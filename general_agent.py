@@ -2,9 +2,10 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.tools import tool
+from langchain_core.tools import tool, BaseTool
 from langgraph.prebuilt import create_react_agent
 from datetime import datetime
+from typing import List
 import os
 import pdb
 
@@ -21,12 +22,12 @@ def check_tavily_api_key():
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
     
 
-def general_agent(llm: Runnable):
+def general_agent(llm: Runnable, extra_tools: List[BaseTool] = []):
     """Returns an Agent as described in
     https://python.langchain.com/docs/tutorials/agents/"""
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
-    tools = [search, date]
+    tools = [search, date] + extra_tools
     agent_executor = create_react_agent(llm,
                                         tools)
     return agent_executor

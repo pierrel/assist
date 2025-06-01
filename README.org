@@ -1,7 +1,4 @@
-* Task list
-** TODO Get ReAct Agent working with local llm
-Ollama + llama3.2 doesn't seem to be good at deciding whether to call a tool or not. Even when [[file:learnings.org::*ollama][updating the Modelfile]]. Need to find a local solution that can both call tools or just answer.
 
-See [[file:general_agent.py][general_agent.py]] and get this working.
+* Task list
 ** TODO Streaming responses
 Update [[file:server.py][server.py]] to handle streaming responses
