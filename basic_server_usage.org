@@ -1,0 +1,19 @@
+The point of the basic_custom_server is to create a simple langserve instance
+that can interact with gptel. These are the tasks I need to complete
+to realize this:
+1. [X] Get it running locally
+2. [X] Send a request
+3. [X] Point gptel to local version
+4. [X] Ensure it works as expected
+5. [X] Update to point to locally running instance (try with Ollama interface)
+
+
+Configuration for Gptel:
+#+begin_src elisp
+(gptel-make-openai "Local"
+  :protocol "http"
+  :host "localhost:5000"
+  :endpoint "/chat/completions"
+  :key "made up"
+  :stream nil)
+#+end_src
