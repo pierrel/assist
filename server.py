@@ -3,11 +3,15 @@ from datetime import datetime
 from fastapi import FastAPI, Request
 from loguru import logger
 from typing import List, Optional, Union
+from itertools import takewhile
+import pdb
 
 from pydantic import BaseModel
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 from general_agent import general_agent
+
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
 
@@ -38,8 +42,6 @@ class ChatCompletionResponse(BaseModel):
 
 
 app = FastAPI(title="OpenAI-compatible API")
-llm = ChatOllama(model="llama3.2", temperature=0)
-agent = general_agent(llm)
 
 
 def openai_to_lanchain_message(message: ChatMessage) -> AnyMessage:
@@ -53,8 +55,7 @@ def openai_to_lanchain_message(message: ChatMessage) -> AnyMessage:
 
 
 def openai_to_langchain(messages: List[ChatMessage]) -> List[AnyMessage]:
-    return list(map(openai_to_lanchain_message,
-                    messages))
+    return list(map(openai_to_lanchain_message, messages))
 
 
 @app.middleware("http")
@@ -77,26 +78,74 @@ async def log_middle(request: Request, call_next):
 
 
 @app.post("/chat/completions")
-def chat_completions(request: ChatCompletionRequest):
+def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResponse:
+    agent = get_agent(request.model, request.temperature)
     langchain_messages = openai_to_langchain(request.messages)
+    user_request = langchain_messages[-1].content
 
-    logger.debug("not streaming response")
-    logger.debug("messages sending:")
-    for message in langchain_messages:
-        logger.debug(message)
+    logger.debug(f"Request: {user_request}")
     resp = agent.invoke({"messages": langchain_messages})
-    message = resp['messages'][-1]
-    logger.debug(f'Got response {message}')
+    debug_tool_use(resp)
+    message = resp["messages"][-1]
+    logger.debug(f"Got response {message}")
     return {
         "id": "1337",
         "object": "chat.completion",
         "created": time.time(),
         "model": request.model,
-        "choices": [{
-            "message": ChatMessage(role="assistant",
-                                   content=message.content)
-        }]
+        "choices": [
+            {"message": ChatMessage(role="assistant", content=message.content)}
+        ],
     }
+
+
+def not_human_message(message: AnyMessage) -> bool:
+    return not isinstance(message, HumanMessage)
+
+
+def render_tool_call(tc: dict) -> str:
+    return f"{tc['name']}: {tc['args']}"
+
+
+def render_tool_calls(tool_calls: list[dict]) -> str:
+    return "\n".join(map(render_tool_call, tool_calls))
+
+def render_ai_message(message: AIMessage) -> str:
+    if message.tool_calls:
+        tcs = render_tool_calls(message.tool_calls)
+        # Prepend each line in `tcs` with "- "
+        tcs = "\n".join([f"{idx+1}. {line}" for idx, line in enumerate(tcs.split("\n"))])
+        return f"AI Tool Calls:\n{tcs}"
+    else:
+        return f"AIMessage: {message.content}"
+
+
+def render_tool_message(message: ToolMessage) -> str:
+    return f"ToolMessage: {message.content}"
+
+
+def work_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Takes a list of messages and returns a list of all the messages
+    between the last HumanMessage and the next to last element
+
+    """
+    with_result = list(reversed(list(takewhile(not_human_message,
+                                               reversed(messages)))))
+    return with_result[:-1]
+
+
+def debug_tool_use(response):
+    messages = work_messages(response["messages"])
+    for message in messages:
+        if isinstance(message, ToolMessage):
+            logger.debug(render_tool_message(message))
+        elif isinstance(message, AIMessage):
+            logger.debug(render_ai_message(message))
+
+
+def get_agent(model: str, temperature: float) -> Runnable:
+    llm = ChatOllama(model=model, temperature=temperature)
+    return general_agent(llm)
 
 
 if __name__ == "__main__":
