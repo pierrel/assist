@@ -1,13 +1,14 @@
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.runnables import Runnable
-from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool, BaseTool
 from langgraph.prebuilt import create_react_agent
 from datetime import datetime
 from typing import List
+from tools import filesystem as fstools
+import time
 import os
-import pdb
+from pathlib import Path
 
 @tool
 def date() -> str:
@@ -15,7 +16,6 @@ def date() -> str:
     [year]"""
     dt = datetime.now()
     return dt.strftime("%B %d, %Y")
-
 
 def check_tavily_api_key():
     if not os.getenv('TAVILY_API_KEY'):
@@ -27,9 +27,12 @@ def general_agent(llm: Runnable, extra_tools: List[BaseTool] = []):
     https://python.langchain.com/docs/tutorials/agents/"""
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
-    tools = [search, date] + extra_tools
+    tools = [search,
+             date,
+             fstools.list_files,
+             fstools.file_contents]
     agent_executor = create_react_agent(llm,
-                                        tools)
+                                        tools + extra_tools)
     return agent_executor
 
 def test_agents():
@@ -45,7 +48,9 @@ def test_agents():
         agent = general_agent(llm)
         for message in [nontool_message, tool_message]:
             print(f"Message: {message.content}")
+            start = time.time()
             res = agent.invoke({"messages": [sys, message]})
-            messages = res['messages'] 
-            print(f"Response: {messages[-1].content}")
+            elapsed = time.time() - start
+            messages = res['messages']
+            print(f"Response ({elapsed}): {messages[-1].content}")
         print("=====================\n\n")
