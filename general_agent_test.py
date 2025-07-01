@@ -1,9 +1,8 @@
 from unittest import TestCase
-from langchain_ollama import ChatOllama
 from typing import Union
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 import os
-import general_agent
+from test_utils import make_test_agent
 
 AnyMessage = Union[HumanMessage, AIMessage, ToolMessage]
 
@@ -14,8 +13,19 @@ def tool_messages(resp_messages: AnyMessage) -> list[ToolMessage]:
 class TestGeneralAgent(TestCase):
     @classmethod
     def setUpClass(cls):
-        llm = ChatOllama(model="mistral", temperature=0.4)
-        cls.agent = general_agent.general_agent(llm, [])
+        current_file = os.path.basename(__file__)
+        responses = [
+            [
+                ToolMessage(content=f"{current_file}", tool_call_id="1"),
+                AIMessage(content=f"Files include {current_file}")
+            ],
+            [
+                ToolMessage(content="listing", tool_call_id="1"),
+                ToolMessage(content="file contents", tool_call_id="2"),
+                AIMessage(content="The show_file_contents tool reads files")
+            ],
+        ]
+        cls.agent = make_test_agent(responses)
 
     def test_fs_tools_list_files(self):
         current_dir = os.getcwd()
