@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from tools import project_index
+from assist.tools import project_index
 from langchain_community.embeddings import FakeEmbeddings
 
 
