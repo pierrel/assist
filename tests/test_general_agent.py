@@ -2,7 +2,7 @@ from unittest import TestCase
 from typing import Union
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 import os
-from test_utils import make_test_agent
+from .utils import make_test_agent
 
 AnyMessage = Union[HumanMessage, AIMessage, ToolMessage]
 

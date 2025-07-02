@@ -1,7 +1,7 @@
 from unittest import TestCase
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
-from test_utils import make_test_agent
-import server  # under test
+from .utils import make_test_agent
+from assist import server  # under test
 
 
 class TestServer(TestCase):
