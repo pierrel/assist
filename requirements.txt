@@ -1,0 +1,13 @@
+fastapi>=0.115
+uvicorn
+loguru
+pydantic>=2
+langchain
+langchain-core
+langchain-community
+langchain-openai
+langchain-ollama
+langgraph
+tavily-python
+chromadb
+pytest
