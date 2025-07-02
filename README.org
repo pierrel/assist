@@ -1,4 +1,13 @@
+Assist is an extensible llm-based assistant. It currently provides an OpenAI-comparible API with a ReAct agent and some simple tools. It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
 
+It is not /just/ a coding assistant, but should be able to help with any project or goal.
+* Concepts
+** Project
+This is based on the currently-active buffer and uses projectile to decide what the root directory of the project is.
+** Context
+The information needed to perform a task. For example, the source files for a software project
+** Extra context
+Supporting information
 * Development
 Install the package in editable mode so Emacs/Elpy can discover the modules:
 
@@ -15,3 +24,18 @@ pytest
 * Task list
 ** TODO Streaming responses
 Update [[file:src/assist/server.py][server.py]] to handle streaming responses
+** TODO Make agent more flexible
+** TODO Update folder structure to be easier to navigate
+** TODO Add project directory to context, not just the active buffers
+** TODO Provide a grep-like retriever
+** TODO Index project for vector retrieval
+* User flows
+These are the main user flows for working with Assist
+** TODO Re-write
+I want to highlight a region and ask that it be re-written in a certain way.
+** Explain/describe
+When I first open a project, I want to have a high-level overview of it. This should be fairly straightforward to ask while working on the project. Probably should generate automatically when there is no explanation or when the explanation was created long before the current version (check git?).
+** Suggest
+Make recommendations on what to do next or what to update as you're editing. Find bugs and make the recommendations somewhere.
+** Large changes
+I want to be able to ask for meaningfully large changes like refactors or implementation of whole features.
