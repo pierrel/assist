@@ -9,6 +9,12 @@ The information needed to perform a task. For example, the source files for a so
 ** Extra context
 Supporting information
 * Development
+Install the dependencies
+
+#+begin_src shell
+pip install -r requirements.txt
+#+end_src
+
 Install the package in editable mode so Emacs/Elpy can discover the modules:
 
 #+begin_src shell
