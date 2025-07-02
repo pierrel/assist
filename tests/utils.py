@@ -3,8 +3,8 @@ from typing import List
 from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable
 
-from fake_runnable import FakeRunnable
-import general_agent
+from assist.fake_runnable import FakeRunnable
+from assist import general_agent
 
 
 def make_test_agent(responses: List[List[BaseMessage]], temperature: float = 0.4) -> Runnable:
