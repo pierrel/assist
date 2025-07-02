@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
-from .general_agent import general_agent
+from assist.general_agent import general_agent
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]

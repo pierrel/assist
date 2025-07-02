@@ -5,8 +5,8 @@ from langchain_core.tools import tool, BaseTool
 from langgraph.prebuilt import create_react_agent
 from datetime import datetime
 from typing import List
-from .tools import filesystem as fstools
-from .tools import project_index
+from assist.tools import filesystem as fstools
+from assist.tools import project_index
 import time
 import os
 from pathlib import Path
