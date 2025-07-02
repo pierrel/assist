@@ -22,7 +22,7 @@ pytest
 #+end_src
 
 * Task list
-** TODO Streaming responses
+** DONE Streaming responses
 Update [[file:src/assist/server.py][server.py]] to handle streaming responses
 ** TODO Make agent more flexible
 ** TODO Update folder structure to be easier to navigate
