@@ -6,6 +6,7 @@ from langgraph.prebuilt import create_react_agent
 from datetime import datetime
 from typing import List
 from tools import filesystem as fstools
+from tools import project_index
 import time
 import os
 from pathlib import Path
@@ -27,10 +28,14 @@ def general_agent(llm: Runnable, extra_tools: List[BaseTool] = []):
     https://python.langchain.com/docs/tutorials/agents/"""
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
-    tools = [search,
-             date,
-             fstools.list_files,
-             fstools.file_contents]
+    proj_tool = project_index.project_search
+    tools = [
+        search,
+        date,
+        fstools.list_files,
+        fstools.file_contents,
+        proj_tool,
+    ]
     agent_executor = create_react_agent(llm,
                                         tools + extra_tools)
     return agent_executor
