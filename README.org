@@ -1,4 +1,17 @@
 
+* Development
+Install the package in editable mode so Emacs/Elpy can discover the modules:
+
+#+begin_src shell
+pip install -e .
+#+end_src
+
+Run the tests with:
+
+#+begin_src shell
+pytest
+#+end_src
+
 * Task list
 ** TODO Streaming responses
-Update [[file:server.py][server.py]] to handle streaming responses
+Update [[file:src/assist/server.py][server.py]] to handle streaming responses
