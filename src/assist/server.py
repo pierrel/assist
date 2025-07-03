@@ -1,6 +1,8 @@
 import time
 from datetime import datetime
 from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+import json
 from loguru import logger
 from typing import List, Optional, Union
 from itertools import takewhile
@@ -10,7 +12,7 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
-from .general_agent import general_agent
+from assist.general_agent import general_agent
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
@@ -78,12 +80,51 @@ async def log_middle(request: Request, call_next):
 
 
 @app.post("/chat/completions")
-def chat_completions(request: ChatCompletionRequest) -> ChatCompletionResponse:
+def chat_completions(request: ChatCompletionRequest):
     agent = get_agent(request.model, request.temperature)
     langchain_messages = openai_to_langchain(request.messages)
     user_request = langchain_messages[-1].content
 
     logger.debug(f"Request: {user_request}")
+
+    if request.stream:
+        def event_gen():
+            resp = agent.invoke({"messages": langchain_messages})
+            debug_tool_use(resp)
+            message = resp["messages"][-1]
+            logger.debug(f"Streaming response {message}")
+            created = int(time.time())
+            first = {
+                "id": "1337",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [{"delta": {"role": "assistant"}, "index": 0}],
+            }
+            yield f"data: {json.dumps(first)}\n\n"
+            for ch in message.content:
+                chunk = {
+                    "id": "1337",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [{"delta": {"content": ch}, "index": 0}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+            finish = {
+                "id": "1337",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [
+                    {"delta": {}, "finish_reason": "stop", "index": 0}
+                ],
+            }
+            yield f"data: {json.dumps(finish)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_gen(), media_type="text/event-stream")
+
     resp = agent.invoke({"messages": langchain_messages})
     debug_tool_use(resp)
     message = resp["messages"][-1]
