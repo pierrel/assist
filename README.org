@@ -22,10 +22,7 @@ pytest
 #+end_src
 
 * Task list
-** DONE Streaming responses
-Update [[file:src/assist/server.py][server.py]] to handle streaming responses
 ** TODO Make agent more flexible
-** TODO Update folder structure to be easier to navigate
 ** TODO Add project directory to context, not just the active buffers
 ** TODO Provide a grep-like retriever
 ** TODO Index project for vector retrieval
