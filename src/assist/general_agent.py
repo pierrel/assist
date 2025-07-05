@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import List
 from assist.tools import filesystem as fstools
 from assist.tools import project_index
+from langchain_community.embeddings import HuggingFaceEmbeddings
 import time
 import os
 from pathlib import Path
@@ -28,6 +29,8 @@ def general_agent(llm: Runnable, extra_tools: List[BaseTool] = []):
     https://python.langchain.com/docs/tutorials/agents/"""
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
+    hf = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    project_index.set_embedding(hf)
     proj_tool = project_index.project_search
     tools = [
         search,
