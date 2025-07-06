@@ -11,3 +11,4 @@ langgraph
 tavily-python
 chromadb
 pytest
+sentence-transformers

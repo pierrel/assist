@@ -6,7 +6,6 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from typing import Optional
 
 from langchain_core.embeddings import Embeddings
-from langchain_community.embeddings import FakeEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.tools import tool
 
@@ -32,7 +31,10 @@ def _build_vectorstore() -> Chroma:
         glob="**/*.*",
         recursive=True,
         loader_cls=TextLoader,
-        exclude=["**/.git/**", str(INDEX_DIR)],
+        exclude=["**/.git/**",
+                 "**/.venv/**",
+                 "**/__pycache__/**",
+                 str(INDEX_DIR)],
     )
     index_creator = VectorstoreIndexCreator(
         vectorstore_cls=Chroma,
