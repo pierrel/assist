@@ -31,3 +31,10 @@ class TestProjectIndex(TestCase):
         joined2 = "\n".join(d.page_content for d in docs2)
         self.assertIn("foo bar baz", joined2)
 
+    def test_index_and_search_with_tool(self):
+        tool = self.index.search_tool()
+        docs = tool.invoke({
+            "project_root": self.project_root,
+            "query": "hello"
+        })
+        self.assertIn("hello world", docs)
