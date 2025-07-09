@@ -31,8 +31,8 @@ def general_agent(
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
     hf = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    project_index.set_embedding(hf)
-    proj_tool = project_index.project_search
+    pi = project_index.ProjectIndex(hf)
+    proj_tool = pi.search_tool()
     tools = [
         search,
         date,

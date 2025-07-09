@@ -40,6 +40,7 @@ class ProjectIndex:
                 "**/.git/**",
                 "**/.venv/**",
                 "**/__pycache__/**",
+                "**/*.jpg",
                 str(index_dir),
             ],
         )
@@ -50,7 +51,6 @@ class ProjectIndex:
         )
         index = index_creator.from_loaders([loader])
         vectorstore = index.vectorstore
-        vectorstore.persist()
         return vectorstore
 
     def load_vectorstore(self, index_dir: Path) -> Chroma:
@@ -75,28 +75,24 @@ class ProjectIndex:
         self._retrievers[key] = retriever
         return retriever
 
-    def project_search(self, project_root: Path | str, query: str) -> str:
-        """Search ``project_root`` for relevant information."""
+    def search(self, project_root: Path | str, query: str) -> str:
         retriever = self.get_retriever(project_root)
-        docs = retriever.get_relevant_documents(query)
+        docs = retriever.invoke(query)
         return "\n".join(doc.page_content for doc in docs)
+        
 
+    def search_tool(self):
+        @tool
+        def project_search(project_root: Path | str, query: str) -> str:
+            """Search ``project_root`` for relevant information about
+            the given ``query``. Will return all of the information
+            found from the search.
 
-_DEFAULT_INDEX = ProjectIndex()
+            """
+            retriever = self.get_retriever(project_root)
+            docs = retriever.invoke(query)
+            return "\n".join(doc.page_content for doc in docs)
 
+        return project_search
 
-def set_embedding(embedding: Optional[Embeddings]) -> None:
-    _DEFAULT_INDEX.set_embedding(embedding)
-
-
-def get_project_retriever(project_root: Path | str):
-    return _DEFAULT_INDEX.get_retriever(project_root)
-
-
-@tool
-def project_search(project_root: Path | str, query: str) -> str:
-    """Search ``project_root`` for relevant information."""
-    return _DEFAULT_INDEX.project_search(project_root, query)
-
-
-__all__ = ["ProjectIndex", "set_embedding", "get_project_retriever", "project_search"]
+__all__ = ["ProjectIndex"]
