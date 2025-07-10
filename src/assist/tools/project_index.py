@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 from langchain.indexes import VectorstoreIndexCreator
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 from langchain_core.tools import tool
 
@@ -15,14 +15,9 @@ from langchain_core.tools import tool
 class ProjectIndex:
     """Manage vector stores for arbitrary projects."""
 
-    def __init__(self, embedding: Optional[Embeddings] = None) -> None:
+    def __init__(self, embedding: Embeddings) -> None:
         self._embedding = embedding
         self._retrievers: Dict[str, Chroma] = {}
-
-    def set_embedding(self, embedding: Optional[Embeddings]) -> None:
-        """Set the embedding function used for new vector stores."""
-        self._embedding = embedding
-        self._retrievers = {}
 
     def index_dir(self, project_root: Path) -> Path:
         """Return a unique directory for storing the vector index."""
