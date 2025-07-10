@@ -17,8 +17,7 @@ class TestProjectIndex(TestCase):
 
         self.index = project_index.ProjectIndex(FakeEmbeddings(size=4))
 
-    def tearDown(self):
-        self.index.set_embedding(None)
+    def tearDown(self): 
         self.tmpdir.cleanup()
 
     def test_index_and_search(self):
