@@ -17,8 +17,7 @@ class TestProjectIndex(TestCase):
 
         self.index = project_index.ProjectIndex(FakeEmbeddings(size=4))
 
-    def tearDown(self):
-        self.index.set_embedding(None)
+    def tearDown(self): 
         self.tmpdir.cleanup()
 
     def test_index_and_search(self):
@@ -31,3 +30,10 @@ class TestProjectIndex(TestCase):
         joined2 = "\n".join(d.page_content for d in docs2)
         self.assertIn("foo bar baz", joined2)
 
+    def test_index_and_search_with_tool(self):
+        tool = self.index.search_tool()
+        docs = tool.invoke({
+            "project_root": self.project_root,
+            "query": "hello"
+        })
+        self.assertIn("hello world", docs)
