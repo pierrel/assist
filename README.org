@@ -4,6 +4,10 @@ It is not /just/ a coding assistant, but should be able to help with any project
 * Concepts
 ** Project
 This is based on the currently-active buffer and uses projectile to decide what the root directory of the project is.
+
+(todo) If there are multiple buffers from different projects open, then:
+1. Take the project with the most open buffers
+2. Take the first (alphabetical order)
 ** Context
 The information needed to perform a task. For example, the source files for a software project
 ** Extra context
@@ -35,7 +39,7 @@ pytest tests/integration
 
 * User flows
 These are the main user flows for working with Assist
-** TODO Re-write
+** Re-write
 I want to highlight a region and ask that it be re-written in a certain way.
 ** Explain/describe
 When I first open a project, I want to have a high-level overview of it. This should be fairly straightforward to ask while working on the project. Probably should generate automatically when there is no explanation or when the explanation was created long before the current version (check git?).
