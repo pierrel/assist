@@ -33,11 +33,6 @@ Run the integration tests with:
 pytest tests/integration
 #+end_src
 
-* Task list
-** TODO Make agent more flexible
-** TODO Add project directory to context, not just the active buffers
-** TODO Provide a grep-like retriever
-** TODO Index project for vector retrieval
 * User flows
 These are the main user flows for working with Assist
 ** TODO Re-write
