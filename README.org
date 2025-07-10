@@ -27,6 +27,12 @@ Run the tests with:
 pytest
 #+end_src
 
+Run the integration tests with:
+
+#+begin_src shell
+pytest tests/integration
+#+end_src
+
 * Task list
 ** TODO Make agent more flexible
 ** TODO Add project directory to context, not just the active buffers
