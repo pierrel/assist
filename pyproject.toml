@@ -5,6 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "assist"
 version = "0.1.0"
+dependencies = [
+    "vgrep==0.1.1"
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

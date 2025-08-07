@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import List
 from assist.tools import filesystem as fstools
 from assist.tools import project_index
-from langchain_community.embeddings import HuggingFaceEmbeddings
 import time
 import os
 
@@ -30,8 +29,7 @@ def general_agent(
     """Return a ReAct agent configured with useful tools."""
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
-    hf = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    pi = project_index.ProjectIndex(hf)
+    pi = project_index.ProjectIndex()
     proj_tool = pi.search_tool()
     tools = [
         search,
