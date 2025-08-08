@@ -4,7 +4,6 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from assist.tools import project_index
-from langchain_community.embeddings import FakeEmbeddings
 
 
 class TestProjectIndex(TestCase):
@@ -15,7 +14,7 @@ class TestProjectIndex(TestCase):
         (self.project_root / "sub/file1.txt").write_text("hello world")
         (self.project_root / "file2.txt").write_text("foo bar baz")
 
-        self.index = project_index.ProjectIndex(FakeEmbeddings(size=4))
+        self.index = project_index.ProjectIndex()
 
     def tearDown(self): 
         self.tmpdir.cleanup()
