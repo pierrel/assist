@@ -12,9 +12,12 @@ from typing import List, Optional
 from loguru import logger
 from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from typing import TypedDict
+
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
+from langgraph.graph import StateGraph, END
 
 from .general_agent import general_agent
 
@@ -50,22 +53,84 @@ class PlannerAgent:
 
 
 class ReflexionAgent:
-    """Compose planning with the existing ReAct agent."""
+    """Plan execution and summarization orchestrated with LangGraph."""
+
+    class _State(TypedDict):
+        messages: List[BaseMessage]
+        plan_steps: List[str]
+        step_index: int
 
     def __init__(self, llm: Runnable, tools: List[BaseTool], callbacks: Optional[List] = None):
         self.callbacks = callbacks or [ConsoleCallbackHandler()]
         self.planner = PlannerAgent(llm, tools, callbacks=self.callbacks)
+        # Separate agents for execution and summarization
         self.agent = general_agent(llm, tools)
+        self.summarizer = general_agent(llm, tools)
+        self.graph = self._build_graph()
+
+    def _build_graph(self) -> Runnable:
+        graph = StateGraph(self._State)
+
+        def plan_node(state: ReflexionAgent._State) -> dict:
+            user_msg = state["messages"][-1]
+            content = getattr(user_msg, "content", str(user_msg))
+            logger.debug("Generating plan for message: %s", content)
+            plan = self.planner.make_plan(content)
+            steps = [s.split(".", 1)[-1].strip() for s in plan.splitlines() if s.strip()]
+            logger.debug("Plan steps: %s", steps)
+            return {"plan_steps": steps, "step_index": 0}
+
+        def execute_node(state: ReflexionAgent._State) -> dict:
+            idx = state["step_index"]
+            step = state["plan_steps"][idx]
+            logger.debug("Executing step %d: %s", idx + 1, step)
+            step_msg = HumanMessage(content=step)
+            resp = self.agent.invoke(
+                {"messages": state["messages"] + [step_msg]},
+                {"callbacks": self.callbacks},
+            )
+            result_msg = resp["messages"][-1]
+            logger.debug("Step %d result: %s", idx + 1, result_msg.content)
+            return {
+                "messages": state["messages"] + [step_msg, result_msg],
+                "step_index": idx + 1,
+            }
+
+        def summarize_node(state: ReflexionAgent._State) -> dict:
+            logger.debug("Summarizing final response")
+            summary_prompt = SystemMessage(content="Summarize the conversation so far.")
+            resp = self.summarizer.invoke(
+                {"messages": state["messages"] + [summary_prompt]},
+                {"callbacks": self.callbacks},
+            )
+            final_msg = resp["messages"][-1]
+            logger.debug("Final response: %s", final_msg.content)
+            return {"messages": state["messages"] + [summary_prompt, final_msg]}
+
+        def continue_or_finish(state: ReflexionAgent._State) -> str:
+            if state["step_index"] < len(state["plan_steps"]):
+                return "execute"
+            return "summarize"
+
+        graph.add_node("plan", plan_node)
+        graph.add_node("execute", execute_node)
+        graph.add_node("summarize", summarize_node)
+
+        graph.set_entry_point("plan")
+        graph.add_edge("plan", "execute")
+        graph.add_conditional_edges("execute", continue_or_finish, {"execute": "execute", "summarize": "summarize"})
+        graph.set_finish_point("summarize")
+
+        return graph.compile()
 
     def invoke(self, inputs: dict) -> dict:
-        messages = inputs.get("messages", [])
-        user_msg = messages[-1]
-        logger.debug("Invoking agent for message: %s", getattr(user_msg, "content", user_msg))
-        plan = self.planner.make_plan(getattr(user_msg, "content", user_msg))
-        plan_msg = SystemMessage(content=f"Follow this plan:\n{plan}")
-        logger.debug("Executing plan via ReAct agent")
-        result = self.agent.invoke({"messages": messages + [plan_msg]}, {"callbacks": self.callbacks})
-        return result
+        state: ReflexionAgent._State = {
+            "messages": inputs.get("messages", []),
+            "plan_steps": [],
+            "step_index": 0,
+        }
+        result = self.graph.invoke(state, {"callbacks": self.callbacks})
+        return {"messages": result["messages"]}
 
 
 def reflexion_agent(

@@ -7,10 +7,8 @@ from datetime import datetime
 from typing import List
 from assist.tools import filesystem as fstools
 from assist.tools import project_index
-from langchain_community.embeddings import HuggingFaceEmbeddings
 import time
 import os
-from pathlib import Path
 
 @tool
 def date() -> str:
@@ -24,14 +22,15 @@ def check_tavily_api_key():
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
     
 
-def general_agent(llm: Runnable, extra_tools: List[BaseTool] = []):
-    """Returns an Agent as described in
-    https://python.langchain.com/docs/tutorials/agents/"""
+def general_agent(
+    llm: Runnable,
+    extra_tools: List[BaseTool] = [],
+):
+    """Return a ReAct agent configured with useful tools."""
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
-    hf = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    project_index.set_embedding(hf)
-    proj_tool = project_index.project_search
+    pi = project_index.ProjectIndex()
+    proj_tool = pi.search_tool()
     tools = [
         search,
         date,

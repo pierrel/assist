@@ -5,25 +5,27 @@
   "Opens or finds the right chat buffer for the project, displays that
 buffer, adds the query to the buffer, and sends it to gptel"
   (interactive "M")
-  (let ((full-query (format "%s%s"
-			    query
-			    (assist/open-buffer-details-string)))
-	(chat-buf (get-buffer-create (assist/buffer-name))))
+  (let ((chat-buf (get-buffer-create (assist/buffer-name))))
     (with-current-buffer chat-buf
       (goto-char (point-max))
       (insert "\n\n")
-      (insert full-query)
+      (insert (assist/full-query query))
       (goto-char (point-max))
       (gptel-send))
     ;; Need to find the right function that opens
     (display-buffer chat-buf)))
 
+(defun assist/full-query (from-user-query)
+  (format "%s%s%s"
+	  from-user-query
+	  (assist/open-buffer-details-string)
+	  (assist/project-details-string)))
+(assist/full-query "hello")
 
 (defun assist/project-info ()
   "Return some information about the current project to uniquely identify
 it from other projects"
   (projectile-acquire-root))
-(assist/project-info)
 
 (defun assist/buffer-name ()
   "Create the chat buffer name based on the current buffer's project"
@@ -52,7 +54,14 @@ the current frame."
 (defun assist/open-buffer-details-string ()
   (if-let ((buf-details (assist/open-buffer-details)))
       (format "\n\nHere are all the files within the context of this request:\n[begin open files]\n%s\n[end open files]"
-	        (string-join buf-details "\n"))))
+	        (string-join buf-details "\n"))
+    ""))
+
+(defun assist/project-details-string ()
+  (if-let ((pinfo (assist/project-info)))
+      (format "\nThis is the project directory within the context of this request: %s"
+	      pinfo)
+    ""))
 
 (defun assist/buffer-details (buf)
   "Return the filename associated with the given buffer. nil if the buffer has no file name"
