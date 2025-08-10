@@ -6,10 +6,9 @@ import json
 from loguru import logger
 from typing import List, Optional, Union
 from itertools import takewhile
-import pdb
 
 from pydantic import BaseModel
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage,ToolMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 from assist.general_agent import general_agent
@@ -55,6 +54,12 @@ def openai_to_lanchain_message(message: ChatMessage) -> AnyMessage:
         case _:
             return AIMessage(content=message.content)
 
+def extract_content(message: BaseMessage) -> str:
+    """Return a human-readable output based on the agent message"""
+    if isinstance(message, AIMessage):
+        return message.content
+    else:
+        return ''
 
 def openai_to_langchain(messages: List[ChatMessage]) -> List[AnyMessage]:
     return list(map(openai_to_lanchain_message, messages))
@@ -89,10 +94,6 @@ def chat_completions(request: ChatCompletionRequest):
 
     if request.stream:
         def event_gen():
-            resp = agent.invoke({"messages": langchain_messages})
-            debug_tool_use(resp)
-            message = resp["messages"][-1]
-            logger.debug(f"Streaming response {message}")
             created = int(time.time())
             first = {
                 "id": "1337",
@@ -102,13 +103,15 @@ def chat_completions(request: ChatCompletionRequest):
                 "choices": [{"delta": {"role": "assistant"}, "index": 0}],
             }
             yield f"data: {json.dumps(first)}\n\n"
-            for ch in message.content:
+            for ch, metadata in agent.stream({"messages": langchain_messages},
+                                             stream_mode="messages"):
+                content = extract_content(ch)
                 chunk = {
                     "id": "1337",
                     "object": "chat.completion.chunk",
                     "created": created,
                     "model": request.model,
-                    "choices": [{"delta": {"content": ch}, "index": 0}],
+                    "choices": [{"delta": {"content": content}, "index": 0}],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
             finish = {
