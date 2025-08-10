@@ -1,0 +1,84 @@
+import json
+import time
+from threading import Thread
+from unittest.mock import patch
+
+import pytest
+import requests
+import uvicorn
+from langchain_core.messages import AIMessage, HumanMessage
+
+from assist import server
+from tests.utils import make_test_agent
+
+
+@pytest.fixture(scope="module")
+def run_server():
+    """Start the FastAPI server in a background thread and stop it after tests."""
+    long_content = (
+        "I can assist with answering questions, writing code, debugging, and more."
+    )
+    msgs = [
+        HumanMessage(content="What kinds of things can you help me with?"),
+        AIMessage(content=long_content),
+    ]
+    agent = make_test_agent([msgs])
+    port = 5001
+
+    with patch("assist.server.get_agent", return_value=agent):
+        config = uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="info")
+        srv = uvicorn.Server(config)
+        thread = Thread(target=srv.run, daemon=True)
+        thread.start()
+
+        base_url = f"http://127.0.0.1:{port}"
+        timeout = time.time() + 5
+        while True:
+            try:
+                requests.get(base_url)
+                break
+            except Exception:
+                if time.time() > timeout:
+                    raise RuntimeError("Server failed to start")
+                time.sleep(0.1)
+
+        yield base_url
+
+        srv.should_exit = True
+        thread.join()
+
+
+def test_streaming_chat_completions(run_server):
+    url = f"{run_server}/chat/completions"
+    payload = {
+        "model": "test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": "What kinds of things can you help me with?",
+            }
+        ],
+        "stream": True,
+    }
+    with requests.post(url, json=payload, stream=True) as resp:
+        events = []
+        for line in resp.iter_lines():
+            if line:
+                line = line.decode("utf-8")
+                assert line.startswith("data:")
+                data = line[len("data: ") :]
+                if data == "[DONE]":
+                    break
+                events.append(json.loads(data))
+
+    assert events[0]["choices"][0]["delta"]["role"] == "assistant"
+    content = "".join(
+        e["choices"][0]["delta"].get("content", "") for e in events[1:-1]
+    )
+    assert len(events) > 20
+    assert (
+        content
+        == "I can assist with answering questions, writing code, debugging, and more."
+    )
+    assert events[-1]["choices"][0]["finish_reason"] == "stop"
+
