@@ -16,8 +16,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 
+from pydantic import BaseModel, Field
+
 from .general_agent import general_agent
 
+class Plan(BaseModel):
+    goal: str = Field(description="A concise description of the goal to be achieved by following the steps")
+    steps: List[str] = Field(description="The list of steps to follow to achieve a goal")
 
 class PlannerAgent:
     """Generate a tool-based plan for a user request."""
@@ -27,8 +32,8 @@ class PlannerAgent:
         self.tools = tools
         self.callbacks = callbacks or [ConsoleCallbackHandler()]
 
-    def make_plan(self, user_request: str) -> str:
-        logger.debug("Generating plan for request: %s", user_request)
+    def make_plan(self, user_request: str) -> List[str]:
+        logger.debug(f"Generating plan for request: {user_request}")
         tool_list = ", ".join(t.name for t in self.tools)
         messages = [
             SystemMessage(
@@ -39,14 +44,10 @@ class PlannerAgent:
             ),
             HumanMessage(content=f"Tools: {tool_list}\nTask: {user_request}\nPlan:")
         ]
-        response = self.llm.invoke({"messages": messages}, {"callbacks": self.callbacks})
-        if isinstance(response, dict) and "messages" in response:
-            msg = response["messages"][-1]
-            plan = getattr(msg, "content", str(msg))
-        else:
-            plan = getattr(response, "content", str(response))
-        logger.debug("Plan generated:\n%s", plan)
-        return plan
+        plan = self.llm.with_structured_output(Plan).invoke(messages)
+        steps = "\n".join(plan.steps)
+        logger.debug(f"Plan generated:\n{steps}")
+        return plan.steps
 
 
 class ReflexionAgent:
@@ -58,10 +59,13 @@ class ReflexionAgent:
         self.agent = general_agent(llm, tools)
 
     def invoke(self, inputs: dict) -> dict:
+        logger.debug(f"Invoking agent for input {inputs}")
         messages = inputs.get("messages", [])
         user_msg = messages[-1]
-        logger.debug("Invoking agent for message: %s", getattr(user_msg, "content", user_msg))
-        plan = self.planner.make_plan(getattr(user_msg, "content", user_msg))
+        logger.debug(f"Invoking agent for message: {user_msg}")
+        plan_steps = self.planner.make_plan(getattr(user_msg, "content", user_msg))
+        plan = "\n".join(plan_steps)
+        logger.debug(f"got plan: {plan}")
         plan_msg = SystemMessage(content=f"Follow this plan:\n{plan}")
         logger.debug("Executing plan via ReAct agent")
         result = self.agent.invoke({"messages": messages + [plan_msg]}, {"callbacks": self.callbacks})
