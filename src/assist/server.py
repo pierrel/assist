@@ -11,7 +11,8 @@ from pydantic import BaseModel
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage,ToolMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
-from assist.general_agent import general_agent
+import assist.tools as tools
+from assist.reflexion_agent import reflexion_agent
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
@@ -103,8 +104,7 @@ def chat_completions(request: ChatCompletionRequest):
                 "choices": [{"delta": {"role": "assistant"}, "index": 0}],
             }
             yield f"data: {json.dumps(first)}\n\n"
-            for ch, metadata in agent.stream({"messages": langchain_messages},
-                                             stream_mode="messages"):
+            for ch, metadata in agent.invoke({"messages": langchain_messages}):
                 content = extract_content(ch)
                 chunk = {
                     "id": "1337",
@@ -189,7 +189,12 @@ def debug_tool_use(response):
 
 def get_agent(model: str, temperature: float) -> Runnable:
     llm = ChatOllama(model=model, temperature=temperature)
-    return general_agent(llm)
+    pi = tools.project_index.ProjectIndex()
+    proj_tool = pi.search_tool()
+    return reflexion_agent(llm,
+                           [tools.filesystem.file_contents,
+                            tools.filesystem.list_files,
+                            proj_tool])
 
 
 if __name__ == "__main__":
