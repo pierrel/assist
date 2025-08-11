@@ -19,12 +19,13 @@ from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
 from .general_agent import general_agent
+from .promptable import Promptable
 
 class Plan(BaseModel):
     goal: str = Field(description="A concise description of the goal to be achieved by following the steps")
     steps: List[str] = Field(description="The list of steps to follow to achieve a goal")
 
-class PlannerAgent:
+class PlannerAgent(Promptable):
     """Generate a tool-based plan for a user request."""
 
     def __init__(self, llm: Runnable, tools: List[BaseTool], callbacks: Optional[List] = None):
@@ -37,12 +38,15 @@ class PlannerAgent:
         tool_list = ", ".join(t.name for t in self.tools)
         messages = [
             SystemMessage(
-                content=(
-                    "You are a planning assistant. Given a task and available tools, "
-                    "produce a numbered list describing how to accomplish the task using those tools."
+                content=self.prompt_for("make_plan_system.txt")
+            ),
+            HumanMessage(
+                content=self.prompt_for(
+                    "make_plan_user.txt",
+                    tools=tool_list,
+                    task=user_request,
                 )
             ),
-            HumanMessage(content=f"Tools: {tool_list}\nTask: {user_request}\nPlan:")
         ]
         plan = self.llm.with_structured_output(Plan).invoke(messages)
         steps = "\n".join(plan.steps)
@@ -50,7 +54,7 @@ class PlannerAgent:
         return plan.steps
 
 
-class ReflexionAgent:
+class ReflexionAgent(Promptable):
     """Compose planning with the existing ReAct agent."""
 
     def __init__(self, llm: Runnable, tools: List[BaseTool], callbacks: Optional[List] = None):
@@ -66,7 +70,9 @@ class ReflexionAgent:
         plan_steps = self.planner.make_plan(getattr(user_msg, "content", user_msg))
         plan = "\n".join(plan_steps)
         logger.debug(f"got plan: {plan}")
-        plan_msg = SystemMessage(content=f"Follow this plan:\n{plan}")
+        plan_msg = SystemMessage(
+            content=self.prompt_for("follow_plan.txt", plan=plan)
+        )
         logger.debug("Executing plan via ReAct agent")
         result = self.agent.invoke({"messages": messages + [plan_msg]}, {"callbacks": self.callbacks})
         return result
