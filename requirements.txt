@@ -14,3 +14,4 @@ chromadb
 pytest
 sentence-transformers
 vgrep==0.1.1
+mypy
