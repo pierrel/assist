@@ -1,95 +1,110 @@
-"""Planner and reflexion agents.
+"""Reflexion graph built from planning and execution steps."""
 
-``PlannerAgent`` generates a short plan describing how to complete a task using
-the available tools. ``ReflexionAgent`` composes this planning step with the
-existing ReAct agent returned by :func:`general_agent`.  Both stages log their
-activity with :mod:`loguru` and can emit LangChain tracing callbacks via
-``ConsoleCallbackHandler``.
-"""
-
-from typing import List, Optional
+from typing import List, Optional, TypedDict
 
 from loguru import logger
 from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
-
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
-
+from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 
-from .general_agent import general_agent
-from .promptable import Promptable
+from assist.general_agent import general_agent
+from assist.promptable import prompt_for
 
-class Plan(BaseModel):
-    goal: str = Field(description="A concise description of the goal to be achieved by following the steps")
-    steps: List[str] = Field(description="The list of steps to follow to achieve a goal")
 
-class PlannerAgent(Promptable):
-    """Generate a tool-based plan for a user request."""
+class ReflexionState(TypedDict):
+    messages: List[BaseMessage]
+    plan: List[str]
+    step_index: int
+    history: List[str]
 
-    def __init__(self, llm: Runnable, tools: List[BaseTool], callbacks: Optional[List] = None):
-        self.llm = llm
-        self.tools = tools
-        self.callbacks = callbacks or [ConsoleCallbackHandler()]
 
-    def make_plan(self, user_request: str) -> List[str]:
-        logger.debug(f"Generating plan for request: {user_request}")
-        tool_list = ", ".join(t.name for t in self.tools)
+def build_reflexion_graph(
+    llm: Runnable,
+    tools: List[BaseTool],
+    callbacks: Optional[List] = None
+) -> Runnable:
+    """Compose planning, step execution and summarisation using LangGraph."""
+
+    callbacks = callbacks or [ConsoleCallbackHandler()]
+    agent = general_agent(llm, tools)
+
+    graph = StateGraph(ReflexionState)
+
+    class Plan(BaseModel):
+        goal: str = Field(
+            description="A concise description of the goal to be achieved by following the steps"
+        )
+        steps: List[str] = Field(
+            description="The list of steps to follow to achieve a goal"
+        )
+
+    def plan_node(state: ReflexionState):
+        user_msg = state["messages"][-1]
+        request = getattr(user_msg, "content", user_msg)
+        logger.debug(f"Generating plan for request: {request}")
+        tool_list = ", ".join(t.name for t in tools)
         messages = [
-            SystemMessage(
-                content=self.prompt_for("make_plan_system.txt")
-            ),
+            SystemMessage(content=prompt_for("make_plan_system.txt")),
             HumanMessage(
-                content=self.prompt_for(
-                    "make_plan_user.txt",
-                    tools=tool_list,
-                    task=user_request,
+                content=prompt_for(
+                    "make_plan_user.txt", tools=tool_list, task=request
                 )
             ),
         ]
-        plan = self.llm.with_structured_output(Plan).invoke(messages)
-        steps = "\n".join(plan.steps)
-        logger.debug(f"Plan generated:\n{steps}")
-        return plan.steps
-
-
-class ReflexionAgent(Promptable):
-    """Compose planning with the existing ReAct agent."""
-
-    def __init__(self, llm: Runnable, tools: List[BaseTool], callbacks: Optional[List] = None):
-        self.callbacks = callbacks or [ConsoleCallbackHandler()]
-        self.planner = PlannerAgent(llm, tools, callbacks=self.callbacks)
-        self.agent = general_agent(llm, tools)
-
-    def invoke(self, inputs: dict) -> dict:
-        logger.debug(f"Invoking agent for input {inputs}")
-        messages = inputs.get("messages", [])
-        user_msg = messages[-1]
-        logger.debug(f"Invoking agent for message: {user_msg}")
-        plan_steps = self.planner.make_plan(getattr(user_msg, "content", user_msg))
-        plan = "\n".join(plan_steps)
-        logger.debug(f"got plan: {plan}")
-        plan_msg = SystemMessage(
-            content=self.prompt_for("follow_plan.txt", plan=plan)
+        plan = llm.with_structured_output(Plan).invoke(
+            messages,
+            {"callbacks": callbacks}
         )
-        logger.debug("Executing plan via ReAct agent")
-        result = self.agent.invoke({"messages": messages + [plan_msg]}, {"callbacks": self.callbacks})
-        return result
+        steps = plan.steps
+        logger.debug("Plan generated:\n" + "\n".join(steps))
+        return {"plan": steps, "step_index": 0, "history": []}
 
+    graph.add_node("plan", plan_node)
 
-def reflexion_agent(
-    llm: Runnable,
-    tools: List[BaseTool],
-    callbacks: Optional[List] = None,
-) -> Runnable:
-    """Create a reflexion agent using ``llm`` and ``tools``.
+    def execute_node(state: ReflexionState):
+        step = state["plan"][state["step_index"]]
+        history_text = "\n".join(state["history"])
+        logger.debug(f"Executing step {state['step_index'] + 1}: {step}")
+        messages = [
+            SystemMessage(content=prompt_for("execute_step_system.txt")),
+            *state["messages"],
+            HumanMessage(
+                content=prompt_for(
+                    "execute_step_user.txt", history=history_text, step=step
+                )
+            ),
+        ]
+        result = agent.invoke({"messages": messages}, {"callbacks": callbacks})
+        output_msg = result["messages"][-1]
+        new_hist = state["history"] + [f"{step}: {output_msg.content}"]
+        logger.debug(f"Step result: {output_msg.content}")
+        return {"history": new_hist, "step_index": state["step_index"] + 1}
 
-    The agent first asks ``llm`` for a plan referencing the given tools, then
-    executes that plan using the ReAct agent returned by :func:`general_agent`.
-    Additional ``callbacks`` are passed to both the planning and execution
-    stages, allowing integration with LangChain tracing utilities.
-    """
-    return ReflexionAgent(llm, tools, callbacks=callbacks)
+    graph.add_node("execute", execute_node)
 
-__all__ = ["reflexion_agent", "PlannerAgent", "ReflexionAgent"]
+    def continue_cond(state: ReflexionState):
+        return state["step_index"] < len(state["plan"])
+
+    graph.add_conditional_edges("execute", continue_cond, {True: "execute", False: "summarize"})
+
+    def summarize_node(state: ReflexionState):
+        history_text = "\n".join(state["history"])
+        messages = [
+            SystemMessage(content=prompt_for("summarize_system.txt")),
+            HumanMessage(
+                content=prompt_for("summarize_user.txt", history=history_text)
+            ),
+        ]
+        summary = llm.invoke(messages)
+        logger.debug(f"Summary: {summary.content}")
+        return {"messages": state["messages"] + [summary]}
+
+    graph.add_node("summarize", summarize_node)
+    graph.set_entry_point("plan")
+    graph.add_edge("plan", "execute")
+    graph.add_edge("summarize", END)
+
+    return graph.compile()
