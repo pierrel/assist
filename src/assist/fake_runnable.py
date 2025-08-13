@@ -41,3 +41,7 @@ class FakeRunnable:
             self._schema = None
             return schema(goal="", steps=steps)
         return FakeInvocation(resp)
+
+    def stream(self, *_args, **kwargs):
+        res = self.invoke(self, *_args, **kwargs)
+        return (res, {})
