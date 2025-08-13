@@ -22,6 +22,11 @@ def _infer_module() -> str:
     raise RuntimeError("Could not infer caller module")
 
 
+def base_prompt_for(prompt_path: str, **kwargs):
+    template = env.get_template(prompt_path)
+    return template.render(**kwargs)
+
+
 def prompt_for(prompt_name: str, *, module: str | None = None, **kwargs) -> str:
     """Render ``prompt_name`` for ``module`` using optional ``kwargs``.
 
@@ -30,8 +35,7 @@ def prompt_for(prompt_name: str, *, module: str | None = None, **kwargs) -> str:
     module = module or _infer_module()
     name = _folder_from_module(module)
     path = f"{name}/{prompt_name}"
-    template = env.get_template(path)
-    return template.render(**kwargs)
+    return base_prompt_for(path, **kwargs)
 
 
 class Promptable:

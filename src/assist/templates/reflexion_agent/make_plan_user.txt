@@ -1,4 +1,5 @@
 Given the following task and available tools, provide a numbered list of steps to accomplish the task using those tools.
-Tools: {{ tools }}
+Tools:
+{{ tools }}
+
 Task: {{ task }}
-Plan:

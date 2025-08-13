@@ -11,14 +11,44 @@ from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 
 from assist.general_agent import general_agent
-from assist.promptable import prompt_for
+from assist.promptable import base_prompt_for
 
+class Step(BaseModel):
+    step: str = Field(
+        description="A concrete description of what to *do* to accompliash an objective that, together with other steps will resolve the ultimate goal."
+    )
+    objective: str = Field(
+        description="Objective of the step - how does this particular step get the user closer to their goal?"
+    )
+
+class StepResolution(Step):
+    resolution: str = Field(
+        description="The resolution of the step"
+    )
+
+class Plan(BaseModel):
+    goal: str = Field(
+        description="A concise description of the goal to be achieved by following the steps"
+    )
+    steps: List[Step] = Field(
+        description="The list of steps to follow to achieve a goal."
+    )
+    assumptions: List[str] = Field(
+        description="A list of assumptions being made that can be reversed."
+    )
+    risks: List[str] = Field(
+        description="A list of gaps, hazards, or decisions needed"
+    )
 
 class ReflexionState(TypedDict):
     messages: List[BaseMessage]
-    plan: List[str]
+    plan: Plan
     step_index: int
-    history: List[str]
+    history: List[StepResolution]
+
+
+def tool_list_item(tool: BaseTool):
+    return f"- {tool.name}: {tool.description}"
 
 
 def build_reflexion_graph(
@@ -26,31 +56,23 @@ def build_reflexion_graph(
     tools: List[BaseTool],
     callbacks: Optional[List] = None
 ) -> Runnable:
-    """Compose planning, step execution and summarisation using LangGraph."""
+    """Compose planning, step execution and summarization using LangGraph."""
 
     callbacks = callbacks or [ConsoleCallbackHandler()]
     agent = general_agent(llm, tools)
 
     graph = StateGraph(ReflexionState)
 
-    class Plan(BaseModel):
-        goal: str = Field(
-            description="A concise description of the goal to be achieved by following the steps"
-        )
-        steps: List[str] = Field(
-            description="The list of steps to follow to achieve a goal"
-        )
-
     def plan_node(state: ReflexionState):
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
         logger.debug(f"Generating plan for request: {request}")
-        tool_list = ", ".join(t.name for t in tools)
+        tool_list = "\n".join(tool_list_item(t) for t in tools)
         messages = [
-            SystemMessage(content=prompt_for("make_plan_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/make_plan_system.txt")),
             HumanMessage(
-                content=prompt_for(
-                    "make_plan_user.txt", tools=tool_list, task=request
+                content=base_prompt_for(
+                    "reflexion_agent/make_plan_user.txt", tools=tool_list, task=request
                 )
             ),
         ]
@@ -58,22 +80,21 @@ def build_reflexion_graph(
             messages,
             {"callbacks": callbacks}
         )
-        steps = plan.steps
-        logger.debug("Plan generated:\n" + "\n".join(steps))
-        return {"plan": steps, "step_index": 0, "history": []}
+        logger.debug(f"Plan generated:\n{plan}")
+        return {"plan": plan, "step_index": 0, "history": []}
 
     graph.add_node("plan", plan_node)
 
     def execute_node(state: ReflexionState):
-        step = state["plan"][state["step_index"]]
+        step = state["plan"].steps[state["step_index"]]
         history_text = "\n".join(state["history"])
         logger.debug(f"Executing step {state['step_index'] + 1}: {step}")
         messages = [
-            SystemMessage(content=prompt_for("execute_step_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
             *state["messages"],
             HumanMessage(
-                content=prompt_for(
-                    "execute_step_user.txt", history=history_text, step=step
+                content=base_prompt_for(
+                    "reflexion_agent/execute_step_user.txt", history=history_text, step=step
                 )
             ),
         ]
@@ -86,16 +107,16 @@ def build_reflexion_graph(
     graph.add_node("execute", execute_node)
 
     def continue_cond(state: ReflexionState):
-        return state["step_index"] < len(state["plan"])
+        return state["step_index"] < len(state["plan"].steps)
 
     graph.add_conditional_edges("execute", continue_cond, {True: "execute", False: "summarize"})
 
     def summarize_node(state: ReflexionState):
         history_text = "\n".join(state["history"])
         messages = [
-            SystemMessage(content=prompt_for("summarize_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
             HumanMessage(
-                content=prompt_for("summarize_user.txt", history=history_text)
+                content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),
         ]
         summary = llm.invoke(messages)
