@@ -35,7 +35,7 @@ def prompt_for(prompt_name: str, *, module: str | None = None, **kwargs) -> str:
     module = module or _infer_module()
     name = _folder_from_module(module)
     path = f"{name}/{prompt_name}"
-    return base_prompt_for(path)
+    return base_prompt_for(path, **kwargs)
 
 
 class Promptable:
