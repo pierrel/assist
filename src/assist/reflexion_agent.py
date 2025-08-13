@@ -10,23 +10,26 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 
-from .general_agent import general_agent
-from .promptable import prompt_for
+from assist.general_agent import general_agent
+from assist.promptable import prompt_for
 
 
-def reflexion_agent(
-    llm: Runnable, tools: List[BaseTool], callbacks: Optional[List] = None
+class ReflexionState(TypedDict):
+    messages: List[BaseMessage]
+    plan: List[str]
+    step_index: int
+    history: List[str]
+
+
+def build_reflexion_graph(
+    llm: Runnable,
+    tools: List[BaseTool],
+    callbacks: Optional[List] = None
 ) -> Runnable:
     """Compose planning, step execution and summarisation using LangGraph."""
 
     callbacks = callbacks or [ConsoleCallbackHandler()]
     agent = general_agent(llm, tools)
-
-    class ReflexionState(TypedDict):
-        messages: List[BaseMessage]
-        plan: List[str]
-        step_index: int
-        history: List[str]
 
     graph = StateGraph(ReflexionState)
 
@@ -51,7 +54,10 @@ def reflexion_agent(
                 )
             ),
         ]
-        plan = llm.with_structured_output(Plan).invoke(messages, {"callbacks": callbacks})
+        plan = llm.with_structured_output(Plan).invoke(
+            messages,
+            {"callbacks": callbacks}
+        )
         steps = plan.steps
         logger.debug("Plan generated:\n" + "\n".join(steps))
         return {"plan": steps, "step_index": 0, "history": []}
@@ -92,10 +98,9 @@ def reflexion_agent(
                 content=prompt_for("summarize_user.txt", history=history_text)
             ),
         ]
-        summary_invocation = llm.invoke(messages)
-        summary_msg = summary_invocation["messages"][0]
-        logger.debug(f"Summary: {summary_msg.content}")
-        return {"messages": state["messages"] + [summary_msg]}
+        summary = llm.invoke(messages)
+        logger.debug(f"Summary: {summary.content}")
+        return {"messages": state["messages"] + [summary]}
 
     graph.add_node("summarize", summarize_node)
     graph.set_entry_point("plan")
