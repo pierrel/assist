@@ -1,4 +1,5 @@
 import time
+import os
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
@@ -8,11 +9,14 @@ from typing import List, Optional, Union
 from itertools import takewhile
 
 from pydantic import BaseModel
+from langchain_community.tools.tavily_search import TavilySearchResults
+from assist.tools import filesystem as fstools
+from assist.tools import project_index
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage,ToolMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 import assist.tools as tools
-from assist.reflexion_agent import reflexion_agent
+from assist.reflexion_agent import build_reflexion_graph
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
@@ -104,7 +108,7 @@ def chat_completions(request: ChatCompletionRequest):
                 "choices": [{"delta": {"role": "assistant"}, "index": 0}],
             }
             yield f"data: {json.dumps(first)}\n\n"
-            for ch, metadata in agent.invoke({"messages": langchain_messages}):
+            for ch, metadata in agent.stream({"messages": langchain_messages}, stream_mode="messages"):
                 content = extract_content(ch)
                 chunk = {
                     "id": "1337",
@@ -186,15 +190,24 @@ def debug_tool_use(response):
         elif isinstance(message, AIMessage):
             logger.debug(render_ai_message(message))
 
+def check_tavily_api_key():
+    if not os.getenv('TAVILY_API_KEY'):
+        raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
 
 def get_agent(model: str, temperature: float) -> Runnable:
+    check_tavily_api_key()
+    search = TavilySearchResults(max_results=10)
+    pi = project_index.ProjectIndex()
+    proj_tool = pi.search_tool()
+
     llm = ChatOllama(model=model, temperature=temperature)
     pi = tools.project_index.ProjectIndex()
     proj_tool = pi.search_tool()
-    return reflexion_agent(llm,
-                           [tools.filesystem.file_contents,
-                            tools.filesystem.list_files,
-                            proj_tool])
+    return build_reflexion_graph(llm,
+                                 [tools.filesystem.file_contents,
+                                  tools.filesystem.list_files,
+                                  proj_tool,
+                                  search])
 
 
 if __name__ == "__main__":
