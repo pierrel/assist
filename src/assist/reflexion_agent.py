@@ -116,7 +116,7 @@ def build_reflexion_graph(
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
             HumanMessage(
-                content=base_prompt_for("reflexion_agent/.txt", history=history_text)
+                content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),
         ]
         summary = llm.invoke(messages)
