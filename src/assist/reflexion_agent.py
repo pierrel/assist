@@ -11,7 +11,7 @@ from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
 
 from assist.general_agent import general_agent
-from assist.promptable import prompt_for
+from assist.promptable import base_prompt_for
 
 class Step(BaseModel):
     step: str = Field(
@@ -69,10 +69,10 @@ def build_reflexion_graph(
         logger.debug(f"Generating plan for request: {request}")
         tool_list = "\n".join(tool_list_item(t) for t in tools)
         messages = [
-            SystemMessage(content=prompt_for("make_plan_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/make_plan_system.txt")),
             HumanMessage(
-                content=prompt_for(
-                    "make_plan_user.txt", tools=tool_list, task=request
+                content=base_prompt_for(
+                    "reflexion_agent/make_plan_user.txt", tools=tool_list, task=request
                 )
             ),
         ]
@@ -90,11 +90,11 @@ def build_reflexion_graph(
         history_text = "\n".join(state["history"])
         logger.debug(f"Executing step {state['step_index'] + 1}: {step}")
         messages = [
-            SystemMessage(content=prompt_for("execute_step_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
             *state["messages"],
             HumanMessage(
-                content=prompt_for(
-                    "execute_step_user.txt", history=history_text, step=step
+                content=base_prompt_for(
+                    "reflexion_agent/execute_step_user.txt", history=history_text, step=step
                 )
             ),
         ]
@@ -107,16 +107,16 @@ def build_reflexion_graph(
     graph.add_node("execute", execute_node)
 
     def continue_cond(state: ReflexionState):
-        return state["step_index"] < len(state["plan"])
+        return state["step_index"] < len(state["plan"].steps)
 
     graph.add_conditional_edges("execute", continue_cond, {True: "execute", False: "summarize"})
 
     def summarize_node(state: ReflexionState):
         history_text = "\n".join(state["history"])
         messages = [
-            SystemMessage(content=prompt_for("summarize_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
             HumanMessage(
-                content=prompt_for("summarize_user.txt", history=history_text)
+                content=base_prompt_for("reflexion_agent/.txt", history=history_text)
             ),
         ]
         summary = llm.invoke(messages)
