@@ -1,11 +1,13 @@
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from assist.tools import project_index, filesystem
 from assist.reflexion_agent import build_reflexion_graph, ReflexionState
 from IPython.display import Image, display
 
-llm = ChatOllama(model="qwen3:8b", temperature=0.8)
+#llm = ChatOllama(model="qwen3:8b", temperature=0.8)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.8)
 pi = project_index.ProjectIndex()
 proj_tool = pi.search_tool()
 search = TavilySearchResults(max_results=10)
