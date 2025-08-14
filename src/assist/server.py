@@ -1,22 +1,28 @@
 import time
 import os
 from datetime import datetime
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 import json
 from loguru import logger
-from typing import List, Optional, Union
+from typing import Any, Iterator, List, Optional, Union
 from itertools import takewhile
 
 from pydantic import BaseModel
 from langchain_community.tools.tavily_search import TavilySearchResults
-from assist.tools import filesystem as fstools
 from assist.tools import project_index
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage,ToolMessage, BaseMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 import assist.tools as tools
 from assist.reflexion_agent import build_reflexion_graph
+from assist.agent_types import AgentInvokeResult
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
@@ -71,7 +77,7 @@ def openai_to_langchain(messages: List[ChatMessage]) -> List[AnyMessage]:
 
 
 @app.middleware("http")
-async def log_middle(request: Request, call_next):
+async def log_middle(request: Request, call_next) -> Response:
     logger.debug(f"{request.method} {request.url}")
     routes = request.app.router.routes
     logger.debug("Params:")
@@ -90,7 +96,7 @@ async def log_middle(request: Request, call_next):
 
 
 @app.post("/chat/completions")
-def chat_completions(request: ChatCompletionRequest):
+def chat_completions(request: ChatCompletionRequest) -> Response:
     agent = get_agent(request.model, request.temperature)
     langchain_messages = openai_to_langchain(request.messages)
     user_request = langchain_messages[-1].content
@@ -98,7 +104,7 @@ def chat_completions(request: ChatCompletionRequest):
     logger.debug(f"Request: {user_request}")
 
     if request.stream:
-        def event_gen():
+        def event_gen() -> Iterator[str]:
             created = int(time.time())
             first = {
                 "id": "1337",
@@ -132,30 +138,34 @@ def chat_completions(request: ChatCompletionRequest):
 
         return StreamingResponse(event_gen(), media_type="text/event-stream")
 
-    resp = agent.invoke({"messages": langchain_messages})
+    resp_raw = agent.invoke({"messages": langchain_messages})
+    resp = AgentInvokeResult.model_validate(resp_raw)
     debug_tool_use(resp)
-    message = resp["messages"][-1]
+    message = resp.messages[-1]
     logger.debug(f"Got response {message}")
-    return {
-        "id": "1337",
-        "object": "chat.completion",
-        "created": time.time(),
-        "model": request.model,
-        "choices": [
-            {"message": ChatMessage(role="assistant", content=message.content)}
+    created = datetime.fromtimestamp(time.time())
+    return ChatCompletionResponse(
+        id="1337",
+        object="chat.completion",
+        created=created,
+        model=request.model,
+        choices=[
+            ChatCompletionChoice(
+                message=ChatMessage(role="assistant", content=message.content)
+            )
         ],
-    }
+    )
 
 
 def not_human_message(message: AnyMessage) -> bool:
     return not isinstance(message, HumanMessage)
 
 
-def render_tool_call(tc: dict) -> str:
+def render_tool_call(tc: dict[str, Any]) -> str:
     return f"{tc['name']}: {tc['args']}"
 
 
-def render_tool_calls(tool_calls: list[dict]) -> str:
+def render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
     return "\n".join(map(render_tool_call, tool_calls))
 
 def render_ai_message(message: AIMessage) -> str:
@@ -182,15 +192,15 @@ def work_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
     return with_result[:-1]
 
 
-def debug_tool_use(response):
-    messages = work_messages(response["messages"])
+def debug_tool_use(response: AgentInvokeResult) -> None:
+    messages = work_messages(response.messages)
     for message in messages:
         if isinstance(message, ToolMessage):
             logger.debug(render_tool_message(message))
         elif isinstance(message, AIMessage):
             logger.debug(render_ai_message(message))
 
-def check_tavily_api_key():
+def check_tavily_api_key() -> None:
     if not os.getenv('TAVILY_API_KEY'):
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
 

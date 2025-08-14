@@ -22,7 +22,7 @@ def _infer_module() -> str:
     raise RuntimeError("Could not infer caller module")
 
 
-def base_prompt_for(prompt_path: str, **kwargs):
+def base_prompt_for(prompt_path: str, **kwargs) -> str:
     template = env.get_template(prompt_path)
     return template.render(**kwargs)
 

@@ -8,7 +8,7 @@ from typing import Dict, List
 
 import numpy as np
 from langchain_core.documents import Document
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 from vgrep.manager import Manager
 
 
@@ -27,7 +27,7 @@ class _DummyContextualizer:
 class _Retriever:
     """Wrap ``vgrep``'s ``Manager`` with the retriever interface used by tests."""
 
-    def __init__(self, mgr: Manager):
+    def __init__(self, mgr: Manager) -> None:
         self._mgr = mgr
 
     def get_relevant_documents(self, query: str) -> List[Document]:
@@ -45,7 +45,7 @@ class _DeterministicEmbedding:
     the same text will always produce the same vector without requiring network
     access or external models."""
 
-    def __init__(self, dim: int = 64):
+    def __init__(self, dim: int = 64) -> None:
         self._dim = dim
 
     def __call__(self, input: List[str]) -> List[List[float]]:  # pragma: no cover - simple
@@ -97,7 +97,7 @@ class ProjectIndex:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def get_retriever(self, project_root: Path | str):
+    def get_retriever(self, project_root: Path | str) -> _Retriever:
         """Return a retriever for ``project_root``."""
         root = Path(project_root)
         key = str(root.resolve())
@@ -118,7 +118,7 @@ class ProjectIndex:
         docs = retriever.invoke(query)
         return "\n".join(doc.page_content for doc in docs)
 
-    def search_tool(self):
+    def search_tool(self) -> BaseTool:
         @tool
         def project_search(project_root: Path | str, query: str) -> str:
             """Search ``project_root`` for relevant information about the given ``query``."""
