@@ -20,7 +20,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
-import assist.tools as tools
+from assist.tools import filesystem, project_index
 from assist.reflexion_agent import build_reflexion_graph
 from assist.agent_types import AgentInvokeResult
 
@@ -211,11 +211,11 @@ def get_agent(model: str, temperature: float) -> Runnable:
     proj_tool = pi.search_tool()
 
     llm = ChatOllama(model=model, temperature=temperature)
-    pi = tools.project_index.ProjectIndex()
+    pi = project_index.ProjectIndex()
     proj_tool = pi.search_tool()
     return build_reflexion_graph(llm,
-                                 [tools.filesystem.file_contents,
-                                  tools.filesystem.list_files,
+                                 [filesystem.file_contents,
+                                  filesystem.list_files,
                                   proj_tool,
                                   search])
 
