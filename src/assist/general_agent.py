@@ -10,13 +10,12 @@ import os
 def general_agent(
     llm: Runnable,
     tools: List[BaseTool] = [],
-):
+) -> Runnable:
     """Return a ReAct agent configured with useful tools."""
-    agent_executor = create_react_agent(llm,
-                                        tools)
+    agent_executor = create_react_agent(llm, tools)
     return agent_executor
 
-def test_agents():
+def test_agents() -> None:
     from langchain_ollama import ChatOllama
     from langchain_openai import ChatOpenAI
     nontool_message = HumanMessage(content="Hello. How are you doing today? What kinds of things can you help me with?")
