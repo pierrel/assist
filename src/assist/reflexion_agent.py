@@ -1,6 +1,6 @@
 """Reflexion graph built from planning and execution steps."""
 
-from typing import List, Optional, TypedDict
+from typing import Dict, List, Optional, TypedDict
 
 from loguru import logger
 from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from assist.general_agent import general_agent
 from assist.promptable import base_prompt_for
+from assist.agent_types import AgentInvokeResult
 
 class Step(BaseModel):
     step: str = Field(
@@ -47,7 +48,7 @@ class ReflexionState(TypedDict):
     history: List[StepResolution]
 
 
-def tool_list_item(tool: BaseTool):
+def tool_list_item(tool: BaseTool) -> str:
     return f"- {tool.name}: {tool.description}"
 
 
@@ -63,7 +64,7 @@ def build_reflexion_graph(
 
     graph = StateGraph(ReflexionState)
 
-    def plan_node(state: ReflexionState):
+    def plan_node(state: ReflexionState) -> Dict[str, object]:
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
         logger.debug(f"Generating plan for request: {request}")
@@ -85,7 +86,7 @@ def build_reflexion_graph(
 
     graph.add_node("plan", plan_node)
 
-    def execute_node(state: ReflexionState):
+    def execute_node(state: ReflexionState) -> Dict[str, object]:
         step = state["plan"].steps[state["step_index"]]
         history_text = "\n".join(state["history"])
         logger.debug(f"Executing step {state['step_index'] + 1}: {step}")
@@ -98,20 +99,21 @@ def build_reflexion_graph(
                 )
             ),
         ]
-        result = agent.invoke({"messages": messages}, {"callbacks": callbacks})
-        output_msg = result["messages"][-1]
+        result_raw = agent.invoke({"messages": messages}, {"callbacks": callbacks})
+        result = AgentInvokeResult.model_validate(result_raw)
+        output_msg = result.messages[-1]
         new_hist = state["history"] + [f"{step}: {output_msg.content}"]
         logger.debug(f"Step result: {output_msg.content}")
         return {"history": new_hist, "step_index": state["step_index"] + 1}
 
     graph.add_node("execute", execute_node)
 
-    def continue_cond(state: ReflexionState):
+    def continue_cond(state: ReflexionState) -> bool:
         return state["step_index"] < len(state["plan"].steps)
 
     graph.add_conditional_edges("execute", continue_cond, {True: "execute", False: "summarize"})
 
-    def summarize_node(state: ReflexionState):
+    def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(state["history"])
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
