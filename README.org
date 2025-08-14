@@ -12,13 +12,27 @@ This is based on the currently-active buffer and uses projectile to decide what 
 The information needed to perform a task. For example, the source files for a software project
 ** Extra context
 Supporting information
-* Development
-Install the dependencies
+* Dependencies
+Install dependencies
 
 #+begin_src shell
 pip install -r requirements.txt
 #+end_src
 
+Enable the virtual environment
+
+#+begin_src shell
+source .venv/bin/activate
+#+end_src
+
+In emacs: =M-x pyvenv-activate=
+* Running
+Run the server
+
+#+begin shell
+python src/assist/server.python
+#+end_shell
+* Development
 Install the package in editable mode so Emacs/Elpy can discover the modules:
 
 #+begin_src shell
@@ -36,7 +50,6 @@ Run the integration tests with:
 #+begin_src shell
 pytest tests/integration
 #+end_src
-
 * User flows
 These are the main user flows for working with Assist
 ** Re-write

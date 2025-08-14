@@ -1,0 +1,5 @@
+Previous steps and results:
+{{ history }}
+
+Execute the next step:
+{{ step }}
