@@ -1,18 +1,26 @@
-Assist is an extensible llm-based assistant. It currently provides an OpenAI-comparible API with a ReAct agent and some simple tools. It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
+#+Title: Assist
+Assist is an extensible, local-focused, llm-based assistant. The principles guiding this project include:
+- Privacy - The user has full control and no information leaves their computer.
+- Extensibility - All agentic behavior is easy to modify or add to.
+- Generic - Assist can help with anything.
+
+It currently provides an OpenAI-compatible API with a ReAct agent and some simple tools. It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
 
 It is not /just/ a coding assistant, but should be able to help with any project or goal.
 * Concepts
 ** Project
-This is based on the currently-active buffer and uses projectile to decide what the root directory of the project is.
+A project is a git repository, contains the main context for interactions as well as external references. All of the interaction with Assist is handled within the context of the project.
 
-(todo) If there are multiple buffers from different projects open, then:
-1. Take the project with the most open buffers
-2. Take the first (alphabetical order)
+A user is /in/ the project when they are actively editing the files. Right now there is some support for emacs through inspecting the currently active buffers to gain context.
 ** Context
-The information needed to perform a task. For example, the source files for a software project
-** Extra context
-Supporting information
-* Dependencies
+The information needed to perform a task. This is inclusive of the main project files, other local files, and internet resources.
+** Agent
+The agent acts within the context of the project and can perform internet searches. It takes a requests from the user to perform tasks.
+** Task
+A unit of work for the agent to perform on behalf of the user.
+* Getting started
+The set-up is currently fairly manual. Clone and follow the below.
+** Dependencies
 Install dependencies
 
 #+begin_src shell
@@ -26,13 +34,13 @@ source .venv/bin/activate
 #+end_src
 
 In emacs: =M-x pyvenv-activate=
-* Running
+** Running
 Run the server
 
 #+begin shell
 python src/assist/server.python
 #+end_shell
-* Development
+** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:
 
 #+begin_src shell
@@ -60,3 +68,47 @@ When I first open a project, I want to have a high-level overview of it. This sh
 Make recommendations on what to do next or what to update as you're editing. Find bugs and make the recommendations somewhere.
 ** Large changes
 I want to be able to ask for meaningfully large changes like refactors or implementation of whole features.
+* Roadmap
+** Guidance
+/Under active development/
+
+Tasks primarily involve gathering information from relevant sources and providing guidance to the user. They can be thought of as side-effect free.
+*** Objectives
+**** TODO Improve summarization step
+Better prompt, currently it's the simplest version.
+**** TODO Improve tool understanding and usage
+Better descriptions.
+**** TODO Simplify node/prompt/graph interaction and composition
+Less verbose, more testable.
+**** TODO Prompt and flow optimization
+Need a framework for automatically judging results and
+**** TODO System message to llm
+Currently the supplied system message is not transferred to the agent. Either do it or be explicit about it being thrown away.
+**** TODO Automatic llm selection
+Based on the task. Currenlty 1 llm runs for everything, which is either overkill or insufficient for some tasks.
+**** TODO Multi-turn interactions
+It's currently optimized to answer 1 thing without a history of other asks.
+**** TODO Cross-project user preferences
+**** TODO External tools
+On-computer "manuals" that can be shared across projects.
+**** TODO Handle "re-write" use-case
+Offer an in-emacs diff of a proposed change based on the current region, the project, and the request.
+**** TODO User preferences and facts
+An agent that can store and retrieve information that will better help.
+** Action
+/Future feature/
+
+Actually perform some work which has side effects. These could be:
+- Editing files (within the project)
+- Making API requests which have side effects
+- Opening a browser to do work
+*** Within the project
+*** Outside the project
+** Proactivity
+/Future feature/
+
+Perform unsolicited work for the user. For example, analyze the current project and decide what the user would do next to get closer to their goal(s).
+
+The results could be in the form of:
+- Proposed change to the project files (like a PR)
+- Recommended purchases (just hit "OK" to actually do it)
