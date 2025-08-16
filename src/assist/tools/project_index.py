@@ -121,7 +121,15 @@ class ProjectIndex:
     def search_tool(self) -> BaseTool:
         @tool
         def project_search(project_root: Path | str, query: str) -> str:
-            """Search ``project_root`` for relevant information about the given ``query``."""
+            """Search ``project_root`` for relevant information about the given ``query``.
+
+            Args:
+            ``project_root`` is a directory on the filesystem that at the top level of the project. The project contains information relevant to the user's current task.
+
+            ``query`` is the query to be performed to learn more about the files in the project, which are vectorized for easy semantic search.
+
+            Returns:
+            str: A newline-separated list of file contents relevant to the query."""
             retriever = self.get_retriever(project_root)
             docs = retriever.invoke(query)
             return "\n".join(doc.page_content for doc in docs)
