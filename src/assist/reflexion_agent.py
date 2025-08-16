@@ -1,4 +1,5 @@
 """Reflexion graph built from planning and execution steps."""
+import math
 import time
 
 from typing import Dict, List, Optional, TypedDict, Literal
@@ -152,14 +153,13 @@ def build_reflexion_graph(
                 "learnings": all_learnings}
         
     graph.add_node("plan_check", plan_check)
-    
+
     def replan_cond(state: ReflexionState) -> bool:
         """Check the state for the need to replan."""
         return state["needs_replan"]
 
     def continue_cond(state: ReflexionState) -> bool:
         return state["step_index"] < len(state["plan"].steps)
-
 
     def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summarize"]:
         if replan_cond(state):
@@ -169,8 +169,28 @@ def build_reflexion_graph(
         else:
             return "summarize"
 
-    graph.add_conditional_edges("plan_check",
-                                big_condition)
+    graph.add_conditional_edges("plan_check", big_condition)
+
+    def checkpoints(total_steps: int) -> set[int]:
+        """Return step indices where a plan check should occur."""
+        return {
+            total_steps,
+            math.ceil(total_steps / 3),
+            math.ceil(2 * total_steps / 3),
+        }
+
+    def after_execute(state: ReflexionState) -> Literal["plan_check", "execute", "summarize"]:
+        """Determine next node after executing a step."""
+        total = len(state["plan"].steps)
+        idx = state["step_index"]
+        if idx in checkpoints(total):
+            return "plan_check"
+        elif idx < total:
+            return "execute"
+        else:
+            return "summarize"
+
+    graph.add_conditional_edges("execute", after_execute)
 
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(state["history"])
@@ -187,7 +207,6 @@ def build_reflexion_graph(
     graph.add_node("summarize", summarize_node)
     graph.set_entry_point("plan")
     graph.add_edge("plan", "execute")
-    graph.add_edge("execute", "plan_check")
     graph.add_edge("summarize", END)
 
     return graph.compile()
