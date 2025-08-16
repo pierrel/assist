@@ -169,7 +169,7 @@ def build_reflexion_graph(
         else:
             return "summarize"
 
-    graph.add_conditional_edges("execute",
+    graph.add_conditional_edges("plan_check",
                                 big_condition)
 
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
