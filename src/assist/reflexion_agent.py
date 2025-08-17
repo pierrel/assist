@@ -145,7 +145,7 @@ def build_reflexion_graph(
         ]
 
         retro: PlanRetrospective = llm.with_structured_output(PlanRetrospective).invoke(messages, {"callbacks": callbacks})
-
+        logger.debug(f"Retrospected with:\n{retro}")
         all_learnings = state.get("learnings", [])
         if retro.needs_replan:
             all_learnings = all_learnings + [retro.learnings]
