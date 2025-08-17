@@ -3,3 +3,7 @@ Tools:
 {{ tools }}
 
 Task: {{ task }}
+
+{% if learnings %}
+Please take the guidance
+{% endif %}

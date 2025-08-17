@@ -5,7 +5,12 @@ import os
 
 @tool
 def list_files(root: str) -> list[str]:
-    """List the files in the given root directory."""
+    """List all files recursively in the given ``root`` directory.
+
+    Use this to learn more about the structure of the project files.
+
+    Returns:
+    list[str]: A list of the absolute paths of all files under ``root``."""
     return [f for f in os.listdir(root) if os.path.isfile(os.path.join(root, f))]
 
 

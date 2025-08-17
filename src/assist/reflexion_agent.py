@@ -1,6 +1,8 @@
 """Reflexion graph built from planning and execution steps."""
+import math
+import time
 
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, TypedDict, Literal
 
 from loguru import logger
 from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
@@ -14,18 +16,21 @@ from assist.general_agent import general_agent
 from assist.promptable import base_prompt_for
 from assist.agent_types import AgentInvokeResult
 
+
 class Step(BaseModel):
-    step: str = Field(
-        description="A concrete description of what to *do* to accompliash an objective that, together with other steps will resolve the ultimate goal."
+    action: str = Field(
+        description="A concise and concrete description of what to *do* to accompliash an objective that, together with other steps will resolve the ultimate goal."
     )
     objective: str = Field(
         description="Objective of the step - how does this particular step get the user closer to their goal?"
     )
 
+
 class StepResolution(Step):
     resolution: str = Field(
-        description="The resolution of the step"
+        description="The resolution of the step that achieves the objective."
     )
+
 
 class Plan(BaseModel):
     goal: str = Field(
@@ -41,11 +46,23 @@ class Plan(BaseModel):
         description="A list of gaps, hazards, or decisions needed"
     )
 
+
+class PlanRetrospective(BaseModel):
+    needs_replan: bool = Field(
+        description="Whether or not the user requires a new plan to achieve the goal"
+    )
+    learnings: Optional[str] = Field(
+        description="If a new plan is required, then the learnings that should be incorporated into that new plan so that it has a better chance of achieving the goal."
+    )
+
+
 class ReflexionState(TypedDict):
     messages: List[BaseMessage]
     plan: Plan
     step_index: int
     history: List[StepResolution]
+    needs_replan: bool
+    learnings: List[str]
 
 
 def tool_list_item(tool: BaseTool) -> str:
@@ -77,12 +94,17 @@ def build_reflexion_graph(
                 )
             ),
         ]
+        start = time.time()
         plan = llm.with_structured_output(Plan).invoke(
             messages,
             {"callbacks": callbacks}
         )
-        logger.debug(f"Plan generated:\n{plan}")
-        return {"plan": plan, "step_index": 0, "history": []}
+        logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
+        return {"plan": plan,
+                "step_index": 0,
+                "history": [],
+                "needs_replan": False,
+                "learnings": state.get("learnings", [])}
 
     graph.add_node("plan", plan_node)
 
@@ -108,10 +130,67 @@ def build_reflexion_graph(
 
     graph.add_node("execute", execute_node)
 
+    def plan_check(state: ReflexionState) -> Dict[str, object]:
+        """Asks an llm if a replan is required. If so, updates learnings and the replan bit."""
+        plan = state["plan"]
+        human_prompt = base_prompt_for(
+            "reflexion_agent/plan_check_user.txt",
+            step_resolutions=state["history"],
+            remaining_steps=plan.steps[len(state["history"]):],
+            goal=plan.goal
+        )
+        messages = [
+            SystemMessage(content=base_prompt_for("reflexion_agent/plan_check_system.txt")),
+            HumanMessage(content=human_prompt),
+        ]
+
+        retro: PlanRetrospective = llm.with_structured_output(PlanRetrospective).invoke(messages, {"callbacks": callbacks})
+        logger.debug(f"Retrospected with:\n{retro}")
+        all_learnings = state.get("learnings", [])
+        if retro.needs_replan:
+            all_learnings = all_learnings + [retro.learnings]
+        return {"needs_replan": retro.needs_replan,
+                "learnings": all_learnings}
+        
+    graph.add_node("plan_check", plan_check)
+
+    def replan_cond(state: ReflexionState) -> bool:
+        """Check the state for the need to replan."""
+        return state["needs_replan"]
+
     def continue_cond(state: ReflexionState) -> bool:
         return state["step_index"] < len(state["plan"].steps)
 
-    graph.add_conditional_edges("execute", continue_cond, {True: "execute", False: "summarize"})
+    def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summarize"]:
+        if replan_cond(state):
+            return "plan"
+        elif continue_cond(state):
+            return "execute"
+        else:
+            return "summarize"
+
+    graph.add_conditional_edges("plan_check", big_condition)
+
+    def checkpoints(total_steps: int) -> set[int]:
+        """Return step indices where a plan check should occur."""
+        return {
+            total_steps,
+            math.ceil(total_steps / 3),
+            math.ceil(2 * total_steps / 3),
+        }
+
+    def after_execute(state: ReflexionState) -> Literal["plan_check", "execute", "summarize"]:
+        """Determine next node after executing a step."""
+        total = len(state["plan"].steps)
+        idx = state["step_index"]
+        if idx in checkpoints(total):
+            return "plan_check"
+        elif idx < total:
+            return "execute"
+        else:
+            return "summarize"
+
+    graph.add_conditional_edges("execute", after_execute)
 
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(state["history"])

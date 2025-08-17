@@ -5,8 +5,9 @@ from langchain_openai import ChatOpenAI
 from assist.tools import project_index, filesystem
 from assist.reflexion_agent import build_reflexion_graph, ReflexionState
 from IPython.display import Image, display
+import time
 
-#llm = ChatOllama(model="qwen3:8b", temperature=0.8)
+#llm = ChatOllama(model="qwen3:4b", temperature=0.8)
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.8)
 pi = project_index.ProjectIndex()
 proj_tool = pi.search_tool()
@@ -19,9 +20,11 @@ agent = build_reflexion_graph(llm,
 
 Image(agent.get_graph().draw_mermaid_png(output_file_path="./agent_graph.png"))
 
-request = HumanMessage(content="What’s the best practice for organizing langgraph agents? Do I create a class to house the construction of the graph? Just a function to generate and return the graph? Something else?")
+request = HumanMessage(content="Help me understand how python iterators work\nThis is the project directory within the context of this request: /home/pierre/src/assist/")
+
+start = time.time()
 resp = agent.invoke({"messages": [request]})
+total_time = time.time() - start
 print(resp)
 
-
-
+print(f"\n\nTook {total_time}s")
