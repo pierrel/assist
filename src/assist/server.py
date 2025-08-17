@@ -20,7 +20,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
-import assist.tools as tools
+from assist.tools import filesystem, project_index
 from assist.reflexion_agent import build_reflexion_graph
 from assist.agent_types import AgentInvokeResult
 
@@ -97,6 +97,7 @@ async def log_middle(request: Request, call_next) -> Response:
 
 @app.post("/chat/completions")
 def chat_completions(request: ChatCompletionRequest) -> Response:
+    start = time.time()
     agent = get_agent(request.model, request.temperature)
     langchain_messages = openai_to_langchain(request.messages)
     user_request = langchain_messages[-1].content
@@ -135,6 +136,7 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
             }
             yield f"data: {json.dumps(finish)}\n\n"
             yield "data: [DONE]\n\n"
+            logger.debug(f"Reponse took {time.time() - start}s")
 
         return StreamingResponse(event_gen(), media_type="text/event-stream")
 
@@ -144,6 +146,7 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
     message = resp.messages[-1]
     logger.debug(f"Got response {message}")
     created = datetime.fromtimestamp(time.time())
+    logger.debug(f"Reponse tool {time.time() - start}s")
     return ChatCompletionResponse(
         id="1337",
         object="chat.completion",
@@ -211,11 +214,11 @@ def get_agent(model: str, temperature: float) -> Runnable:
     proj_tool = pi.search_tool()
 
     llm = ChatOllama(model=model, temperature=temperature)
-    pi = tools.project_index.ProjectIndex()
+    pi = project_index.ProjectIndex()
     proj_tool = pi.search_tool()
     return build_reflexion_graph(llm,
-                                 [tools.filesystem.file_contents,
-                                  tools.filesystem.list_files,
+                                 [filesystem.file_contents,
+                                  filesystem.list_files,
                                   proj_tool,
                                   search])
 
