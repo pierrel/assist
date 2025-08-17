@@ -92,3 +92,167 @@ def test_plan_check_intervals(monkeypatch):
 
     assert llm.retro_calls == 3
     assert dummy_agent.count == 6
+
+
+def test_plan_node_outputs_initial_state(monkeypatch):
+    class LLM:
+        def __init__(self):
+            self.schema = None
+            self.calls: list[list] = []
+
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, messages, _opts=None):
+            self.calls.append(messages)
+            step = Step(action="a", objective="o")
+            return Plan(goal="g", steps=[step], assumptions=[], risks=[])
+
+    llm = LLM()
+
+    def fake_general_agent(_llm, _tools):
+        return DummyAgent()
+
+    monkeypatch.setattr(reflexion_agent, "general_agent", fake_general_agent)
+
+    graph = build_reflexion_graph(llm, [])
+    plan_node = graph.builder.nodes["plan"].runnable.func
+
+    state = {"messages": [HumanMessage(content="do task")], "learnings": []}
+    out = plan_node(state)
+
+    assert isinstance(out["plan"], Plan)
+    assert out["step_index"] == 0
+    assert out["history"] == []
+    assert out["needs_replan"] is False
+    assert out["learnings"] == []
+    assert "do task" in llm.calls[0][1].content
+
+
+def test_execute_node_passes_history_to_agent(monkeypatch):
+    class TwoStepLLM:
+        def __init__(self):
+            self.schema = None
+
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, _messages, _opts=None):
+            steps = [
+                Step(action="step1", objective="obj1"),
+                Step(action="step2", objective="obj2"),
+            ]
+            return Plan(goal="g", steps=steps, assumptions=[], risks=[])
+
+    class SpyAgent:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, inputs, _opts=None):
+            self.calls.append(inputs["messages"])
+            idx = len(self.calls)
+            return {"messages": [AIMessage(content=f"result{idx}")]}
+
+    llm = TwoStepLLM()
+    agent = SpyAgent()
+
+    def fake_general_agent(_llm, _tools):
+        return agent
+
+    monkeypatch.setattr(reflexion_agent, "general_agent", fake_general_agent)
+
+    graph = build_reflexion_graph(llm, [])
+    plan_node = graph.builder.nodes["plan"].runnable.func
+    execute_node = graph.builder.nodes["execute"].runnable.func
+
+    state = {"messages": [HumanMessage(content="task")], "learnings": []}
+    state.update(plan_node(state))
+
+    out1 = execute_node(state)
+    state.update(out1)
+
+    out2 = execute_node(state)
+
+    assert len(agent.calls) == 2
+    first_call = agent.calls[0][-1].content
+    assert "step1" in first_call
+    second_call = agent.calls[1][-1].content
+    assert "result1" in second_call
+    assert out1["history"][0].endswith("result1")
+    assert out2["history"][1].endswith("result2")
+
+
+def test_plan_check_updates_state(monkeypatch):
+    class RetroLLM:
+        def __init__(self):
+            self.schema = None
+            self.calls = []
+
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, messages, _opts=None):
+            self.calls.append(messages)
+            return PlanRetrospective(needs_replan=True, learnings="learn")
+
+    llm = RetroLLM()
+
+    def fake_general_agent(_llm, _tools):
+        return DummyAgent()
+
+    monkeypatch.setattr(reflexion_agent, "general_agent", fake_general_agent)
+
+    graph = build_reflexion_graph(llm, [])
+    plan_check = graph.builder.nodes["plan_check"].runnable.func
+    plan = Plan(goal="g", steps=[Step(action="a", objective="o")], assumptions=[], risks=[])
+    state = {
+        "messages": [HumanMessage(content="task")],
+        "plan": plan,
+        "history": ["Step(action='a', objective='o'): result"],
+        "step_index": 1,
+        "needs_replan": False,
+        "learnings": [],
+    }
+
+    out = plan_check(state)
+
+    assert out["needs_replan"] is True
+    assert out["learnings"] == ["learn"]
+    assert "overall user task" in llm.calls[0][1].content
+
+
+def test_summarize_node_appends_message(monkeypatch):
+    class SummLLM:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, messages, _opts=None):
+            self.calls.append(messages)
+            return AIMessage(content="summary")
+
+        def with_structured_output(self, schema):
+            return self
+
+    llm = SummLLM()
+
+    def fake_general_agent(_llm, _tools):
+        return DummyAgent()
+
+    monkeypatch.setattr(reflexion_agent, "general_agent", fake_general_agent)
+
+    graph = build_reflexion_graph(llm, [])
+    summarize = graph.builder.nodes["summarize"].runnable.func
+
+    state = {
+        "messages": [HumanMessage(content="task")],
+        "history": ["Step(action='a', objective='o'): result"],
+    }
+
+    out = summarize(state)
+
+    assert isinstance(out["messages"][-1], AIMessage)
+    assert out["messages"][-1].content == "summary"
+    assert "result" in llm.calls[0][1].content
