@@ -108,10 +108,11 @@ def build_reflexion_graph(
 
     graph.add_node("plan", plan_node)
 
-    def execute_node(state: ReflexionState) -> Dict[str, object]:
-        step = state["plan"].steps[state["step_index"]]
-        history_text = "\n".join(state["history"])
-        logger.debug(f"Executing step {state['step_index'] + 1}: {step}")
+    def execute_node(state: ReflexionState) -> ReflexionState:
+        step_index = state["step_index"]
+        step = state["plan"].steps[step_index]
+        history_text = "\n".join([h.resolution for h in state["history"]])
+        logger.debug(f"Executing step {step_index + 1}: {step}")
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
             *state["messages"],
@@ -124,9 +125,13 @@ def build_reflexion_graph(
         result_raw = agent.invoke({"messages": messages}, {"callbacks": callbacks})
         result = AgentInvokeResult.model_validate(result_raw)
         output_msg = result.messages[-1]
-        new_hist = state["history"] + [f"{step}: {output_msg.content}"]
-        logger.debug(f"Step result: {output_msg.content}")
-        return {"history": new_hist, "step_index": state["step_index"] + 1}
+        res = StepResolution(action=step.action,
+                             objective=step.objective,
+                             resolution=output_msg.content)
+        new_hist = state["history"] + [res]
+        state["history"] = new_hist
+        state["step_index"] = step_index + 1
+        return state
 
     graph.add_node("execute", execute_node)
 
@@ -193,7 +198,7 @@ def build_reflexion_graph(
     graph.add_conditional_edges("execute", after_execute)
 
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
-        history_text = "\n".join(state["history"])
+        history_text = "\n".join(h.resolution for h in state["history"])
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
             HumanMessage(
