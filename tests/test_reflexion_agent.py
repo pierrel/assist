@@ -2,7 +2,7 @@ import pytest
 from langchain_core.messages import HumanMessage, AIMessage
 
 from assist import reflexion_agent
-from assist.reflexion_agent import build_reflexion_graph, Plan, Step, PlanRetrospective
+from assist.reflexion_agent import build_reflexion_graph, Plan, Step, PlanRetrospective, StepResolution
 
 
 class DummyLLM:
@@ -180,8 +180,8 @@ def test_execute_node_passes_history_to_agent(monkeypatch):
     assert "step1" in first_call
     second_call = agent.calls[1][-1].content
     assert "result1" in second_call
-    assert out1["history"][0].endswith("result1")
-    assert out2["history"][1].endswith("result2")
+    assert out1["history"][0].resolution.endswith("result1")
+    assert out2["history"][0].resolution.endswith("result2")
 
 
 def test_plan_check_updates_state(monkeypatch):
@@ -248,7 +248,7 @@ def test_summarize_node_appends_message(monkeypatch):
 
     state = {
         "messages": [HumanMessage(content="task")],
-        "history": ["Step(action='a', objective='o'): result"],
+        "history": [StepResolution(action='a', objective='o', resolution='result')]
     }
 
     out = summarize(state)
