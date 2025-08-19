@@ -181,7 +181,7 @@ def test_execute_node_passes_history_to_agent(monkeypatch):
     second_call = agent.calls[1][-1].content
     assert "result1" in second_call
     assert out1["history"][0].resolution.endswith("result1")
-    assert out2["history"][0].resolution.endswith("result2")
+    assert out2["history"][1].resolution.endswith("result2")
 
 
 def test_plan_check_updates_state(monkeypatch):
