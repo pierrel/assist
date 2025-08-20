@@ -1,0 +1,9 @@
+- id: summarize_history
+  input:
+    history:
+      - "Step(action='Greet', objective='Say hi'): Hi there!"
+      - "Step(action='Share fact', objective='Inform user'): Tea originated in China."
+  expect:
+    validators:
+      - type: regex
+        pattern: "tea"

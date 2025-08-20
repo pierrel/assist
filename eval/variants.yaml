@@ -1,0 +1,45 @@
+variants:
+  - name: reflexion_default
+    model: openai_compatible
+    model_cfg:
+      base_url: "http://localhost:11434/v1"
+      model: "llama3.1:8b-instruct"
+      temperature: 0.0
+    prompt: "eval/prompts/default.j2"
+    graph: "assist.eval_graphs:reflexion_graph_v1"
+
+  - name: planner_default
+    model: openai_compatible
+    model_cfg:
+      base_url: "http://localhost:11434/v1"
+      model: "llama3.1:8b-instruct"
+      temperature: 0.0
+    prompt: "eval/prompts/default.j2"
+    graph: "assist.eval_graphs:planner_graph_v1"
+
+  - name: plan_checker_default
+    model: openai_compatible
+    model_cfg:
+      base_url: "http://localhost:11434/v1"
+      model: "llama3.1:8b-instruct"
+      temperature: 0.0
+    prompt: "eval/prompts/default.j2"
+    graph: "assist.eval_graphs:plan_checker_graph_v1"
+
+  - name: step_executor_default
+    model: openai_compatible
+    model_cfg:
+      base_url: "http://localhost:11434/v1"
+      model: "llama3.1:8b-instruct"
+      temperature: 0.0
+    prompt: "eval/prompts/default.j2"
+    graph: "assist.eval_graphs:step_executor_graph_v1"
+
+  - name: summarizer_default
+    model: openai_compatible
+    model_cfg:
+      base_url: "http://localhost:11434/v1"
+      model: "llama3.1:8b-instruct"
+      temperature: 0.0
+    prompt: "eval/prompts/default.j2"
+    graph: "assist.eval_graphs:summarizer_graph_v1"
