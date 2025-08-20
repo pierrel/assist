@@ -1,0 +1,9 @@
+- id: reflexion_capital
+  input:
+    user: "Identify the capital of France and provide one fact about it."
+  expect:
+    validators:
+      - type: regex
+        pattern: "Paris"
+      - type: max_tokens
+        value: 100

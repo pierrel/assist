@@ -1,0 +1,15 @@
+- id: check_no_replan
+  input:
+    step_resolutions:
+      - "Boil water: done"
+    remaining_steps:
+      - "Steep tea"
+    goal: "Prepare tea"
+  expect:
+    validators:
+      - type: jsonschema
+        schema:
+          type: object
+          required: [needs_replan]
+          properties:
+            needs_replan: {type: boolean}
