@@ -10,7 +10,6 @@ from itertools import takewhile
 
 from pydantic import BaseModel
 from langchain_community.tools.tavily_search import TavilySearchResults
-from assist.tools import project_index
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -21,6 +20,7 @@ from langchain_core.messages import (
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 from assist.tools import filesystem, project_index
+from assist.tools.system_info import SystemInfoIndex
 from assist.reflexion_agent import build_reflexion_graph
 from assist.agent_types import AgentInvokeResult
 
@@ -210,17 +210,27 @@ def check_tavily_api_key() -> None:
 def get_agent(model: str, temperature: float) -> Runnable:
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
+
     pi = project_index.ProjectIndex()
     proj_tool = pi.search_tool()
 
+    sys_index = SystemInfoIndex()
+    sys_search = sys_index.search_tool()
+    sys_list = sys_index.list_tool()
+
     llm = ChatOllama(model=model, temperature=temperature)
-    pi = project_index.ProjectIndex()
-    proj_tool = pi.search_tool()
-    return build_reflexion_graph(llm,
-                                 [filesystem.file_contents,
-                                  filesystem.list_files,
-                                  proj_tool,
-                                  search])
+    return build_reflexion_graph(
+        llm,
+        [
+            filesystem.file_contents,
+            filesystem.list_files,
+            filesystem.project_context,
+            proj_tool,
+            sys_search,
+            sys_list,
+            search,
+        ],
+    )
 
 
 if __name__ == "__main__":
