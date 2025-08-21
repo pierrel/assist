@@ -122,7 +122,8 @@ def build_reflexion_graph(
                 )
             ),
         ]
-        result_raw = agent.invoke({"messages": messages}, {"callbacks": callbacks})
+        result_raw = agent.invoke({"messages": messages},
+                                  {"callbacks": callbacks})
         result = AgentInvokeResult.model_validate(result_raw)
         output_msg = result.messages[-1]
         res = StepResolution(action=step.action,
