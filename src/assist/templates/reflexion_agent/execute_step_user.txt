@@ -1,5 +1,9 @@
+Execute this step:
+{{ step }}
+
+Here is the overall goal, for which this is one step:
+{{ goal }}
+
 Previous steps and results:
 {{ history }}
 
-Execute the next step:
-{{ step }}
