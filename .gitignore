@@ -1,3 +1,6 @@
 **/*~
 **/__pycache__
 .venv
+**/#*#
+.ob-jupyter
+keys
