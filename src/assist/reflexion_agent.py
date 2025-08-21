@@ -118,7 +118,10 @@ def build_reflexion_graph(
             *state["messages"],
             HumanMessage(
                 content=base_prompt_for(
-                    "reflexion_agent/execute_step_user.txt", history=history_text, step=step
+                    "reflexion_agent/execute_step_user.txt",
+                    history=history_text,
+                    step=step,
+                    goal=state["plan"].goal
                 )
             ),
         ]
