@@ -6,10 +6,11 @@ from typing import Dict, List, Optional, TypedDict, Literal
 
 from loguru import logger
 from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
+from langgraph.config import get_stream_writer
 from pydantic import BaseModel, Field
 
 from assist.general_agent import general_agent
@@ -69,6 +70,15 @@ def tool_list_item(tool: BaseTool) -> str:
     return f"- {tool.name}: {tool.description}"
 
 
+def safe_write(event: dict) -> None:
+    """Write streaming events if a writer is available."""
+    try:
+        writer = get_stream_writer()
+    except RuntimeError:
+        return
+    writer(event)
+
+
 def build_reflexion_graph(
     llm: Runnable,
     tools: List[BaseTool],
@@ -100,11 +110,15 @@ def build_reflexion_graph(
             {"callbacks": callbacks}
         )
         logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
+        total = len(plan.steps)
+        text = "Re-plan complete" if state.get("needs_replan") else "Plan ready"
+        safe_write({"type": "status", "node": "plan", "msg": f"{text} with {total} steps."})
         return {"plan": plan,
                 "step_index": 0,
                 "history": [],
                 "needs_replan": False,
-                "learnings": state.get("learnings", [])}
+                "learnings": state.get("learnings", []),
+                "messages": state["messages"]}
 
     graph.add_node("plan", plan_node)
 
@@ -135,6 +149,15 @@ def build_reflexion_graph(
 
     graph.add_node("execute", execute_node)
 
+    def announce_step(state: ReflexionState) -> Dict[str, object]:
+        idx = state["step_index"]
+        step = state["plan"].steps[idx]
+        total = len(state["plan"].steps)
+        safe_write({"type": "status", "node": "execute", "msg": f"Step {idx + 1}/{total}: {step.action}"})
+        return {}
+
+    graph.add_node("announce_step", announce_step)
+
     def plan_check(state: ReflexionState) -> Dict[str, object]:
         """Asks an llm if a replan is required. If so, updates learnings and the replan bit."""
         plan = state["plan"]
@@ -154,6 +177,7 @@ def build_reflexion_graph(
         all_learnings = state.get("learnings", [])
         if retro.needs_replan:
             all_learnings = all_learnings + [retro.learnings]
+            safe_write({"type": "status", "node": "plan_check", "msg": "Re-planning..."})
         return {"needs_replan": retro.needs_replan,
                 "learnings": all_learnings}
         
@@ -166,13 +190,13 @@ def build_reflexion_graph(
     def continue_cond(state: ReflexionState) -> bool:
         return state["step_index"] < len(state["plan"].steps)
 
-    def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summarize"]:
+    def big_condition(state: ReflexionState) -> Literal["announce_step", "plan", "announce_summary"]:
         if replan_cond(state):
             return "plan"
         elif continue_cond(state):
-            return "execute"
+            return "announce_step"
         else:
-            return "summarize"
+            return "announce_summary"
 
     graph.add_conditional_edges("plan_check", big_condition)
 
@@ -184,18 +208,23 @@ def build_reflexion_graph(
             math.ceil(2 * total_steps / 3),
         }
 
-    def after_execute(state: ReflexionState) -> Literal["plan_check", "execute", "summarize"]:
+    def after_execute(state: ReflexionState) -> Literal["plan_check", "announce_step", "announce_summary"]:
         """Determine next node after executing a step."""
         total = len(state["plan"].steps)
         idx = state["step_index"]
         if idx in checkpoints(total):
             return "plan_check"
         elif idx < total:
-            return "execute"
+            return "announce_step"
         else:
-            return "summarize"
+            return "announce_summary"
 
     graph.add_conditional_edges("execute", after_execute)
+    def announce_summary(state: ReflexionState) -> Dict[str, object]:
+        safe_write({"type": "status", "node": "summarize", "msg": "Summarizing..."})
+        return {}
+
+    graph.add_node("announce_summary", announce_summary)
 
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(h.resolution for h in state["history"])
@@ -207,11 +236,14 @@ def build_reflexion_graph(
         ]
         summary = llm.invoke(messages)
         logger.debug(f"Summary: {summary.content}")
+        safe_write({"type": "status", "node": "summarize", "msg": "Summary complete"})
         return {"messages": state["messages"] + [summary]}
 
     graph.add_node("summarize", summarize_node)
     graph.set_entry_point("plan")
-    graph.add_edge("plan", "execute")
+    graph.add_edge("plan", "announce_step")
+    graph.add_edge("announce_step", "execute")
+    graph.add_edge("announce_summary", "summarize")
     graph.add_edge("summarize", END)
 
     return graph.compile()
