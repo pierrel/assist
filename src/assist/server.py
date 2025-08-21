@@ -115,16 +115,26 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
                 "choices": [{"delta": {"role": "assistant"}, "index": 0}],
             }
             yield f"data: {json.dumps(first)}\n\n"
-            for ch, metadata in agent.stream({"messages": langchain_messages}, stream_mode="messages"):
-                content = extract_content(ch)
-                chunk = {
-                    "id": "1337",
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": request.model,
-                    "choices": [{"delta": {"content": content}, "index": 0}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
+            stream = agent.stream(
+                {"messages": langchain_messages},
+                stream_mode=["messages", "custom"],
+                subgraphs=True,
+            )
+            for mode, chunk in stream:
+                if mode == "messages":
+                    ch, metadata = chunk
+                    content = extract_content(ch)
+                    chunk_data = {
+                        "id": "1337",
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": request.model,
+                        "choices": [{"delta": {"content": content}, "index": 0}],
+                    }
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
+                elif mode == "custom":
+                    event = chunk.get("type", "custom")
+                    yield f"event: {event}\ndata: {json.dumps(chunk)}\n\n"
             finish = {
                 "id": "1337",
                 "object": "chat.completion.chunk",
