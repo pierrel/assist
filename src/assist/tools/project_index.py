@@ -10,6 +10,7 @@ import numpy as np
 from langchain_core.documents import Document
 from langchain_core.tools import BaseTool, tool
 from vgrep.manager import Manager
+from .filesystem import _gitignore_spec, _is_ignored
 
 
 class _DummyContextualizer:
@@ -79,7 +80,16 @@ class ProjectIndex:
     # ------------------------------------------------------------------
     def _create_manager(self, project_root: Path, index_dir: Path) -> Manager:
         embedding = _DeterministicEmbedding() if os.getenv("PYTEST_CURRENT_TEST") else None
-        mgr = Manager(project_root, db_path=index_dir, embedding=embedding)
+        ignore_spec = _gitignore_spec(project_root)
+        file_match = None
+        if ignore_spec:
+            def match(p: Path) -> bool:
+                rel = p.relative_to(project_root)
+                return not _is_ignored(rel, project_root, ignore_spec)
+
+            file_match = match
+
+        mgr = Manager(project_root, file_match=file_match, db_path=index_dir, embedding=embedding)
         # The default contextualizer uses an LLM; replace it to keep tests
         # lightweight and deterministic.
         mgr.db.contextualizer = _DummyContextualizer()
