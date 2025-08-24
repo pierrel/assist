@@ -36,3 +36,29 @@ class TestProjectIndex(TestCase):
             "query": "hello"
         })
         self.assertIn("hello world", docs)
+
+    def test_respects_gitignore(self):
+        ignored = self.project_root / "ignored.txt"
+        ignored.write_text("secret")
+        (self.project_root / ".gitignore").write_text("ignored.txt\n")
+
+        retriever = self.index.get_retriever(self.project_root)
+        docs = retriever.get_relevant_documents("secret")
+        joined = "\n".join(d.page_content for d in docs)
+        self.assertNotIn("secret", joined)
+
+    def test_respects_parent_gitignore(self):
+        ignored = self.project_root / "sub" / "ignored.txt"
+        ignored.write_text("secret")
+        visible = self.project_root / "sub" / "visible.txt"
+        visible.write_text("hello")
+        (self.project_root / ".gitignore").write_text("sub/ignored.txt\n")
+
+        retriever = self.index.get_retriever(self.project_root / "sub")
+        docs = retriever.get_relevant_documents("hello")
+        joined = "\n".join(d.page_content for d in docs)
+        self.assertIn("hello", joined)
+
+        docs_secret = retriever.get_relevant_documents("secret")
+        joined_secret = "\n".join(d.page_content for d in docs_secret)
+        self.assertNotIn("secret", joined_secret)
