@@ -62,6 +62,8 @@ pytest tests/integration
 The project ships with a small, local-first harness for benchmarking agents and their
 subcomponents. Datasets live under =eval/datasets= and describe input/expected pairs.
 Variants in =eval/variants.yaml= map models and graph builders to run.
+Graph builders are exposed from =assist.reflexion_agent= and referenced as
+"module:function" strings so the harness always uses the live code.
 
 Run a dataset against the default variants:
 
