@@ -1,0 +1,9 @@
+- id: plan_tea
+  input:
+    user: "Make a short plan for brewing a cup of tea."
+  expect:
+    validators:
+      - type: regex
+        pattern: "boil"
+      - type: regex
+        pattern: "tea"
