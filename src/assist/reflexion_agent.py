@@ -138,8 +138,9 @@ def build_execute_node(agent: Runnable,
                        callbacks: Optional[List]) -> Callable:
     def execute_node(state: ReflexionState) -> Dict[str, object]:
         step = state["plan"].steps[state["step_index"]]
-        history_text = "\n".join(state["history"])
-        logger.debug(f"Executing step {state['step_index'] + 1}: {step}")
+        step_index = state['step_index']
+        history_text = "\n".join([str(h) for h in state['history']])
+        logger.debug(f"Executing step {step_index}: {step}")
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
             *state["messages"],
@@ -165,6 +166,7 @@ def build_execute_node(agent: Runnable,
         return state
 
     return execute_node
+
 
 def build_plan_check_node(llm: BaseChatModel,
                           callbacks: Optional[List]) -> Callable:
@@ -278,7 +280,6 @@ def build_reflexion_graph(
 
     return graph.compile()
 
-def single_node_graph
 
 def reflexion_graph_v1() -> Runnable:
     """Default reflexion graph using a lightweight LLM."""
