@@ -3,12 +3,13 @@ import math
 import os
 import time
 
-from typing import Dict, List, Optional, TypedDict, Literal
+from typing import Dict, List, Optional, TypedDict, Literal, Callable
 
 from loguru import logger
 from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel, Field
@@ -102,18 +103,9 @@ def _default_llm() -> Runnable:
     return _StaticLLM()
 
 
-def build_reflexion_graph(
-    llm: Runnable,
-    tools: List[BaseTool],
-    callbacks: Optional[List] = None
-) -> Runnable:
-    """Compose planning, step execution and summarization using LangGraph."""
-
-    callbacks = callbacks or [ConsoleCallbackHandler()]
-    agent = general_agent(llm, tools)
-
-    graph = StateGraph(ReflexionState)
-
+def build_plan_node(llm: BaseChatModel,
+                    tools: List[BaseTool],
+                    callbacks: Optional[List]) -> Callable:
     def plan_node(state: ReflexionState) -> Dict[str, object]:
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
@@ -138,9 +130,12 @@ def build_reflexion_graph(
                 "history": [],
                 "needs_replan": False,
                 "learnings": state.get("learnings", [])}
+    return plan_node
 
-    graph.add_node("plan", plan_node)
 
+def build_execute_node(agent: Runnable,
+                       tools: List[BaseTool],
+                       callbacks: Optional[List]) -> Callable:
     def execute_node(state: ReflexionState) -> Dict[str, object]:
         step = state["plan"].steps[state["step_index"]]
         history_text = "\n".join(state["history"])
@@ -161,9 +156,11 @@ def build_reflexion_graph(
         logger.debug(f"Step result: {output_msg.content}")
         return {"history": new_hist, "step_index": state["step_index"] + 1}
 
-    graph.add_node("execute", execute_node)
+    return execute_node
 
-    def plan_check(state: ReflexionState) -> Dict[str, object]:
+def build_plan_check_node(llm: BaseChatModel,
+                          callbacks: Optional[List]) -> Callable:
+    def plan_check_node(state: ReflexionState) -> Dict[str, object]:
         """Asks an llm if a replan is required. If so, updates learnings and the replan bit."""
         plan = state["plan"]
         human_prompt = base_prompt_for(
@@ -184,47 +181,12 @@ def build_reflexion_graph(
             all_learnings = all_learnings + [retro.learnings]
         return {"needs_replan": retro.needs_replan,
                 "learnings": all_learnings}
-        
-    graph.add_node("plan_check", plan_check)
 
-    def replan_cond(state: ReflexionState) -> bool:
-        """Check the state for the need to replan."""
-        return state["needs_replan"]
+    return plan_check_node
 
-    def continue_cond(state: ReflexionState) -> bool:
-        return state["step_index"] < len(state["plan"].steps)
 
-    def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summarize"]:
-        if replan_cond(state):
-            return "plan"
-        elif continue_cond(state):
-            return "execute"
-        else:
-            return "summarize"
-
-    graph.add_conditional_edges("plan_check", big_condition)
-
-    def checkpoints(total_steps: int) -> set[int]:
-        """Return step indices where a plan check should occur."""
-        return {
-            total_steps,
-            math.ceil(total_steps / 3),
-            math.ceil(2 * total_steps / 3),
-        }
-
-    def after_execute(state: ReflexionState) -> Literal["plan_check", "execute", "summarize"]:
-        """Determine next node after executing a step."""
-        total = len(state["plan"].steps)
-        idx = state["step_index"]
-        if idx in checkpoints(total):
-            return "plan_check"
-        elif idx < total:
-            return "execute"
-        else:
-            return "summarize"
-
-    graph.add_conditional_edges("execute", after_execute)
-
+def build_summarize_node(llm: BaseChatModel,
+                         callbacks: Optional[List]) -> Callable:
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(state["history"])
         messages = [
@@ -236,10 +198,74 @@ def build_reflexion_graph(
         summary = llm.invoke(messages)
         logger.debug(f"Summary: {summary.content}")
         return {"messages": state["messages"] + [summary]}
+    return summarize_node
 
-    graph.add_node("summarize", summarize_node)
-    graph.set_entry_point("plan")
+
+def checkpoints(total_steps: int) -> set[int]:
+    """Return step indices where a plan check should occur."""
+    return {
+        total_steps,
+        math.ceil(total_steps / 3),
+        math.ceil(2 * total_steps / 3),
+    }
+
+
+def after_execute(state: ReflexionState) -> Literal["plan_check", "execute", "summarize"]:
+    """Determine next node after executing a step."""
+    total = len(state["plan"].steps)
+    idx = state["step_index"]
+    if idx in checkpoints(total):
+        return "plan_check"
+    elif idx < total:
+        return "execute"
+    else:
+        return "summarize"
+
+
+def replan_cond(state: ReflexionState) -> bool:
+    """Check the state for the need to replan."""
+    return state["needs_replan"]
+
+
+def continue_cond(state: ReflexionState) -> bool:
+    return state["step_index"] < len(state["plan"].steps)
+
+
+def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summarize"]:
+    if replan_cond(state):
+        return "plan"
+    elif continue_cond(state):
+        return "execute"
+    else:
+        return "summarize"
+
+
+def build_reflexion_graph(
+    llm: Runnable,
+    tools: List[BaseTool],
+    callbacks: Optional[List] = None
+) -> Runnable:
+    """Compose planning, step execution and summarization using LangGraph."""
+
+    callbacks = callbacks or [ConsoleCallbackHandler()]
+    agent = general_agent(llm, tools)
+    graph = StateGraph(ReflexionState)
+
+    graph.add_node("plan", build_plan_node(llm,
+                                           tools,
+                                           callbacks))
+    graph.add_node("execute", build_execute_node(agent,
+                                                 tools,
+                                                 callbacks))
+    graph.add_node("plan_check", build_plan_check_node(llm,
+                                                       callbacks))
+    graph.add_node("summarize", build_summarize_node(llm,
+                                                     callbacks))
+
     graph.add_edge("plan", "execute")
+    graph.add_conditional_edges("plan_check", big_condition)
+    graph.add_conditional_edges("execute", after_execute)
+    graph.set_entry_point("plan")
     graph.add_edge("summarize", END)
 
     return graph.compile()
@@ -254,21 +280,9 @@ def planner_graph_v1() -> Runnable:
     """Graph that only performs planning."""
     llm = _default_llm()
     graph = StateGraph(dict)
-
-    def plan_node(state: Dict[str, object]) -> Dict[str, object]:
-        request = state.get("user", "")
-        messages: List[BaseMessage] = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/make_plan_system.txt")),
-            HumanMessage(
-                content=base_prompt_for(
-                    "reflexion_agent/make_plan_user.txt", tools="", task=request
-                )
-            ),
-        ]
-        plan = llm.with_structured_output(Plan).invoke(messages)
-        return {"output": plan.model_dump_json()}
-
-    graph.add_node("plan", plan_node)
+    
+    
+    graph.add_node("plan", build_plan_node(llm))
     graph.set_entry_point("plan")
     graph.add_edge("plan", END)
     return graph.compile()
@@ -279,21 +293,7 @@ def plan_checker_graph_v1() -> Runnable:
     llm = _default_llm()
     graph = StateGraph(dict)
 
-    def check_node(state: Dict[str, object]) -> Dict[str, object]:
-        human_prompt = base_prompt_for(
-            "reflexion_agent/plan_check_user.txt",
-            step_resolutions=state.get("step_resolutions", []),
-            remaining_steps=state.get("remaining_steps", []),
-            goal=state.get("goal", ""),
-        )
-        messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/plan_check_system.txt")),
-            HumanMessage(content=human_prompt),
-        ]
-        retro: PlanRetrospective = llm.with_structured_output(PlanRetrospective).invoke(messages)
-        return {"output": retro.model_dump_json()}
-
-    graph.add_node("check", check_node)
+    graph.add_node("check", build_plan_check_node(llm))
     graph.set_entry_point("check")
     graph.add_edge("check", END)
     return graph.compile()
@@ -305,21 +305,7 @@ def step_executor_graph_v1() -> Runnable:
     agent = general_agent(llm, [])
     graph = StateGraph(dict)
 
-    def exec_node(state: Dict[str, object]) -> Dict[str, object]:
-        step = Step(**state.get("step", {}))
-        history = state.get("history", "")
-        messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
-            HumanMessage(content=str(history)),
-            HumanMessage(
-                content=base_prompt_for("reflexion_agent/execute_step_user.txt", history=history, step=step)
-            ),
-        ]
-        result_raw = agent.invoke({"messages": messages})
-        output_msg = result_raw["messages"][-1]
-        return {"output": output_msg.content}
-
-    graph.add_node("exec", exec_node)
+    graph.add_node("exec", build_execute_node(agent))
     graph.set_entry_point("exec")
     graph.add_edge("exec", END)
     return graph.compile()
@@ -330,19 +316,7 @@ def summarizer_graph_v1() -> Runnable:
     llm = _default_llm()
     graph = StateGraph(dict)
 
-    def sum_node(state: Dict[str, object]) -> Dict[str, object]:
-        history = state.get("history", [])
-        history_text = "\n".join(history)
-        messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
-            HumanMessage(
-                content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
-            ),
-        ]
-        summary = llm.invoke(messages)
-        return {"output": summary.content}
-
-    graph.add_node("sum", sum_node)
+    graph.add_node("sum", build_summarize_node(llm))
     graph.set_entry_point("sum")
     graph.add_edge("sum", END)
     return graph.compile()
