@@ -19,4 +19,5 @@ mypy
 typer
 pyyaml
 jsonschema
+pathspec
 

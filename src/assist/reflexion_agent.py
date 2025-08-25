@@ -145,16 +145,24 @@ def build_execute_node(agent: Runnable,
             *state["messages"],
             HumanMessage(
                 content=base_prompt_for(
-                    "reflexion_agent/execute_step_user.txt", history=history_text, step=step
+                    "reflexion_agent/execute_step_user.txt",
+                    history=history_text,
+                    step=step,
+                    goal=state["plan"].goal
                 )
             ),
         ]
-        result_raw = agent.invoke({"messages": messages}, {"callbacks": callbacks})
+        result_raw = agent.invoke({"messages": messages},
+                                  {"callbacks": callbacks})
         result = AgentInvokeResult.model_validate(result_raw)
         output_msg = result.messages[-1]
-        new_hist = state["history"] + [f"{step}: {output_msg.content}"]
-        logger.debug(f"Step result: {output_msg.content}")
-        return {"history": new_hist, "step_index": state["step_index"] + 1}
+        res = StepResolution(action=step.action,
+                             objective=step.objective,
+                             resolution=output_msg.content)
+        new_hist = state["history"] + [res]
+        state["history"] = new_hist
+        state["step_index"] = step_index + 1
+        return state
 
     return execute_node
 
@@ -188,7 +196,7 @@ def build_plan_check_node(llm: BaseChatModel,
 def build_summarize_node(llm: BaseChatModel,
                          callbacks: Optional[List]) -> Callable:
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
-        history_text = "\n".join(state["history"])
+        history_text = "\n".join(h.resolution for h in state["history"])
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
             HumanMessage(
