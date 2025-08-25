@@ -270,6 +270,7 @@ def build_reflexion_graph(
 
     return graph.compile()
 
+def single_node_graph
 
 def reflexion_graph_v1() -> Runnable:
     """Default reflexion graph using a lightweight LLM."""
@@ -282,7 +283,7 @@ def planner_graph_v1() -> Runnable:
     graph = StateGraph(dict)
     
     
-    graph.add_node("plan", build_plan_node(llm))
+    graph.add_node("plan", build_plan_node(llm, [], []))
     graph.set_entry_point("plan")
     graph.add_edge("plan", END)
     return graph.compile()
@@ -293,7 +294,7 @@ def plan_checker_graph_v1() -> Runnable:
     llm = _default_llm()
     graph = StateGraph(dict)
 
-    graph.add_node("check", build_plan_check_node(llm))
+    graph.add_node("check", build_plan_check_node(llm, []))
     graph.set_entry_point("check")
     graph.add_edge("check", END)
     return graph.compile()
@@ -305,7 +306,9 @@ def step_executor_graph_v1() -> Runnable:
     agent = general_agent(llm, [])
     graph = StateGraph(dict)
 
-    graph.add_node("exec", build_execute_node(agent))
+    graph.add_node("exec", build_execute_node(agent,
+                                              [],
+                                              []))
     graph.set_entry_point("exec")
     graph.add_edge("exec", END)
     return graph.compile()
@@ -316,7 +319,9 @@ def summarizer_graph_v1() -> Runnable:
     llm = _default_llm()
     graph = StateGraph(dict)
 
-    graph.add_node("sum", build_summarize_node(llm))
+    graph.add_node("sum", build_summarize_node(llm,
+                                               [],
+                                               []))
     graph.set_entry_point("sum")
     graph.add_edge("sum", END)
     return graph.compile()
