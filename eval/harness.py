@@ -62,7 +62,7 @@ def grade(output: str, expect: Dict[str, Any]) -> tuple[bool, float, List[str]]:
         args = {k: v[k] for k in v.keys() if k not in ("type")}
         ok, note = fn(output, **args) if args else fn(output)
         results.append(ok)
-        notes.append(f"{'\u2713' if ok else '\u2717'} {note}")
+        notes.append(f"{'✓' if ok else '✗'} {note}")
     ok = all(results) if results else True
     score = sum(results)/len(results) if results else 1.0
     return ok, score, notes
