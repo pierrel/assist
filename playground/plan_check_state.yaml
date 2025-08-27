@@ -1,0 +1,15 @@
+messages: []
+plan:
+  goal: "Test goal"
+  steps:
+    - action: "do something"
+      objective: "achieve something"
+  assumptions: []
+  risks: []
+step_index: 1
+history:
+  - action: "do something"
+    objective: "achieve something"
+    resolution: "completed"
+needs_replan: false
+learnings: []
