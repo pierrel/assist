@@ -1,0 +1,17 @@
+messages: []
+plan:
+  goal: "Prepare tea"
+  steps:
+    - action: "Boil water"
+      objective: "Boil water"
+    - action: "Steep tea"
+      objective: "Steep tea"
+  assumptions: []
+  risks: []
+step_index: 1
+history:
+  - action: "Boil water"
+    objective: "Boil water"
+    resolution: "done"
+needs_replan: false
+learnings: []
