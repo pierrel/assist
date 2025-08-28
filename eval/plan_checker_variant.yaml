@@ -1,0 +1,4 @@
+variants:
+  - name: pc
+    graph: eval.plan_check_graph:plan_checker_runnable_v1
+    prompt: eval/prompts/default.j2

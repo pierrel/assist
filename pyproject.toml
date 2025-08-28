@@ -6,7 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "assist"
 version = "0.1.0"
 dependencies = [
-    "vgrep==0.1.1"
+    "vgrep==0.1.1",
+    "Jinja2==3.1.6",
+    "typer",
+    "pyyaml",
+    "jsonschema"
 ]
 
 [tool.setuptools.packages.find]
