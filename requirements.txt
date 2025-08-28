@@ -16,5 +16,8 @@ sentence-transformers
 vgrep==0.1.1
 Jinja2==3.1.6
 mypy
+typer
+pyyaml
+jsonschema
 pathspec
 
