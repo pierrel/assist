@@ -9,6 +9,32 @@ from typing import Any, Dict, List, Callable, Optional
 
 from jinja2 import Template
 from .validators import VALIDATORS
+from assist.reflexion_agent import Plan, StepResolution
+
+
+def _load_from_path(path: pathlib.Path) -> Any:
+    if path.suffix in (".yaml", ".yml"):
+        data = yaml.safe_load(path.read_text())
+    elif path.suffix == ".json":
+        data = json.loads(path.read_text())
+    else:
+        data = path.read_text()
+    return _resolve_refs(data, path.parent)
+
+
+def _resolve_refs(obj: Any, base_dir: pathlib.Path) -> Any:
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for k, v in obj.items():
+            if k.endswith("_path") and isinstance(v, str):
+                ref = base_dir / v
+                out[k[:-5]] = _load_from_path(ref)
+            else:
+                out[k] = _resolve_refs(v, base_dir)
+        return out
+    if isinstance(obj, list):
+        return [_resolve_refs(i, base_dir) for i in obj]
+    return obj
 
 
 def load_graph(dotted: str):
@@ -75,13 +101,19 @@ def run(
 ):
     var_cfg = yaml.safe_load(variants.read_text())["variants"]
     tests = yaml.safe_load(dataset.read_text())
+    tests = [_resolve_refs(t, dataset.parent) for t in tests]
     run_id = uuid.uuid4().hex
     outf = out.open("a")
     for var in var_cfg:
         graph = load_graph(var["graph"])
         sys_prompt = render_prompt(var["prompt"])
         for t in tests:
-            state = dict(**t["input"], system_prompt=sys_prompt, _variant=var["name"])
+            base_state = t["input"]
+            state = dict(**base_state, system_prompt=sys_prompt, _variant=var["name"])
+            if isinstance(state.get("plan"), dict):
+                state["plan"] = Plan.model_validate(state["plan"])
+            if isinstance(state.get("history"), list):
+                state["history"] = [StepResolution.model_validate(h) for h in state["history"]]
             res = run_one(graph, state)
             ok, score, notes = grade(res["output"], t.get("expect", {}))
             rec = EvalRecord(
