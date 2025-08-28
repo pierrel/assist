@@ -70,14 +70,21 @@ def tool_list_item(tool: BaseTool) -> str:
 
 
 def build_reflexion_graph(
-    llm: Runnable,
+    planner_llm: Runnable,
     tools: List[BaseTool],
-    callbacks: Optional[List] = None
+    executor_llm: Optional[Runnable] = None,
+    callbacks: Optional[List] = None,
 ) -> Runnable:
-    """Compose planning, step execution and summarization using LangGraph."""
+    """Compose planning, step execution and summarization using LangGraph.
+
+    ``planner_llm`` handles planning, plan checking and summarization.  If
+    ``executor_llm`` is provided, it is used for step execution; otherwise the
+    planner model is reused.
+    """
 
     callbacks = callbacks or [ConsoleCallbackHandler()]
-    agent = general_agent(llm, tools)
+    exec_llm = executor_llm or planner_llm
+    agent = general_agent(exec_llm, tools)
 
     graph = StateGraph(ReflexionState)
 
@@ -95,7 +102,7 @@ def build_reflexion_graph(
             ),
         ]
         start = time.time()
-        plan = llm.with_structured_output(Plan).invoke(
+        plan = planner_llm.with_structured_output(Plan).invoke(
             messages,
             {"callbacks": callbacks}
         )
@@ -153,7 +160,7 @@ def build_reflexion_graph(
             HumanMessage(content=human_prompt),
         ]
 
-        retro: PlanRetrospective = llm.with_structured_output(PlanRetrospective).invoke(messages, {"callbacks": callbacks})
+        retro: PlanRetrospective = planner_llm.with_structured_output(PlanRetrospective).invoke(messages, {"callbacks": callbacks})
         logger.debug(f"Retrospected with:\n{retro}")
         all_learnings = state.get("learnings", [])
         if retro.needs_replan:
@@ -209,7 +216,7 @@ def build_reflexion_graph(
                 content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),
         ]
-        summary = llm.invoke(messages)
+        summary = planner_llm.invoke(messages)
         logger.debug(f"Summary: {summary.content}")
         return {"messages": state["messages"] + [summary]}
 

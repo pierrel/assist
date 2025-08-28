@@ -18,10 +18,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import Runnable
-from langchain_ollama import ChatOllama
 from assist.tools import filesystem, project_index
 from assist.tools.system_info import SystemInfoIndex
 from assist.reflexion_agent import build_reflexion_graph
+from assist.model_manager import ModelManager
 from assist.agent_types import AgentInvokeResult
 
 
@@ -207,6 +207,9 @@ def check_tavily_api_key() -> None:
     if not os.getenv('TAVILY_API_KEY'):
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
 
+model_manager = ModelManager()
+
+
 def get_agent(model: str, temperature: float) -> Runnable:
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
@@ -218,9 +221,10 @@ def get_agent(model: str, temperature: float) -> Runnable:
     sys_search = sys_index.search_tool()
     sys_list = sys_index.list_tool()
 
-    llm = ChatOllama(model=model, temperature=temperature)
+    planner_llm, executor_llm = model_manager.get_llms(model, temperature)
+
     return build_reflexion_graph(
-        llm,
+        planner_llm,
         [
             filesystem.file_contents,
             filesystem.list_files,
@@ -230,6 +234,7 @@ def get_agent(model: str, temperature: float) -> Runnable:
             sys_list,
             search,
         ],
+        executor_llm=executor_llm,
     )
 
 
