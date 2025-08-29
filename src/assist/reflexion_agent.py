@@ -253,12 +253,20 @@ def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summariz
 def build_reflexion_graph(
     llm: Runnable,
     tools: List[BaseTool],
-    callbacks: Optional[List] = None
+    callbacks: Optional[List] = None,
+    execution_llm: Optional[Runnable] = None,
 ) -> Runnable:
-    """Compose planning, step execution and summarization using LangGraph."""
+    """Compose planning, step execution and summarization using LangGraph.
+
+    ``llm`` is used for planning related tasks (planning, plan checking and
+    summarization) while ``execution_llm`` – if provided – is used for step
+    execution. When ``execution_llm`` is ``None`` the planner ``llm`` is also
+    used for execution.
+    """
 
     callbacks = callbacks or [ConsoleCallbackHandler()]
-    agent = general_agent(llm, tools)
+    exec_llm = execution_llm or llm
+    agent = general_agent(exec_llm, tools)
     graph = StateGraph(ReflexionState)
 
     graph.add_node("plan", build_plan_node(llm,
