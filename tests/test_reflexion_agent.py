@@ -1,5 +1,6 @@
 import pytest
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.runnables import Runnable
 
 from assist import reflexion_agent
 from assist.reflexion_agent import build_reflexion_graph, Plan, Step, PlanRetrospective, StepResolution
@@ -256,3 +257,22 @@ def test_summarize_node_appends_message(monkeypatch):
     assert isinstance(out["messages"][-1], AIMessage)
     assert out["messages"][-1].content == "summary"
     assert "result" in llm.calls[0][1].content
+
+
+def test_build_reflexion_graph_allows_separate_execution_llm(monkeypatch):
+    plan_llm = object()
+    exec_llm = object()
+
+    class DummyAgent:
+        pass
+
+    def fake_general_agent(llm, _tools):
+        fake_general_agent.called_with = llm
+        return DummyAgent()
+
+    monkeypatch.setattr(reflexion_agent, "general_agent", fake_general_agent)
+
+    graph = build_reflexion_graph(plan_llm, [], execution_llm=exec_llm)
+
+    assert isinstance(graph, Runnable)
+    assert fake_general_agent.called_with is exec_llm

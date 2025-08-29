@@ -21,17 +21,16 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import Runnable
-from langchain_ollama import ChatOllama
 from assist.tools import filesystem, project_index
 from assist.tools.system_info import SystemInfoIndex
 from assist.reflexion_agent import build_reflexion_graph
 from assist.agent_types import AgentInvokeResult
+from assist.model_manager import get_model_pair
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
 
 INDEX_DB_ROOT = Path(tempfile.gettempdir())
-
 
 class ChatMessage(BaseModel):
     role: str
@@ -223,9 +222,9 @@ def get_agent(model: str, temperature: float) -> Runnable:
     sys_search = sys_index.search_tool()
     sys_list = sys_index.list_tool()
 
-    llm = ChatOllama(model=model, temperature=temperature)
+    plan_llm, exec_llm = get_model_pair(model, temperature)
     return build_reflexion_graph(
-        llm,
+        plan_llm,
         [
             filesystem.file_contents,
             filesystem.list_files,
@@ -235,6 +234,7 @@ def get_agent(model: str, temperature: float) -> Runnable:
             sys_list,
             search,
         ],
+        execution_llm=exec_llm,
     )
 
 
