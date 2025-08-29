@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import subprocess
-import re
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from langchain_core.runnables import Runnable
 
@@ -14,6 +13,13 @@ class ModelManager:
     The planner model is used for planning, plan checking and summarization,
     while the executor model handles individual step execution.
     """
+
+    #: Mapping of planning model -> execution model
+    PLAN_EXECUTION_MAP: Dict[str, str] = {
+        "gpt-4o": "gpt-4o-mini",
+        "gpt-4o-mini": "gpt-4o-mini",
+        "llama3.2:8b": "llama3.2:3b",
+    }
 
     def __init__(self) -> None:
         self.ollama_models = self._load_ollama_models()
@@ -42,61 +48,27 @@ class ModelManager:
         return model.startswith("gpt")
 
     # ------------------------------------------------------------------
-    # OpenAI handling
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _openai_step_model(model: str) -> str:
-        """Return a cheaper OpenAI model similar to ``model``.
-
-        Current heuristic simply selects the ``-mini`` variant when available.
-        """
-        return model if model.endswith("-mini") else f"{model}-mini"
-
-    # ------------------------------------------------------------------
-    # Ollama handling
-    # ------------------------------------------------------------------
-    def _ollama_step_model(self, model: str) -> str:
-        family, size = model.split(":", 1) if ":" in model else (model, "")
-        family_models = [m for m in self.ollama_models if m.startswith(family + ":")]
-        if not family_models:
-            return model
-
-        def size_value(m: str) -> float:
-            s = m.split(":", 1)[1]
-            match = re.search(r"[0-9]+(?:\.[0-9]+)?", s)
-            return float(match.group(0)) if match else 0
-
-        family_models.sort(key=size_value)
-        sizes = [m.split(":", 1)[1] for m in family_models]
-        if size in sizes:
-            idx = sizes.index(size)
-            if idx > 0:
-                return f"{family}:{sizes[idx - 1]}"
-            else:
-                return model
-        else:
-            return f"{family}:{sizes[0]}"
-
-    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
     def get_llms(self, model: str, temperature: float) -> Tuple[Runnable, Runnable]:
         """Return ``(planner_llm, executor_llm)`` for ``model``.
 
         ``planner_llm`` mirrors the requested model exactly, while
-        ``executor_llm`` is a cheaper sibling model.
+        ``executor_llm`` is looked up via :pyattr:`PLAN_EXECUTION_MAP`.
         """
+        exec_model = self.PLAN_EXECUTION_MAP.get(model, model)
+
         if self._is_openai_model(model):
             from langchain_openai import ChatOpenAI
 
             planner_llm = ChatOpenAI(model=model, temperature=temperature)
-            exec_model = self._openai_step_model(model)
             executor_llm = ChatOpenAI(model=exec_model, temperature=temperature)
         else:
             from langchain_ollama import ChatOllama
 
             planner_llm = ChatOllama(model=model, temperature=temperature)
-            exec_model = self._ollama_step_model(model)
+            if exec_model not in self.ollama_models:
+                exec_model = model
             executor_llm = ChatOllama(model=exec_model, temperature=temperature)
 
         return planner_llm, executor_llm
