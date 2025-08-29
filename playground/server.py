@@ -6,14 +6,13 @@ import threading
 import requests
 import uvicorn
 
-# Ensure the package can be imported when running this script directly.
-sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
-
+from assist import server
 from assist.server import app
 
-
 HOST = "0.0.0.0"
-PORT = 5000
+PORT = 5001
+
+server.INDEX_DB_ROOT = "~/.cache/assist/dbs/"
 
 
 def run_server() -> tuple[uvicorn.Server, threading.Thread]:
@@ -30,6 +29,10 @@ def run_server() -> tuple[uvicorn.Server, threading.Thread]:
     thread.start()
     return server, thread
 
+
+def stop_server(server: uvicorn.Server, thread: threading.Thread):
+    server.should_exit = True
+    server_thread.join()
 
 server, server_thread = run_server()
 
@@ -48,7 +51,3 @@ response = requests.post(
     },
 )
 print(response.text)
-
-# Shut down the server gracefully
-server.should_exit = True
-server_thread.join()
