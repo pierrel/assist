@@ -7,9 +7,8 @@ import yaml
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Callable, Optional
 
-from jinja2 import Template
 from .validators import VALIDATORS
-from assist.reflexion_agent import Plan, StepResolution
+from .hydrate import hydrate
 
 
 def _load_from_path(path: pathlib.Path) -> Any:
@@ -43,16 +42,13 @@ def load_graph(dotted: str):
     return getattr(mod, fn)()
 
 
-def render_prompt(path: str, **vars) -> str:
-    tpl = Template(pathlib.Path(path).read_text())
-    return tpl.render(**vars)
-
 
 @dataclass
 class EvalRecord:
     run_id: str
+    dataset: str
+    node: str
     test_id: str
-    variant: str
     ok: bool
     score: float
     wall_ms: float
@@ -94,45 +90,60 @@ def grade(output: str, expect: Dict[str, Any]) -> tuple[bool, float, List[str]]:
     return ok, score, notes
 
 
+GRAPH_MAP = {
+    "reflexion": "assist.reflexion_agent:reflexion_graph_v1",
+    "planner": "assist.reflexion_agent:planner_graph_v1",
+    "plan_check": "assist.reflexion_agent:plan_checker_graph_v1",
+    "step_executor": "assist.reflexion_agent:step_executor_graph_v1",
+    "summarizer": "assist.reflexion_agent:summarizer_graph_v1",
+}
+
+
+def _infer_graph(dataset: pathlib.Path) -> tuple[str, str]:
+    stem = dataset.stem
+    for prefix, graph in GRAPH_MAP.items():
+        if stem.startswith(prefix):
+            node = prefix
+            if prefix == "plan_check":
+                node = "plan_checker"
+            return node, graph
+    raise ValueError(f"Cannot infer graph for dataset {dataset.name}")
+
+
 def run(
     dataset: pathlib.Path,
-    variants: pathlib.Path = pathlib.Path("eval/variants.yaml"),
     out: pathlib.Path = pathlib.Path("eval_results.jsonl"),
 ):
-    var_cfg = yaml.safe_load(variants.read_text())["variants"]
+    node, graph_dotted = _infer_graph(dataset)
+    graph = load_graph(graph_dotted)
     tests = yaml.safe_load(dataset.read_text())
     tests = [_resolve_refs(t, dataset.parent) for t in tests]
     run_id = uuid.uuid4().hex
+    dataset_name = dataset.stem
     outf = out.open("a")
-    for var in var_cfg:
-        graph = load_graph(var["graph"])
-        sys_prompt = render_prompt(var["prompt"])
-        for t in tests:
-            base_state = t["input"]
-            state = dict(**base_state, system_prompt=sys_prompt, _variant=var["name"])
-            if isinstance(state.get("plan"), dict):
-                state["plan"] = Plan.model_validate(state["plan"])
-            if isinstance(state.get("history"), list):
-                state["history"] = [StepResolution.model_validate(h) for h in state["history"]]
-            res = run_one(graph, state)
-            ok, score, notes = grade(res["output"], t.get("expect", {}))
-            rec = EvalRecord(
-                run_id=run_id,
-                test_id=t["id"],
-                variant=var["name"],
-                ok=ok,
-                score=score,
-                wall_ms=res["wall_ms"],
-                steps=res["steps"],
-                tool_calls=res["tool_calls"],
-                prompt_tokens=res["usage"].get("prompt_tokens"),
-                completion_tokens=res["usage"].get("completion_tokens"),
-                raw_output=res["output"],
-                error=res["error"],
-                meta={"notes": notes, "model_cfg": var.get("model_cfg", {})},
-            )
-            outf.write(json.dumps(asdict(rec)) + "\n")
-            print(f"[{var['name']}:{t['id']}] {'OK' if ok else 'FAIL'} score={score:.2f} time={rec.wall_ms:.0f}ms {' | '.join(notes)}")
+    for t in tests:
+        base_state = t["input"]
+        state = hydrate(base_state)
+        res = run_one(graph, state)
+        ok, score, notes = grade(res["output"], t.get("expect", {}))
+        rec = EvalRecord(
+            run_id=run_id,
+            dataset=dataset_name,
+            node=node,
+            test_id=t["id"],
+            ok=ok,
+            score=score,
+            wall_ms=res["wall_ms"],
+            steps=res["steps"],
+            tool_calls=res["tool_calls"],
+            prompt_tokens=res["usage"].get("prompt_tokens"),
+            completion_tokens=res["usage"].get("completion_tokens"),
+            raw_output=res["output"],
+            error=res["error"],
+            meta={"notes": notes, "graph": graph_dotted},
+        )
+        outf.write(json.dumps(asdict(rec)) + "\n")
+        print(f"[{t['id']}] {'OK' if ok else 'FAIL'} score={score:.2f} time={rec.wall_ms:.0f}ms {' | '.join(notes)}")
     outf.close()
 
 
@@ -142,7 +153,7 @@ if __name__ == "__main__":
     app = typer.Typer()
 
     @app.command()
-    def cli(dataset: pathlib.Path, variants: pathlib.Path = pathlib.Path("eval/variants.yaml"), out: pathlib.Path = pathlib.Path("eval_results.jsonl")):
-        run(dataset=dataset, variants=variants, out=out)
+    def cli(dataset: pathlib.Path, out: pathlib.Path = pathlib.Path("eval_results.jsonl")):
+        run(dataset=dataset, out=out)
 
     app()

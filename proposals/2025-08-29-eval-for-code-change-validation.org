@@ -1,0 +1,21 @@
+#+TITLE: Evaluation system for code change validation
+
+* Requirements
+- Run *all* datasets with validation to produce a baseline. After a code change the same datasets are rerun and results compared to the baseline.
+- Remove the concept of variants; evaluation always uses the default graphs/LLM configuration.
+- Dataset files live in =eval/datasets/=
+  - Main files follow =[node]_[reason].yaml= and contain a list of test cases, each with =input= and =expect=. Include one for the =reflexion_agent= overall.
+  - Shared snippets live in =partial_[node].yaml= and are referenced from the main files via *_path fields so common inputs can be reused.
+- The harness infers which graph to call from the dataset filename and should take minimal arguments (only output path).
+- Support an easy "baseline vs code change" workflow: run baseline once, make a change, rerun, then compare outputs.
+
+* Proposed code changes
+- *eval/harness.py*
+  - Drop the =variants= parameter and the =variant= field of =EvalRecord=.
+  - Add a =run_all()= function that discovers datasets in =eval/datasets/=. Parse the node name from the filename and map it to the corresponding graph function in ~assist.reflexion_agent~, resolving any *_path references to partial files.
+  - Use the default LLM configuration with its built-in system prompt.
+  - Records should include the dataset name and node so that results can be grouped without variants.
+- Remove =eval/variants.yaml= and =eval/plan_checker_variant.yaml=; the harness no longer accepts a variants file. Remove =eval/prompts/default.j2=; the dummy LLM includes its prompt internally.
+- *eval/report.py*
+  - Aggregate results by dataset/node instead of variant.
+- Ensure the new dataset layout is documented and easy to maintain. Result files can be compared with standard diff tools.

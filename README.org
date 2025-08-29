@@ -61,14 +61,13 @@ pytest tests/integration
 * Evaluation
 The project ships with a small, local-first harness for benchmarking agents and their
 subcomponents. Datasets live under =eval/datasets= and describe input/expected pairs.
-Variants in =eval/variants.yaml= map models and graph builders to run.
-Graph builders are exposed from =assist.reflexion_agent= and referenced as
-"module:function" strings so the harness always uses the live code.
+The harness infers which graph to run from the dataset filename and uses the default
+LLM configuration baked into =assist.reflexion_agent=.
 
-Run a dataset against the default variants:
+Run a dataset:
 
 #+begin_src shell
-python -m eval.harness eval/datasets/reflexion_smoke.yaml --variants eval/variants.yaml --out eval_results.jsonl
+python -m eval.harness eval/datasets/reflexion_smoke.yaml --out eval_results.jsonl
 #+end_src
 
 Datasets available:
@@ -84,7 +83,7 @@ Summarize results:
 python -m eval.report < eval_results.jsonl
 #+end_src
 
-Edit =eval/variants.yaml= to point to local models or restrict which graphs are evaluated.
+Edit the dataset files under =eval/datasets= to adjust tests or add new ones.
 * User flows
 These are the main user flows for working with Assist
 ** Re-write
