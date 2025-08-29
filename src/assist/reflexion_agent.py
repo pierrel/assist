@@ -76,22 +76,43 @@ def tool_list_item(tool: BaseTool) -> str:
     return f"- {tool.name}: {tool.description}"
 
 
+DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+
 def _default_llm() -> Runnable:
     """Return a default LLM or a fake runnable for offline tests."""
     if ChatOpenAI is not None and os.getenv("OPENAI_API_KEY"):
-        return ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+        base = ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+
+        class _WithPrompt(Runnable):
+            def __init__(self, llm):
+                self.llm = llm
+                self._schema: type[BaseModel] | None = None
+
+            def with_structured_output(self, schema: type[BaseModel]):
+                self._schema = schema
+                self.llm = self.llm.with_structured_output(schema)
+                return self
+
+            def invoke(self, messages, _opts=None):
+                messages = [SystemMessage(content=DEFAULT_SYSTEM_PROMPT), *messages]
+                return self.llm.invoke(messages, _opts)
+
+        return _WithPrompt(base)
 
     from langchain_core.messages import AIMessage
 
     class _StaticLLM(Runnable):
         def __init__(self) -> None:
             self._schema: type[BaseModel] | None = None
+            self.default_system_prompt = DEFAULT_SYSTEM_PROMPT
 
         def with_structured_output(self, schema: type[BaseModel]) -> "_StaticLLM":
             self._schema = schema
             return self
 
-        def invoke(self, _messages, _opts=None):
+        def invoke(self, messages, _opts=None):
+            if messages and not isinstance(messages[0], SystemMessage):
+                messages = [SystemMessage(content=DEFAULT_SYSTEM_PROMPT), *messages]
             if self._schema is Plan:
                 self._schema = None
                 return Plan(goal="", steps=[], assumptions=[], risks=[])
