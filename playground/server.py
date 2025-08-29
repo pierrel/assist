@@ -1,7 +1,9 @@
 import sys
+import time
 from pathlib import Path
 import threading
 
+import requests
 import uvicorn
 
 # Ensure the package can be imported when running this script directly.
@@ -26,3 +28,23 @@ def run_server() -> tuple[uvicorn.Server, threading.Thread]:
 
 
 server, server_thread = run_server()
+
+# Wait for the server to start before sending the request
+while not server.started:
+    time.sleep(0.1)
+
+response = requests.post(
+    "http://0.0.0.0:5000/chat/completions",
+    json={
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello from the client."},
+        ],
+    },
+)
+print(response.text)
+
+# Shut down the server gracefully
+server.should_exit = True
+server_thread.join()
