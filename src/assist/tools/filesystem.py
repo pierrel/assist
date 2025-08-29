@@ -7,59 +7,107 @@ from pathspec import PathSpec
 # Tools for working with the filesystem
 
 
-@tool
-def list_files(root: str) -> list[str]:
-    """Recursively list files under ``root`` with creation and modification times.
+def _gitignore_spec(root_path: Path) -> tuple[PathSpec, Path] | None:
+    """Return a ``PathSpec`` and its base directory for ``root_path``.
 
-    Files matching patterns from a ``.gitignore`` file in ``root`` are skipped.
-    The results are sorted by last modified date in descending order and each
-    entry includes the absolute path, creation date, and last modified date.
+    ``root_path`` may be any directory within the project tree.  This function
+    searches upwards from ``root_path`` until a ``.gitignore`` file is found and
+    returns the parsed ``PathSpec`` along with the directory containing the
+    ``.gitignore``.  ``None`` is returned if no ``.gitignore`` is found or the
+    file cannot be read.
+    """
+    current = root_path
+    while True:
+        gitignore = current / ".gitignore"
+        if gitignore.exists():
+            try:
+                spec = PathSpec.from_lines("gitwildmatch", gitignore.read_text().splitlines())
+            except OSError:
+                return None
+            return spec, current
+        if current.parent == current:
+            break
+        current = current.parent
+    return None
+
+
+def _is_ignored(rel_path: Path, root: Path, ignore_spec: tuple[PathSpec, Path] | None) -> bool:
+    """Return ``True`` if ``rel_path`` under ``root`` matches ``ignore_spec``."""
+    if not ignore_spec:
+        return False
+    spec, base = ignore_spec
+    abs_path = (root / rel_path).resolve()
+    try:
+        rel_to_base = abs_path.relative_to(base)
+    except ValueError:
+        return False
+    return spec.match_file(rel_to_base.as_posix())
+
+
+@tool
+def list_files(root: str) -> tuple[list[str], str | None]:
+    """List up to 200 files and directories under ``root``.
+
+    Files matching patterns from a ``.gitignore`` file in ``root`` or any
+    ancestor directory are skipped.
+    Only entries within four levels below ``root`` are considered.  The results
+    are sorted by last modified date in descending order and each entry includes
+    the absolute path, creation date, and last modified date.
 
     Args:
         root: Directory to search.
 
     Returns:
-        list[str]: ``"<path> (created: <cdate>, modified: <mdate>)"`` entries
-        for every file under ``root`` that isn't ignored.
+        tuple[list[str], str | None]: ``["<path> (created: <cdate>, modified: <mdate>)"]``
+        entries for files and directories.  If more than 200 entries are found,
+        only the first 200 are returned along with a message indicating that the
+        results were truncated.
     """
     root_path = Path(root)
-    ignore_spec: PathSpec | None = None
-    gitignore = root_path / ".gitignore"
-    if gitignore.exists():
-        try:
-            ignore_spec = PathSpec.from_lines("gitwildmatch", gitignore.read_text().splitlines())
-        except OSError:
-            ignore_spec = None
+    ignore_spec = _gitignore_spec(root_path)
 
-    files: list[tuple[str, float, float]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    entries: list[tuple[str, float, float]] = []
+    for dirpath, dirnames, filenames in os.walk(root_path):
         rel_dir = Path(os.path.relpath(dirpath, root_path))
         if str(rel_dir) == ".":
             rel_dir = Path()
 
+        depth = len(rel_dir.parts)
+        if depth >= 4:
+            dirnames[:] = []
+
         if ignore_spec:
-            dirnames[:] = [
-                d for d in dirnames
-                if not ignore_spec.match_file((rel_dir / d).as_posix())
-            ]
+            dirnames[:] = [d for d in dirnames if not _is_ignored(rel_dir / d, root_path, ignore_spec)]
+
+        if depth > 0 and not _is_ignored(rel_dir, root_path, ignore_spec):
+            path = Path(dirpath)
+            try:
+                stat = path.stat()
+            except OSError:
+                pass
+            else:
+                entries.append((str(path.resolve()), stat.st_ctime, stat.st_mtime))
 
         for name in filenames:
-            rel_file = (rel_dir / name).as_posix()
-            if ignore_spec and ignore_spec.match_file(rel_file):
+            rel_file = rel_dir / name
+            if _is_ignored(rel_file, root_path, ignore_spec):
                 continue
             path = Path(dirpath) / name
             try:
                 stat = path.stat()
             except OSError:
                 continue
-            files.append((str(path.resolve()), stat.st_ctime, stat.st_mtime))
+            entries.append((str(path.resolve()), stat.st_ctime, stat.st_mtime))
 
-    files.sort(key=lambda x: x[2], reverse=True)
+    entries.sort(key=lambda x: x[2], reverse=True)
 
     def fmt(ts: float) -> str:
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
-    return [f"{p} (created: {fmt(c)}, modified: {fmt(m)})" for p, c, m in files]
+    formatted = [f"{p} (created: {fmt(c)}, modified: {fmt(m)})" for p, c, m in entries]
+    if len(formatted) > 200:
+        return formatted[:200], "Over 200 files found, only returned the first 200 files"
+    return formatted, None
 
 
 @tool
