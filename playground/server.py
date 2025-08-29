@@ -12,6 +12,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 from assist.server import app
 
 
+HOST = "0.0.0.0"
+PORT = 5000
+
+
 def run_server() -> tuple[uvicorn.Server, threading.Thread]:
     """Run the FastAPI server in a separate thread.
 
@@ -20,7 +24,7 @@ def run_server() -> tuple[uvicorn.Server, threading.Thread]:
     tuple[uvicorn.Server, threading.Thread]
         The running server instance and the thread executing it.
     """
-    config = uvicorn.Config(app, host="0.0.0.0", port=5000, log_level="debug")
+    config = uvicorn.Config(app, host=HOST, port=PORT, log_level="debug")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -34,7 +38,7 @@ while not server.started:
     time.sleep(0.1)
 
 response = requests.post(
-    "http://0.0.0.0:5000/chat/completions",
+    f"http://{HOST}:{PORT}/chat/completions",
     json={
         "model": "gpt-4o-mini",
         "messages": [
