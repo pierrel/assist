@@ -13,9 +13,16 @@ from .project_index import ProjectIndex
 class SystemInfoIndex:
     """Index and search system info (``info``) documentation."""
 
-    def __init__(self, info_root: Path | str = Path("/usr/share/info")) -> None:
+    def __init__(
+        self,
+        info_root: Path | str = Path("/usr/share/info"),
+        base_dir: Path | str | None = None,
+    ) -> None:
         self._info_root = Path(info_root)
-        self._index = ProjectIndex()
+        base = Path(base_dir) if base_dir is not None else None
+        if base is not None:
+            base = base / "system"
+        self._index = ProjectIndex(base)
         self._prepared_dir: Path | None = None
 
     # ------------------------------------------------------------------

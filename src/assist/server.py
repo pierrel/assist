@@ -1,5 +1,8 @@
 import time
 import os
+import argparse
+from pathlib import Path
+import tempfile
 from datetime import datetime
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
@@ -26,6 +29,8 @@ from assist.agent_types import AgentInvokeResult
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
+
+INDEX_DB_ROOT = Path(tempfile.gettempdir())
 
 
 class ChatMessage(BaseModel):
@@ -211,10 +216,10 @@ def get_agent(model: str, temperature: float) -> Runnable:
     check_tavily_api_key()
     search = TavilySearchResults(max_results=10)
 
-    pi = project_index.ProjectIndex()
+    pi = project_index.ProjectIndex(base_dir=INDEX_DB_ROOT)
     proj_tool = pi.search_tool()
 
-    sys_index = SystemInfoIndex()
+    sys_index = SystemInfoIndex(base_dir=INDEX_DB_ROOT)
     sys_search = sys_index.search_tool()
     sys_list = sys_index.list_tool()
 
@@ -234,6 +239,17 @@ def get_agent(model: str, temperature: float) -> Runnable:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--index-db", type=Path, default=INDEX_DB_ROOT)
+    args = parser.parse_args()
+    path = args.index_db.expanduser().resolve()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # pragma: no cover - can't simulate
+        raise SystemExit(f"Cannot create index directory {path}: {exc}") from exc
+    if not os.access(path, os.R_OK | os.W_OK):  # pragma: no cover - simple
+        raise SystemExit(f"Cannot access index directory {path}")
+    INDEX_DB_ROOT = path
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=5000, log_level="debug")
