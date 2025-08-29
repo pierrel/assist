@@ -1,0 +1,13 @@
+* Problem
+Project index and system info index dbs are stored in a temporary directly and regularly cleaned up. This causes frequent re-indexing.
+* Solution
+Provide a way to set the database directories with a command-line input.
+* Requirements
+1. Accept a command-line argument, "--index-db" that is a file path.
+2. The file path should be used by both project index and system info tools to store the database
+3. If the user cannot access the path, then raise an error on server start
+4. If the directory does not exist, then create it
+5. Each of project and system info indexes create their own sub-directory that they can use to store their files and dbs
+6. For convenience, create a "scripts/startup" shell script that launches the server with a given index db directory. It should also set the virtual environment correctly.
+* Implementation details
+To be filled in later.
