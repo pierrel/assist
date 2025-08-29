@@ -14,13 +14,18 @@ def list_files(root: str) -> list[str]:
     Files matching patterns from a ``.gitignore`` file in ``root`` are skipped.
     The results are sorted by last modified date in descending order and each
     entry includes the absolute path, creation date, and last modified date.
+    Only the 200 most recently modified files are returned. If more than 200
+    files are found, the final entry will be the string ``"Limit of 200 files"
+    ``"reached"`` to indicate truncation.
 
     Args:
         root: Directory to search.
 
     Returns:
         list[str]: ``"<path> (created: <cdate>, modified: <mdate>)"`` entries
-        for every file under ``root`` that isn't ignored.
+        for up to 200 files under ``root`` that aren't ignored. When the
+        directory contains more than 200 files, a final entry of
+        ``"Limit of 200 files reached"`` is appended to the list.
     """
     root_path = Path(root)
     ignore_spec: PathSpec | None = None
@@ -59,7 +64,10 @@ def list_files(root: str) -> list[str]:
     def fmt(ts: float) -> str:
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
-    return [f"{p} (created: {fmt(c)}, modified: {fmt(m)})" for p, c, m in files]
+    result = [f"{p} (created: {fmt(c)}, modified: {fmt(m)})" for p, c, m in files[:200]]
+    if len(files) > 200:
+        result.append("Limit of 200 files reached")
+    return result
 
 
 @tool
