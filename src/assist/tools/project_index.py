@@ -66,13 +66,16 @@ class _DeterministicEmbedding:
 class ProjectIndex:
     """Manage vector stores for arbitrary projects using ``vgrep``."""
 
-    def __init__(self) -> None:
+    def __init__(self, base_dir: Path | str | None = None) -> None:
         self._retrievers: Dict[str, _Retriever] = {}
+        self._base_dir = Path(base_dir) if base_dir is not None else Path(tempfile.gettempdir())
 
     def index_dir(self, project_root: Path) -> Path:
         """Return a unique directory for storing the vector index."""
         digest = hashlib.md5(str(project_root.resolve()).encode()).hexdigest()[:8]
-        return Path(tempfile.gettempdir()) / f"assist_index_{digest}"
+        base = self._base_dir / "projects" / f"assist_index_{digest}"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -105,7 +108,7 @@ class ProjectIndex:
             return self._retrievers[key]
 
         index_dir = self.index_dir(root)
-        if index_dir.exists():
+        if any(index_dir.iterdir()):
             retriever = self._load_index(root, index_dir)
         else:
             retriever = self._build_index(root, index_dir)
