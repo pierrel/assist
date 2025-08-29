@@ -1,6 +1,7 @@
 **/*~
 **/__pycache__
-.venv
+**/.venv
+**/site-packages
 **/#*#
 .ob-jupyter
 keys
