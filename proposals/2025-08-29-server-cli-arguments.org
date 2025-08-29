@@ -10,4 +10,43 @@ Provide a way to set the database directories with a command-line input.
 5. Each of project and system info indexes create their own sub-directory that they can use to store their files and dbs
 6. For convenience, create a "scripts/startup" shell script that launches the server with a given index db directory. It should also set the virtual environment correctly.
 * Implementation details
-To be filled in later.
+1. **CLI parsing**
+   - Extend ``assist/server.py`` to use ``argparse`` in ``__main__`` and
+     accept ``--index-db``.
+   - Resolve the argument to an absolute ``Path``.
+   - If the directory does not exist, create it with
+     ``path.mkdir(parents=True, exist_ok=True)``.
+   - If creation fails or the directory is not readable and writable,
+     raise ``SystemExit`` so the server refuses to start.
+   - Store the resolved path in a module level variable
+     ``INDEX_DB_ROOT`` for later use.
+
+2. **Project index location**
+   - Update ``assist/tools/project_index.py``:
+     - ``ProjectIndex`` gains an optional ``base_dir`` parameter.
+       When provided it is used instead of ``tempfile.gettempdir``.
+     - ``index_dir`` now returns ``base_dir / 'projects' /
+       <hash_of_project_root>`` and ensures the directory exists.
+
+3. **System info location**
+   - Update ``assist/tools/system_info.py`` so
+     ``SystemInfoIndex`` accepts ``base_dir``.
+   - Construct its internal ``ProjectIndex`` with
+     ``base_dir / 'system'`` so system and project data are separated.
+   - ``_prepare_dir`` uses this base path and creates the directory if
+     necessary.
+
+4. **Server wiring**
+   - ``get_agent`` creates ``ProjectIndex`` and ``SystemInfoIndex``
+     using ``INDEX_DB_ROOT`` established during CLI parsing.
+
+5. **Startup script**
+   - Add ``scripts/startup``:
+     - Activates the repository's virtual environment
+       (``.venv/bin/activate``).
+     - Invokes ``python -m assist.server --index-db "$1"`` where the
+       first argument is the desired database directory.
+     - Example usage: ``scripts/startup ~/.cache/assist``.
+
+These changes allow both project and system info indexes to persist in a
+user‑specified location while retaining separate sub‑directories.

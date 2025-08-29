@@ -1,0 +1,11 @@
+#!/bin/sh
+# Activate virtual environment and start server with persistent index database.
+set -e
+
+if [ -z "$1" ]; then
+  echo "Usage: scripts/startup <index-db-path>" >&2
+  exit 1
+fi
+
+. "$(dirname "$0")/../.venv/bin/activate"
+exec python -m assist.server --index-db "$1"
