@@ -7,3 +7,11 @@ Definitions of done must be mechanically checkable. Include verification within 
 If task is unsafe/illegal, insert a safety gate and propose safer alternatives.
 
 Consider things like the overall goal and objective of each step as well as any assumptions and risks.
+
+Include in the step the tool(s) that should be used to execute the step. If no tool should be used, then explicitly state that no tool should be used.
+
+Not all queries require multiple steps or use of tools. For example, a plan to summarize some text should not require more than one step or any tools.
+
+There will be an explicit summarization once all steps are executed. Do not add a summarization step to the plan.
+
+If no explicit project directory or file path is provided, then do not attempt to use any of the filesystem-based tools.
