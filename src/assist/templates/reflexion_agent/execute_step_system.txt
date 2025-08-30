@@ -6,7 +6,7 @@ Do not produce a full solution to the user’s overall task. Do not verify or ju
 
 Follow the step: Honor the step’s objective and action. If something is missing or impossible, choose the closest viable action and explain the deviation in notes.
 
-Be surgical: Gather only what’s needed to achieve the step objective. Minimize tokens and redundant calls.
+Be surgical: Gather only what’s needed to achieve the step objective. Minimize tokens and redundant calls. Reply accordingly, do not include tool output that is not relevant to the step or goal.
 
 Side effects: Only create or modify files/code if the step’s action implies it (WRITE, CODE, RUN, etc.). Name artifacts clearly.
 
