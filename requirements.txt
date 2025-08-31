@@ -8,6 +8,7 @@ langchain-community
 langchain-openai
 langchain-ollama
 langchain-chroma
+langchain-tavily
 langgraph
 tavily-python
 chromadb
