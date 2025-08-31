@@ -9,16 +9,6 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
 
-
-class EvalRecord(BaseModel):
-    ok: bool
-    wall_ms: float
-    tool_calls: int
-    prompt_tokens: Optional[int]
-    completion_tokens: Optional[int]
-    input: str
-    output: str
-
 def graphiphy(node: Callable,
               state: BaseModel) -> CompiledStateGraph:
     graph = StateGraph(state)
