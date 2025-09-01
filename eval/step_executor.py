@@ -1,9 +1,27 @@
-import re
-from langchain_core.messages import HumanMessage
-from assist.reflexion_agent import step_executor_graph_v1, Plan, Step
-from .types import Validation
+from langchain_core.messages import HumanMessage, SystemMessage
+from assist.reflexion_agent import (
+    build_execute_node,
+    Plan,
+    Step,
+    ReflexionState,
+    StepResolution,
+    general_agent
+)
+from langchain_openai import ChatOpenAI
+from assist.tools.base import base_tools
+from eval.types import Validation
 
-GRAPH = step_executor_graph_v1()
+llm = ChatOpenAI(model="gpt-4o-mini")
+tools = base_tools("~/.cache/assist/dbs/")
+
+
+def has_resolution(state: ReflexionState) -> bool:
+    return state["history"][0].resolution not in (None, "")
+
+
+GRAPH = build_execute_node(general_agent(llm,
+                                         tools),
+                           [])
 
 PLAN = Plan(
     goal="Greet user",
@@ -12,18 +30,19 @@ PLAN = Plan(
     risks=[],
 )
 
-STATE = {
-    "messages": [HumanMessage(content="Execute the plan")],
-    "plan": PLAN,
-    "step_index": 0,
-    "history": [],
-    "needs_replan": False,
-    "learnings": [],
-}
+STATE = ReflexionState(
+    messages=[SystemMessage("You are a helpful assistant"),
+              HumanMessage("Hello, how are you?")],
+    plan=PLAN,
+    step_index=0,
+    history=[],
+    needs_replan=False,
+    learnings=[],
+)
 
 VALIDATIONS = [
     Validation(
         input=STATE,
-        check=re.compile("resolution"),
+        check=has_resolution
     )
 ]
