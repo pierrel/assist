@@ -1,8 +1,12 @@
-import re
-from assist.reflexion_agent import plan_checker_graph_v1, Plan, Step, StepResolution
-from .types import Validation
+from assist.reflexion_agent import build_plan_check_node, Plan, Step, StepResolution, ReflexionState
+from eval.types import Validation
+from langchain_openai import ChatOpenAI
 
-GRAPH = plan_checker_graph_v1()
+def check_needs_replan(state: ReflexionState) -> bool:
+    return state["needs_replan"] is False
+
+GRAPH = build_plan_check_node(ChatOpenAI(model="gpt-4o-mini"),
+                              [])
 
 PLAN = Plan(
     goal="Prepare tea",
