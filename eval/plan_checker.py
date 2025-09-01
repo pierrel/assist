@@ -30,6 +30,6 @@ STATE = {
 VALIDATIONS = [
     Validation(
         input=STATE,
-        check=re.compile("needs_replan"),
+        check=check_needs_replan
     )
 ]
