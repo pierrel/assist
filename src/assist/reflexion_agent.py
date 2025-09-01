@@ -76,33 +76,6 @@ def tool_list_item(tool: BaseTool) -> str:
     return f"- {tool.name}: {tool.description}"
 
 
-def _default_llm() -> Runnable:
-    """Return a default LLM or a fake runnable for offline tests."""
-    if ChatOpenAI is not None and os.getenv("OPENAI_API_KEY"):
-        return ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
-
-    from langchain_core.messages import AIMessage
-
-    class _StaticLLM(Runnable):
-        def __init__(self) -> None:
-            self._schema: type[BaseModel] | None = None
-
-        def with_structured_output(self, schema: type[BaseModel]) -> "_StaticLLM":
-            self._schema = schema
-            return self
-
-        def invoke(self, _messages, _opts=None):
-            if self._schema is Plan:
-                self._schema = None
-                return Plan(goal="", steps=[], assumptions=[], risks=[])
-            if self._schema is PlanRetrospective:
-                self._schema = None
-                return PlanRetrospective(needs_replan=False, learnings=None)
-            return AIMessage(content="")
-
-    return _StaticLLM()
-
-
 def build_plan_node(llm: BaseChatModel,
                     tools: List[BaseTool],
                     callbacks: Optional[List]) -> Callable:
@@ -134,7 +107,6 @@ def build_plan_node(llm: BaseChatModel,
 
 
 def build_execute_node(agent: Runnable,
-                       tools: List[BaseTool],
                        callbacks: Optional[List]) -> Callable:
     def execute_node(state: ReflexionState) -> Dict[str, object]:
         step = state["plan"].steps[state["step_index"]]
@@ -273,7 +245,6 @@ def build_reflexion_graph(
                                            tools,
                                            callbacks))
     graph.add_node("execute", build_execute_node(agent,
-                                                 tools,
                                                  callbacks))
     graph.add_node("plan_check", build_plan_check_node(llm,
                                                        callbacks))
@@ -286,59 +257,4 @@ def build_reflexion_graph(
     graph.set_entry_point("plan")
     graph.add_edge("summarize", END)
 
-    return graph.compile()
-
-
-def reflexion_graph_v1() -> Runnable:
-    """Default reflexion graph using a lightweight LLM."""
-    return build_reflexion_graph(_default_llm(), tools=[])
-
-
-def planner_graph_v1() -> Runnable:
-    """Graph that only performs planning."""
-    llm = _default_llm()
-    graph = StateGraph(dict)
-    
-    
-    graph.add_node("plan", build_plan_node(llm, [], []))
-    graph.set_entry_point("plan")
-    graph.add_edge("plan", END)
-    return graph.compile()
-
-
-def plan_checker_graph_v1() -> Runnable:
-    """Graph that evaluates if replanning is required."""
-    llm = _default_llm()
-    graph = StateGraph(dict)
-
-    graph.add_node("check", build_plan_check_node(llm, []))
-    graph.set_entry_point("check")
-    graph.add_edge("check", END)
-    return graph.compile()
-
-
-def step_executor_graph_v1() -> Runnable:
-    """Graph that executes a single step."""
-    llm = _default_llm()
-    agent = general_agent(llm, [])
-    graph = StateGraph(dict)
-
-    graph.add_node("exec", build_execute_node(agent,
-                                              [],
-                                              []))
-    graph.set_entry_point("exec")
-    graph.add_edge("exec", END)
-    return graph.compile()
-
-
-def summarizer_graph_v1() -> Runnable:
-    """Graph that summarizes a list of step resolutions."""
-    llm = _default_llm()
-    graph = StateGraph(dict)
-
-    graph.add_node("sum", build_summarize_node(llm,
-                                               [],
-                                               []))
-    graph.set_entry_point("sum")
-    graph.add_edge("sum", END)
     return graph.compile()
