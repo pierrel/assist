@@ -1,0 +1,37 @@
+* Problem
+The current evaluation harness relies on YAML datasets and variant files.
+Input payloads and validation rules are scattered, making it hard to extend
+or reason about individual node behaviour. Validators only yield pass/fail
+and running the harness requires multiple configuration files.
+
+* Solution
+Define evaluation data directly in Python. Each node (planner, plan checker,
+step executor, summarizer and the full reflexion agent) exposes a module that
+contains sample inputs and validation rules. A single runner imports these
+modules, invokes the corresponding graph and records scores. Remove the YAML
+configuration files.
+
+* Requirements
+1. One Python module per node exposing ``GRAPH`` and ``VALIDATIONS``.
+2. Each validation object stores the node input and either a regex pattern or
+   a function returning a float rating in ``[0,1]``.
+3. Runner writes JSONL evaluation records and is invoked as ``python -m
+   eval.run OUTPUT_PATH`` where the output path is the only argument.
+4. All legacy YAML files under ``eval/`` are removed.
+5. Include at least one sample validation for each node using the default
+   offline LLM behaviour.
+
+* Implementation details
+1. ``eval/types.py`` defines a ``Validation`` dataclass and ``Check`` type.
+2. Node modules ``eval/reflexion.py``, ``eval/planner.py``,
+   ``eval/plan_checker.py``, ``eval/step_executor.py`` and
+   ``eval/summarizer.py`` import graphs from ``assist.reflexion_agent`` and
+   provide ``GRAPH``/``VALIDATIONS``.
+3. ``eval/run.py`` handles graph execution, scoring (regex or callable), JSON
+   serialisation of outputs and writing ``EvalRecord`` lines. It exposes a
+   Typer CLI that accepts only the output file path.
+4. Delete ``eval/harness.py``, ``eval/validators.py``,
+   ``eval/plan_check_graph.py``, ``eval/variants.yaml``,
+   ``eval/plan_checker_variant.yaml`` and all YAML files in ``eval/datasets``.
+5. Sample validations follow the lightweight pattern seen in
+   ``playground/eval/plan_eval.py``.
