@@ -21,6 +21,10 @@ GRAPH = build_plan_node(ChatOpenAI(model="gpt-4o-mini"),
 
 VALIDATIONS = [
     Validation(
+        input={"messages": [HumanMessage(content="How do I brew a cup of tea?")]},
+        check=check_plan
+    ),
+    Validation(
         input={"messages": [HumanMessage(content="Make a short plan for brewing a cup of tea.")]},
         check=check_plan
     )
