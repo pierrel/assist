@@ -20,10 +20,10 @@ from .types import Validation, Check
 from assist.reflexion_agent import ReflexionState
 
 MODULES = [
-#    "eval.reflexion",
-#    "eval.planner",
-#    "eval.plan_checker",
-#    "eval.step_executor",
+    "eval.reflexion",
+    "eval.planner",
+    "eval.plan_checker",
+    "eval.step_executor",
     "eval.summarizer",
 ]
 
