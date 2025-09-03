@@ -1,13 +1,39 @@
 import re
-from typing import Any
+from typing import Any, Optional, Callable
+from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage
+from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool
 
-from assist.reflexion_agent import Plan, Step, PlanRetrospective
+from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph
+
+from assist.reflexion_agent import Plan, Step, PlanRetrospective, ReflexionState
+from assist.tools.base import base_tools
 from eval.types import Validation
 
+def graphiphy(node: Callable) -> CompiledStateGraph:
+    graph = StateGraph(ReflexionState)
 
-class DummyLLM:
+    graph.add_node("node", node)
+    graph.set_entry_point("node")
+    graph.add_edge("node", END)
+    return graph.compile()
+
+def base_tools_for_test() -> List[BaseTool]:
+    return base_tools("~/.cache/assist/dbs/")
+
+def thinking_llm(message: Optional[str]) -> Runnable:
+    return DummyLLM(message)
+
+def execution_llm(message: Optional[str]) -> Runnable:
+    return DummyLLM(message)
+
+def agent(message: Optional[str]) -> Runnable:
+    return DummyAgent(message)
+
+class DummyLLM():
     """Minimal stand‑in for chat models used in validation tests."""
 
     def __init__(self, message: str = "ok") -> None:
