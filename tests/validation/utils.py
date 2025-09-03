@@ -1,5 +1,5 @@
 import re
-from typing import Any, Optional, Callable
+from typing import Any, Optional, Callable, List
 from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage
