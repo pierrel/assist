@@ -1,4 +1,4 @@
-import pytest
+from unittest import TestCase
 
 from assist.reflexion_agent import (
     build_plan_check_node,
@@ -7,45 +7,37 @@ from assist.reflexion_agent import (
     StepResolution,
     ReflexionState,
 )
-from eval.types import Validation
 
-from .utils import run_validation, DummyLLM
-
-
-def check_needs_replan(state: ReflexionState) -> bool:
-    return state["needs_replan"] is False
+from .utils import DummyLLM, graphiphy
 
 
-LLM = DummyLLM()
-GRAPH = build_plan_check_node(LLM, [])
+class TestPlanCheckerNode(TestCase):
+    def setUp(self):
+        llm = DummyLLM()
+        self.graph = graphiphy(build_plan_check_node(llm, []))
 
-PLAN = Plan(
-    goal="Prepare tea",
-    steps=[
-        Step(action="Boil water", objective="Boil water"),
-        Step(action="Steep tea", objective="Steep tea"),
-    ],
-    assumptions=[],
-    risks=[],
-)
+        plan = Plan(
+            goal="Prepare tea",
+            steps=[
+                Step(action="Boil water", objective="Boil water"),
+                Step(action="Steep tea", objective="Steep tea"),
+            ],
+            assumptions=[],
+            risks=[],
+        )
 
-STATE: ReflexionState = {
-    "messages": [],
-    "plan": PLAN,
-    "step_index": 1,
-    "history": [
-        StepResolution(action="Boil water", objective="Boil water", resolution="done")
-    ],
-    "needs_replan": False,
-    "learnings": [],
-}
+        self.state: ReflexionState = {
+            "messages": [],
+            "plan": plan,
+            "step_index": 1,
+            "history": [
+                StepResolution(action="Boil water", objective="Boil water", resolution="done")
+            ],
+            "needs_replan": False,
+            "learnings": [],
+        }
 
-
-VALIDATIONS = [Validation(input=STATE, check=check_needs_replan)]
-
-
-@pytest.mark.validation
-@pytest.mark.parametrize("validation", VALIDATIONS)
-def test_plan_checker_node(validation: Validation) -> None:
-    assert run_validation(GRAPH, validation)
+    def test_no_replan_needed(self):
+        result = self.graph.invoke(self.state)
+        self.assertFalse(result["needs_replan"])
 
