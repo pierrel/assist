@@ -1,36 +1,35 @@
-import pytest
+from unittest import TestCase
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from assist.reflexion_agent import build_summarize_node, StepResolution, ReflexionState
-from eval.types import Validation
 
-from .utils import run_validation, DummyLLM
-
-
-def check_messages(output: ReflexionState) -> bool:
-    out_message = output["messages"][-1]
-    is_aimessage = isinstance(out_message, AIMessage)
-    has_china = "china" in out_message.content.lower()
-    return is_aimessage and has_china
+from .utils import DummyLLM, graphiphy
 
 
-LLM = DummyLLM(message="Tea originated in China.")
-GRAPH = build_summarize_node(LLM, [])
+class TestSummarizerNode(TestCase):
+    def setUp(self):
+        llm = DummyLLM(message="Tea originated in China.")
+        self.graph = graphiphy(build_summarize_node(llm, []))
+        self.state: ReflexionState = {
+            "messages": [
+                SystemMessage("You are a helpful assistant"),
+                HumanMessage("What's up with tea?"),
+            ],
+            "history": [
+                StepResolution(
+                    action="Greet", objective="Say hi", resolution="Hi there!"
+                ),
+                StepResolution(
+                    action="Share fact",
+                    objective="Inform user",
+                    resolution="Tea originated in China.",
+                ),
+            ],
+        }
 
-STATE: ReflexionState = {
-    "messages": [SystemMessage("You are a helpful assistant"), HumanMessage("What's up with tea?")],
-    "history": [
-        StepResolution(action="Greet", objective="Say hi", resolution="Hi there!"),
-        StepResolution(action="Share fact", objective="Inform user", resolution="Tea originated in China."),
-    ],
-}
-
-
-VALIDATIONS = [Validation(input=STATE, check=check_messages)]
-
-
-@pytest.mark.validation
-@pytest.mark.parametrize("validation", VALIDATIONS)
-def test_summarizer_node(validation: Validation) -> None:
-    assert run_validation(GRAPH, validation)
+    def test_summary_mentions_china(self):
+        result = self.graph.invoke(self.state)
+        out_message = result["messages"][-1]
+        self.assertIsInstance(out_message, AIMessage)
+        self.assertIn("china", out_message.content.lower())
 
