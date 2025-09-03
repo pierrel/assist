@@ -1,0 +1,46 @@
+* Problem
+Current validations live in the evaluation modules and run via the standalone
+runner. They are detached from the normal ``pytest`` flow, making it hard to
+invoke them alongside integration tests or to target individual checks using
+standard test selection flags.
+
+* Solution
+Introduce a validation test suite where each node and its validations are
+expressed as ``pytest`` tests. Every validation becomes a test function that
+feeds input to a node graph and asserts the expected behaviour. Running
+``pytest`` will then execute these validations, enabling selective execution
+via markers or test paths. The existing evaluation runner remains unchanged so
+it can later evolve into an automated LLM-judging system.
+
+* Requirements
+1. Define nodes and their ``Validation`` objects inside test modules (e.g.
+   ``tests/validation/test_planner.py``).
+2. Provide a helper that executes a node graph with a given ``Validation`` and
+   returns a boolean result.
+3. Use ``pytest`` parametrisation to generate one test per validation while
+   keeping the declarative ``Validation`` structure.
+4. Mark validation tests (``@pytest.mark.validation``) so developers can run
+   ``pytest -m validation`` or select individual tests.
+5. Document how the test suite complements, not replaces, the existing
+   evaluation runner.
+
+* Implementation details
+1. Each test module defines a ``GRAPH`` and ``VALIDATIONS`` list, mirroring the
+   current evaluation modules but scoped to tests.
+2. A helper ``run_validation(graph, validation)`` drives the node with the
+   validation's input and evaluates its check.
+3. Parametrised ``test_<node>_validation`` functions iterate over the
+   ``VALIDATIONS`` list and assert that ``run_validation`` returns ``True``.
+4. No changes are required to ``eval/run.py``; it continues to execute
+   validations independently and will later host the automated judging logic.
+
+* Open questions
+- How do we share node definitions between the test suite and the runner to
+  avoid duplication?
+- Should validation tests produce richer artifacts (traces, logs) for future
+  LLM-based judging?
+
+* Future direction
+This proposal adds a developer-facing test suite today while leaving room for
+an eventual automated judging system in which LLMs score node outputs according
+to custom criteria.
