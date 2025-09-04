@@ -4,16 +4,12 @@ from langchain_core.messages import HumanMessage, AIMessage
 import assist.reflexion_agent as reflexion_agent
 from assist.reflexion_agent import build_reflexion_graph
 
-from .utils import DummyLLM, DummyAgent
+from .utils import DummyLLM, DummyAgent, fake_general_agent
 
 
 class TestReflexionNode(TestCase):
     def setUp(self):
         self.llm = DummyLLM(message="The capital of France is Paris.")
-
-        def fake_general_agent(_llm, _tools):
-            return DummyAgent(message="Paris is the capital of France.")
-
         self.orig_agent = reflexion_agent.general_agent
         reflexion_agent.general_agent = fake_general_agent
         self.graph = build_reflexion_graph(self.llm, [], [], self.llm)

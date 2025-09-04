@@ -1,15 +1,20 @@
 import re
+import os
 from typing import Any, Optional, Callable, List
 from pydantic import BaseModel
 
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
+from langchain_core.language_models import BaseChatModel
+
+from langchain_openai import ChatOpenAI
 
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 
 from assist.reflexion_agent import Plan, Step, PlanRetrospective, ReflexionState
+from assist.general_agent import general_agent
 from assist.tools.base import base_tools
 from eval.types import Validation
 
@@ -21,17 +26,30 @@ def graphiphy(node: Callable) -> CompiledStateGraph:
     graph.add_edge("node", END)
     return graph.compile()
 
+def actual_llm() -> BaseChatModel:
+    return ChatOpenAI(model="gpt-4o-mini")
+    
 def base_tools_for_test() -> List[BaseTool]:
     return base_tools("~/.cache/assist/dbs/")
 
 def thinking_llm(message: Optional[str]) -> Runnable:
-    return DummyLLM(message)
+    if os.getenv("OPENAI_API_KEY") and os.getenv("TAVILY_API_KEY"):
+        return actual_llm()
+    else:
+        return DummyLLM(message)
 
 def execution_llm(message: Optional[str]) -> Runnable:
-    return DummyLLM(message)
+    if os.getenv("OPENAI_API_KEY") and os.getenv("TAVILY_API_KEY"):
+        return 
+    else:
+        return DummyLLM(message)
 
-def agent(message: Optional[str]) -> Runnable:
-    return DummyAgent(message)
+def fake_general_agent(llm, tools) -> Runnable:
+    if os.getenv("OPENAI_API_KEY") and os.getenv("TAVILY_API_KEY"):
+        return general_agent(actual_llm(),
+                             base_tools_for_test())
+    else:
+        return DummyAgent(message)
 
 class DummyLLM():
     """Minimal stand‑in for chat models used in validation tests."""
