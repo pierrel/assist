@@ -49,7 +49,7 @@ def fake_general_agent(llm, tools) -> Runnable:
         return general_agent(actual_llm(),
                              base_tools_for_test())
     else:
-        return DummyAgent(message)
+        return DummyAgent()
 
 class DummyLLM():
     """Minimal stand‑in for chat models used in validation tests."""
