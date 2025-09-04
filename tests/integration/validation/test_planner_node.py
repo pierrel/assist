@@ -6,13 +6,13 @@ from assist.reflexion_agent import build_plan_node
 from .utils import thinking_llm, graphiphy
 
 class TestPlannerNode(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         llm = thinking_llm("")
         self.graph = graphiphy(build_plan_node(llm,
                                                [],
                                                []))
 
-    def test_tea_brew(self):
+    def test_tea_brew(self) -> None:
         state = self.graph.invoke({"messages": [HumanMessage(content="How do I brew a cup of tea?")]})
         
         plan = state["plan"]
@@ -26,7 +26,7 @@ class TestPlannerNode(TestCase):
         self.assertGreater(len(plan.steps), 2, "Should have more than 2 steps")
         self.assertTrue(uses_tavily, "Mentions tavily in any step")
 
-    def test_rewrite_more_professional(self):
+    def test_rewrite_more_professional(self) -> None:
         query = "Rewrite this to be more professional."
         examples = [
             "hey—need that report asap. thx.",
@@ -37,9 +37,9 @@ class TestPlannerNode(TestCase):
                 "messages": [HumanMessage(content=f"{query} {example}")]
             })
             plan = state["plan"]
-            assert len(plan.steps) > 1
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
 
-    def test_rephrase_for_ninth_grade(self):
+    def test_rephrase_for_ninth_grade(self) -> None:
         query = "Rephrase for a 9th-grade reading level."
         examples = [
             "The municipality’s fiscal posture necessitates austerity measures.",
@@ -50,9 +50,9 @@ class TestPlannerNode(TestCase):
                 "messages": [HumanMessage(content=f"{query} {example}")]
             })
             plan = state["plan"]
-            assert len(plan.steps) > 1
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
 
-    def test_extract_entities_to_json(self):
+    def test_extract_entities_to_json(self) -> None:
         query = "Extract all dates, people, and organizations from this text into JSON."
         examples = [
             "On March 2, 2024, Mayor London Breed met with leaders from SFUSD.",
@@ -63,9 +63,9 @@ class TestPlannerNode(TestCase):
                 "messages": [HumanMessage(content=f"{query} {example}")]
             })
             plan = state["plan"]
-            assert len(plan.steps) > 1
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
 
-    def test_classify_customer_messages(self):
+    def test_classify_customer_messages(self) -> None:
         query = (
             "Classify these customer messages into issue categories; return CSV."
         )
@@ -83,5 +83,5 @@ class TestPlannerNode(TestCase):
                 "messages": [HumanMessage(content=f"{query} {example}")]
             })
             plan = state["plan"]
-            assert len(plan.steps) > 1
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
 
