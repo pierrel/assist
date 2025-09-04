@@ -21,7 +21,10 @@ class TestPlannerNode(TestCase):
         has_over_2_steps = len(plan.steps) > 2
         uses_tavily = any("tavily" in s.action for s in plan.steps)
 
-        assert has_assumptions and has_risks and has_over_2_steps and uses_tavily
+        self.assertTrue(has_assumptions, "Has assumptions")
+        self.assertTrue(has_risks, "Has risks")
+        self.assertGreater(len(plan.steps), 2, "Should have more than 2 steps")
+        self.assertTrue(uses_tavily, "Mentions tavily in any step")
 
     def test_rewrite_more_professional(self):
         query = "Rewrite this to be more professional."
