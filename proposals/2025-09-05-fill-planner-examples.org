@@ -1,0 +1,122 @@
+* Context
+There's a need to include many more examples to stress test the system and make changes to improve the capabilities.
+
+* Solution
+Add many tests that simulate real user situations, tasks, and queries. The tests should cover a wide variety of queries:
+- Rephrase a sentence or re-write some code.
+-
+
+The tests should cover situations that need to be handled well by the system:
+- Queries that don't need any tools
+- Proper tools are used when appropriate
+- Replans are required
+- Execution steps are handled well
+- Summaries are appropriate
+- No internal (to the model) knowledge is used
+- Executing WRITE operations
+- Write/test/re-write coding loops
+
+The tests should be aspirational, they do not all need to work right away.
+
+* Requirements
+These should be implemented in the =tests/validation= module.
+
+** V1 - Planner
+Implement the example scenarios for the =test_planner_node.py= suite of tests. The same pattern found currently in the file should be continued as much as possible.
+
+The assertions should validate reasonable expectations of the plan steps. Some examples (will change depending on the scenario):
+- Multiple steps are created
+- No tools are used for simple English-language rewrites (unless very uncommon words are used,  in which case a search for the correct usage should be executed)
+- Tools are used whenever external knowledge would even help
+** V2 - Executor
+TBD
+** V3 - Replanner
+TBD
+** V4 - Summary
+TBD
+* Example scenarios
+Awesome—here are 10, moving from simple → agentic. For each, I give two tiny example inputs you could swap in for the referenced “this …”:
+
+1. **Rewrite this to be more professional.**
+
+   * Example A: “hey—need that report asap. thx.”
+   * Example B: “We kinda dropped the ball on the Q3 metrics.”
+
+2. **Rephrase for a 9th-grade reading level.**
+
+   * Example A: “The municipality’s fiscal posture necessitates austerity measures.”
+   * Example B: “Our platform leverages distributed systems to optimize throughput.”
+
+3. **Extract all dates, people, and organizations from this text into JSON.**
+
+   * Example A: “On March 2, 2024, Mayor London Breed met with leaders from SFUSD.”
+   * Example B: “Apple hired Sam Patel on 2023-11-14 after interviews at UCSF.”
+
+4. **Classify these customer messages into issue categories; return CSV.**
+
+   * Example A (mini set):
+
+     1. “App crashes when I upload a photo.”
+     2. “How do I reset my password?”
+     3. “Please cancel my subscription.”
+     4. “Charged twice for August.”
+   * Example B (mini set):
+
+     1. “Search results are super slow.”
+     2. “Two-factor code never arrives.”
+     3. “Dark mode text is unreadable.”
+
+5. **Refactor this function for readability and add docstrings and type hints.**
+
+   * Example A (Python):
+
+     ```python
+     def f(a,b):
+         r=[]
+         for i in a:
+             if i not in r: r.append(i)
+         for j in b:
+             if j not in r: r.append(j)
+         return r
+     ```
+   * Example B (Python):
+
+     ```python
+     def calc(x):
+         t=0
+         for i in range(len(x)):
+             t=t+x[i]
+         return t/len(x)
+     ```
+
+6. **Implement a small Python CLI with argparse that performs tasks X and Y.**
+
+   * Example A: X = “convert a .txt file to uppercase”, Y = “count words and print top-5 by frequency”.
+   * Example B: X = “merge two CSVs by ‘id’”, Y = “filter rows where ‘amount’ > 100 and save”.
+
+7. **Research the best minimalist mechanical watches under \$3k; compare and cite.**
+
+   * Example A: “Field watches under \$1.5k, 38–40 mm, sapphire, no date.”
+   * Example B: “Dress watches under \$2.5k, <10 mm thick, Bauhaus aesthetics.”
+
+8. **Create a day-trip plan using rideshare only; estimate times/costs; output a tweakable sheet.**
+
+   * Example A: “Sonoma plaza stroll + one tasting + lunch, 4 adults, Saturday 9/20.”
+   * Example B: “Half Moon Bay coastal walk + café lunch, 2 adults, Sunday 10/5.”
+
+9. **File an expense report from provided PDFs: extract line items, code them, total, attach, submit.**
+
+   * Example A: Receipts = “Lyft \$28.34 (08/12), Coffee \$6.50 (08/12), Lunch w/ client \$54.20 (08/12).”
+   * Example B: Receipts = “SFO⇄LAX airfare \$216.90 (08/25), Hotel 1 night \$189.00 (08/25), Per-diem dinner \$35.00.”
+
+10. **Run a benchmark comparing three LLMs on a supplied prompt suite; chart quality/latency; memo.**
+- Example A (coding suite):
+
+  * “Write a JSON Schema for a contact record.”
+  * “Explain time complexity of this function and optimize.”
+  * “Fix this failing pytest with minimal changes.”
+- Example B (reasoning/summarization suite):
+
+  * “Summarize article into 5 bullets ≤80 chars.”
+  * “Extract dates/people/orgs into JSON.”
+  * “Classify support tickets into {Billing, Access, Bug}.”
