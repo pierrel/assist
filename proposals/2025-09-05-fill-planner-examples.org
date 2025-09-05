@@ -23,6 +23,15 @@ The tests should be aspirational, they do not all need to work right away.
 * Requirements
 These should be implemented in the =tests/integration/validation= module. Tests are not meant to be deterministic since they rely on a real llm. The test harness is proposed to leverage the assertions and structure. This module is not run as part of the normal build.
 
+This flow should be used to meet the requirements: For each example scenario:
+1. Implement the test, creating assertions according to reasonable expectations
+2. Run that one test
+3. If the test fails, then either update the prompts or add tools to satisfy the test, re-run after each change
+4. Repeat from 2 until the test passes
+5. Run the entire suite (=pytest tests/integration/validation=)
+6. If any test fails, then update prompts to better satisfy that test
+7. Repeat from step 5 until all tests pass
+
 ** V1 - Planner
 Implement the example scenarios for the =test_planner_node.py= suite of tests. The same pattern found currently in the file should be continued as much as possible.
 
