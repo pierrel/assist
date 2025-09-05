@@ -3,8 +3,10 @@ There's a need to include many more examples to stress test the system and make 
 
 * Solution
 Add many tests that simulate real user situations, tasks, and queries. The tests should cover a wide variety of queries:
-- Rephrase a sentence or re-write some code.
--
+- Rephrase a sentence, restructure some text, or re-write some code
+- Research a topic and summarize the results
+- Make a recommendation based on research
+- Implement a working feature in code, using write/test/observe feedback loops
 
 The tests should cover situations that need to be handled well by the system:
 - Queries that don't need any tools
@@ -19,12 +21,12 @@ The tests should cover situations that need to be handled well by the system:
 The tests should be aspirational, they do not all need to work right away.
 
 * Requirements
-These should be implemented in the =tests/validation= module.
+These should be implemented in the =tests/integration/validation= module. Tests are not meant to be deterministic since they rely on a real llm. The test harness is proposed to leverage the assertions and structure. This module is not run as part of the normal build.
 
 ** V1 - Planner
 Implement the example scenarios for the =test_planner_node.py= suite of tests. The same pattern found currently in the file should be continued as much as possible.
 
-The assertions should validate reasonable expectations of the plan steps. Some examples (will change depending on the scenario):
+Implement assertions based on reasonable expectations of the plan steps. Some examples (will change depending on the scenario):
 - Multiple steps are created
 - No tools are used for simple English-language rewrites (unless very uncommon words are used,  in which case a search for the correct usage should be executed)
 - Tools are used whenever external knowledge would even help
