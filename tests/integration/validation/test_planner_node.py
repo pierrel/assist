@@ -1,21 +1,18 @@
-import pytest
 from unittest import TestCase
 from langchain_core.messages import HumanMessage
 
-from assist.reflexion_agent import build_plan_node, ReflexionState
-from assist.tools.base import base_tools
-from eval.types import Validation
+from assist.reflexion_agent import build_plan_node
 
-from .utils import run_validation, thinking_llm, base_tools_for_test, graphiphy
+from .utils import thinking_llm, graphiphy
 
 class TestPlannerNode(TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         llm = thinking_llm("")
         self.graph = graphiphy(build_plan_node(llm,
-                                               base_tools_for_test(),
+                                               [],
                                                []))
 
-    def test_tea_brew(self):
+    def test_tea_brew(self) -> None:
         state = self.graph.invoke({"messages": [HumanMessage(content="How do I brew a cup of tea?")]})
         
         plan = state["plan"]
@@ -23,6 +20,68 @@ class TestPlannerNode(TestCase):
         has_risks = bool(plan.risks)
         has_over_2_steps = len(plan.steps) > 2
         uses_tavily = any("tavily" in s.action for s in plan.steps)
-        
-        assert has_assumptions and has_risks and has_over_2_steps and uses_tavily
+
+        self.assertTrue(has_assumptions, "Has assumptions")
+        self.assertTrue(has_risks, "Has risks")
+        self.assertGreater(len(plan.steps), 2, "Should have more than 2 steps")
+        self.assertTrue(uses_tavily, "Mentions tavily in any step")
+
+    def test_rewrite_more_professional(self) -> None:
+        query = "Rewrite this to be more professional."
+        examples = [
+            "hey—need that report asap. thx.",
+            "We kinda dropped the ball on the Q3 metrics.",
+        ]
+        for example in examples:
+            state = self.graph.invoke({
+                "messages": [HumanMessage(content=f"{query} {example}")]
+            })
+            plan = state["plan"]
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
+
+    def test_rephrase_for_ninth_grade(self) -> None:
+        query = "Rephrase for a 9th-grade reading level."
+        examples = [
+            "The municipality’s fiscal posture necessitates austerity measures.",
+            "Our platform leverages distributed systems to optimize throughput.",
+        ]
+        for example in examples:
+            state = self.graph.invoke({
+                "messages": [HumanMessage(content=f"{query} {example}")]
+            })
+            plan = state["plan"]
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
+
+    def test_extract_entities_to_json(self) -> None:
+        query = "Extract all dates, people, and organizations from this text into JSON."
+        examples = [
+            "On March 2, 2024, Mayor London Breed met with leaders from SFUSD.",
+            "Apple hired Sam Patel on 2023-11-14 after interviews at UCSF.",
+        ]
+        for example in examples:
+            state = self.graph.invoke({
+                "messages": [HumanMessage(content=f"{query} {example}")]
+            })
+            plan = state["plan"]
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
+
+    def test_classify_customer_messages(self) -> None:
+        query = (
+            "Classify these customer messages into issue categories; return CSV."
+        )
+        examples = [
+            "App crashes when I upload a photo.",
+            "How do I reset my password?",
+            "Please cancel my subscription.",
+            "Charged twice for August.",
+            "Search results are super slow.",
+            "Two-factor code never arrives.",
+            "Dark mode text is unreadable.",
+        ]
+        for example in examples:
+            state = self.graph.invoke({
+                "messages": [HumanMessage(content=f"{query} {example}")]
+            })
+            plan = state["plan"]
+            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
 
