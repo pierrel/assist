@@ -37,7 +37,7 @@ class TestPlannerNode(TestCase):
                 "messages": [HumanMessage(content=f"{query} {example}")]
             })
             plan = state["plan"]
-            self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
+            self.assertGreater(len(plan.steps), 1, "has at least 2 steps")
 
     def test_rephrase_for_ninth_grade(self) -> None:
         query = "Rephrase for a 9th-grade reading level."
@@ -51,6 +51,9 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
+            self.assertNotIn("tavily",
+                             [step.action for step in plan.steps],
+                             "It should not try to use the tavily tool")
 
     def test_extract_entities_to_json(self) -> None:
         query = "Extract all dates, people, and organizations from this text into JSON."
@@ -64,6 +67,9 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
+            self.assertNotIn("tool",
+                             [step.action for step in plan.steps],
+                             "No tool is available to be used for this task")
 
     def test_classify_customer_messages(self) -> None:
         query = (
@@ -84,4 +90,8 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
+            self.assertNotIn("tool",
+                             [step.action for step in plan.steps],
+                             "No tool is available to be used for this task")
+
 
