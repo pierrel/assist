@@ -5,5 +5,8 @@ Tools:
 Task: {{ task }}
 
 {% if learnings %}
-Please take the guidance
+There was a previous attempt at a plan for this which did not end up working out. These are the learnings from past attempts that should be incorporated into any new plan. Avoid their mistakes, follow their guidance:
+{% for learning in learnings %}
+{{ learning }}
+{% endfor %}
 {% endif %}
