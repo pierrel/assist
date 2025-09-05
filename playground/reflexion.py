@@ -18,7 +18,7 @@ agent = build_reflexion_graph(llm,
                                proj_tool,
                                search])
 
-Image(agent.get_graph().draw_mermaid_png(output_file_path="./agent_graph.png"))
+#Image(agent.get_graph().draw_mermaid_png(output_file_path="./agent_graph.png"))
 
 request = HumanMessage(content="Help me understand how python iterators work\nThis is the project directory within the context of this request: /home/pierre/src/assist/")
 
