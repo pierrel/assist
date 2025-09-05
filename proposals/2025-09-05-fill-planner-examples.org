@@ -131,3 +131,14 @@ Awesome—here are 10, moving from simple → agentic. For each, I give two tiny
   * “Summarize article into 5 bullets ≤80 chars.”
   * “Extract dates/people/orgs into JSON.”
   * “Classify support tickets into {Billing, Access, Bug}.”
+
+* Implementation Guidance
+This flow should be used to meet the requirements: For each example scenario:
+1. Implement the test, creating assertions according to reasonable expectations
+2. Run that one test
+3. If the test fails, then either update the prompts or add tools to satisfy the test, re-run after each change
+4. Repeat from 2 until the test passes
+5. Run the entire suite (=pytest tests/integration/validation=)
+6. If any test fails, then update prompts to better satisfy that test
+7. Repeat from step 5 until all tests pass
+
