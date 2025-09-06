@@ -3,7 +3,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 from pathspec import PathSpec
-import subprocess
+
+from assist import git
 
 # Tools for working with the filesystem
 
@@ -117,7 +118,13 @@ def project_context(root: str) -> str:
 
     return "\n\n".join(contents)
 @tool
-def write_file(path: str, content: str, overwrite: bool = False, append: bool = False, commit_message: str | None = None) -> str:
+def write_file(
+    path: str,
+    content: str,
+    overwrite: bool = False,
+    append: bool = False,
+    commit_message: str | None = None,
+) -> str:
     """Write ``content`` to ``path`` ensuring repository safety.
 
     The parent directory of ``path`` must be within a Git repository. If the
@@ -136,28 +143,15 @@ def write_file(path: str, content: str, overwrite: bool = False, append: bool = 
     Returns:
         str: A status message describing the action taken.
     """
+
     p = Path(path).expanduser().resolve()
     parent = p.parent
 
-    try:
-        subprocess.run([
-            "git",
-            "rev-parse",
-            "--is-inside-work-tree"
-        ], cwd=parent, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as exc:  # pragma: no cover - simple
-        raise ValueError("Parent directory is not inside a Git repository") from exc
+    git.repo_root(parent)
 
     if p.exists():
-        try:
-            subprocess.run([
-                "git",
-                "ls-files",
-                "--error-unmatch",
-                str(p)
-            ], cwd=parent, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError as exc:
-            raise ValueError("File exists but is not tracked by Git") from exc
+        if not git.is_tracked(p):
+            raise ValueError("File exists but is not tracked by Git")
         if not (overwrite or append):
             raise ValueError("File exists; set overwrite=True or append=True to modify")
         mode = "a" if append else "w"
@@ -170,14 +164,7 @@ def write_file(path: str, content: str, overwrite: bool = False, append: bool = 
         f.write(content)
 
     if commit_message:
-        root = subprocess.run([
-            "git",
-            "rev-parse",
-            "--show-toplevel"
-        ], cwd=parent, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
-        rel = str(p.relative_to(root))
-        subprocess.run(["git", "add", rel], cwd=root, check=True)
-        subprocess.run(["git", "commit", "-m", commit_message], cwd=root, check=True)
+        git.commit_file(p, commit_message)
         return f"Wrote and committed {p}"
 
     return f"Wrote {p}"
