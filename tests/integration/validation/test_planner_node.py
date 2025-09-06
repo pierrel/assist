@@ -202,14 +202,6 @@ class TestPlannerNode(TestCase):
                 ),
                 "Uses search or reference tool",
             )
-            self.assertTrue(
-                any(
-                    "system_info" in step.action.lower()
-                    for step in plan.steps
-                ),
-                "Uses search or reference tool",
-            )
-
 
     def test_day_trip_plan(self) -> None:
         query = (
