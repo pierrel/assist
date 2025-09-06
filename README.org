@@ -58,6 +58,9 @@ Run the integration tests with:
 #+begin_src shell
 pytest tests/integration
 #+end_src
+The integration suite includes validation tests ensuring the planner can
+independently employ the file-writing tool for tasks that create or update
+files.
 * Evaluation
 The project ships with a small, local-first harness for benchmarking agents and their
 subcomponents. Datasets live under =eval/datasets= and describe input/expected pairs.
