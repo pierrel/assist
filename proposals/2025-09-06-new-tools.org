@@ -1,0 +1,31 @@
+* Existing Tools
+1. tavily_search - A search engine optimized for comprehensive, accurate, and trusted results. Useful for answering questions about current events.
+2. project_search - Search ``project_root`` for relevant information about the given query.
+3. system_info_search - Search system ``info`` files for technical information about a query.
+4. list_system_info_files - List available ``info`` files with short descriptions.
+5. list_files - Recursively list files under a directory with creation and modification times.
+6. file_contents - Return the contents of a specified file path.
+7. project_context - Collect the contents of README and AGENTS files for quick project onboarding.
+
+* Problem
+The expanded base toolset now covers search and basic file-system access, but still lacks utilities for operational tasks. In ``tests/integration/validation/test_planner_node.py``, the planner builds a step-by-step guide for "How do I brew a cup of tea?". Generating actionable plans like this often requires converting units (water temperature, volume) and tracking steeping times. Beyond the tea example, planning workflows also need targeted web searches (restricted to a site or page) and date calculations for scheduling. These capabilities are missing from existing tools.
+
+* Solution
+Provide utility tools for unit conversion, step timing, targeted web searches, and date calculations so plans can supply precise measurements, durations, relevant references, and schedules.
+
+* Requirements
+1. **UnitConversionTool** converts quantities between common units for temperature, volume, mass, and time.
+2. **TimerTool** starts named timers, reports remaining or elapsed time, and can cancel timers.
+3. **SiteSearchTool** searches within a specific domain or URL for pages matching a query.
+4. **PageSearchTool** retrieves matching content from a single web page given its URL and a query.
+5. **DateTools**
+   - **CurrentDateTool** returns the current date in ISO format.
+   - **DateOffsetTool** returns the date occurring a given number of days, weeks, or months before or after a supplied date.
+   - **DateDiffTool** returns the number of days, weeks, or months between two dates, with an option to count only weekdays or weekend days.
+
+* Implementation details
+1. ``assist/tools/unit_conversion.py`` defines ``UnitConversionTool`` using a conversion library such as ``pint`` and exposes it as a LangChain tool.
+2. ``assist/tools/timer.py`` implements ``TimerTool`` that stores timers in memory and returns elapsed or remaining time when queried.
+3. ``assist/tools/web_search.py`` implements ``SiteSearchTool`` and ``PageSearchTool`` using HTTP requests and HTML parsing constrained to the requested domain or page.
+4. ``assist/tools/date_utils.py`` collects ``CurrentDateTool``, ``DateOffsetTool``, and ``DateDiffTool`` using Python's ``datetime`` module.
+5. ``assist/tools/base.py`` imports these classes and appends them to the ``base_tools`` list so they are available to planning and execution nodes.
