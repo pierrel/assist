@@ -19,12 +19,12 @@ class TestPlannerNode(TestCase):
         has_assumptions = bool(plan.assumptions)
         has_risks = bool(plan.risks)
         has_over_2_steps = len(plan.steps) > 2
-        uses_tavily = any("tavily" in s.action.lower() for s in plan.steps)
+        uses_tavily = any("tavily_search" in s.action.lower() for s in plan.steps)
 
         self.assertTrue(has_assumptions, "Has assumptions")
         self.assertTrue(has_risks, "Has risks")
         self.assertGreater(len(plan.steps), 2, "Should have more than 2 steps")
-        self.assertIn("tavily",
+        self.assertIn("tavily_search",
                       [step.action.lower() for step in plan.steps],
                       "Mentions tavily in any step")
 
@@ -189,7 +189,7 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertIn("tavily",
+            self.assertIn("tavily_search",
                           [step.action.lower() for step in plan.steps],
                           "Mentions tavily in any step")
             self.assertIn("system_info_search",
@@ -210,7 +210,7 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertIn("tavily",
+            self.assertIn("tavily_search",
                           [step.action.lower() for step in plan.steps],
                           "Mentions tavily in any step")
 
