@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from pathspec import PathSpec
 
+from assist import git
+
 # Tools for working with the filesystem
 
 
@@ -115,3 +117,55 @@ def project_context(root: str) -> str:
         contents.append(f"# {p}\n{text}")
 
     return "\n\n".join(contents)
+@tool
+def write_file(
+    path: str,
+    content: str,
+    overwrite: bool = False,
+    append: bool = False,
+    commit_message: str | None = None,
+) -> str:
+    """Write ``content`` to ``path`` ensuring repository safety.
+
+    The parent directory of ``path`` must be within a Git repository. If the
+    file already exists it must be tracked by Git. Existing files are not
+    modified unless ``overwrite`` or ``append`` is set. When ``commit_message``
+    is provided the change is staged and committed.
+
+    Args:
+        path: Destination file path.
+        content: Text to write.
+        overwrite: Replace the file if it already exists.
+        append: Append to the file if it already exists.
+        commit_message: Optional commit message. If given, the file is staged
+            and committed after writing.
+
+    Returns:
+        str: A status message describing the action taken.
+    """
+
+    p = Path(path).expanduser().resolve()
+    parent = p.parent
+
+    git.repo_root(parent)
+
+    if p.exists():
+        if not git.is_tracked(p):
+            raise ValueError("File exists but is not tracked by Git")
+        if not (overwrite or append):
+            raise ValueError("File exists; set overwrite=True or append=True to modify")
+        mode = "a" if append else "w"
+    else:
+        if not parent.exists():
+            raise ValueError("Parent directory does not exist")
+        mode = "w"
+
+    with open(p, mode, encoding="utf-8") as f:
+        f.write(content)
+
+    if commit_message:
+        git.commit_file(p, commit_message)
+        return f"Wrote and committed {p}"
+
+    return f"Wrote {p}"
+
