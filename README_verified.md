@@ -5,6 +5,8 @@
 ### Description:
 This project, named Assist, is a local-focused, extensible LLM-based assistant prioritizing user privacy and control. It aims to facilitate various tasks beyond coding assistance, providing an OpenAI-compatible API with a ReAct agent tailored primarily for Emacs.
 
+Streaming responses now include only the newly generated assistant message without replaying the previous conversation.
+
 ### Key Sections:
 1. **Concepts**:
     - **Project**: Represents a Git repository containing context for interactions with external references.
