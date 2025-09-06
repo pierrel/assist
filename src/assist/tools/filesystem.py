@@ -3,6 +3,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from pathspec import PathSpec
+import subprocess
 
 # Tools for working with the filesystem
 
@@ -115,3 +116,69 @@ def project_context(root: str) -> str:
         contents.append(f"# {p}\n{text}")
 
     return "\n\n".join(contents)
+@tool
+def write_file(path: str, content: str, overwrite: bool = False, append: bool = False, commit_message: str | None = None) -> str:
+    """Write ``content`` to ``path`` ensuring repository safety.
+
+    The parent directory of ``path`` must be within a Git repository. If the
+    file already exists it must be tracked by Git. Existing files are not
+    modified unless ``overwrite`` or ``append`` is set. When ``commit_message``
+    is provided the change is staged and committed.
+
+    Args:
+        path: Destination file path.
+        content: Text to write.
+        overwrite: Replace the file if it already exists.
+        append: Append to the file if it already exists.
+        commit_message: Optional commit message. If given, the file is staged
+            and committed after writing.
+
+    Returns:
+        str: A status message describing the action taken.
+    """
+    p = Path(path).expanduser().resolve()
+    parent = p.parent
+
+    try:
+        subprocess.run([
+            "git",
+            "rev-parse",
+            "--is-inside-work-tree"
+        ], cwd=parent, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - simple
+        raise ValueError("Parent directory is not inside a Git repository") from exc
+
+    if p.exists():
+        try:
+            subprocess.run([
+                "git",
+                "ls-files",
+                "--error-unmatch",
+                str(p)
+            ], cwd=parent, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as exc:
+            raise ValueError("File exists but is not tracked by Git") from exc
+        if not (overwrite or append):
+            raise ValueError("File exists; set overwrite=True or append=True to modify")
+        mode = "a" if append else "w"
+    else:
+        if not parent.exists():
+            raise ValueError("Parent directory does not exist")
+        mode = "w"
+
+    with open(p, mode, encoding="utf-8") as f:
+        f.write(content)
+
+    if commit_message:
+        root = subprocess.run([
+            "git",
+            "rev-parse",
+            "--show-toplevel"
+        ], cwd=parent, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
+        rel = str(p.relative_to(root))
+        subprocess.run(["git", "add", rel], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-m", commit_message], cwd=root, check=True)
+        return f"Wrote and committed {p}"
+
+    return f"Wrote {p}"
+
