@@ -117,7 +117,11 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
                 "choices": [{"delta": {"role": "assistant"}, "index": 0}],
             }
             yield f"data: {json.dumps(first)}\n\n"
+            skip_idx = 0
             for ch, metadata in agent.stream({"messages": langchain_messages}, stream_mode="messages"):
+                if skip_idx < len(langchain_messages) and ch == langchain_messages[skip_idx]:
+                    skip_idx += 1
+                    continue
                 content = extract_content(ch)
                 chunk = {
                     "id": "1337",

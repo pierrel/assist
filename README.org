@@ -6,6 +6,8 @@ Assist is an extensible, local-focused, llm-based assistant. The principles guid
 
 It currently provides an OpenAI-compatible API with a ReAct agent and some simple tools. It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
 
+Streaming responses now send only the assistant's latest message rather than replaying prior conversation history.
+
 It is not /just/ a coding assistant, but should be able to help with any project or goal.
 * Concepts
 ** Project

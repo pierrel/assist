@@ -141,7 +141,8 @@ class ProjectIndex:
 
             Returns:
             str: A newline-separated list of file contents relevant to the query."""
-            if not p.exist():
+            p = Path(project_root)
+            if not p.exists():
                 raise BaseException("File does not exist")
             elif is_filesystem_root(p):
                 raise BaseException("Cannot index the entire filesystem")
