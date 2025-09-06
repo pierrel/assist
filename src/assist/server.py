@@ -12,7 +12,6 @@ from typing import Any, Iterator, List, Optional, Union
 from itertools import takewhile
 
 from pydantic import BaseModel
-from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -21,9 +20,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.runnables import Runnable
-from assist.tools import filesystem, project_index
-from assist.tools.system_info import SystemInfoIndex
 from assist.reflexion_agent import build_reflexion_graph
+from assist.tools.base import base_tools
 from assist.agent_types import AgentInvokeResult
 from assist.model_manager import get_model_pair
 
@@ -213,27 +211,11 @@ def check_tavily_api_key() -> None:
 
 def get_agent(model: str, temperature: float) -> Runnable:
     check_tavily_api_key()
-    search = TavilySearchResults(max_results=10)
-
-    pi = project_index.ProjectIndex(base_dir=INDEX_DB_ROOT)
-    proj_tool = pi.search_tool()
-
-    sys_index = SystemInfoIndex(base_dir=INDEX_DB_ROOT)
-    sys_search = sys_index.search_tool()
-    sys_list = sys_index.list_tool()
-
     plan_llm, exec_llm = get_model_pair(model, temperature)
+    tools = base_tools(INDEX_DB_ROOT)
     return build_reflexion_graph(
         plan_llm,
-        [
-            filesystem.file_contents,
-            filesystem.list_files,
-            filesystem.project_context,
-            proj_tool,
-            sys_search,
-            sys_list,
-            search,
-        ],
+        tools,
         execution_llm=exec_llm,
     )
 
