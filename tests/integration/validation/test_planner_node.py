@@ -109,7 +109,7 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     "tavily" in step.action.lower()
                     or "search" in step.action.lower()
@@ -170,7 +170,7 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertTrue(
+            self.assertFalse(
                 any(
                     "tavily" in step.action.lower()
                     or "search" in step.action.lower()
