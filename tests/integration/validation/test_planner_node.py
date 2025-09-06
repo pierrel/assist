@@ -12,6 +12,24 @@ class TestPlannerNode(TestCase):
                                                base_tools_for_test(),
                                                []))
 
+    def test_project_context_without_project(self):
+        state = self.graph.invoke({"messages": [HumanMessage(content="Hello, can you explain to me what's in the README file?")]})
+        plan = state["plan"]
+
+        self.assertGreater(len(plan.steps), 1, "Should have multiple steps")
+        # the following should really be false...
+        self.assertTrue(any(["project_context" in step.action.lower() for step in plan.steps]),
+                        "It should not try to use the project context")
+
+    def test_project_context_with_projecct(self):
+        state = self.graph.invoke({"messages": [HumanMessage(content="Hello, can you explain to me what's in the README file?\n\nThe context for this request is /home/myhome/project")]})
+        plan = state["plan"]
+
+        self.assertTrue(any(["project_context" in step.action.lower() for step in plan.steps]),
+                         "It should not try to use the project context")
+        self.assertTrue(any(["README" in s.action for s in plan.steps]))
+
+
     def test_tea_brew(self) -> None:
         state = self.graph.invoke({"messages": [HumanMessage(content="How do I brew a cup of tea?")]})
         

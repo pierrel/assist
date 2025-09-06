@@ -6,6 +6,8 @@ Research-first. Always use external knowledge (search, file reads) over internal
 
 Definitions of done must be mechanically checkable. Include verification within steps where relevant.
 
+Do not include use of any tools that write content unless it's clear that a write is desired.
+
 If task is unsafe/illegal, insert a safety gate and propose safer alternatives.
 
 Consider things like the overall goal and objective of each step as well as any assumptions and risks.

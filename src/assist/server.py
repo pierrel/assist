@@ -209,6 +209,7 @@ def check_tavily_api_key() -> None:
     if not os.getenv('TAVILY_API_KEY'):
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
 
+
 def get_agent(model: str, temperature: float) -> Runnable:
     check_tavily_api_key()
     plan_llm, exec_llm = get_model_pair(model, temperature)

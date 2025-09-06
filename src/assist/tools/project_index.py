@@ -11,6 +11,14 @@ from langchain_core.documents import Document
 from langchain_core.tools import BaseTool, tool
 from vgrep.manager import Manager
 
+from pathlib import Path
+
+def is_filesystem_root(path_str: str | Path) -> bool:
+    """
+    Checks if the given path (as a string) is the filesystem root using pathlib.
+    """
+    path_obj = Path(path_str).resolve()
+    return path_obj == path_obj.parent
 
 class _DummyContextualizer:
     """Simple contextualizer that returns an empty string.
@@ -124,7 +132,7 @@ class ProjectIndex:
     def search_tool(self) -> BaseTool:
         @tool
         def project_search(project_root: Path | str, query: str) -> str:
-            """Search ``project_root`` for relevant information about the given ``query``.
+            """Search ``project_root`` for relevant information about the given ``query``. Only use in cases where the project root is clear. Using this at the filesystem root or a nonexistant path will result in an error.
 
             Args:
             ``project_root`` is a directory on the filesystem that at the top level of the project. The project contains information relevant to the user's current task.
@@ -133,9 +141,14 @@ class ProjectIndex:
 
             Returns:
             str: A newline-separated list of file contents relevant to the query."""
-            retriever = self.get_retriever(project_root)
-            docs = retriever.invoke(query)
-            return "\n".join(doc.page_content for doc in docs)
+            if not p.exist():
+                raise BaseException("File does not exist")
+            elif is_filesystem_root(p):
+                raise BaseException("Cannot index the entire filesystem")
+            else:
+                retriever = self.get_retriever(project_root)
+                docs = retriever.invoke(query)
+                return "\n".join(doc.page_content for doc in docs)
 
         return project_search
 
