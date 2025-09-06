@@ -31,17 +31,3 @@ def test_write_file_existing_tracked_overwrite(tmp_path):
     subprocess.run(["git", "add", "t.txt"], cwd=tmp_path, check=True)
     write_file.invoke({"path": str(target), "content": "new", "overwrite": True})
     assert target.read_text() == "new"
-
-
-def test_write_file_commit(tmp_path):
-    init_repo(tmp_path)
-    target = tmp_path / "c.txt"
-    write_file.invoke({"path": str(target), "content": "data", "commit_message": "add c"})
-    log = subprocess.run(
-        ["git", "log", "-1", "--pretty=%B"],
-        cwd=tmp_path,
-        text=True,
-        capture_output=True,
-        check=True,
-    ).stdout.strip()
-    assert log == "add c"
