@@ -128,8 +128,7 @@ def write_file(
 
     The parent directory of ``path`` must be within a Git repository. If the
     file already exists it must be tracked by Git. Existing files are not
-    modified unless ``overwrite`` or ``append`` is set. When ``commit_message``
-    is provided the change is staged and committed.
+    modified unless ``overwrite`` or ``append`` is set.
 
     Args:
         path: Destination file path.
