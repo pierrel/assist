@@ -123,7 +123,6 @@ def write_file(
     content: str,
     overwrite: bool = False,
     append: bool = False,
-    commit_message: str | None = None,
 ) -> str:
     """Write ``content`` to ``path`` ensuring repository safety.
 
@@ -137,8 +136,6 @@ def write_file(
         content: Text to write.
         overwrite: Replace the file if it already exists.
         append: Append to the file if it already exists.
-        commit_message: Optional commit message. If given, the file is staged
-            and committed after writing.
 
     Returns:
         str: A status message describing the action taken.
@@ -162,10 +159,6 @@ def write_file(
 
     with open(p, mode, encoding="utf-8") as f:
         f.write(content)
-
-    if commit_message:
-        git.commit_file(p, commit_message)
-        return f"Wrote and committed {p}"
 
     return f"Wrote {p}"
 
