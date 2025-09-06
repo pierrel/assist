@@ -1,4 +1,5 @@
 Given the following task and available tools, provide a numbered list of steps to accomplish the task using those tools.
+Explicitly reference the tool names in the steps (for example, "Use tavily to search for ...").
 Tools:
 {{ tools }}
 
