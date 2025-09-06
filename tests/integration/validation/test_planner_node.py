@@ -24,7 +24,9 @@ class TestPlannerNode(TestCase):
         self.assertTrue(has_assumptions, "Has assumptions")
         self.assertTrue(has_risks, "Has risks")
         self.assertGreater(len(plan.steps), 2, "Should have more than 2 steps")
-        self.assertTrue(uses_tavily, "Mentions tavily in any step")
+        self.assertIn("tavily",
+                      [step.action.lower() for step in plan.steps],
+                      "Mentions tavily in any step")
 
     def test_rewrite_more_professional(self) -> None:
         query = "Rewrite this to be more professional."
@@ -37,6 +39,7 @@ class TestPlannerNode(TestCase):
                 "messages": [HumanMessage(content=f"{query} {example}")]
             })
             plan = state["plan"]
+
             self.assertGreater(len(plan.steps), 1, "has at least 2 steps")
             self.assertTrue(
                 any(
@@ -186,10 +189,12 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertTrue(
-                any("tavily" in step.action.lower() for step in plan.steps),
-                "Mentions tavily in any step",
-            )
+            self.assertIn("tavily",
+                          [step.action.lower() for step in plan.steps],
+                          "Mentions tavily in any step")
+            self.assertIn("system_info_search",
+                          [step.action.lower() for step in plan.steps],
+                          "Steps include system_info_search")
 
     def test_day_trip_plan(self) -> None:
         query = (
@@ -205,10 +210,9 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertTrue(
-                any("tavily" in step.action.lower() for step in plan.steps),
-                "Mentions tavily in any step",
-            )
+            self.assertIn("tavily",
+                          [step.action.lower() for step in plan.steps],
+                          "Mentions tavily in any step")
 
     def test_file_expense_report(self) -> None:
         query = (
