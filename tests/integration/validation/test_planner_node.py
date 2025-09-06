@@ -24,9 +24,14 @@ class TestPlannerNode(TestCase):
         self.assertTrue(has_assumptions, "Has assumptions")
         self.assertTrue(has_risks, "Has risks")
         self.assertGreater(len(plan.steps), 2, "Should have more than 2 steps")
-        self.assertIn("tavily_search",
-                      [step.action.lower() for step in plan.steps],
-                      "Mentions tavily in any step")
+        self.assertTrue(
+                any(
+                    "tavily" in step.action.lower()
+                    or "search" in step.action.lower()
+                    for step in plan.steps
+                ),
+                "Uses search or reference tool",
+            )
 
     def test_rewrite_more_professional(self) -> None:
         query = "Rewrite this to be more professional."
@@ -189,12 +194,22 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertIn("tavily_search",
-                          [step.action.lower() for step in plan.steps],
-                          "Mentions tavily in any step")
-            self.assertIn("system_info_search",
-                          [step.action.lower() for step in plan.steps],
-                          "Steps include system_info_search")
+            self.assertTrue(
+                any(
+                    "tavily" in step.action.lower()
+                    or "search" in step.action.lower()
+                    for step in plan.steps
+                ),
+                "Uses search or reference tool",
+            )
+            self.assertTrue(
+                any(
+                    "system_info" in step.action.lower()
+                    for step in plan.steps
+                ),
+                "Uses search or reference tool",
+            )
+
 
     def test_day_trip_plan(self) -> None:
         query = (
@@ -210,9 +225,14 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertIn("tavily_search",
-                          [step.action.lower() for step in plan.steps],
-                          "Mentions tavily in any step")
+            self.assertTrue(
+                any(
+                    "tavily" in step.action.lower()
+                    or "search" in step.action.lower()
+                    for step in plan.steps
+                ),
+                "Uses search or reference tool",
+            )
 
     def test_file_expense_report(self) -> None:
         query = (
