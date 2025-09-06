@@ -141,10 +141,9 @@ class ProjectIndex:
 
             Returns:
             str: A newline-separated list of file contents relevant to the query."""
-            p = Path(project_root)
-            if not p.exists():
+            if not project_root.exist():
                 return "File does not exist"
-            elif is_filesystem_root(p):
+            elif is_filesystem_root(project_root):
                 return "Cannot index the entire filesystem"
             else:
                 retriever = self.get_retriever(project_root)
