@@ -1,5 +1,5 @@
 import pytest
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.runnables import Runnable
 
 from assist import reflexion_agent
@@ -178,6 +178,7 @@ def test_execute_node_passes_history_to_agent(monkeypatch):
 
     assert len(agent.calls) == 2
     first_call = agent.calls[0][-1].content
+    assert len(agent.calls[0]) == 2
     assert "step1" in first_call
     second_call = agent.calls[1][-1].content
     assert "result1" in second_call
@@ -256,7 +257,7 @@ def test_summarize_node_appends_message(monkeypatch):
 
     assert isinstance(out["messages"][-1], AIMessage)
     assert out["messages"][-1].content == "summary"
-    assert "result" in llm.calls[0][1].content
+    assert "result" in llm.calls[0][-1].content
 
 
 def test_build_reflexion_graph_allows_separate_execution_llm(monkeypatch):
@@ -276,3 +277,89 @@ def test_build_reflexion_graph_allows_separate_execution_llm(monkeypatch):
 
     assert isinstance(graph, Runnable)
     assert fake_general_agent.called_with is exec_llm
+
+
+def test_context_and_system_message_routing(monkeypatch):
+    class SpyLLM:
+        def __init__(self):
+            self.schema = None
+            self.plan_messages = None
+            self.retro_messages = None
+            self.summary_messages = None
+
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, messages, _opts=None):
+            if self.schema is Plan:
+                self.plan_messages = messages
+                step = Step(action="a", objective="o")
+                self.schema = None
+                return Plan(goal="g", steps=[step], assumptions=[], risks=[])
+            elif self.schema is PlanRetrospective:
+                self.retro_messages = messages
+                self.schema = None
+                return PlanRetrospective(needs_replan=False, learnings=None)
+            else:
+                self.summary_messages = messages
+                return AIMessage(content="summary")
+
+    class SpyAgent:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, inputs, _opts=None):
+            self.calls.append(inputs["messages"])
+            return {"messages": [AIMessage(content="result")]} 
+
+    llm = SpyLLM()
+    agent = SpyAgent()
+
+    def fake_general_agent(_llm, _tools):
+        return agent
+
+    monkeypatch.setattr(reflexion_agent, "general_agent", fake_general_agent)
+
+    graph = build_reflexion_graph(llm, [])
+    plan_node = graph.builder.nodes["plan"].runnable.func
+    execute_node = graph.builder.nodes["execute"].runnable.func
+    plan_check = graph.builder.nodes["plan_check"].runnable.func
+    summarize = graph.builder.nodes["summarize"].runnable.func
+
+    state = {
+        "messages": [
+            SystemMessage(content="sys"),
+            HumanMessage(content="hello"),
+            AIMessage(content="hi"),
+            HumanMessage(content="task"),
+        ],
+        "learnings": [],
+    }
+
+    state.update(plan_node(state))
+    execute_node(state)
+    plan_check(state)
+    summarize(state)
+
+    # Planner sees system message and prior context
+    plan_sys = llm.plan_messages[0].content
+    assert "sys" in plan_sys
+    assert "Here is guidance from the user:" in plan_sys
+    assert any(isinstance(m, HumanMessage) and m.content == "hello" for m in llm.plan_messages)
+    assert any(isinstance(m, AIMessage) and m.content == "hi" for m in llm.plan_messages)
+
+    # Executor does not receive conversation context
+    exec_text = " ".join(m.content for m in agent.calls[0])
+    assert "hello" not in exec_text and "sys" not in exec_text
+
+    # Plan check also ignores conversation context
+    retro_text = " ".join(m.content for m in llm.retro_messages)
+    assert "hello" not in retro_text and "sys" not in retro_text
+
+    # Summarizer sees system message and prior context
+    summary_sys = llm.summary_messages[0].content
+    assert "sys" in summary_sys
+    assert "Here is guidance from the user:" in summary_sys
+    assert any(isinstance(m, HumanMessage) and m.content == "hello" for m in llm.summary_messages)
+    assert any(isinstance(m, AIMessage) and m.content == "hi" for m in llm.summary_messages)

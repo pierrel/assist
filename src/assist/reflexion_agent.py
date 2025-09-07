@@ -24,6 +24,21 @@ from assist.promptable import base_prompt_for
 from assist.agent_types import AgentInvokeResult
 
 
+def _extract_system_and_context(messages: List[BaseMessage]) -> tuple[list[str], List[BaseMessage]]:
+    """Return system message contents and non-system messages."""
+    system_msgs = [m.content for m in messages if isinstance(m, SystemMessage)]
+    non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+    return system_msgs, non_system
+
+
+def _combine_system_prompt(base_prompt: str, system_msgs: list[str]) -> str:
+    """Append server-supplied system prompts to the base prompt."""
+    if not system_msgs:
+        return base_prompt
+    guidance = "\n\nHere is guidance from the user:\n" + "\n".join(system_msgs)
+    return f"{base_prompt}{guidance}"
+
+
 class Step(BaseModel):
     action: str = Field(
         description="A concise and concrete description of what to *do* to accompliash an objective that, together with other steps will resolve the ultimate goal."
@@ -85,8 +100,14 @@ def build_plan_node(llm: BaseChatModel,
         logger.debug(f"Generating plan for request: {request}")
         tool_list = "\n".join(tool_list_item(t) for t in tools)
         project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
+        prior_messages = state["messages"][:-1]
+        sys_msgs, context_msgs = _extract_system_and_context(prior_messages)
+        system_prompt = _combine_system_prompt(
+            base_prompt_for("reflexion_agent/make_plan_system.txt"), sys_msgs
+        )
         messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/make_plan_system.txt")),
+            SystemMessage(content=system_prompt),
+            *context_msgs,
             HumanMessage(
                 content=base_prompt_for(
                     "reflexion_agent/make_plan_user.txt",
@@ -121,7 +142,6 @@ def build_execute_node(agent: Runnable,
         project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
-            *state["messages"],
             HumanMessage(
                 content=base_prompt_for(
                     "reflexion_agent/execute_step_user.txt",
@@ -178,8 +198,13 @@ def build_summarize_node(llm: BaseChatModel,
                          callbacks: Optional[List]) -> Callable:
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(h.resolution for h in state["history"])
+        sys_msgs, context_msgs = _extract_system_and_context(state["messages"])
+        system_prompt = _combine_system_prompt(
+            base_prompt_for("reflexion_agent/summarize_system.txt"), sys_msgs
+        )
         messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/summarize_system.txt")),
+            SystemMessage(content=system_prompt),
+            *context_msgs,
             HumanMessage(
                 content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),

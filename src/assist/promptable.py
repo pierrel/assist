@@ -1,5 +1,7 @@
 import inspect
 
+from typing import Any
+
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 env = Environment(
@@ -22,12 +24,12 @@ def _infer_module() -> str:
     raise RuntimeError("Could not infer caller module")
 
 
-def base_prompt_for(prompt_path: str, **kwargs) -> str:
+def base_prompt_for(prompt_path: str, **kwargs: Any) -> str:
     template = env.get_template(prompt_path)
     return template.render(**kwargs)
 
 
-def prompt_for(prompt_name: str, *, module: str | None = None, **kwargs) -> str:
+def prompt_for(prompt_name: str, *, module: str | None = None, **kwargs: Any) -> str:
     """Render ``prompt_name`` for ``module`` using optional ``kwargs``.
 
     If ``module`` is not provided, it is inferred from the caller's module.
@@ -44,5 +46,5 @@ class Promptable:
     def prompts_folder(self) -> str:
         return _folder_from_module(self.__module__)
 
-    def prompt_for(self, prompt_name: str, **kwargs) -> str:
+    def prompt_for(self, prompt_name: str, **kwargs: Any) -> str:
         return prompt_for(prompt_name, **kwargs)
