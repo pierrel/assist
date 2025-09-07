@@ -12,6 +12,26 @@ class TestPlannerNode(TestCase):
                                                base_tools_for_test(),
                                                []))
 
+    def ask_node(self, query: str) -> ReflexionState:
+        message = HumanMessage(content=query)
+        return self.graph.invoke({"messages": [message]})
+
+
+    def test_search_website(self):
+        state = self.ask_node("I remember seeing something about college campuses with the best food on this website: https://www.mentalfloss.com. What's the URL for that article?")
+
+        self.assertTrue(any(["site_search" in s.action.lower() for s in state["plan"].steps]))
+
+
+
+    def test_search_webpage(self):
+        state = self.ask_node("Which campus has the best food according to this website: https://www.mentalfloss.com/food/best-and-worst-college-campus-food?utm_source=firefox-newtab-en-us ?")
+
+        self.assertTrue(any(["page_search" in s.action.lower() for s in state["plan"].steps]))
+
+
+    def test_tea_brew(self):
+
     def test_project_context_without_project(self):
         state = self.graph.invoke({"messages": [HumanMessage(content="Hello, can you explain to me what's in the README file?")]})
         plan = state["plan"]
