@@ -21,9 +21,28 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import Runnable
 from assist.reflexion_agent import build_reflexion_graph
-from assist.tools.base import base_tools
 from assist.agent_types import AgentInvokeResult
 from assist.model_manager import get_model_pair
+
+# ---------------------------------------------------------------------------
+# Safeguard: record server startup file and project root so tools can avoid
+# accessing the Assist codebase when the server is running.
+# ---------------------------------------------------------------------------
+
+def _find_project_root(start: Path) -> Path:
+    """Locate the project root by searching for ``pyproject.toml``."""
+    for parent in [start] + list(start.parents):
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return start
+
+
+_SERVER_STARTUP_FILE = Path(__file__).resolve()
+_PROJECT_ROOT = _find_project_root(_SERVER_STARTUP_FILE)
+os.environ.setdefault("ASSIST_SERVER_STARTUP_FILE", str(_SERVER_STARTUP_FILE))
+os.environ.setdefault("ASSIST_SERVER_PROJECT_ROOT", str(_PROJECT_ROOT))
+
+from assist.tools.base import base_tools
 
 
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]

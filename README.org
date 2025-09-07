@@ -9,6 +9,8 @@ It currently provides an OpenAI-compatible API with a ReAct agent and some simpl
 Streaming responses now send only the assistant's latest message rather than replaying prior conversation history.
 
 It is not /just/ a coding assistant, but should be able to help with any project or goal.
+When running the server, built-in tools refuse to read from or write to the Assist codebase itself for safety. The planner and executor prompts explicitly forbid using any tool to access that directory.
+This warning is only shown when the server knows its project root.
 * Concepts
 ** Project
 A project is a git repository, contains the main context for interactions as well as external references. All of the interaction with Assist is handled within the context of the project.

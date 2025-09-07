@@ -6,6 +6,9 @@
 This project, named Assist, is a local-focused, extensible LLM-based assistant prioritizing user privacy and control. It aims to facilitate various tasks beyond coding assistance, providing an OpenAI-compatible API with a ReAct agent tailored primarily for Emacs.
 
 Streaming responses now include only the newly generated assistant message without replaying the previous conversation.
+Built-in tools refuse to access or modify Assist's own source tree when the server is running.
+Planner and executor prompts explicitly forbid using tools to access that directory.
+This warning appears only when the server can determine its project root.
 
 ### Key Sections:
 1. **Concepts**:
