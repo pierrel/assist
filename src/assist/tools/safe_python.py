@@ -68,10 +68,11 @@ class SafePythonTool(BaseTool):
         builtins_str = ", ".join(sorted(b for b in allowed_builtins if b != "__import__"))
         modules_str = ", ".join(sorted(allowed_modules))
         description = (
-            "Execute Python code in a sandboxed environment. "
+            "Execute Python code in a sandboxed environment. Use this tool for calculations and statistics tasks."
             "No filesystem or network access. "
-            f"Builtins: {builtins_str}. "
-            f"Modules: {modules_str}."
+            f"The only builtins available are: {builtins_str}. "
+            f"The only modules available are: {modules_str}. "
+            "Do not attempt to use any builtins or modules outside of those lists."
         )
         super().__init__(description=description)
 
