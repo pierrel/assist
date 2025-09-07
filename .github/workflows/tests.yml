@@ -18,5 +18,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e .
-      - name: Run tests
+      - name: Static type analysis
+        run: mypy src | tee mypy-report.txt
+        continue-on-error: true
+      - name: Upload mypy report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: mypy-report
+          path: mypy-report.txt
+          if-no-files-found: ignore
+      - name: Run tests with coverage
         run: pytest -vv
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore
