@@ -23,7 +23,7 @@ jobs:
         continue-on-error: true
       - name: Upload mypy report
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: mypy-report
           path: mypy-report.txt
@@ -32,7 +32,7 @@ jobs:
         run: pytest -vv
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage.xml
