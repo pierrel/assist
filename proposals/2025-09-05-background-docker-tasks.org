@@ -1,0 +1,96 @@
+* Problem
+Long-running or isolation-requiring tasks (e.g., large code changes or extended research) cannot be handled interactively in the main environment. They need reproducible contexts and must keep clients informed while running.
+
+* Solution
+Run tasks asynchronously inside self-contained Docker containers on the same machine. A request API enqueues jobs, a worker launches containers, and a progress tracker lets clients poll or subscribe for frequent updates. Containers are cleaned after completion with artifacts preserved.
+
+* Requirements
+1. Requests submit via an API and receive job IDs for later status checks.
+2. A job queue and worker execute tasks asynchronously.
+3. Each job runs in a Docker container that pulls the required code and executes the specified operations.
+4. Jobs emit progress updates at regular intervals (e.g., every five minutes) to a tracker accessible through status endpoints or push notifications.
+5. Containers persist for the lifetime of a Task (the conversation), handle multiple exchanges, and are cleaned after 48 hours of inactivity or when the client marks the Task complete. If a cleaned Task receives a new query, a container is recreated with the Task's previous state by pulling its dedicated git branch prefixed ``assist/``.
+6. Containers persist logs and artifacts and are destroyed after Task completion or cleanup.
+7. Use Docker resource limits and scheduling to avoid overloading the host.
+8. Base images pre-index system files and bundle comprehensive offline
+   documentation (Python reference, Unix tools, and libraries like
+   ``langchain``) serving as the canonical source of truth for
+   technology usage.
+
+* Technical design
+** Architecture
+   The system comprises a front-end ``assist`` server, a job queue, worker
+   processes that manage Docker containers, and a progress log store. The
+   assist server accepts requests and records them in the queue. Workers
+   pull jobs, start containers, and stream progress back to the store so
+   clients can query status at any time.
+** Implementation details
+1. **Request API**
+   - Expose endpoints to submit jobs and query status.
+   - Immediately enqueue tasks and return job IDs.
+2. **Job runner**
+   - Employ a queue system (Celery, RQ, or custom) to pull jobs.
+   - Workers leverage Docker to isolate tasks, invoking ``docker run``
+     with mounted repositories and artifact volumes.
+3. **Container image**
+   - ``docker build`` creates a reusable image with all tooling,
+     pre-indexed system files (e.g., using ``rg --files``) and stored
+     indexes for fast search.
+   - The image embeds extensive offline docs for Python, common Unix
+     utilities, and bundled libraries (``langchain`` etc.) so operators
+     rely on in-container references.
+4. **Progress tracking**
+   - Containers write status updates to a shared log or database.
+   - The server exposes a ``/status/{id}`` endpoint and optionally pushes updates via WebSockets or server-sent events.
+5. **Task lifecycle & state**
+   - The first request for a Task creates a container and a git branch named ``assist/<task-name>`` where changes are committed.
+   - Containers persist for the Task's lifetime, sending updates, and are cleaned after 48 hours of inactivity or when the client marks the Task complete.
+   - Before removal, containers store artifacts (logs, reports) so clients can retrieve them.
+   - Cleanup pushes the Task branch to the remote repository and then removes the container.
+   - If a cleaned Task receives a new request, a container is recreated and the corresponding branch is pulled to restore state.
+6. **Resource management**
+   - Configure CPU and memory limits per container and set concurrency thresholds.
+** Messaging between processes
+   - Workers start containers with a lightweight assist server that exposes
+     HTTP endpoints for progress and command messages.
+   - The main server sends tasks via REST to the container server, and the
+     container posts progress back through a shared message queue or
+     callback endpoint. Logs can be streamed using server‑sent events.
+** Container runtime
+   - Each container runs a trimmed assist server to execute the task.
+   - An environment flag disables the ability to spawn nested containers,
+     ensuring tasks run only within their assigned environment.
+** Task and repository linkage
+   - Requests specify the target project. The worker clones the project's
+     repository and checks out ``assist/<task-name>``.
+   - All commits occur on that branch; cleanup pushes the branch upstream so
+     future container recreations can resume from the same state.
+** Interfaces
+   | Direction              | Interface                                      |
+   |------------------------|------------------------------------------------|
+   | Client → Assist server | ``POST /tasks`` to submit, ``GET /status/{id}``|
+   | Assist → Container     | REST ``/execute`` with task payload            |
+   | Container → Assist     | REST ``/progress`` or SSE stream               |
+** Client implementation notes
+   - Clients poll or subscribe to status streams, display progress, and
+     offer a "mark complete" action that triggers cleanup.
+   - Future proposal should specify UI/UX for viewing logs and artifacts.
+
+* Open questions
+1. How aggressively should resource limits throttle tasks that exceed their
+   quotas?
+2. What security controls are needed when bundling offline documentation and
+   code in the base image?
+3. Can container state be snapshot and restored more efficiently than git
+   branches for large binary artifacts?
+
+* Future work
+1. Investigate incremental container image layers to speed up recreation.
+2. Provide a browser-based dashboard for log streaming and artifact access.
+3. Explore remote execution on additional machines if local capacity is
+   saturated.
+
+* Testing
+   - Provide integration tests using a dummy task and a Docker image stub to
+     simulate long‑running work. Tests assert progress updates, branch
+     persistence, and cleanup behavior for predictable validation.
