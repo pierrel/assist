@@ -1,0 +1,8 @@
+Objective: {{ objective }}
+
+Source: {{ source }}
+
+Content:
+{{ content }}
+
+Provide notes relevant to the objective above.
