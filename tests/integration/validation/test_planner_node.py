@@ -24,11 +24,16 @@ class TestPlannerNode(TestCase):
                         f"{thing} should be in a plan step")
 
     def assertInPlan(self,
-                        thing: str,
-                        state: ReflexionState):
+                     thing: str,
+                     state: ReflexionState):
         plan = state["plan"]
         self.assertTrue(any([thing in s.action for s in plan.steps]),
                         f"{thing} should not be in a plan step")
+
+    def test_python_usage(self) -> None:
+        state = self.ask_node("If I save $100 every month in an account that started with $10,000 and provides an interest rate of 3%, how much will the account have in 10 years?")
+
+        self.assertInPlan("python", state)
     
     def test_dont_write_file(self) -> None:
         state = self.ask_node("What is the capital of France?")
