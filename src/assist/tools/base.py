@@ -17,6 +17,7 @@ def base_tools(index_path: Path) -> List[BaseTool]:
         project_index.ProjectIndex(base_dir=index_path).search_tool(),
         #sys_index.search_tool(),
         #sys_index.list_tool(),
+        filesystem.write_file,
         filesystem.list_files,
         filesystem.file_contents,
         filesystem.project_context,
