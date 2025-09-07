@@ -27,7 +27,7 @@ class TestPlannerNode(TestCase):
 
 
 
-        def test_search_webpage(self):
+    def test_search_webpage(self):
         state = self.ask_node("Which campus has the best food according to this website: https://www.mentalfloss.com/food/best-and-worst-college-campus-food?utm_source=firefox-newtab-en-us ?")
 
         self.assertTrue(any(["page_search" in s.action.lower() for s in state["plan"].steps]))
