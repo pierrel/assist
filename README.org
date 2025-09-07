@@ -6,6 +6,8 @@ Assist is an extensible, local-focused, llm-based assistant. The principles guid
 
 It currently provides an OpenAI-compatible API with a ReAct agent and some simple tools. It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
 
+Streaming responses now send only the assistant's latest message rather than replaying prior conversation history.
+
 It is not /just/ a coding assistant, but should be able to help with any project or goal.
 * Concepts
 ** Project
@@ -57,6 +59,14 @@ Run the integration tests with:
 
 #+begin_src shell
 pytest tests/integration
+#+end_src
+
+Additional validation tests for the planner node cover ten example scenarios.
+Each scenario asserts that plans query external references (e.g., Tavily search or local indexes),
+so they require valid `OPENAI_API_KEY` and `TAVILY_API_KEY` environment variables:
+
+#+begin_src shell
+pytest tests/integration/validation/test_planner_node.py
 #+end_src
 * Evaluation
 The project ships with a small, local-first harness for benchmarking agents and their

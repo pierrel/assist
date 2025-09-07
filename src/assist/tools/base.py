@@ -15,8 +15,8 @@ def base_tools(index_path: Path) -> List[BaseTool]:
     return [
         TavilySearch(max_results=10),
         project_index.ProjectIndex(base_dir=index_path).search_tool(),
-        sys_index.search_tool(),
-        sys_index.list_tool(),
+        #sys_index.search_tool(),
+        #sys_index.list_tool(),
         filesystem.list_files,
         filesystem.file_contents,
         filesystem.project_context,

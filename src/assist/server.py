@@ -117,7 +117,11 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
                 "choices": [{"delta": {"role": "assistant"}, "index": 0}],
             }
             yield f"data: {json.dumps(first)}\n\n"
+            skip_idx = 0
             for ch, metadata in agent.stream({"messages": langchain_messages}, stream_mode="messages"):
+                if skip_idx < len(langchain_messages) and ch == langchain_messages[skip_idx]:
+                    skip_idx += 1
+                    continue
                 content = extract_content(ch)
                 chunk = {
                     "id": "1337",
@@ -208,6 +212,7 @@ def debug_tool_use(response: AgentInvokeResult) -> None:
 def check_tavily_api_key() -> None:
     if not os.getenv('TAVILY_API_KEY'):
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
+
 
 def get_agent(model: str, temperature: float) -> Runnable:
     check_tavily_api_key()
