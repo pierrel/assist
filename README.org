@@ -80,39 +80,26 @@ so they require valid `OPENAI_API_KEY` and `TAVILY_API_KEY` environment variable
 pytest tests/integration/validation/test_planner_node.py
 #+end_src
 
+** Validations
+There's a set of tests in =tests/integration/validations= that stress a live llm within the agent and different nodes in different conditions.
+
 Run the whole validation suite repeatedly to check stability:
 
 #+begin_src shell
 python scripts/run_validation_tests.py        # runs 10 times by default
 python scripts/run_validation_tests.py 5      # run it five times
 #+end_src
-* Evaluation
-The project ships with a small, local-first harness for benchmarking agents and their
-subcomponents. Datasets live under =eval/datasets= and describe input/expected pairs.
-Variants in =eval/variants.yaml= map models and graph builders to run.
-Graph builders are exposed from =assist.reflexion_agent= and referenced as
-"module:function" strings so the harness always uses the live code.
-
-Run a dataset against the default variants:
+** Examples
+Small scripts under =playground/= demonstrate different pieces of the system.
+To see how a tool error is surfaced, run:
 
 #+begin_src shell
-python -m eval.harness eval/datasets/reflexion_smoke.yaml --variants eval/variants.yaml --out eval_results.jsonl
+python playground/tool_exception.py
 #+end_src
 
-Datasets available:
-- =reflexion_smoke.yaml=: full reflexion agent
-- =planner_smoke.yaml=: planner layer
-- =plan_check_smoke.yaml=: plan checker
-- =step_executor_smoke.yaml=: step executor
-- =summarizer_smoke.yaml=: summarizer
-
-Summarize results:
-
-#+begin_src shell
-python -m eval.report < eval_results.jsonl
-#+end_src
-
-Edit =eval/variants.yaml= to point to local models or restrict which graphs are evaluated.
+The script defines a tool that always fails, wires a live model to it, and prints the
+resulting messages, including the tool error. Provide a valid `OPENAI_API_KEY` in the
+environment.
 * User flows
 These are the main user flows for working with Assist
 ** Re-write
