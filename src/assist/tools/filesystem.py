@@ -5,6 +5,7 @@ from pathlib import Path
 from pathspec import PathSpec
 
 from assist import git
+from assist.tools.safeguard import in_server_project, ensure_outside_server
 
 # Tools for working with the filesystem
 
@@ -30,6 +31,8 @@ def list_files(root: str) -> list[str]:
         ``"Limit of 200 files reached"`` is appended to the list.
     """
     root_path = Path(root)
+    if in_server_project(root_path):
+        return ["Access to server project files is not allowed"]
     ignore_spec: PathSpec | None = None
     gitignore = root_path / ".gitignore"
     if gitignore.exists():
@@ -39,7 +42,7 @@ def list_files(root: str) -> list[str]:
             ignore_spec = None
 
     files: list[tuple[str, float, float]] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root_path):
         rel_dir = Path(os.path.relpath(dirpath, root_path))
         if str(rel_dir) == ".":
             rel_dir = Path()
@@ -82,7 +85,10 @@ def file_contents(path: str) -> str:
     Returns:
         str: The content of the specified file as a string.
     """
-    with open(path, 'r') as f:
+    p = Path(path)
+    if in_server_project(p):
+        return "Access to server project files is not allowed"
+    with open(p, 'r') as f:
         return f.read()
 
 
@@ -101,8 +107,11 @@ def project_context(root: str) -> str:
         str: Concatenated contents of matching files, each section prefixed with
         the file path.
     """
+    root_path = Path(root)
+    if in_server_project(root_path):
+        return "Access to server project files is not allowed"
     paths: list[Path] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, _dirnames, filenames in os.walk(root_path):
         for name in filenames:
             upper = name.upper()
             if upper.startswith("README") or upper.startswith("AGENTS"):
@@ -141,6 +150,7 @@ def write_file(
     """
 
     p = Path(path).expanduser().resolve()
+    ensure_outside_server(p)
     parent = p.parent
 
     git.repo_root(parent)
