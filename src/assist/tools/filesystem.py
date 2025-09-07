@@ -25,10 +25,7 @@ def list_files(root: str) -> list[str]:
         root: Directory to search.
 
     Returns:
-        list[str]: ``"<path> (created: <cdate>, modified: <mdate>)"`` entries
-        for up to 200 files under ``root`` that aren't ignored. When the
-        directory contains more than 200 files, a final entry of
-        ``"Limit of 200 files reached"`` is appended to the list.
+        list[str]: ``"<path> (created: <cdate>, modified: <mdate>)"``
     """
     root_path = Path(root)
     if in_server_project(root_path):
