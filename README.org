@@ -79,6 +79,13 @@ so they require valid `OPENAI_API_KEY` and `TAVILY_API_KEY` environment variable
 #+begin_src shell
 pytest tests/integration/validation/test_planner_node.py
 #+end_src
+
+Run the whole validation suite repeatedly to check stability:
+
+#+begin_src shell
+python scripts/run_validation_tests.py        # runs 10 times by default
+python scripts/run_validation_tests.py 5      # run it five times
+#+end_src
 * Evaluation
 The project ships with a small, local-first harness for benchmarking agents and their
 subcomponents. Datasets live under =eval/datasets= and describe input/expected pairs.
