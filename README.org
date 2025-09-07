@@ -51,11 +51,20 @@ Install the package in editable mode so Emacs/Elpy can discover the modules:
 pip install -e .
 #+end_src
 
-Run the tests with:
+Run the tests with coverage:
 
 #+begin_src shell
 pytest
 #+end_src
+
+Generate a static type report:
+
+#+begin_src shell
+mypy src
+#+end_src
+
+Both coverage and type checking run in CI for pull requests and pushes to main.
+Reports are uploaded as artifacts and do not block the build.
 
 Run the integration tests with:
 
