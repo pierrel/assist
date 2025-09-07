@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 import os
 from pathlib import Path
+from assist.tools.safeguard import in_server_project
 from typing import Dict, List
 
 import numpy as np
@@ -111,6 +112,8 @@ class ProjectIndex:
     def get_retriever(self, project_root: Path | str) -> _Retriever:
         """Return a retriever for ``project_root``."""
         root = Path(project_root)
+        if in_server_project(root):
+            raise ValueError("Cannot index the server project")
         key = str(root.resolve())
         if key in self._retrievers:
             return self._retrievers[key]
@@ -142,6 +145,8 @@ class ProjectIndex:
             Returns:
             str: A newline-separated list of file contents relevant to the query."""
             p = Path(project_root)
+            if in_server_project(p):
+                return "Cannot index the server project"
             if not p.exists():
                 return "File does not exist"
             elif is_filesystem_root(p):

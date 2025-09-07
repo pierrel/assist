@@ -7,3 +7,7 @@ Here is the overall goal, for which this is one step:
 Previous steps and results:
 {{ history }}
 
+{% if project_root %}
+Remember: do not use any tool that reads, writes, or indexes files in {{ project_root }} or any of its subdirectories.
+{% endif %}
+

@@ -84,11 +84,16 @@ def build_plan_node(llm: BaseChatModel,
         request = getattr(user_msg, "content", user_msg)
         logger.debug(f"Generating plan for request: {request}")
         tool_list = "\n".join(tool_list_item(t) for t in tools)
+        project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/make_plan_system.txt")),
             HumanMessage(
                 content=base_prompt_for(
-                    "reflexion_agent/make_plan_user.txt", tools=tool_list, task=request
+                    "reflexion_agent/make_plan_user.txt",
+                    tools=tool_list,
+                    task=request,
+                    project_root=project_root,
+                    learnings=state.get("learnings", [])
                 )
             ),
         ]
@@ -113,6 +118,7 @@ def build_execute_node(agent: Runnable,
         step_index = state['step_index']
         history_text = "\n".join([str(h) for h in state['history']])
         logger.debug(f"Executing step {step_index}: {step}")
+        project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
             *state["messages"],
@@ -121,7 +127,8 @@ def build_execute_node(agent: Runnable,
                     "reflexion_agent/execute_step_user.txt",
                     history=history_text,
                     step=step,
-                    goal=state["plan"].goal
+                    goal=state["plan"].goal,
+                    project_root=project_root
                 )
             ),
         ]
