@@ -25,7 +25,7 @@ def test_blocks_os_import():
 def test_description_mentions_limits():
     tool = SafePythonTool()
     desc = tool.description
-    assert "Builtins" in desc and "Modules" in desc
+    assert "builtins" in desc and "modules" in desc
     assert "abs" in desc and "math" in desc
 
 
