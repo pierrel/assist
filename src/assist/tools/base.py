@@ -15,7 +15,7 @@ def base_tools(index_path: Path) -> List[BaseTool]:
         filesystem.project_context,
         filesystem.write_file,
         proj.search_tool(),
-        sys_index.search_tool(),
-        sys_index.list_tool(),
+        #sys_index.search_tool(),
+        #sys_index.list_tool(),
         TavilySearch(max_results=10),
     ]
