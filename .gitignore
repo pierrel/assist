@@ -2,6 +2,7 @@
 **/__pycache__
 **/.venv
 **/site-packages
+**/.mypy_cache
 **/#*#
 .ob-jupyter
 keys

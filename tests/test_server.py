@@ -42,3 +42,34 @@ class TestServer(TestCase):
         work_message_types = [type(m) for m in work_messages]
         self.assertListEqual(work_message_types, [AIMessage, ToolMessage, AIMessage])
         self.assertEqual(len(work_messages), 3)
+
+    def test_streaming_only_new_messages(self):
+        class DummyAgent:
+            def stream(self, args, stream_mode="messages"):
+                messages = args["messages"]
+                for m in messages + [AIMessage(content="new answer")]:
+                    yield m, {}
+
+        messages = [
+            server.ChatMessage(role="user", content="hi"),
+            server.ChatMessage(role="assistant", content="hello"),
+            server.ChatMessage(role="user", content="how are you?"),
+        ]
+
+        with patch("assist.server.get_agent", return_value=DummyAgent()):
+            req = server.ChatCompletionRequest(model="mock", messages=messages, stream=True)
+            resp = server.chat_completions(req)
+
+            async def collect(r: StreamingResponse):
+                data = []
+                async for chunk in r.body_iterator:
+                    if isinstance(chunk, bytes):
+                        data.append(chunk.decode())
+                    else:
+                        data.append(chunk)
+                return "".join(data)
+
+            stream = asyncio.run(collect(resp))
+
+        self.assertIn("new answer", stream)
+        self.assertNotIn("hello", stream)
