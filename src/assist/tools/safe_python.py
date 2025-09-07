@@ -13,13 +13,9 @@ class SafePythonTool(BaseTool):
     """Execute Python code without filesystem side effects."""
 
     name: str = "python"
-    description: str = (
-        "Execute Python code in a sandboxed environment. "
-        "The code cannot access the filesystem or network."
-    )
+    description: str = ""
 
     def __init__(self) -> None:
-        super().__init__()
         allowed_builtins = {
             name: getattr(builtins, name)
             for name in [
@@ -48,20 +44,42 @@ class SafePythonTool(BaseTool):
                 "set",
             ]
         }
-        allowed_modules = {"math", "statistics", "random", "numpy"}
+        allowed_modules = {"math", "statistics", "random"}
+        for mod in ("numpy",):
+            try:
+                __import__(mod)
+            except Exception:  # pragma: no cover - optional dependency
+                continue
+            allowed_modules.add(mod)
 
-        def _safe_import(name: str, globals: Any | None = None, locals: Any | None = None,
-                         fromlist: tuple[str, ...] = (), level: int = 0) -> Any:
+        def _safe_import(
+            name: str,
+            globals: Any | None = None,
+            locals: Any | None = None,
+            fromlist: tuple[str, ...] = (),
+            level: int = 0,
+        ) -> Any:
             if name in allowed_modules:
                 return __import__(name, globals, locals, fromlist, level)
             raise ImportError(f"Module '{name}' not allowed")
 
         allowed_builtins["__import__"] = _safe_import
+
+        builtins_str = ", ".join(sorted(b for b in allowed_builtins if b != "__import__"))
+        modules_str = ", ".join(sorted(allowed_modules))
+        description = (
+            "Execute Python code in a sandboxed environment. "
+            "No filesystem or network access. "
+            f"Builtins: {builtins_str}. "
+            f"Modules: {modules_str}."
+        )
+        super().__init__(description=description)
+
         self._globals: Dict[str, Any] = {"__builtins__": allowed_builtins}
         for mod in allowed_modules:
             try:
                 self._globals[mod] = __import__(mod)
-            except Exception:
+            except Exception:  # pragma: no cover - import guard
                 pass
 
     def _run(self, code: str) -> str:

@@ -4,7 +4,7 @@ Assist is an extensible, local-focused, llm-based assistant. The principles guid
 - Extensibility - All agentic behavior is easy to modify or add to.
 - Generic - Assist can help with anything.
 
-It currently provides an OpenAI-compatible API with a ReAct agent and some simple tools, including a safe Python execution tool for read-only computations. It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
+It currently provides an OpenAI-compatible API with a ReAct agent and some simple tools, including a safe Python execution tool for read-only computations with limited builtins (e.g., =abs=, =sum=) and modules (=math=, =statistics=, =random=, =numpy= if available). It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
 
 Streaming responses now send only the assistant's latest message rather than replaying prior conversation history.
 

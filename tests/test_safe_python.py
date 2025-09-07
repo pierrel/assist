@@ -1,3 +1,5 @@
+import importlib
+
 from assist.tools.safe_python import SafePythonTool
 
 
@@ -18,3 +20,20 @@ def test_blocks_os_import():
     tool = SafePythonTool()
     out = tool.run("import os")
     assert "not allowed" in out
+
+
+def test_description_mentions_limits():
+    tool = SafePythonTool()
+    desc = tool.description
+    assert "Builtins" in desc and "Modules" in desc
+    assert "abs" in desc and "math" in desc
+
+
+def test_numpy_mention_matches_installation():
+    tool = SafePythonTool()
+    try:
+        importlib.import_module("numpy")
+    except Exception:
+        assert "numpy" not in tool.description
+    else:
+        assert "numpy" in tool.description
