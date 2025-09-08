@@ -26,7 +26,13 @@ def test_description_mentions_limits():
     tool = SafePythonTool()
     desc = tool.description
     assert "Builtins" in desc and "Modules" in desc
-    assert "abs" in desc and "math" in desc
+    assert "abs" in desc and "pow" in desc and "math" in desc
+
+
+def test_pow_builtin():
+    tool = SafePythonTool()
+    out = tool.run("result = pow(2, 3)")
+    assert out.strip().endswith("8")
 
 
 def test_numpy_mention_matches_installation():

@@ -42,6 +42,7 @@ class SafePythonTool(BaseTool):
                 "list",
                 "tuple",
                 "set",
+                "pow",
             ]
         }
         allowed_modules = {"math", "statistics", "random"}
