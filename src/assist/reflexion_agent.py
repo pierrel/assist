@@ -1,4 +1,5 @@
 """Reflexion graph built from planning and execution steps."""
+import pdb
 import math
 import os
 import time
@@ -109,7 +110,10 @@ def build_plan_node(
         prior_messages = state["messages"][:-1]
         sys_msgs, context_msgs = _extract_system_and_context(prior_messages)
         system_prompt = _combine_system_prompt(
-            base_prompt_for("reflexion_agent/make_plan_system.txt"), sys_msgs
+            base_prompt_for("reflexion_agent/make_plan_system.txt",
+                            tools=tool_list,
+                            project_root=project_root),
+            sys_msgs
         )
         messages = [
             SystemMessage(content=system_prompt),
@@ -117,13 +121,12 @@ def build_plan_node(
             HumanMessage(
                 content=base_prompt_for(
                     "reflexion_agent/make_plan_user.txt",
-                    tools=tool_list,
                     task=request,
-                    project_root=project_root,
                     learnings=state.get("learnings", [])
                 )
             ),
         ]
+        logger.debug(f"Full messaging for plan:\n{messages}")
         start = time.time()
         plan = llm.with_structured_output(Plan).invoke(
             messages,
