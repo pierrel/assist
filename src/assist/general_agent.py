@@ -3,16 +3,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool, BaseTool
 from langgraph.prebuilt import create_react_agent
 from datetime import datetime
-from typing import List
+from typing import Any, List
 import time
-import os    
+import os
 
 def general_agent(
-    llm: Runnable,
-    tools: List[BaseTool] = [],
-) -> Runnable:
+    llm: Runnable[Any, Any],
+    tools: List[BaseTool] | None = None,
+) -> Runnable[Any, Any]:
     """Return a ReAct agent configured with useful tools."""
-    agent_executor = create_react_agent(llm, tools)
+    agent_executor = create_react_agent(llm, tools or [])
     return agent_executor
 
 def test_agents() -> None:
