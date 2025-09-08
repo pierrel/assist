@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from langchain_core.tools import BaseTool
 
 try:
@@ -36,7 +38,7 @@ class UnitConversionTool(BaseTool):
             return f"Error: {exc}"
         return f"{converted.magnitude} {converted.units}"
 
-    async def _arun(self, *args, **kwargs) -> str:  # pragma: no cover - sync tool
+    async def _arun(self, *args: Any, **kwargs: Any) -> str:  # pragma: no cover - sync tool
         raise NotImplementedError
 
 

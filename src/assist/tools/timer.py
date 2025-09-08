@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Dict
+from typing import Any, Dict
 from langchain_core.tools import BaseTool
 
 
@@ -40,7 +40,7 @@ class TimerTool(BaseTool):
             return f"Timer '{name}' cancelled"
         return "Unknown action. Use 'start', 'status', or 'cancel'"
 
-    async def _arun(self, *args, **kwargs) -> str:  # pragma: no cover - sync tool
+    async def _arun(self, *args: Any, **kwargs: Any) -> str:  # pragma: no cover - sync tool
         raise NotImplementedError
 
 

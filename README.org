@@ -31,6 +31,9 @@ Install dependencies
 pip install -r requirements.txt
 #+end_src
 
+Typing stubs for ``requests`` and ``python-dateutil`` are included to enable
+stricter type checking.
+
 Enable the virtual environment
 
 #+begin_src shell

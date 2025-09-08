@@ -31,19 +31,24 @@ class FakeRunnable:
         self._schema = schema
         return self
 
-    def invoke(self, *_args, **_kwargs) -> BaseModel | FakeInvocation:
+    def invoke(self, *args: Any, **kwargs: Any) -> BaseModel | FakeInvocation:
         if self._idx >= len(self._responses):
             raise IndexError("No more fake responses")
         resp = self._responses[self._idx]
         self._idx += 1
         if self._schema:
-            content = resp[0].content
-            steps = [line.split('. ', 1)[1] if '. ' in line else line for line in content.splitlines() if line]
+            content_raw = resp[0].content
+            content = content_raw if isinstance(content_raw, str) else str(content_raw)
+            steps = [
+                line.split('. ', 1)[1] if '. ' in line else line
+                for line in content.splitlines()
+                if line
+            ]
             schema = self._schema
             self._schema = None
             return schema(goal="", steps=steps)
         return FakeInvocation(resp)
 
-    def stream(self, *_args, **kwargs) -> Tuple[BaseModel | FakeInvocation, Dict[str, Any]]:
-        res = self.invoke(self, *_args, **kwargs)
+    def stream(self, *args: Any, **kwargs: Any) -> Tuple[BaseModel | FakeInvocation, Dict[str, Any]]:
+        res = self.invoke(*args, **kwargs)
         return (res, {})
