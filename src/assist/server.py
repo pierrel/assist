@@ -23,6 +23,8 @@ from langchain_core.runnables import Runnable
 from assist.reflexion_agent import build_reflexion_graph
 from assist.agent_types import AgentInvokeResult
 from assist.model_manager import get_model_pair
+from assist.mcp_client import load_mcp_tools
+from langchain_core.tools import BaseTool
 
 # ---------------------------------------------------------------------------
 # Safeguard: record server startup file and project root so tools can avoid
@@ -48,6 +50,7 @@ from assist.tools.base import base_tools
 AnyMessage = Union[SystemMessage, HumanMessage, AIMessage]
 
 INDEX_DB_ROOT = Path(tempfile.gettempdir())
+EXTERNAL_MCP_TOOLS: List[BaseTool] = []
 
 class ChatMessage(BaseModel):
     role: str
@@ -236,7 +239,7 @@ def check_tavily_api_key() -> None:
 def get_agent(model: str, temperature: float) -> Runnable:
     check_tavily_api_key()
     plan_llm, exec_llm = get_model_pair(model, temperature)
-    tools = base_tools(INDEX_DB_ROOT)
+    tools = base_tools(INDEX_DB_ROOT) + EXTERNAL_MCP_TOOLS
     return build_reflexion_graph(
         plan_llm,
         tools,
@@ -247,6 +250,12 @@ def get_agent(model: str, temperature: float) -> Runnable:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--index-db", type=Path, default=INDEX_DB_ROOT)
+    parser.add_argument(
+        "--mcp-server",
+        action="append",
+        default=[],
+        help="URL for an external MCP server (repeatable)",
+    )
     args = parser.parse_args()
     path = args.index_db.expanduser().resolve()
     try:
@@ -256,6 +265,8 @@ if __name__ == "__main__":
     if not os.access(path, os.R_OK | os.W_OK):  # pragma: no cover - simple
         raise SystemExit(f"Cannot access index directory {path}")
     INDEX_DB_ROOT = path
+    for url in args.mcp_server:
+        EXTERNAL_MCP_TOOLS.extend(load_mcp_tools(url))
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=5000, log_level="debug")

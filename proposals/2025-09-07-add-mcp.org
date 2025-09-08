@@ -1,0 +1,22 @@
+* Existing Tools
+1. ``assist/server.py`` provides an OpenAI-compatible HTTP API that wires a ReAct agent with local tools.
+2. ``scripts/startup`` launches the server with a predefined environment.
+
+* Problem
+Assist lacks a standard Model Context Protocol (MCP) endpoint, so editors and other clients that speak MCP cannot interact with the agent without custom adapters.
+
+* Solution
+Introduce a minimal MCP server that wraps the existing agent. Clients that implement the MCP specification could then discover Assist's tools and exchange messages without bespoke integrations.
+
+* Requirements
+1. Provide a ``assist/mcp_server.py`` module exposing a ``run()`` function that starts an MCP server.
+2. The server must register available tools and surface them through MCP's capability discovery.
+3. Add a CLI entry point so users can launch the server with ``python -m assist.mcp_server`` and optional ``--port`` and ``--host`` flags.
+4. Reuse the existing agent setup so the MCP server shares project indexing and tool configuration with the HTTP server.
+5. Document how to start the MCP server and connect from an MCP client.
+
+* Implementation details
+1. ``assist/mcp_server.py`` defines ``run(host: str = "127.0.0.1", port: int = 8765)`` that initializes the agent and serves MCP requests.
+2. ``assist/__init__.py`` exports ``mcp_server`` for easy imports.
+3. Extend ``scripts/startup`` to accept a ``--mcp`` flag that starts the MCP server instead of the HTTP server.
+4. Update ``README.org`` with usage instructions and the new flag.

@@ -10,7 +10,8 @@ dependencies = [
     "Jinja2==3.1.6",
     "typer",
     "pyyaml",
-    "jsonschema"
+    "jsonschema",
+    "mcp"
 ]
 
 [tool.setuptools.packages.find]

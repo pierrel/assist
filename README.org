@@ -39,11 +39,12 @@ source .venv/bin/activate
 
 In emacs: =M-x pyvenv-activate=
 ** Running
-Run the server
+Run the server. Repeat ``--mcp-server`` to register external MCP servers.
+Tools from each server are namespaced by host.
 
-#+begin shell
-python src/assist/server.python
-#+end_shell
+#+begin_src shell
+python src/assist/server.py --mcp-server http://localhost:8765/sse
+#+end_src
 ** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:
 
@@ -145,6 +146,8 @@ Actually perform some work which has side effects. These could be:
 - Making API requests which have side effects
 - Opening a browser to do work
 *** Within the project
+- Support a Model Context Protocol (MCP) server so standard clients can invoke Assist inside the project.
+- Use external Model Context Protocol (MCP) servers to supplement built-in tools.
 *** Outside the project
 ** Proactivity
 /Future feature/

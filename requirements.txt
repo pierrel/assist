@@ -22,4 +22,5 @@ typer
 pyyaml
 jsonschema
 pathspec
+mcp
 
