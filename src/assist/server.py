@@ -5,10 +5,10 @@ from pathlib import Path
 import tempfile
 from datetime import datetime
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import json
 from loguru import logger
-from typing import Any, Iterator, List, Optional, Union
+from typing import Any, Awaitable, Callable, Iterator, List, Optional, Union, Mapping, Sequence
 from itertools import takewhile
 
 from pydantic import BaseModel
@@ -18,6 +18,7 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
     ToolMessage,
+    ToolCall,
 )
 from langchain_core.runnables import Runnable
 from assist.reflexion_agent import build_reflexion_graph
@@ -88,17 +89,18 @@ def openai_to_lanchain_message(message: ChatMessage) -> AnyMessage:
 
 def extract_content(message: BaseMessage) -> str:
     """Return a human-readable output based on the agent message"""
-    if isinstance(message, AIMessage):
+    if isinstance(message, AIMessage) and isinstance(message.content, str):
         return message.content
-    else:
-        return ''
+    return ""
 
 def openai_to_langchain(messages: List[ChatMessage]) -> List[AnyMessage]:
     return list(map(openai_to_lanchain_message, messages))
 
 
 @app.middleware("http")
-async def log_middle(request: Request, call_next) -> Response:
+async def log_middle(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
     logger.debug(f"{request.method} {request.url}")
     routes = request.app.router.routes
     logger.debug("Params:")
@@ -110,7 +112,7 @@ async def log_middle(request: Request, call_next) -> Response:
     for name, value in request.headers.items():
         logger.debug(f"\t{name}: {value}")
 
-    body = await request.body()
+    body = (await request.body()).decode()
     logger.debug(f"Body: {body}")
     response = await call_next(request)
     return response
@@ -119,7 +121,7 @@ async def log_middle(request: Request, call_next) -> Response:
 @app.post("/chat/completions")
 def chat_completions(request: ChatCompletionRequest) -> Response:
     start = time.time()
-    agent = get_agent(request.model, request.temperature)
+    agent = get_agent(request.model, request.temperature or 0.1)
     langchain_messages = openai_to_langchain(request.messages)
     user_request = langchain_messages[-1].content
 
@@ -172,28 +174,30 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
     logger.debug(f"Got response {message}")
     created = datetime.fromtimestamp(time.time())
     logger.debug(f"Reponse tool {time.time() - start}s")
-    return ChatCompletionResponse(
-        id="1337",
-        object="chat.completion",
-        created=created,
-        model=request.model,
-        choices=[
-            ChatCompletionChoice(
-                message=ChatMessage(role="assistant", content=message.content)
-            )
-        ],
+    return JSONResponse(
+        content=ChatCompletionResponse(
+            id="1337",
+            object="chat.completion",
+            created=created,
+            model=request.model,
+            choices=[
+                ChatCompletionChoice(
+                    message=ChatMessage(role="assistant", content=message.content)
+                )
+            ],
+        ).model_dump()
     )
 
 
-def not_human_message(message: AnyMessage) -> bool:
+def not_human_message(message: BaseMessage) -> bool:
     return not isinstance(message, HumanMessage)
 
 
-def render_tool_call(tc: dict[str, Any]) -> str:
+def render_tool_call(tc: Mapping[str, Any]) -> str:
     return f"{tc['name']}: {tc['args']}"
 
 
-def render_tool_calls(tool_calls: list[dict[str, Any]]) -> str:
+def render_tool_calls(tool_calls: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(map(render_tool_call, tool_calls))
 
 def render_ai_message(message: AIMessage) -> str:
@@ -210,13 +214,11 @@ def render_tool_message(message: ToolMessage) -> str:
     return f"ToolMessage: {message.content}"
 
 
-def work_messages(messages: list[AnyMessage]) -> list[AnyMessage]:
-    """Takes a list of messages and returns a list of all the messages
-    between the last HumanMessage and the next to last element
-
-    """
-    with_result = list(reversed(list(takewhile(not_human_message,
-                                               reversed(messages)))))
+def work_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Return messages between the last human input and the final response."""
+    with_result = list(
+        reversed(list(takewhile(not_human_message, reversed(messages))))
+    )
     return with_result[:-1]
 
 
@@ -233,7 +235,7 @@ def check_tavily_api_key() -> None:
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
 
 
-def get_agent(model: str, temperature: float) -> Runnable:
+def get_agent(model: str, temperature: float) -> Runnable[Any, Any]:
     check_tavily_api_key()
     plan_llm, exec_llm = get_model_pair(model, temperature)
     tools = base_tools(INDEX_DB_ROOT)
