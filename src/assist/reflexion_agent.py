@@ -3,7 +3,7 @@ import math
 import os
 import time
 
-from typing import Dict, List, Optional, TypedDict, Literal, Callable
+from typing import Any, Callable, Dict, List, Optional, TypedDict, Literal, cast
 
 from loguru import logger
 from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
@@ -26,7 +26,11 @@ from assist.agent_types import AgentInvokeResult
 
 def _extract_system_and_context(messages: List[BaseMessage]) -> tuple[list[str], List[BaseMessage]]:
     """Return system message contents and non-system messages."""
-    system_msgs = [m.content for m in messages if isinstance(m, SystemMessage)]
+    system_msgs = [
+        m.content
+        for m in messages
+        if isinstance(m, SystemMessage) and isinstance(m.content, str)
+    ]
     non_system = [m for m in messages if not isinstance(m, SystemMessage)]
     return system_msgs, non_system
 
@@ -91,9 +95,11 @@ def tool_list_item(tool: BaseTool) -> str:
     return f"- {tool.name}: {tool.description}"
 
 
-def build_plan_node(llm: BaseChatModel,
-                    tools: List[BaseTool],
-                    callbacks: Optional[List]) -> Callable:
+def build_plan_node(
+    llm: BaseChatModel,
+    tools: List[BaseTool],
+    callbacks: Optional[List[Any]],
+) -> Callable[[ReflexionState], Dict[str, object]]:
     def plan_node(state: ReflexionState) -> Dict[str, object]:
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
@@ -132,9 +138,11 @@ def build_plan_node(llm: BaseChatModel,
     return plan_node
 
 
-def build_execute_node(agent: Runnable,
-                       callbacks: Optional[List]) -> Callable:
-    def execute_node(state: ReflexionState) -> Dict[str, object]:
+def build_execute_node(
+    agent: Runnable[Any, Any],
+    callbacks: Optional[List[Any]],
+) -> Callable[[ReflexionState], ReflexionState]:
+    def execute_node(state: ReflexionState) -> ReflexionState:
         step = state["plan"].steps[state["step_index"]]
         step_index = state['step_index']
         history_text = "\n".join([str(h) for h in state['history']])
@@ -167,8 +175,10 @@ def build_execute_node(agent: Runnable,
     return execute_node
 
 
-def build_plan_check_node(llm: BaseChatModel,
-                          callbacks: Optional[List]) -> Callable:
+def build_plan_check_node(
+    llm: BaseChatModel,
+    callbacks: Optional[List[Any]],
+) -> Callable[[ReflexionState], Dict[str, object]]:
     def plan_check_node(state: ReflexionState) -> Dict[str, object]:
         """Asks an llm if a replan is required. If so, updates learnings and the replan bit."""
         plan = state["plan"]
@@ -183,19 +193,23 @@ def build_plan_check_node(llm: BaseChatModel,
             HumanMessage(content=human_prompt),
         ]
 
-        retro: PlanRetrospective = llm.with_structured_output(PlanRetrospective).invoke(messages, {"callbacks": callbacks})
+        retro_raw = llm.with_structured_output(PlanRetrospective).invoke(
+            messages, {"callbacks": callbacks}
+        )
+        retro = PlanRetrospective.model_validate(retro_raw)
         logger.debug(f"Retrospected with:\n{retro}")
         all_learnings = state.get("learnings", [])
-        if retro.needs_replan:
+        if retro.needs_replan and retro.learnings is not None:
             all_learnings = all_learnings + [retro.learnings]
-        return {"needs_replan": retro.needs_replan,
-                "learnings": all_learnings}
+        return {"needs_replan": retro.needs_replan, "learnings": all_learnings}
 
     return plan_check_node
 
 
-def build_summarize_node(llm: BaseChatModel,
-                         callbacks: Optional[List]) -> Callable:
+def build_summarize_node(
+    llm: BaseChatModel,
+    callbacks: Optional[List[Any]],
+) -> Callable[[ReflexionState], Dict[str, List[BaseMessage]]]:
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(h.resolution for h in state["history"])
         sys_msgs, context_msgs = _extract_system_and_context(state["messages"])
@@ -255,11 +269,11 @@ def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summariz
 
 
 def build_reflexion_graph(
-    llm: Runnable,
+    llm: BaseChatModel,
     tools: List[BaseTool],
-    callbacks: Optional[List] = None,
-    execution_llm: Optional[Runnable] = None,
-) -> Runnable:
+    callbacks: Optional[List[Any]] = None,
+    execution_llm: Optional[BaseChatModel] = None,
+) -> Runnable[Any, Any]:
     """Compose planning, step execution and summarization using LangGraph.
 
     ``llm`` is used for planning related tasks (planning, plan checking and
@@ -273,15 +287,10 @@ def build_reflexion_graph(
     agent = general_agent(exec_llm, tools)
     graph = StateGraph(ReflexionState)
 
-    graph.add_node("plan", build_plan_node(llm,
-                                           tools,
-                                           callbacks))
-    graph.add_node("execute", build_execute_node(agent,
-                                                 callbacks))
-    graph.add_node("plan_check", build_plan_check_node(llm,
-                                                       callbacks))
-    graph.add_node("summarize", build_summarize_node(llm,
-                                                     callbacks))
+    graph.add_node("plan", cast(Any, build_plan_node(llm, tools, callbacks)))
+    graph.add_node("execute", cast(Any, build_execute_node(agent, callbacks)))
+    graph.add_node("plan_check", cast(Any, build_plan_check_node(llm, callbacks)))
+    graph.add_node("summarize", cast(Any, build_summarize_node(llm, callbacks)))
 
     graph.add_edge("plan", "execute")
     graph.add_conditional_edges("plan_check", big_condition)

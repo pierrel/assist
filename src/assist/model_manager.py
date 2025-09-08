@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from langchain_core.runnables import Runnable
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_ollama import ChatOllama
 try:  # pragma: no cover - optional dependency
     from langchain_openai import ChatOpenAI
@@ -21,7 +21,7 @@ MODEL_EXECUTION_MAP: dict[str, str] = {
 }
 
 
-def select_chat_model(model: str, temperature: float) -> Runnable:
+def select_chat_model(model: str, temperature: float) -> BaseChatModel:
     """Return the appropriate chat model for ``model``.
 
     If the model string indicates a ChatGPT model (``gpt-*``) a ``ChatOpenAI``
@@ -34,7 +34,7 @@ def select_chat_model(model: str, temperature: float) -> Runnable:
     return ChatOllama(model=model, temperature=temperature)
 
 
-def get_model_pair(model: str, temperature: float) -> Tuple[Runnable, Runnable]:
+def get_model_pair(model: str, temperature: float) -> Tuple[BaseChatModel, BaseChatModel]:
     """Return a pair of (planning_llm, execution_llm) for ``model``.
 
     The planning model is always ``model`` and the execution model is looked up
