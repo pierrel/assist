@@ -20,7 +20,6 @@ buffer, adds the query to the buffer, and sends it to gptel"
 	  from-user-query
 	  (assist/open-buffer-details-string)
 	  (assist/project-details-string)))
-(assist/full-query "hello")
 
 (defun assist/project-info ()
   "Return some information about the current project to uniquely identify

@@ -1,6 +1,7 @@
 import pytest
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.runnables import Runnable
+from langgraph.errors import GraphRecursionError
 
 from assist import reflexion_agent
 from assist.reflexion_agent import build_reflexion_graph, Plan, Step, PlanRetrospective, StepResolution
@@ -127,6 +128,7 @@ def test_plan_node_outputs_initial_state(monkeypatch):
     assert out["step_index"] == 0
     assert out["history"] == []
     assert out["needs_replan"] is False
+    assert out["plan_check_needed"] is False
     assert out["learnings"] == []
     assert "do task" in llm.calls[0][1].content
 
@@ -363,3 +365,61 @@ def test_context_and_system_message_routing(monkeypatch):
     assert "Here is guidance from the user:" in summary_sys
     assert any(isinstance(m, HumanMessage) and m.content == "hello" for m in llm.summary_messages)
     assert any(isinstance(m, AIMessage) and m.content == "hi" for m in llm.summary_messages)
+
+
+def test_execute_node_handles_recursion(monkeypatch):
+    class LLM:
+        def __init__(self):
+            self.schema = None
+
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, _messages, _opts=None):
+            step = Step(action="run", objective="obj")
+            return Plan(goal="g", steps=[step], assumptions=[], risks=[])
+
+    class FailingAgent:
+        def invoke(self, _inputs, _opts=None):
+            raise GraphRecursionError("boom")
+
+    monkeypatch.setattr(
+        reflexion_agent, "general_agent", lambda _llm, _tools: FailingAgent()
+    )
+
+    graph = build_reflexion_graph(LLM(), [])
+    plan_node = graph.builder.nodes["plan"].runnable.func
+    execute_node = graph.builder.nodes["execute"].runnable.func
+
+    state = {"messages": [HumanMessage(content="task")], "learnings": []}
+    state.update(plan_node(state))
+    out = execute_node(state)
+
+    assert out["plan_check_needed"] is True
+    assert out["step_index"] == 1
+    assert len(out["history"]) == 1
+    assert "run" in out["history"][0].resolution
+    assert reflexion_agent.after_execute(out) == "plan_check"
+
+
+def test_reflexion_graph_handles_recursion_error(monkeypatch):
+    llm = DummyLLM()
+    dummy_agent = DummyAgent()
+
+    monkeypatch.setattr(
+        reflexion_agent, "general_agent", lambda _llm, _tools: dummy_agent
+    )
+
+    graph = build_reflexion_graph(llm, [])
+
+    def raise_recursion(*_args, **_kwargs):
+        raise GraphRecursionError("too many replans")
+
+    monkeypatch.setattr(graph._runnable, "invoke", raise_recursion)
+
+    result = graph.invoke({"messages": [HumanMessage(content="task")]})
+    last = result["messages"][-1]
+
+    assert isinstance(last, AIMessage)
+    assert last.content.endswith("?")

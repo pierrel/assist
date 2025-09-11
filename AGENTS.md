@@ -1,6 +1,3 @@
-# Doc management
-- Always update the README to align with the latest changes
-
 # Design guideline
 1. **Prime Directive: never design against the requirements**
    Design the architecture to *absorb change*, not to mirror today’s use cases. ([InfoQ][1])
