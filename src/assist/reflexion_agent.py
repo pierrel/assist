@@ -8,11 +8,12 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict, Literal, cast
 
 from loguru import logger
 from assist.debug_callback import ReadableConsoleCallbackHandler
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
 
 try:  # pragma: no cover - optional dependency
@@ -89,6 +90,7 @@ class ReflexionState(TypedDict):
     step_index: int
     history: List[StepResolution]
     needs_replan: bool
+    plan_check_needed: bool
     learnings: List[str]
 
 
@@ -131,11 +133,14 @@ def build_plan_node(
             {"callbacks": callbacks, "tags": ["plan"]}
         )
         logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
-        return {"plan": plan,
-                "step_index": 0,
-                "history": [],
-                "needs_replan": False,
-                "learnings": state.get("learnings", [])}
+        return {
+            "plan": plan,
+            "step_index": 0,
+            "history": [],
+            "needs_replan": False,
+            "plan_check_needed": False,
+            "learnings": state.get("learnings", []),
+        }
     return plan_node
 
 
@@ -161,17 +166,25 @@ def build_execute_node(
                 )
             ),
         ]
-        result_raw = agent.invoke(
-            {"messages": messages},
-            {"callbacks": callbacks, "tags": ["execute"]}
+        try:
+            result_raw = agent.invoke({"messages": messages,
+                                       "callbacks": callbacks,
+                                       "tags": ["execute"]})
+            result = AgentInvokeResult.model_validate(result_raw)
+            output_msg = result.messages[-1]
+            resolution = output_msg.content
+        except GraphRecursionError:
+            resolution = (
+                f"Could not satisfy step '{step.action}' due to recursion. "
+                "A replan may be needed if this step was crucial."
+            )
+            state["plan_check_needed"] = True
+        res = StepResolution(
+            action=step.action,
+            objective=step.objective,
+            resolution=resolution,
         )
-        result = AgentInvokeResult.model_validate(result_raw)
-        output_msg = result.messages[-1]
-        res = StepResolution(action=step.action,
-                             objective=step.objective,
-                             resolution=output_msg.content)
-        new_hist = state["history"] + [res]
-        state["history"] = new_hist
+        state["history"] = state["history"] + [res]
         state["step_index"] = step_index + 1
         return state
 
@@ -247,12 +260,14 @@ def after_execute(state: ReflexionState) -> Literal["plan_check", "execute", "su
     """Determine next node after executing a step."""
     total = len(state["plan"].steps)
     idx = state["step_index"]
+    if state.get("plan_check_needed"):
+        state["plan_check_needed"] = False
+        return "plan_check"
     if idx in checkpoints(total):
         return "plan_check"
-    elif idx < total:
+    if idx < total:
         return "execute"
-    else:
-        return "summarize"
+    return "summarize"
 
 
 def replan_cond(state: ReflexionState) -> bool:
@@ -271,6 +286,50 @@ def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summariz
         return "execute"
     else:
         return "summarize"
+
+
+class GraphRecursionHandler(Runnable[Any, Any]):
+    """Wrap a runnable to turn ``GraphRecursionError`` into a question."""
+
+    def __init__(self, runnable: Runnable[Any, Any]):
+        self._runnable = runnable
+
+    def invoke(
+        self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        try:
+            return self._runnable.invoke(inputs, config)
+        except GraphRecursionError:
+            question = AIMessage(
+                content=(
+                    "I kept replanning without making progress. Could you "
+                    "clarify your goal or provide more details so I can continue?"
+                )
+            )
+            msgs = inputs.get("messages", []) + [question]
+            return {"messages": msgs}
+
+    def stream(
+        self,
+        inputs: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
+        *,
+        stream_mode: str = "messages",
+    ):
+        try:
+            yield from self._runnable.stream(inputs, config, stream_mode=stream_mode)
+        except GraphRecursionError:
+            question = AIMessage(
+                content=(
+                    "I kept replanning without making progress. Could you "
+                    "clarify your goal or provide more details so I can continue?"
+                )
+            )
+            yield question, {}
+
+    @property
+    def builder(self):
+        return getattr(self._runnable, "builder", None)
 
 
 def build_reflexion_graph(
@@ -302,5 +361,5 @@ def build_reflexion_graph(
     graph.add_conditional_edges("execute", after_execute)
     graph.set_entry_point("plan")
     graph.add_edge("summarize", END)
-
-    return graph.compile()
+    compiled = graph.compile()
+    return GraphRecursionHandler(compiled)

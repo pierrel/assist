@@ -37,6 +37,7 @@ STATE = ReflexionState(
     step_index=0,
     history=[],
     needs_replan=False,
+    plan_check_needed=False,
     learnings=[],
 )
 
