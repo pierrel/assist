@@ -83,6 +83,11 @@ so they require valid `OPENAI_API_KEY` and `TAVILY_API_KEY` environment variable
 pytest tests/integration/validation/test_planner_node.py
 #+end_src
 
+** Debugging
+To see every prompt and response during an agent run, use
+`ReadableConsoleCallbackHandler`. Each LLM call prints the node, model, prompt,
+and response in a readable format.
+
 ** Validations
 There's a set of tests in =tests/integration/validations= that stress a live llm within the agent and different nodes in different conditions.
 
