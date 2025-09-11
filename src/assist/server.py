@@ -108,12 +108,8 @@ async def log_middle(
     logger.debug(request.path_params)
     for route in routes:
         match, scope = route.matches(request)
-    logger.debug("Headers:")
-    for name, value in request.headers.items():
-        logger.debug(f"\t{name}: {value}")
-
     body = (await request.body()).decode()
-    logger.debug(f"Body: {body}")
+    logger.debug(f"Request body: {body}")
     response = await call_next(request)
     return response
 
@@ -124,8 +120,6 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
     agent = get_agent(request.model, request.temperature or 0.1)
     langchain_messages = openai_to_langchain(request.messages)
     user_request = langchain_messages[-1].content
-
-    logger.debug(f"Request: {user_request}")
 
     if request.stream:
         def event_gen() -> Iterator[str]:
@@ -169,11 +163,8 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
 
     resp_raw = agent.invoke({"messages": langchain_messages})
     resp = AgentInvokeResult.model_validate(resp_raw)
-    debug_tool_use(resp)
     message = resp.messages[-1]
-    logger.debug(f"Got response {message}")
     created = datetime.fromtimestamp(time.time())
-    logger.debug(f"Reponse tool {time.time() - start}s")
     return JSONResponse(
         content=ChatCompletionResponse(
             id="1337",
@@ -221,14 +212,6 @@ def work_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     )
     return with_result[:-1]
 
-
-def debug_tool_use(response: AgentInvokeResult) -> None:
-    messages = work_messages(response.messages)
-    for message in messages:
-        if isinstance(message, ToolMessage):
-            logger.debug(render_tool_message(message))
-        elif isinstance(message, AIMessage):
-            logger.debug(render_ai_message(message))
 
 def check_tavily_api_key() -> None:
     if not os.getenv('TAVILY_API_KEY'):

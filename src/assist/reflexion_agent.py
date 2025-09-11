@@ -7,7 +7,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, TypedDict, Literal, cast
 
 from loguru import logger
-from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
+from assist.debug_callback import ReadableConsoleCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -106,7 +106,6 @@ def build_plan_node(
     def plan_node(state: ReflexionState) -> Dict[str, object]:
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
-        logger.debug(f"Generating plan for request: {request}")
         tool_list = "\n".join(tool_list_item(t) for t in tools)
         project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         prior_messages = state["messages"][:-1]
@@ -128,11 +127,10 @@ def build_plan_node(
                 )
             ),
         ]
-        logger.debug(f"Full messaging for plan:\n{messages}")
         start = time.time()
         plan = llm.with_structured_output(Plan).invoke(
             messages,
-            {"callbacks": callbacks}
+            {"callbacks": callbacks, "tags": ["plan"]}
         )
         logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
         return {
@@ -169,8 +167,9 @@ def build_execute_node(
             ),
         ]
         try:
-            result_raw = agent.invoke({"messages": messages},
-                                      {"callbacks": callbacks})
+            result_raw = agent.invoke({"messages": messages,
+                                       "callbacks": callbacks,
+                                       "tags": ["execute"]})
             result = AgentInvokeResult.model_validate(result_raw)
             output_msg = result.messages[-1]
             resolution = output_msg.content
@@ -211,10 +210,10 @@ def build_plan_check_node(
         ]
 
         retro_raw = llm.with_structured_output(PlanRetrospective).invoke(
-            messages, {"callbacks": callbacks}
+            messages,
+            {"callbacks": callbacks, "tags": ["plan_check"]}
         )
         retro = PlanRetrospective.model_validate(retro_raw)
-        logger.debug(f"Retrospected with:\n{retro}")
         all_learnings = state.get("learnings", [])
         if retro.needs_replan and retro.learnings is not None:
             all_learnings = all_learnings + [retro.learnings]
@@ -240,8 +239,10 @@ def build_summarize_node(
                 content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),
         ]
-        summary = llm.invoke(messages)
-        logger.debug(f"Summary: {summary.content}")
+        summary = llm.invoke(
+            messages,
+            {"callbacks": callbacks, "tags": ["summarize"]}
+        )
         return {"messages": state["messages"] + [summary]}
     return summarize_node
 
@@ -345,7 +346,7 @@ def build_reflexion_graph(
     used for execution.
     """
 
-    callbacks = callbacks or [ConsoleCallbackHandler()]
+    callbacks = callbacks or [ReadableConsoleCallbackHandler()]
     exec_llm = execution_llm or llm
     agent = general_agent(exec_llm, tools)
     graph = StateGraph(ReflexionState)
