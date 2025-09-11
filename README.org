@@ -6,10 +6,6 @@ Assist is an extensible, local-focused, llm-based assistant. The principles guid
 
 It currently provides an OpenAI-compatible API with a ReAct agent and some simple tools, including a safe Python execution tool for read-only computations with limited builtins (e.g., =abs=, =sum=, =pow=) and modules (=math=, =statistics=, =random=, =numpy= if available). To capture a value, assign it to a variable named =result= or print it. A small demonstration lives in =playground/play_safe_python.py= using =ChatOpenAI= with the safe Python tool to compute compound savings. It's currently very tailored to Emacs, but hopefully can be extended in the future to handle other editors.
 
-Streaming responses now send only the assistant's latest message rather than replaying prior conversation history.
-It is not /just/ a coding assistant, but should be able to help with any project or goal.
-When running the server, built-in tools refuse to read from or write to the Assist codebase itself for safety. The planner and executor prompts explicitly forbid using any tool to access that directory.
-This warning is only shown when the server knows its project root.
 * Implementation notes
 The reflexion agent gracefully handles graph recursion limits. If a step's execution exceeds the recursion depth, the agent records the failure and notes that a replan without that step may be needed. When repeated replans hit the recursion limit, the agent asks the user a clarifying question.
 * Concepts
