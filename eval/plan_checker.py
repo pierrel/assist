@@ -24,6 +24,7 @@ STATE = {
     "step_index": 1,
     "history": [StepResolution(action="Boil water", objective="Boil water", resolution="done")],
     "needs_replan": False,
+    "plan_check_needed": False,
     "learnings": [],
 }
 

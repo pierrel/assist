@@ -1,4 +1,5 @@
 """Reflexion graph built from planning and execution steps."""
+import pdb
 import math
 import os
 import time
@@ -6,12 +7,13 @@ import time
 from typing import Any, Callable, Dict, List, Optional, TypedDict, Literal, cast
 
 from loguru import logger
-from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from assist.debug_callback import ReadableConsoleCallbackHandler
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
 
 try:  # pragma: no cover - optional dependency
@@ -88,6 +90,7 @@ class ReflexionState(TypedDict):
     step_index: int
     history: List[StepResolution]
     needs_replan: bool
+    plan_check_needed: bool
     learnings: List[str]
 
 
@@ -103,13 +106,15 @@ def build_plan_node(
     def plan_node(state: ReflexionState) -> Dict[str, object]:
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
-        logger.debug(f"Generating plan for request: {request}")
         tool_list = "\n".join(tool_list_item(t) for t in tools)
         project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         prior_messages = state["messages"][:-1]
         sys_msgs, context_msgs = _extract_system_and_context(prior_messages)
         system_prompt = _combine_system_prompt(
-            base_prompt_for("reflexion_agent/make_plan_system.txt"), sys_msgs
+            base_prompt_for("reflexion_agent/make_plan_system.txt",
+                            tools=tool_list,
+                            project_root=project_root),
+            sys_msgs
         )
         messages = [
             SystemMessage(content=system_prompt),
@@ -117,9 +122,7 @@ def build_plan_node(
             HumanMessage(
                 content=base_prompt_for(
                     "reflexion_agent/make_plan_user.txt",
-                    tools=tool_list,
                     task=request,
-                    project_root=project_root,
                     learnings=state.get("learnings", [])
                 )
             ),
@@ -127,14 +130,17 @@ def build_plan_node(
         start = time.time()
         plan = llm.with_structured_output(Plan).invoke(
             messages,
-            {"callbacks": callbacks}
+            {"callbacks": callbacks, "tags": ["plan"]}
         )
         logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
-        return {"plan": plan,
-                "step_index": 0,
-                "history": [],
-                "needs_replan": False,
-                "learnings": state.get("learnings", [])}
+        return {
+            "plan": plan,
+            "step_index": 0,
+            "history": [],
+            "needs_replan": False,
+            "plan_check_needed": False,
+            "learnings": state.get("learnings", []),
+        }
     return plan_node
 
 
@@ -160,15 +166,25 @@ def build_execute_node(
                 )
             ),
         ]
-        result_raw = agent.invoke({"messages": messages},
-                                  {"callbacks": callbacks})
-        result = AgentInvokeResult.model_validate(result_raw)
-        output_msg = result.messages[-1]
-        res = StepResolution(action=step.action,
-                             objective=step.objective,
-                             resolution=output_msg.content)
-        new_hist = state["history"] + [res]
-        state["history"] = new_hist
+        try:
+            result_raw = agent.invoke({"messages": messages,
+                                       "callbacks": callbacks,
+                                       "tags": ["execute"]})
+            result = AgentInvokeResult.model_validate(result_raw)
+            output_msg = result.messages[-1]
+            resolution = output_msg.content
+        except GraphRecursionError:
+            resolution = (
+                f"Could not satisfy step '{step.action}' due to recursion. "
+                "A replan may be needed if this step was crucial."
+            )
+            state["plan_check_needed"] = True
+        res = StepResolution(
+            action=step.action,
+            objective=step.objective,
+            resolution=resolution,
+        )
+        state["history"] = state["history"] + [res]
         state["step_index"] = step_index + 1
         return state
 
@@ -194,10 +210,10 @@ def build_plan_check_node(
         ]
 
         retro_raw = llm.with_structured_output(PlanRetrospective).invoke(
-            messages, {"callbacks": callbacks}
+            messages,
+            {"callbacks": callbacks, "tags": ["plan_check"]}
         )
         retro = PlanRetrospective.model_validate(retro_raw)
-        logger.debug(f"Retrospected with:\n{retro}")
         all_learnings = state.get("learnings", [])
         if retro.needs_replan and retro.learnings is not None:
             all_learnings = all_learnings + [retro.learnings]
@@ -223,8 +239,10 @@ def build_summarize_node(
                 content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),
         ]
-        summary = llm.invoke(messages)
-        logger.debug(f"Summary: {summary.content}")
+        summary = llm.invoke(
+            messages,
+            {"callbacks": callbacks, "tags": ["summarize"]}
+        )
         return {"messages": state["messages"] + [summary]}
     return summarize_node
 
@@ -242,12 +260,14 @@ def after_execute(state: ReflexionState) -> Literal["plan_check", "execute", "su
     """Determine next node after executing a step."""
     total = len(state["plan"].steps)
     idx = state["step_index"]
+    if state.get("plan_check_needed"):
+        state["plan_check_needed"] = False
+        return "plan_check"
     if idx in checkpoints(total):
         return "plan_check"
-    elif idx < total:
+    if idx < total:
         return "execute"
-    else:
-        return "summarize"
+    return "summarize"
 
 
 def replan_cond(state: ReflexionState) -> bool:
@@ -268,6 +288,50 @@ def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summariz
         return "summarize"
 
 
+class GraphRecursionHandler(Runnable[Any, Any]):
+    """Wrap a runnable to turn ``GraphRecursionError`` into a question."""
+
+    def __init__(self, runnable: Runnable[Any, Any]):
+        self._runnable = runnable
+
+    def invoke(
+        self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        try:
+            return self._runnable.invoke(inputs, config)
+        except GraphRecursionError:
+            question = AIMessage(
+                content=(
+                    "I kept replanning without making progress. Could you "
+                    "clarify your goal or provide more details so I can continue?"
+                )
+            )
+            msgs = inputs.get("messages", []) + [question]
+            return {"messages": msgs}
+
+    def stream(
+        self,
+        inputs: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
+        *,
+        stream_mode: str = "messages",
+    ):
+        try:
+            yield from self._runnable.stream(inputs, config, stream_mode=stream_mode)
+        except GraphRecursionError:
+            question = AIMessage(
+                content=(
+                    "I kept replanning without making progress. Could you "
+                    "clarify your goal or provide more details so I can continue?"
+                )
+            )
+            yield question, {}
+
+    @property
+    def builder(self):
+        return getattr(self._runnable, "builder", None)
+
+
 def build_reflexion_graph(
     llm: BaseChatModel,
     tools: List[BaseTool],
@@ -282,7 +346,7 @@ def build_reflexion_graph(
     used for execution.
     """
 
-    callbacks = callbacks or [ConsoleCallbackHandler()]
+    callbacks = callbacks or [ReadableConsoleCallbackHandler()]
     exec_llm = execution_llm or llm
     agent = general_agent(exec_llm, tools)
     graph = StateGraph(ReflexionState)
@@ -297,5 +361,5 @@ def build_reflexion_graph(
     graph.add_conditional_edges("execute", after_execute)
     graph.set_entry_point("plan")
     graph.add_edge("summarize", END)
-
-    return graph.compile()
+    compiled = graph.compile()
+    return GraphRecursionHandler(compiled)
