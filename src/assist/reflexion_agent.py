@@ -104,7 +104,6 @@ def build_plan_node(
     def plan_node(state: ReflexionState) -> Dict[str, object]:
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
-        logger.debug(f"Generating plan for request: {request}")
         tool_list = "\n".join(tool_list_item(t) for t in tools)
         project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         prior_messages = state["messages"][:-1]
@@ -126,7 +125,6 @@ def build_plan_node(
                 )
             ),
         ]
-        logger.debug(f"Full messaging for plan:\n{messages}")
         start = time.time()
         plan = llm.with_structured_output(Plan).invoke(
             messages,
@@ -203,7 +201,6 @@ def build_plan_check_node(
             {"callbacks": callbacks, "tags": ["plan_check"]}
         )
         retro = PlanRetrospective.model_validate(retro_raw)
-        logger.debug(f"Retrospected with:\n{retro}")
         all_learnings = state.get("learnings", [])
         if retro.needs_replan and retro.learnings is not None:
             all_learnings = all_learnings + [retro.learnings]
@@ -233,7 +230,6 @@ def build_summarize_node(
             messages,
             {"callbacks": callbacks, "tags": ["summarize"]}
         )
-        logger.debug(f"Summary: {summary.content}")
         return {"messages": state["messages"] + [summary]}
     return summarize_node
 
