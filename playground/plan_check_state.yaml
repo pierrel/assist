@@ -12,4 +12,5 @@ history:
     objective: "achieve something"
     resolution: "completed"
 needs_replan: false
+plan_check_needed: false
 learnings: []

@@ -51,6 +51,7 @@ state: ReflexionState = {
     "step_index": data["step_index"],
     "history": history,
     "needs_replan": data.get("needs_replan", False),
+    "plan_check_needed": data.get("plan_check_needed", False),
     "learnings": data.get("learnings", []),
 }
 

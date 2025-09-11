@@ -34,6 +34,7 @@ class TestPlanCheckerNode(TestCase):
                 StepResolution(action="Boil water", objective="Boil water", resolution="done")
             ],
             "needs_replan": False,
+            "plan_check_needed": False,
             "learnings": [],
         }
 
