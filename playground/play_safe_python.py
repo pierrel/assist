@@ -1,6 +1,6 @@
 """Demonstrate using :class:`SafePythonTool` with a real LLM."""
 
-from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
+from assist.debug_callback import ReadableConsoleCallbackHandler
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -13,7 +13,7 @@ def main() -> None:
     tool = SafePythonTool()
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.4).bind_tools([tool])
     preagent = create_react_agent(llm, [tool])
-    agent = preagent.with_config({"callbacks": [ConsoleCallbackHandler()]})
+    agent = preagent.with_config({"callbacks": [ReadableConsoleCallbackHandler()]})
 
     prompt = (
         "If I save $100 every month in an account that started with $10,000 and "

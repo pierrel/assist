@@ -4,7 +4,7 @@ from assist.reflexion_agent import build_plan_node, ReflexionState
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama
 from assist.tools.base import base_tools
-from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
+from assist.debug_callback import ReadableConsoleCallbackHandler
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -24,7 +24,7 @@ def plan_eval_simple():
                      temperature=0.8)
     node = build_plan_node(llm,
                            base_tools("~/.cache/assist/dbs"),
-                           [ConsoleCallbackHandler()])
+                           [ReadableConsoleCallbackHandler()])
     graph = graphiphy(node, ReflexionState)
     state = ReflexionState(messages=[SystemMessage("You are a helpful assistant"),
                                      HumanMessage("What's the 200th digit of pi?")],

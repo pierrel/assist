@@ -7,7 +7,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, TypedDict, Literal, cast
 
 from loguru import logger
-from langchain.callbacks.tracers.stdout import ConsoleCallbackHandler
+from assist.debug_callback import ReadableConsoleCallbackHandler
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -130,7 +130,7 @@ def build_plan_node(
         start = time.time()
         plan = llm.with_structured_output(Plan).invoke(
             messages,
-            {"callbacks": callbacks}
+            {"callbacks": callbacks, "tags": ["plan"]}
         )
         logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
         return {"plan": plan,
@@ -163,8 +163,10 @@ def build_execute_node(
                 )
             ),
         ]
-        result_raw = agent.invoke({"messages": messages},
-                                  {"callbacks": callbacks})
+        result_raw = agent.invoke(
+            {"messages": messages},
+            {"callbacks": callbacks, "tags": ["execute"]}
+        )
         result = AgentInvokeResult.model_validate(result_raw)
         output_msg = result.messages[-1]
         res = StepResolution(action=step.action,
@@ -197,7 +199,8 @@ def build_plan_check_node(
         ]
 
         retro_raw = llm.with_structured_output(PlanRetrospective).invoke(
-            messages, {"callbacks": callbacks}
+            messages,
+            {"callbacks": callbacks, "tags": ["plan_check"]}
         )
         retro = PlanRetrospective.model_validate(retro_raw)
         logger.debug(f"Retrospected with:\n{retro}")
@@ -226,7 +229,10 @@ def build_summarize_node(
                 content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),
         ]
-        summary = llm.invoke(messages)
+        summary = llm.invoke(
+            messages,
+            {"callbacks": callbacks, "tags": ["summarize"]}
+        )
         logger.debug(f"Summary: {summary.content}")
         return {"messages": state["messages"] + [summary]}
     return summarize_node
@@ -285,7 +291,7 @@ def build_reflexion_graph(
     used for execution.
     """
 
-    callbacks = callbacks or [ConsoleCallbackHandler()]
+    callbacks = callbacks or [ReadableConsoleCallbackHandler()]
     exec_llm = execution_llm or llm
     agent = general_agent(exec_llm, tools)
     graph = StateGraph(ReflexionState)
