@@ -20,6 +20,17 @@ MODEL_EXECUTION_MAP: dict[str, str] = {
     "gpt-4o-mini": "gpt-4o-mini",
 }
 
+# Mapping of model names to their character context limits
+MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    # OpenAI models expose a 128k token context window, which comfortably
+    # exceeds most tool outputs. The limits here are expressed in characters
+    # rather than tokens for simplicity.
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+}
+
+DEFAULT_CONTEXT_LIMIT = 32_768
+
 
 def select_chat_model(model: str, temperature: float) -> BaseChatModel:
     """Return the appropriate chat model for ``model``.
@@ -45,3 +56,12 @@ def get_model_pair(model: str, temperature: float) -> Tuple[BaseChatModel, BaseC
     exec_model = MODEL_EXECUTION_MAP.get(model, model)
     exec_llm = select_chat_model(exec_model, temperature)
     return plan_llm, exec_llm
+
+
+def get_context_limit(llm: BaseChatModel) -> int:
+    """Return the character context limit for ``llm``.
+
+    If ``llm.model`` is unknown, ``DEFAULT_CONTEXT_LIMIT`` is used.
+    """
+    model_name = getattr(llm, "model", "")
+    return MODEL_CONTEXT_LIMITS.get(model_name, DEFAULT_CONTEXT_LIMIT)

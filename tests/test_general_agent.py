@@ -3,6 +3,9 @@ from typing import Union
 from langchain_core.messages import HumanMessage, ToolMessage, AIMessage
 import os
 from .utils import make_test_agent
+from assist.general_agent import _guard_tool, TRUNCATE_MSG, general_agent, CONTEXT_BUFFER_RATIO
+from langchain_core.tools import tool
+from unittest.mock import patch
 
 AnyMessage = Union[HumanMessage, AIMessage, ToolMessage]
 
@@ -49,3 +52,31 @@ class TestGeneralAgent(TestCase):
 
         self.assertEqual(len(tool_messages(resp_messages)), 2)
         self.assertTrue("show_file_contents" in resp_messages[-1].content)
+
+
+def test_guard_tool_truncates_output():
+    @tool
+    def long_tool() -> str:
+        """Return a big string"""
+        return "x" * 120
+
+    guarded = _guard_tool(long_tool, 50)
+    out = guarded.invoke({})
+    assert out.endswith(TRUNCATE_MSG)
+    assert len(out) <= 50 + len(TRUNCATE_MSG)
+
+
+def test_general_agent_uses_model_manager_limit():
+    @tool
+    def dummy() -> str:
+        """Return a short string"""
+        return "ok"
+
+    with patch("assist.general_agent._guard_tool", side_effect=lambda t, l: t) as guard, \
+            patch("assist.general_agent.create_react_agent") as creator, \
+            patch("assist.general_agent.get_context_limit", return_value=55):
+        general_agent(object(), [dummy])
+        guard.assert_called_once()
+        expected = int(55 * CONTEXT_BUFFER_RATIO) - len(TRUNCATE_MSG)
+        assert guard.call_args.args[1] == expected
+        creator.assert_called_once()
