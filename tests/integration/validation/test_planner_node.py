@@ -43,13 +43,13 @@ class TestPlannerNode(TestCase):
     def test_search_website(self) -> None:
         state = self.ask_node("I remember seeing something about college campuses with the best food on this website: https://www.mentalfloss.com. What's the URL for that article?")
 
-        self.assertInPlan("site_search", state)
+        self.assertInPlan("search_site", state)
 
 
     def test_search_webpage(self) -> None:
         state = self.ask_node("Which campus has the best food according to this website: https://www.mentalfloss.com/food/best-and-worst-college-campus-food?utm_source=firefox-newtab-en-us ?")
 
-        self.assertInPlan("page_search", state)
+        self.assertInPlan("search_page", state)
 
 
     def test_project_context_without_project(self):
