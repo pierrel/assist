@@ -10,7 +10,7 @@ from langchain_tavily import TavilySearch
 
 
 class SearchWeb(TavilySearch):
-    """one_line: Searches the public web; returns up to `max_results` entries with title, url and content.
+    """Searches the public web; returns up to `max_results` entries with title, url and content.
 
     when_to_use:
     - Need information from across the web.
@@ -63,7 +63,7 @@ class SearchWeb(TavilySearch):
 
 @tool
 def search_site(domain: str, query: str) -> dict:
-    """one_line: Searches a domain for pages matching a query; returns up to five "title - URL" results.
+    """Searches a domain for pages matching a query; returns up to five "title - URL" results.
 
     when_to_use:
     - Need web pages from a specific site.
@@ -96,8 +96,6 @@ def search_site(domain: str, query: str) -> dict:
     - input: {"domain": "wikipedia.org", "query": "AI"}
       output: {"results": ["Artificial intelligence - https://wikipedia.org/..."],
                "brief_summary": "5 results"}
-    version: "1.0"
-    owner: "assist"
     """
     params = {"q": f"site:{domain} {query}"}
     resp = requests.get("https://duckduckgo.com/html/", params=params, timeout=10)
@@ -115,7 +113,7 @@ def search_site(domain: str, query: str) -> dict:
 
 @tool
 def search_page(url: str, query: str) -> dict:
-    """one_line: Finds up to five snippets from a page containing a query string.
+    """Finds up to five snippets from a page containing a query string.
 
     when_to_use:
     - Extract context from a single known URL.
@@ -146,8 +144,6 @@ def search_page(url: str, query: str) -> dict:
       output: {"snippets": ["Call us ..."], "brief_summary": "1 match"}
     - input: {"url": "https://example.com", "query": "foo"}
       output: {"snippets": ["No matches"], "brief_summary": "0 matches"}
-    version: "1.0"
-    owner: "assist"
     """
     resp = requests.get(url, timeout=10)
     text = re.sub(r"<[^>]+>", " ", resp.text)

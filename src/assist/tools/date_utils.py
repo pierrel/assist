@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 
 @tool
 def get_current_date() -> dict:
-    """one_line: Returns today's date in ISO format (YYYY-MM-DD).
+    """Returns today's date in ISO format (YYYY-MM-DD).
 
     when_to_use:
     - Need the current date for logging or scheduling.
@@ -31,8 +31,6 @@ def get_current_date() -> dict:
     examples:
     - input: {}
       output: {"date": "2025-09-01", "brief_summary": "2025-09-01"}
-    version: "1.0"
-    owner: "assist"
     """
     today = date.today().isoformat()
     return {"date": today, "brief_summary": today}
@@ -40,7 +38,7 @@ def get_current_date() -> dict:
 
 @tool
 def offset_date(base_date: str, days: int = 0, weeks: int = 0, months: int = 0) -> dict:
-    """one_line: Returns the ISO date offset from ``base_date`` by the given days, weeks, or months.
+    """Returns the ISO date offset from ``base_date`` by the given days, weeks, or months.
 
     when_to_use:
     - Calculate a deadline or reminder date.
@@ -70,8 +68,6 @@ def offset_date(base_date: str, days: int = 0, weeks: int = 0, months: int = 0) 
     examples:
     - input: {"base_date": "2025-09-01", "days": 7}
       output: {"date": "2025-09-08", "brief_summary": "2025-09-08"}
-    version: "1.0"
-    owner: "assist"
     """
     dt = datetime.fromisoformat(base_date).date()
     dt = dt + relativedelta(days=days, weeks=weeks, months=months)
@@ -86,7 +82,7 @@ def diff_dates(
     unit: str = "days",
     mode: str = "all",
 ) -> dict:
-    """one_line: Returns the difference between two dates in the specified unit.
+    """Returns the difference between two dates in the specified unit.
 
     when_to_use:
     - Measure duration between two dates.
@@ -117,8 +113,6 @@ def diff_dates(
     examples:
     - input: {"start_date": "2025-09-01", "end_date": "2025-09-10"}
       output: {"difference": 9, "brief_summary": "9 days"}
-    version: "1.0"
-    owner: "assist"
     """
     start = datetime.fromisoformat(start_date).date()
     end = datetime.fromisoformat(end_date).date()
