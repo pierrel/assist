@@ -4,8 +4,10 @@ import hashlib
 import tempfile
 import os
 from pathlib import Path
-from assist.tools.safeguard import in_server_project
 from typing import Dict, List
+
+from assist.git import repo_root
+from assist.tools.safeguard import in_server_project
 
 import numpy as np
 from langchain_core.documents import Document
@@ -115,6 +117,10 @@ class ProjectIndex:
         root = Path(project_root)
         if in_server_project(root):
             raise ValueError("Cannot index the server project")
+        try:
+            repo_root(root)
+        except ValueError as exc:  # pragma: no cover - simple
+            raise ValueError("Directory is not inside a Git repository") from exc
         key = str(root.resolve())
         if key in self._retrievers:
             return self._retrievers[key]
@@ -150,12 +156,15 @@ class ProjectIndex:
                 return "Cannot index the server project"
             if not p.exists():
                 return "File does not exist"
-            elif is_filesystem_root(p):
+            try:
+                repo_root(p)
+            except ValueError:
+                return "Directory is not inside a Git repository"
+            if is_filesystem_root(p):
                 return "Cannot index the entire filesystem"
-            else:
-                retriever = self.get_retriever(project_root)
-                docs = retriever.invoke(query)
-                return "\n".join(doc.page_content for doc in docs)
+            retriever = self.get_retriever(project_root)
+            docs = retriever.invoke(query)
+            return "\n".join(doc.page_content for doc in docs)
 
         return project_search
 
