@@ -13,6 +13,10 @@ class TestProjectIndex(TestCase):
         (self.project_root / "sub").mkdir()
         (self.project_root / "sub/file1.txt").write_text("hello world")
         (self.project_root / "file2.txt").write_text("foo bar baz")
+        (self.project_root / ".hidden.txt").write_text("secret stuff")
+        (self.project_root / "ignored").mkdir()
+        (self.project_root / "ignored/skip.txt").write_text("skip me")
+        (self.project_root / ".gitignore").write_text("ignored/\n")
 
         self.index = project_index.ProjectIndex()
 
@@ -28,6 +32,15 @@ class TestProjectIndex(TestCase):
         docs2 = retriever.get_relevant_documents("foo bar")
         joined2 = "\n".join(d.page_content for d in docs2)
         self.assertIn("foo bar baz", joined2)
+
+    def test_respects_ignore_rules(self):
+        retriever = self.index.get_retriever(self.project_root)
+        hidden = retriever.get_relevant_documents("secret stuff")
+        joined_hidden = "\n".join(d.page_content for d in hidden)
+        self.assertNotIn("secret stuff", joined_hidden)
+        ignored = retriever.get_relevant_documents("skip me")
+        joined_ignored = "\n".join(d.page_content for d in ignored)
+        self.assertNotIn("skip me", joined_ignored)
 
     def test_index_and_search_with_tool(self):
         tool = self.index.search_tool()
