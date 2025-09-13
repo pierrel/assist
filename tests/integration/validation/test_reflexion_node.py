@@ -4,7 +4,13 @@ from langchain_core.messages import HumanMessage, AIMessage
 import assist.reflexion_agent as reflexion_agent
 from assist.reflexion_agent import build_reflexion_graph
 
-from .utils import DummyLLM, DummyAgent, fake_general_agent
+from .utils import (
+    DummyLLM,
+    DummyAgent,
+    fake_general_agent,
+    actual_llm,
+    base_tools_for_test,
+)
 
 
 class TestReflexionNode(TestCase):
@@ -31,4 +37,23 @@ class TestReflexionNode(TestCase):
         self.assertIsInstance(message, AIMessage)
         self.assertNotIn("ummary", message.content)
         self.assertIn("France", message.content)
+
+
+def test_agent_summarizes_file_from_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("ASSIST_SERVER_PROJECT_ROOT", "")
+    llm = actual_llm()
+    graph = build_reflexion_graph(llm, base_tools_for_test())
+
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("Rutabaga is a root vegetable.\nIt is nutritious.")
+
+    messages = [
+        HumanMessage(content="Where is the sample file?"),
+        AIMessage(content=f"It is in file: {file_path}"),
+        HumanMessage(content="Please summarize that file from before."),
+    ]
+
+    result = graph.invoke({"messages": messages})
+    final_content = result["messages"][-1].content.lower()
+    assert "rutabaga" in final_content
 
