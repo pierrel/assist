@@ -17,6 +17,7 @@ class SystemInfoIndex:
         self,
         info_root: Path | str = Path("/usr/share/info"),
         base_dir: Path | str | None = None,
+        keywords: List[str] | None = None,
     ) -> None:
         self._info_root = Path(info_root)
         base = Path(base_dir) if base_dir is not None else None
@@ -24,10 +25,21 @@ class SystemInfoIndex:
             base = base / "system"
         self._index = ProjectIndex(base)
         self._prepared_dir: Path | None = None
+        self._keywords = keywords or []
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _matches_keywords(self, path: Path) -> bool:
+        if not self._keywords:
+            return True
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8", errors="ignore") as src:
+                content = src.read()
+        else:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        return any(k in content for k in self._keywords)
+
     def _prepare_dir(self) -> Path:
         if self._prepared_dir is not None:
             return self._prepared_dir
@@ -40,6 +52,8 @@ class SystemInfoIndex:
                 continue
             name = f.name
             if "info" not in name:
+                continue
+            if not self._matches_keywords(f):
                 continue
             target = dest / name.replace(".gz", "")
             if f.suffix == ".gz":
@@ -84,6 +98,13 @@ class SystemInfoIndex:
                     if ":" not in line:
                         continue
                     name, rest = line.split(":", 1)
+                    info_file = self._info_root / f"{name.strip()}.info"
+                    if not info_file.exists():
+                        info_file = info_file.with_suffix(".info.gz")
+                    if not info_file.exists():
+                        continue
+                    if not self._matches_keywords(info_file):
+                        continue
                     # Description usually follows after '.\t'
                     desc = rest.split(".\t", 1)[-1].strip()
                     entries.append(f"{name.strip()} - {desc}")

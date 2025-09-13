@@ -38,3 +38,15 @@ def test_system_info_search(tmp_path):
     search_tool = idx.search_tool()
     result = search_tool.invoke("bananas")
     assert "bananas" in result
+
+
+def test_system_info_keyword_filter(tmp_path):
+    info_root = _create_info_root(tmp_path)
+    idx = SystemInfoIndex(info_root, keywords=["bananas"])
+    search_tool = idx.search_tool()
+    assert "bananas" in search_tool.invoke("bananas")
+    assert "apples" not in search_tool.invoke("apples")
+    list_tool = idx.list_tool()
+    files = list_tool.invoke({})
+    assert "alpha - Alpha info file." in files
+    assert all("beta" not in f for f in files)
