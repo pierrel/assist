@@ -11,8 +11,9 @@ import numpy as np
 from langchain_core.documents import Document
 from langchain_core.tools import BaseTool, tool
 from vgrep.manager import Manager
+from .ignore import apply_vgrep_ignore
 
-from pathlib import Path
+apply_vgrep_ignore()
 
 def is_filesystem_root(path_str: str | Path) -> bool:
     """
