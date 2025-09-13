@@ -25,7 +25,7 @@ class TestGeneralAgent(TestCase):
             [
                 ToolMessage(content="listing", tool_call_id="1"),
                 ToolMessage(content="file contents", tool_call_id="2"),
-                AIMessage(content="The show_file_contents tool reads files")
+                AIMessage(content="The read_file tool reads files")
             ],
         ]
         cls.agent = make_test_agent(responses)
@@ -41,7 +41,7 @@ class TestGeneralAgent(TestCase):
         self.assertEqual(len(tool_messages(resp_messages)), 1)
         self.assertTrue(current_file in resp_messages[-1].content)
 
-    def test_fs_tools_show_file_contents(self):
+    def test_fs_tools_read_file(self):
         current_dir = os.getcwd()
         current_file = os.path.basename(__file__)
 
@@ -51,7 +51,7 @@ class TestGeneralAgent(TestCase):
         resp_messages = resp['messages']
 
         self.assertEqual(len(tool_messages(resp_messages)), 2)
-        self.assertTrue("show_file_contents" in resp_messages[-1].content)
+        self.assertTrue("read_file" in resp_messages[-1].content)
 
 
 def test_guard_tool_truncates_output():

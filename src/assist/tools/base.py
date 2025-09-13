@@ -20,7 +20,7 @@ def base_tools(index_path: Path) -> List[BaseTool]:
         filesystem.write_file_user,
         filesystem.write_file_tmp,
         filesystem.list_files,
-        filesystem.file_contents,
+        filesystem.read_file,
         filesystem.project_context,
         UnitConversionTool(),
         TimerTool(),

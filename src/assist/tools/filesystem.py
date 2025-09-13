@@ -67,23 +67,38 @@ def list_files(root: str) -> list[str]:
 
 
 @tool
-def file_contents(path: str, task: str = "", request: str = "") -> str:
-    """Return the contents or a summary of ``path``.
+def read_file(absolute_path: str, task: str = "", request: str = "") -> str:
+    """Reads or summarizes the contents of an absolute file path.
 
-    When the file is small enough to fit within the model's context window the
-    full contents are returned.  For larger files a dedicated study agent reads
-    the file in chunks and summarizes it using ``task`` and ``request`` as
-    guidance so the result can be used to complete the user's objective.
-
-    Args:
-        path: The path to the desired file.
-        task: Description of the current execution step.
-        request: Original user request or broader context.
-
-    Returns:
-        str: The file's content or a summary suitable for the task.
+    when_to_use:
+    - Inspect the contents of a single local file.
+    - Summarize a large file for a specific task.
+    when_not_to_use:
+    - Only a relative path is available.
+    - Need to write or modify files.
+    args_schema:
+    - absolute_path (str): Absolute path to the file, e.g. "/tmp/example.txt".
+    - task (str): Description of the current execution step.
+    - request (str): Original user request or broader context.
+    preconditions_permissions:
+    - Path must be absolute and outside the server project.
+    side_effects:
+    - Reads file from disk; idempotent: true; retry_safe: true.
+    cost_latency: "~1-100ms; free"
+    pagination_cursors:
+    - input_cursor: none
+    - next_cursor: none
+    errors:
+    - relative_path: Only absolute file paths are allowed.
+    returns:
+    - content (str): File text or a summary suitable for the task.
+    examples:
+    - input: {"absolute_path": "/tmp/foo.txt"}
+      output: "Hello"
     """
-    p = Path(path)
+    p = Path(absolute_path)
+    if not p.is_absolute():
+        raise ValueError("Only absolute file paths are allowed")
     if in_server_project(p):
         return "Access to server project files is not allowed"
     return study_file(p, task=task, request=request)
