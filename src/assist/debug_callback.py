@@ -20,6 +20,7 @@ class ReadableConsoleCallbackHandler(BaseCallbackHandler):
 
     def __init__(self) -> None:  # noqa: D401 - short and simple
         self._runs: Dict[UUID, Dict[str, Any]] = {}
+        self._tools: Dict[UUID, Dict[str, Any]] = {}
 
     @staticmethod
     def _pretty(obj: Any) -> str:
@@ -42,6 +43,36 @@ class ReadableConsoleCallbackHandler(BaseCallbackHandler):
             return json.dumps(obj, indent=2, ensure_ascii=False, default=str)
         except Exception:
             return pformat(obj)
+
+    def on_tool_start(
+        self,
+        serialized: Dict[str, Any],
+        input_str: str,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        tags: Optional[List[str]] = None,  # noqa: D417 - required by protocol
+        metadata: Optional[Dict[str, Any]] = None,  # noqa: D417 - required by protocol
+        **kwargs: Any,
+    ) -> None:
+        name = serialized.get("name", "tool")
+        self._tools[run_id] = {"name": name, "input": input_str}
+
+    def on_tool_end(
+        self,
+        output: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        info = self._tools.pop(run_id, {"name": "tool", "input": ""})
+        print("Tool:")
+        print(f"  Name: {info['name']}")
+        print("  Args:")
+        print(self._pretty(info["input"]))
+        print("  Output:")
+        print(self._pretty(output))
 
     def on_llm_start(
         self,
@@ -94,3 +125,32 @@ class ReadableConsoleCallbackHandler(BaseCallbackHandler):
                 if formatted:
                     print(formatted)
         print("===== End =====\n")
+
+    def on_chain_end(
+        self,
+        outputs: Dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        tags = kwargs.get("tags") or []
+        node = tags[0] if tags else ""
+        if node == "plan":
+            plan = outputs.get("plan", outputs)
+            if hasattr(plan, "model_dump"):
+                plan = plan.model_dump()
+            print("Plan:")
+            print(self._pretty(plan))
+        elif node == "execute":
+            history = outputs.get("history", [])
+            resolution: Any = ""
+            if history:
+                last = history[-1]
+                if isinstance(last, dict):
+                    resolution = last.get("resolution", "")
+                else:
+                    resolution = getattr(last, "resolution", "")
+            if resolution:
+                print("Final Response:")
+                print(self._pretty(resolution))
