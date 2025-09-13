@@ -157,7 +157,6 @@ def build_execute_node(
         step = state["plan"].steps[state["step_index"]]
         step_index = state['step_index']
         history_text = "\n".join([str(h) for h in state['history']])
-        logger.debug(f"Executing step {step_index}: {step}")
         project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         messages = [
             SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
