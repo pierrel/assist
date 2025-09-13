@@ -172,9 +172,10 @@ def build_execute_node(
             ),
         ]
         try:
-            result_raw = agent.invoke({"messages": messages,
-                                       "callbacks": callbacks,
-                                       "tags": ["execute"]})
+            result_raw = agent.invoke(
+                {"messages": messages},
+                {"callbacks": callbacks, "tags": ["execute"]},
+            )
             result = AgentInvokeResult.model_validate(result_raw)
             output_msg = result.messages[-1]
             resolution = output_msg.content
