@@ -2,7 +2,7 @@ Here is the overall user task {{ goal }}
 
 Here are the steps and their resolution:
 {% for plan_step in step_resolutions %}
-  Step {{ loop.index+1 }}:
+  Step {{ loop.index }}:
   - Objective: {{ plan_step.objective }}
   - Action {{ plan_step.action }}
   - Resolution: {{ plan_step.resolution }}
@@ -10,7 +10,7 @@ Here are the steps and their resolution:
 
 Here are the remaining steps to be taken:
 {% for next_plan_step in remaining_steps %}
-  Remaining Step {{ loop.index+1 }}:
+  Step {{ loop.index + (step_resolutions|length) }}:
   - Objective: {{ next_plan_step.objective }}
   - Action: {{ next_plan_step.action }}
 {% endfor %}
