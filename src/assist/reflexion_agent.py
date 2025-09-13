@@ -179,6 +179,11 @@ def build_execute_node(
                 "A replan may be needed if this step was crucial."
             )
             state["plan_check_needed"] = True
+            learning = (
+                f"Attempting '{step.action}' caused a recursion error. "
+                "Try a different approach for this step."
+            )
+            state["learnings"] = state.get("learnings", []) + [learning]
         res = StepResolution(
             action=step.action,
             objective=step.objective,

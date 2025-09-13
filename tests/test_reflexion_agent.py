@@ -401,6 +401,49 @@ def test_execute_node_handles_recursion(monkeypatch):
     assert len(out["history"]) == 1
     assert "run" in out["history"][0].resolution
     assert reflexion_agent.after_execute(out) == "plan_check"
+    assert len(out["learnings"]) == 1
+    assert "run" in out["learnings"][0]
+    assert "recursion" in out["learnings"][0]
+
+
+def test_recursion_learning_passed_to_planner(monkeypatch):
+    class LLM:
+        def __init__(self):
+            self.schema = None
+            self.plan_prompts = []
+            self.retro_calls = 0
+
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, messages, _opts=None):
+            if self.schema is Plan:
+                self.plan_prompts.append(messages)
+                step = Step(action="run", objective="obj")
+                return Plan(goal="g", steps=[step], assumptions=[], risks=[])
+            elif self.schema is PlanRetrospective:
+                self.retro_calls += 1
+                needs = self.retro_calls == 1
+                return PlanRetrospective(needs_replan=needs, learnings=None)
+            else:
+                return AIMessage(content="summary")
+
+    class FailingAgent:
+        def invoke(self, _inputs, _opts=None):
+            raise GraphRecursionError("boom")
+
+    monkeypatch.setattr(
+        reflexion_agent, "general_agent", lambda _llm, _tools: FailingAgent()
+    )
+
+    llm = LLM()
+    graph = build_reflexion_graph(llm, [])
+    graph.invoke({"messages": [HumanMessage(content="task")]})
+
+    second_plan = llm.plan_prompts[1]
+    human_msg = next(m for m in second_plan if isinstance(m, HumanMessage))
+    assert "recursion error" in human_msg.content
 
 
 def test_reflexion_graph_handles_recursion_error(monkeypatch):
