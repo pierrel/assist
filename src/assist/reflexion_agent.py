@@ -135,7 +135,7 @@ def build_plan_node(
             messages,
             {"callbacks": callbacks, "tags": ["plan"]}
         )
-        logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
+        logger.debug(f"Plan generated in {time.time() - start}s")
         replan_count = state.get("replan_count", 0) + 1
         return {
             "plan": plan,
