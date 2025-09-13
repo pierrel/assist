@@ -33,12 +33,12 @@ class TestPlannerNode(TestCase):
     def test_dont_write_file(self) -> None:
         state = self.ask_node("What is the capital of France?")
 
-        self.assertNotInPlan("write_file", state)
+        self.assertNotInPlan("write_file_user", state)
 
     def test_should_write_file(self) -> None:
         state = self.ask_node("Write me a python script to use in my project at /home/pierre/myproject")
 
-        self.assertInPlan("write_file", state)
+        self.assertInPlan("write_file_user", state)
 
     def test_search_website(self) -> None:
         state = self.ask_node("I remember seeing something about college campuses with the best food on this website: https://www.mentalfloss.com. What's the URL for that article?")

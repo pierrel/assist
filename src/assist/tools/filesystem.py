@@ -1,5 +1,6 @@
 from langchain_core.tools import tool
 import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from pathspec import PathSpec
@@ -124,14 +125,15 @@ def project_context(root: str) -> str:
 
     return "\n\n".join(contents)
 @tool
-def write_file(
+def write_file_user(
     path: str,
     content: str,
     overwrite: bool = False,
     append: bool = False,
 ) -> str:
-    """Write ``content`` to ``path`` ensuring repository safety.
+    """Write ``content`` to ``path`` for user-visible results.
 
+    Use this tool only when the user explicitly requests a file to be written.
     The parent directory of ``path`` must be within a Git repository. If the
     file already exists it must be tracked by Git. Existing files are not
     modified unless ``overwrite`` or ``append`` is set.
@@ -161,6 +163,70 @@ def write_file(
     else:
         if not parent.exists():
             raise ValueError("Parent directory does not exist")
+        mode = "w"
+
+    with open(p, mode, encoding="utf-8") as f:
+        f.write(content)
+
+    return f"Wrote {p}"
+
+
+@tool
+def write_file_tmp(
+    path: str,
+    content: str,
+    overwrite: bool = False,
+    append: bool = False,
+) -> str:
+    """Write ``content`` to ``path`` for temporary internal use.
+
+    Intended for files that are not shown to the user, such as intermediate
+    data stored between steps. If ``path`` is not already located within a
+    temporary directory, a new unique temporary directory is created and the
+    file is written relative to that directory. Unlike
+    :func:`write_file_user`, this tool does not require the target to be part of
+    a Git repository.
+
+    Args:
+        path: Destination file path. When not within a temporary directory the
+            file will be created inside a new temporary directory unique to this
+            request.
+        content: Text to write.
+        overwrite: Replace the file if it already exists.
+        append: Append to the file if it already exists.
+
+    Returns:
+        str: A status message describing the action taken and the full path to
+        the file.
+    """
+
+    given = Path(path).expanduser()
+
+    def _in_temp_dir(p: Path) -> bool:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        try:
+            p.resolve().relative_to(temp_root)
+            return True
+        except ValueError:
+            return False
+
+    if not _in_temp_dir(given):
+        temp_dir = Path(tempfile.mkdtemp(prefix="assist_tmp_"))
+        relative = given.relative_to(given.anchor) if given.is_absolute() else given
+        p = temp_dir / relative
+    else:
+        p = given
+
+    p = p.resolve()
+    ensure_outside_server(p)
+    parent = p.parent
+    parent.mkdir(parents=True, exist_ok=True)
+
+    if p.exists():
+        if not (overwrite or append):
+            raise ValueError("File exists; set overwrite=True or append=True to modify")
+        mode = "a" if append else "w"
+    else:
         mode = "w"
 
     with open(p, mode, encoding="utf-8") as f:
