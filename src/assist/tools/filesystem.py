@@ -3,10 +3,10 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from pathspec import PathSpec
-
 from assist import git
 from assist.tools.safeguard import in_server_project, ensure_outside_server
+from .ignore import load_ignore_spec
+
 from assist.study_agent import study_file
 
 # Tools for working with the filesystem
@@ -16,12 +16,11 @@ from assist.study_agent import study_file
 def list_files(root: str) -> list[str]:
     """Recursively list files under ``root`` with creation and modification times.
 
-    Files matching patterns from a ``.gitignore`` file in ``root`` are skipped.
-    The results are sorted by last modified date in descending order and each
-    entry includes the absolute path, creation date, and last modified date.
-    Only the 200 most recently modified files are returned. If more than 200
-    files are found, the final entry will be the string ``"Limit of 200 files"
-    ``"reached"`` to indicate truncation.
+    Results are sorted by last modified date in descending order and each entry
+    includes the absolute path, creation date, and last modified date. Only the
+    200 most recently modified files are returned. If more than 200 files are
+    found, the final entry will be the string ``"Limit of 200 files"`` ``"reached"``
+    to indicate truncation.
 
     Args:
         root: Directory to search.
@@ -32,13 +31,7 @@ def list_files(root: str) -> list[str]:
     root_path = Path(root)
     if in_server_project(root_path):
         return ["Access to server project files is not allowed"]
-    ignore_spec: PathSpec | None = None
-    gitignore = root_path / ".gitignore"
-    if gitignore.exists():
-        try:
-            ignore_spec = PathSpec.from_lines("gitwildmatch", gitignore.read_text().splitlines())
-        except OSError:
-            ignore_spec = None
+    ignore_spec = load_ignore_spec(root_path)
 
     files: list[tuple[str, float, float]] = []
     for dirpath, dirnames, filenames in os.walk(root_path):
@@ -46,15 +39,14 @@ def list_files(root: str) -> list[str]:
         if str(rel_dir) == ".":
             rel_dir = Path()
 
-        if ignore_spec:
-            dirnames[:] = [
-                d for d in dirnames
-                if not ignore_spec.match_file((rel_dir / d).as_posix())
-            ]
+        dirnames[:] = [
+            d for d in dirnames
+            if not ignore_spec.match_file((rel_dir / d).as_posix())
+        ]
 
         for name in filenames:
             rel_file = (rel_dir / name).as_posix()
-            if ignore_spec and ignore_spec.match_file(rel_file):
+            if ignore_spec.match_file(rel_file):
                 continue
             path = Path(dirpath) / name
             try:
@@ -115,9 +107,20 @@ def project_context(root: str) -> str:
     root_path = Path(root)
     if in_server_project(root_path):
         return "Access to server project files is not allowed"
+    ignore_spec = load_ignore_spec(root_path)
     paths: list[Path] = []
-    for dirpath, _dirnames, filenames in os.walk(root_path):
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        rel_dir = Path(os.path.relpath(dirpath, root_path))
+        if str(rel_dir) == ".":
+            rel_dir = Path()
+        dirnames[:] = [
+            d for d in dirnames
+            if not ignore_spec.match_file((rel_dir / d).as_posix())
+        ]
         for name in filenames:
+            rel_file = (rel_dir / name).as_posix()
+            if ignore_spec.match_file(rel_file):
+                continue
             upper = name.upper()
             if upper.startswith("README") or upper.startswith("AGENTS"):
                 paths.append(Path(dirpath) / name)
