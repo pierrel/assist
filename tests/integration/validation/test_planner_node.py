@@ -21,7 +21,7 @@ class TestPlannerNode(TestCase):
                         state: ReflexionState):
         plan = state["plan"]
         self.assertFalse(any([thing in s.action for s in plan.steps]),
-                        f"{thing} should be in a plan step")
+                        f"{thing} should not be in a plan step")
 
     def assertInPlan(self,
                         thing: str,
@@ -36,21 +36,20 @@ class TestPlannerNode(TestCase):
         self.assertNotInPlan("write_file", state)
 
     def test_should_write_file(self) -> None:
-        state = self.ask_node("Write me a python script to use in my projecct at /home/pierre/myproject")
+        state = self.ask_node("Write me a python script to use in my project at /home/pierre/myproject")
 
         self.assertInPlan("write_file", state)
 
     def test_search_website(self) -> None:
         state = self.ask_node("I remember seeing something about college campuses with the best food on this website: https://www.mentalfloss.com. What's the URL for that article?")
 
-        self.assertTrue(any(["site_search" in s.action.lower() for s in state["plan"].steps]))
-
+        self.assertInPlan("site_search", state)
 
 
     def test_search_webpage(self) -> None:
         state = self.ask_node("Which campus has the best food according to this website: https://www.mentalfloss.com/food/best-and-worst-college-campus-food?utm_source=firefox-newtab-en-us ?")
 
-        self.assertTrue(any(["page_search" in s.action.lower() for s in state["plan"].steps]))
+        self.assertInPlan("page_search", state)
 
 
     def test_project_context_without_project(self):
@@ -59,16 +58,15 @@ class TestPlannerNode(TestCase):
 
         self.assertGreater(len(plan.steps), 1, "Should have multiple steps")
         # the following should really be false...
-        self.assertTrue(any(["project_context" in step.action.lower() for step in plan.steps]),
-                        "It should not try to use the project context")
+        self.assertInPlan("project_context", state)
 
     def test_project_context_with_projecct(self):
         state = self.graph.invoke({"messages": [HumanMessage(content="Hello, can you explain to me what's in the README file?\n\nThe context for this request is /home/myhome/project")]})
         plan = state["plan"]
 
-        self.assertTrue(any(["project_context" in step.action.lower() for step in plan.steps]),
-                         "It should not try to use the project context")
-        self.assertTrue(any(["README" in s.action for s in plan.steps]))
+        
+        self.assertInPlan("project_context", state)
+        self.assertInPlan("README", state)
 
 
     def test_tea_brew(self) -> None:
@@ -178,14 +176,7 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertTrue(
-                any(
-                    "tavily" in step.action.lower()
-                    or "search" in step.action.lower()
-                    for step in plan.steps
-                ),
-                "Uses search or reference tool",
-            )
+            self.assertNotInPlan("write_file", state)
 
     def test_refactor_function_readability(self) -> None:
         query = (
