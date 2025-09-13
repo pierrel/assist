@@ -47,16 +47,28 @@ class SystemInfoIndex:
                     shutil.copyfileobj(src, dst)
             else:
                 shutil.copy(f, target)
-
         self._prepared_dir = dest
         return dest
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _fallback_search(self, root: Path, query: str) -> str:
+        results: List[str] = []
+        for f in root.iterdir():
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            text = f.read_text(errors="ignore")
+            if query in text:
+                results.append(text)
+        return "\n".join(results)
+
     def search(self, query: str) -> str:
         root = self._prepare_dir()
-        return self._index.search(root, query)
+        try:
+            return self._index.search(root, query)
+        except ValueError:
+            return self._fallback_search(root, query)
 
     def search_tool(self) -> BaseTool:
         @tool
