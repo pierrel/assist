@@ -1,0 +1,37 @@
+* Problem
+The reflexion agent can reason over information but lacks a way to systematically
+study a set of resources and extract notes relevant to a user objective. This
+makes it difficult to ground later reasoning in external documents or web
+pages.
+
+* Solution
+Introduce a *study agent* that accepts an objective and list of resources. The
+agent reads each resource, identifies passages relevant to the objective and
+writes consolidated notes to a file. The implementation mirrors the reflexion
+agent patterns for node graphs and prompt creation so the study process is
+traceable and pluggable.
+
+* Requirements
+1. Accept an objective/query and a list of resources that may be local file
+   paths or URLs.
+2. Retrieve the content for each resource: read files and download web pages.
+3. For every resource, create a node that summarises information relevant to the
+   objective using LLM prompts.
+4. Aggregate all node outputs into a single note file that includes citations to
+   original sources.
+5. Return the path to the note file so downstream agents can consume it.
+6. Expose the study functionality as a tool callable from the reflexion agent.
+7. Record the reasoning steps and prompts for observability, matching existing
+   reflexion agent conventions.
+
+* Implementation details
+1. ``assist/study_agent.py`` defines a graph with nodes for resource loading,
+   LLM summarisation and note aggregation.
+2. Prompts follow the existing ``Promptable`` pattern used by the reflexion
+   agent to enable templating and reuse.
+3. Notes are written to ``<workspace>/study/<slugified-objective>.md`` and
+   include inline citations like ``[source #]`` with a bibliography at the end.
+4. The reflexion agent gains a ``study`` tool that invokes the study graph and
+   returns the produced file path.
+5. Documentation and examples live in ``README.org`` describing how to call the
+   study agent directly or through the reflexion agent.
