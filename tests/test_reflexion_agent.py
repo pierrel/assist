@@ -404,20 +404,31 @@ def test_execute_node_handles_recursion(monkeypatch):
 
 
 def test_reflexion_graph_handles_recursion_error(monkeypatch):
-    llm = DummyLLM()
-    dummy_agent = DummyAgent()
+    class LoopingLLM:
+        def __init__(self):
+            self.schema = None
 
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return self
+
+        def invoke(self, _messages, _opts=None):
+            if self.schema is Plan:
+                self.schema = None
+                step = Step(action="run", objective="obj")
+                return Plan(goal="goal", steps=[step], assumptions=[], risks=[])
+            elif self.schema is PlanRetrospective:
+                self.schema = None
+                return PlanRetrospective(needs_replan=True, learnings=None)
+            else:
+                return AIMessage(content="Need more info?")
+
+    dummy_agent = DummyAgent()
     monkeypatch.setattr(
         reflexion_agent, "general_agent", lambda _llm, _tools: dummy_agent
     )
 
-    graph = build_reflexion_graph(llm, [])
-
-    def raise_recursion(*_args, **_kwargs):
-        raise GraphRecursionError("too many replans")
-
-    monkeypatch.setattr(graph._runnable, "invoke", raise_recursion)
-
+    graph = build_reflexion_graph(LoopingLLM(), [])
     result = graph.invoke({"messages": [HumanMessage(content="task")]})
     last = result["messages"][-1]
 
