@@ -12,6 +12,7 @@ def _create_info_root(tmp_path):
     (info_root / "beta.info").write_text(
         "Beta file documenting apples."
     )
+    (info_root / ".hidden.info").write_text("secret")
 
     # Directory listing used by ``list_tool``
     dir_content = (
@@ -38,3 +39,11 @@ def test_system_info_search(tmp_path):
     search_tool = idx.search_tool()
     result = search_tool.invoke("bananas")
     assert "bananas" in result
+
+
+def test_system_info_ignores_hidden(tmp_path):
+    info_root = _create_info_root(tmp_path)
+    idx = SystemInfoIndex(info_root)
+    search_tool = idx.search_tool()
+    result = search_tool.invoke("secret")
+    assert "secret" not in result
