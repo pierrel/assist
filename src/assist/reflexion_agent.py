@@ -25,6 +25,8 @@ from assist.general_agent import general_agent
 from assist.promptable import base_prompt_for
 from assist.agent_types import AgentInvokeResult
 
+REPLAN_LIMIT = 3
+
 
 def _extract_system_and_context(messages: List[BaseMessage]) -> tuple[list[str], List[BaseMessage]]:
     """Return system message contents and non-system messages."""
@@ -92,6 +94,7 @@ class ReflexionState(TypedDict):
     needs_replan: bool
     plan_check_needed: bool
     learnings: List[str]
+    replan_count: int
 
 
 def tool_list_item(tool: BaseTool) -> str:
@@ -133,6 +136,7 @@ def build_plan_node(
             {"callbacks": callbacks, "tags": ["plan"]}
         )
         logger.debug(f"Plan generated in {time.time() - start}s:\n{plan}")
+        replan_count = state.get("replan_count", 0) + 1
         return {
             "plan": plan,
             "step_index": 0,
@@ -140,6 +144,7 @@ def build_plan_node(
             "needs_replan": False,
             "plan_check_needed": False,
             "learnings": state.get("learnings", []),
+            "replan_count": replan_count,
         }
     return plan_node
 
@@ -247,6 +252,35 @@ def build_summarize_node(
     return summarize_node
 
 
+def build_recursion_node(
+    llm: BaseChatModel,
+    callbacks: Optional[List[Any]],
+) -> Callable[[ReflexionState], Dict[str, List[BaseMessage]]]:
+    def recursion_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
+        plan = state.get("plan")
+        steps_text = "\n".join(
+            f"{i+1}. {s.action} - {s.objective}" for i, s in enumerate(plan.steps)
+        ) if plan else ""
+        history_text = "\n".join(
+            f"{i+1}. {h.action}: {h.resolution}" for i, h in enumerate(state.get("history", []))
+        )
+        messages = [
+            SystemMessage(content=base_prompt_for("reflexion_agent/recursion_system.txt")),
+            HumanMessage(
+                content=base_prompt_for(
+                    "reflexion_agent/recursion_user.txt",
+                    goal=plan.goal if plan else "",
+                    plan_steps=steps_text,
+                    history=history_text,
+                )
+            ),
+        ]
+        question = llm.invoke(messages, {"callbacks": callbacks, "tags": ["recursion"]})
+        return {"messages": state["messages"] + [question]}
+
+    return recursion_node
+
+
 def checkpoints(total_steps: int) -> set[int]:
     """Return step indices where a plan check should occur."""
     return {
@@ -279,57 +313,15 @@ def continue_cond(state: ReflexionState) -> bool:
     return state["step_index"] < len(state["plan"].steps)
 
 
-def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summarize"]:
+def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summarize", "recursion"]:
     if replan_cond(state):
+        if state.get("replan_count", 0) >= REPLAN_LIMIT:
+            return "recursion"
         return "plan"
     elif continue_cond(state):
         return "execute"
     else:
         return "summarize"
-
-
-class GraphRecursionHandler(Runnable[Any, Any]):
-    """Wrap a runnable to turn ``GraphRecursionError`` into a question."""
-
-    def __init__(self, runnable: Runnable[Any, Any]):
-        self._runnable = runnable
-
-    def invoke(
-        self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        try:
-            return self._runnable.invoke(inputs, config)
-        except GraphRecursionError:
-            question = AIMessage(
-                content=(
-                    "I kept replanning without making progress. Could you "
-                    "clarify your goal or provide more details so I can continue?"
-                )
-            )
-            msgs = inputs.get("messages", []) + [question]
-            return {"messages": msgs}
-
-    def stream(
-        self,
-        inputs: Dict[str, Any],
-        config: Optional[Dict[str, Any]] = None,
-        *,
-        stream_mode: str = "messages",
-    ):
-        try:
-            yield from self._runnable.stream(inputs, config, stream_mode=stream_mode)
-        except GraphRecursionError:
-            question = AIMessage(
-                content=(
-                    "I kept replanning without making progress. Could you "
-                    "clarify your goal or provide more details so I can continue?"
-                )
-            )
-            yield question, {}
-
-    @property
-    def builder(self):
-        return getattr(self._runnable, "builder", None)
 
 
 def build_reflexion_graph(
@@ -355,11 +347,13 @@ def build_reflexion_graph(
     graph.add_node("execute", cast(Any, build_execute_node(agent, callbacks)))
     graph.add_node("plan_check", cast(Any, build_plan_check_node(llm, callbacks)))
     graph.add_node("summarize", cast(Any, build_summarize_node(llm, callbacks)))
+    graph.add_node("recursion", cast(Any, build_recursion_node(llm, callbacks)))
 
     graph.add_edge("plan", "execute")
     graph.add_conditional_edges("plan_check", big_condition)
     graph.add_conditional_edges("execute", after_execute)
     graph.set_entry_point("plan")
     graph.add_edge("summarize", END)
+    graph.add_edge("recursion", END)
     compiled = graph.compile()
-    return GraphRecursionHandler(compiled)
+    return compiled
