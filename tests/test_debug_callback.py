@@ -23,3 +23,21 @@ def test_pretty_print_json(capsys):
     handler.on_llm_end(result, run_id=run_id)
     out = capsys.readouterr().out
     assert json.dumps(data, indent=2) in out
+
+
+def test_plan_and_execute_and_tool(capsys):
+    handler = ReadableConsoleCallbackHandler()
+    # Plan output
+    plan = {"steps": [{"action": "a", "objective": "b"}]}
+    handler.on_chain_end({"plan": plan}, run_id=uuid4(), tags=["plan"])
+    # Tool usage
+    tool_run = uuid4()
+    handler.on_tool_start({"name": "tool-a"}, json.dumps({"x": 1}), run_id=tool_run)
+    handler.on_tool_end({"result": 2}, run_id=tool_run)
+    # Final response from execute node
+    handler.on_chain_end({"history": [{"resolution": "done"}]}, run_id=uuid4(), tags=["execute"])
+    out = capsys.readouterr().out
+    assert "Plan:" in out
+    assert json.dumps(plan, indent=2) in out
+    assert "tool-a" in out and '"x": 1' in out and '"result": 2' in out
+    assert "Final Response:" in out and "done" in out

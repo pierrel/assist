@@ -82,7 +82,9 @@ pytest tests/integration/validation/test_planner_node.py
 ** Debugging
 To see every prompt and response during an agent run, use
 `ReadableConsoleCallbackHandler`. Each LLM call prints the node, model, prompt,
-and response in a readable format.
+and response in a readable format. The handler also shows the generated plan,
+tool invocations with their arguments and results, and the final response from
+the execution node.
 
 ** Validations
 There's a set of tests in =tests/integration/validations= that stress a live llm within the agent and different nodes in different conditions.

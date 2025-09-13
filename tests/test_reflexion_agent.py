@@ -188,6 +188,35 @@ def test_execute_node_passes_history_to_agent(monkeypatch):
     assert out2["history"][1].resolution.endswith("result2")
 
 
+def test_execute_node_passes_callbacks(monkeypatch):
+    class SpyAgent:
+        def __init__(self):
+            self.configs = []
+
+        def invoke(self, inputs, config=None):
+            self.configs.append(config)
+            return {"messages": [AIMessage(content="result")]}
+
+    agent = SpyAgent()
+    callbacks = [object()]
+    execute_node = reflexion_agent.build_execute_node(agent, callbacks)
+    plan = Plan(goal="g", steps=[Step(action="a", objective="o")], assumptions=[], risks=[])
+    state = {
+        "messages": [],
+        "plan": plan,
+        "step_index": 0,
+        "history": [],
+        "needs_replan": False,
+        "plan_check_needed": False,
+        "learnings": [],
+    }
+
+    execute_node(state)
+
+    assert agent.configs[0]["callbacks"] is callbacks
+    assert "execute" in agent.configs[0]["tags"]
+
+
 def test_plan_check_updates_state(monkeypatch):
     class RetroLLM:
         def __init__(self):
