@@ -6,6 +6,59 @@ from typing import List
 
 import requests
 from langchain_core.tools import tool
+from langchain_tavily import TavilySearch
+
+
+class SearchWeb(TavilySearch):
+    """one_line: Searches the public web; returns up to `max_results` entries with title, url and content.
+
+    when_to_use:
+    - Need information from across the web.
+    - Verify facts with multiple sources.
+    - Explore recent news or updates.
+    when_not_to_use:
+    - Restrict results to a single site → use search_site.
+    - Already have the URL to inspect → use search_page.
+    - Lacking internet access or Tavily credentials.
+    args_schema:
+    - query (str): Search terms, e.g. "latest AI research".
+    preconditions_permissions:
+    - Requires `TAVILY_API_KEY` environment variable.
+    side_effects:
+    - Sends HTTP requests; idempotent: true; retry_safe: true.
+    cost_latency: "~200-1000ms; API billing may apply"
+    pagination_cursors:
+    - input_cursor: none
+    - next_cursor: none
+    errors:
+    - network_error: Request failed; check key and connectivity.
+    returns:
+    - results (list[dict]): Items with "title", "url", "content".
+    - brief_summary (str): Short result count summary.
+    examples:
+    - input: {"query": "python dataclasses"}
+      output: {"results": [...], "brief_summary": "10 results"}
+    version: "1.0"
+    owner: "assist"
+    """
+
+    name: str = "search_web"
+
+    def _run(self, query: str, config: dict | None = None, **kwargs):  # type: ignore[override]
+        data = super()._run(query, **kwargs)
+        results = data.get("results", [])
+        data["brief_summary"] = (
+            f"{len(results)} result" if len(results) == 1 else f"{len(results)} results"
+        )
+        return data
+
+    async def _arun(self, query: str, config: dict | None = None, **kwargs):  # type: ignore[override]
+        data = await super()._arun(query, **kwargs)
+        results = data.get("results", [])
+        data["brief_summary"] = (
+            f"{len(results)} result" if len(results) == 1 else f"{len(results)} results"
+        )
+        return data
 
 
 @tool
@@ -113,4 +166,4 @@ def search_page(url: str, query: str) -> dict:
     return {"snippets": snippets, "brief_summary": summary}
 
 
-__all__ = ["search_site", "search_page"]
+__all__ = ["SearchWeb", "search_site", "search_page"]
