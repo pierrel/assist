@@ -137,11 +137,13 @@ class ReadableConsoleCallbackHandler(BaseCallbackHandler):
         tags = kwargs.get("tags") or []
         node = tags[0] if tags else ""
         if node == "plan":
-            plan = outputs.get("plan", outputs)
-            if hasattr(plan, "model_dump"):
-                plan = plan.model_dump()
+            plan_obj: Any = outputs
+            if isinstance(outputs, dict):
+                plan_obj = outputs.get("plan", outputs)
+            if hasattr(plan_obj, "model_dump"):
+                plan_obj = plan_obj.model_dump()
             print("Plan:")
-            print(self._pretty(plan))
+            print(self._pretty(plan_obj))
         elif node == "execute":
             history = outputs.get("history", [])
             resolution: Any = ""
