@@ -1,6 +1,8 @@
 """Custom callback handler for readable prompt/response logging."""
 from __future__ import annotations
 
+import json
+from pprint import pformat
 from typing import Any, Dict, List, Optional, cast
 from uuid import UUID
 
@@ -18,6 +20,28 @@ class ReadableConsoleCallbackHandler(BaseCallbackHandler):
 
     def __init__(self) -> None:  # noqa: D401 - short and simple
         self._runs: Dict[UUID, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _pretty(obj: Any) -> str:
+        """Return a human-friendly representation of *obj*.
+
+        If *obj* is a JSON string or a JSON-serializable structure, it is
+        formatted with indentation. Otherwise ``str(obj)`` or ``pformat`` is
+        used. This keeps LLM outputs like plans or reflexion states readable.
+        """
+
+        if obj is None:
+            return ""
+        if isinstance(obj, str):
+            try:
+                parsed = json.loads(obj)
+            except Exception:
+                return obj
+            return json.dumps(parsed, indent=2, ensure_ascii=False)
+        try:
+            return json.dumps(obj, indent=2, ensure_ascii=False, default=str)
+        except Exception:
+            return pformat(obj)
 
     def on_llm_start(
         self,
@@ -65,7 +89,8 @@ class ReadableConsoleCallbackHandler(BaseCallbackHandler):
         for gen_list in response.generations:
             for gen in gen_list:
                 message = getattr(gen, "message", None)
-                text = getattr(message, "content", getattr(gen, "text", ""))
-                if text:
-                    print(text)
+                content = getattr(message, "content", getattr(gen, "text", ""))
+                formatted = self._pretty(content)
+                if formatted:
+                    print(formatted)
         print("===== End =====\n")
