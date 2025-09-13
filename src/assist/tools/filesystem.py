@@ -7,6 +7,7 @@ from assist import git
 from assist.tools.safeguard import in_server_project, ensure_outside_server
 from .ignore import load_ignore_spec
 
+from assist.study_agent import study_file
 
 # Tools for working with the filesystem
 
@@ -66,20 +67,26 @@ def list_files(root: str) -> list[str]:
 
 
 @tool
-def file_contents(path: str) -> str:
-    """Returns the contents of the file at `path`.
+def file_contents(path: str, task: str = "", request: str = "") -> str:
+    """Return the contents or a summary of ``path``.
+
+    When the file is small enough to fit within the model's context window the
+    full contents are returned.  For larger files a dedicated study agent reads
+    the file in chunks and summarizes it using ``task`` and ``request`` as
+    guidance so the result can be used to complete the user's objective.
 
     Args:
-        path (str): The path to the desired file.
+        path: The path to the desired file.
+        task: Description of the current execution step.
+        request: Original user request or broader context.
 
     Returns:
-        str: The content of the specified file as a string.
+        str: The file's content or a summary suitable for the task.
     """
     p = Path(path)
     if in_server_project(p):
         return "Access to server project files is not allowed"
-    with open(p, 'r') as f:
-        return f.read()
+    return study_file(p, task=task, request=request)
 
 
 @tool

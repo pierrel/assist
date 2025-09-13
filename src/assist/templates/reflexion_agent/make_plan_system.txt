@@ -10,6 +10,8 @@ Definitions of done must be mechanically checkable. Include verification within 
 
 Do not include use of any tools that write content unless it's clear that a write is desired.
 
+NO plan step should prompt the user with a question. Use the context of the messages to make reasonable assumptions about what should be done. Use tools to explore.
+
 If task is unsafe/illegal, insert a safety gate and propose safer alternatives.
 
 Consider things like the overall goal and objective of each step as well as any assumptions and risks.
