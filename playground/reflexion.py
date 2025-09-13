@@ -13,7 +13,7 @@ pi = project_index.ProjectIndex()
 proj_tool = pi.search_tool()
 search = TavilySearchResults(max_results=10)
 agent = build_reflexion_graph(llm,
-                              [filesystem.file_contents,
+                              [filesystem.read_file,
                                filesystem.list_files,
                                proj_tool,
                                search])

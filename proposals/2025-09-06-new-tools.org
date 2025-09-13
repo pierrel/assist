@@ -4,7 +4,7 @@
 3. system_info_search - Search system ``info`` files for technical information about a query.
 4. list_system_info_files - List available ``info`` files with short descriptions.
 5. list_files - Recursively list files under a directory with creation and modification times.
-6. file_contents - Return the contents of a specified file path.
+6. read_file - Return the contents of a specified file path.
 7. project_context - Collect the contents of README and AGENTS files for quick project onboarding.
 
 * Problem
