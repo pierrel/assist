@@ -141,17 +141,17 @@ class ProjectIndex:
 
     def search_tool(self) -> BaseTool:
         @tool
-        def project_search(project_root: Path | str, query: str) -> str:
-            """Search ``project_root`` for relevant information about the given ``query``. Only use in cases where the project root is clear. Using this at the filesystem root or a nonexistant path will result in an error.
+        def semantic_search(root_dir: Path | str, query: str) -> str:
+            """Semantically search ``root_dir`` for relevant information about the given ``query``. Only use in cases where the project root is clear. Using this at the filesystem root or a nonexistant path will result in an error.
 
             Args:
-            ``project_root`` is a directory on the filesystem that at the top level of the project. The project contains information relevant to the user's current task.
+            ``root_dir`` is a directory on the filesystem that at the top level of the project. The project contains information relevant to the user's current task.
 
             ``query`` is the query to be performed to learn more about the files in the project, which are vectorized for easy semantic search.
 
             Returns:
             str: A newline-separated list of file contents relevant to the query."""
-            p = Path(project_root)
+            p = Path(root_dir)
             if in_server_project(p):
                 return "Cannot index the server project"
             if not p.exists():
@@ -162,11 +162,11 @@ class ProjectIndex:
                 return "Directory is not inside a Git repository"
             if is_filesystem_root(p):
                 return "Cannot index the entire filesystem"
-            retriever = self.get_retriever(project_root)
+            retriever = self.get_retriever(root_dir)
             docs = retriever.invoke(query)
             return "\n".join(doc.page_content for doc in docs)
 
-        return project_search
+        return semantic_search
 
 
 __all__ = ["ProjectIndex"]
