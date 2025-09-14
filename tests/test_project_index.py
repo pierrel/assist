@@ -70,7 +70,7 @@ class TestProjectIndex(TestCase):
     def test_index_and_search_with_tool(self):
         tool = self.index.search_tool()
         docs = tool.invoke({
-            "project_root": self.project_root,
+            "root_dir": self.project_root,
             "query": "hello"
         })
         self.assertIn("hello world", docs)
