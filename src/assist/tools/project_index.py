@@ -4,8 +4,10 @@ import hashlib
 import tempfile
 import os
 from pathlib import Path
-from assist.tools.safeguard import in_server_project
 from typing import Dict, List
+
+from assist.git import repo_root
+from assist.tools.safeguard import in_server_project
 
 import numpy as np
 from langchain_core.documents import Document
@@ -115,6 +117,10 @@ class ProjectIndex:
         root = Path(project_root)
         if in_server_project(root):
             raise ValueError("Cannot index the server project")
+        try:
+            repo_root(root)
+        except ValueError as exc:  # pragma: no cover - simple
+            raise ValueError("Directory is not inside a Git repository") from exc
         key = str(root.resolve())
         if key in self._retrievers:
             return self._retrievers[key]
@@ -135,29 +141,32 @@ class ProjectIndex:
 
     def search_tool(self) -> BaseTool:
         @tool
-        def project_search(project_root: Path | str, query: str) -> str:
-            """Search ``project_root`` for relevant information about the given ``query``. Only use in cases where the project root is clear. Using this at the filesystem root or a nonexistant path will result in an error.
+        def semantic_search(root_dir: Path | str, query: str) -> str:
+            """Semantically search ``root_dir`` for relevant information about the given ``query``. Only use in cases where the project root is clear. Using this at the filesystem root or a nonexistant path will result in an error.
 
             Args:
-            ``project_root`` is a directory on the filesystem that at the top level of the project. The project contains information relevant to the user's current task.
+            ``root_dir`` is a directory on the filesystem that at the top level of the project. The project contains information relevant to the user's current task.
 
             ``query`` is the query to be performed to learn more about the files in the project, which are vectorized for easy semantic search.
 
             Returns:
             str: A newline-separated list of file contents relevant to the query."""
-            p = Path(project_root)
+            p = Path(root_dir)
             if in_server_project(p):
                 return "Cannot index the server project"
             if not p.exists():
                 return "File does not exist"
-            elif is_filesystem_root(p):
+            try:
+                repo_root(p)
+            except ValueError:
+                return "Directory is not inside a Git repository"
+            if is_filesystem_root(p):
                 return "Cannot index the entire filesystem"
-            else:
-                retriever = self.get_retriever(project_root)
-                docs = retriever.invoke(query)
-                return "\n".join(doc.page_content for doc in docs)
+            retriever = self.get_retriever(root_dir)
+            docs = retriever.invoke(query)
+            return "\n".join(doc.page_content for doc in docs)
 
-        return project_search
+        return semantic_search
 
 
 __all__ = ["ProjectIndex"]

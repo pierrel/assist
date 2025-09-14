@@ -6,6 +6,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 from langchain_ollama import ChatOllama
 from pathlib import Path
+import subprocess
 
 
 def setup_temp_files(contents: list[str]) -> TemporaryDirectory:
@@ -17,6 +18,24 @@ def setup_temp_files(contents: list[str]) -> TemporaryDirectory:
         file = NamedTemporaryFile(dir=tmpdir.name,
                                   suffix=".txt")
         Path(file.name).write_text(content)
+    subprocess.run(["git", "init"], cwd=tmpdir.name, check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "add", "."], cwd=tmpdir.name, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=tmpdir.name,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     return tmpdir
 
 class TestProjectIndex(TestCase):
