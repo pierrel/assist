@@ -35,6 +35,15 @@ def test_write_file_user_existing_tracked_overwrite(tmp_path):
     assert target.read_text() == "new"
 
 
+def test_write_file_user_existing_tracked_append(tmp_path):
+    init_repo(tmp_path)
+    target = tmp_path / "t.txt"
+    target.write_text("old")
+    subprocess.run(["git", "add", "t.txt"], cwd=tmp_path, check=True)
+    write_file_user.invoke({"path": str(target), "content": "new", "append": True})
+    assert target.read_text() == "oldnew"
+
+
 def test_write_file_tmp_new():
     res = write_file_tmp.invoke({"path": "tmp.txt", "content": "hi"})
     target = Path(res.removeprefix("Wrote ").strip())
@@ -51,3 +60,10 @@ def test_write_file_tmp_overwrite():
         write_file_tmp.invoke({"path": str(target), "content": "new"})
     write_file_tmp.invoke({"path": str(target), "content": "new", "overwrite": True})
     assert target.read_text() == "new"
+
+
+def test_write_file_tmp_append():
+    res = write_file_tmp.invoke({"path": "tmp.txt", "content": "a"})
+    target = Path(res.removeprefix("Wrote ").strip())
+    write_file_tmp.invoke({"path": str(target), "content": "b", "append": True})
+    assert target.read_text() == "ab"
