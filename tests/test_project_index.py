@@ -1,4 +1,4 @@
-import os
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -17,13 +17,31 @@ class TestProjectIndex(TestCase):
         (self.project_root / "ignored").mkdir()
         (self.project_root / "ignored/skip.txt").write_text("skip me")
         (self.project_root / ".gitignore").write_text("ignored/\n")
+        subprocess.run(["git", "init"], cwd=self.project_root, check=True, stdout=subprocess.PIPE)
+        subprocess.run(["git", "add", "."], cwd=self.project_root, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+            cwd=self.project_root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
         self.index = project_index.ProjectIndex()
 
     def tearDown(self): 
         self.tmpdir.cleanup()
 
-    def test_index_and_search(self):
+    def test_index_and_search_repo_root(self):
         retriever = self.index.get_retriever(self.project_root)
         docs = retriever.get_relevant_documents("hello")
         joined = "\n".join(d.page_content for d in docs)
@@ -32,6 +50,13 @@ class TestProjectIndex(TestCase):
         docs2 = retriever.get_relevant_documents("foo bar")
         joined2 = "\n".join(d.page_content for d in docs2)
         self.assertIn("foo bar baz", joined2)
+
+    def test_index_and_search_subdirectory(self):
+        subdir = self.project_root / "sub"
+        retriever = self.index.get_retriever(subdir)
+        docs = retriever.get_relevant_documents("hello")
+        joined = "\n".join(d.page_content for d in docs)
+        self.assertIn("hello world", joined)
 
     def test_respects_ignore_rules(self):
         retriever = self.index.get_retriever(self.project_root)
@@ -45,7 +70,13 @@ class TestProjectIndex(TestCase):
     def test_index_and_search_with_tool(self):
         tool = self.index.search_tool()
         docs = tool.invoke({
-            "project_root": self.project_root,
+            "root_dir": self.project_root,
             "query": "hello"
         })
         self.assertIn("hello world", docs)
+
+    def test_requires_git_repo(self):
+        with TemporaryDirectory() as td:
+            path = Path(td)
+            with self.assertRaises(ValueError):
+                self.index.get_retriever(path)
