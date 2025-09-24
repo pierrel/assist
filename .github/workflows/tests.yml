@@ -18,6 +18,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e .
+      - name: Render reflexion graph
+        run: |
+          python scripts/render_reflexion_graph.py --output-dir generated/reflexion_graph
+          git diff --exit-code generated/reflexion_graph
       - name: Static type analysis
         run: mypy src | tee mypy-report.txt
         continue-on-error: true
