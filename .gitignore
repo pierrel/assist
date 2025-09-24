@@ -6,3 +6,6 @@
 **/#*#
 .ob-jupyter
 keys
+src/assist.egg-info/
+.coverage
+coverage.xml

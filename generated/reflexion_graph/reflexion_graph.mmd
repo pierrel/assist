@@ -1,0 +1,27 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	plan(plan)
+	execute(execute)
+	plan_check(plan_check)
+	summarize(summarize)
+	recursion(recursion)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> plan;
+	execute -.-> plan_check;
+	execute -.-> summarize;
+	plan --> execute;
+	plan_check -.-> execute;
+	plan_check -.-> plan;
+	plan_check -.-> recursion;
+	plan_check -.-> summarize;
+	recursion --> __end__;
+	summarize --> __end__;
+	execute -.-> execute;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
