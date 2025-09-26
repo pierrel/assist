@@ -5,7 +5,10 @@ planning models to their corresponding execution models.
 """
 from __future__ import annotations
 
-from typing import Tuple
+import os
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
+import yaml
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_ollama import ChatOllama
@@ -32,12 +35,52 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
 DEFAULT_CONTEXT_LIMIT = 32_768
 
 
+def _load_custom_openai_config() -> Optional[Dict[str, Any]]:
+    """Load custom OpenAI configuration from llm-config.yml if present.
+    
+    Returns:
+        Dict with 'url', 'model', and 'api_key' keys if config file exists,
+        otherwise None.
+    """
+    config_path = Path("llm-config.yml")
+    if not config_path.exists():
+        return None
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Validate required fields
+        required_fields = {'url', 'model', 'api_key'}
+        if not isinstance(config, dict) or not required_fields.issubset(config.keys()):
+            return None
+            
+        return config
+    except Exception:
+        return None
+
+
 def select_chat_model(model: str, temperature: float) -> BaseChatModel:
     """Return the appropriate chat model for ``model``.
 
-    If the model string indicates a ChatGPT model (``gpt-*``) a ``ChatOpenAI``
-    instance is returned, otherwise a ``ChatOllama`` instance is used.
+    If a custom OpenAI configuration is available in llm-config.yml, it will be used
+    for ChatOpenAI models. Otherwise, if the model string indicates a ChatGPT model 
+    (``gpt-*``) a ``ChatOpenAI`` instance is returned, otherwise a ``ChatOllama`` 
+    instance is used.
     """
+    # Check for custom configuration first
+    custom_config = _load_custom_openai_config()
+    if custom_config:
+        if ChatOpenAI is None:  # pragma: no cover - environment dependent
+            raise RuntimeError("ChatOpenAI is not available")
+        return ChatOpenAI(
+            model=custom_config['model'],
+            temperature=temperature,
+            api_key=custom_config['api_key'],
+            base_url=custom_config['url']
+        )
+    
+    # Fall back to default behavior
     if model.startswith("gpt-"):
         if ChatOpenAI is None:  # pragma: no cover - environment dependent
             raise RuntimeError("ChatOpenAI is not available")
@@ -48,10 +91,21 @@ def select_chat_model(model: str, temperature: float) -> BaseChatModel:
 def get_model_pair(model: str, temperature: float) -> Tuple[BaseChatModel, BaseChatModel]:
     """Return a pair of (planning_llm, execution_llm) for ``model``.
 
-    The planning model is always ``model`` and the execution model is looked up
-    in ``MODEL_EXECUTION_MAP``. If there is no mapping, the planning model is
-    also used for execution.
+    If a custom OpenAI configuration is available in llm-config.yml, both planning 
+    and execution models will use the custom configuration. Otherwise, the planning 
+    model is always ``model`` and the execution model is looked up in 
+    ``MODEL_EXECUTION_MAP``. If there is no mapping, the planning model is also used 
+    for execution.
     """
+    # Check for custom configuration first  
+    custom_config = _load_custom_openai_config()
+    if custom_config:
+        # When using custom config, use the same model for both planning and execution
+        plan_llm = select_chat_model(model, temperature)
+        exec_llm = select_chat_model(model, temperature)
+        return plan_llm, exec_llm
+    
+    # Fall back to default behavior
     plan_llm = select_chat_model(model, temperature)
     exec_model = MODEL_EXECUTION_MAP.get(model, model)
     exec_llm = select_chat_model(exec_model, temperature)

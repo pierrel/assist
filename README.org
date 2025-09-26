@@ -37,6 +37,18 @@ source .venv/bin/activate
 #+end_src
 
 In emacs: =M-x pyvenv-activate=
+** Configuration
+*** Custom OpenAI API Configuration
+You can configure Assist to use a custom OpenAI-compatible API by creating a =llm-config.yml= file in the project root directory. This file is automatically excluded from git.
+
+#+begin_src yaml
+url: "http://localhost:8000/v1"
+model: "custom-model-name"  
+api_key: "your-api-key-here"
+#+end_src
+
+If this file is present, both the planning and execution models will use the custom configuration instead of the default model selection logic. See =llm-config.yml.example= for more examples.
+
 ** Running
 Run the server
 

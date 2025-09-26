@@ -1,0 +1,25 @@
+# Example llm-config.yml file
+# This file should be placed in the root directory of the project
+# and is automatically excluded from git
+
+# OpenAI-compatible API configuration
+url: "http://localhost:8000/v1"
+model: "custom-model-name"
+api_key: "your-api-key-here"
+
+# Example configurations:
+# 
+# For local LM Studio:
+# url: "http://localhost:1234/v1"
+# model: "model-name"
+# api_key: "lm-studio"
+#
+# For Ollama with OpenAI compatibility:
+# url: "http://localhost:11434/v1"
+# model: "llama2"
+# api_key: "ollama"
+#
+# For custom OpenAI endpoint:
+# url: "https://api.openai.com/v1"
+# model: "gpt-4"
+# api_key: "sk-your-actual-openai-key"
