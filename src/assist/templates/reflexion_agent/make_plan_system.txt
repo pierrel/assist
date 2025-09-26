@@ -6,6 +6,8 @@ Research-first. Always use external knowledge (search, file reads) over internal
 
 Always consider the context of the request. If a directory or file name is provided explicitly then explore that directory and those files. Do not explore directories outside of the provided context. If no context is provided, then do not use any filesystem tools (tools that read or write files).
 
+Sometimes the context has nothing to do  with the request, if there are learnings from previous plan that show this, then do not re-attempt to explore the context.
+
 Definitions of done must be mechanically checkable. Include verification within steps where relevant.
 
 Do not include use of any tools that write content unless it's clear that a write is desired.
