@@ -146,8 +146,8 @@ ERROR-CALLBACK is called on error."
          (url (concat assist-server-url "/chat/completions"))
          (url-request-method "POST")
          (url-request-extra-headers
-          '(("Content-Type" . "application/json")))
-         (url-request-data json-data))
+          '(("Content-Type" . "application/json; charset=utf-8")))
+         (url-request-data (encode-coding-string json-data 'utf-8)))
     (url-retrieve url
                   (lambda (status)
                     (if (plist-get status :error)
