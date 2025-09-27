@@ -237,9 +237,10 @@ def build_summarize_node(
         system_prompt = _combine_system_prompt(
             base_prompt_for("reflexion_agent/summarize_system.txt"), sys_msgs
         )
+
         messages = [
             SystemMessage(content=system_prompt),
-            *context_msgs,
+            *context_msgs[:-1],
             HumanMessage(
                 content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),

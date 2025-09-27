@@ -103,7 +103,7 @@ class TestReflexionCompletion(TestCase):
 
     def test_should_write_file(self) -> None:
         self._assert_completion(
-            "Write me a python script to use in my project at /home/pierre/myproject"
+            "Write me a python script that adds a few numbers together to use in my project at /home/pierre/myproject"
         )
 
     def test_search_website(self) -> None:
@@ -118,7 +118,7 @@ class TestReflexionCompletion(TestCase):
 
     def test_project_context_without_project(self) -> None:
         self._assert_completion(
-            "Hello, can you explain to me what's in the README file?"
+            "Hello, can you explain to me what's in the inbox file?"
         )
 
     def test_project_context_with_project(self) -> None:

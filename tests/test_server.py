@@ -56,7 +56,12 @@ class TestServer(TestCase):
             server.ChatMessage(role="user", content="how are you?"),
         ]
 
-        with patch("assist.server.get_agent", return_value=DummyAgent()):
+        class DummyPlanLLM:
+            model = "dummy-model"
+
+        with patch(
+            "assist.server.get_agent", return_value=(DummyAgent(), DummyPlanLLM())
+        ):
             req = server.ChatCompletionRequest(model="mock", messages=messages, stream=True)
             resp = server.chat_completions(req)
 
