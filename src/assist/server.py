@@ -166,21 +166,20 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
     resp_raw = agent.invoke({"messages": langchain_messages})
     resp = AgentInvokeResult.model_validate(resp_raw)
     message = resp.messages[-1]
-    created = datetime.fromtimestamp(time.time())
-    return JSONResponse(
-        content=ChatCompletionResponse(
-            id="1337",
-            object="chat.completion",
-            created=created,
-            model=active_model,
-            choices=[
-                ChatCompletionChoice(
-                    message=ChatMessage(role="assistant", content=message.content)
-                )
-            ],
-        ).model_dump()
-    )
-
+    created = int(time.time())
+    cm = ChatMessage(role="assistant", content=message.content)
+    ccr = {
+        'id': "1337",
+        'object': "chat.completion",
+        'created': created,
+        'model': request.model,
+        'choices': [
+            ChatCompletionChoice(
+                message=cm
+            ).model_dump()
+        ],
+    }
+    return JSONResponse(content=ccr)
 
 def not_human_message(message: BaseMessage) -> bool:
     return not isinstance(message, HumanMessage)
