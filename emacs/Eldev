@@ -1,0 +1,7 @@
+; -*- mode: emacs-lisp; lexical-binding: t -*-
+
+(setq eldev-project-main-file "assist.el")
+
+(eldev-use-plugin 'autoloads)
+
+(eldev-add-loading-roots 'test "tests")
