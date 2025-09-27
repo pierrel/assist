@@ -161,28 +161,31 @@ ERROR-CALLBACK is called on error."
 ;;; Response handling
 
 (defun assist--handle-stream-response (response buffer-name start-point)
-  "Handle streaming RESPONSE for BUFFER-NAME."
+  "Handle streaming RESPONSE for BUFFER-NAME starting at START-POINT."
   (when-let ((buffer (get-buffer buffer-name)))
     (with-current-buffer buffer
       (save-excursion
         (goto-char start-point)
-        (let ((lines (split-string response "\n")))
+        (let ((lines (split-string response "\n"))
+	      (data-start "data: "))
           (dolist (line lines)
-            (when (and (string-prefix-p "data: " line)
-                       (not (string= "data: [DONE]" line)))
-              (let* ((json-line (substring line 6))
-                     (data (ignore-errors (json-read-from-string json-line)))
-                     (choices (cdr (assoc 'choices data)))
-                     (delta (cdr (assoc 'delta (aref choices 0))))
-                     (content (cdr (assoc 'content delta))))
-                (when content
-                  ;; First content chunk - create AI block
-                  (unless (gethash buffer-name assist--active-requests)
-                    (insert "\n#+begin_ai\n")
-                    (puthash buffer-name t assist--active-requests)
-		    (insert "\n#+end_ai\n")
-                    (assist--set-status "assist: processing"))
-                  (insert content))))))))))
+            (when (string-prefix-p data-start line)
+              (if (string= "data: [DONE]" line)
+                  ;; Stream is done - finalize response
+                  (assist--finalize-response buffer-name)
+                ;; Process content
+                (let* ((json-line (substring line (length data-start)))
+                       (data (ignore-errors (json-read-from-string json-line)))
+                       (choices (cdr (assoc 'choices data)))
+                       (delta (cdr (assoc 'delta (aref choices 0))))
+                       (content (cdr (assoc 'content delta))))
+                  (when content
+                    ;; First content chunk - create AI block
+                    (unless (gethash buffer-name assist--active-requests)
+                      (insert "\n#+begin_ai\n")
+                      (puthash buffer-name t assist--active-requests)
+                      (assist--set-status "assist: processing"))
+                    (insert content)))))))))))
 
 (defun assist--finalize-response (buffer-name)
   "Finalize response for BUFFER-NAME."
