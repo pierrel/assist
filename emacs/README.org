@@ -1,5 +1,22 @@
 #+title: Assist.el
+
 Assist.el defines how emacs interacts with the assist server. It is implemented as a minor mode.
+
+* Status
+
+** ✅ Long Chat functionality - IMPLEMENTED
+- Buffer-based conversations in org-mode
+- Message parsing and AI block formatting  
+- Submission with `assist-submit` function
+- Status indication in mode line
+- Thinking section filtering
+
+** ⏳ One-off query functionality - IMPLEMENTED
+- Quick queries without changing windows
+- Buffer selection with autocomplete
+- Status updates in echo area and mode line
+- Automatic buffer creation and switching
+
 * Concepts
 *Buffers* are the main way of interacting with Assist. Queries can be written directly into the buffer and "submitted" to Assist. Buffers are always in org-mode.
 
@@ -12,23 +29,47 @@ This is the AI message.
 
 *Thinking* happens within AI messages. They are optional and are returned by the Assist server inside of thinking tags (<thinking>...</thinking>). They are never sent during submission.
 
-*Submission* happens when the assist/submit is called. It takes everything before the current point, splits it into human and ai messages, and sends it to the server. When the server responds, the response is put into an AI block (see AI messages above) as it's being received. The block is closed once the server is done.
+*Submission* happens when the assist-submit is called. It takes everything before the current point, splits it into human and ai messages, and sends it to the server. When the server responds, the response is put into an AI block (see AI messages above) as it's being received. The block is closed once the server is done.
+
+* Implementation
+
+The assist.el package provides:
+
+** Core Functions
+- `assist-submit` - Submit conversation in current buffer
+- `assist-query` - Quick one-off queries 
+- `assist-enable` / `assist-disable` - Toggle minor mode
+
+** Key Bindings  
+- `C-c C-a s` - Submit current conversation
+- `C-c C-a q` - Quick query
+
+** Customization
+- `assist-server-url` - URL of the Assist server (default: "http://localhost:8000")
+- `assist-buffer-prefix` - Prefix for chat buffers (default: "Assist: ")
+
 * Style
-Functions are always prefixed with "assist/".
+Functions are always prefixed with "assist-" (public) or "assist--" (private).
+
 * Use-cases
-** Long chat
+** ✅ Long chat - IMPLEMENTED
 As a user, I want to have a back-and-forth conversation with assist.
-*** Requirements
-1. I must be in a buffer (doesn't need to be an "Assist: " buffer).
-2. I submit with the "assist/submit" function
-** One-off query
+*** Requirements  
+1. ✅ I must be in a buffer (doesn't need to be an "Assist: " buffer).
+2. ✅ I submit with the "assist-submit" function
+
+** ✅ One-off query - IMPLEMENTED  
 As a user, I want to submit a query to assist without interrupting my workflow.
 *** Requirements
-1. I should be able to query assist without changing my windows. This can be done through the echo area input.
-2. I should see the status of the request in the buffer echo and mode line
-   1. When submitting, I should see "assist: submitting" in the echo area and the assist minor mode section.
-   2. When assist is processing, I should see "assist: processing" in the echo and mode areas. This happens once the first chunk is sent back to the client.
-   3. When assist is done, I should see "assist: done" in the echo area and the mode section should revert back to the usual minor mode line ("assist")
-   4. When there is an error returned from the assist server, then I should see "assist: error"
-3. When assist finishes (in either error or done), then the output should be put into the right buffer and that buffer should pop open.
-4. When submitting new queries, I should be able to choose from active chats. By default, the last chat buffer should be selected. Autocomplete is used to find the chat buffers. Chat buffers are appended with  "Assist: ". To create a new chat, I can enter any unique string (no autocomplete available) and the buffer will be created.
+1. ✅ I should be able to query assist without changing my windows. This can be done through the echo area input.
+2. ✅ I should see the status of the request in the buffer echo and mode line
+   1. ✅ When submitting, I should see "assist: submitting" in the echo area and the assist minor mode section.
+   2. ✅ When assist is processing, I should see "assist: processing" in the echo and mode areas. This happens once the first chunk is sent back to the client.
+   3. ✅ When assist is done, I should see "assist: done" in the echo area and the mode section should revert back to the usual minor mode line ("assist")
+   4. ✅ When there is an error returned from the assist server, then I should see "assist: error"
+3. ✅ When assist finishes (in either error or done), then the output should be put into the right buffer and that buffer should pop open.
+4. ✅ When submitting new queries, I should be able to choose from active chats. By default, the last chat buffer should be selected. Autocomplete is used to find the chat buffers. Chat buffers are appended with  "Assist: ". To create a new chat, I can enter any unique string (no autocomplete available) and the buffer will be created.
+
+* Installation and Usage
+
+See DEMO.md for detailed usage examples.
