@@ -160,12 +160,12 @@ ERROR-CALLBACK is called on error."
 
 ;;; Response handling
 
-(defun assist--handle-stream-response (response buffer-name)
+(defun assist--handle-stream-response (response buffer-name start-point)
   "Handle streaming RESPONSE for BUFFER-NAME."
   (when-let ((buffer (get-buffer buffer-name)))
     (with-current-buffer buffer
       (save-excursion
-        (goto-char (point-max))
+        (goto-char start-point)
         (let ((lines (split-string response "\n")))
           (dolist (line lines)
             (when (and (string-prefix-p "data: " line)
@@ -180,6 +180,7 @@ ERROR-CALLBACK is called on error."
                   (unless (gethash buffer-name assist--active-requests)
                     (insert "\n#+begin_ai\n")
                     (puthash buffer-name t assist--active-requests)
+		    (insert "\n#+end_ai\n")
                     (assist--set-status "assist: processing"))
                   (insert content))))))))))
 
@@ -203,7 +204,8 @@ ERROR-CALLBACK is called on error."
     (user-error "Assist submission requires org-mode"))
   
   (let ((messages (assist--parse-messages))
-        (buffer-name (buffer-name)))
+        (buffer-name (buffer-name))
+	(cur-point (point)))
     
     (when (null messages)
       (user-error "No messages to submit"))
@@ -215,7 +217,9 @@ ERROR-CALLBACK is called on error."
      messages
      (lambda (&rest args)
        (let ((data (plist-get args :data)))
-         (assist--handle-stream-response data buffer-name)))
+         (assist--handle-stream-response data
+					 buffer-name
+					 cur-point)))
      (lambda (&rest args)
        (let ((error-thrown (plist-get args :error-thrown)))
          (assist--set-status "assist: error")
