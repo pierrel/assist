@@ -34,6 +34,7 @@ DEFAULT_MODEL = "gpt-4o-mini"
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
+    'models/mistral.gguf': 128_000,
 }
 
 DEFAULT_CONTEXT_LIMIT = 32_768
