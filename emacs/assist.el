@@ -19,6 +19,7 @@
 (require 'org)
 (require 'json)
 (require 'url)
+(require 'cl-lib)
 
 ;;; Customization
 
@@ -81,6 +82,40 @@
   "Set the current status to STATUS and update mode line."
   (setq assist--status status)
   (force-mode-line-update))
+
+(defun assist--generate-open-files-context ()
+  "Generate a context string describing currently opened file buffers and their projects.
+Uses Projectile when available. This context is prepended as a system message so the
+LLM can reason about the user's workspace.  Safe for Emacs 27: only uses Projectile APIs."
+  (let* ((have-projectile (require 'projectile nil t))
+         (file-bufs (seq-filter (lambda (b) (buffer-file-name b)) (buffer-list)))
+         (entries
+          (cl-loop for b in file-bufs
+                   for path = (buffer-file-name b)
+                   for project-root = (when have-projectile
+                                        (with-current-buffer b
+                                          (ignore-errors (projectile-project-root))))
+                   for project-name = (cond
+                                       (project-root (file-name-nondirectory (directory-file-name project-root)))
+                                       (t "(no-project)"))
+                   for rel-path = (if (and project-root (string-prefix-p project-root path))
+                                      (string-remove-prefix project-root path)
+                                    path)
+                   collect (format "%s :: %s\n  abs:%s\n  mode:%s modified:%s"
+                                   project-name
+                                   rel-path
+                                   path
+                                   (with-current-buffer b (symbol-name major-mode))
+                                   (with-current-buffer b (if (buffer-modified-p b) "yes" "no"))))))
+    (when entries
+      (concat "WORKSPACE CONTEXT (read-only; summarize or reference if helpful)\n"
+              "Each entry lists: PROJECT :: RELATIVE-PATH then details.\n"
+              (mapconcat #'identity
+                         (cl-loop for e in entries
+                                  for i from 1
+                                  collect (format "%d. %s" i e))
+                         "\n")
+              "\nEND WORKSPACE CONTEXT"))))
 
 ;;; Message parsing
 
@@ -218,17 +253,23 @@ ERROR-CALLBACK is called on error."
 ;;; Core functions
 
 (defun assist-submit ()
-  "Submit the conversation in the current buffer to Assist."
+  "Submit the conversation in the current buffer to Assist.
+Prepends a system message describing currently opened file buffers and their
+Projectile projects so the AI can reference the user's active workspace.  The
+CUR-POINT at submission time marks where streaming text will be inserted."
   (interactive)
   (unless (derived-mode-p 'org-mode)
     (user-error "Assist submission requires org-mode"))
   
-  (let ((messages (assist--parse-messages))
-        (buffer-name (buffer-name))
-	(cur-point (point)))
+  (let* ((messages (assist--parse-messages))
+         (buffer-name (buffer-name))
+	 (cur-point (point))
+         (context (assist--generate-open-files-context)))
     
     (when (null messages)
       (user-error "No messages to submit"))
+    (when context
+      (setq messages (cons `((role . "system") (content . ,context)) messages)))
     
     (assist--set-status "assist: submitting")
     (message "assist: submitting")
