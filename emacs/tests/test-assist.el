@@ -164,7 +164,7 @@
             (let ((content (buffer-string)))
               (should (string-match-p "User query\n\n#\\+begin_ai\nAI response\n" content))
               (should (string-match-p "#\\+end_ai" content))
-              (should (string-match-p "Existing content below" content)))))
+              (should (string-match-p "end_ai\n\n\nExisting content below" content)))))
       (kill-buffer buffer))))
 
 (ert-deftest assist-test-point-handling-single-newline-present ()
