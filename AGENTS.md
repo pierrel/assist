@@ -113,3 +113,11 @@ Always follow these guidelines when writing code:
 20. Simple, emergent design + keep it clean
     — Follows Kent Beck’s four rules (passes tests, no duplication, expresses intent, minimal elements) and the Boy Scout Rule: leave the code cleaner than you found it.
 
+# Testing guidelines
+1. Always run python tests (`pytest`) whenever any python files are modified and iterate on any failures until tests pass.
+2. Always run the emacs linter (`eldev lint` or `eldev lint -f [file]`) whenever any elisp files are modified.
+3. Always run tests (`eldev test` from the assist/emacs directory) whenever elisp files are modified.
+4. Always run any new elisp functions for correct functionality (using `eldev eval [expression]`) and iterate on any failures until all tests pass.
+
+# Documentation guidelines
+README files are always updated as new user-facing functionality is added or modified. Do not clutter the top-level README file(s) - always add sections as needed.
