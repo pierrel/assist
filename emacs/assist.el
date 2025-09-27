@@ -172,7 +172,7 @@ ERROR-CALLBACK is called on error."
             (when (string-prefix-p data-start line)
               (if (string= "data: [DONE]" line)
                   ;; Stream is done - finalize response
-                  (assist--finalize-response buffer-name start-point)
+                  (assist--finalize-response buffer-name (point))
                 ;; Process content
                 (let* ((json-line (substring line (length data-start)))
                        (data (ignore-errors (json-read-from-string json-line)))
@@ -203,12 +203,13 @@ ERROR-CALLBACK is called on error."
      ;; Two or more newlines before - don't add any
      (t nil))))
 
-(defun assist--finalize-response (buffer-name &optional start-point)
+(defun assist--finalize-response (buffer-name &optional cur-point)
   "Finalize response for BUFFER-NAME, optionally using START-POINT."
   (when-let ((buffer (get-buffer buffer-name)))
     (with-current-buffer buffer
       (save-excursion
-        (goto-char (point-max))
+        (goto-char (or cur-point
+		       (point-max)))
         (insert "\n#+end_ai\n"))
       (remhash buffer-name assist--active-requests)
       (assist--set-status "assist: done")
