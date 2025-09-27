@@ -172,7 +172,7 @@ ERROR-CALLBACK is called on error."
             (when (string-prefix-p data-start line)
               (if (string= "data: [DONE]" line)
                   ;; Stream is done - finalize response
-                  (assist--finalize-response buffer-name)
+                  (assist--finalize-response buffer-name start-point)
                 ;; Process content
                 (let* ((json-line (substring line (length data-start)))
                        (data (ignore-errors (json-read-from-string json-line)))
@@ -182,13 +182,29 @@ ERROR-CALLBACK is called on error."
                   (when content
                     ;; First content chunk - create AI block
                     (unless (gethash buffer-name assist--active-requests)
-                      (insert "\n#+begin_ai\n")
+                      (assist--ensure-proper-spacing start-point)
+                      (insert "#+begin_ai\n")
                       (puthash buffer-name t assist--active-requests)
                       (assist--set-status "assist: processing"))
                     (insert content)))))))))))
 
-(defun assist--finalize-response (buffer-name)
-  "Finalize response for BUFFER-NAME."
+(defun assist--ensure-proper-spacing (start-point)
+  "Ensure proper spacing before AI block at START-POINT."
+  (goto-char start-point)
+  (let ((char-before (if (> (point) 1) (char-before) nil))
+        (char-before-2 (if (> (point) 2) (char-before (1- (point))) nil)))
+    (cond
+     ;; No newlines before - add two
+     ((not (eq char-before ?\n))
+      (insert "\n\n"))
+     ;; One newline before - add one more
+     ((and (eq char-before ?\n) (not (eq char-before-2 ?\n)))
+      (insert "\n"))
+     ;; Two or more newlines before - don't add any
+     (t nil))))
+
+(defun assist--finalize-response (buffer-name &optional start-point)
+  "Finalize response for BUFFER-NAME, optionally using START-POINT."
   (when-let ((buffer (get-buffer buffer-name)))
     (with-current-buffer buffer
       (save-excursion
