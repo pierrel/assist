@@ -46,8 +46,10 @@ response = requests.post(
         "model": "gpt-4o-mini",
         "messages": [
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Hello from the client."},
+            {"role": "user", "content": "Hello. What is the capital of France?"},
         ],
     },
 )
 print(response.text)
+
+stop_server(server, server_thread)
