@@ -20,6 +20,7 @@ from langchain_core.messages import (
     ToolMessage,
     ToolCall,
 )
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.runnables import Runnable
 from assist.reflexion_agent import build_reflexion_graph
 from assist.agent_types import AgentInvokeResult
@@ -117,7 +118,8 @@ async def log_middle(
 @app.post("/chat/completions")
 def chat_completions(request: ChatCompletionRequest) -> Response:
     start = time.time()
-    agent = get_agent(request.model, request.temperature or 0.1)
+    agent, plan_llm = get_agent(request.temperature or 0.1)
+    active_model = getattr(plan_llm, "model", "gpt-4o-mini")
     langchain_messages = openai_to_langchain(request.messages)
     user_request = langchain_messages[-1].content
 
@@ -128,7 +130,7 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
                 "id": "1337",
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": request.model,
+                "model": active_model,
                 "choices": [{"delta": {"role": "assistant"}, "index": 0}],
             }
             yield f"data: {json.dumps(first)}\n\n"
@@ -142,7 +144,7 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
                     "id": "1337",
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": request.model,
+                    "model": active_model,
                     "choices": [{"delta": {"content": content}, "index": 0}],
                 }
                 yield f"data: {json.dumps(chunk)}\n\n"
@@ -150,7 +152,7 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
                 "id": "1337",
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": request.model,
+                "model": active_model,
                 "choices": [
                     {"delta": {}, "finish_reason": "stop", "index": 0}
                 ],
@@ -164,21 +166,20 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
     resp_raw = agent.invoke({"messages": langchain_messages})
     resp = AgentInvokeResult.model_validate(resp_raw)
     message = resp.messages[-1]
-    created = datetime.fromtimestamp(time.time())
-    return JSONResponse(
-        content=ChatCompletionResponse(
-            id="1337",
-            object="chat.completion",
-            created=created,
-            model=request.model,
-            choices=[
-                ChatCompletionChoice(
-                    message=ChatMessage(role="assistant", content=message.content)
-                )
-            ],
-        ).model_dump()
-    )
-
+    created = int(time.time())
+    cm = ChatMessage(role="assistant", content=message.content)
+    ccr = {
+        'id': "1337",
+        'object': "chat.completion",
+        'created': created,
+        'model': request.model,
+        'choices': [
+            ChatCompletionChoice(
+                message=cm
+            ).model_dump()
+        ],
+    }
+    return JSONResponse(content=ccr)
 
 def not_human_message(message: BaseMessage) -> bool:
     return not isinstance(message, HumanMessage)
@@ -218,15 +219,16 @@ def check_tavily_api_key() -> None:
         raise RuntimeError('Please define the environment variable TAVILY_API_KEY')
 
 
-def get_agent(model: str, temperature: float) -> Runnable[Any, Any]:
+def get_agent(temperature: float) -> tuple[Runnable[Any, Any], BaseChatModel]:
     check_tavily_api_key()
-    plan_llm, exec_llm = get_model_pair(model, temperature)
+    plan_llm, exec_llm = get_model_pair(temperature)
     tools = base_tools(INDEX_DB_ROOT)
-    return build_reflexion_graph(
+    agent = build_reflexion_graph(
         plan_llm,
         tools,
         execution_llm=exec_llm,
     )
+    return agent, plan_llm
 
 
 if __name__ == "__main__":

@@ -9,3 +9,4 @@ keys
 src/assist.egg-info/
 .coverage
 coverage.xml
+llm-config.yml
