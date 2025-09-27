@@ -1,0 +1,34 @@
+#+title: Assist.el
+Assist.el defines how emacs interacts with the assist server. It is implemented as a minor mode.
+* Concepts
+*Buffers* are the main way of interacting with Assist. Queries can be written directly into the buffer and "submitted" to Assist. Buffers are always in org-mode.
+
+*AI messages* (results from Assist) are added in a block like:
+#+begin_ai
+This is the AI message.
+#+end_ai
+
+*Human messages* are anything outside of AI messages.
+
+*Thinking* happens within AI messages. They are optional and are returned by the Assist server inside of thinking tags (<thinking>...</thinking>). They are never sent during submission.
+
+*Submission* happens when the assist/submit is called. It takes everything before the current point, splits it into human and ai messages, and sends it to the server. When the server responds, the response is put into an AI block (see AI messages above) as it's being received. The block is closed once the server is done.
+* Style
+Functions are always prefixed with "assist/".
+* Use-cases
+** Long chat
+As a user, I want to have a back-and-forth conversation with assist.
+*** Requirements
+1. I must be in a buffer (doesn't need to be an "Assist: " buffer).
+2. I submit with the "assist/submit" function
+** One-off query
+As a user, I want to submit a query to assist without interrupting my workflow.
+*** Requirements
+1. I should be able to query assist without changing my windows. This can be done through the echo area input.
+2. I should see the status of the request in the buffer echo and mode line
+   1. When submitting, I should see "assist: submitting" in the echo area and the assist minor mode section.
+   2. When assist is processing, I should see "assist: processing" in the echo and mode areas. This happens once the first chunk is sent back to the client.
+   3. When assist is done, I should see "assist: done" in the echo area and the mode section should revert back to the usual minor mode line ("assist")
+   4. When there is an error returned from the assist server, then I should see "assist: error"
+3. When assist finishes (in either error or done), then the output should be put into the right buffer and that buffer should pop open.
+4. When submitting new queries, I should be able to choose from active chats. By default, the last chat buffer should be selected. Autocomplete is used to find the chat buffers. Chat buffers are appended with  "Assist: ". To create a new chat, I can enter any unique string (no autocomplete available) and the buffer will be created.
