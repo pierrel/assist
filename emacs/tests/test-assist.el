@@ -65,7 +65,7 @@
   "Test parsing simple human message."
   (with-test-buffer
    "Hello, how are you?"
-   (let ((messages (assist--parse-messages)))
+   (let ((messages (assist--parse-messages (point-max))))
      (should (= (length messages) 1))
      (should (string= (cdr (assoc 'role (car messages))) "user"))
      (should (string= (cdr (assoc 'content (car messages))) "Hello, how are you?")))))
@@ -74,7 +74,7 @@
   "Test parsing conversation with AI response."
   (with-test-buffer
    "Hello, how are you?\n\n#+begin_ai\nI'm doing well, thank you!\n#+end_ai\n\nWhat's the weather like?"
-   (let ((messages (assist--parse-messages)))
+   (let ((messages (assist--parse-messages (point-max))))
      (should (= (length messages) 3))
      ;; First human message
      (should (string= (cdr (assoc 'role (nth 0 messages))) "user"))
@@ -90,7 +90,7 @@
   "Test parsing AI message with thinking section."
   (with-test-buffer
    "What is 2+2?\n\n#+begin_ai\n<thinking>\nThis is a simple math question. 2+2 equals 4.\n</thinking>\n\nThe answer is 4.\n#+end_ai"
-   (let ((messages (assist--parse-messages)))
+   (let ((messages (assist--parse-messages (point-max))))
      (should (= (length messages) 2))
      ;; Human message
      (should (string= (cdr (assoc 'role (nth 0 messages))) "user"))
