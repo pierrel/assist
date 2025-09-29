@@ -177,9 +177,11 @@ ERROR-CALLBACK is called on error."
 
 (defun assist--get-project-files-assoc (files)
   (-group-by (lambda (e)
-	       (with-current-buffer (get-file-buffer e)
-		 (projectile-project-root)))
-	     files))
+               (with-current-buffer (get-file-buffer e)
+                 (if (fboundp 'projectile-project-root)
+                     (projectile-project-root)
+                   default-directory)))
+             files))
 
 (defun assist--project-context-string (project-files)
   (let ((project (car project-files))
@@ -192,10 +194,12 @@ ERROR-CALLBACK is called on error."
 			 "\n"))))
 
 (defun assist--get-user-context ()
-  (mapcar #'assist--project-context-string
-	  (assist--get-project-files-assoc
-	   (mapcar #'buffer-file-name
-		   (assist--get-user-open-file-buffers)))))
+  (string-join
+   (mapcar #'assist--project-context-string
+           (assist--get-project-files-assoc
+            (mapcar #'buffer-file-name
+                    (assist--get-user-open-file-buffers))))
+   "\n"))
 
 ;;; Response handling
 

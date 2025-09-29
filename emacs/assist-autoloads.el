@@ -36,6 +36,10 @@ Disable Assist minor mode in current buffer." t)
 (register-definition-prefixes "assist" '("assist-"))
 
 
+;;; Generated autoloads from dash.el
+
+(register-definition-prefixes "dash" '("->>" "-filter" "-group-by" "-map" "-non-nil"))
+
 ;;; End of scraped data
 
 (provide 'assist-autoloads)
