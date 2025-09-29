@@ -19,6 +19,36 @@
      (goto-char (point-min))
      ,@body))
 
+(defmacro with-project (name open-files open-fileless-buffers &rest body)
+  "Creates a project and opens some buffers and files."
+  `(let* ((tmp-dir (make-temp-file ,name t))
+	  (default-directory tmp-dir)
+	  (assist--captured nil)
+	  (to-kill '()))
+     (dolist (open-file ,open-files)
+       (let* ((full-filename (expand-file-name open-file))
+	      (new-temp-file
+	       (make-temp-file (expand-file-name open-file
+						 tmp-dir))))
+	 (split-window-below)
+	 (balance-windows)
+	 (other-window 1)
+	 (add-to-list 'to-kill
+		      (find-file new-temp-file))))
+     (dolist (buf ,open-fileless-buffers)
+       (split-window-below)
+       (balance-windows)
+       (other-window 1)
+       (let ((newbuf (get-buffer-create buf)))
+	 (add-to-list 'to-kill newbuf)
+	 (switch-to-buffer newbuf)))
+     ,@body
+     ;; clean up
+     (dolist (buf to-kill)
+       (kill-buffer buf))
+     (delete-other-windows)))
+
+
 ;;; Tests for utility functions
 
 (ert-deftest assist-test-buffer-is-assist-p ()
@@ -211,5 +241,31 @@
             (should (derived-mode-p 'org-mode))
             (should assist-minor-mode)))
       (kill-buffer buffer))))
+
+(ert-deftest assist-test-with-project ()
+  (with-project "assist-proj"
+		'("one.txt")
+		'("*hello*")
+		(should (seq-find (apply-partially #'string-match-p
+						   "one.txt")
+				  (mapcar #'buffer-name
+					  (buffer-list)))))
+  (should-not (seq-find (apply-partially #'string-match-p
+					 "one.txt")
+			(mapcar #'buffer-name
+				(buffer-list)))))
+
+(ert-deftest assist-test-get-user-context ()
+  (with-project "assist-user-context"
+		'("one.txt" "two.txt")
+		'("*hello*")
+		(should (string-match-p "one.txt"
+					(assist--get-user-context)))
+		(should (string-match-p "two.txt"
+					(assist--get-user-context)))
+		(should-not (string-match-p "*hello*"
+					    (assist--get-user-context)))
+		(should (string-match-p "/tmp"
+					(assist--get-user-context)))))
 
 ;;; test-assist.el ends here

@@ -4,9 +4,9 @@
 
 ;; Author: Assist Contributors
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "27.1") (dash "20240510.1327"))
 ;; Keywords: convenience, tools
-;; URL: https://github.com/user/assist
+;; URL: https://github.com/pierrel/assist
 
 ;;; Commentary:
 
@@ -19,6 +19,8 @@
 (require 'org)
 (require 'json)
 (require 'url)
+(eval-when-compile (require 'dash))
+(require 'dash)
 
 ;;; Customization
 
@@ -157,6 +159,43 @@ ERROR-CALLBACK is called on error."
                       (forward-char 1)
                       (funcall success-callback :data (buffer-substring (point) (point-max)))))
                   nil t)))
+
+;;; Context handling
+
+(defun assist--get-user-open-file-buffers ()
+  (if-let ((frame (selected-frame)))
+      ;; Get all buffer names from the given frame:
+      (->> frame
+	   (buffer-list)		; all buffers
+	   (-map #'buffer-file-name)
+	   (-non-nil)
+	   (-map #'get-file-buffer)	; just those with files
+	   (-map #'get-buffer-window)	; mapped to windows
+	   (-non-nil)			; remove ones with no window
+	   (-map #'window-buffer))	; back to the buffer itself
+    (error "No focused frame found")))
+
+(defun assist--get-project-files-assoc (files)
+  (-group-by (lambda (e)
+	       (with-current-buffer (get-file-buffer e)
+		 (projectile-project-root)))
+	     files))
+
+(defun assist--project-context-string (project-files)
+  (let ((project (car project-files))
+	(files (cdr project-files)))
+    (format "The following files are open in project %s:\n%s"
+	    project
+	    (string-join (mapcar (apply-partially #'format
+						  "- %s")
+				 files)
+			 "\n"))))
+
+(defun assist--get-user-context ()
+  (mapcar #'assist--project-context-string
+	  (assist--get-project-files-assoc
+	   (mapcar #'buffer-file-name
+		   (assist--get-user-open-file-buffers)))))
 
 ;;; Response handling
 
