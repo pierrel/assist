@@ -84,7 +84,7 @@
 
 ;;; Message parsing
 
-(defun assist--parse-messages ()
+(defun assist--parse-messages (up-to-point)
   "Parse current buffer into human and AI messages."
   (save-excursion
     (goto-char (point-min))
@@ -114,9 +114,9 @@
           (setq current-pos ai-block-end)))
       
       ;; Add final human message if exists
-      (when (< current-pos (point-max))
+      (when (< current-pos up-to-point)
         (let ((human-text (string-trim
-                          (buffer-substring-no-properties current-pos (point-max)))))
+                          (buffer-substring-no-properties current-pos up-to-point))))
           (when (not (string-empty-p human-text))
             (push `((role . "user") (content . ,human-text)) messages))))
       
@@ -223,7 +223,7 @@ ERROR-CALLBACK is called on error."
   (unless (derived-mode-p 'org-mode)
     (user-error "Assist submission requires org-mode"))
   
-  (let ((messages (assist--parse-messages))
+  (let ((messages (assist--parse-messages (point)))
         (buffer-name (buffer-name))
 	(cur-point (point)))
     
