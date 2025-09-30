@@ -87,6 +87,20 @@
      (should (string= (cdr (assoc 'role (nth 2 messages))) "user"))
      (should (string= (cdr (assoc 'content (nth 2 messages))) "What's the weather like?")))))
 
+(ert-deftest assist-test-message-parsing-inside ()
+  "Test parsing conversation from the middle"
+  (with-test-buffer
+   "Hello, how are you?\n\n#+begin_ai\nI'm doing well, thank you!\n#+end_ai\n\nWhat's the weather like\n\nI wonder if its OK"
+   (beginning-of-buffer)
+   (search-forward "the weather like")
+   (forward-line)
+   (let ((messages (assist--parse-messages (point))))
+     (should (= (length messages) 3))
+     (should-not (seq-find (apply-partially #'string-match-p "I wonder if its OK")
+			   (mapcar (lambda (message)
+				     (cdr (assoc 'content message)))
+				   messages))))))
+
 (ert-deftest assist-test-message-parsing-with-thinking ()
   "Test parsing AI message with thinking section."
   (with-test-buffer
