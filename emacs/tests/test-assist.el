@@ -42,11 +42,12 @@
        (let ((newbuf (get-buffer-create buf)))
 	 (add-to-list 'to-kill newbuf)
 	 (switch-to-buffer newbuf)))
-     ,@body
-     ;; clean up
-     (dolist (buf to-kill)
-       (kill-buffer buf))
-     (delete-other-windows)))
+     (unwind-protect
+	 ,@body
+       ;; clean up
+       (dolist (buf to-kill)
+	 (kill-buffer buf))
+       (delete-other-windows))))
 
 
 ;;; Tests for utility functions
