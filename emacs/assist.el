@@ -4,7 +4,7 @@
 
 ;; Author: Assist Contributors
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1") (dash "20240510.1327"))
+;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, tools
 ;; URL: https://github.com/pierrel/assist
 
@@ -19,8 +19,6 @@
 (require 'org)
 (require 'json)
 (require 'url)
-(eval-when-compile (require 'dash))
-(require 'dash)
 
 ;;; Customization
 
@@ -165,23 +163,23 @@ ERROR-CALLBACK is called on error."
 (defun assist--get-user-open-file-buffers ()
   (if-let ((frame (selected-frame)))
       ;; Get all buffer names from the given frame:
-      (->> frame
-	   (buffer-list)		; all buffers
-	   (-map #'buffer-file-name)
-	   (-non-nil)
-	   (-map #'get-file-buffer)	; just those with files
-	   (-map #'get-buffer-window)	; mapped to windows
-	   (-non-nil)			; remove ones with no window
-	   (-map #'window-buffer))	; back to the buffer itself
+      (thread-last frame
+		   (buffer-list)		; all buffers
+		   (seq-map #'buffer-file-name)
+		   (seq-keep #'identity)
+		   (seq-map #'get-file-buffer)	; just those with files
+		   (seq-map #'get-buffer-window); mapped to windows
+		   (seq-keep #'identity)        ; remove ones with no window
+		   (seq-map #'window-buffer))	; back to the buffer itself
     (error "No focused frame found")))
 
 (defun assist--get-project-files-assoc (files)
-  (-group-by (lambda (e)
-               (with-current-buffer (get-file-buffer e)
-                 (if (fboundp 'projectile-project-root)
-                     (projectile-project-root)
-                   default-directory)))
-             files))
+  (seq-group-by (lambda (e)
+		  (with-current-buffer (get-file-buffer e)
+                    (if (fboundp 'projectile-project-root)
+			(projectile-project-root)
+                      default-directory)))
+		files))
 
 (defun assist--project-context-string (project-files)
   (let ((project (car project-files))
