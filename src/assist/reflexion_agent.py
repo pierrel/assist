@@ -101,12 +101,57 @@ def tool_list_item(tool: BaseTool) -> str:
     return f"- {tool.name}: {tool.description}"
 
 
+def _emit_status_message(content: str) -> AIMessage:
+    """Helper to create status messages that will be emitted during streaming."""
+    return AIMessage(content=content)
+
+
+class ToolCallCallback:
+    """Callback to capture tool calls and emit status messages."""
+    def __init__(self):
+        self.tool_calls = []
+    
+    def on_tool_start(self, tool_name: str):
+        self.tool_calls.append(f"Calling tool {tool_name}.")
+    
+    def get_and_clear_calls(self):
+        calls = self.tool_calls[:]
+        self.tool_calls.clear()
+        return calls
+
+
+def _detect_tool_calls_in_messages(messages: List[BaseMessage]) -> List[str]:
+    """Extract tool call names from messages for status reporting."""
+    tool_calls = []
+    for message in messages:
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            for tool_call in message.tool_calls:
+                if hasattr(tool_call, 'name'):
+                    tool_calls.append(f"Calling tool {tool_call.name}.")
+                elif isinstance(tool_call, dict) and 'name' in tool_call:
+                    tool_calls.append(f"Calling tool {tool_call['name']}.")
+    return tool_calls
+
+
 def build_plan_node(
     llm: BaseChatModel,
     tools: List[BaseTool],
     callbacks: Optional[List[Any]],
 ) -> Callable[[ReflexionState], Dict[str, object]]:
     def plan_node(state: ReflexionState) -> Dict[str, object]:
+        # Add thinking tag and planning start message
+        current_messages = state["messages"]
+        is_first_plan = state.get("replan_count", 0) == 0
+        
+        if is_first_plan:
+            # First time - add thinking tag
+            new_messages = current_messages + [_emit_status_message("<thinking>")]
+        else:
+            # Replanning
+            new_messages = current_messages + [_emit_status_message("Revising plan...")]
+        
+        new_messages = new_messages + [_emit_status_message("Planning...")]
+        
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
         tool_list = "\n".join(tool_list_item(t) for t in tools)
@@ -137,7 +182,12 @@ def build_plan_node(
         )
         logger.debug(f"Plan generated in {time.time() - start}s")
         replan_count = state.get("replan_count", 0) + 1
+        
+        # Add plan complete message
+        new_messages = new_messages + [_emit_status_message("Plan complete.")]
+        
         return {
+            "messages": new_messages,
             "plan": plan,
             "step_index": 0,
             "history": [],
@@ -170,12 +220,23 @@ def build_execute_node(
                 )
             ),
         ]
+        
+        # Start with current messages
+        current_messages = state["messages"]
+        
         try:
             result_raw = agent.invoke(
                 {"messages": messages},
                 {"callbacks": callbacks, "tags": ["execute"]},
             )
             result = AgentInvokeResult.model_validate(result_raw)
+            
+            # Detect tool calls and add status messages
+            all_messages = result.messages
+            tool_call_statuses = _detect_tool_calls_in_messages(all_messages)
+            for tool_status in tool_call_statuses:
+                current_messages = current_messages + [_emit_status_message(tool_status)]
+            
             output_msg = result.messages[-1]
             resolution = output_msg.content
         except GraphRecursionError:
@@ -184,14 +245,19 @@ def build_execute_node(
                 "A replan may be needed if this step was crucial."
             )
             state["plan_check_needed"] = True
+        
         res = StepResolution(
             action=step.action,
             objective=step.objective,
             resolution=resolution,
         )
-        state["history"] = state["history"] + [res]
-        state["step_index"] = step_index + 1
-        return state
+        
+        # Update state
+        new_state = state.copy()
+        new_state["messages"] = current_messages
+        new_state["history"] = state["history"] + [res]
+        new_state["step_index"] = step_index + 1
+        return new_state
 
     return execute_node
 
@@ -232,6 +298,9 @@ def build_summarize_node(
     callbacks: Optional[List[Any]],
 ) -> Callable[[ReflexionState], Dict[str, List[BaseMessage]]]:
     def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
+        # Add summarizing status message
+        current_messages = state["messages"] + [_emit_status_message("Summarizing...")]
+        
         history_text = "\n".join(h.resolution for h in state["history"])
         sys_msgs, context_msgs = _extract_system_and_context(state["messages"])
         system_prompt = _combine_system_prompt(
@@ -249,7 +318,10 @@ def build_summarize_node(
             messages,
             {"callbacks": callbacks, "tags": ["summarize"]}
         )
-        return {"messages": state["messages"] + [summary]}
+        
+        # Add thinking close tag before the final summary
+        final_messages = current_messages + [_emit_status_message("</thinking>")] + [summary]
+        return {"messages": final_messages}
     return summarize_node
 
 
@@ -277,7 +349,10 @@ def build_recursion_node(
             ),
         ]
         question = llm.invoke(messages, {"callbacks": callbacks, "tags": ["recursion"]})
-        return {"messages": state["messages"] + [question]}
+        
+        # Add thinking close tag before the final question
+        final_messages = state["messages"] + [_emit_status_message("</thinking>")] + [question]
+        return {"messages": final_messages}
 
     return recursion_node
 
