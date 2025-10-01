@@ -63,6 +63,7 @@ mypy src
 #+end_src
 
 Both coverage and type checking run in CI for pull requests and pushes to main.
+Emacs linting and testing also run in CI using eldev.
 Reports are uploaded as artifacts and do not block the build.
 
 Run the integration tests with:
