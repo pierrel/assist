@@ -68,6 +68,10 @@ class _DeterministicEmbedding:
             vectors.append(rng.random(self._dim, dtype=np.float32).tolist())
         return vectors
 
+    def embed_query(self, input: List[str]) -> List[List[float]]:  # pragma: no cover - simple
+        """Embed query texts for search. This is called by ChromaDB during query operations."""
+        return self.__call__(input)
+
     def name(self) -> str:  # pragma: no cover - simple
         return "deterministic"
 

@@ -1,4 +1,7 @@
 Execute this step:
+{{ step.action }}
+
+To achieve this objective:
 {{ step.objective }}
 
 Here is the overall goal, for which this is one step:
