@@ -22,6 +22,8 @@ typer
 pyyaml
 jsonschema
 pathspec
+requests
 types-requests
 types-python-dateutil
+types-PyYAML
 
