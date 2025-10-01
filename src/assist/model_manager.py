@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
 
+import requests
 import yaml
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -47,6 +48,7 @@ class OpenAIConfig:
     url: str
     model: str
     api_key: str
+    test_url_path: Optional[str] = None
 
 
 def _project_root() -> Path:
@@ -61,6 +63,19 @@ def _project_root() -> Path:
 
 def _config_path() -> Path:
     return _project_root() / CONFIG_FILENAME
+
+
+def _test_local_llm_availability(config: OpenAIConfig) -> bool:
+    """Test if the local LLM is available by making a request to the test URL."""
+    if not config.test_url_path:
+        return False
+    
+    test_url = config.url.rstrip('/') + config.test_url_path
+    try:
+        response = requests.get(test_url, timeout=5)
+        return bool(response.status_code == 200)
+    except (requests.RequestException, Exception):
+        return False
 
 
 @lru_cache(maxsize=1)
@@ -86,6 +101,7 @@ def _load_custom_openai_config() -> Optional[OpenAIConfig]:
         url=str(raw["url"]),
         model=str(raw["model"]),
         api_key=str(raw["api_key"]),
+        test_url_path=str(raw["test_url_path"]),
     )
 
 
@@ -110,13 +126,18 @@ def select_chat_model(model: str, temperature: float) -> BaseChatModel:
 
     config = _load_custom_openai_config()
     if config:
-        return _build_openai_chat_model(
-            config.model,
-            temperature=temperature,
-            base_url=config.url,
-            api_key=config.api_key,
-        )
+        if _test_local_llm_availability(config):
+            print(f"Using local LLM configuration from {CONFIG_FILENAME}")
+            return _build_openai_chat_model(
+                config.model,
+                temperature=temperature,
+                base_url=config.url,
+                api_key=config.api_key,
+            )
+        else:
+            print(f"Local LLM from {CONFIG_FILENAME} is not available, falling back to OpenAI API")
 
+    print("Using OpenAI API configuration")
     if model.startswith("gpt-"):
         return _build_openai_chat_model(model, temperature=temperature)
 
@@ -133,14 +154,19 @@ def get_model_pair(temperature: float) -> Tuple[BaseChatModel, BaseChatModel]:
 
     config = _load_custom_openai_config()
     if config:
-        llm = _build_openai_chat_model(
-            config.model,
-            temperature=temperature,
-            base_url=config.url,
-            api_key=config.api_key,
-        )
-        return llm, llm
+        if _test_local_llm_availability(config):
+            print(f"Using local LLM configuration from {CONFIG_FILENAME}")
+            llm = _build_openai_chat_model(
+                config.model,
+                temperature=temperature,
+                base_url=config.url,
+                api_key=config.api_key,
+            )
+            return llm, llm
+        else:
+            print(f"Local LLM from {CONFIG_FILENAME} is not available, falling back to OpenAI API")
 
+    print("Using OpenAI API configuration")
     default_llm = _build_openai_chat_model(DEFAULT_MODEL, temperature=temperature)
     return default_llm, default_llm
 
