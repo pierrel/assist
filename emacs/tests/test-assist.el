@@ -19,6 +19,37 @@
      (goto-char (point-min))
      ,@body))
 
+(defmacro with-project (name open-files open-fileless-buffers &rest body)
+  "Creates a project and opens some buffers and files."
+  `(let* ((tmp-dir (make-temp-file ,name t))
+	  (default-directory tmp-dir)
+	  (assist--captured nil)
+	  (to-kill '()))
+     (dolist (open-file ,open-files)
+       (let* ((full-filename (expand-file-name open-file))
+	      (new-temp-file
+	       (make-temp-file (expand-file-name open-file
+						 tmp-dir))))
+	 (split-window-below)
+	 (balance-windows)
+	 (other-window 1)
+	 (add-to-list 'to-kill
+		      (find-file new-temp-file))))
+     (dolist (buf ,open-fileless-buffers)
+       (split-window-below)
+       (balance-windows)
+       (other-window 1)
+       (let ((newbuf (get-buffer-create buf)))
+	 (add-to-list 'to-kill newbuf)
+	 (switch-to-buffer newbuf)))
+     (unwind-protect
+	 ,@body
+       ;; clean up
+       (dolist (buf to-kill)
+	 (kill-buffer buf))
+       (delete-other-windows))))
+
+
 ;;; Tests for utility functions
 
 (ert-deftest assist-test-buffer-is-assist-p ()
@@ -35,7 +66,7 @@
   "Test parsing simple human message."
   (with-test-buffer
    "Hello, how are you?"
-   (let ((messages (assist--parse-messages)))
+   (let ((messages (assist--parse-messages (point-max))))
      (should (= (length messages) 1))
      (should (string= (cdr (assoc 'role (car messages))) "user"))
      (should (string= (cdr (assoc 'content (car messages))) "Hello, how are you?")))))
@@ -44,7 +75,7 @@
   "Test parsing conversation with AI response."
   (with-test-buffer
    "Hello, how are you?\n\n#+begin_ai\nI'm doing well, thank you!\n#+end_ai\n\nWhat's the weather like?"
-   (let ((messages (assist--parse-messages)))
+   (let ((messages (assist--parse-messages (point-max))))
      (should (= (length messages) 3))
      ;; First human message
      (should (string= (cdr (assoc 'role (nth 0 messages))) "user"))
@@ -56,11 +87,25 @@
      (should (string= (cdr (assoc 'role (nth 2 messages))) "user"))
      (should (string= (cdr (assoc 'content (nth 2 messages))) "What's the weather like?")))))
 
+(ert-deftest assist-test-message-parsing-inside ()
+  "Test parsing conversation from the middle"
+  (with-test-buffer
+   "Hello, how are you?\n\n#+begin_ai\nI'm doing well, thank you!\n#+end_ai\n\nWhat's the weather like\n\nI wonder if its OK"
+   (beginning-of-buffer)
+   (search-forward "the weather like")
+   (forward-line)
+   (let ((messages (assist--parse-messages (point))))
+     (should (= (length messages) 3))
+     (should-not (seq-find (apply-partially #'string-match-p "I wonder if its OK")
+			   (mapcar (lambda (message)
+				     (cdr (assoc 'content message)))
+				   messages))))))
+
 (ert-deftest assist-test-message-parsing-with-thinking ()
   "Test parsing AI message with thinking section."
   (with-test-buffer
    "What is 2+2?\n\n#+begin_ai\n<thinking>\nThis is a simple math question. 2+2 equals 4.\n</thinking>\n\nThe answer is 4.\n#+end_ai"
-   (let ((messages (assist--parse-messages)))
+   (let ((messages (assist--parse-messages (point-max))))
      (should (= (length messages) 2))
      ;; Human message
      (should (string= (cdr (assoc 'role (nth 0 messages))) "user"))
@@ -211,5 +256,42 @@
             (should (derived-mode-p 'org-mode))
             (should assist-minor-mode)))
       (kill-buffer buffer))))
+
+(ert-deftest assist-test-with-project ()
+  (with-project "assist-proj"
+		'("one.txt")
+		'("*hello*")
+		(should (seq-find (apply-partially #'string-match-p
+						   "one.txt")
+				  (mapcar #'buffer-name
+					  (buffer-list)))))
+  (should-not (seq-find (apply-partially #'string-match-p
+					 "one.txt")
+			(mapcar #'buffer-name
+				(buffer-list)))))
+
+(ert-deftest assist-test-get-user-context ()
+  (with-project "assist-user-context"
+		'("one.txt" "two.txt")
+		'("*hello*")
+		(should (string-match-p "one.txt"
+					(assist--get-user-context)))
+		(should (string-match-p "two.txt"
+					(assist--get-user-context)))
+		(should-not (string-match-p "*hello*"
+					    (assist--get-user-context)))
+		(should (string-match-p "/tmp"
+					(assist--get-user-context)))))
+
+(ert-deftest assist-test-send-request-with-context ()
+   (with-test-buffer
+    "Hello, how are you?\n\n#+begin_ai\nI'm doing well, thank you!\n#+end_ai\n\nWhat's the weather like?"
+    (let ((messages (assist--add-to-last-message
+		     (assist--parse-messages (point-max))
+		     "Hellooooooooo")))
+      ;; Last human message
+      (should (string-match-p "Hellooooooooo"
+			      (cdr (assoc 'content
+					  (car (last messages)))))))))
 
 ;;; test-assist.el ends here

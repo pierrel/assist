@@ -6,7 +6,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience, tools
-;; URL: https://github.com/user/assist
+;; URL: https://github.com/pierrel/assist
 
 ;;; Commentary:
 
@@ -119,7 +119,7 @@ LLM can reason about the user's workspace.  Safe for Emacs 27: only uses Project
 
 ;;; Message parsing
 
-(defun assist--parse-messages ()
+(defun assist--parse-messages (up-to-point)
   "Parse current buffer into human and AI messages."
   (save-excursion
     (goto-char (point-min))
@@ -149,9 +149,9 @@ LLM can reason about the user's workspace.  Safe for Emacs 27: only uses Project
           (setq current-pos ai-block-end)))
       
       ;; Add final human message if exists
-      (when (< current-pos (point-max))
+      (when (< current-pos up-to-point)
         (let ((human-text (string-trim
-                          (buffer-substring-no-properties current-pos (point-max)))))
+                          (buffer-substring-no-properties current-pos up-to-point))))
           (when (not (string-empty-p human-text))
             (push `((role . "user") (content . ,human-text)) messages))))
       
@@ -192,6 +192,47 @@ ERROR-CALLBACK is called on error."
                       (forward-char 1)
                       (funcall success-callback :data (buffer-substring (point) (point-max)))))
                   nil t)))
+
+;;; Context handling
+
+(defun assist--get-user-open-file-buffers ()
+  (if-let ((frame (selected-frame)))
+      ;; Get all buffer names from the given frame:
+      (thread-last frame
+		   (buffer-list)		; all buffers
+		   (seq-map #'buffer-file-name)
+		   (seq-keep #'identity)
+		   (seq-map #'get-file-buffer)	; just those with files
+		   (seq-map #'get-buffer-window); mapped to windows
+		   (seq-keep #'identity)        ; remove ones with no window
+		   (seq-map #'window-buffer))	; back to the buffer itself
+    (error "No focused frame found")))
+
+(defun assist--get-project-files-assoc (files)
+  (seq-group-by (lambda (e)
+		  (with-current-buffer (get-file-buffer e)
+                    (if (fboundp 'projectile-project-root)
+			(projectile-project-root)
+                      default-directory)))
+		files))
+
+(defun assist--project-context-string (project-files)
+  (let ((project (car project-files))
+	(files (cdr project-files)))
+    (format "The following files are open in project %s:\n%s"
+	    project
+	    (string-join (mapcar (apply-partially #'format
+						  "- %s")
+				 files)
+			 "\n"))))
+
+(defun assist--get-user-context ()
+  (string-join
+   (mapcar #'assist--project-context-string
+           (assist--get-project-files-assoc
+            (mapcar #'buffer-file-name
+                    (assist--get-user-open-file-buffers))))
+   "\n\n"))
 
 ;;; Response handling
 
@@ -250,6 +291,20 @@ ERROR-CALLBACK is called on error."
       (assist--set-status "assist: done")
       (run-with-timer 3 nil (lambda () (assist--set-status "assist"))))))
 
+(defun assist--add-to-last-message (messages addition)
+  "Adds `addition' to the end of the final message in `messages'"
+  (let* ((the-last-message (car (last messages)))
+	 (the-last-content (cdr (assoc 'content
+				       the-last-message))))
+    (append (butlast messages)
+	    (list
+	     (cons
+	      (cons 'content
+		    (string-join (list the-last-content
+				       addition)
+				 "\n\n"))
+	      (assoc-delete-all 'content the-last-message))))))
+
 ;;; Core functions
 
 (defun assist-submit ()
@@ -261,10 +316,11 @@ CUR-POINT at submission time marks where streaming text will be inserted."
   (unless (derived-mode-p 'org-mode)
     (user-error "Assist submission requires org-mode"))
   
-  (let* ((messages (assist--parse-messages))
-         (buffer-name (buffer-name))
-	 (cur-point (point))
-         (context (assist--generate-open-files-context)))
+  (let ((messages (assist--add-to-last-message
+		   (assist--parse-messages (point))
+		   (assist--get-user-context)))
+        (buffer-name (buffer-name))
+	(cur-point (point)))
     
     (when (null messages)
       (user-error "No messages to submit"))
