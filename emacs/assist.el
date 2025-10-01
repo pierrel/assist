@@ -199,7 +199,7 @@ ERROR-CALLBACK is called on error."
            (assist--get-project-files-assoc
             (mapcar #'buffer-file-name
                     (assist--get-user-open-file-buffers))))
-   "\n"))
+   "\n\n"))
 
 ;;; Response handling
 
@@ -258,6 +258,20 @@ ERROR-CALLBACK is called on error."
       (assist--set-status "assist: done")
       (run-with-timer 3 nil (lambda () (assist--set-status "assist"))))))
 
+(defun assist--add-to-last-message (messages addition)
+  "Adds `addition' to the end of the final message in `messages'"
+  (let* ((the-last-message (car (last messages)))
+	 (the-last-content (cdr (assoc 'content
+				       the-last-message))))
+    (append (butlast messages)
+	    (list
+	     (cons
+	      (cons 'content
+		    (string-join (list the-last-content
+				       addition)
+				 "\n\n"))
+	      (assoc-delete-all 'content the-last-message))))))
+
 ;;; Core functions
 
 (defun assist-submit ()
@@ -266,7 +280,9 @@ ERROR-CALLBACK is called on error."
   (unless (derived-mode-p 'org-mode)
     (user-error "Assist submission requires org-mode"))
   
-  (let ((messages (assist--parse-messages (point)))
+  (let ((messages (assist--add-to-last-message
+		   (assist--parse-messages (point))
+		   (assist--get-user-context)))
         (buffer-name (buffer-name))
 	(cur-point (point)))
     

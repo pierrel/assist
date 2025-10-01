@@ -283,4 +283,15 @@
 		(should (string-match-p "/tmp"
 					(assist--get-user-context)))))
 
+(ert-deftest assist-test-send-request-with-context ()
+   (with-test-buffer
+    "Hello, how are you?\n\n#+begin_ai\nI'm doing well, thank you!\n#+end_ai\n\nWhat's the weather like?"
+    (let ((messages (assist--add-to-last-message
+		     (assist--parse-messages (point-max))
+		     "Hellooooooooo")))
+      ;; Last human message
+      (should (string-match-p "Hellooooooooo"
+			      (cdr (assoc 'content
+					  (car (last messages)))))))))
+
 ;;; test-assist.el ends here
