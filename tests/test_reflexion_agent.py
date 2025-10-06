@@ -181,7 +181,7 @@ def test_execute_node_passes_history_to_agent(monkeypatch):
     assert len(agent.calls) == 2
     first_call = agent.calls[0][-1].content
     assert len(agent.calls[0]) == 2
-    assert "step1" in first_call
+    assert "obj1" in first_call
     second_call = agent.calls[1][-1].content
     assert "result1" in second_call
     assert out1["history"][0].resolution.endswith("result1")
