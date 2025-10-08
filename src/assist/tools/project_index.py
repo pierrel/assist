@@ -60,13 +60,22 @@ class _DeterministicEmbedding:
     def __init__(self, dim: int = 64) -> None:
         self._dim = dim
 
-    def __call__(self, input: List[str]) -> List[List[float]]:  # pragma: no cover - simple
+    def _embed(self, input: List[str]) -> List[List[float]]:
         vectors: List[List[float]] = []
         for text in input:
             seed = int(hashlib.sha256(text.encode()).hexdigest(), 16) % (2**32)
             rng = np.random.default_rng(seed)
             vectors.append(rng.random(self._dim, dtype=np.float32).tolist())
         return vectors
+
+    def __call__(self, input: List[str]) -> List[List[float]]:  # pragma: no cover - simple
+        return self._embed(list(input))
+
+    def embed_documents(self, input: List[str]) -> List[List[float]]:  # pragma: no cover - simple
+        return self._embed(list(input))
+
+    def embed_query(self, input: List[str]) -> List[List[float]]:  # pragma: no cover - simple
+        return self._embed(list(input))
 
     def name(self) -> str:  # pragma: no cover - simple
         return "deterministic"
