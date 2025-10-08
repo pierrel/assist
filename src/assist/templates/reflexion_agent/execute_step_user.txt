@@ -1,5 +1,6 @@
 Execute this step:
-{{ step.objective }}
+Action: {{ step.action }}
+Objective: {{ step.objective }}
 
 Here is the overall goal, for which this is one step:
 {{ goal }}
