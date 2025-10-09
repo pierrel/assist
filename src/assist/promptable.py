@@ -6,7 +6,9 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 
 env = Environment(
     loader=PackageLoader("assist"),
-    autoescape=select_autoescape(),
+    autoescape=select_autoescape(
+        enabled_extensions=("html", "htm", "xml", "md", "md.jinja"),
+    ),
 )
 
 
