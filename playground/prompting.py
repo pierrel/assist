@@ -5,5 +5,5 @@ class MyClass(Promptable):
         return self.prompt_file()
 
 mc = MyClass()
-mc.prompt_for("test_template.txt",
+mc.prompt_for("test_template.md.jinja",
               here="Here it is")

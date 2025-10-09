@@ -114,7 +114,7 @@ def build_plan_node(
         prior_messages = state["messages"][:-1]
         sys_msgs, context_msgs = _extract_system_and_context(prior_messages)
         system_prompt = _combine_system_prompt(
-            base_prompt_for("reflexion_agent/make_plan_system.txt",
+            base_prompt_for("reflexion_agent/make_plan_system.md.jinja",
                             tools=tool_list,
                             project_root=project_root),
             sys_msgs
@@ -124,7 +124,7 @@ def build_plan_node(
             *context_msgs,
             HumanMessage(
                 content=base_prompt_for(
-                    "reflexion_agent/make_plan_user.txt",
+                    "reflexion_agent/make_plan_user.md.jinja",
                     task=request,
                     learnings=state.get("learnings", [])
                 )
@@ -159,10 +159,10 @@ def build_execute_node(
         history_text = "\n".join([str(h) for h in state['history']])
         project_root = os.environ.get("ASSIST_SERVER_PROJECT_ROOT", "")
         messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/execute_step_system.md.jinja")),
             HumanMessage(
                 content=base_prompt_for(
-                    "reflexion_agent/execute_step_user.txt",
+                    "reflexion_agent/execute_step_user.md.jinja",
                     history=history_text,
                     step=step,
                     goal=state["plan"].goal,
@@ -204,13 +204,13 @@ def build_plan_check_node(
         """Asks an llm if a replan is required. If so, updates learnings and the replan bit."""
         plan = state["plan"]
         human_prompt = base_prompt_for(
-            "reflexion_agent/plan_check_user.txt",
+            "reflexion_agent/plan_check_user.md.jinja",
             step_resolutions=state["history"],
             remaining_steps=plan.steps[len(state["history"]):],
             goal=plan.goal
         )
         messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/plan_check_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/plan_check_system.md.jinja")),
             HumanMessage(content=human_prompt),
         ]
 
@@ -235,14 +235,14 @@ def build_summarize_node(
         history_text = "\n".join(h.resolution for h in state["history"])
         sys_msgs, context_msgs = _extract_system_and_context(state["messages"])
         system_prompt = _combine_system_prompt(
-            base_prompt_for("reflexion_agent/summarize_system.txt"), sys_msgs
+            base_prompt_for("reflexion_agent/summarize_system.md.jinja"), sys_msgs
         )
 
         messages = [
             SystemMessage(content=system_prompt),
             *context_msgs[:-1],
             HumanMessage(
-                content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
+                content=base_prompt_for("reflexion_agent/summarize_user.md.jinja", history=history_text)
             ),
         ]
         summary = llm.invoke(
@@ -266,10 +266,10 @@ def build_recursion_node(
             f"{i+1}. {h.action}: {h.resolution}" for i, h in enumerate(state.get("history", []))
         )
         messages = [
-            SystemMessage(content=base_prompt_for("reflexion_agent/recursion_system.txt")),
+            SystemMessage(content=base_prompt_for("reflexion_agent/recursion_system.md.jinja")),
             HumanMessage(
                 content=base_prompt_for(
-                    "reflexion_agent/recursion_user.txt",
+                    "reflexion_agent/recursion_user.md.jinja",
                     goal=plan.goal if plan else "",
                     plan_steps=steps_text,
                     history=history_text,
