@@ -52,8 +52,22 @@ response = requests.post(
             {"role": "user",
              "content": "And what's it's population?"}
         ],
+        "stream": True,
     },
+    stream=True
 )
-print(response.text)
+
+counter = 0
+saved = []
+for line in response.iter_lines():
+    if line:
+        saved.append(line)
+        print(f"{counter}: {line}")
+        counter += 1
+
+print("Full output")
+counter = 0
+for line in saved:
+    print(f"{counter}: {line}")
 
 stop_server(server, server_thread)

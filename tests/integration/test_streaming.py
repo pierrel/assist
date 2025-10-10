@@ -38,6 +38,22 @@ def run_server():
     srv.should_exit = True
     thread.join()
 
+def test_streaming_agent():
+    agent, plan_llm = server.get_agent(0.2)
+
+    payload = {"messages": [
+            {
+                "role": "user",
+                "content": "What is the capital of France?",
+            }
+    ]}
+    saved = []
+    for ch, metadata in agent.stream(payload,
+                                     stream_mode="messages"):
+        saved.append(ch)
+
+    assert len(saved) > 20
+
 
 def test_streaming_chat_completions(run_server):
     url = f"{run_server}/chat/completions"

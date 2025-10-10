@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 import json
 from loguru import logger
+from assist.debug_callback import ReadableConsoleCallbackHandler
 from typing import Any, Awaitable, Callable, Iterator, List, Optional, Union, Mapping, Sequence
 from itertools import takewhile
 
@@ -122,6 +123,7 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
     active_model = getattr(plan_llm, "model", "gpt-4o-mini")
     langchain_messages = openai_to_langchain(request.messages)
     user_request = langchain_messages[-1].content
+    callbacks = [ReadableConsoleCallbackHandler()]
 
     if request.stream:
         def event_gen() -> Iterator[str]:
@@ -135,7 +137,7 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
             }
             yield f"data: {json.dumps(first)}\n\n"
             skip_idx = 0
-            for ch, metadata in agent.stream({"messages": langchain_messages}, stream_mode="messages"):
+            for ch, metadata in agent.stream({"messages": langchain_messages}, stream_mode="messages", callbacks=callbacks):
                 if skip_idx < len(langchain_messages) and ch == langchain_messages[skip_idx]:
                     skip_idx += 1
                     continue
@@ -163,7 +165,8 @@ def chat_completions(request: ChatCompletionRequest) -> Response:
 
         return StreamingResponse(event_gen(), media_type="text/event-stream")
 
-    resp_raw = agent.invoke({"messages": langchain_messages})
+    resp_raw = agent.invoke({"messages": langchain_messages},
+                            callbacks=callbacks)
     resp = AgentInvokeResult.model_validate(resp_raw)
     message = resp.messages[-1]
     created = int(time.time())

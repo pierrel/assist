@@ -7,9 +7,8 @@ import time
 from typing import Any, Callable, Dict, List, Optional, TypedDict, Literal, cast
 
 from loguru import logger
-from assist.debug_callback import ReadableConsoleCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
-from langchain_core.runnables import Runnable
+from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
@@ -26,7 +25,6 @@ from assist.promptable import base_prompt_for
 from assist.agent_types import AgentInvokeResult
 
 REPLAN_LIMIT = 3
-
 
 def _extract_system_and_context(messages: List[BaseMessage]) -> tuple[list[str], List[BaseMessage]]:
     """Return system message contents and non-system messages."""
@@ -104,9 +102,9 @@ def tool_list_item(tool: BaseTool) -> str:
 def build_plan_node(
     llm: BaseChatModel,
     tools: List[BaseTool],
-    callbacks: Optional[List[Any]],
 ) -> Callable[[ReflexionState], Dict[str, object]]:
-    def plan_node(state: ReflexionState) -> Dict[str, object]:
+    def plan_node(state: ReflexionState,
+                  config:RunnableConfig) -> Dict[str, object]:
         user_msg = state["messages"][-1]
         request = getattr(user_msg, "content", user_msg)
         tool_list = "\n".join(tool_list_item(t) for t in tools)
@@ -131,9 +129,9 @@ def build_plan_node(
             ),
         ]
         start = time.time()
-        plan = llm.with_structured_output(Plan).invoke(
+        plan = llm.with_structured_output(Plan).with_config(tags=["plan"]).invoke(
             messages,
-            {"callbacks": callbacks, "tags": ["plan"]}
+            config=config,
         )
         logger.debug(f"Plan generated in {time.time() - start}s")
         replan_count = state.get("replan_count", 0) + 1
@@ -151,9 +149,9 @@ def build_plan_node(
 
 def build_execute_node(
     agent: Runnable[Any, Any],
-    callbacks: Optional[List[Any]],
 ) -> Callable[[ReflexionState], ReflexionState]:
-    def execute_node(state: ReflexionState) -> ReflexionState:
+    def execute_node(state: ReflexionState,
+                     config: RunnableConfig) -> ReflexionState:
         step = state["plan"].steps[state["step_index"]]
         step_index = state['step_index']
         history_text = "\n".join([str(h) for h in state['history']])
@@ -171,9 +169,9 @@ def build_execute_node(
             ),
         ]
         try:
-            result_raw = agent.invoke(
+            result_raw = agent.with_config(tags=["execute"]).invoke(
                 {"messages": messages},
-                {"callbacks": callbacks, "tags": ["execute"]},
+                config=config,
             )
             result = AgentInvokeResult.model_validate(result_raw)
             output_msg = result.messages[-1]
@@ -198,9 +196,8 @@ def build_execute_node(
 
 def build_plan_check_node(
     llm: BaseChatModel,
-    callbacks: Optional[List[Any]],
 ) -> Callable[[ReflexionState], Dict[str, object]]:
-    def plan_check_node(state: ReflexionState) -> Dict[str, object]:
+    def plan_check_node(state: ReflexionState, config: RunnableConfig) -> Dict[str, object]:
         """Asks an llm if a replan is required. If so, updates learnings and the replan bit."""
         plan = state["plan"]
         human_prompt = base_prompt_for(
@@ -214,9 +211,9 @@ def build_plan_check_node(
             HumanMessage(content=human_prompt),
         ]
 
-        retro_raw = llm.with_structured_output(PlanRetrospective).invoke(
+        retro_raw = llm.with_config(tags=["plan_check"]).with_structured_output(PlanRetrospective).invoke(
             messages,
-            {"callbacks": callbacks, "tags": ["plan_check"]}
+            config=config,
         )
         retro = PlanRetrospective.model_validate(retro_raw)
         all_learnings = state.get("learnings", [])
@@ -227,11 +224,10 @@ def build_plan_check_node(
     return plan_check_node
 
 
-def build_summarize_node(
-    llm: BaseChatModel,
-    callbacks: Optional[List[Any]],
-) -> Callable[[ReflexionState], Dict[str, List[BaseMessage]]]:
-    def summarize_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
+def build_summarize_node(llm: BaseChatModel) -> Callable[[ReflexionState], Dict[str, List[BaseMessage]]]:
+    def summarize_node(state: ReflexionState,
+                       *,
+                       config:RunnableConfig) -> Dict[str, List[BaseMessage]]:
         history_text = "\n".join(h.resolution for h in state["history"])
         sys_msgs, context_msgs = _extract_system_and_context(state["messages"])
         system_prompt = _combine_system_prompt(
@@ -245,9 +241,10 @@ def build_summarize_node(
                 content=base_prompt_for("reflexion_agent/summarize_user.txt", history=history_text)
             ),
         ]
-        summary = llm.invoke(
+
+        summary = llm.with_config(tags=["summary"]).invoke(
             messages,
-            {"callbacks": callbacks, "tags": ["summarize"]}
+            config=config,
         )
         return {"messages": state["messages"] + [summary]}
     return summarize_node
@@ -255,9 +252,9 @@ def build_summarize_node(
 
 def build_recursion_node(
     llm: BaseChatModel,
-    callbacks: Optional[List[Any]],
 ) -> Callable[[ReflexionState], Dict[str, List[BaseMessage]]]:
-    def recursion_node(state: ReflexionState) -> Dict[str, List[BaseMessage]]:
+    def recursion_node(state: ReflexionState,
+                       config: RunnableConfig) -> Dict[str, List[BaseMessage]]:
         plan = state.get("plan")
         steps_text = "\n".join(
             f"{i+1}. {s.action} - {s.objective}" for i, s in enumerate(plan.steps)
@@ -276,7 +273,8 @@ def build_recursion_node(
                 )
             ),
         ]
-        question = llm.invoke(messages, {"callbacks": callbacks, "tags": ["recursion"]})
+        question = llm.with_config(tags=["recursion"]).invoke(messages,
+                              config=config)
         return {"messages": state["messages"] + [question]}
 
     return recursion_node
@@ -328,7 +326,6 @@ def big_condition(state: ReflexionState) -> Literal["execute", "plan", "summariz
 def build_reflexion_graph(
     llm: BaseChatModel,
     tools: List[BaseTool],
-    callbacks: Optional[List[Any]] = None,
     execution_llm: Optional[BaseChatModel] = None,
 ) -> Runnable[Any, Any]:
     """Compose planning, step execution and summarization using LangGraph.
@@ -339,16 +336,15 @@ def build_reflexion_graph(
     used for execution.
     """
 
-    callbacks = callbacks or [ReadableConsoleCallbackHandler()]
     exec_llm = execution_llm or llm
     agent = general_agent(exec_llm, tools)
     graph = StateGraph(ReflexionState)
 
-    graph.add_node("plan", cast(Any, build_plan_node(llm, tools, callbacks)))
-    graph.add_node("execute", cast(Any, build_execute_node(agent, callbacks)))
-    graph.add_node("plan_check", cast(Any, build_plan_check_node(llm, callbacks)))
-    graph.add_node("summarize", cast(Any, build_summarize_node(llm, callbacks)))
-    graph.add_node("recursion", cast(Any, build_recursion_node(llm, callbacks)))
+    graph.add_node("plan", cast(Any, build_plan_node(llm, tools)))
+    graph.add_node("execute", cast(Any, build_execute_node(agent)))
+    graph.add_node("plan_check", cast(Any, build_plan_check_node(llm)))
+    graph.add_node("summarize", cast(Any, build_summarize_node(llm)))
+    graph.add_node("recursion", cast(Any, build_recursion_node(llm)))
 
     graph.add_edge("plan", "execute")
     graph.add_conditional_edges("plan_check", big_condition)
