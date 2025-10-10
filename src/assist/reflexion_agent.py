@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict, Literal, cast
 from loguru import logger
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, BaseMessage
 from langchain_core.runnables import Runnable, RunnableConfig
+from assist.debug_callback import ReadableConsoleCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
@@ -131,7 +132,6 @@ def build_plan_node(
         start = time.time()
         plan = llm.with_structured_output(Plan).with_config(tags=["plan"]).invoke(
             messages,
-            config=config,
         )
         logger.debug(f"Plan generated in {time.time() - start}s")
         replan_count = state.get("replan_count", 0) + 1
@@ -171,7 +171,6 @@ def build_execute_node(
         try:
             result_raw = agent.with_config(tags=["execute"]).invoke(
                 {"messages": messages},
-                config=config,
             )
             result = AgentInvokeResult.model_validate(result_raw)
             output_msg = result.messages[-1]
@@ -213,7 +212,6 @@ def build_plan_check_node(
 
         retro_raw = llm.with_config(tags=["plan_check"]).with_structured_output(PlanRetrospective).invoke(
             messages,
-            config=config,
         )
         retro = PlanRetrospective.model_validate(retro_raw)
         all_learnings = state.get("learnings", [])
@@ -242,9 +240,9 @@ def build_summarize_node(llm: BaseChatModel) -> Callable[[ReflexionState], Dict[
             ),
         ]
 
-        summary = llm.with_config(tags=["summary"]).invoke(
+        summary = llm.with_config(tags=["summary"],
+                                  config=config).invoke(
             messages,
-            config=config,
         )
         return {"messages": state["messages"] + [summary]}
     return summarize_node
@@ -273,8 +271,7 @@ def build_recursion_node(
                 )
             ),
         ]
-        question = llm.with_config(tags=["recursion"]).invoke(messages,
-                              config=config)
+        question = llm.with_config(tags=["recursion"]).invoke(messages)
         return {"messages": state["messages"] + [question]}
 
     return recursion_node
@@ -353,4 +350,4 @@ def build_reflexion_graph(
     graph.add_edge("summarize", END)
     graph.add_edge("recursion", END)
     compiled = graph.compile()
-    return compiled
+    return compiled.with_config(callbacks=[ReadableConsoleCallbackHandler])
