@@ -324,8 +324,6 @@ CUR-POINT at submission time marks where streaming text will be inserted."
     
     (when (null messages)
       (user-error "No messages to submit"))
-    (when context
-      (setq messages (cons `((role . "system") (content . ,context)) messages)))
     
     (assist--set-status "assist: submitting")
     (message "assist: submitting")
