@@ -350,4 +350,4 @@ def build_reflexion_graph(
     graph.add_edge("summarize", END)
     graph.add_edge("recursion", END)
     compiled = graph.compile()
-    return compiled.with_config(callbacks=[ReadableConsoleCallbackHandler])
+    return compiled.with_config(callbacks=[ReadableConsoleCallbackHandler()])
