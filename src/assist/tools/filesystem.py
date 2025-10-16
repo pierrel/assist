@@ -12,6 +12,22 @@ from assist.study_agent import study_file
 # Tools for working with the filesystem
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 @tool
 def list_files(root: str) -> list[str]:
     """Recursively list files under ``root`` with creation and modification times.
@@ -184,14 +200,15 @@ def write_file_user(
             raise ValueError("File exists but is not tracked by Git")
         if not (overwrite or append):
             raise ValueError("File exists; set overwrite=True or append=True to modify")
-        mode = "a" if append else "w"
+        if append:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            _atomic_write(p, content)
     else:
         if not parent.exists():
             raise ValueError("Parent directory does not exist")
-        mode = "w"
-
-    with open(p, mode, encoding="utf-8") as f:
-        f.write(content)
+        _atomic_write(p, content)
 
     return f"Wrote {p}"
 
@@ -250,12 +267,13 @@ def write_file_tmp(
     if p.exists():
         if not (overwrite or append):
             raise ValueError("File exists; set overwrite=True or append=True to modify")
-        mode = "a" if append else "w"
+        if append:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(content)
+        else:
+            _atomic_write(p, content)
     else:
-        mode = "w"
-
-    with open(p, mode, encoding="utf-8") as f:
-        f.write(content)
+        _atomic_write(p, content)
 
     return f"Wrote {p}"
 
