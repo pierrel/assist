@@ -16,7 +16,7 @@ from langgraph.graph.state import CompiledStateGraph
 from assist.reflexion_agent import Plan, Step, PlanRetrospective, ReflexionState
 from assist.general_agent import general_agent
 from assist.tools.base import base_tools
-from eval.types import Validation
+from assist.model_manager import get_model_pair
 
 def graphiphy(node: Callable) -> CompiledStateGraph:
     graph = StateGraph(ReflexionState)
@@ -27,7 +27,7 @@ def graphiphy(node: Callable) -> CompiledStateGraph:
     return graph.compile()
 
 def actual_llm() -> BaseChatModel:
-    return ChatOpenAI(model="gpt-4o-mini")
+    return get_model_pair(0.2)[0]
     
 def base_tools_for_test() -> List[BaseTool]:
     return base_tools("~/.cache/assist/dbs/")
@@ -88,17 +88,3 @@ class DummyAgent:
 
     def invoke(self, _inputs, _opts: Any | None = None):
         return {"messages": [AIMessage(content=self.message)]}
-
-
-def run_validation(graph, validation: Validation) -> bool:
-    """Execute ``graph`` with ``validation.input`` and evaluate ``validation.check``.
-
-    ``graph`` can be a simple callable or an object exposing ``invoke``.
-    Returns ``True`` if the check passes, otherwise ``False``.
-    """
-    runner = getattr(graph, "invoke", graph)
-    output = runner(validation.input)
-    check = validation.check
-    if isinstance(check, re.Pattern):
-        return bool(check.search(output))
-    return bool(check(output))
