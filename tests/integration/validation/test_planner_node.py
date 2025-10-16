@@ -8,9 +8,9 @@ from .utils import thinking_llm, graphiphy, base_tools_for_test
 class TestPlannerNode(TestCase):
     def setUp(self) -> None:
         llm = thinking_llm("")
+        print(f"got LLM {llm}")
         self.graph = graphiphy(build_plan_node(llm,
-                                               base_tools_for_test(),
-                                               []))
+                                               base_tools_for_test()))
 
     def ask_node(self, query: str) -> ReflexionState:
         message = HumanMessage(content=query)
@@ -36,7 +36,7 @@ class TestPlannerNode(TestCase):
         self.assertNotInPlan("write_file_user", state)
 
     def test_should_write_file(self) -> None:
-        state = self.ask_node("Write me a python script to use in my project at /home/pierre/myproject")
+        state = self.ask_node("Write me a python script to use in my project at ~/myproject")
 
         self.assertInPlan("write_file_user", state)
 
