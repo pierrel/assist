@@ -57,17 +57,14 @@ response = requests.post(
     stream=True
 )
 
-counter = 0
 saved = []
-for line in response.iter_lines():
-    if line:
-        saved.append(line)
-        print(f"{counter}: {line}")
-        counter += 1
 
-print("Full output")
-counter = 0
-for line in saved:
-    print(f"{counter}: {line}")
+for counter, line in enumerate(response.iter_lines()):
+    if line:
+        print(f"{counter}: {line}")
+        saved.append(line)
+
+print("FULL RESPONSE")
+print("".join(saved))
 
 stop_server(server, server_thread)
