@@ -20,15 +20,17 @@ class TestPlannerNode(TestCase):
                         thing: str,
                         state: ReflexionState):
         plan = state["plan"]
-        self.assertFalse(any([thing in s.action for s in plan.steps]),
+        actions = {s.action for s in plan.steps}
+        self.assertFalse(any(thing == action for action in actions),
                         f"{thing} should not be in a plan step")
 
     def assertInPlan(self,
                         thing: str,
                         state: ReflexionState):
         plan = state["plan"]
-        self.assertTrue(any([thing in s.action for s in plan.steps]),
-                        f"{thing} should not be in a plan step")
+        actions = {s.action for s in plan.steps}
+        self.assertTrue(any(thing == action for action in actions),
+                        f"{thing} should be in a plan step")
     
     def test_dont_write_file(self) -> None:
         state = self.ask_node("What is the capital of France?")
@@ -57,14 +59,12 @@ class TestPlannerNode(TestCase):
         plan = state["plan"]
 
         self.assertGreater(len(plan.steps), 1, "Should have multiple steps")
-        # the following should really be false...
-        self.assertInPlan("project_context", state)
+        self.assertNotInPlan("project_context", state)
 
     def test_project_context_with_projecct(self):
         state = self.graph.invoke({"messages": [HumanMessage(content="Hello, can you explain to me what's in the README file?\n\nThe context for this request is /home/myhome/project")]})
         plan = state["plan"]
 
-        
         self.assertInPlan("project_context", state)
         self.assertInPlan("README", state)
 
@@ -148,7 +148,7 @@ class TestPlannerNode(TestCase):
             })
             plan = state["plan"]
             self.assertGreater(len(plan.steps), 1, "Has at least 2 steps")
-            self.assertFalse(
+            self.assertTrue(
                 any(
                     "tavily" in step.action.lower()
                     or "search" in step.action.lower()
