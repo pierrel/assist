@@ -1,5 +1,17 @@
 {{ task }}
 
+Provide a concise plan. Rules:
+- If this task is a pure rewrite / rephrase / classify / summarize / translate / extract-from-provided-text then output EXACTLY ONE STEP with NO tools (no search_*, no write_file_*).
+- For simple fact lookup output EXACTLY ONE STEP using search_web only.
+- Do NOT include write_file_user unless user explicitly asks to create/save/update a file or provides a file path.
+- Each action starts with a verb or exact tool name if a tool is required.
+- Keep actions unique.
+Return only steps, assumptions, risks; do not answer the task directly.
+
+Do NOT include write_file_user unless the user explicitly requested creating/updating/saving a file or gave a file path.
+Avoid duplicate actions or objectives.
+If this is a pure rewrite/rephrase/classify/extract/summarize task: produce ONE step and NO tools.
+
 {% if learnings %}
 There was a previous attempt at a plan for this which did not end up working out. These are the learnings from past attempts that should be incorporated into any new plan. Avoid their mistakes, follow their guidance:
 {% for learning in learnings %}
