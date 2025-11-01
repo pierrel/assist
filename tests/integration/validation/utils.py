@@ -33,10 +33,7 @@ def base_tools_for_test() -> List[BaseTool]:
     return base_tools("~/.cache/assist/dbs/")
 
 def thinking_llm(message: Optional[str]) -> Runnable:
-    if os.getenv("OPENAI_API_KEY") and os.getenv("TAVILY_API_KEY"):
-        return actual_llm()
-    else:
-        return DummyLLM(message)
+    return actual_llm()
 
 def execution_llm(message: Optional[str]) -> Runnable:
     if os.getenv("OPENAI_API_KEY") and os.getenv("TAVILY_API_KEY"):
