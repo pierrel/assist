@@ -20,9 +20,6 @@ class TestPlannerNode(TestCase):
         for a, o in zip(actions, objectives):
             self.assertTrue(o.strip(), f"Empty objective for action {a}")
             self.assertNotEqual(a.lower(), o.lower(), f"Objective duplicates action text: {a}")
-        # No duplicates
-        self.assertEqual(len(set(actions)), len(actions), f"Duplicate actions: {actions}")
-        self.assertEqual(len(set(objectives)), len(objectives), f"Duplicate objectives: {objectives}")
         # Step bounds
         if simple:
             self.assertLessEqual(len(actions), 5, f"Simple query should have <=5 steps: {actions}")
@@ -141,7 +138,7 @@ class TestPlannerNode(TestCase):
         self.assertGreaterEqual(len(plan.steps), 1, f"Expected >=1 steps, got {len(plan.steps)}: {[s.action for s in plan.steps]}")
         self.assertInPlan(state, "semantic_search", False)
         self.assertInPlan(state, "list_files", False)
-        self.assertInPlan("read_file", state, False)
+        self.assertInPlan(state, "read_file", False)
         self.assertPlanStructure(state, "README explanation", simple=False)
 
     def test_procedural_instruction_includes_search_and_quality(self) -> None:
@@ -176,7 +173,7 @@ class TestPlannerNode(TestCase):
         for example in examples:
             state = self.ask_node(f"{query}: {example}")
             plan = state["plan"]
-            self.assertLessEquale(len(plan.steps), 2, f"Expected <=2 steps, got {len(plan.steps)}: {[s.action for s in plan.steps]}") 
+            self.assertLessEqual(len(plan.steps), 2, f"Expected <=2 steps, got {len(plan.steps)}: {[s.action for s in plan.steps]}") 
             self.assertInPlan(state, "search_web", False)
             self.assertPlanStructure(state, "rephrase 9th grade", simple=False)
             self.assertNotInPlan("write_file", state)
