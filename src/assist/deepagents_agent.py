@@ -81,3 +81,7 @@ class DeepAgentsChat:
         content = resp["messages"][-1].content
         self.messages.append({"role": "assistant", "content": content})
         return content
+
+    def get_messages(self) -> list[dict]:
+        """Return all messages in this chat (role/content dicts)."""
+        return list(self.messages)
