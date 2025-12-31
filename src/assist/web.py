@@ -54,9 +54,11 @@ def render_thread(tid: str, chat: DeepAgentsChat) -> str:
     rendered = []
     for m in msgs:
         role = html.escape(m.get("role", ""))
-        content = html.escape(str(m.get("content", "")))
+        raw = str(m.get("content", ""))
+        # Render with simple newlines for both roles; escape to avoid XSS
+        content_html = html.escape(raw).replace("\n", "<br/>")
         cls = "user" if role == "user" else "assistant"
-        bubble = f"<div class=\"msg {cls}\"><div class=\"role\">{role}</div><div class=\"content\">{content}</div></div>"
+        bubble = f"<div class=\"msg {cls}\"><div class=\"role\">{role}</div><div class=\"content\">{content_html}</div></div>"
         rendered.append(bubble)
     body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
     return f"""
@@ -122,4 +124,4 @@ async def post_message(tid: str, text: str = Form(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5050, log_level="info")
+    uvicorn.run("assist.web:app", host="0.0.0.0", port=5050, log_level="info", reload=True)
