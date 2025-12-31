@@ -40,9 +40,21 @@ In emacs: =M-x pyvenv-activate=
 ** Running
 Run the server
 
-#+begin shell
-python src/assist/server.python
-#+end_shell
+#+begin_src shell
+python assist.server
+#+end_src
+
+Run the CLI
+
+#+begin_src shell
+python -m assist.cli
+#+end_src
+
+Run the Web UI (auto-reload)
+
+#+begin_src shell
+python assist.web
+#+end_src
 ** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:
 
@@ -54,6 +66,19 @@ Run the tests with coverage:
 
 #+begin_src shell
 pytest
+#+end_src
+
+Interface integration tests (no mocks; require TAVILY_API_KEY and internet):
+
+#+begin_src shell
+pytest tests/integration/interfaces -q
+#+end_src
+
+Playwright setup for web tests:
+
+#+begin_src shell
+pip install playwright pytest-playwright
+python -m playwright install
 #+end_src
 
 Generate a static type report:
