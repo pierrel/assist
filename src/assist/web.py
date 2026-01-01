@@ -2,7 +2,7 @@ import html
 import uuid
 from typing import Dict
 
-from fastapi import FastAPI, Form, HTTPException
+from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from assist.deepagents_agent import DeepAgentsChat
@@ -24,26 +24,35 @@ def render_index() -> str:
     return f"""
     <html>
       <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Assist Web</title>
         <style>
-          body {{ font-family: sans-serif; margin: 2rem; }}
-          .topbar {{ display: flex; justify-content: space-between; align-items: center; }}
-          ul {{ line-height: 1.8; }}
-          a {{ text-decoration: none; }}
-          .btn {{ padding: .4rem .8rem; border: 1px solid #333; border-radius: 4px; background: #eee; }}
+          :root {{ --pad: 1rem; }}
+          body {{ font-family: sans-serif; margin: 0; }}
+          .container {{ max-width: 800px; margin: 0 auto; padding: var(--pad); }}
+          .topbar {{ display: flex; gap: .5rem; flex-wrap: wrap; justify-content: space-between; align-items: center; }}
+          ul {{ line-height: 1.8; padding-left: 1rem; }}
+          a {{ text-decoration: none; display: block; padding: .5rem .6rem; border-radius: 6px; }}
+          a:active, a:focus {{ outline: none; }}
+          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; }}
+          @media (max-width: 480px) {{
+            .btn {{ width: 100%; }}
+          }}
         </style>
       </head>
       <body>
-        <div class="topbar">
-          <h1>Assist Web</h1>
-          <form action="/threads" method="post">
-            <button class="btn" type="submit">New thread</button>
-          </form>
+        <div class="container">
+          <div class="topbar">
+            <h1 style="font-size:1.4rem; margin:0">Assist Web</h1>
+            <form action="/threads" method="post" style="margin:0">
+              <button class="btn" type="submit">New thread</button>
+            </form>
+          </div>
+          <h2 style="font-size:1.2rem">Threads</h2>
+          <ul>
+            {items_html}
+          </ul>
         </div>
-        <h2>Threads</h2>
-        <ul>
-          {items_html}
-        </ul>
       </body>
     </html>
     """
@@ -64,30 +73,40 @@ def render_thread(tid: str, chat: DeepAgentsChat) -> str:
     return f"""
     <html>
       <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Thread {html.escape(tid)}</title>
         <style>
-          body {{ font-family: sans-serif; margin: 2rem; }}
-          .nav {{ margin-bottom: 1rem; }}
-          .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 70ch; }}
+          :root {{ --pad: 1rem; }}
+          body {{ font-family: sans-serif; margin: 0; }}
+          .container {{ max-width: 800px; margin: 0 auto; padding: var(--pad); }}
+          .nav a {{ display: inline-block; padding: .4rem .6rem; border-radius: 6px; text-decoration: none; }}
+          .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
           .msg.user {{ background: #e6f3ff; border: 1px solid #b5dbff; }}
           .msg.assistant {{ background: #f6f6f6; border: 1px solid #ddd; }}
           .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
-          form textarea {{ width: 100%; height: 8rem; }}
-          .btn {{ padding: .4rem .8rem; border: 1px solid #333; border-radius: 4px; background: #eee; }}
+          form textarea {{ width: 100%; min-height: 6rem; height: 24vh; box-sizing: border-box; }}
+          form {{ margin-top: 1rem; }}
+          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; }}
+          @media (max-width: 480px) {{
+            .msg {{ padding: .5rem .6rem; }}
+          }}
         </style>
       </head>
       <body>
-        <div class="nav"><a href="/">← All threads</a></div>
-        <h2>Thread {html.escape(tid)}</h2>
-        <div>
-          {body}
+        <div class="container">
+          <div class="nav"><a href="/">← All threads</a></div>
+          <h2 style="font-size:1.2rem">Thread {html.escape(tid)}</h2>
+          <div>
+            {body}
+          </div>
+          <hr/>
+          <form action="/thread/{tid}/message" method="post">
+            <label for="text">Your message</label><br/>
+            <textarea id="text" name="text" required placeholder="Type your message..."></textarea><br/>
+            <button class="btn" type="submit">Send</button>
+            <div style="font-size:.85rem; color:#666; margin-top:.4rem;">If you close or refresh, your message will still be processed.</div>
+          </form>
         </div>
-        <hr/>
-        <form action="/thread/{tid}/message" method="post">
-          <label for="text">Your message</label><br/>
-          <textarea id="text" name="text" required></textarea><br/>
-          <button class="btn" type="submit">Send</button>
-        </form>
       </body>
     </html>
     """
@@ -101,6 +120,7 @@ async def index() -> str:
 @app.post("/threads")
 async def create_thread():
     tid = uuid.uuid4().hex
+    # Create thread immediately so it's accessible regardless of client state
     THREADS[tid] = DeepAgentsChat("/")
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
@@ -114,11 +134,13 @@ async def get_thread(tid: str) -> str:
 
 
 @app.post("/thread/{tid}/message")
-async def post_message(tid: str, text: str = Form(...)):
+async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = Form(...)):
     chat = THREADS.get(tid)
     if not chat:
         raise HTTPException(status_code=404, detail="Thread not found")
-    chat.message(text)
+
+    # Schedule processing so it completes even if client disconnects.
+    background_tasks.add_task(chat.message, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
