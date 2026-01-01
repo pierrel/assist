@@ -27,7 +27,7 @@ def wait_port(port: int, timeout: float = 20.0):
 def test_web_ui_flow():
     assert os.getenv("TAVILY_API_KEY") is not None, "TAVILY_API_KEY must be set for integration"
     # Start server
-    srv = subprocess.Popen(["python", "-m", "uvicorn", "assist.web:app", "--host", "127.0.0.1", "--port", str(PORT)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    srv = subprocess.Popen(["python", "-m", "uvicorn", "manage.web:app", "--host", "127.0.0.1", "--port", str(PORT)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait_port(PORT, timeout=30)
         with sync_playwright() as p:

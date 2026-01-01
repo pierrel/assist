@@ -47,13 +47,15 @@ python assist.server
 Run the CLI
 
 #+begin_src shell
-python -m assist.cli
+python -m manage.cli
 #+end_src
 
 Run the Web UI (auto-reload)
 
 #+begin_src shell
-python assist.web
+python -m manage.web
+# or
+uvicorn manage.web:app --host 0.0.0.0 --port 5050 --reload
 #+end_src
 ** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:
