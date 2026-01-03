@@ -11,7 +11,6 @@ app = FastAPI(title="Assist Web")
 
 THREADS: Dict[str, DeepAgentsChat] = {}
 TITLES: Dict[str, str] = {}
-TITLES: Dict[str, str] = {}
 
 def render_index() -> str:
     items = []
@@ -131,7 +130,7 @@ def _process_message_and_title(tid: str, text: str) -> None:
         return
     chat.message(text)
     try:
-        TITLES[tid] = chat.description()
+        TITLES[tid] = chat.description()[:30]
     except Exception:
         TITLES.setdefault(tid, tid)
 
