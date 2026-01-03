@@ -85,3 +85,19 @@ class DeepAgentsChat:
     def get_messages(self) -> list[dict]:
         """Return all messages in this chat (role/content dicts)."""
         return list(self.messages)
+
+    def description(self) -> str:
+        """Return a short (<=5 words) description of the conversation so far.
+
+        Uses the underlying chat model directly. Raises ValueError if there
+        are no messages yet.
+        """
+        if not self.messages:
+            raise ValueError("no messages to describe")
+        prompt = {
+            "role": "system",
+            "content": base_prompt_for("deepagents/describe_system.md.j2"),
+        }
+        msgs = [prompt] + self.messages
+        resp = self.model.invoke(msgs)
+        return resp.content.strip()
