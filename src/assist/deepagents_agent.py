@@ -3,16 +3,16 @@ from typing import Literal
 
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain_openai import ChatOpenAI
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from tavily import TavilyClient
 
 from assist.promptable import base_prompt_for
+from assist.model_manager import select_chat_model
 from langgraph.graph.state import CompiledStateGraph
 from datetime import datetime
 
 tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
-model = ChatOpenAI(model="gpt-4o-mini")
 
 def internet_search(
         query: str,
@@ -29,8 +29,7 @@ def internet_search(
     )
     return search_docs
 
-
-def deepagents_agent() -> CompiledStateGraph:
+def deepagents_agent(model: BaseChatModel) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     Includes Tavily web search and a critique/research subagent pair. The main agent
@@ -70,8 +69,9 @@ class DeepAgentsChat:
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = f"{working_dir}:{ts}"
+        self.model = select_chat_model("mistral-nemo", 0.1)
         self.messages = []
-        self.agent = deepagents_agent()
+        self.agent = deepagents_agent(self.model)
 
     def message(self, text: str) -> str:
         if not isinstance(text, str):
