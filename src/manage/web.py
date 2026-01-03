@@ -10,6 +10,8 @@ from assist.deepagents_agent import DeepAgentsChat
 app = FastAPI(title="Assist Web")
 
 THREADS: Dict[str, DeepAgentsChat] = {}
+TITLES: Dict[str, str] = {}
+TITLES: Dict[str, str] = {}
 
 def render_index() -> str:
     items = []
@@ -17,7 +19,8 @@ def render_index() -> str:
         items.append("<li><em>No threads yet</em></li>")
     else:
         for tid in THREADS:
-            items.append(f'<li><a href="/thread/{tid}">{tid}</a></li>')
+            title = TITLES.get(tid, tid)
+            items.append(f'<li><a href="/thread/{tid}">{html.escape(title)}</a></li>')
     items_html = "\n".join(items)
     return f"""
     <html>
@@ -57,6 +60,7 @@ def render_index() -> str:
 
 
 def render_thread(tid: str, chat: DeepAgentsChat) -> str:
+    title = TITLES.get(tid, tid)
     msgs = chat.get_messages()
     rendered = []
     for m in msgs:
@@ -71,7 +75,7 @@ def render_thread(tid: str, chat: DeepAgentsChat) -> str:
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Thread {html.escape(tid)}</title>
+        <title>{html.escape(title)}</title>
         <style>
           :root {{ --pad: 1rem; }}
           body {{ font-family: sans-serif; margin: 0; }}
@@ -92,7 +96,7 @@ def render_thread(tid: str, chat: DeepAgentsChat) -> str:
       <body>
         <div class="container">
           <div class="nav"><a href="/">← All threads</a></div>
-          <h2 style="font-size:1.2rem">Thread {html.escape(tid)}</h2>
+          <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
           <div>
             {body}
           </div>
@@ -121,6 +125,17 @@ async def create_thread():
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
+def _process_message_and_title(tid: str, text: str) -> None:
+    chat = THREADS.get(tid)
+    if not chat:
+        return
+    chat.message(text)
+    try:
+        TITLES[tid] = chat.description()
+    except Exception:
+        TITLES.setdefault(tid, tid)
+
+
 @app.get("/thread/{tid}", response_class=HTMLResponse)
 async def get_thread(tid: str) -> str:
     chat = THREADS.get(tid)
@@ -134,7 +149,7 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
     chat = THREADS.get(tid)
     if not chat:
         raise HTTPException(status_code=404, detail="Thread not found")
-    background_tasks.add_task(chat.message, text)
+    background_tasks.add_task(_process_message_and_title, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
