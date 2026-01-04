@@ -1,23 +1,25 @@
 import html
-import uuid
+import os
 from typing import Dict
 
 from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from assist.deepagents_agent import DeepAgentsThread
+from assist.deepagents_agent import DeepAgentsThread, DeepAgentsThreadManager
 
 app = FastAPI(title="Assist Web")
 
-THREADS: Dict[str, DeepAgentsThread] = {}
+ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
+MANAGER = DeepAgentsThreadManager(ROOT)
 TITLES: Dict[str, str] = {}
 
 def render_index() -> str:
     items = []
-    if not THREADS:
+    tids = MANAGER.list()
+    if not tids:
         items.append("<li><em>No threads yet</em></li>")
     else:
-        for tid in THREADS:
+        for tid in tids:
             title = TITLES.get(tid, tid)
             items.append(f'<li><a href="/thread/{tid}">{html.escape(title)}</a></li>')
     items_html = "\n".join(items)
@@ -119,14 +121,14 @@ async def index() -> str:
 
 @app.post("/threads")
 async def create_thread():
-    tid = uuid.uuid4().hex
-    THREADS[tid] = DeepAgentsThread("/")
-    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+    chat = MANAGER.new()
+    return RedirectResponse(url=f"/thread/{chat.thread_id}", status_code=303)
 
 
 def _process_message_and_title(tid: str, text: str) -> None:
-    chat = THREADS.get(tid)
-    if not chat:
+    try:
+        chat = MANAGER.get(tid)
+    except FileNotFoundError:
         return
     chat.message(text)
     try:
@@ -137,16 +139,18 @@ def _process_message_and_title(tid: str, text: str) -> None:
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
 async def get_thread(tid: str) -> str:
-    chat = THREADS.get(tid)
-    if not chat:
+    try:
+        chat = MANAGER.get(tid)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
     return render_thread(tid, chat)
 
 
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = Form(...)):
-    chat = THREADS.get(tid)
-    if not chat:
+    try:
+        chat = MANAGER.get(tid)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
     background_tasks.add_task(_process_message_and_title, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
@@ -154,4 +158,5 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
 
 if __name__ == "__main__":
     import uvicorn
+    os.makedirs(ROOT, exist_ok=True)
     uvicorn.run("manage.web:app", host="0.0.0.0", port=5050, log_level="info", reload=True)

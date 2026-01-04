@@ -2,7 +2,10 @@ import os
 from typing import Literal
 
 from deepagents import create_deep_agent
+from langchain.messages import HumanMessage, AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+import sqlite3
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from tavily import TavilyClient
@@ -29,7 +32,7 @@ def internet_search(
     )
     return search_docs
 
-def deepagents_agent(model: BaseChatModel) -> CompiledStateGraph:
+def deepagents_agent(model: BaseChatModel, checkpointer=None) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     Includes Tavily web search and a critique/research subagent pair. The main agent
@@ -51,7 +54,7 @@ def deepagents_agent(model: BaseChatModel) -> CompiledStateGraph:
     return create_deep_agent(
         model=model,
         tools=[internet_search],
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
         subagents=[critique_sub_agent, research_sub_agent],
     )
@@ -65,26 +68,36 @@ class DeepAgentsThread:
     assistant reply as a string.
     """
 
-    def __init__(self, working_dir: str):
+    def __init__(self,
+                 working_dir: str,
+                 thread_id: str | None = None,
+                 checkpointer=None):
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        self.thread_id = f"{working_dir}:{ts}"
+        self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = select_chat_model("mistral-nemo", 0.1)
-        self.messages = []
-        self.agent = deepagents_agent(self.model)
+
+        self.agent = deepagents_agent(self.model, checkpointer=checkpointer)
 
     def message(self, text: str) -> str:
         if not isinstance(text, str):
             raise TypeError("text must be a string")
-        self.messages.append({"role": "user", "content": text})
-        resp = self.agent.invoke({"messages": self.messages}, {"configurable": {"thread_id": self.thread_id}})
-        content = resp["messages"][-1].content
-        self.messages.append({"role": "assistant", "content": content})
-        return content
+        # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
+        resp = self.agent.invoke({"messages": [{"role": "user", "content": text}]},
+                                 {"configurable": {"thread_id": self.thread_id}})
+        # The agent appends the AI reply to the persisted messages channel; return the last assistant content.
+        return resp["messages"][-1].content
 
     def get_messages(self) -> list[dict]:
-        """Return all messages in this chat (role/content dicts)."""
-        return list(self.messages)
+        """Return user/assistant messages from checkpointer state as role/content dicts."""
+        state = self.agent.get_state({"configurable": {"thread_id": self.thread_id}})
+        msgs = []
+        for m in state.values.get("messages", []):
+            if isinstance(m, HumanMessage):
+                msgs.append({"role": "user", "content": m.content})
+            elif isinstance(m, AIMessage) and m.content:
+                msgs.append({"role": "assistant", "content": m.content})
+        return msgs
 
     def description(self) -> str:
         """Return a short (<=5 words) description of the conversation so far.
@@ -92,12 +105,70 @@ class DeepAgentsThread:
         Uses the underlying chat model directly. Raises ValueError if there
         are no messages yet.
         """
-        if not self.messages:
+        msgs = self.get_messages()
+        if not msgs:
             raise ValueError("no messages to describe")
         prompt = {
             "role": "system",
             "content": base_prompt_for("deepagents/describe_system.md.j2"),
         }
-        msgs = [prompt] + self.messages
-        resp = self.model.invoke(msgs)
+        resp = self.model.invoke([prompt] + msgs)
         return resp.content.strip()
+
+
+class DeepAgentsThreadManager:
+    """Manage DeepAgentsThread instances persisted under a directory tree.
+
+    At the root directory, a sqlite DB named 'threads.db' is used for LangGraph
+    checkpointing via SqliteSaver.
+    """
+
+    def __init__(self, root_dir: str):
+        self.root_dir = root_dir
+        os.makedirs(self.root_dir, exist_ok=True)
+        self.db_path = os.path.join(self.root_dir, "threads.db")
+        # Ensure DB file exists upfront
+        if not os.path.exists(self.db_path):
+            open(self.db_path, "a").close()
+        # SqliteSaver expects a sqlite3.Connection
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.checkpointer = SqliteSaver(conn)
+
+    def list(self) -> list[str]:
+        return [name for name in os.listdir(self.root_dir)
+                if os.path.isdir(os.path.join(self.root_dir, name)) and name != "__pycache__"]
+
+    def get(self, thread_id: str) -> DeepAgentsThread:
+        tdir = os.path.join(self.root_dir, thread_id)
+        if not os.path.isdir(tdir):
+            raise FileNotFoundError(f"thread directory not found: {thread_id}")
+        return DeepAgentsThread(tdir, thread_id=thread_id, checkpointer=self.checkpointer)
+
+    def remove(self, thread_id: str) -> None:
+        tdir = os.path.join(self.root_dir, thread_id)
+        if os.path.isdir(tdir):
+            # Best-effort delete
+            for root, dirs, files in os.walk(tdir, topdown=False):
+                for f in files:
+                    try:
+                        os.remove(os.path.join(root, f))
+                    except Exception:
+                        pass
+                for d in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, d))
+                    except Exception:
+                        pass
+            try:
+                os.rmdir(tdir)
+            except Exception:
+                pass
+
+    def new(self) -> DeepAgentsThread:
+        # Let thread create its own ID, then use it as directory name
+        tmp = DeepAgentsThread(self.root_dir, checkpointer=self.checkpointer)
+        # Derive a clean ID for directory: prefer UUID
+        tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
+        tdir = os.path.join(self.root_dir, tid)
+        os.makedirs(tdir, exist_ok=True)
+        return DeepAgentsThread(tdir, thread_id=tid, checkpointer=self.checkpointer)
