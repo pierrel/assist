@@ -131,8 +131,8 @@ class DeepAgentsThreadManager:
         if not os.path.exists(self.db_path):
             open(self.db_path, "a").close()
         # SqliteSaver expects a sqlite3.Connection
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.checkpointer = SqliteSaver(conn)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.checkpointer = SqliteSaver(self.conn)
 
     def list(self) -> list[str]:
         return [name for name in os.listdir(self.root_dir)
@@ -172,3 +172,16 @@ class DeepAgentsThreadManager:
         tdir = os.path.join(self.root_dir, tid)
         os.makedirs(tdir, exist_ok=True)
         return DeepAgentsThread(tdir, thread_id=tid, checkpointer=self.checkpointer)
+
+    def close(self) -> None:
+        try:
+            if hasattr(self, "conn") and self.conn:
+                self.conn.close()
+        except Exception:
+            pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
