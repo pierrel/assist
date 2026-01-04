@@ -6,6 +6,7 @@ from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from assist.deepagents_agent import DeepAgentsThread, DeepAgentsThreadManager
+import markdown
 
 app = FastAPI(title="Assist Web")
 
@@ -73,7 +74,12 @@ def render_thread(tid: str, chat: DeepAgentsThread) -> str:
     for m in msgs:
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
-        content_html = html.escape(raw).replace("\n", "<br/>")
+        if role == "assistant":
+            # Render assistant content as Markdown to HTML
+            content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
+        else:
+            # Human/user content is plain text with basic escaping
+            content_html = html.escape(raw).replace("\n", "<br/>")
         cls = "user" if role == "user" else "assistant"
         bubble = f"<div class=\"msg {cls}\"><div class=\"role\">{role}</div><div class=\"content\">{content_html}</div></div>"
         rendered.append(bubble)
