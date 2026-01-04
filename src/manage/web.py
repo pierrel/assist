@@ -5,11 +5,11 @@ from typing import Dict
 from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from assist.deepagents_agent import DeepAgentsChat
+from assist.deepagents_agent import DeepAgentsThread
 
 app = FastAPI(title="Assist Web")
 
-THREADS: Dict[str, DeepAgentsChat] = {}
+THREADS: Dict[str, DeepAgentsThread] = {}
 TITLES: Dict[str, str] = {}
 
 def render_index() -> str:
@@ -58,7 +58,7 @@ def render_index() -> str:
     """
 
 
-def render_thread(tid: str, chat: DeepAgentsChat) -> str:
+def render_thread(tid: str, chat: DeepAgentsThread) -> str:
     title = TITLES.get(tid, tid)
     msgs = chat.get_messages()
     rendered = []
@@ -120,7 +120,7 @@ async def index() -> str:
 @app.post("/threads")
 async def create_thread():
     tid = uuid.uuid4().hex
-    THREADS[tid] = DeepAgentsChat("/")
+    THREADS[tid] = DeepAgentsThread("/")
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 

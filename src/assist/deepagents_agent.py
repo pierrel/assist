@@ -57,7 +57,7 @@ def deepagents_agent(model: BaseChatModel) -> CompiledStateGraph:
     )
 
 
-class DeepAgentsChat:
+class DeepAgentsThread:
     """Reusable chat-like interface that mimics the CLI back-and-forth.
 
     Initialize with a working directory; it derives a thread id from cwd + timestamp,

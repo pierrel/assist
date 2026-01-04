@@ -1,11 +1,11 @@
 import sys
 import os
-from assist.deepagents_agent import DeepAgentsChat
+from assist.deepagents_agent import DeepAgentsThread
 
 def main():
     working_dir = os.getcwd()
     print(f"Working directory: {working_dir}")
-    chat = DeepAgentsChat(working_dir)
+    chat = DeepAgentsThread(working_dir)
     try:
         while True:
             try:
