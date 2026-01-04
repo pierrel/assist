@@ -71,11 +71,12 @@ class DeepAgentsThread:
     def __init__(self,
                  working_dir: str,
                  thread_id: str | None = None,
-                 checkpointer=None):
+                 checkpointer=None,
+                 model: BaseChatModel | None = None):
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
-        self.model = select_chat_model("mistral-nemo", 0.1)
+        self.model = model or select_chat_model("mistral-nemo", 0.1)
 
         self.agent = deepagents_agent(self.model, checkpointer=checkpointer)
 
@@ -104,7 +105,18 @@ class DeepAgentsThread:
 
         Uses the underlying chat model directly. Raises ValueError if there
         are no messages yet.
+        If description.txt exists in the thread directory, return it; otherwise compute and cache.
         """
+        desc_path = os.path.join(self.working_dir, "description.txt")
+        try:
+            if os.path.exists(desc_path):
+                with open(desc_path, "r", encoding="utf-8") as f:
+                    cached = f.read().strip()
+                    if cached:
+                        return cached
+        except Exception:
+            pass
+
         msgs = self.get_messages()
         if not msgs:
             raise ValueError("no messages to describe")
@@ -113,7 +125,16 @@ class DeepAgentsThread:
             "content": base_prompt_for("deepagents/describe_system.md.j2"),
         }
         resp = self.model.invoke([prompt] + msgs)
-        return resp.content.strip()
+        desc = resp.content.strip()
+
+        try:
+            os.makedirs(self.working_dir, exist_ok=True)
+            with open(desc_path, "w", encoding="utf-8") as f:
+                f.write(desc)
+        except Exception:
+            pass
+
+        return desc
 
 
 class DeepAgentsThreadManager:
@@ -133,6 +154,8 @@ class DeepAgentsThreadManager:
         # SqliteSaver expects a sqlite3.Connection
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.checkpointer = SqliteSaver(self.conn)
+        # Create and reuse one chat model for all threads
+        self.model = select_chat_model("mistral-nemo", 0.1)
 
     def list(self) -> list[str]:
         return [name for name in os.listdir(self.root_dir)
@@ -142,7 +165,7 @@ class DeepAgentsThreadManager:
         tdir = os.path.join(self.root_dir, thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}")
-        return DeepAgentsThread(tdir, thread_id=thread_id, checkpointer=self.checkpointer)
+        return DeepAgentsThread(tdir, thread_id=thread_id, checkpointer=self.checkpointer, model=self.model)
 
     def remove(self, thread_id: str) -> None:
         tdir = os.path.join(self.root_dir, thread_id)
@@ -165,13 +188,11 @@ class DeepAgentsThreadManager:
                 pass
 
     def new(self) -> DeepAgentsThread:
-        # Let thread create its own ID, then use it as directory name
-        tmp = DeepAgentsThread(self.root_dir, checkpointer=self.checkpointer)
-        # Derive a clean ID for directory: prefer UUID
+        # Derive a clean ID for directory: prefer timestamp+rand
         tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
         tdir = os.path.join(self.root_dir, tid)
         os.makedirs(tdir, exist_ok=True)
-        return DeepAgentsThread(tdir, thread_id=tid, checkpointer=self.checkpointer)
+        return DeepAgentsThread(tdir, thread_id=tid, checkpointer=self.checkpointer, model=self.model)
 
     def close(self) -> None:
         try:
