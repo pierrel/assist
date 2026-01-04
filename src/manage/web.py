@@ -11,7 +11,6 @@ app = FastAPI(title="Assist Web")
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = DeepAgentsThreadManager(ROOT)
-TITLES: Dict[str, str] = {}
 
 def render_index() -> str:
     items = []
@@ -20,7 +19,11 @@ def render_index() -> str:
         items.append("<li><em>No threads yet</em></li>")
     else:
         for tid in tids:
-            title = TITLES.get(tid, tid)
+            try:
+                chat = MANAGER.get(tid)
+                title = chat.description()
+            except Exception:
+                title = tid
             items.append(f'<li><a href="/thread/{tid}">{html.escape(title)}</a></li>')
     items_html = "\n".join(items)
     return f"""
@@ -61,7 +64,10 @@ def render_index() -> str:
 
 
 def render_thread(tid: str, chat: DeepAgentsThread) -> str:
-    title = TITLES.get(tid, tid)
+    try:
+        title = MANAGER.get(tid).description()
+    except Exception:
+        title = tid
     msgs = chat.get_messages()
     rendered = []
     for m in msgs:
@@ -125,16 +131,12 @@ async def create_thread():
     return RedirectResponse(url=f"/thread/{chat.thread_id}", status_code=303)
 
 
-def _process_message_and_title(tid: str, text: str) -> None:
+def _process_message(tid: str, text: str) -> None:
     try:
         chat = MANAGER.get(tid)
     except FileNotFoundError:
         return
     chat.message(text)
-    try:
-        TITLES[tid] = chat.description()[:30]
-    except Exception:
-        TITLES.setdefault(tid, tid)
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
@@ -152,7 +154,7 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
         chat = MANAGER.get(tid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
-    background_tasks.add_task(_process_message_and_title, tid, text)
+    background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
