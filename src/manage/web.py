@@ -80,7 +80,7 @@ def render_thread(tid: str, chat: DeepAgentsThread) -> str:
         else:
             # Human/user content is plain text with basic escaping
             content_html = html.escape(raw).replace("\n", "<br/>")
-        cls = "user" if role == "user" else "assistant"
+        cls = "user" if role == "user" else ("tools" if role == "tools" else "assistant")
         bubble = f"<div class=\"msg {cls}\"><div class=\"role\">{role}</div><div class=\"content\">{content_html}</div></div>"
         rendered.append(bubble)
     body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"

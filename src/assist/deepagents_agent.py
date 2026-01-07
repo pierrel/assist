@@ -17,6 +17,22 @@ from datetime import datetime
 
 tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
+def render_tool_calls(message: AIMessage) -> str:
+    calls = getattr(message, "tool_calls", None)
+    if calls:
+        return "\n".join(map(lambda c: render_tool_call(c), calls))
+    else:
+        return ""
+
+def render_tool_call(call: dict) -> str:
+    name = call.get("name", "none")
+    if name == "task" and call.get("args", None):
+        args = call.get("args")
+        subagent = args.get("subagent_type", "none")
+        return f"Calling subagent {subagent}"
+    else:
+        return f"Calling {name}"
+
 def internet_search(
         query: str,
         max_results: int = 5,
@@ -32,12 +48,21 @@ def internet_search(
     )
     return search_docs
 
-def deepagents_agent(model: BaseChatModel, checkpointer=None) -> CompiledStateGraph:
+def url_content(url: str) -> dict:
+    """Extract the content from the given url."""
+    return tavily_client.extract(url)
+
+from assist.middleware.thread_logging_middleware import LoggingMiddleware
+
+def deepagents_agent(model: BaseChatModel, checkpointer=None, log_dir: str | None = None) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
-    Includes Tavily web search and a critique/research subagent pair. The main agent
-    should respond to the user with findings rather than only writing to files.
+    Includes Tavily web search and a critique/research/fact-check subagent trio.
     """
+    middleware = []
+    if log_dir:
+        middleware.append(LoggingMiddleware(log_dir))
+    
     research_sub_agent = {
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time.",
@@ -51,12 +76,20 @@ def deepagents_agent(model: BaseChatModel, checkpointer=None) -> CompiledStateGr
         "system_prompt": base_prompt_for("deepagents/sub_critique.txt.j2"),
     }
 
+    fact_check_sub_agent = {
+        "name": "fact-check-agent",
+        "description": "Used to check all references for alignment with claims and statements",
+        "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
+        "tools": [url_content],
+    }
+
     return create_deep_agent(
         model=model,
         tools=[internet_search],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
-        subagents=[critique_sub_agent, research_sub_agent],
+        subagents=[critique_sub_agent, research_sub_agent, fact_check_sub_agent],
+        middleware=middleware,
     )
 
 
@@ -77,8 +110,9 @@ class DeepAgentsThread:
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = model or select_chat_model("mistral-nemo", 0.1)
-
-        self.agent = deepagents_agent(self.model, checkpointer=checkpointer)
+        self.agent = deepagents_agent(self.model,
+                                      checkpointer=checkpointer,
+                                      log_dir=self.working_dir)
 
     def message(self, text: str) -> str:
         if not isinstance(text, str):
@@ -96,8 +130,13 @@ class DeepAgentsThread:
         for m in state.values.get("messages", []):
             if isinstance(m, HumanMessage):
                 msgs.append({"role": "user", "content": m.content})
-            elif isinstance(m, AIMessage) and m.content:
-                msgs.append({"role": "assistant", "content": m.content})
+            elif isinstance(m, AIMessage):
+                calls = getattr(m, "tool_calls", None)
+                if calls:
+                    msgs.append({"role": "tools",
+                                 "content": render_tool_calls(m)})
+                elif m.content:
+                    msgs.append({"role": "assistant", "content": m.content})
         return msgs
 
     def description(self) -> str:
