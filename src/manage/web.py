@@ -3,15 +3,29 @@ import os
 from typing import Dict
 
 from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
+from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from assist.deepagents_agent import DeepAgentsThread, DeepAgentsThreadManager
 import markdown
 
-app = FastAPI(title="Assist Web")
-
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = DeepAgentsThreadManager(ROOT)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure thread root exists at startup
+    os.makedirs(ROOT, exist_ok=True)
+    try:
+        yield
+    finally:
+        # Close shared resources (e.g., sqlite connection) to avoid leaks
+        try:
+            MANAGER.close()
+        except Exception:
+            pass
+
+app = FastAPI(title="Assist Web", lifespan=lifespan)
 
 def render_index() -> str:
     items = []
@@ -167,4 +181,4 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
 if __name__ == "__main__":
     import uvicorn
     os.makedirs(ROOT, exist_ok=True)
-    uvicorn.run("manage.web:app", host="0.0.0.0", port=5050, log_level="info", reload=True)
+    uvicorn.run("manage.web:app", host="0.0.0.0", port=5050, log_level="info", reload=False)
