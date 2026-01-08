@@ -48,20 +48,17 @@ def internet_search(
     )
     return search_docs
 
+
 def url_content(url: str) -> dict:
     """Extract the content from the given url."""
     return tavily_client.extract(url)
 
-from assist.middleware.thread_logging_middleware import LoggingMiddleware
 
 def deepagents_agent(model: BaseChatModel, checkpointer=None, log_dir: str | None = None) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     Includes Tavily web search and a critique/research/fact-check subagent trio.
     """
-    middleware = []
-    if log_dir:
-        middleware.append(LoggingMiddleware(log_dir))
     
     research_sub_agent = {
         "name": "research-agent",
@@ -83,13 +80,13 @@ def deepagents_agent(model: BaseChatModel, checkpointer=None, log_dir: str | Non
         "tools": [url_content],
     }
 
+    model.profile["max_input_tokens"] = 120000 # TODO: Move this somewhere like the  model manager
     return create_deep_agent(
         model=model,
         tools=[internet_search],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
-        subagents=[critique_sub_agent, research_sub_agent, fact_check_sub_agent],
-        middleware=middleware,
+        subagents=[critique_sub_agent, research_sub_agent, fact_check_sub_agent]
     )
 
 
