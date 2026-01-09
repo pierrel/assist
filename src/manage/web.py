@@ -85,7 +85,7 @@ def render_thread(tid: str, chat: DeepAgentsThread) -> str:
         title = tid
     msgs = chat.get_messages()
     rendered = []
-    for m in msgs:
+    for m in reversed(msgs):
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
         if role == "assistant":
@@ -124,16 +124,16 @@ def render_thread(tid: str, chat: DeepAgentsThread) -> str:
         <div class="container">
           <div class="nav"><a href="/">← All threads</a></div>
           <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
-          <div>
-            {body}
-          </div>
-          <hr/>
           <form action="/thread/{tid}/message" method="post">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..."></textarea><br/>
             <button class="btn" type="submit">Send</button>
             <div style="font-size:.85rem; color:#666; margin-top:.4rem;">If you close or refresh, your message will still be processed.</div>
           </form>
+          <hr/>
+          <div>
+            {body}
+          </div>
         </div>
       </body>
     </html>

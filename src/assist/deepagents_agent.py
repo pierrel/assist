@@ -36,7 +36,7 @@ def render_tool_call(call: dict) -> str:
 def internet_search(
         query: str,
         max_results: int = 5,
-        topic: Literal["general", "news", "finance", "software", "shopping"] = "general",
+        topic: Literal["general", "news", "finance"] = "general",
         include_raw_content: bool = False,
 ):
     """Used to search the internet for information on a given topic using a query string."""
