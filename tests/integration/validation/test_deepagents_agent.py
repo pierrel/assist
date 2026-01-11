@@ -33,3 +33,10 @@ class TestDeepagentsAgent(TestCase):
         print(messages)
         self.assertTrue(messages)
                                       
+    def test_hard_research(self):
+        thread_id = uuid.uuid1()
+        messages = send_message(self.agent,
+                                "In emacs, I want to create a buffer in a window with ui controls that, when clicked, do not move the focus to that window (it should stay in the buffer/window its in). How do I achieve this?",
+                                thread_id)
+        print(messages)
+        self.assertTrue(messages)

@@ -106,14 +106,16 @@ def _load_custom_openai_config() -> Optional[OpenAIConfig]:
 
 
 def _build_openai_chat_model(
-    model: str, *, temperature: float, base_url: Optional[str] = None, api_key: Optional[str] = None
+        model: str, *, temperature: float, base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> BaseChatModel:
     """Create a ``ChatOpenAI`` instance with the provided parameters."""
 
     if ChatOpenAI is None:  # pragma: no cover - environment dependent
         raise RuntimeError("ChatOpenAI is not available")
 
-    kwargs: dict[str, object] = {"model": model, "temperature": temperature}
+    kwargs: dict[str, object] = {"model": model,
+                                 "temperature": temperature,
+                                 "max_tokens": 1024}
     if base_url:
         kwargs["base_url"] = base_url
     if api_key:
