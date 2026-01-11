@@ -70,7 +70,7 @@ def render_tool_call(call: dict) -> str:
     else:
         return f"Calling {name}"
 
-def deepagents_agent(model: BaseChatModel, checkpointer=None, log_dir: str | None = None) -> CompiledStateGraph:
+def create(model: BaseChatModel, checkpointer=None, log_dir: str | None = None) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     Includes Tavily web search and a critique/research/fact-check subagent trio.
@@ -106,7 +106,7 @@ def deepagents_agent(model: BaseChatModel, checkpointer=None, log_dir: str | Non
     )
 
 
-class DeepAgentsThread:
+class Thread:
     """Reusable chat-like interface that mimics the CLI back-and-forth.
 
     Initialize with a working directory; it derives a thread id from cwd + timestamp,
@@ -123,9 +123,9 @@ class DeepAgentsThread:
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = model or select_chat_model("mistral-nemo", 0.1)
-        self.agent = deepagents_agent(self.model,
-                                      checkpointer=checkpointer,
-                                      log_dir=self.working_dir)
+        self.agent = create(self.model,
+                            checkpointer=checkpointer,
+                            log_dir=self.working_dir)
 
     def message(self, text: str) -> str:
         if not isinstance(text, str):
@@ -196,7 +196,7 @@ class DeepAgentsThread:
         return desc
 
 
-class DeepAgentsThreadManager:
+class ThreadManager:
     """Manage DeepAgentsThread instances persisted under a directory tree.
 
     At the root directory, a sqlite DB named 'threads.db' is used for LangGraph
@@ -220,11 +220,11 @@ class DeepAgentsThreadManager:
         return [name for name in os.listdir(self.root_dir)
                 if os.path.isdir(os.path.join(self.root_dir, name)) and name != "__pycache__"]
 
-    def get(self, thread_id: str) -> DeepAgentsThread:
+    def get(self, thread_id: str) -> Thread:
         tdir = os.path.join(self.root_dir, thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}")
-        return DeepAgentsThread(tdir, thread_id=thread_id, checkpointer=self.checkpointer, model=self.model)
+        return Thread(tdir, thread_id=thread_id, checkpointer=self.checkpointer, model=self.model)
 
     def remove(self, thread_id: str) -> None:
         tdir = os.path.join(self.root_dir, thread_id)
@@ -246,12 +246,12 @@ class DeepAgentsThreadManager:
             except Exception:
                 pass
 
-    def new(self) -> DeepAgentsThread:
+    def new(self) -> Thread:
         # Derive a clean ID for directory: prefer timestamp+rand
         tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
         tdir = os.path.join(self.root_dir, tid)
         os.makedirs(tdir, exist_ok=True)
-        return DeepAgentsThread(tdir, thread_id=tid, checkpointer=self.checkpointer, model=self.model)
+        return Thread(tdir, thread_id=tid, checkpointer=self.checkpointer, model=self.model)
 
     def close(self) -> None:
         try:
