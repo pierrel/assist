@@ -17,12 +17,17 @@ from datetime import datetime
 
 tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
 
+
 def render_tool_calls(message: AIMessage) -> str:
     calls = getattr(message, "tool_calls", None)
     if calls:
-        return "\n".join(map(lambda c: render_tool_call(c), calls))
-    else:
-        return ""
+        calls_str = " -- ".join(map(lambda c: render_tool_call(c), calls))
+        if getattr(message, "content", None):
+            return f"{calls_str} \n> {message.content}"
+
+        return calls_str
+    return ""
+
 
 def render_tool_call(call: dict) -> str:
     name = call.get("name", "none")

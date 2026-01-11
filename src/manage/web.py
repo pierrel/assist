@@ -88,8 +88,8 @@ def render_thread(tid: str, chat: DeepAgentsThread) -> str:
     for m in reversed(msgs):
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
-        if role == "assistant":
-            # Render assistant content as Markdown to HTML
+        if role == "assistant" or role == "tools":
+            # Render assistant and tool content as Markdown to HTML
             content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
         else:
             # Human/user content is plain text with basic escaping
