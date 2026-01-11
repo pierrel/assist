@@ -1,4 +1,8 @@
 import os
+import re
+import requests
+import time
+from urllib.parse import urlparse, parse_qs, unquote
 from typing import Literal
 
 from deepagents import create_deep_agent
@@ -8,14 +12,42 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
 from langchain_core.language_models.chat_models import BaseChatModel
 
-from tavily import TavilyClient
-
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from langgraph.graph.state import CompiledStateGraph
 from datetime import datetime
+from ddgs import DDGS
 
-tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
+ddgs_search = DDGS()
+
+def url_content(url: str) -> str:
+    """Extract the content from the given url."""
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}, timeout=10)
+        r.raise_for_status()
+        text = r.text
+        # Strip HTML tags and condense whitespace
+        txt = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
+        txt = re.sub(r"<[^>]+>", " ", txt)
+        txt = re.sub(r"\s+", " ", txt).strip()
+        return txt[:1200]
+    except Exception:
+        return ""
+
+
+def internet_search(
+        query: str,
+        max_results: int = 5,
+) -> list[dict]:
+    """Used to search the internet for information on a given topic using a query string."""
+    time.sleep(1) # TODO: to not hit the rate limit, set a 1s limit /between/ requests
+    search_docs = ddgs_search.text(query,
+                                   max_results=max_results,
+                                   region="en_us",
+                                   safesearch="off",
+                                   backend="html")
+    
+    return search_docs
 
 
 def render_tool_calls(message: AIMessage) -> str:
@@ -37,27 +69,6 @@ def render_tool_call(call: dict) -> str:
         return f"Calling subagent {subagent}"
     else:
         return f"Calling {name}"
-
-def internet_search(
-        query: str,
-        max_results: int = 5,
-        topic: Literal["general", "news", "finance"] = "general",
-        include_raw_content: bool = False,
-):
-    """Used to search the internet for information on a given topic using a query string."""
-    search_docs = tavily_client.search(
-        query,
-        max_results=max_results,
-        include_raw_content=include_raw_content,
-        topic=topic,
-    )
-    return search_docs
-
-
-def url_content(url: str) -> dict:
-    """Extract the content from the given url."""
-    return tavily_client.extract(url)
-
 
 def deepagents_agent(model: BaseChatModel, checkpointer=None, log_dir: str | None = None) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
