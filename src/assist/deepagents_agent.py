@@ -118,6 +118,7 @@ class DeepAgentsThread:
         resp = self.agent.invoke({"messages": [{"role": "user", "content": text}]},
                                  {"configurable": {"thread_id": self.thread_id}})
         # The agent appends the AI reply to the persisted messages channel; return the last assistant content.
+        # But callers should read final_report.md via get_messages for the final answer.
         return resp["messages"][-1].content
 
     def get_messages(self) -> list[dict]:
@@ -134,7 +135,13 @@ class DeepAgentsThread:
                                  "content": render_tool_calls(m)})
                 elif m.content:
                     msgs.append({"role": "assistant", "content": m.content})
-        return msgs
+        # If a final_report.md exists, add another node with the content at the very end
+        report_content = state.values.get("files", {}).get("/final_report.md", {}).get("content", None)
+        if report_content:
+            return msgs + [{"role": "assistant",
+                            "content": "\n".join(report_content)}]
+        else:
+            return msgs
 
     def description(self) -> str:
         """Return a short (<=5 words) description of the conversation so far.
