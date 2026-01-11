@@ -6,7 +6,6 @@ import pytest
 
 @pytest.mark.integration
 def test_cli_interaction():
-    assert os.getenv("TAVILY_API_KEY") is not None, "TAVILY_API_KEY must be set for integration"
     proc = subprocess.Popen([sys.executable, "-m", "manage.cli"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         # Send a simple prompt and then quit

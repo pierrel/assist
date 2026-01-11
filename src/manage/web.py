@@ -7,7 +7,7 @@ from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from assist.deepagents_agent import DeepAgentsThread, DeepAgentsThreadManager
+from assist.agent import Thread, ThreadManager
 import markdown
 
 # debug logging by default
@@ -18,7 +18,7 @@ logging.getLogger("langchain").setLevel(logging.DEBUG)
 logging.getLogger("deepagents").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
-MANAGER = DeepAgentsThreadManager(ROOT)
+MANAGER = ThreadManager(ROOT)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -86,7 +86,7 @@ def render_index() -> str:
     """
 
 
-def render_thread(tid: str, chat: DeepAgentsThread) -> str:
+def render_thread(tid: str, chat: Thread) -> str:
     try:
         title = MANAGER.get(tid).description()
     except Exception:

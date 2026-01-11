@@ -1,9 +1,0 @@
-Goal: {{ goal }}
-
-Planned steps:
-{{ plan_steps }}
-
-Completed steps:
-{{ history }}
-
-The plan keeps repeating without progress. Ask the user a specific question that would help resolve the issue.

@@ -192,3 +192,7 @@ Perform unsolicited work for the user. For example, analyze the current project 
 The results could be in the form of:
 - Proposed change to the project files (like a PR)
 - Recommended purchases (just hit "OK" to actually do it)
+* Deepagents updates
+As of 2026, this project relies heavily on langchain deepagents. Some of the details of how to work with deepagents here.
+** Architecture
+There will be a single, generalist deepagent with multiple sub-agents.
