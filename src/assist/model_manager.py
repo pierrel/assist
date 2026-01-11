@@ -114,8 +114,7 @@ def _build_openai_chat_model(
         raise RuntimeError("ChatOpenAI is not available")
 
     kwargs: dict[str, object] = {"model": model,
-                                 "temperature": temperature,
-                                 "max_tokens": 1024}
+                                 "temperature": temperature}
     if base_url:
         kwargs["base_url"] = base_url
     if api_key:
