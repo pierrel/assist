@@ -1,3 +1,4 @@
+import logging, sys
 import html
 import os
 from typing import Dict
@@ -8,6 +9,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from assist.deepagents_agent import DeepAgentsThread, DeepAgentsThreadManager
 import markdown
+
+# debug logging by default
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("openai").setLevel(logging.DEBUG)
+logging.getLogger("langchain").setLevel(logging.DEBUG)
+logging.getLogger("deepagents").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = DeepAgentsThreadManager(ROOT)
