@@ -45,7 +45,7 @@ def internet_search(
                                    max_results=max_results,
                                    region="en_us",
                                    safesearch="off",
-                                   backend="html")
+                                   backend="duckduckgo")
     
     return search_docs
 
