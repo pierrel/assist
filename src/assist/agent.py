@@ -3,7 +3,7 @@ import re
 import requests
 import time
 from urllib.parse import urlparse, parse_qs, unquote
-from typing import Literal
+from typing import Literal, Dict, Any
 
 from deepagents import create_deep_agent
 from langchain.messages import HumanMessage, AIMessage, ToolMessage
@@ -11,28 +11,18 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
 from langchain_core.language_models.chat_models import BaseChatModel
+from tavily import TavilyClient
 
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from langgraph.graph.state import CompiledStateGraph
 from datetime import datetime
-from ddgs import DDGS
 
-ddgs_search = DDGS()
+tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 
-def url_content(url: str) -> str:
+def url_content(url: str) -> Dict[str, Any]:
     """Extract the content from the given url."""
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}, timeout=10)
-        r.raise_for_status()
-        text = r.text
-        # Strip HTML tags and condense whitespace
-        txt = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
-        txt = re.sub(r"<[^>]+>", " ", txt)
-        txt = re.sub(r"\s+", " ", txt).strip()
-        return txt[:1200]
-    except Exception:
-        return ""
+    return tavily.extract([url])
 
 
 def internet_search(
@@ -40,13 +30,8 @@ def internet_search(
         max_results: int = 5,
 ) -> list[dict]:
     """Used to search the internet for information on a given topic using a query string."""
-    time.sleep(1) # TODO: to not hit the rate limit, set a 1s limit /between/ requests
-    search_docs = ddgs_search.text(query,
-                                   max_results=max_results,
-                                   region="en_us",
-                                   safesearch="off",
-                                   backend="duckduckgo")
-    
+    search_docs = tavily.search(query,
+                                max_results=max_results)
     return search_docs
 
 
@@ -80,7 +65,7 @@ def create(model: BaseChatModel, checkpointer=None, log_dir: str | None = None) 
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
-        "tools": [internet_search],
+        "tools": [internet_search, url_content],
     }
 
     critique_sub_agent = {
@@ -99,7 +84,7 @@ def create(model: BaseChatModel, checkpointer=None, log_dir: str | None = None) 
     model.profile["max_input_tokens"] = 120000 # TODO: Move this somewhere like the  model manager
     return create_deep_agent(
         model=model,
-        tools=[internet_search],
+        tools=[internet_search, url_content],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
         subagents=[critique_sub_agent, research_sub_agent, fact_check_sub_agent]
