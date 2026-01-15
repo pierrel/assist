@@ -9,7 +9,7 @@ from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 
 
 from assist.model_manager import select_chat_model
-from assist.deepagents_agent import deepagents_agent
+from assist.agent import create
 
 from .utils2 import send_message
 
@@ -18,9 +18,9 @@ class TestAgent(TestCase):
     def setUp(self):
         self.working_dir = tempfile.mkdtemp()
         self.model = select_chat_model("gpt-oss-20b", 0.3)
-        self.agent = deepagents_agent(self.model,
-                                      checkpointer=InMemorySaver(),
-                                      log_dir=self.working_dir)
+        self.agent = create(self.model,
+                            checkpointer=InMemorySaver(),
+                            log_dir=self.working_dir)
 
 
     def tearDown(self):
