@@ -73,3 +73,26 @@ As a user, I want to submit a query to assist without interrupting my workflow.
 * Installation and Usage
 
 See DEMO.md for detailed usage examples.
+
+* Development
+
+** Testing
+Run tests using eldev:
+
+#+begin_src shell
+eldev test
+#+end_src
+
+Run linting:
+
+#+begin_src shell
+eldev lint
+#+end_src
+
+Alternatively, tests can be run directly with emacs:
+
+#+begin_src shell
+emacs --batch -L . -L tests -l tests/test-assist.el -f ert-run-tests-batch-and-exit
+#+end_src
+
+Both linting and testing run automatically in CI.
