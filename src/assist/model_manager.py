@@ -129,12 +129,14 @@ def select_chat_model(model: str, temperature: float) -> BaseChatModel:
     if config:
         if _test_local_llm_availability(config):
             print(f"Using local LLM configuration from {CONFIG_FILENAME}")
-            return _build_openai_chat_model(
+            model= _build_openai_chat_model(
                 config.model,
                 temperature=temperature,
                 base_url=config.url,
                 api_key=config.api_key,
             )
+            model.profile["max_input_tokens"] = 120000
+            return model
         else:
             print(f"Local LLM from {CONFIG_FILENAME} is not available, falling back to OpenAI API")
 
