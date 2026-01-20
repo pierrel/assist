@@ -157,6 +157,19 @@ def git_commit(repo_dir: str, message: str) -> None:
     subprocess.run(['git', '-C', repo_dir, 'commit', '-m', message], check=True)
 
 
+def merge_main_into_current_and_push(repo_path: str) -> None:
+    """Merge latest main into current branch and push the branch to origin."""
+    import subprocess
+    # Ensure we have latest remote refs
+    subprocess.run(['git', '-C', repo_path, 'fetch', 'origin'], check=True)
+    # Determine current branch
+    cur = subprocess.run(['git', '-C', repo_path, 'rev-parse', '--abbrev-ref', 'HEAD'], stdout=subprocess.PIPE, text=True, check=True)
+    branch = cur.stdout.strip()
+    # Merge origin/main into current branch
+    subprocess.run(['git', '-C', repo_path, 'merge', '--no-edit', 'origin/main'], check=True)
+    # Push current branch
+    subprocess.run(['git', '-C', repo_path, 'push', '--set-upstream', 'origin', branch], check=True)
+
 class DomainManager:
     def __init__(self,
                  root: str | None = None,
@@ -165,7 +178,8 @@ class DomainManager:
             self.root = root
         else:
             self.root = tempfile.mkdtemp()
-        
+
+        self.repo = repo
         self.repo_path = os.path.join(self.root, 'domain')
         # Clone only if the repo does not already exist
         repo_exists = os.path.isdir(self.repo_path)
@@ -175,14 +189,21 @@ class DomainManager:
             os.makedirs(self.repo_path, exist_ok=True)
 
     def changes(self) -> List[Change]:
-        return git_diff(self.repo_path)
+        if self.repo:
+            return git_diff(self.repo_path)
+        else:
+            return []
 
     def main_diff(self) -> List[Change]:
-        return git_diff_main(self.repo_path)
+        if self.repo:
+            return git_diff_main(self.repo_path)
+        else:
+            return []
 
     def domain(self) -> str:
         return self.repo_path
 
     def sync(self, commit_message: str) -> None:
-        git_commit(self.repo_path, commit_message)
-        git_push(self.repo_path)
+        if self.repo:
+            git_commit(self.repo_path, commit_message)
+            git_push(self.repo_path)
