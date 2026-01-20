@@ -91,7 +91,7 @@ class Thread:
         changes = self.domain_manager.changes()
         if changes:
             changes_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in changes])
-            return msgs + [{"role": "assistant",
+            return msgs + [{"role": "diff",
                             "content": changes_content}]
         else:
             return msgs

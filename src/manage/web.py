@@ -9,6 +9,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from assist.thread import Thread, ThreadManager
 import markdown
+from pygments import highlight
+from pygments.lexers import DiffLexer
+from pygments.formatters import HtmlFormatter
 
 # debug logging by default
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -35,6 +38,10 @@ async def lifespan(app: FastAPI):
             pass
 
 app = FastAPI(title="Assist Web", lifespan=lifespan)
+
+def render_diff(text: str) -> str:
+    # Use Pygments to render unified diffs with HTML formatting
+    return highlight(text, DiffLexer(), HtmlFormatter(nowrap=False))
 
 def render_index() -> str:
     items = []
@@ -97,7 +104,10 @@ def render_thread(tid: str, chat: Thread) -> str:
     for m in reversed(msgs):
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
-        if role == "assistant" or role == "tools":
+        if role == "diff":
+            # Render diffs using Pygments for proper coloring/formatting
+            content_html = render_diff(raw)
+        elif role == "assistant" or role == "tools":
             # Render assistant and tool content as Markdown to HTML
             content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
         else:
