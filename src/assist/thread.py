@@ -191,7 +191,7 @@ class ThreadManager:
             except Exception:
                 pass
 
-    def new(self, domain: str) -> Thread:
+    def new(self, domain: str|None = None) -> Thread:
         # Derive a clean ID for directory: prefer timestamp+rand
         tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
         tdir = os.path.join(self.root_dir, tid)
