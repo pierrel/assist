@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 from typing import List
 from pydantic import BaseModel
+from datetime import datetime
 
 class Change(BaseModel):
     path: str
@@ -13,6 +14,9 @@ def clone_repo(repo_url: str, dest_dir: str) -> None:
     parent = os.path.dirname(dest_dir)
     os.makedirs(parent, exist_ok=True)
     subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True)
+    # Create a new branch assist/[timestamp]
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    subprocess.run(['git', '-C', dest_dir, 'checkout', '-b', f'assist/{ts}'], check=True)
 
 
 def git_diff(repo_dir: str) -> List[Change]:
@@ -73,6 +77,86 @@ def git_diff(repo_dir: str) -> List[Change]:
     return changes
 
 
+def git_diff_main(repo_dir: str) -> List[Change]:
+    """Return diffs of current working tree compared to ``main``.
+
+    Includes tracked changes versus ``main`` and untracked files as added.
+    """
+    changes: List[Change] = []
+
+    # Files changed relative to main
+    names = subprocess.run(
+        ['git', '-C', repo_dir, 'diff', '--name-only', 'main...'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if names.returncode not in (0, 1):
+        raise RuntimeError(f"git diff --name-only main... failed: {names.stderr.strip()}")
+
+    for path in [l.strip() for l in names.stdout.splitlines() if l.strip()]:
+        d = subprocess.run(
+            ['git', '-C', repo_dir, 'diff', '--no-color', 'main...', '--', path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if d.returncode not in (0, 1):
+            raise RuntimeError(f"git diff main... failed for {path}: {d.stderr.strip()}")
+        if d.stdout:
+            changes.append(Change(path=path, diff=d.stdout))
+
+    # Untracked files: show as diff from /dev/null
+    ls = subprocess.run(
+        ['git', '-C', repo_dir, 'ls-files', '--others', '--exclude-standard'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if ls.returncode != 0:
+        raise RuntimeError(f"git ls-files failed: {ls.stderr.strip()}")
+
+    for path in [line.strip() for line in ls.stdout.splitlines() if line.strip()]:
+        d = subprocess.run(
+            ['git', '-C', repo_dir, 'diff', '--no-index', '--no-color', '--', '/dev/null', path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if d.returncode not in (0, 1):
+            raise RuntimeError(f"git diff --no-index failed for {path}: {d.stderr.strip()}")
+        if d.stdout:
+            changes.append(Change(path=path, diff=d.stdout))
+
+    return changes
+
+
+def git_push(repo_dir: str) -> None:
+    """Push current branch to origin, setting upstream if needed."""
+    # Determine current branch
+    cur = subprocess.run(['git', '-C', repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+    branch = cur.stdout.strip()
+    subprocess.run(['git', '-C', repo_dir, 'push', '--set-upstream', 'origin', branch], check=True)
+
+
+def git_commit(repo_dir: str, message: str) -> None:
+    """Stage all changes (including new files) and commit with message.
+
+    If there are no staged changes, do nothing instead of failing.
+    """
+    subprocess.run(['git', '-C', repo_dir, 'add', '-A'], check=True)
+    # Check if there are staged changes; 'git diff --cached --quiet' exits 1 when there are diffs
+    check = subprocess.run(['git', '-C', repo_dir, 'diff', '--cached', '--quiet'])
+    if check.returncode == 0:
+        return
+    subprocess.run(['git', '-C', repo_dir, 'commit', '-m', message], check=True)
+
+
 class DomainManager:
     def __init__(self,
                  root: str | None = None,
@@ -93,7 +177,12 @@ class DomainManager:
     def changes(self) -> List[Change]:
         return git_diff(self.repo_path)
 
+    def main_diff(self) -> List[Change]:
+        return git_diff_main(self.repo_path)
+
     def domain(self) -> str:
         return self.repo_path
 
-
+    def sync(self, commit_message: str) -> None:
+        git_commit(self.repo_path, commit_message)
+        git_push(self.repo_path)

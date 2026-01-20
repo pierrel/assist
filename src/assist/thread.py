@@ -69,8 +69,10 @@ class Thread:
         # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
         resp = self.agent.invoke({"messages": [{"role": "user", "content": text}]},
                                  {"configurable": {"thread_id": self.thread_id}})
-        # The agent appends the AI reply to the persisted messages channel; return the last assistant content.
-        # But callers should read final_report.md via get_messages for the final answer.
+        # After message, sync changes if any
+        if self.domain_manager.changes():
+            last_assistant = resp["messages"][-1].content if resp.get("messages") else "assistant update"
+            self.domain_manager.sync(last_assistant)
         return resp["messages"][-1].content
 
     def get_messages(self) -> list[dict]:
@@ -87,8 +89,8 @@ class Thread:
                                  "content": render_tool_calls(m)})
                 elif m.content:
                     msgs.append({"role": "assistant", "content": m.content})
-        # If a there were any changes, then summarize them at the end
-        changes = self.domain_manager.changes()
+        # If there were any changes vs main, summarize them at the end
+        changes = self.domain_manager.main_diff()
         if changes:
             changes_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in changes])
             return msgs + [{"role": "diff",
