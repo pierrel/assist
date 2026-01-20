@@ -49,7 +49,7 @@ class Thread:
 
     def __init__(self,
                  working_dir: str,
-                 domain: str,
+                 domain: str | None = None,
                  thread_id: str | None = None,
                  checkpointer=None,
                  model: BaseChatModel | None = None):
@@ -57,8 +57,8 @@ class Thread:
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = model or select_chat_model("mistral-nemo", 0.1)
-        self.domain_manager = DomainManager(domain,
-                                            working_dir)
+        self.domain_manager = DomainManager(working_dir,
+                                            domain)
         self.agent = create_agent(self.model,
                                   working_dir=self.domain_manager.domain(),
                                   checkpointer=checkpointer)
@@ -90,8 +90,9 @@ class Thread:
         # If a there were any changes, then summarize them at the end
         changes = self.domain_manager.changes()
         if changes:
+            changes_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in changes])
             return msgs + [{"role": "assistant",
-                            "content": pformat(changes)}]
+                            "content": changes_content}]
         else:
             return msgs
 

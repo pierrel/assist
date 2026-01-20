@@ -7,7 +7,7 @@ from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from assist.agent import Thread, ThreadManager
+from assist.thread import Thread, ThreadManager
 import markdown
 
 # debug logging by default
@@ -19,6 +19,7 @@ logging.getLogger("deepagents").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
+DEFAULT_DOMAIN = "/home/pierre/git/life.git/"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -155,7 +156,7 @@ async def index() -> str:
 
 @app.post("/threads")
 async def create_thread():
-    chat = MANAGER.new()
+    chat = MANAGER.new(DEFAULT_DOMAIN)
     return RedirectResponse(url=f"/thread/{chat.thread_id}", status_code=303)
 
 
