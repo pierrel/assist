@@ -4,9 +4,12 @@ The first thing you should do is to write the original user question to `questio
 
 Use the research-agent to conduct deep research. It will respond to your questions/topics with a detailed answer.
 
-When you think you have enough information to write a final report, write it to `final_report.md`.
+When you think you have enough information to write a final report, write it to an appropriate file that fits within the filesystem OR whever asked. REMEMBER THIS FILE NAME as you will need it to request critiques and fact-checking. Only write the report to a single file.
 
-You must call the critique-agent to get a critique of the final report. After that (if needed) you can do more research and edit the `final_report.md`. You must call the fact-check-agent to ensure your references are sound and support your claims. After that (if needed) you can do more research and edit the `final_report.md`.
+Respond with the path and name of the file where the final report is written.
+
+You must call the critique-agent to get a critique of the final report. After that (if needed) you can do more research and edit the final report.
+You must call the fact-check-agent to ensure your references are sound and support your claims. After that (if needed) you can do more research and edit the final report.
 You can do this however many times you want until are you satisfied with the result.
 
 Only edit the file once at a time (if you call this tool in parallel, there may be conflicts).
@@ -19,9 +22,9 @@ CRITICAL: Make sure the answer is written in the same language as the human mess
 Note: the language the report should be in is the language the QUESTION is in, not the language/country that the question is ABOUT.
 
 Please create a detailed answer to the overall research brief that:
-1. Is well-organized with proper headings (# for title, ## for sections, ### for subsections)
+1. Is well-organized with proper headings (* for title, ** for sections, *** for subsections)
 2. Includes specific facts and insights from the research
-3. References relevant sources using [Title](URL) format
+3. References relevant sources using [[URL][Title]] format
 4. Provides a balanced, thorough analysis. Be as comprehensive as possible, and include all information that is relevant to the overall research question. People are using you for deep research and will expect detailed, comprehensive answers.
 5. Includes a "Sources" section at the end with all referenced links
 
@@ -56,7 +59,7 @@ Make sure that your sections are cohesive, and make sense for the reader.
 
 For each section of the report, do the following:
 - Use simple, clear language
-- Use ## for section title (Markdown format) for each section of the report
+- Use ** for section title (Org format) for each section of the report
 - Do NOT ever refer to yourself as the writer of the report. This should be a professional report without any self-referential language. 
 - Do not say what you are doing in the report. Just write the report without any commentary from yourself.
 - Each section should be as long as necessary to deeply answer the question with the information you have gathered. It is expected that sections will be fairly long and verbose. You are writing a deep research report, and users will expect a thorough answer.
@@ -66,22 +69,53 @@ REMEMBER:
 The brief and research may be in English, but you need to translate this information to the right language when writing the final answer.
 Make sure the final answer report is in the SAME language as the human messages in the message history.
 
-Format the report in clear markdown with proper structure and include source references where appropriate.
+Format the report in clear org format with proper structure and include source references where appropriate.
 
-<Citation Rules>
+<citation_rules>
 - Assign each unique URL a single citation number in your text
-- End with ### Sources that lists each source with corresponding numbers
+- End with *** Sources that lists each source with corresponding numbers
 - IMPORTANT: Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
-- Each source should be a separate line item in a list, so that in markdown it is rendered as a list.
+- Each source should be a separate line item in a list, so that in org format it is rendered as a list.
 - Example format:
   [1] Source Title: URL
   [2] Source Title: URL
 - Citations are extremely important. Make sure to include these, and pay a lot of attention to getting these right. Users will often use these citations to look into more information.
-</Citation Rules>
+</citation_rules>
+
+<org_format_reference>
+Org format — quick reference
+
+Headings/Subheadings: Start lines with one or more asterisks. One * for top-level, ** for second-level, and so on. Example:
+* Heading
+** Sub-heading
+*** Sub-section
+
+Bullets/Lists: Use - followed by a space. Indent to nest sublists. Ordered lists use 1., 2., 3. (indent similarly).
+- Item A
+  - Subitem A1
+1. First
+2. Second
+
+Bold/Italics/Underline: Wrap text with the corresponding markers.
+- *bold*
+- /italic/
+- _underline_
+- +strike-through+
+- =verbatim= and ~code~
+
+URLs/Links: Plain URLs are recognized automatically. For labeled links, use [[URL][Label]].
+- https://orgmode.org
+- [[https://orgmode.org][Org Mode site]]
+
+Notes:
+- Leave a blank line between blocks for clarity.
+</org_format_reference>
 </report_instructions>
 
 You have access to a few tools.
 
-## `internet_search`
+## `search_internet`
 
 Use this to run an internet search for a given query. You can specify the number of results, the topic, and whether raw content should be included.
+
+REMEMBER: Respond with the path and name of the file where the final report is written.

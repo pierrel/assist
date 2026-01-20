@@ -1,4 +1,4 @@
-Emacs Org format — quick reference
+Org format — quick reference
 
 - Headings/Subheadings: Start lines with one or more asterisks. One * for top-level, ** for second-level, and so on. Example:
   * Project
