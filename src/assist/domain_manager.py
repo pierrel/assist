@@ -84,12 +84,11 @@ class DomainManager:
         
         self.repo_path = os.path.join(self.root, 'domain')
         # Clone only if the repo does not already exist
-        repo_exists = os.path.isdir(os.path.join(self.repo_path, '.git'))
+        repo_exists = os.path.isdir(self.repo_path)
         if repo and not repo_exists:
-            clone_repo(self.repo_url, self.repo_path)
+            clone_repo(repo, self.repo_path)
         elif not repo and not repo_exists:
-            
-            
+            os.makedirs(self.repo_path, exist_ok=True)
 
     def changes(self) -> List[Change]:
         return git_diff(self.repo_path)
