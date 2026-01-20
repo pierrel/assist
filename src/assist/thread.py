@@ -22,7 +22,7 @@ from assist.domain_manager import DomainManager
 def render_tool_calls(message: AIMessage) -> str:
     calls = getattr(message, "tool_calls", None)
     if calls:
-        calls_str = message.content + " -- ".join(map(lambda c: render_tool_call(c), calls))
+        calls_str = " -- ".join(map(lambda c: render_tool_call(c), calls))
         if getattr(message, "content", None):
             return f"{calls_str} \n> {message.content}"
 

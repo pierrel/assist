@@ -12,7 +12,7 @@ def clone_repo(repo_url: str, dest_dir: str) -> None:
     """Always clone the repository into dest_dir."""
     parent = os.path.dirname(dest_dir)
     os.makedirs(parent, exist_ok=True)
-    subprocess.run(['git', 'clone', repo_url, dest_dir], check=True)
+    subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True)
 
 
 def git_diff(repo_dir: str) -> List[Change]:
