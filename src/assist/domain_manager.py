@@ -170,6 +170,31 @@ def merge_main_into_current_and_push(repo_path: str) -> None:
     # Push current branch
     subprocess.run(['git', '-C', repo_path, 'push', '--set-upstream', 'origin', branch], check=True)
 
+def git_repo(path: str) -> str | None:
+    """Return the remote URL of the git repository at path, or None if not a repo."""
+    try:
+        inside = subprocess.run(
+            ['git', '-C', path, 'rev-parse', '--is-inside-work-tree'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if inside.returncode != 0 or inside.stdout.strip() != 'true':
+            return None
+        remote = subprocess.run(
+            ['git', '-C', path, 'remote', 'get-url', 'origin'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if remote.returncode != 0:
+            return None
+        return remote.stdout.strip() or None
+    except Exception:
+        return None
+
 class DomainManager:
     def __init__(self,
                  root: str | None = None,
@@ -179,13 +204,15 @@ class DomainManager:
         else:
             self.root = tempfile.mkdtemp()
 
-        self.repo = repo
         self.repo_path = os.path.join(self.root, 'domain')
+        # If repo_path is already a git repo, use its remote
+        existing_remote = git_repo(self.repo_path)
+        self.repo = existing_remote or repo
         # Clone only if the repo does not already exist
         repo_exists = os.path.isdir(self.repo_path)
-        if repo and not repo_exists:
-            clone_repo(repo, self.repo_path)
-        elif not repo and not repo_exists:
+        if self.repo and not existing_remote and not repo_exists:
+            clone_repo(self.repo, self.repo_path)
+        elif not self.repo and not repo_exists:
             os.makedirs(self.repo_path, exist_ok=True)
 
     def changes(self) -> List[Change]:
