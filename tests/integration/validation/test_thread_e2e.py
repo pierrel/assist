@@ -6,7 +6,7 @@ import uuid
 from unittest import TestCase
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
-from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, BaseMessage
 
 
 from assist.model_manager import select_chat_model
@@ -71,3 +71,18 @@ class TestThreadE2E(TestCase):
         with open(inbox_path, "r", encoding="utf-8") as f:
             content = f.read()
         self.assertIn("2026-11-07", content, "Inbox should contain normalized due date")
+
+    def test_find_pants(self):
+        message = "I need new pants. What are some good, custom made pants options. Provide both local (to san francisco) and over the internet. Also provide a price range."
+        thread = self.thread_manager.new()
+        create_structure(thread.domain_manager.domain())
+        resp = thread.message(message)
+        self.assertTrue(resp, "Should respond")
+        inbox_path = os.path.join(thread.domain_manager.domain(), "gtd", "inbox.org")
+        with open(inbox_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("pant", content, "Inbox should contain something about pants")
+        tool_calls = [m.name for m in thread.get_raw_messages() if isinstance(m, ToolMessage)]
+        self.assertIn("write_todos", tool_calls)
+        self.assertIn("task", tool_calls)
+
