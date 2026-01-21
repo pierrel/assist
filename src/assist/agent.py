@@ -15,8 +15,8 @@ from assist.tools import read_url, search_internet
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None) -> CompiledStateGraph:
-    retry_middle = ModelRetryMiddleware(max_retries=4,
-                                        backoff_factor=1.5)
+    retry_middle = ModelRetryMiddleware(max_retries=6,
+                                        backoff_factor=2)
     mw = [retry_middle]
     
     research_sub = CompiledSubAgent(
@@ -33,7 +33,6 @@ def create_agent(model: BaseChatModel,
 
     return create_deep_agent(
         model=model,
-        tools=[search_internet],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/general_instructions.md.j2"),
         middleware=mw,
