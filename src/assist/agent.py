@@ -26,7 +26,7 @@ class AgentHarness:
                                  {"configurable": {"thread_id": self.thread_id}})
         return resp["messages"][-1].content
 
-    def all_messages(self) -> List[AnyMessage]:
+    def all_messages(self) -> list[AnyMessage]:
         state = self.agent.get_state({"configurable": {"thread_id": self.thread_id}})
         return state.values.get("messages", [])
         
