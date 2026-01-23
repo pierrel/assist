@@ -186,11 +186,7 @@ async def index() -> str:
 async def create_thread():
     chat = MANAGER.new(DEFAULT_DOMAIN)
     tid = chat.thread_id
-    # Cache the description of the newly created thread
-    try:
-        DESCRIPTION_CACHE[tid] = chat.description()
-    except Exception:
-        DESCRIPTION_CACHE[tid] = tid
+    # Don't cache description yet - new threads don't have content for a real description
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -200,6 +196,9 @@ def _process_message(tid: str, text: str) -> None:
     except FileNotFoundError:
         return
     chat.message(text)
+    # Invalidate cache so description gets re-read with updated content
+    if tid in DESCRIPTION_CACHE:
+        del DESCRIPTION_CACHE[tid]
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
