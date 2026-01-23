@@ -24,11 +24,35 @@ logging.getLogger("deepagents").setLevel(logging.DEBUG)
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
 DEFAULT_DOMAIN = get_domain()
+DESCRIPTION_CACHE: Dict[str, str] = {}
+
+def get_cached_description(tid: str) -> str:
+    """Get thread description from cache, or read from FS and cache if miss."""
+    if tid in DESCRIPTION_CACHE:
+        return DESCRIPTION_CACHE[tid]
+
+    # Cache miss - read from FS and cache
+    try:
+        chat = MANAGER.get(tid)
+        description = chat.description()
+        DESCRIPTION_CACHE[tid] = description
+        return description
+    except Exception:
+        return tid
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Ensure thread root exists at startup
     os.makedirs(ROOT, exist_ok=True)
+
+    # Populate description cache at startup
+    for tid in MANAGER.list():
+        try:
+            chat = MANAGER.get(tid)
+            DESCRIPTION_CACHE[tid] = chat.description()
+        except Exception:
+            DESCRIPTION_CACHE[tid] = tid
+
     try:
         yield
     finally:
@@ -51,11 +75,7 @@ def render_index() -> str:
         items.append("<li><em>No threads yet</em></li>")
     else:
         for tid in tids:
-            try:
-                chat = MANAGER.get(tid)
-                title = chat.description()
-            except Exception:
-                title = tid
+            title = get_cached_description(tid)
             items.append(f'<li><a href="/thread/{tid}">{html.escape(title)}</a></li>')
     items_html = "\n".join(items)
     return f"""
@@ -96,10 +116,7 @@ def render_index() -> str:
 
 
 def render_thread(tid: str, chat: Thread) -> str:
-    try:
-        title = MANAGER.get(tid).description()
-    except Exception:
-        title = tid
+    title = get_cached_description(tid)
     msgs = chat.get_messages()
     rendered = []
     for m in reversed(msgs):
@@ -168,7 +185,13 @@ async def index() -> str:
 @app.post("/threads")
 async def create_thread():
     chat = MANAGER.new(DEFAULT_DOMAIN)
-    return RedirectResponse(url=f"/thread/{chat.thread_id}", status_code=303)
+    tid = chat.thread_id
+    # Cache the description of the newly created thread
+    try:
+        DESCRIPTION_CACHE[tid] = chat.description()
+    except Exception:
+        DESCRIPTION_CACHE[tid] = tid
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 def _process_message(tid: str, text: str) -> None:
