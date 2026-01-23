@@ -16,6 +16,8 @@ import requests
 import yaml
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from assist.config_manager import get_config, config_path
+
 try:  # pragma: no cover - optional dependency
     from langchain_openai import ChatOpenAI
 except Exception:  # pragma: no cover
@@ -26,7 +28,6 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover
     ChatOllama = None  # type: ignore
 
-CONFIG_FILENAME = "llm-config.yml"
 DEFAULT_MODEL = "gpt-4o-mini"
 
 # Mapping of model names to their character context limits. OpenAI models
@@ -51,20 +52,6 @@ class OpenAIConfig:
     test_url_path: Optional[str] = None
 
 
-def _project_root() -> Path:
-    """Locate the project root by searching for ``pyproject.toml``."""
-
-    start = Path(__file__).resolve()
-    for parent in [start] + list(start.parents):
-        if (parent / "pyproject.toml").exists():
-            return parent
-    return start.parent
-
-
-def _config_path() -> Path:
-    return _project_root() / CONFIG_FILENAME
-
-
 def _test_local_llm_availability(config: OpenAIConfig) -> bool:
     """Test if the local LLM is available by making a request to the test URL."""
     if not config.test_url_path:
@@ -80,21 +67,13 @@ def _test_local_llm_availability(config: OpenAIConfig) -> bool:
 
 @lru_cache(maxsize=1)
 def _load_custom_openai_config() -> Optional[OpenAIConfig]:
-    """Return the custom OpenAI configuration if ``llm-config.yml`` exists."""
-
-    path = _config_path()
-    if not path.exists():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text()) or {}
-    except (OSError, yaml.YAMLError) as exc:  # pragma: no cover - filesystem/env
-        raise RuntimeError(f"Unable to read {CONFIG_FILENAME}: {exc}") from exc
-
+    """Return the custom OpenAI configuration."""
+    raw = get_config()
     missing = [key for key in ("url", "model", "api_key") if not raw.get(key)]
     if missing:
         missing_keys = ", ".join(sorted(missing))
         raise RuntimeError(
-            f"{CONFIG_FILENAME} is missing required keys: {missing_keys}"
+            f"Config is missing required keys: {missing_keys}"
         )
 
     return OpenAIConfig(
@@ -129,7 +108,7 @@ def select_chat_model(model: str, temperature: float) -> BaseChatModel:
     config = _load_custom_openai_config()
     if config:
         if _test_local_llm_availability(config):
-            print(f"Using local LLM configuration from {CONFIG_FILENAME}")
+            print(f"Using local LLM configuration from ")
             model= _build_openai_chat_model(
                 config.model,
                 temperature=temperature,
@@ -139,7 +118,7 @@ def select_chat_model(model: str, temperature: float) -> BaseChatModel:
             model.profile["max_input_tokens"] = 120000
             return model
         else:
-            print(f"Local LLM from {CONFIG_FILENAME} is not available, falling back to OpenAI API")
+            print(f"Local LLM from {config_path()} is not available, falling back to OpenAI API")
 
     print("Using OpenAI API configuration")
     if model.startswith("gpt-"):
@@ -159,7 +138,7 @@ def get_model_pair(temperature: float) -> Tuple[BaseChatModel, BaseChatModel]:
     config = _load_custom_openai_config()
     if config:
         if _test_local_llm_availability(config):
-            print(f"Using local LLM configuration from {CONFIG_FILENAME}")
+            print(f"Using local LLM configuration from {config_path()}")
             llm = _build_openai_chat_model(
                 config.model,
                 temperature=temperature,
@@ -168,7 +147,7 @@ def get_model_pair(temperature: float) -> Tuple[BaseChatModel, BaseChatModel]:
             )
             return llm, llm
         else:
-            print(f"Local LLM from {CONFIG_FILENAME} is not available, falling back to OpenAI API")
+            print(f"Local LLM from {config_path()} is not available, falling back to OpenAI API")
 
     print("Using OpenAI API configuration")
     default_llm = _build_openai_chat_model(DEFAULT_MODEL, temperature=temperature)
