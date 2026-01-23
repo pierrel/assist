@@ -1,5 +1,7 @@
+import uuid
+
 from deepagents import create_deep_agent, CompiledSubAgent
-from langchain.messages import AIMessage
+from langchain.messages import AIMessage, AnyMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -11,6 +13,23 @@ from langchain.agents.middleware import ModelRetryMiddleware
 from openai import InternalServerError
 
 from assist.tools import read_url, search_internet
+
+class AgentHarness:
+    """Makes it easier to have conversations"""
+    
+    def __init__(self, agent: CompiledStateGraph, thread_id: str | None = None):
+        self.agent = agent
+        self.thread_id = thread_id or uuid.uuid1()
+
+    def message(self, text: str) -> AIMessage:
+        resp = self.agent.invoke({"messages": [{"role": "user", "content": text}]},
+                                 {"configurable": {"thread_id": self.thread_id}})
+        return resp["messages"][-1].content
+
+    def all_messages(self) -> List[AnyMessage]:
+        state = self.agent.get_state({"configurable": {"thread_id": self.thread_id}})
+        return state.values.get("messages", [])
+        
 
 def create_agent(model: BaseChatModel,
                  working_dir: str,
@@ -38,6 +57,20 @@ def create_agent(model: BaseChatModel,
         middleware=mw,
         backend=fs,
         subagents=[research_sub]
+    )
+
+def create_user_expert_agent(model: BaseChatModel,
+                             working_dir: str,
+                             checkpointer=None,
+                             middleware=[]) -> CompiledStateGraph:
+    fs = FilesystemBackend(root_dir=working_dir,
+                           virtual_mode=True)
+    return create_deep_agent(
+        model=model,
+        checkpointer=checkpointer or InMemorySaver(),
+        system_prompt=base_prompt_for("deepagents/user_expert.md.j2"),
+        backend=fs,
+        middleware=middleware,
     )
 
 
