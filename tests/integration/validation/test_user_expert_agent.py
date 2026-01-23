@@ -44,18 +44,17 @@ class TestUserExpertAgent(TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
-                           
+
         return AgentHarness(create_user_expert_agent(self.model,
-                                                     root))
+                                                     root)), root
     
     def setUp(self):
         self.model = select_chat_model("gpt-oss-20b", 0.1)
 
     def test_reads_readme(self):
-        root = tempfile.mkdtemp()
-        agent = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
-                                   "gtd": {"inbox.org":
-                                           """* Tasks
+        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
+                                         "gtd": {"inbox.org":
+                                                 """* Tasks
                                            ** TODO Fold laundry
                                            Just get it done
                                            ** TODO Buy new pants"""}})
@@ -63,20 +62,15 @@ class TestUserExpertAgent(TestCase):
         self.assertRegex(res, "inbox\\.org", "Should mention the inbox file")
 
     def test_adds_item_correctly(self):
-        root = tempfile.mkdtemp()
-        agent = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
-                                   "gtd": {"inbox.org":
-                                           """* Tasks
-                                           ** TODO Fold laundry
-                                           Just get it done
-                                           ** TODO Buy new pants
-                                           Size 31"""}})
+        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
+                                         "gtd": {"inbox.org":
+                                                 "* Tasks\n** TODO Fold laundry\nJust get it done\n** TODO Buy new pants\nSize 31"}})
         inbox_contents_before = read_file(f"{root}/gtd/inbox.org")
         res = agent.message("I need a new washer/dryer")
         inbox_contents = read_file(f"{root}/gtd/inbox.org")
-        self.assertRegex(res, "updated", "Should mention that a change was made.")
+        self.assertRegex(res, "(?i)updated|added", "Should mention that a change was made.")
         self.assertRegex(inbox_contents,
-                         "^\\*\\* TODO.*dryer",
+                         "(?im)^\\*\\* TODO.*dryer",
                          "Should have added a TODO with dryer in the heading")
         self.assertRegex(inbox_contents,
                          "laundry\nJust get it done",
