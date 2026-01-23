@@ -12,6 +12,7 @@ import markdown
 from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
+from assist.config_manager import get_domain
 
 # debug logging by default
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -22,7 +23,7 @@ logging.getLogger("deepagents").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
-DEFAULT_DOMAIN = "/home/pierre/git/life.git/"
+DEFAULT_DOMAIN = get_domain()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
