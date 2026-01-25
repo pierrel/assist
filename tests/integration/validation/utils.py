@@ -1,4 +1,76 @@
 import os
+from unittest import TestCase
+from langchain_core.messages import ToolMessage
+
+
+class AgentTestMixin:
+    """
+    Mixin for TestCase classes that adds agent-specific assertions.
+
+    Usage:
+        class MyTest(AgentTestMixin, TestCase):
+            def test_something(self):
+                agent, root = self.create_agent({...})
+                agent.message("Write a file")
+                self.assertToolCall(agent, "write_file", "Should have written")
+    """
+
+    def assertToolCall(self, agent, tool_name: str, msg: str = None):
+        """
+        Assert that a specific tool was called by the agent.
+
+        Args:
+            agent: The AgentHarness instance
+            tool_name: The name of the tool to check for
+            msg: Optional custom assertion message
+        """
+        tool_calls = [m.name for m in agent.all_messages() if isinstance(m, ToolMessage)]
+
+        if msg is None:
+            msg = f"Tool '{tool_name}' should have been called. Called tools: {tool_calls}"
+
+        self.assertIn(tool_name, tool_calls, msg)
+
+
+def assertToolCall(test_case, agent, tool_name: str, msg: str = None):
+    """
+    Assert that a specific tool was called by the agent.
+
+    This function can be used directly or as a helper to add to TestCase classes.
+
+    Args:
+        test_case: The TestCase instance (pass self from the test)
+        agent: The AgentHarness instance
+        tool_name: The name of the tool to check for
+        msg: Optional custom assertion message
+
+    Usage (direct):
+        from tests.integration.validation.utils import assertToolCall
+
+        agent, root = self.create_agent({...})
+        agent.message("Do something")
+        assertToolCall(self, agent, "write_file", "Should have written a file")
+
+    Usage (as method - add to TestCase setUp):
+        from tests.integration.validation.utils import assertToolCall
+
+        class MyTest(TestCase):
+            def setUp(self):
+                # Add as instance method
+                self.assertToolCall = lambda agent, tool, msg=None: assertToolCall(self, agent, tool, msg)
+
+            def test_something(self):
+                agent, root = self.create_agent({...})
+                agent.message("Write a file")
+                self.assertToolCall(agent, "write_file", "Should have written")
+    """
+    tool_calls = [m.name for m in agent.all_messages() if isinstance(m, ToolMessage)]
+
+    if msg is None:
+        msg = f"Tool '{tool_name}' should have been called. Called tools: {tool_calls}"
+
+    test_case.assertIn(tool_name, tool_calls, msg)
+
 
 def read_file(path: str):
     """Returns the full contents of file at path"""
