@@ -8,12 +8,15 @@ import os
 import json
 import re
 import shutil
+import logging
 from datetime import datetime
 from typing import Dict, List
 
 from assist.thread import Thread
 from assist.model_manager import select_chat_model
 from edd.agent import create_capture_agent
+
+logger = logging.getLogger(__name__)
 
 
 def sanitize_dirname(description: str) -> str:
@@ -91,12 +94,12 @@ def capture_conversation(thread: Thread, reason: str, improvements_dir: str) -> 
     capture_domain_dir = os.path.join(capture_dir, "domain")
 
     if os.path.exists(source_domain_dir):
-        print(f"Copying domain directory from {source_domain_dir} to {capture_domain_dir}")
+        logger.info(f"Copying domain directory from {source_domain_dir} to {capture_domain_dir}")
         shutil.copytree(source_domain_dir, capture_domain_dir,
                        ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pyc', '.pytest_cache'))
-        print(f"Domain directory copied successfully")
+        logger.debug(f"Domain directory copied successfully")
     else:
-        print(f"No domain directory found at {source_domain_dir}, creating empty domain dir")
+        logger.debug(f"No domain directory found at {source_domain_dir}, creating empty domain dir")
         os.makedirs(capture_domain_dir, exist_ok=True)
 
     # Prepare conversation data for the agent
@@ -194,18 +197,18 @@ Begin!
 """
 
     # Invoke the agent to generate the test case
-    print(f"Invoking capture agent for thread {thread.thread_id}...")
-    print(f"Capture directory: {capture_dir}")
-    print(f"Domain directory copied to: {capture_domain_dir}")
+    logger.info(f"Invoking capture agent for thread {thread.thread_id}")
+    logger.debug(f"Capture directory: {capture_dir}")
+    logger.debug(f"Domain directory copied to: {capture_domain_dir}")
 
     try:
         response = agent.invoke(
             {"messages": [{"role": "user", "content": task}]},
             {"configurable": {"thread_id": f"capture-{thread.thread_id}"}}
         )
-        print(f"Agent completed. Response: {response.get('messages', [])[-1].content if response.get('messages') else 'No response'}")
+        logger.debug(f"Agent completed successfully")
     except Exception as e:
-        print(f"Agent invocation failed: {e}")
+        logger.error(f"Agent invocation failed: {e}", exc_info=True)
         _write_fallback_files(capture_dir, thread, messages, reason)
         return capture_dir
 
@@ -217,11 +220,11 @@ Begin!
 
     if missing_files:
         # Agent didn't complete the task properly
-        print(f"Agent did not create all required files. Missing: {missing_files}")
-        print("Using fallback file generation...")
+        logger.warning(f"Agent did not create all required files. Missing: {missing_files}")
+        logger.info("Using fallback file generation")
         _write_fallback_files(capture_dir, thread, messages, reason)
     else:
-        print(f"All files created successfully in {capture_dir}")
+        logger.info(f"All files created successfully in {capture_dir}")
 
     return capture_dir
 

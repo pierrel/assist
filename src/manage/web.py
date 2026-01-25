@@ -171,7 +171,7 @@ def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
         <div class="container">
           <div class="nav"><a href="/">← All threads</a></div>
           <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
-          {"<div class='success-msg'>Conversation captured successfully!</div>" if captured else ""}
+          {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           <form action="/thread/{tid}/message" method="post">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..."></textarea><br/>
@@ -266,12 +266,13 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
-@app.post("/thread/{tid}/capture")
-async def capture_thread(tid: str, reason: str = Form(...)):
+def _capture_conversation(tid: str, reason: str) -> None:
+    """Background task to capture a conversation."""
     try:
         thread = MANAGER.get(tid)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Thread not found")
+        logging.error(f"Thread {tid} not found for capture")
+        return
 
     # Get repo root (navigate up from src/manage/web.py to repo root)
     current_file = os.path.abspath(__file__)
@@ -281,9 +282,30 @@ async def capture_thread(tid: str, reason: str = Form(...)):
     from edd.capture import capture_conversation
     try:
         capture_path = capture_conversation(thread, reason, improvements_dir)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logging.info(f"Conversation captured successfully to {capture_path}")
+    except Exception as e:
+        logging.error(f"Failed to capture conversation for thread {tid}: {e}", exc_info=True)
 
+
+@app.post("/thread/{tid}/capture")
+async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: str = Form(...)):
+    try:
+        thread = MANAGER.get(tid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    # Validate thread has messages before queuing
+    try:
+        messages = thread.get_messages()
+        if not messages:
+            raise HTTPException(status_code=400, detail="Cannot capture empty conversation")
+    except Exception:
+        pass  # Let the background task handle it
+
+    # Queue the capture as a background task
+    background_tasks.add_task(_capture_conversation, tid, reason)
+
+    # Return immediately
     return RedirectResponse(
         url=f"/thread/{tid}?captured=1",
         status_code=303
