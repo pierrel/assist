@@ -115,7 +115,7 @@ def render_index() -> str:
     """
 
 
-def render_thread(tid: str, chat: Thread) -> str:
+def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
     title = get_cached_description(tid)
     msgs = chat.get_messages()
     rendered = []
@@ -151,9 +151,19 @@ def render_thread(tid: str, chat: Thread) -> str:
           .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
           form textarea {{ width: 100%; min-height: 6rem; height: 24vh; box-sizing: border-box; }}
           form {{ margin-top: 1rem; }}
-          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; }}
+          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; cursor: pointer; }}
+          .btn-secondary {{ background: #ddd; }}
+          .success-msg {{ background: #d4edda; border: 1px solid #c3e6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #155724; }}
+          .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); }}
+          .modal-content {{ background: #fff; margin: 10% auto; padding: 1.5rem; width: 90%; max-width: 500px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+          .modal-content h3 {{ margin-top: 0; }}
+          .modal-content textarea {{ width: 100%; min-height: 100px; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }}
+          .modal-content label {{ display: block; margin-bottom: .5rem; font-weight: 500; }}
+          .button-group {{ display: flex; gap: .5rem; margin-top: 1rem; }}
           @media (max-width: 480px) {{
             .msg {{ padding: .5rem .6rem; }}
+            .button-group {{ flex-direction: column; }}
+            .btn {{ width: 100%; }}
           }}
         </style>
       </head>
@@ -161,12 +171,48 @@ def render_thread(tid: str, chat: Thread) -> str:
         <div class="container">
           <div class="nav"><a href="/">← All threads</a></div>
           <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
+          {"<div class='success-msg'>Conversation captured successfully!</div>" if captured else ""}
           <form action="/thread/{tid}/message" method="post">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..."></textarea><br/>
-            <button class="btn" type="submit">Send</button>
+            <div class="button-group">
+              <button class="btn" type="submit">Send</button>
+              <button class="btn btn-secondary" type="button" onclick="showCaptureModal()">Capture Conversation</button>
+            </div>
             <div style="font-size:.85rem; color:#666; margin-top:.4rem;">If you close or refresh, your message will still be processed.</div>
           </form>
+
+          <!-- Capture Modal -->
+          <div id="captureModal" class="modal">
+            <div class="modal-content">
+              <h3>Capture Conversation</h3>
+              <p>Save this conversation for future testing and replay.</p>
+              <form action="/thread/{tid}/capture" method="post">
+                <label for="reason">Why are you capturing this conversation?</label>
+                <textarea id="reason" name="reason" required placeholder="e.g., Good example of authentication bug handling"></textarea>
+                <div class="button-group">
+                  <button class="btn" type="submit">Save</button>
+                  <button class="btn btn-secondary" type="button" onclick="hideCaptureModal()">Cancel</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <script>
+            function showCaptureModal() {{
+              document.getElementById('captureModal').style.display = 'block';
+            }}
+            function hideCaptureModal() {{
+              document.getElementById('captureModal').style.display = 'none';
+            }}
+            // Close modal when clicking outside
+            window.onclick = function(event) {{
+              const modal = document.getElementById('captureModal');
+              if (event.target == modal) {{
+                hideCaptureModal();
+              }}
+            }}
+          </script>
           <hr/>
           <div>
             {body}
@@ -202,12 +248,12 @@ def _process_message(tid: str, text: str) -> None:
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
-async def get_thread(tid: str) -> str:
+async def get_thread(tid: str, captured: int = 0) -> str:
     try:
         chat = MANAGER.get(tid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
-    return render_thread(tid, chat)
+    return render_thread(tid, chat, captured=bool(captured))
 
 
 @app.post("/thread/{tid}/message")
@@ -218,6 +264,30 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
         raise HTTPException(status_code=404, detail="Thread not found")
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+@app.post("/thread/{tid}/capture")
+async def capture_thread(tid: str, reason: str = Form(...)):
+    try:
+        thread = MANAGER.get(tid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    # Get repo root (navigate up from src/manage/web.py to repo root)
+    current_file = os.path.abspath(__file__)
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+    improvements_dir = os.path.join(repo_root, "improvements")
+
+    from edd.capture import capture_conversation
+    try:
+        capture_path = capture_conversation(thread, reason, improvements_dir)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return RedirectResponse(
+        url=f"/thread/{tid}?captured=1",
+        status_code=303
+    )
 
 
 if __name__ == "__main__":
