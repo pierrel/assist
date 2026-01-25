@@ -8,9 +8,9 @@ from unittest import TestCase
 from assist.model_manager import select_chat_model
 from assist.agent import create_agent, AgentHarness
 
-from .utils import read_file, create_filesystem
+from .utils import read_file, create_filesystem, AgentTestMixin
 
-class TestAgent(TestCase):
+class TestAgent(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
@@ -134,3 +134,62 @@ class TestAgent(TestCase):
         res = agent.message("When was Paris founded? By who? Why?")
         file_after = read_file(f"{root}/paris.org")
         self.assertNotEqual(file_before, file_after, "It should have updated the file with relevant information")
+
+    def test_emacs_framebuffer_touchscreen(self):
+        # Setup filesystem with ONLY necessary files (none needed for this test)
+        agent, root = self.create_agent({})
+
+        # Send key message
+        user_msg = (
+            "I have eMacs running in a direct frame buffer and in a very small touch screen. "
+            "What are some of the things that I should consider with this setup so that I have a good "
+            "experience and eMacs runs smoothly?"
+        )
+        res = agent.message(user_msg)
+
+        # Basic sanity check
+        self.assertIsNotNone(res)
+
+        # Assert that the assistant mentions key considerations
+        self.assertToolCall(agent, "task", "It should have called a sub-agent")
+
+    def test_scenario(self):
+        # Setup filesystem with ONLY necessary files
+        agent, root = self.create_agent({
+            "README.org": dedent("""
+These are the files that I use to manage my everyday life through emacs org mode. All files by default are written in org format.
+
+* Todos
+It is also where I keep my todo list(s). I use the gtd method and org TODOs and use the following files to manage my todos:
+- gtd/inbox.org - General inbox where todo items begin
+- gtd/projects.org - Todo items organized by project. TODOs are placed under the project in general order of either priority or next action.
+- gtd/someday.org - Todo items that don't require any immediate attention, mostly saved for future ideas
+- gtd/tickler.org - Todo items that will be important at some point in the future
+
+All new items should start in the inbox for later triaging.
+* Research
+The result of general research is placed in the =references= directory and can be referenced in other files.
+
+* Other
+I have files that track fitness, finances, and Roman's (my son) progress. I also keep notes about travel plans and ideas for gifts for my wife (Ana)."""),
+            "question.txt": "Research best practices for import statements in Python and Guido van Rossum's recommendations. Provide concise summary and key points.",
+            "references": {".keep": ""},
+        })
+
+        # Send key message
+        res = agent.message('What are the best practices for import statements in python? What does guido recommend?')
+
+        # Assert that the agent responded
+        self.assertIsNotNone(res)
+
+        # After the agent finishes, question.txt should be removed
+        self.assertFalse(os.path.exists(os.path.join(root, "question.txt")), "question.txt should be deleted after processing")
+
+        # The report should be written into the references directory
+        report_path = os.path.join(root, "references", "report_import_best_practices.org")
+        self.assertTrue(os.path.exists(report_path), "Report should be created in references directory")
+
+        # Verify that the report contains expected content
+        report_content = read_file(report_path)
+        self.assertIn("Import Statements Best Practices in Python", report_content, "Report should contain key heading")
+
