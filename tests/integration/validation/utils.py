@@ -72,10 +72,14 @@ def assertToolCall(test_case, agent, tool_name: str, msg: str = None):
     test_case.assertIn(tool_name, tool_calls, msg)
 
 
-def read_file(path: str):
+def read_file(path: str) -> str:
     """Returns the full contents of file at path"""
     with open(path, 'r') as f:
         return f.read()
+
+def files_in_directory(path: str) -> list[str]:
+    """Returns the files in path as a list"""
+    return []
 
 def create_filesystem(root_dir: str,
                       structure: dict):
