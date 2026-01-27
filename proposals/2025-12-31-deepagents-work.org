@@ -1,0 +1,53 @@
+#+title: Deepagents Work
+
+Currently (7406aef9dd994feca455d351a605d8c6ff64862f), the assist.deepagents_agent module is very simple and research-forward. It should be updated to conduct its work mainly within the working directory, using the files within that directory as well as internet searches (an already-available tool) to 
+
+* File Structure
+- Working directory
+  - [list of working files] - These are the files already in the directory that can be read and (when necessary) edited by the agent. 
+  - README.org - This is a file that should be read into the agent before doing any work. This should set the context for the task/query and provide a high-level overview of the files in the directory and general structure.
+  - AGENTS.md - This should also be read directly into the system prompt to provide additional guidance to the agent.
+  - .assist - These are the intermediary files used by the agent and not necessarily intended to be read by people. These files are sym-linked into the working directory and never intended to be checked into git.
+    - memories - Long-term memories for the sole purpose of helping the agent remember facts about and preferences for the user.
+    - short_[thread_id] - Working/scratch directory specific to a thread for more short-term memory.
+
+
+* Capabilities
+When initiating a new thread, the user should be prompted for a domain from the list of available domains for the context of the thread. If no domain is chosen, then a default repository is used, configured when iniitating the system.
+
+The user can ask for changes to the domain or just use the output from the agent without making any changes.
+
+** Domains
+*** Available domains
+The available domains are the git repositories available to the system within the Workspace. The system is given this directory when initiated.
+*** Chosen domain
+When a domain is chosen, then
+1. the corresponding git repository is cloned into the workspace with name "[domain]_[thread_id]"
+2. the memories directory is symlinked into it
+3. a new git branch is created representing the thread. The branch should be named "[thread_id]-[year]-[month]-[date]"
+
+The agent is initiated "from" this directory so that it becomes its working directory and the agent has full agency over the files therein.
+
+** Handling changes
+Whenever a query is completed, the entire working directory is committed to git, including any new files with a summary of the changes 
+
+** Workspace
+The system is given a workspace from which it will work. This will contain directories:
+- threads - The list of threads represented as directories within. Each thread corresponds to a domain and thread ID. The name of each directory is "[domain]_[thread_id]".
+- memories - The memories directory which persists across threads. This directory is symlinked into the thread directory with name ".assist".
+
+* Multi-agent workflow
+1. Start thread
+2. Initialize working directory
+   1. Checkout git repo
+   2. Create new branch
+3. Wait for input
+4. Summarize request if first request
+5. Main agent
+6. Check for filesystem changes,
+   1. if so, then
+      1. summarize changes (user and assisant messages)
+      2. commit
+
+
+
