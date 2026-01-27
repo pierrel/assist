@@ -218,7 +218,7 @@ The best tests come from actual user interactions that didn't work as expected. 
 1. *Capture it immediately* using the "Capture Conversation" button
 2. Review the generated test case
 3. Refine the assertions to be specific and meaningful
-4. Move it to ~tests/integration/validation/~
+4. Move it to ~edd/tests/validation/~
 
 ** Test Structure (Standard Pattern)
 
@@ -342,7 +342,7 @@ Capture conversations when:
 3. *Background processing*: The capture agent analyzes and generates test files
 4. *Review*: Check ~improvements/YYYYMMDD-HHMMSS-description/~
 5. *Refine*: Customize the generated test case with better assertions
-6. *Promote*: Move refined tests to ~tests/integration/validation/~
+6. *Promote*: Move refined tests to ~edd/tests/validation/~
 
 ** Generated Files
 

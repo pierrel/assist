@@ -38,12 +38,6 @@ source .venv/bin/activate
 
 In emacs: =M-x pyvenv-activate=
 ** Running
-Run the server
-
-#+begin_src shell
-python assist.server
-#+end_src
-
 Run the CLI
 
 #+begin_src shell
@@ -86,7 +80,7 @@ python -m playwright install
 Generate a static type report:
 
 #+begin_src shell
-mypy src
+mypy assist manage edd
 #+end_src
 
 Both coverage and type checking run in CI for pull requests and pushes to main.
@@ -98,12 +92,11 @@ Run the integration tests with:
 pytest tests/integration
 #+end_src
 
-Additional validation tests for the planner node cover ten example scenarios.
-Each scenario asserts that plans query external references (e.g., Tavily search or local indexes),
-so they require valid `OPENAI_API_KEY` and `TAVILY_API_KEY` environment variables:
+Additional validation tests cover various agent behaviors and require valid API keys
+for external services (e.g., `OPENAI_API_KEY`, `TAVILY_API_KEY`):
 
 #+begin_src shell
-pytest tests/integration/validation/test_planner_node.py
+pytest edd/tests/validation
 #+end_src
 
 ** Debugging
@@ -114,7 +107,7 @@ tool invocations with their arguments and results, and the final response from
 the execution node.
 
 ** Validations
-There's a set of tests in =tests/integration/validations= that stress a live llm within the agent and different nodes in different conditions.
+There's a set of tests in =edd/tests/validation= that stress a live llm within the agent and different nodes in different conditions.
 
 Run the whole validation suite repeatedly to check stability:
 

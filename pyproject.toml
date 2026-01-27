@@ -14,10 +14,10 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14.2"
 plugins = ["pydantic.mypy"]
 strict = true
 ignore_missing_imports = true
