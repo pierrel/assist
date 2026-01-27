@@ -79,7 +79,7 @@ def read_file(path: str) -> str:
 
 def files_in_directory(path: str) -> list[str]:
     """Returns the files in path as a list"""
-    return []
+    return os.listdir(path)
 
 def create_filesystem(root_dir: str,
                       structure: dict):
