@@ -102,6 +102,17 @@ def capture_conversation(thread: Thread, reason: str, improvements_dir: str) -> 
         logger.debug(f"No domain directory found at {source_domain_dir}, creating empty domain dir")
         os.makedirs(capture_domain_dir, exist_ok=True)
 
+    # Copy the product-policy.org to the capture directory so the agent can reference it
+    edd_dir = os.path.dirname(os.path.abspath(__file__))
+    policy_source = os.path.join(edd_dir, "product-policy.org")
+    policy_dest = os.path.join(capture_dir, "product-policy.org")
+
+    if os.path.exists(policy_source):
+        logger.debug(f"Copying product-policy.org to {capture_dir}")
+        shutil.copy2(policy_source, policy_dest)
+    else:
+        logger.warning(f"Product policy not found at {policy_source}")
+
     # Prepare conversation data for the agent
     conversation_summary = _format_conversation_for_agent(messages, thread, reason)
 
@@ -114,27 +125,31 @@ def capture_conversation(thread: Thread, reason: str, improvements_dir: str) -> 
     first_user_msg = next((m["content"] for m in messages if m["role"] == "user"), "")
 
     # Construct the agent's task
-    task = f"""You are an expert test case generator. Your task is to analyze a conversation and create a focused, reproducible test case.
+    task = f"""You are an expert test case generator using Eval-Driven Development (EDD) principles.
 
 ## CRITICAL INSTRUCTIONS
 
 **Your working directory structure**:
 ```
 . (your current directory - the capture output)
-├── domain/           # Copy of the original conversation's files
-│   └── (source files used in the conversation)
-├── test_case.py      # You will create this
-├── conversation.json # You will create this
-└── README.md         # You will create this
+├── domain/                                   # Copy of the original conversation's files
+├── product-policy.org                        # EDD product policy (READ THIS FIRST!)
+├── test_case.py                              # You will create this
+├── conversation.json                         # You will create this
+├── README.md                                 # You will create this
+└── general_instructions_recommendation.md.j2 # You will create this
 ```
 
 **What to do**:
-1. Use `ls domain` to see what files exist from the original conversation
-2. Use `read_file("domain/filename")` to read relevant files
-3. Analyze which files are NECESSARY for the test (not all of them!)
-4. Write test_case.py with ONLY the necessary files included
-5. Write conversation.json with metadata (include list of files you chose)
-6. Write README.md with documentation
+1. Read `product-policy.org` to understand critical behaviors and test patterns
+2. Use `ls domain` to see what files exist from the original conversation
+3. Identify which critical behavior(s) from the policy this conversation demonstrates
+4. Use `read_file("domain/filename")` to read relevant files
+5. Analyze which files are NECESSARY for the test (not all of them!)
+6. Write test_case.py following product policy patterns with ONLY necessary files
+7. Write general_instructions_recommendation.md.j2 with specific system prompt improvements
+8. Write conversation.json with metadata (include critical behaviors identified)
+9. Write README.md with documentation and recommendations summary
 
 ## Conversation Context
 
@@ -188,10 +203,18 @@ class TestCaptured_{thread.thread_id.replace('-', '_')}(TestCase):
 
 ## START NOW
 
-Step 1: Run `ls domain` to see available files
-Step 2: Read only the relevant files with `read_file("domain/filename")`
-Step 3: Write test_case.py with proper assertions and MINIMAL filesystem setup
-Step 4: Write conversation.json and README.md
+**Required Steps (in order):**
+
+Step 1: Read `product-policy.org` to understand critical behaviors and test patterns
+Step 2: Run `ls domain` to see available files from the conversation
+Step 3: Identify which critical behavior(s) this conversation demonstrates
+Step 4: Read only the relevant files with `read_file("domain/filename")`
+Step 5: Write test_case.py following product policy patterns with MINIMAL filesystem setup
+Step 6: Write general_instructions_recommendation.md.j2 with specific system prompt improvements
+Step 7: Write conversation.json with metadata and critical behaviors list
+Step 8: Write README.md with summary and recommendations
+
+Remember: All four files (test_case.py, general_instructions_recommendation.md.j2, conversation.json, README.md) are REQUIRED.
 
 Begin!
 """
@@ -215,7 +238,7 @@ Begin!
     # The agent will have written the files directly to capture_dir
     # We just need to verify they exist and return the path
 
-    required_files = ["test_case.py", "conversation.json", "README.md"]
+    required_files = ["test_case.py", "conversation.json", "README.md", "general_instructions_recommendation.md.j2"]
     missing_files = [f for f in required_files if not os.path.exists(os.path.join(capture_dir, f))]
 
     if missing_files:
@@ -319,3 +342,35 @@ class TestCapturedConversation(TestCase):
 
     with open(os.path.join(capture_dir, "test_case.py"), "w") as f:
         f.write(test_template.format(reason=reason))
+
+    # Basic system prompt recommendation
+    recommendation = """# System Prompt Recommendation
+
+## Issue Identified
+The agent did not complete the capture process successfully, so specific recommendations
+could not be generated automatically.
+
+## Manual Review Required
+Please review the conversation in the domain/ directory and:
+1. Identify which critical behavior from product-policy.org was involved
+2. Determine what the agent should have done differently
+3. Write specific guidance to add to general_instructions.md.j2
+
+## Template
+
+```
+[Specific instruction to add to the system prompt]
+```
+
+## Placement
+[After which section in general_instructions.md.j2]
+
+## Rationale
+[Why this will help the agent succeed]
+
+## Test Coverage
+This recommendation should help pass: test_conversation
+"""
+
+    with open(os.path.join(capture_dir, "general_instructions_recommendation.md.j2"), "w") as f:
+        f.write(recommendation)
