@@ -10,7 +10,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
-TEST_PATH = Path("tests/integration/validation")
+TEST_PATH = Path("edd/tests/validation")
 
 
 def parse_results(output: str) -> Iterable[Tuple[str, str]]:
