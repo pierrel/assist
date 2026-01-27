@@ -1,0 +1,546 @@
+#+TITLE: Eval-Driven Development Product Policy
+#+AUTHOR: Assist Team
+#+DATE: 2026-01-25
+
+* Overview
+
+This document defines the product policy for the Assist agent system using Eval-Driven Development (EDD) principles. EDD is a methodology where we build evaluations (tests) to define planned capabilities before agents can fulfill them, then iterate until the agent performs well.
+
+** Core Philosophy
+
+#+BEGIN_QUOTE
+"Evals get harder to build the longer you wait. Early on, product requirements naturally translate into test cases, but waiting too long means reverse-engineering success criteria from a live system."
+#+END_QUOTE
+
+We capture real conversations as they happen, turn them into reproducible test cases, and use those tests to drive improvements.
+
+
+* Critical Agent Behaviors
+
+These are the core behaviors that define success for the Assist agent. Every test should verify one or more of these behaviors.
+
+** Context Awareness (README-First Approach)
+
+*** Policy
+The agent MUST proactively search for and read README.* files before taking any action.
+
+*** Rationale
+Local context is critical for understanding:
+- File structure and organization
+- Project conventions and workflows
+- User preferences and patterns
+- Location of task lists and documentation
+
+*** Test Pattern
+#+BEGIN_SRC python
+def test_reads_readme(self):
+    agent, root = self.create_agent({
+        "README.org": "All of my todos are in gtd/inbox.org",
+        "gtd": {"inbox.org": "* Tasks\n** TODO Example"}
+    })
+    res = agent.message("Where are my todos?")
+    self.assertRegex(res, "inbox\\.org", "Should mention the inbox file")
+    self.assertToolCall(agent, "read_file", "Should have read README")
+#+END_SRC
+
+*** Success Criteria
+- Agent reads README.* within first few tool calls
+- Agent references README content in responses
+- Agent follows patterns documented in README
+
+** Actionable Task Management
+
+*** Policy
+When a user query implies an action or task, the agent MUST:
+1. Identify the appropriate task list location from README or context
+2. Create/update a task entry with clear, actionable details
+3. Place new tasks in the inbox for triaging (GTD method)
+
+*** Rationale
+Users think in terms of actions and outcomes. The agent should translate queries into concrete next steps stored in the user's task management system.
+
+*** Test Pattern
+#+BEGIN_SRC python
+def test_adds_item_correctly(self):
+    agent, root = self.create_agent({
+        "README.org": "All of my todos are in gtd/inbox.org",
+        "gtd": {"inbox.org": "* Tasks\n** TODO Existing task"}
+    })
+    res = agent.message("I need a new washer/dryer")
+    inbox_contents = read_file(f"{root}/gtd/inbox.org")
+
+    # Verify task was added
+    self.assertRegex(res, "(?i)updated|added", "Should mention the change")
+    self.assertRegex(inbox_contents, "(?im)^\\*\\* TODO.*dryer",
+                     "Should have added TODO with dryer")
+
+    # Verify structure preservation
+    self.assertRegex(inbox_contents, "Existing task",
+                     "Should not have corrupted existing tasks")
+#+END_SRC
+
+*** Success Criteria
+- New tasks appear in the correct location (usually inbox)
+- Task format matches existing patterns (e.g., org-mode TODO syntax)
+- Existing tasks are preserved and not corrupted
+- Response confirms the task was created
+
+** Knowledge Delegation (Research Agent)
+
+*** Policy
+For ANY external or topic knowledge that is not present in the local filesystem, the agent MUST:
+1. Delegate to the research subagent (NEVER use internal training data)
+2. Provide a clear question with constraints
+3. Save research results in the appropriate location (e.g., references/)
+4. Read and use those results before responding
+
+*** Rationale
+- Ensures up-to-date, accurate information
+- Creates a knowledge base that persists in the filesystem
+- Makes research traceable and auditable
+- Avoids hallucination from outdated training data
+
+*** Test Pattern
+#+BEGIN_SRC python
+def test_delegates_external_knowledge(self):
+    agent, root = self.create_agent({
+        "README.org": dedent("""
+        Research results go in the =references= directory.
+        """),
+        "references": {".keep": ""}
+    })
+
+    res = agent.message("What are Python import best practices?")
+
+    # Should use research agent
+    self.assertToolCall(agent, "task", "Should delegate to research agent")
+
+    # Should save results
+    references = os.listdir(os.path.join(root, "references"))
+    research_files = [f for f in references if f.startswith("report_")]
+    self.assertTrue(len(research_files) > 0, "Should create research report")
+#+END_SRC
+
+*** Success Criteria
+- Research subagent is invoked for external questions
+- Results are saved to filesystem in documented location
+- Agent reads and uses the saved research in its response
+- Research is formatted appropriately (org-mode, markdown, etc.)
+
+** Minimal, Precise File Changes
+
+*** Policy
+The agent MUST:
+1. Read the complete file before editing to understand structure
+2. Make only the changes necessary to accomplish the goal
+3. Preserve existing patterns, formatting, and structure
+4. Never introduce secrets, credentials, or sensitive data
+
+*** Rationale
+Users trust the agent with their files. Changes should be:
+- Predictable and traceable
+- Consistent with existing style
+- Focused on the specific request
+- Non-destructive to existing content
+
+*** Test Pattern
+#+BEGIN_SRC python
+def test_preserves_structure(self):
+    agent, root = self.create_agent({
+        "tasks.org": dedent("""\
+        * Tasks
+        ** TODO Fold laundry
+        Just get it done
+        ** TODO Buy new pants
+        Size 31
+        """)
+    })
+
+    agent.message("Add a TODO to buy groceries")
+    contents = read_file(f"{root}/tasks.org")
+
+    # Should preserve original structure
+    self.assertRegex(contents, "laundry\\nJust get it done",
+                     "Should not split existing TODO")
+    self.assertRegex(contents, "pants\\nSize",
+                     "Should preserve multi-line tasks")
+
+    # Should add new item correctly
+    self.assertRegex(contents, "(?im)^\\*\\* TODO.*groceries")
+#+END_SRC
+
+*** Success Criteria
+- Existing content is preserved exactly
+- New content follows the same formatting patterns
+- Multi-line items are not corrupted
+- Hierarchy and structure are maintained
+
+** Filesystem-Aware Intelligence
+
+*** Policy
+The agent MUST understand and respect the filesystem organization:
+1. Use ~ls~ and ~grep~ to discover relevant files
+2. Identify patterns in file naming and organization
+3. Place new files in appropriate locations based on existing structure
+4. Reference file paths correctly in responses
+
+*** Rationale
+Every user has their own organization system. The agent should adapt to the user's patterns rather than imposing its own structure.
+
+*** Test Pattern
+#+BEGIN_SRC python
+def test_finds_relevant_files(self):
+    agent, root = self.create_agent({
+        "README.org": "Fitness tracking in fitness.org",
+        "fitness.org": "* 2026\nGoal: swim 40mi"
+    })
+
+    res = agent.message("What are my swim goals for 2026?")
+
+    # Should find and read the right file
+    self.assertIn("40", res, "Should find the goal")
+    self.assertRegex(res, "miles|mi", "Should include units")
+    self.assertToolCall(agent, "read_file", "Should have read fitness.org")
+#+END_SRC
+
+*** Success Criteria
+- Agent discovers files through search, not guessing
+- Correct files are read based on content, not just names
+- Multiple related files are considered when relevant
+- New files follow existing naming conventions
+
+* Test Writing Guidelines
+
+** Start with Real Failures
+
+The best tests come from actual user interactions that didn't work as expected. When you encounter a conversation that highlights a gap:
+
+1. *Capture it immediately* using the "Capture Conversation" button
+2. Review the generated test case
+3. Refine the assertions to be specific and meaningful
+4. Move it to ~tests/integration/validation/~
+
+** Test Structure (Standard Pattern)
+
+#+BEGIN_SRC python
+from unittest import TestCase
+from assist.agent import create_agent, AgentHarness
+from tests.integration.validation.utils import (
+    AgentTestMixin, create_filesystem, read_file
+)
+
+class TestFeatureName(AgentTestMixin, TestCase):
+    def setUp(self):
+        self.model = select_chat_model("gpt-oss-20b", 0.1)
+
+    def create_agent(self, filesystem: dict):
+        root = tempfile.mkdtemp()
+        create_filesystem(root, filesystem)
+        return AgentHarness(create_agent(self.model, root)), root
+
+    def test_specific_behavior(self):
+        # 1. Setup: Minimal filesystem with only necessary files
+        agent, root = self.create_agent({
+            "README.org": "Context about the setup",
+            "relevant_file.org": "Specific content needed"
+        })
+
+        # 2. Act: Send the user message
+        res = agent.message("User's question or request")
+
+        # 3. Assert: Verify behavior
+        self.assertIsNotNone(res)  # Basic sanity
+        self.assertRegex(res, "expected_pattern", "Should mention X")
+        self.assertToolCall(agent, "tool_name", "Should have used tool")
+
+        # 4. Assert: Check filesystem changes if relevant
+        contents = read_file(f"{root}/relevant_file.org")
+        self.assertIn("expected_content", contents)
+#+END_SRC
+
+** Minimal Filesystem Setup
+
+*Keep it focused.* Only include files that are actually needed for the test.
+
+*** Good Example (Minimal)
+#+BEGIN_SRC python
+agent, root = self.create_agent({
+    "README.org": "Tasks are in gtd/inbox.org",
+    "gtd": {"inbox.org": "* Tasks"}
+})
+#+END_SRC
+
+*** Bad Example (Too Much)
+#+BEGIN_SRC python
+agent, root = self.create_agent({
+    "README.org": "...",
+    "gtd": {
+        "inbox.org": "...",
+        "projects.org": "...",
+        "someday.org": "...",
+        "tickler.org": "..."
+    },
+    "fitness.org": "...",
+    "finances.org": "...",
+    # ... entire filesystem ...
+})
+# Only inbox.org was actually needed!
+#+END_SRC
+
+** Assertion Best Practices
+
+*** Use Specific Patterns
+#+BEGIN_SRC python
+# Good: Specific regex that tests the actual requirement
+self.assertRegex(inbox_contents, "(?im)^\\*\\* TODO.*dryer",
+                 "Should add TODO with dryer in heading")
+
+# Bad: Too vague
+self.assertIn("TODO", inbox_contents)  # Could match existing TODOs
+#+END_SRC
+
+*** Test Structure Preservation
+#+BEGIN_SRC python
+# Verify multi-line items aren't corrupted
+self.assertRegex(contents, "laundry\\nJust get it done",
+                 "Should not split TODO items")
+#+END_SRC
+
+*** Use assertToolCall for Tool Verification
+#+BEGIN_SRC python
+# Verify agent called the right tools
+self.assertToolCall(agent, "read_file", "Should have read README")
+self.assertToolCall(agent, "write_file", "Should have updated file")
+self.assertToolCall(agent, "task", "Should have used research agent")
+#+END_SRC
+
+*** Include Meaningful Messages
+#+BEGIN_SRC python
+# Good: Explains what should happen
+self.assertTrue(os.path.exists(report_path),
+                "Report should be created in references directory")
+
+# Bad: No explanation
+self.assertTrue(os.path.exists(report_path))
+#+END_SRC
+
+* Capture Workflow
+
+** When to Capture
+
+Capture conversations when:
+- ✅ Agent behavior is unexpected or wrong
+- ✅ A new capability is demonstrated successfully
+- ✅ Edge cases or corner cases appear
+- ✅ User workflow patterns emerge
+- ✅ Integration between features works well
+
+** Capture Process
+
+1. *During the conversation*: Use the "Capture Conversation" button in the web UI
+2. *Provide context*: Write a clear reason explaining why this conversation matters
+3. *Background processing*: The capture agent analyzes and generates test files
+4. *Review*: Check ~improvements/YYYYMMDD-HHMMSS-description/~
+5. *Refine*: Customize the generated test case with better assertions
+6. *Promote*: Move refined tests to ~tests/integration/validation/~
+
+** Generated Files
+
+Each capture creates:
+- ~test_case.py~ - Test following standard patterns (customize this!)
+- ~conversation.json~ - Metadata and full conversation
+- ~README.md~ - Documentation about the capture
+- ~domain/~ - Copy of files used in the conversation
+
+** Customization Checklist
+
+Before promoting a captured test:
+- [ ] Test name is descriptive (not just ~test_conversation~)
+- [ ] Filesystem setup is minimal (only necessary files)
+- [ ] Assertions are specific and meaningful
+- [ ] Test validates the important behavior, not implementation details
+- [ ] Assertion messages explain what should happen
+- [ ] Test uses ~AgentTestMixin~ for ~assertToolCall~
+
+* Success Metrics
+
+** Test Suite Health
+
+- *Coverage*: Each critical behavior has at least 3 tests
+- *Clarity*: Test names clearly indicate what behavior is tested
+- *Speed*: Test suite runs in < 5 minutes
+- *Reliability*: < 5% flaky test rate
+
+** Agent Performance
+
+- *Context Awareness*: README read in > 90% of interactions
+- *Task Management*: User requests converted to tasks > 80% of the time
+- *Research Delegation*: External questions delegated > 95% of the time
+- *Structure Preservation*: No file corruption in > 99% of edits
+
+** Development Velocity
+
+- *Capture Rate*: 5-10 conversations captured per week
+- *Promotion Rate*: 50% of captured conversations become tests
+- *Iteration Speed*: Failed tests fixed within 1 sprint
+- *Regression Prevention*: Zero regressions on existing tests
+
+* Anti-Patterns to Avoid
+
+** Over-Testing Implementation Details
+
+❌ *Bad*: Testing that agent calls specific tool in specific order
+#+BEGIN_SRC python
+# Don't do this - tests implementation, not behavior
+self.assertEqual(tool_calls[0], "ls")
+self.assertEqual(tool_calls[1], "grep")
+self.assertEqual(tool_calls[2], "read_file")
+#+END_SRC
+
+✅ *Good*: Testing that agent achieves the outcome
+#+BEGIN_SRC python
+# Do this - tests behavior/outcome
+self.assertToolCall(agent, "read_file", "Should have read README")
+self.assertIn("expected content", res)
+#+END_SRC
+
+** Massive Filesystem Setups
+
+❌ *Bad*: Including entire example filesystem
+#+BEGIN_SRC python
+agent, root = self.create_agent({
+    # 50 files with full content...
+})
+# Only 2 files were actually needed
+#+END_SRC
+
+✅ *Good*: Minimal necessary setup
+#+BEGIN_SRC python
+agent, root = self.create_agent({
+    "README.org": "Tasks in inbox.org",
+    "gtd": {"inbox.org": "* Tasks"}
+})
+#+END_SRC
+
+** Vague Assertions
+
+❌ *Bad*: Assertion doesn't explain what's expected
+#+BEGIN_SRC python
+self.assertTrue(something)
+self.assertIn("text", contents)
+#+END_SRC
+
+✅ *Good*: Clear expectation with explanation
+#+BEGIN_SRC python
+self.assertTrue(os.path.exists(report_path),
+                "Research report should be saved to references/")
+self.assertRegex(contents, "(?im)^\\*\\* TODO.*task",
+                 "Should add new TODO in org-mode format")
+#+END_SRC
+
+** Testing Without Context
+
+❌ *Bad*: Agent with no README or context
+#+BEGIN_SRC python
+agent, root = self.create_agent({
+    "file.txt": "content"
+})
+# How should agent know what to do?
+#+END_SRC
+
+✅ *Good*: Realistic context that agent would have
+#+BEGIN_SRC python
+agent, root = self.create_agent({
+    "README.org": "Files are organized by...",
+    "file.txt": "content"
+})
+#+END_SRC
+
+* Evolution and Maintenance
+
+** Adding New Behaviors
+
+When adding a new capability:
+1. *Write the test first*
+2. Document the expected behavior in this policy
+3. Implement until the test passes
+4. Capture real usage for refinement
+5. Add 2-3 more tests for edge cases
+
+* Appendix: Common Test Patterns
+
+** Pattern: Task Addition
+#+BEGIN_SRC python
+def test_adds_task(self):
+    agent, root = self.create_agent({
+        "README.org": "Tasks in gtd/inbox.org",
+        "gtd": {"inbox.org": "* Tasks\n** TODO Existing"}
+    })
+
+    res = agent.message("I need to buy milk")
+    inbox = read_file(f"{root}/gtd/inbox.org")
+
+    self.assertRegex(res, "(?i)added|updated")
+    self.assertRegex(inbox, "(?im)^\\*\\* TODO.*milk")
+    self.assertIn("Existing", inbox)  # Preserves existing
+#+END_SRC
+
+** Pattern: Research Delegation
+#+BEGIN_SRC python
+def test_delegates_research(self):
+    agent, root = self.create_agent({
+        "README.org": "Research goes in references/",
+        "references": {".keep": ""}
+    })
+
+    res = agent.message("What are Python best practices?")
+
+    self.assertToolCall(agent, "task", "Should use research agent")
+    reports = [f for f in os.listdir(f"{root}/references")
+               if f.startswith("report_")]
+    self.assertTrue(len(reports) > 0, "Should save research")
+#+END_SRC
+
+** Pattern: File Discovery
+#+BEGIN_SRC python
+def test_finds_files(self):
+    agent, root = self.create_agent({
+        "README.org": "Fitness tracking in fitness.org",
+        "fitness.org": "* Goals\n- Swim 40mi"
+    })
+
+    res = agent.message("What are my fitness goals?")
+
+    self.assertIn("40", res)
+    self.assertRegex(res, "(?i)swim")
+    self.assertToolCall(agent, "read_file")
+#+END_SRC
+
+** Pattern: Structure Preservation
+#+BEGIN_SRC python
+def test_preserves_structure(self):
+    agent, root = self.create_agent({
+        "tasks.org": dedent("""\
+        * Tasks
+        ** TODO First
+        Details here
+        ** TODO Second
+        More details
+        """)
+    })
+
+    agent.message("Add TODO to call dentist")
+    contents = read_file(f"{root}/tasks.org")
+
+    # Verify no corruption
+    self.assertRegex(contents, "First\\nDetails here")
+    self.assertRegex(contents, "Second\\nMore details")
+    # Verify addition
+    self.assertRegex(contents, "(?im)^\\*\\* TODO.*dentist")
+#+END_SRC
+
+* EDD References
+
+- [[https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents][Anthropic: Demystifying Evals for AI Agents]]
+- [[https://platform.openai.com/docs/guides/evaluation-best-practices][OpenAI: Evaluation Best Practices]]
+- [[https://www.databricks.com/dataaisummit/session/evaluation-driven-development-workflows-best-practices-and-real-world][Databricks: Evaluation-Driven Development Workflows]]
