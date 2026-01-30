@@ -4,15 +4,13 @@ from deepagents import create_deep_agent, CompiledSubAgent
 from langchain.messages import AIMessage, AnyMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
-
-from assist.promptable import base_prompt_for
 from langgraph.graph.state import CompiledStateGraph
-from deepagents.backends import FilesystemBackend
 from langchain.agents.middleware import ModelRetryMiddleware
-
 from openai import InternalServerError
 
+from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
+from assist.backends import create_composite_backend
 
 class AgentHarness:
     """Makes it easier to have conversations"""
@@ -27,7 +25,9 @@ class AgentHarness:
         return resp["messages"][-1].content
 
     def all_messages(self) -> list[AnyMessage]:
-        state = self.agent.get_state({"configurable": {"thread_id": self.thread_id}})
+        state = self.agent.get_state({
+            "configurable": {"thread_id": self.thread_id}
+        })
         return state.values.get("messages", [])
         
 
@@ -41,14 +41,18 @@ def create_agent(model: BaseChatModel,
     research_sub = CompiledSubAgent(
         name="research-agent",
         description= "Used to conduct thorough research. The result of the research will be placed in a file and the file name/path will be returned. Provide a filename for more control.",
-        runnable= create_research_agent(model,
-                                        working_dir,
-                                        checkpointer,
-                                        mw)
+        runnable=create_research_agent(model,
+                                       working_dir,
+                                       checkpointer,
+                                       mw)
     )
 
-    fs = FilesystemBackend(root_dir=working_dir,
-                           virtual_mode=True)
+    fs = create_composite_backend(working_dir,
+                                  ["/question.txt",
+                                   "question.txt",
+                                   "/large_tool_results/",
+                                   "large_tool_results/",
+                                   "large_tool_results"])
 
     return create_deep_agent(
         model=model,
@@ -63,8 +67,12 @@ def create_user_expert_agent(model: BaseChatModel,
                              working_dir: str,
                              checkpointer=None,
                              middleware=[]) -> CompiledStateGraph:
-    fs = FilesystemBackend(root_dir=working_dir,
-                           virtual_mode=True)
+    fs = create_composite_backend(working_dir,
+                                  ["/question.txt",
+                                   "question.txt",
+                                   "/large_tool_results/",
+                                   "large_tool_results/",
+                                   "large_tool_results"])
     return create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
@@ -105,8 +113,12 @@ def create_research_agent(model: BaseChatModel,
     }
 
     
-    fs = FilesystemBackend(root_dir=working_dir,
-                           virtual_mode=True)
+    fs = create_composite_backend(working_dir,
+                                  ["/question.txt",
+                                   "question.txt",
+                                   "/large_tool_results/",
+                                   "large_tool_results/",
+                                   "large_tool_results"])
     return create_deep_agent(
         model=model,
         tools=[search_internet, read_url],
