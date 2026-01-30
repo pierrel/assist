@@ -12,6 +12,23 @@ from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend
 
+
+def _create_standard_backend(working_dir: str):
+    """Create the standard composite backend with state exclusions.
+
+    This backend excludes ephemeral files like question.txt and large_tool_results/
+    from the stateful filesystem, using StateBackend instead.
+    """
+    return create_composite_backend(
+        working_dir,
+        ["/question.txt",
+         "question.txt",
+         "/large_tool_results/",
+         "large_tool_results/",
+         "large_tool_results"]
+    )
+
+
 class AgentHarness:
     """Makes it easier to have conversations"""
     
@@ -47,19 +64,12 @@ def create_agent(model: BaseChatModel,
                                        mw)
     )
 
-    fs = create_composite_backend(working_dir,
-                                  ["/question.txt",
-                                   "question.txt",
-                                   "/large_tool_results/",
-                                   "large_tool_results/",
-                                   "large_tool_results"])
-
     return create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/general_instructions.md.j2"),
         middleware=mw,
-        backend=fs,
+        backend=_create_standard_backend(working_dir),
         subagents=[research_sub]
     )
 
@@ -67,17 +77,11 @@ def create_user_expert_agent(model: BaseChatModel,
                              working_dir: str,
                              checkpointer=None,
                              middleware=[]) -> CompiledStateGraph:
-    fs = create_composite_backend(working_dir,
-                                  ["/question.txt",
-                                   "question.txt",
-                                   "/large_tool_results/",
-                                   "large_tool_results/",
-                                   "large_tool_results"])
     return create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/user_expert.md.j2"),
-        backend=fs,
+        backend=_create_standard_backend(working_dir),
         middleware=middleware,
     )
 
@@ -112,19 +116,12 @@ def create_research_agent(model: BaseChatModel,
         "tools": [read_url],
     }
 
-    
-    fs = create_composite_backend(working_dir,
-                                  ["/question.txt",
-                                   "question.txt",
-                                   "/large_tool_results/",
-                                   "large_tool_results/",
-                                   "large_tool_results"])
     return create_deep_agent(
         model=model,
         tools=[search_internet, read_url],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
-        backend=fs,
+        backend=_create_standard_backend(working_dir),
         middleware=middleware,
         subagents=[critique_sub_agent,
                    research_sub_agent,
