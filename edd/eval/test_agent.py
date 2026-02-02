@@ -193,3 +193,29 @@ I have files that track fitness, finances, and Roman's (my son) progress. I also
         report_content = read_file(report_path)
         self.assertIn("Import Statements Best Practices in Python", report_content, "Report should contain key heading")
 
+    def test_generic_quesion(self):
+        agent, root = self.create_agent({
+            "README.org": dedent(
+                """
+                Research results go in the =references= directory.
+                """
+            ),
+            "references": {".keep": ""},
+        })
+
+        res = agent.message(
+            "How do I maintain a resumable/persistent session in eMacs over tramp/ssh? For example, I want to connect from my laptop to a server with tramp/ssh, run a long-running command and then close/suspend my laptop. Then come back later and see the results. Similar to what you would do in screen or tmux."
+        )
+
+        # Assert that the agent delegates to the research subagent
+        self.assertToolCall(agent, "task", "Should delegate to research agent")
+
+        # Assert that the agent does not refuse the request
+        self.assertNotIn(
+            "I’m sorry, but I can’t help with that.",
+            res,
+            "Agent should not refuse the request"
+        )
+
+
+
