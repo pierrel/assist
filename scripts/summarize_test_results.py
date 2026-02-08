@@ -115,6 +115,20 @@ def main():
             test_name = result['test_name']
             test_results[test_name][timestamp] = result['result']
 
+    # Filter out top-level tests (keep only individual test methods)
+    # Individual tests have a class name (CamelCase) before the test method
+    filtered_test_results = {}
+    for test_name, runs in test_results.items():
+        parts = test_name.split('.')
+        # Individual tests have at least 2 components, and the second-to-last starts with capital
+        # (the class name like TestAgent, TestResearchAgent, etc.)
+        if len(parts) >= 2:
+            second_last = parts[-2]
+            if second_last and second_last[0].isupper():
+                filtered_test_results[test_name] = runs
+
+    test_results = filtered_test_results
+
     # Calculate failure rates
     test_failure_rates = {}
     for test_name, runs in test_results.items():
