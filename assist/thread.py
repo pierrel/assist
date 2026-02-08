@@ -3,7 +3,7 @@ import re
 import requests
 import time
 from urllib.parse import urlparse, parse_qs, unquote
-from typing import Literal, Dict, Any, List
+from typing import Literal, Dict, Any, List, Iterator
 from pprint import pformat
 
 from langchain.messages import HumanMessage, AIMessage, ToolMessage, AnyMessage
@@ -74,6 +74,14 @@ class Thread:
             last_assistant = resp["messages"][-1].content if resp.get("messages") else "assistant update"
             self.domain_manager.sync(last_assistant)
         return resp["messages"][-1].content
+
+    def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
+        return self.agent.stream({"messages": [{"role": "user", "content": text}]},
+                                 {"configurable": {"thread_id": self.thread_id}},
+                                 stream_mode=["messages", "updates"])
 
     def get_messages(self) -> list[dict]:
         """Return user/assistant messages from checkpointer state as role/content dicts."""
