@@ -11,6 +11,7 @@ from openai import InternalServerError
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend
+from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 
 
 def _create_standard_backend(working_dir: str):
@@ -53,6 +54,7 @@ def create_agent(model: BaseChatModel,
                  checkpointer=None) -> CompiledStateGraph:
     retry_middle = ModelRetryMiddleware(max_retries=6,
                                         backoff_factor=2)
+    logging_mw = ModelLoggingMiddleware("general-agent")
     mw = [retry_middle]
     
     research_sub = CompiledSubAgent(
@@ -68,7 +70,7 @@ def create_agent(model: BaseChatModel,
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/general_instructions.md.j2"),
-        middleware=mw,
+        middleware=mw + [logging_mw],
         backend=_create_standard_backend(working_dir),
         subagents=[research_sub]
     )
@@ -77,12 +79,14 @@ def create_user_expert_agent(model: BaseChatModel,
                              working_dir: str,
                              checkpointer=None,
                              middleware=[]) -> CompiledStateGraph:
+    logging_mw = ModelLoggingMiddleware("user-expert-agent")
+
     return create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/user_expert.md.j2"),
         backend=_create_standard_backend(working_dir),
-        middleware=middleware,
+        middleware=middleware + [logging_mw],
     )
 
 
@@ -95,7 +99,8 @@ def create_research_agent(model: BaseChatModel,
     Includes Tavily web search and a critique/research/fact-check subagent trio.
     """
     
-    
+    logging_mw = ModelLoggingMiddleware("research-agent")
+
     research_sub_agent = {
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
@@ -122,7 +127,7 @@ def create_research_agent(model: BaseChatModel,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
         backend=_create_standard_backend(working_dir),
-        middleware=middleware,
+        middleware=middleware + [logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]
