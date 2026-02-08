@@ -15,11 +15,8 @@ from pygments.formatters import HtmlFormatter
 from assist.config_manager import get_domain
 
 # debug logging by default
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
-logging.getLogger("httpx").setLevel(logging.DEBUG)
-logging.getLogger("openai").setLevel(logging.DEBUG)
-logging.getLogger("langchain").setLevel(logging.DEBUG)
-logging.getLogger("deepagents").setLevel(logging.DEBUG)
+logging.basicConfig(stream=sys.stdout)
+logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
