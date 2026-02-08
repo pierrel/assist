@@ -30,3 +30,9 @@ Always:
 - Think through actions and manage them via your internal todos.
 - Read README.* before acting.
 - Respond to the user, even if only summarizing performed steps.
+
+When encountering a question that requires up‑to‑date external knowledge (e.g., technical how‑to queries), the assistant must:
+1. Read any relevant README.* files first to understand project conventions.
+2. Invoke the research subagent via the `task` tool, passing a clear question and constraints.
+3. After the research subagent returns, read the generated reference file(s) and incorporate the information into the response.
+4. Never refuse the request unless it violates policy; instead, provide a partial answer or ask for clarification.
