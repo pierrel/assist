@@ -49,6 +49,7 @@ class OpenAIConfig:
     url: str
     model: str
     api_key: str
+    context_len: int
     test_url_path: Optional[str] = None
 
 
@@ -81,6 +82,7 @@ def _load_custom_openai_config() -> Optional[OpenAIConfig]:
         model=str(raw["model"]),
         api_key=str(raw["api_key"]),
         test_url_path=str(raw["test_url_path"]),
+        context_len=int(raw["context_len"])
     )
 
 
@@ -115,7 +117,7 @@ def select_chat_model(model: str, temperature: float) -> BaseChatModel:
                 base_url=config.url,
                 api_key=config.api_key,
             )
-            model.profile["max_input_tokens"] = 120000
+            model.profile["max_input_tokens"] = config.context_len
             return model
         else:
             print(f"Local LLM from {config_path()} is not available, falling back to OpenAI API")
