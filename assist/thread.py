@@ -1,23 +1,17 @@
 import os
-import re
-import requests
 import time
-from urllib.parse import urlparse, parse_qs, unquote
+import tempfile
+from datetime import datetime
 from typing import Literal, Dict, Any, List, Iterator
-from pprint import pformat
 
-from langchain.messages import HumanMessage, AIMessage, ToolMessage, AnyMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.sqlite import SqliteSaver
 import sqlite3
+from langchain.messages import HumanMessage, AIMessage, AnyMessage
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
-from datetime import datetime
-
 from assist.agent import create_research_agent, create_agent
-from assist.domain_manager import DomainManager
 
 def render_tool_calls(message: AIMessage) -> str:
     calls = getattr(message, "tool_calls", None)
@@ -29,6 +23,7 @@ def render_tool_calls(message: AIMessage) -> str:
         return calls_str
     return ""
 
+
 def render_tool_call(call: dict) -> str:
     name = call.get("name", "none")
     args = call.get("args", {})
@@ -37,7 +32,6 @@ def render_tool_call(call: dict) -> str:
         return f"Calling subagent {subagent} with {args}"
     else:
         return f"Calling {name} with {args}"
-
 
 class Thread:
     """Reusable chat-like interface that mimics the CLI back-and-forth.
@@ -49,7 +43,6 @@ class Thread:
 
     def __init__(self,
                  working_dir: str,
-                 domain: str | None = None,
                  thread_id: str | None = None,
                  checkpointer=None,
                  model: BaseChatModel | None = None):
@@ -57,23 +50,15 @@ class Thread:
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = model or select_chat_model("mistral-nemo", 0.1)
-        self.domain_manager = DomainManager(working_dir,
-                                            domain)
+        
         self.agent = create_agent(self.model,
-                                  working_dir=self.domain_manager.domain(),
+                                  working_dir=working_dir,
                                   checkpointer=checkpointer)
 
     def message(self, text: str) -> str:
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
-        # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
-        resp = self.agent.invoke({"messages": [{"role": "user", "content": text}]},
+        """Continue the thread and return the last response"""
+        return self.agent.invoke({"messages": [{"role": "user", "content": text}]},
                                  {"configurable": {"thread_id": self.thread_id}})
-        # After message, sync changes if any
-        if self.domain_manager.changes():
-            last_assistant = resp["messages"][-1].content if resp.get("messages") else "assistant update"
-            self.domain_manager.sync(last_assistant)
-        return resp["messages"][-1].content
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):
@@ -97,14 +82,7 @@ class Thread:
                                  "content": render_tool_calls(m)})
                 elif m.content:
                     msgs.append({"role": "assistant", "content": m.content})
-        # If there were any changes vs main, summarize them at the end
-        changes = self.domain_manager.main_diff()
-        if changes:
-            changes_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in changes])
-            return msgs + [{"role": "diff",
-                            "content": changes_content}]
-        else:
-            return msgs
+        return msgs
 
 
     def get_raw_messages(self) -> List[AnyMessage]:
@@ -119,16 +97,6 @@ class Thread:
         are no messages yet.
         If description.txt exists in the thread directory, return it; otherwise compute and cache.
         """
-        desc_path = os.path.join(self.working_dir, "description.txt")
-        try:
-            if os.path.exists(desc_path):
-                with open(desc_path, "r", encoding="utf-8") as f:
-                    cached = f.read().strip()
-                    if cached:
-                        return cached
-        except Exception:
-            pass
-
         msgs = self.get_messages()
         if not msgs:
             raise ValueError("no messages to describe")
@@ -136,16 +104,13 @@ class Thread:
             "role": "system",
             "content": base_prompt_for("deepagents/describe_system.md.j2"),
         }
-        resp = self.model.invoke([prompt] + msgs)
+        request = {
+            "role": "user",
+            "content": "Describe the conversation up until now",
+        }
+        resp = self.model.invoke([prompt] + msgs + [request])
         desc = resp.content.strip()
-
-        try:
-            os.makedirs(self.working_dir, exist_ok=True)
-            with open(desc_path, "w", encoding="utf-8") as f:
-                f.write(desc)
-        except Exception:
-            pass
-
+        
         return desc
 
 
@@ -153,11 +118,17 @@ class ThreadManager:
     """Manage DeepAgentsThread instances persisted under a directory tree.
 
     At the root directory, a sqlite DB named 'threads.db' is used for LangGraph
-    checkpointing via SqliteSaver.
+n    checkpointing via SqliteSaver.
     """
 
-    def __init__(self, root_dir: str):
-        self.root_dir = root_dir
+    DEFAULT_THREAD_WORKING_DIRECTORY = "domain"
+
+    def __init__(self, root_dir: str | None = None):
+        if root_dir:
+            self.root_dir = root_dir
+        else:
+            self.root_dir = tempfile.mkdtemp()
+            
         os.makedirs(self.root_dir, exist_ok=True)
         self.db_path = os.path.join(self.root_dir, "threads.db")
         # Ensure DB file exists upfront
@@ -173,11 +144,19 @@ class ThreadManager:
         return [name for name in os.listdir(self.root_dir)
                 if os.path.isdir(os.path.join(self.root_dir, name)) and name != "__pycache__"]
 
-    def get(self, thread_id: str) -> Thread:
+    def get(self,
+            thread_id: str,
+            working_dir: str | None = None) -> Thread:
         tdir = os.path.join(self.root_dir, thread_id)
         if not os.path.isdir(tdir):
-            raise FileNotFoundError(f"thread directory not found: {thread_id}")
-        return Thread(tdir, thread_id=thread_id, checkpointer=self.checkpointer, model=self.model)
+            raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
+        if not working_dir:
+            working_dir = self.make_default_working_dir(tdir)
+
+        return Thread(working_dir,
+                      thread_id=thread_id,
+                      checkpointer=self.checkpointer,
+                      model=self.model)
 
     def remove(self, thread_id: str) -> None:
         tdir = os.path.join(self.root_dir, thread_id)
@@ -199,12 +178,15 @@ class ThreadManager:
             except Exception:
                 pass
 
-    def new(self, domain: str|None = None) -> Thread:
+    def new(self, working_dir: str|None = None) -> Thread:
         # Derive a clean ID for directory: prefer timestamp+rand
         tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
         tdir = os.path.join(self.root_dir, tid)
         os.makedirs(tdir, exist_ok=True)
-        return Thread(tdir, domain, thread_id=tid, checkpointer=self.checkpointer, model=self.model)
+        if not working_dir:
+            working_dir = self.make_default_working_dir(tdir)
+
+        return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer, model=self.model)
 
     def close(self) -> None:
         try:
@@ -212,6 +194,23 @@ class ThreadManager:
                 self.conn.close()
         except Exception:
             pass
+
+    def thread_dir(self, tid: str) -> str:
+        return os.path.join(self.root_dir, tid)
+
+    def thread_default_working_dir(self, tid: str) -> str:
+        return os.path.join(os.path.join(self.root_dir, tid),
+                            self.DEFAULT_THREAD_WORKING_DIRECTORY)
+
+    def make_default_working_dir(self, tdir: str) -> str:
+        wdir = self.DEFAULT_THREAD_WORKING_DIRECTORY
+        working_dir = os.path.join(tdir, wdir)
+        os.makedirs(working_dir, exist_ok=True)
+        
+        return working_dir
+
+
+
 
     def __del__(self):
         try:

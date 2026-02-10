@@ -197,19 +197,19 @@ def git_repo(path: str) -> str | None:
 
 class DomainManager:
     def __init__(self,
-                 root: str | None = None,
+                 repo_path: str | None = None,
                  repo: str | None = None):
-        if root:
-            self.root = root
+        if repo_path:
+            self.repo_path = repo_path
         else:
-            self.root = tempfile.mkdtemp()
+            self.repo_path = tempfile.mkdtemp()
 
-        self.repo_path = os.path.join(self.root, 'domain')
         # If repo_path is already a git repo, use its remote
         existing_remote = git_repo(self.repo_path)
         self.repo = existing_remote or repo
         # Clone only if the repo does not already exist
         repo_exists = os.path.isdir(self.repo_path)
+
         if self.repo and not existing_remote and not repo_exists:
             clone_repo(self.repo, self.repo_path)
         elif not self.repo and not repo_exists:

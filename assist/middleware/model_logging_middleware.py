@@ -40,9 +40,6 @@ pp            middleware=[ModelLoggingMiddleware()]
         self.agent_name = agent_name
         self._model_call_count = 0
 
-        # Log middleware initialization
-        logger.info(f"ModelLoggingMiddleware initialized for agent: {agent_name or 'default'}")
-
     def _get_agent_name(self, runtime: Runtime) -> str:
         """Extract agent name from runtime or use default."""
         if self.agent_name:

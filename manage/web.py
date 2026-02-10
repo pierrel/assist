@@ -13,6 +13,7 @@ from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
 from assist.config_manager import get_domain
+from assist.domain_manager import DomainManager
 
 # debug logging by default
 logging.basicConfig(stream=sys.stdout)
@@ -28,10 +29,20 @@ def get_cached_description(tid: str) -> str:
     if tid in DESCRIPTION_CACHE:
         return DESCRIPTION_CACHE[tid]
 
-    # Cache miss - read from FS and cache
+    # Cache miss - read from FS or thread and cache
     try:
         chat = MANAGER.get(tid)
-        description = chat.description()
+        thread_dir = MANAGER.thread_dir(tid)
+        description_file = os.path.join(thread_dir,
+                                        "description.txt")
+        if os.path.isfile(description_file):
+            with open(description_file, 'r') as f:
+                description = f.read()
+        else:
+            description = chat.description()
+            os.makedirs(os.path.dirname(description_file), exist_ok=True)
+            with open(description_file, 'w') as f:
+                f.write(description)
         DESCRIPTION_CACHE[tid] = description
         return description
     except Exception:
@@ -44,12 +55,7 @@ async def lifespan(app: FastAPI):
 
     # Populate description cache at startup
     for tid in MANAGER.list():
-        try:
-            chat = MANAGER.get(tid)
-            DESCRIPTION_CACHE[tid] = chat.description()
-        except Exception:
-            DESCRIPTION_CACHE[tid] = tid
-
+        get_cached_description(tid)
     try:
         yield
     finally:
@@ -227,9 +233,10 @@ async def index() -> str:
 
 @app.post("/threads")
 async def create_thread():
-    chat = MANAGER.new(DEFAULT_DOMAIN)
+    chat = MANAGER.new()
     tid = chat.thread_id
-    # Don't cache description yet - new threads don't have content for a real description
+    DomainManager(MANAGER.thread_default_working_dir(tid),
+                  DEFAULT_DOMAIN)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -238,10 +245,17 @@ def _process_message(tid: str, text: str) -> None:
         chat = MANAGER.get(tid)
     except FileNotFoundError:
         return
-    chat.message(text)
-    # Invalidate cache so description gets re-read with updated content
-    if tid in DESCRIPTION_CACHE:
-        del DESCRIPTION_CACHE[tid]
+    resp = chat.message(text)
+
+    # Generate description is there is none
+    get_cached_description(tid)
+    
+    # After message, sync changes if any
+    twdir = MANAGER.thread_default_working_dir(tid)
+    dm = DomainManager(twdir)
+    if dm.changes():
+        last_assistant = resp["messages"][-1].content if resp.get("messages") else "assistant update"
+        dm.sync(last_assistant)        
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)

@@ -89,7 +89,7 @@ def capture_conversation(thread: Thread, reason: str, improvements_dir: str) -> 
 
     # Copy the domain directory from the original thread to the capture directory
     # This gives the agent safe, sandboxed access to read and analyze files
-    source_dir = thread.working_dir
+    source_dir = thread.threads_root
     source_domain_dir = os.path.join(source_dir, "domain")
     capture_domain_dir = os.path.join(capture_dir, "domain")
 
