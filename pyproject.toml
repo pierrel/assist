@@ -13,6 +13,9 @@ dependencies = [
     "jsonschema"
 ]
 
+[project.scripts]
+assist = "manage.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 
