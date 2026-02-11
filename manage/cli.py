@@ -1,10 +1,26 @@
 import sys
 import os
 import tempfile
+import logging
+from datetime import datetime
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from assist.thread import ThreadManager, Thread, render_tool_calls
+
+# Setup logging to file
+project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+logs_dir = os.path.join(project_dir, "logs")
+os.makedirs(logs_dir, exist_ok=True)
+log_filename = datetime.now().strftime("%Y-%m-%d_%H.log")
+log_path = os.path.join(logs_dir, log_filename)
+
+logging.basicConfig(
+    filename=log_path,
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 def print_update(chunk) -> None:
     model_call = chunk.get('model', None)

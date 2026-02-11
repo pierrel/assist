@@ -117,6 +117,9 @@ def select_chat_model(model: str, temperature: float) -> BaseChatModel:
                 base_url=config.url,
                 api_key=config.api_key,
             )
+            # Initialize profile if it doesn't exist
+            if not hasattr(model, 'profile') or model.profile is None:
+                model.profile = {}
             model.profile["max_input_tokens"] = config.context_len
             return model
         else:
@@ -147,6 +150,10 @@ def get_model_pair(temperature: float) -> Tuple[BaseChatModel, BaseChatModel]:
                 base_url=config.url,
                 api_key=config.api_key,
             )
+            # Initialize profile if it doesn't exist
+            if not hasattr(llm, 'profile') or llm.profile is None:
+                llm.profile = {}
+            llm.profile["max_input_tokens"] = config.context_len
             return llm, llm
         else:
             print(f"Local LLM from {config_path()} is not available, falling back to OpenAI API")

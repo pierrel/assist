@@ -56,14 +56,14 @@ def create_agent(model: BaseChatModel,
                                         backoff_factor=2)
     logging_mw = ModelLoggingMiddleware("general-agent")
     mw = [retry_middle]
-    
+
     research_sub = CompiledSubAgent(
         name="research-agent",
         description= "Used to conduct thorough research. The result of the research will be placed in a file and the file name/path will be returned. Provide a filename for more control.",
         runnable=create_research_agent(model,
                                        working_dir,
                                        checkpointer,
-                                       mw)
+                                       [retry_middle])
     )
 
     return create_deep_agent(
@@ -98,7 +98,6 @@ def create_research_agent(model: BaseChatModel,
 
     Includes Tavily web search and a critique/research/fact-check subagent trio.
     """
-    
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     research_sub_agent = {
