@@ -45,28 +45,40 @@ class Thread:
                  working_dir: str,
                  thread_id: str | None = None,
                  checkpointer=None,
-                 model: BaseChatModel | None = None):
+                 model: BaseChatModel | None = None,
+                 max_concurrency: int = 5):
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = model or select_chat_model("mistral-nemo", 0.1)
-        
+        self.max_concurrency = max_concurrency
+
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
                                   checkpointer=checkpointer)
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response"""
-        return self.agent.invoke({"messages": [{"role": "user", "content": text}]},
-                                 {"configurable": {"thread_id": self.thread_id}})
+        return self.agent.invoke(
+            {"messages": [{"role": "user", "content": text}]},
+            {
+                "configurable": {"thread_id": self.thread_id},
+                "max_concurrency": self.max_concurrency
+            }
+        )
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):
             raise TypeError("text must be a string")
         # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
-        return self.agent.stream({"messages": [{"role": "user", "content": text}]},
-                                 {"configurable": {"thread_id": self.thread_id}},
-                                 stream_mode=["messages", "updates"])
+        return self.agent.stream(
+            {"messages": [{"role": "user", "content": text}]},
+            {
+                "configurable": {"thread_id": self.thread_id},
+                "max_concurrency": self.max_concurrency
+            },
+            stream_mode=["messages", "updates"]
+        )
 
     def get_messages(self) -> list[dict]:
         """Return user/assistant messages from checkpointer state as role/content dicts."""

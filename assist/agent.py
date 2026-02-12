@@ -12,6 +12,7 @@ from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
+from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 
 
 def _create_standard_backend(working_dir: str):
@@ -52,10 +53,15 @@ class AgentHarness:
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None) -> CompiledStateGraph:
+    # Core middleware: retry, tool call limiting, JSON validation, and logging
     retry_middle = ModelRetryMiddleware(max_retries=6,
                                         backoff_factor=2)
+    # Limit to 10 tool calls per run to prevent excessive parallel calls
+    # Validate and fix JSON in tool call arguments
+    json_validation_mw = JsonValidationMiddleware(strict=False)
     logging_mw = ModelLoggingMiddleware("general-agent")
-    mw = [retry_middle]
+
+    mw = [retry_middle, tool_limit_mw, json_validation_mw]
 
     research_sub = CompiledSubAgent(
         name="research-agent",
@@ -63,7 +69,7 @@ def create_agent(model: BaseChatModel,
         runnable=create_research_agent(model,
                                        working_dir,
                                        checkpointer,
-                                       [retry_middle])
+                                       [retry_middle, tool_limit_mw, json_validation_mw])
     )
 
     return create_deep_agent(
@@ -79,6 +85,13 @@ def create_user_expert_agent(model: BaseChatModel,
                              working_dir: str,
                              checkpointer=None,
                              middleware=[]) -> CompiledStateGraph:
+    # Only add tool call limiting and JSON validation if not already provided
+    has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
+
+    base_mw = []
+    if not has_json_validation:
+        base_mw.append(JsonValidationMiddleware(strict=False))
+
     logging_mw = ModelLoggingMiddleware("user-expert-agent")
 
     return create_deep_agent(
@@ -86,7 +99,7 @@ def create_user_expert_agent(model: BaseChatModel,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/user_expert.md.j2"),
         backend=_create_standard_backend(working_dir),
-        middleware=middleware + [logging_mw],
+        middleware=base_mw + middleware + [logging_mw],
     )
 
 
@@ -98,6 +111,13 @@ def create_research_agent(model: BaseChatModel,
 
     Includes Tavily web search and a critique/research/fact-check subagent trio.
     """
+    # Only add tool call limiting and JSON validation if not already provided
+    has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
+
+    base_mw = []
+    if not has_json_validation:
+        base_mw.append(JsonValidationMiddleware(strict=False))
+
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     research_sub_agent = {
@@ -126,7 +146,7 @@ def create_research_agent(model: BaseChatModel,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
         backend=_create_standard_backend(working_dir),
-        middleware=middleware + [logging_mw],
+        middleware=base_mw + middleware + [logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]

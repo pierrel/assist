@@ -22,6 +22,8 @@ logging.basicConfig(
 )
 logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
+logger = logging.getLogger("assist.model")
+
 def print_update(chunk) -> None:
     model_call = chunk.get('model', None)
     if model_call:
@@ -49,6 +51,7 @@ def main():
     print(f"Working directory: {working_dir}")
     tm = ThreadManager(thread_dir)
     chat = tm.new(working_dir)
+    logger.info(f"Starting cli in {working_dir} with thread {chat.thread_id} and thread dir of {thread_dir}")
     try:
         while True:
             try:
