@@ -61,7 +61,7 @@ def create_agent(model: BaseChatModel,
     json_validation_mw = JsonValidationMiddleware(strict=False)
     logging_mw = ModelLoggingMiddleware("general-agent")
 
-    mw = [retry_middle, tool_limit_mw, json_validation_mw]
+    mw = [retry_middle, json_validation_mw]
 
     research_sub = CompiledSubAgent(
         name="research-agent",
@@ -69,7 +69,7 @@ def create_agent(model: BaseChatModel,
         runnable=create_research_agent(model,
                                        working_dir,
                                        checkpointer,
-                                       [retry_middle, tool_limit_mw, json_validation_mw])
+                                       [retry_middle, json_validation_mw])
     )
 
     return create_deep_agent(
