@@ -8,14 +8,25 @@ import logging
 from typing import Any
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langgraph.runtime import Runtime
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 # Create a dedicated logger for model interactions
 logger = logging.getLogger("assist.model")
 
 
 class ModelLoggingMiddleware(AgentMiddleware):
-    """Middleware that logs all model prompts and responses at DEBUG level.
+    """Middleware that logs all model prompts and responses.
+
+    Features:
+    - Logs model calls at INFO level (always visible)
+    - Tracks and reports concurrent tool calls
+    - Provides statistics on tool call patterns
+    - Detailed message logging at DEBUG level
+
+    Statistics tracked:
+    - Total number of tool calls made
+    - Maximum concurrent tool calls in a single response
+    - Distribution of concurrent call counts
 
     Usage:
         # Configure the logger level
@@ -26,7 +37,7 @@ class ModelLoggingMiddleware(AgentMiddleware):
         agent = create_agent(
             model=model,
             working_dir=working_dir,
-pp            middleware=[ModelLoggingMiddleware()]
+            middleware=[ModelLoggingMiddleware(agent_name="my-agent")]
         )
     """
 
@@ -39,6 +50,9 @@ pp            middleware=[ModelLoggingMiddleware()]
         """
         self.agent_name = agent_name
         self._model_call_count = 0
+        self._total_tool_calls = 0
+        self._max_concurrent_calls = 0
+        self._concurrent_calls_distribution = {}  # Track frequency of different concurrent call counts
 
     def _get_agent_name(self, runtime: Runtime) -> str:
         """Extract agent name from runtime or use default."""
@@ -78,6 +92,13 @@ pp            middleware=[ModelLoggingMiddleware()]
             return f"[SYSTEM] {msg.content[:200]}..." if len(msg.content) > 200 else f"[SYSTEM] {msg.content}"
         elif isinstance(msg, HumanMessage):
             return f"[USER] {msg.content[:200]}..." if len(msg.content) > 200 else f"[USER] {msg.content}"
+        elif isinstance(msg, ToolMessage):
+            # Tool result message
+            content = msg.content if msg.content else "[No content]"
+            tool_name = getattr(msg, 'name', 'unknown')
+            approx_tokens = self._count_approx_tokens_message(msg)
+            content_preview = content[:100] if len(str(content)) > 100 else content
+            return f"[TOOL RESULT: {tool_name}] ~{approx_tokens} tokens - {content_preview}..." if len(str(content)) > 100 else f"[TOOL RESULT: {tool_name}] {content}"
         elif isinstance(msg, AIMessage):
             content = msg.content if msg.content else "[No content]"
             tool_calls = ""
@@ -157,20 +178,82 @@ pp            middleware=[ModelLoggingMiddleware()]
     def _count_approx_tokens_messages(self, msgs: list[Any]) -> int:
         return sum([self._count_approx_tokens_message(msg) for msg in msgs])
 
+    def _count_tool_calls(self, msg: Any) -> int:
+        """Count the number of tool calls in a message.
+
+        Args:
+            msg: A message object
+
+        Returns:
+            Number of tool calls in the message
+        """
+        if not hasattr(msg, 'tool_calls'):
+            return 0
+
+        tool_calls = msg.tool_calls
+        if not tool_calls:
+            return 0
+
+        return len(tool_calls)
+
+    def _count_tool_results(self, messages: list[Any]) -> int:
+        """Count the number of tool result messages.
+
+        Args:
+            messages: List of messages
+
+        Returns:
+            Number of ToolMessage objects in the list
+        """
+        return sum(1 for msg in messages if isinstance(msg, ToolMessage))
+
+    def _get_tool_result_info(self, messages: list[Any]) -> dict[str, Any]:
+        """Get information about tool results in the messages.
+
+        Args:
+            messages: List of messages
+
+        Returns:
+            Dictionary with tool result statistics
+        """
+        tool_results = [msg for msg in messages if isinstance(msg, ToolMessage)]
+
+        if not tool_results:
+            return {"count": 0, "approx_tokens": 0}
+
+        # Count approximate tokens in tool results
+        total_tokens = sum(self._count_approx_tokens_message(msg) for msg in tool_results)
+
+        return {
+            "count": len(tool_results),
+            "approx_tokens": total_tokens
+        }
+
     def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Log the prompt before sending to the model."""
         self._model_call_count += 1
         agent_name = self._get_agent_name(runtime)
+        messages = state.get("messages", [])
 
-        # Always log at INFO level that a model call is happening
-        logger.info(f"[{agent_name}] Model Call #{self._model_call_count} starting")
+        # Get tool result information
+        tool_result_info = self._get_tool_result_info(messages)
+
+        # Always log at INFO level with tool result info
+        if tool_result_info["count"] > 0:
+            logger.info(
+                f"[{agent_name}] Model Call #{self._model_call_count} starting "
+                f"with {tool_result_info['count']} tool result(s) "
+                f"(~{tool_result_info['approx_tokens']} tokens)"
+            )
+        else:
+            logger.info(f"[{agent_name}] Model Call #{self._model_call_count} starting")
 
         # Detailed logging only at DEBUG level
         if logger.isEnabledFor(logging.DEBUG):
-            messages = state.get("messages", [])
-
             logger.debug("=" * 80)
             logger.debug(f"[{agent_name}] Model Call #{self._model_call_count} - PROMPT ({self._count_approx_tokens_messages(messages)} approx tokens)")
+            if tool_result_info["count"] > 0:
+                logger.debug(f"  Tool results being sent: {tool_result_info['count']} (~{tool_result_info['approx_tokens']} tokens)")
             logger.debug("-" * 80)
 
             # Log each message
@@ -184,20 +267,52 @@ pp            middleware=[ModelLoggingMiddleware()]
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Log the response after receiving from the model."""
         agent_name = self._get_agent_name(runtime)
+        messages = state.get("messages", [])
 
-        # Always log at INFO level that a model call completed
-        logger.info(f"[{agent_name}] Model Call #{self._model_call_count} completed")
+        # Count concurrent tool calls in the response
+        concurrent_calls = 0
+        if messages:
+            last_message = messages[-1]
+            concurrent_calls = self._count_tool_calls(last_message)
+
+            # Update statistics
+            if concurrent_calls > 0:
+                self._total_tool_calls += concurrent_calls
+                if concurrent_calls > self._max_concurrent_calls:
+                    self._max_concurrent_calls = concurrent_calls
+
+                # Track distribution
+                self._concurrent_calls_distribution[concurrent_calls] = \
+                    self._concurrent_calls_distribution.get(concurrent_calls, 0) + 1
+
+        # Always log at INFO level with tool call count
+        if concurrent_calls > 0:
+            logger.info(
+                f"[{agent_name}] Model Call #{self._model_call_count} completed "
+                f"with {concurrent_calls} concurrent tool call(s)"
+            )
+        else:
+            logger.info(f"[{agent_name}] Model Call #{self._model_call_count} completed")
+
+        # Log statistics periodically (every 10 calls)
+        if self._model_call_count % 10 == 0 and self._total_tool_calls > 0:
+            logger.info(
+                f"[{agent_name}] Tool call statistics: "
+                f"Total: {self._total_tool_calls}, "
+                f"Max concurrent: {self._max_concurrent_calls}, "
+                f"Distribution: {dict(sorted(self._concurrent_calls_distribution.items()))}"
+            )
 
         # Detailed logging only at DEBUG level
         if logger.isEnabledFor(logging.DEBUG):
-            messages = state.get("messages", [])
-
             # The last message should be the model's response
             if messages:
                 last_message = messages[-1]
                 logger.debug(f"[{agent_name}] Model Call #{self._model_call_count} - RESPONSE")
                 logger.debug("-" * 80)
                 logger.debug(f"  {self._format_message(last_message)}")
+                if concurrent_calls > 0:
+                    logger.debug(f"  Concurrent tool calls: {concurrent_calls}")
                 logger.debug("=" * 80)
                 logger.debug("")  # Empty line for readability
 
