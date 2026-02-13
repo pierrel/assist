@@ -122,12 +122,26 @@ def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
     title = get_cached_description(tid)
     msgs = chat.get_messages()
     rendered = []
+    diff_counter = 0
     for m in reversed(msgs):
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
         if role == "diff":
             # Render diffs using Pygments for proper coloring/formatting
-            content_html = render_diff(raw)
+            # But wrap in collapsible container that's hidden by default
+            diff_counter += 1
+            diff_id = f"diff-{diff_counter}"
+            diff_content = render_diff(raw)
+            content_html = f"""
+            <div class="diff-container">
+                <button class="diff-toggle" onclick="toggleDiff('{diff_id}')">
+                    <span class="toggle-icon">▶</span> Show diff
+                </button>
+                <div id="{diff_id}" class="diff-content" style="display: none;">
+                    {diff_content}
+                </div>
+            </div>
+            """
         elif role == "assistant" or role == "tools":
             # Render assistant and tool content as Markdown to HTML
             content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
@@ -163,6 +177,12 @@ def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
           .modal-content textarea {{ width: 100%; min-height: 100px; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }}
           .modal-content label {{ display: block; margin-bottom: .5rem; font-weight: 500; }}
           .button-group {{ display: flex; gap: .5rem; margin-top: 1rem; }}
+          .diff-container {{ margin: .5rem 0; }}
+          .diff-toggle {{ background: #f8f9fa; border: 1px solid #dee2e6; padding: .5rem .75rem; border-radius: 6px; cursor: pointer; font-size: .9rem; width: 100%; text-align: left; display: flex; align-items: center; gap: .5rem; transition: background .2s; }}
+          .diff-toggle:hover {{ background: #e9ecef; }}
+          .toggle-icon {{ display: inline-block; transition: transform .2s; font-size: .8rem; }}
+          .toggle-icon.expanded {{ transform: rotate(90deg); }}
+          .diff-content {{ margin-top: .5rem; overflow-x: auto; }}
           @media (max-width: 480px) {{
             .msg {{ padding: .5rem .6rem; }}
             .button-group {{ flex-direction: column; }}
@@ -207,6 +227,21 @@ def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
             }}
             function hideCaptureModal() {{
               document.getElementById('captureModal').style.display = 'none';
+            }}
+            function toggleDiff(diffId) {{
+              const diffContent = document.getElementById(diffId);
+              const toggleButton = event.currentTarget;
+              const toggleIcon = toggleButton.querySelector('.toggle-icon');
+
+              if (diffContent.style.display === 'none') {{
+                diffContent.style.display = 'block';
+                toggleIcon.classList.add('expanded');
+                toggleButton.innerHTML = toggleButton.innerHTML.replace('Show diff', 'Hide diff');
+              }} else {{
+                diffContent.style.display = 'none';
+                toggleIcon.classList.remove('expanded');
+                toggleButton.innerHTML = toggleButton.innerHTML.replace('Hide diff', 'Show diff');
+              }}
             }}
             // Close modal when clicking outside
             window.onclick = function(event) {{

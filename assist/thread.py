@@ -59,13 +59,20 @@ class Thread:
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response"""
-        return self.agent.invoke(
+        result = self.agent.invoke(
             {"messages": [{"role": "user", "content": text}]},
             {
                 "configurable": {"thread_id": self.thread_id},
                 "max_concurrency": self.max_concurrency
             }
         )
+        # Extract content from the last AIMessage
+        messages = result.get("messages", [])
+        if messages:
+            last_msg = messages[-1]
+            if isinstance(last_msg, AIMessage):
+                return last_msg.content
+        return ""
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):
@@ -112,6 +119,14 @@ class Thread:
         msgs = self.get_messages()
         if not msgs:
             raise ValueError("no messages to describe")
+
+        # Filter out "tools" role messages - LangChain doesn't recognize this role
+        # Only include user/assistant messages for description generation
+        filtered_msgs = [m for m in msgs if m.get("role") in ("user", "assistant")]
+
+        if not filtered_msgs:
+            raise ValueError("no user/assistant messages to describe")
+
         prompt = {
             "role": "system",
             "content": base_prompt_for("deepagents/describe_system.md.j2"),
@@ -120,9 +135,9 @@ class Thread:
             "role": "user",
             "content": "Describe the conversation up until now",
         }
-        resp = self.model.invoke([prompt] + msgs + [request])
+        resp = self.model.invoke([prompt] + filtered_msgs + [request])
         desc = resp.content.strip()
-        
+
         return desc
 
 

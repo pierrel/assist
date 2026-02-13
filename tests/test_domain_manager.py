@@ -198,3 +198,18 @@ class TestDomainManagerIntegration(TestCase):
         with open(file_path, "r") as f:
             content = f.read()
         self.assertEqual(content, "* Tasks\n")
+
+    def test_domain_manager_handles_empty_directory(self):
+        """Test that DomainManager works with pre-existing empty directories."""
+        # Simulate what ThreadManager does: create an empty working directory
+        test_path = os.path.join(self.temp_dir, "empty_domain")
+        os.makedirs(test_path, exist_ok=True)
+
+        # Verify it's empty
+        self.assertTrue(os.path.isdir(test_path))
+        self.assertEqual(len(os.listdir(test_path)), 0)
+
+        # Create DomainManager without a repo (won't clone, but should work)
+        dm = DomainManager(repo_path=test_path, repo=None)
+        self.assertEqual(dm.domain(), test_path)
+        self.assertTrue(os.path.isdir(dm.domain()))
