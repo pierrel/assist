@@ -27,48 +27,42 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
     """Middleware that evicts large tool results to prevent context overflow.
 
     This middleware intercepts tool results BEFORE they're sent to the model and:
-    1. Estimates current context usage from conversation history
-    2. Estimates incoming tool result token count
+    1. Calculates current context usage from conversation history
+    2. Calculates incoming tool result size
     3. Checks if combined size exceeds threshold (default: 75% of max_input_tokens)
     4. If yes, writes result to /large_tool_results/{tool_call_id} and replaces
        with a reference message instructing the model to read the file
 
     Args:
         trigger_fraction: Context fraction to trigger eviction (default: 0.75)
-        min_result_tokens: Minimum tool result size to consider for eviction (default: 5000)
         backend_factory: Optional backend factory (will use agent's backend if None)
 
     Example:
         middleware = ContextAwareToolEvictionMiddleware(
             trigger_fraction=0.70,  # Evict if context would reach 70%
-            min_result_tokens=5000,  # Only evict results > 5k tokens
         )
     """
 
     def __init__(
         self,
         trigger_fraction: float = 0.75,
-        min_result_tokens: int = 5000,
         backend_factory: Callable[[ToolRuntime], Any] | None = None,
     ):
         """Initialize the middleware.
 
         Args:
             trigger_fraction: Fraction of max_input_tokens to trigger eviction (0.0-1.0)
-            min_result_tokens: Minimum result size to consider for eviction
             backend_factory: Optional backend factory (uses agent's backend if None)
         """
         if not 0.0 <= trigger_fraction <= 1.0:
             raise ValueError(f"trigger_fraction must be between 0.0 and 1.0, got {trigger_fraction}")
 
         self.trigger_fraction = trigger_fraction
-        self.min_result_tokens = min_result_tokens
         self.backend_factory = backend_factory
         self._eviction_count = 0
 
         logger.info(
-            f"ContextAwareToolEvictionMiddleware initialized: "
-            f"trigger={trigger_fraction:.0%}, min_result_tokens={min_result_tokens}"
+            f"ContextAwareToolEvictionMiddleware initialized: trigger={trigger_fraction:.0%}"
         )
 
     def _get_backend(self, runtime: ToolRuntime) -> Any:
@@ -104,50 +98,14 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
     def _count_message_tokens(self, msg: Any) -> int:
         """Count approximate tokens in a message.
 
-        Accounts for:
-        - Message structure overhead (~10 tokens)
-        - Content (text, multimodal)
-        - Tool calls (name, arguments, IDs)
+        Simply converts the entire message to a string and estimates tokens
+        based on character count (~4 chars per token).
         """
-        total_chars = 40  # Message overhead
+        # Convert entire message to string representation
+        msg_str = str(msg)
 
-        # Count content
-        if hasattr(msg, 'content'):
-            content = msg.content
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict):
-                        if 'text' in part:
-                            total_chars += len(str(part['text']))
-                        else:
-                            total_chars += 100  # Estimate for non-text content
-                    elif isinstance(part, str):
-                        total_chars += len(part)
-
-        # Count tool calls (for AIMessage)
-        if hasattr(msg, 'tool_calls') and msg.tool_calls:
-            for tool_call in msg.tool_calls:
-                # Tool name
-                if 'name' in tool_call:
-                    total_chars += len(str(tool_call['name']))
-
-                # Arguments
-                if 'args' in tool_call or 'arguments' in tool_call:
-                    args = tool_call.get('args') or tool_call.get('arguments', {})
-                    try:
-                        args_str = json.dumps(args) if not isinstance(args, str) else args
-                        total_chars += len(args_str)
-                    except (TypeError, ValueError):
-                        total_chars += len(str(args))
-
-                # Tool call ID
-                if 'id' in tool_call:
-                    total_chars += len(str(tool_call['id']))
-
-                # Structural overhead per call
-                total_chars += 80
+        # Add some overhead for message structure
+        total_chars = len(msg_str) + 50  # +50 for message metadata/structure
 
         return total_chars // 4
 
@@ -191,12 +149,8 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
 
         This is called AFTER tool execution but BEFORE the result is added to messages.
         """
-        logger.debug(f"ContextAwareToolEvictionMiddleware.wrap_tool_call invoked for tool: {request.tool_call.get('name', 'unknown')}")
-
         # Execute the tool first
         tool_result = handler(request)
-
-        logger.debug(f"Tool result type: {type(tool_result).__name__}, is ToolMessage: {isinstance(tool_result, ToolMessage)}")
 
         # Only process ToolMessage results (Commands are already handled)
         if not isinstance(tool_result, ToolMessage):
@@ -216,17 +170,15 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
         projected_tokens = current_tokens + result_tokens
         threshold_tokens = int(max_tokens * self.trigger_fraction)
 
-        # Check if we should evict
-        should_evict = (
-            result_tokens >= self.min_result_tokens and  # Result is large enough
-            projected_tokens >= threshold_tokens          # Would exceed threshold
-        )
+        # Check if we should evict based on projected context size
+        should_evict = projected_tokens >= threshold_tokens
 
         if not should_evict:
             # No eviction needed
             logger.debug(
                 f"Tool result OK: {result_tokens} tokens, "
-                f"context: {current_tokens}/{max_tokens} ({current_tokens/max_tokens:.1%}, projected {projected_tokens})"
+                f"context: {current_tokens}/{max_tokens} ({current_tokens/max_tokens:.1%}, "
+                f"projected: {projected_tokens}/{max_tokens} ({projected_tokens/max_tokens:.1%})"
             )
             return tool_result
 
@@ -261,19 +213,43 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
                 # Return original result if write fails
                 return tool_result
 
-            # Create truncated preview (first 500 chars)
-            preview = content_str[:500]
-            if len(content_str) > 500:
-                preview += "..."
+            # Calculate how many tokens we have available for the replacement message
+            # We want: current_tokens + replacement_tokens < threshold_tokens
+            # So: replacement_tokens < threshold_tokens - current_tokens
+            available_tokens = threshold_tokens - current_tokens
+
+            # Reserve tokens for the message structure (header, footer, etc.)
+            # Rough estimate: ~150 chars for the structure
+            structure_chars = 250
+            available_chars_for_preview = (available_tokens * 4) - structure_chars
+
+            # Create preview, but guard against it being too large
+            preview = ""
+            include_preview = available_chars_for_preview > 100  # Only include if we have >100 chars available
+
+            if include_preview:
+                max_preview_chars = min(500, max(0, int(available_chars_for_preview)))
+                preview = content_str[:max_preview_chars]
+                if len(content_str) > max_preview_chars:
+                    preview += "..."
 
             # Create replacement message that tells model to read the file
-            replacement_content = f"""Tool result too large ({result_tokens:,} tokens), saved to filesystem.
+            if include_preview:
+                replacement_content = f"""Tool result too large ({result_tokens:,} tokens), saved to filesystem.
 
 File: {write_result.path}
 Size: {len(content_str):,} characters (~{result_tokens:,} tokens)
 
 Preview:
 {preview}
+
+To access the full result, use the read_file tool with path: {write_result.path}"""
+            else:
+                # No preview - context too tight
+                replacement_content = f"""Tool result too large ({result_tokens:,} tokens), saved to filesystem.
+
+File: {write_result.path}
+Size: {len(content_str):,} characters (~{result_tokens:,} tokens)
 
 To access the full result, use the read_file tool with path: {write_result.path}"""
 
