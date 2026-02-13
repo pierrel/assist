@@ -207,10 +207,13 @@ class DomainManager:
         # If repo_path is already a git repo, use its remote
         existing_remote = git_repo(self.repo_path)
         self.repo = existing_remote or repo
-        # Clone only if the repo does not already exist
-        repo_exists = os.path.isdir(self.repo_path)
 
-        if self.repo and not existing_remote and not repo_exists:
+        # Check if directory exists and if it's empty
+        repo_exists = os.path.isdir(self.repo_path)
+        is_empty = not os.listdir(self.repo_path) if repo_exists else True
+
+        # Clone if: we have a repo URL, it's not already a git repo, and (directory doesn't exist OR is empty)
+        if self.repo and not existing_remote and (not repo_exists or is_empty):
             clone_repo(self.repo, self.repo_path)
         elif not self.repo and not repo_exists:
             os.makedirs(self.repo_path, exist_ok=True)
