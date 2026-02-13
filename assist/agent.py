@@ -1,4 +1,5 @@
 import uuid
+import logging
 
 from deepagents import create_deep_agent, CompiledSubAgent
 from langchain.messages import AIMessage, AnyMessage
@@ -13,6 +14,10 @@ from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
+from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
+
+
+logger = logging.getLogger(__name__)
 
 
 def _create_standard_backend(working_dir: str):
@@ -50,18 +55,27 @@ class AgentHarness:
         return state.values.get("messages", [])
         
 
+
+
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None) -> CompiledStateGraph:
     # Core middleware: retry, tool call limiting, JSON validation, and logging
     retry_middle = ModelRetryMiddleware(max_retries=6,
                                         backoff_factor=2)
-    # Limit to 10 tool calls per run to prevent excessive parallel calls
     # Validate and fix JSON in tool call arguments
     json_validation_mw = JsonValidationMiddleware(strict=False)
     logging_mw = ModelLoggingMiddleware("general-agent")
 
-    mw = [retry_middle, json_validation_mw]
+    # Context-aware tool eviction: evict results to filesystem if they would cause overflow
+    context_eviction_mw = ContextAwareToolEvictionMiddleware(
+        trigger_fraction=0.75,  # Evict if context would reach 75%
+        min_result_tokens=5000,  # Only evict results > 5k tokens
+    )
+
+    mw = [retry_middle, json_validation_mw, context_eviction_mw]
+
+    backend = _create_standard_backend(working_dir)
 
     research_sub = CompiledSubAgent(
         name="research-agent",
@@ -72,35 +86,51 @@ def create_agent(model: BaseChatModel,
                                        [retry_middle, json_validation_mw])
     )
 
-    return create_deep_agent(
+    agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/general_instructions.md.j2"),
         middleware=mw + [logging_mw],
-        backend=_create_standard_backend(working_dir),
+        backend=backend,
         subagents=[research_sub]
     )
+
+    # ContextAwareToolEvictionMiddleware handles context overflow prevention
+    # by monitoring cumulative context usage. FilesystemMiddleware (built-in)
+    # provides backup eviction for extremely large individual results (>20k tokens default).
+
+    return agent
 
 def create_user_expert_agent(model: BaseChatModel,
                              working_dir: str,
                              checkpointer=None,
                              middleware=[]) -> CompiledStateGraph:
-    # Only add tool call limiting and JSON validation if not already provided
+    # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
     base_mw = []
     if not has_json_validation:
         base_mw.append(JsonValidationMiddleware(strict=False))
 
+    # Context-aware tool eviction
+    context_eviction_mw = ContextAwareToolEvictionMiddleware(
+        trigger_fraction=0.75,
+        min_result_tokens=5000,
+    )
+    base_mw.append(context_eviction_mw)
+
+    backend = _create_standard_backend(working_dir)
     logging_mw = ModelLoggingMiddleware("user-expert-agent")
 
-    return create_deep_agent(
+    agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/user_expert.md.j2"),
-        backend=_create_standard_backend(working_dir),
+        backend=backend,
         middleware=base_mw + middleware + [logging_mw],
     )
+
+    return agent
 
 
 def create_research_agent(model: BaseChatModel,
@@ -111,13 +141,21 @@ def create_research_agent(model: BaseChatModel,
 
     Includes Tavily web search and a critique/research/fact-check subagent trio.
     """
-    # Only add tool call limiting and JSON validation if not already provided
+    # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
     base_mw = []
     if not has_json_validation:
         base_mw.append(JsonValidationMiddleware(strict=False))
 
+    # Context-aware tool eviction for research agents (more aggressive thresholds)
+    context_eviction_mw = ContextAwareToolEvictionMiddleware(
+        trigger_fraction=0.70,  # Evict at 70% for research (more aggressive)
+        min_result_tokens=3000,  # Lower threshold for research results
+    )
+    base_mw.append(context_eviction_mw)
+
+    backend = _create_standard_backend(working_dir)
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     research_sub_agent = {
@@ -140,14 +178,16 @@ def create_research_agent(model: BaseChatModel,
         "tools": [read_url],
     }
 
-    return create_deep_agent(
+    agent = create_deep_agent(
         model=model,
         tools=[search_internet, read_url],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
-        backend=_create_standard_backend(working_dir),
+        backend=backend,
         middleware=base_mw + middleware + [logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]
     )
+
+    return agent
