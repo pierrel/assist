@@ -70,7 +70,6 @@ def create_agent(model: BaseChatModel,
     # Context-aware tool eviction: evict results to filesystem if they would cause overflow
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
         trigger_fraction=0.75,  # Evict if context would reach 75%
-        min_result_tokens=5000,  # Only evict results > 5k tokens
     )
 
     mw = [retry_middle, json_validation_mw, context_eviction_mw]
@@ -115,7 +114,6 @@ def create_user_expert_agent(model: BaseChatModel,
     # Context-aware tool eviction
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
         trigger_fraction=0.75,
-        min_result_tokens=5000,
     )
     base_mw.append(context_eviction_mw)
 
@@ -151,7 +149,6 @@ def create_research_agent(model: BaseChatModel,
     # Context-aware tool eviction for research agents (more aggressive thresholds)
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
         trigger_fraction=0.70,  # Evict at 70% for research (more aggressive)
-        min_result_tokens=3000,  # Lower threshold for research results
     )
     base_mw.append(context_eviction_mw)
 
