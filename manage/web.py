@@ -121,6 +121,18 @@ def render_index() -> str:
 def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
     title = get_cached_description(tid)
     msgs = chat.get_messages()
+
+    # Append diffs from domain repo (computed at render time)
+    try:
+        twdir = MANAGER.thread_default_working_dir(tid)
+        dm = DomainManager(twdir)
+        diffs = dm.main_diff()
+        if diffs:
+            diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
+            msgs.append({"role": "diff", "content": diff_content})
+    except Exception:
+        pass
+
     rendered = []
     diff_counter = 0
     for m in reversed(msgs):
@@ -284,12 +296,13 @@ def _process_message(tid: str, text: str) -> None:
 
     # Generate description is there is none
     get_cached_description(tid)
-    
+
     # After message, sync changes if any
     twdir = MANAGER.thread_default_working_dir(tid)
     dm = DomainManager(twdir)
     if dm.changes():
-        last_assistant = resp["messages"][-1].content if resp.get("messages") else "assistant update"
+        # resp is now a string (the assistant's response), use it as commit message
+        last_assistant = resp if resp else "assistant update"
         dm.sync(last_assistant)        
 
 
