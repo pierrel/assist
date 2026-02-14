@@ -42,6 +42,36 @@ class JsonValidationMiddleware(AgentMiddleware):
         self._validation_count = 0
         self._fix_count = 0
 
+    def _fix_json_invalid_escapes(self, json_str: str) -> str:
+        r"""Fix invalid backslash escape sequences in a JSON string.
+
+        JSON only allows these escape sequences: \" \\ \/ \b \f \n \r \t \uXXXX
+        Models sometimes produce arguments with invalid escapes like \ followed
+        by a space or other characters. This fixes them by escaping the backslash.
+
+        Args:
+            json_str: A JSON string that may contain invalid escape sequences
+
+        Returns:
+            Fixed JSON string with invalid escapes corrected
+        """
+        try:
+            json.loads(json_str)
+            return json_str
+        except json.JSONDecodeError:
+            pass
+
+        # Fix invalid escapes: replace \X where X is not a valid JSON escape char
+        # Valid JSON escape chars after \: " \ / b f n r t u
+        fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', json_str)
+
+        try:
+            json.loads(fixed)
+            return fixed
+        except json.JSONDecodeError:
+            logger.warning(f"Could not fix JSON escapes: {json_str[:100]}...")
+            return json_str
+
     def _sanitize_string_content(self, text: str) -> str:
         """Sanitize string content to ensure it's JSON-safe.
 
@@ -165,6 +195,9 @@ class JsonValidationMiddleware(AgentMiddleware):
             # Fix 3: Remove trailing commas before closing braces/brackets
             fixed = re.sub(r',(\s*[}\]])', r'\1', fixed)
 
+            # Fix 4: Fix invalid backslash escapes (e.g. \  or \- )
+            fixed = self._fix_json_invalid_escapes(fixed)
+
             try:
                 # Validate the fix worked
                 json.loads(fixed)
@@ -226,7 +259,7 @@ class JsonValidationMiddleware(AgentMiddleware):
                     sanitized_msg.content = sanitized_content
                     modified = True
 
-            # Also check tool calls in the message
+            # Also check tool calls in the message (LangChain dict format)
             if hasattr(msg, 'tool_calls') and msg.tool_calls:
                 sanitized_calls = []
                 calls_modified = False
@@ -274,6 +307,45 @@ class JsonValidationMiddleware(AgentMiddleware):
                         sanitized_msg = msg
                     sanitized_msg.tool_calls = sanitized_calls
                     modified = True
+
+            # Also check additional_kwargs tool calls (OpenAI raw format)
+            # This is what actually gets sent to the API - if function.arguments
+            # contains invalid JSON escapes, vLLM will reject with 400 Bad Request
+            if hasattr(msg, 'additional_kwargs'):
+                ak_tool_calls = msg.additional_kwargs.get('tool_calls', [])
+                if ak_tool_calls:
+                    ak_modified = False
+                    fixed_ak_calls = []
+
+                    for tc in ak_tool_calls:
+                        func = tc.get('function', {})
+                        args_str = func.get('arguments')
+
+                        if isinstance(args_str, str):
+                            fixed_str = self._fix_json_invalid_escapes(args_str)
+                            if fixed_str != args_str:
+                                tc = dict(tc)
+                                tc['function'] = dict(func)
+                                tc['function']['arguments'] = fixed_str
+                                ak_modified = True
+                                logger.info(
+                                    f"Fixed invalid JSON escape in additional_kwargs "
+                                    f"tool call {tc.get('id', 'unknown')}"
+                                )
+
+                        fixed_ak_calls.append(tc)
+
+                    if ak_modified:
+                        if sanitized_msg is msg:
+                            if hasattr(msg, 'model_copy'):
+                                sanitized_msg = msg.model_copy()
+                            elif hasattr(msg, 'copy'):
+                                sanitized_msg = msg.copy()
+                            else:
+                                sanitized_msg = msg
+                        sanitized_msg.additional_kwargs = dict(sanitized_msg.additional_kwargs)
+                        sanitized_msg.additional_kwargs['tool_calls'] = fixed_ak_calls
+                        modified = True
 
             sanitized_messages.append(sanitized_msg)
 

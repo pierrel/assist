@@ -325,6 +325,139 @@ This report provides a comprehensive comparison of technologies A and B.
         assert middleware._fix_count == 0
 
 
+class TestInvalidEscapeInToolCallArguments:
+    """Test fix for vLLM 400 Bad Request: 'Invalid \\escape' in tool call arguments.
+
+    This reproduces the exact error from production where:
+    1. Model generates a write_file tool call with markdown content
+    2. The arguments JSON string contains invalid backslash escapes (e.g. \\  or \\ )
+    3. On the NEXT turn, these messages are sent back to vLLM as conversation history
+    4. vLLM tries to parse the function.arguments string as JSON and fails
+    """
+
+    PASSKEYS_ARGUMENTS = (
+        '{"file_path": "/research/passkeys_custom_implementation_research_final.md",'
+        ' "content": "# Research: Custom Passkeys Implementation\\n\\n'
+        '## Overview\\nPasskeys are a modern authentication method.\\n\\n'
+        '### Core Components\\n1. **User Device**: Must support cryptographic operations.\\n'
+        '2. **Authentication Protocol**: WebAuthn or custom.\\n\\n'
+        '### Protocol Design\\n- **WebAuthn Alternative**: You would need to design a protocol that '
+        'achieves the same security guarantees. This includes:\\  '
+        '- **Attestation**: Proving the authenticity of the device.\\n'
+        '  - **Assertion**: Proving possession of the private key.\\n'
+        '- **Key Management**: Securely storing public keys.\\n\\n'
+        '### 3. **User Flow\\n1. **Onboarding**: User generates a passkey.\\n'
+        '2. **Authentication**: User confirms identity."}'
+    )
+
+    def test_invalid_escape_in_arguments_string(self):
+        """Verify the arguments string has invalid JSON escapes (reproducing the bug)."""
+        # This should fail to parse - confirming the bug exists
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(self.PASSKEYS_ARGUMENTS)
+
+    def test_before_model_fixes_invalid_escape_in_additional_kwargs(self):
+        """Test that before_model fixes invalid JSON escapes in additional_kwargs tool calls.
+
+        This is the exact production scenario: conversation history contains an
+        AIMessage with additional_kwargs['tool_calls'] where function.arguments
+        has invalid backslash escapes. When sent to vLLM, this causes a 400 error.
+        """
+        middleware = JsonValidationMiddleware(strict=False)
+
+        # Create AIMessage with additional_kwargs matching the production format
+        msg = AIMessage(
+            content="",
+            additional_kwargs={
+                'tool_calls': [{
+                    'type': 'function',
+                    'id': 'chatcmpl-tool-b8125c7a8a84185b',
+                    'function': {
+                        'name': 'write_file',
+                        'arguments': self.PASSKEYS_ARGUMENTS
+                    }
+                }]
+            }
+        )
+
+        state = {"messages": [HumanMessage(content="hello"), msg]}
+        runtime = Mock()
+
+        result = middleware.before_model(state, runtime)
+
+        # Must return modified state
+        assert result is not None, "Middleware should have detected and fixed invalid JSON"
+
+        # Extract the fixed arguments string
+        fixed_msg = result["messages"][1]
+        fixed_args_str = fixed_msg.additional_kwargs['tool_calls'][0]['function']['arguments']
+
+        # The fixed arguments must be valid JSON
+        try:
+            parsed = json.loads(fixed_args_str)
+            assert 'file_path' in parsed
+            assert 'content' in parsed
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Middleware failed to fix invalid JSON escape in arguments: {e}\n"
+                f"This would cause vLLM 400 Bad Request: 'Invalid \\\\escape'"
+            )
+
+    def test_before_model_preserves_valid_additional_kwargs(self):
+        """Test that valid additional_kwargs tool calls are not modified."""
+        middleware = JsonValidationMiddleware(strict=False)
+
+        valid_arguments = '{"query": "test search", "limit": 10}'
+        msg = AIMessage(
+            content="",
+            additional_kwargs={
+                'tool_calls': [{
+                    'type': 'function',
+                    'id': 'call_1',
+                    'function': {
+                        'name': 'search',
+                        'arguments': valid_arguments
+                    }
+                }]
+            }
+        )
+
+        state = {"messages": [msg]}
+        runtime = Mock()
+
+        result = middleware.before_model(state, runtime)
+
+        # Should not modify valid arguments
+        if result is not None:
+            fixed_args = result["messages"][0].additional_kwargs['tool_calls'][0]['function']['arguments']
+            assert fixed_args == valid_arguments
+
+    def test_fix_json_invalid_escapes(self):
+        """Test _fix_json_invalid_escapes with various invalid escape patterns."""
+        middleware = JsonValidationMiddleware(strict=False)
+
+        # Backslash followed by space (the exact production error)
+        bad = r'{"content": "text with \  continuation"}'
+        fixed = middleware._fix_json_invalid_escapes(bad)
+        parsed = json.loads(fixed)
+        assert "text with" in parsed["content"]
+
+        # Backslash followed by dash
+        bad2 = r'{"content": "list:\- item one"}'
+        fixed2 = middleware._fix_json_invalid_escapes(bad2)
+        parsed2 = json.loads(fixed2)
+        assert "item one" in parsed2["content"]
+
+    def test_fix_preserves_valid_escapes(self):
+        """Test that valid JSON escape sequences are preserved."""
+        middleware = JsonValidationMiddleware(strict=False)
+
+        valid = r'{"content": "line1\nline2\ttab\u0041"}'
+        fixed = middleware._fix_json_invalid_escapes(valid)
+        parsed = json.loads(fixed)
+        assert "line1\nline2\ttab" in parsed["content"]
+
+
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
 
