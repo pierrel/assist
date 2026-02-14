@@ -16,7 +16,7 @@ from assist.config_manager import get_domain
 from assist.domain_manager import DomainManager
 
 # debug logging by default
-logging.basicConfig(stream=sys.stdout)
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
