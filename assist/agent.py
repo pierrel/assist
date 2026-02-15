@@ -100,10 +100,10 @@ def create_agent(model: BaseChatModel,
 
     return agent
 
-def create_user_expert_agent(model: BaseChatModel,
-                             working_dir: str,
-                             checkpointer=None,
-                             middleware=[]) -> CompiledStateGraph:
+def create_context_agent(model: BaseChatModel,
+                         working_dir: str,
+                         checkpointer=None,
+                         middleware=[]) -> CompiledStateGraph:
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
@@ -118,12 +118,12 @@ def create_user_expert_agent(model: BaseChatModel,
     base_mw.append(context_eviction_mw)
 
     backend = _create_standard_backend(working_dir)
-    logging_mw = ModelLoggingMiddleware("user-expert-agent")
+    logging_mw = ModelLoggingMiddleware("context-agent")
 
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/user_expert.md.j2"),
+        system_prompt=base_prompt_for("deepagents/context_agent.md.j2"),
         backend=backend,
         middleware=base_mw + middleware + [logging_mw],
     )
