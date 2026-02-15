@@ -1,12 +1,12 @@
 # Core agent framework
-deepagents>=0.3.5
-langchain>=1.2.4
-langgraph>=1.0.6
-langgraph-checkpoint-sqlite>=3.0.2
+deepagents==0.4.2
+langchain==1.2.10
+langgraph==1.0.8
+langgraph-checkpoint-sqlite==3.0.3
 
 # Language model integrations
-langchain-openai>=1.1.7
-openai>=2.15.0
+langchain-openai==1.1.9
+openai==2.15.0
 
 # Web framework
 fastapi>=0.128.0
