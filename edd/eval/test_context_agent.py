@@ -3,20 +3,20 @@ from textwrap import dedent
 
 from unittest import TestCase
 
-from assist.agent import create_user_expert_agent, AgentHarness
+from assist.agent import create_context_agent, AgentHarness
 
 from assist.model_manager import select_chat_model
 
 from .utils import read_file, create_filesystem
 
-class TestUserExpertAgent(TestCase):
+class TestContextAgent(TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
 
-        return AgentHarness(create_user_expert_agent(self.model,
-                                                     root)), root
-    
+        return AgentHarness(create_context_agent(self.model,
+                                                  root)), root
+
     def setUp(self):
         self.model = select_chat_model("gpt-oss-20b", 0.1)
 
@@ -89,4 +89,3 @@ class TestUserExpertAgent(TestCase):
         file_after = read_file(f"{root}/paris.org")
         self.assertRegex(res, "(?i)updated|added", "It should have an update")
         self.assertNotEqual(file_before, file_after, "It should have updated the file with relevant information")
-        

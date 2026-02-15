@@ -15,6 +15,33 @@ This document defines the product policy for the Assist agent system using Eval-
 We capture real conversations as they happen, turn them into reproducible test cases, and use those tests to drive improvements.
 
 
+* Agent Architecture
+
+The Assist system uses a multi-agent architecture with specialized agents:
+
+** Main Agent (Orchestrator)
+The main agent plans and coordinates work by delegating to specialized subagents. It decides whether a request needs local context, external research, or both, and routes accordingly.
+
+** Context Agent (Subagent)
+The context agent is the local filesystem and user knowledge specialist. Its responsibilities:
+- Discover and read relevant files (README-first approach)
+- Add tasks to the user's task lists (GTD inbox, todo files)
+- Incorporate new information into existing files
+- Create and update plans, notes, and other content
+- Understand and respect the user's file organization patterns
+
+The context agent is designed to be extended beyond filesystem operations to also capture facts, preferences, and topics of interest about the user — building a rich understanding of the user's world.
+
+Prompt: =assist/templates/deepagents/context_agent.md.j2=
+Function: =create_context_agent()= in =assist/agent.py=
+Tests: =edd/eval/test_context_agent.py=
+
+** Research Agent (Subagent)
+The research agent handles external knowledge questions. It conducts web searches, reads URLs, and produces structured reports. It has its own subagents for critique and fact-checking.
+
+Prompt: =assist/templates/deepagents/research_instructions.txt.j2=
+Function: =create_research_agent()= in =assist/agent.py=
+
 * Critical Agent Behaviors
 
 These are the core behaviors that define success for the Assist agent. Every test should verify one or more of these behaviors.
