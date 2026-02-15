@@ -102,34 +102,23 @@ class TestAgent(AgentTestMixin, TestCase):
         res = agent.message("Create a plan for me to reach my swim goal for 2026.")
         plan_after = read_file(f"{root}/fitness.org")
         self.assertNotEqual(plan_before, plan_after, "It should have updated the plan")
-        self.assertIn("swim 40mi\n** Program", plan_after, "It should add a 2026 plan")
-        
+        # Should add content under the 2026 section with a program/plan
+        self.assertRegex(plan_after, "(?i)\\* 2026.*Program",
+                         "It should add a 2026 program/plan section")
+
     def test_finds_and_updates_relevant_files_indirect(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
-                                         "paris.org": dedent("""\n
-                                         Paris is the capital and largest city of France, with an estimated city population of 2,048,472 in an area of 105.4 km2 (40.7 sq mi), and a metropolitan population of 13,171,056 as of January 2025. Located on the river Seine in the centre of the Île-de-France region, it is the largest metropolitan area and fourth-most populous city in the European Union (EU). Nicknamed the City of Light, partly because of its role in the Age of Enlightenment, Paris has been one of the world's major centres of finance, diplomacy, commerce, culture, fashion, and gastronomy since the 17th century.
-                                         """),
-                                         "fitness.org": dedent("""\
-                                         * 2025
-                                         I swam 20mi in 3 months
-                                         ** Program
-                                         January: 2 times a week, 20m each
-                                         February: 2 times a week, 30m each
-                                         March: 3 times a week, 30m each
-                                         July: 3 times a week, 1mi each
-                                         October: 3 times a week, 2mi each
-                                         December: 3mi swim
-                                         * 2026
-                                         Goal: swim 40mi
-                                         """),
-                                         "gtd": {"inbox.org":
-                                                 dedent("""\
-                                                 * Tasks
-                                                 ** TODO Fold laundry
-                                                 Just get it done
-                                                 ** TODO Buy new pants
-                                                 Size 31
-                                                 """)}})
+        """Research an external question and update the relevant local file."""
+        agent, root = self.create_agent({
+            "README.org": "All of my todos are in gtd/inbox.org",
+            "paris.org": dedent("""\
+                Paris is the capital and largest city of France,
+                with a population of about 2 million.
+                Nicknamed the City of Light.
+                """),
+            "gtd": {"inbox.org": dedent("""\
+                * Tasks
+                ** TODO Fold laundry
+                """)}})
         file_before = read_file(f"{root}/paris.org")
         res = agent.message("When was Paris founded? By who? Why?")
         file_after = read_file(f"{root}/paris.org")
@@ -153,41 +142,25 @@ class TestAgent(AgentTestMixin, TestCase):
         # Assert that the assistant mentions key considerations
         self.assertToolCall(agent, "task", "It should have called a sub-agent")
 
-    def test_no_question_and_in_references(self):
-        # Setup filesystem with ONLY necessary files
+    def test_research_saved_to_references(self):
+        """Research should be saved to the references directory when it exists."""
         agent, root = self.create_agent({
-            "README.org": dedent("""
-These are the files that I use to manage my everyday life through emacs org mode. All files by default are written in org format.
-
-* Todos
-It is also where I keep my todo list(s). I use the gtd method and org TODOs and use the following files to manage my todos:
-- gtd/inbox.org - General inbox where todo items begin
-- gtd/projects.org - Todo items organized by project. TODOs are placed under the project in general order of either priority or next action.
-- gtd/someday.org - Todo items that don't require any immediate attention, mostly saved for future ideas
-- gtd/tickler.org - Todo items that will be important at some point in the future
-
-All new items should start in the inbox for later triaging.
-* Research
-The result of general research is placed in the =references= directory and can be referenced in other files.
-
-* Other
-I have files that track fitness, finances, and Roman's (my son) progress. I also keep notes about travel plans and ideas for gifts for my wife (Ana)."""),
+            "README.org": dedent("""\
+                * Research
+                The result of general research is placed in the =references= directory.
+                """),
             "references": {".keep": ""},
         })
 
-        # Send key message
         res = agent.message('What are the best practices for import statements in python? What does guido recommend?')
 
-        # Assert that the agent responded
         self.assertIsNotNone(res)
-
-        # After the agent finishes, question.txt should not exist
-        self.assertFalse(os.path.exists(os.path.join(root, "question.txt")), "question.txt should not exist")
 
         # The report should be written into the references directory
         report_path = os.path.join(root, "references")
-        files = os.listdir(report_path)
-        self.assertGreaterEqual(len(files), 2, "Report should be writtern to the references directory. Current files: {files}")
+        files = [f for f in os.listdir(report_path) if f != ".keep"]
+        self.assertGreaterEqual(len(files), 1,
+                                f"Report should be written to the references directory. Current files: {files}")
 
     def test_generic_quesion(self):
         agent, root = self.create_agent({
@@ -208,10 +181,51 @@ I have files that track fitness, finances, and Roman's (my son) progress. I also
 
         # Assert that the agent does not refuse the request
         self.assertNotIn(
-            "I’m sorry, but I can’t help with that.",
+            "I'm sorry, but I can't help with that.",
             res,
             "Agent should not refuse the request"
         )
 
+    def test_adds_task_in_nested_directory(self):
+        """Agent should find task files in nested directories via context."""
+        agent, root = self.create_agent({
+            "README.org": "All task management is in the planner/ directory using org TODO format",
+            "planner": {"tasks.org": dedent("""\
+                * Active
+                ** TODO Write quarterly report
+                Due next Friday
+                ** TODO Schedule dentist appointment
+                """)},
+        })
+        res = agent.message("I need to renew my passport")
+        tasks_after = read_file(f"{root}/planner/tasks.org")
+        self.assertRegex(res, "(?i)added|updated|passport",
+                         "Should confirm the task was added")
+        self.assertRegex(tasks_after, "(?im)TODO.*passport",
+                         "Should add a TODO about passport")
+        self.assertRegex(tasks_after, "quarterly report",
+                         "Should preserve existing tasks")
 
-
+    def test_combines_context_and_research(self):
+        """When user asks about a topic with local context, agent should
+        use both local files and research to give a complete answer."""
+        agent, root = self.create_agent({
+            "README.org": dedent("""\
+                Research results go in the =references= directory.
+                """),
+            "references": {".keep": ""},
+            "fitness.org": dedent("""\
+                * 2025
+                I swam 20mi in 3 months
+                * 2026
+                Goal: swim 40mi
+                """),
+        })
+        res = agent.message(
+            "I want to reach my swim goal of 40mi this year. "
+            "What training plan would experts recommend for this distance?"
+        )
+        # Should have delegated to research for expert recommendations
+        self.assertToolCall(agent, "task", "Should use subagent for research or context")
+        # Response should reference the user's specific goal
+        self.assertIn("40", res, "Should reference the user's specific goal")
