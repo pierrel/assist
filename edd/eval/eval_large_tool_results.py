@@ -131,21 +131,16 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
     metrics = EvalMetrics()
 
     # Create mock that returns very large payload
-    def mock_tavily_search(query: str, **kwargs):
-        logger.info(f"Mock Tavily search invoked with query: '{query}'")
+    def mock_ddg_search(query: str, **kwargs):
+        logger.info(f"Mock DDG search invoked with query: '{query}'")
         large_payload = create_large_payload(target_tokens=80000)
         logger.info(f"Returning large payload: {len(large_payload)} characters (~{len(large_payload)//4} tokens)")
-        # Return object that str() will convert to large payload
-        # Tavily returns a SearchResponse object that stringifies to show results
-        class MockSearchResponse:
-            def __str__(self):
-                return large_payload
-            def __repr__(self):
-                return large_payload
-        return MockSearchResponse()
+        # Return a list of dicts matching DDG's text() return format
+        # but with a huge body so str() produces a large payload
+        return [{"title": "Mock Result", "href": "https://example.com", "body": large_payload}]
 
-    # Patch the Tavily client's search method BEFORE creating the agent
-    with patch('assist.tools.tavily.search', mock_tavily_search):
+    # Patch the DDGS.text method BEFORE creating the agent
+    with patch('ddgs.DDGS.text', mock_ddg_search):
         with tempfile.TemporaryDirectory() as tmpdir:
             if verbose:
                 print(f"\n{'=' * 80}")
