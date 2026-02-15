@@ -56,9 +56,8 @@ class TestResearchAgent(TestCase):
         # Find the Sources/Reference section and extract all non-blank lines following it
         # up to the next fully blank line or end of file
         sources_regexp = r'(?i)(sources|references?)'
-        self.assertRegex(file_content, sources_match, "Should have a sources or references section")
-
         sources_match = re.search(sources_regexp, file_content, re.MULTILINE)
+        self.assertIsNotNone(sources_match, "Should have a sources or references section")
         # Get text after the Sources/Reference header
         text_after_sources = file_content[sources_match.end():]
 

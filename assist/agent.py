@@ -137,7 +137,7 @@ def create_research_agent(model: BaseChatModel,
                           middleware=[]) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
-    Includes Tavily web search and a critique/research/fact-check subagent trio.
+    Includes DuckDuckGo web search and a critique/research/fact-check subagent trio.
     """
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
