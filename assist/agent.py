@@ -76,9 +76,18 @@ def create_agent(model: BaseChatModel,
 
     backend = _create_standard_backend(working_dir)
 
+    context_sub = CompiledSubAgent(
+        name="context-agent",
+        description="Discovers and surfaces relevant context from the user's local filesystem. Use this agent to find files, read content, and understand the user's file structure before taking action. It is read-only — it will not modify files.",
+        runnable=create_context_agent(model,
+                                      working_dir,
+                                      checkpointer,
+                                      [retry_middle, json_validation_mw])
+    )
+
     research_sub = CompiledSubAgent(
         name="research-agent",
-        description= "Used to conduct thorough research. The result of the research will be placed in a file and the file name/path will be returned. Provide a filename for more control.",
+        description="Used to conduct thorough research on external topics. The result of the research will be placed in a file and the file name/path will be returned. Provide a filename for more control.",
         runnable=create_research_agent(model,
                                        working_dir,
                                        checkpointer,
@@ -91,7 +100,7 @@ def create_agent(model: BaseChatModel,
         system_prompt=base_prompt_for("deepagents/general_instructions.md.j2"),
         middleware=mw + [logging_mw],
         backend=backend,
-        subagents=[research_sub]
+        subagents=[context_sub, research_sub]
     )
 
     # ContextAwareToolEvictionMiddleware handles context overflow prevention
