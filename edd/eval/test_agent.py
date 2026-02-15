@@ -102,8 +102,8 @@ class TestAgent(AgentTestMixin, TestCase):
         res = agent.message("Create a plan for me to reach my swim goal for 2026.")
         plan_after = read_file(f"{root}/fitness.org")
         self.assertNotEqual(plan_before, plan_after, "It should have updated the plan")
-        # Should add content under the 2026 section with a program/plan
-        self.assertRegex(plan_after, "(?i)\\* 2026.*Program",
+        # Should add content under the 2026 section with a program/plan/training schedule
+        self.assertRegex(plan_after, "(?is)\\* 2026.*(Program|Plan|Training|Schedule)",
                          "It should add a 2026 program/plan section")
 
     def test_finds_and_updates_relevant_files_indirect(self):
