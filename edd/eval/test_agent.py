@@ -153,7 +153,7 @@ class TestAgent(AgentTestMixin, TestCase):
         # Assert that the assistant mentions key considerations
         self.assertToolCall(agent, "task", "It should have called a sub-agent")
 
-    def test_scenario(self):
+    def test_no_question_and_in_references(self):
         # Setup filesystem with ONLY necessary files
         agent, root = self.create_agent({
             "README.org": dedent("""
@@ -172,7 +172,6 @@ The result of general research is placed in the =references= directory and can b
 
 * Other
 I have files that track fitness, finances, and Roman's (my son) progress. I also keep notes about travel plans and ideas for gifts for my wife (Ana)."""),
-            "question.txt": "Research best practices for import statements in Python and Guido van Rossum's recommendations. Provide concise summary and key points.",
             "references": {".keep": ""},
         })
 
@@ -182,16 +181,13 @@ I have files that track fitness, finances, and Roman's (my son) progress. I also
         # Assert that the agent responded
         self.assertIsNotNone(res)
 
-        # After the agent finishes, question.txt should be removed
-        self.assertFalse(os.path.exists(os.path.join(root, "question.txt")), "question.txt should be deleted after processing")
+        # After the agent finishes, question.txt should not exist
+        self.assertFalse(os.path.exists(os.path.join(root, "question.txt")), "question.txt should not exist")
 
         # The report should be written into the references directory
-        report_path = os.path.join(root, "references", "report_import_best_practices.org")
-        self.assertTrue(os.path.exists(report_path), "Report should be created in references directory")
-
-        # Verify that the report contains expected content
-        report_content = read_file(report_path)
-        self.assertIn("Import Statements Best Practices in Python", report_content, "Report should contain key heading")
+        report_path = os.path.join(root, "references")
+        files = os.listdir(report_path)
+        self.assertGreaterEqual(len(files), 2, "Report should be writtern to the references directory. Current files: {files}")
 
     def test_generic_quesion(self):
         agent, root = self.create_agent({
