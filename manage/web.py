@@ -1,6 +1,7 @@
 import logging, sys
 import html
 import os
+import subprocess
 from typing import Dict
 
 from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
@@ -118,7 +119,7 @@ def render_index() -> str:
     """
 
 
-def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
+def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool = False) -> str:
     title = get_cached_description(tid)
     msgs = chat.get_messages()
 
@@ -146,9 +147,16 @@ def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
             diff_content = render_diff(raw)
             content_html = f"""
             <div class="diff-container">
-                <button class="diff-toggle" onclick="toggleDiff('{diff_id}')">
-                    <span class="toggle-icon">▶</span> Show diff
-                </button>
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                    <button class="diff-toggle" onclick="toggleDiff('{diff_id}')" style="flex: 1; min-width: 200px;">
+                        <span class="toggle-icon">▶</span> Show diff
+                    </button>
+                    <form action="/thread/{tid}/merge" method="post" style="margin: 0;">
+                        <button class="btn merge-btn" type="submit" onclick="return confirm('Merge this branch into main? This will squash all commits.');">
+                            Merge to Main
+                        </button>
+                    </form>
+                </div>
                 <div id="{diff_id}" class="diff-content" style="display: none;">
                     {diff_content}
                 </div>
@@ -195,6 +203,9 @@ def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
           .toggle-icon {{ display: inline-block; transition: transform .2s; font-size: .8rem; }}
           .toggle-icon.expanded {{ transform: rotate(90deg); }}
           .diff-content {{ margin-top: .5rem; overflow-x: auto; }}
+          .merge-btn {{ background: #28a745; color: white; border: 1px solid #1e7e34; padding: .5rem .75rem; font-size: .9rem; white-space: nowrap; }}
+          .merge-btn:hover {{ background: #218838; border-color: #1c7430; }}
+          .error-msg {{ background: #f8d7da; border: 1px solid #f5c6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #721c24; }}
           @media (max-width: 480px) {{
             .msg {{ padding: .5rem .6rem; }}
             .button-group {{ flex-direction: column; }}
@@ -207,6 +218,7 @@ def render_thread(tid: str, chat: Thread, captured: bool = False) -> str:
           <div class="nav"><a href="/">← All threads</a></div>
           <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
+          {"<div class='success-msg'>Branch successfully merged to main!</div>" if merged else ""}
           <form action="/thread/{tid}/message" method="post">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..."></textarea><br/>
@@ -307,12 +319,12 @@ def _process_message(tid: str, text: str) -> None:
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
-async def get_thread(tid: str, captured: int = 0) -> str:
+async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
     try:
         chat = MANAGER.get(tid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
-    return render_thread(tid, chat, captured=bool(captured))
+    return render_thread(tid, chat, captured=bool(captured), merged=bool(merged))
 
 
 @app.post("/thread/{tid}/message")
@@ -369,6 +381,44 @@ async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: st
         url=f"/thread/{tid}?captured=1",
         status_code=303
     )
+
+
+@app.post("/thread/{tid}/merge")
+async def merge_thread(tid: str):
+    """Merge the current branch into main with AI-generated summary."""
+    try:
+        thread = MANAGER.get(tid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    twdir = MANAGER.thread_default_working_dir(tid)
+    dm = DomainManager(twdir)
+
+    # Get a model for summarizing
+    from assist.model_manager import select_chat_model
+    try:
+        summary_model = select_chat_model("gpt-oss-20b", temperature=0.1)
+    except Exception:
+        # If model fails to load, pass None and use fallback summary
+        summary_model = None
+
+    try:
+        summary = dm.merge_to_main(summary_model)
+        # Redirect with success message (could use query param)
+        return RedirectResponse(
+            url=f"/thread/{tid}?merged=1",
+            status_code=303
+        )
+    except ValueError as e:
+        # User-friendly error (merge conflicts, no changes, etc.)
+        raise HTTPException(status_code=400, detail=str(e))
+    except subprocess.CalledProcessError as e:
+        # Git command failed
+        raise HTTPException(status_code=500, detail=f"Git operation failed: {e}")
+    except Exception as e:
+        # Unexpected error
+        logging.error(f"Merge failed for thread {tid}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Merge failed: {str(e)}")
 
 
 if __name__ == "__main__":
