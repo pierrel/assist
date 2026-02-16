@@ -204,6 +204,48 @@ class TestContextAgent(TestCase):
         self.assertRegex(res, "2026-03-15|March",
                          "Should find the deadline in nested dirs")
 
+    def test_includes_org_format_guidance_for_org_files(self):
+        """When surfacing .org files, should include formatting instructions
+        so the caller knows how to properly edit them."""
+        agent, root = self.create_agent({
+            "README.org": "All of my todos are in gtd/inbox.org",
+            "gtd": {"inbox.org": dedent("""\
+                * Tasks
+                ** TODO Fold laundry
+                Just get it done
+                ** TODO Buy new pants
+                Size 31
+                """)},
+        })
+        res = agent.message("I need to add a reminder to buy groceries")
+        # Should surface the file
+        self.assertRegex(res, "inbox\\.org",
+                         "Should surface the todo file path")
+        # Should include org formatting guidance about headings/structure
+        self.assertRegex(res, "(?i)(\\*.*heading|heading.*\\*|asterisk|org.*(format|structure))",
+                         "Should include org formatting guidance when surfacing .org files")
+        # Should mention the heading-body relationship (critical for correct edits)
+        self.assertRegex(res, "(?i)(body|content.*between|section|before the next heading)",
+                         "Should explain heading-body structure")
+
+    def test_no_org_format_guidance_for_non_org_files(self):
+        """When surfacing non-.org files, should NOT include org formatting instructions."""
+        agent, root = self.create_agent({
+            "README.md": "Tasks are tracked in tasks.md",
+            "tasks.md": dedent("""\
+                # Tasks
+                - [ ] Fold laundry
+                - [ ] Buy new pants (size 31)
+                """),
+        })
+        res = agent.message("I need to add a task about buying groceries")
+        # Should surface the file
+        self.assertRegex(res, "tasks\\.md",
+                         "Should surface the todo file path")
+        # Should NOT include actual org formatting guide content
+        self.assertNotRegex(res, "(?i)Headings/Subheadings.*asterisk",
+                            "Should not include org formatting guide content for .md files")
+
     def test_no_readme_cross_file_context(self):
         """No README. Answer requires info from multiple files."""
         agent, root = self.create_agent({
