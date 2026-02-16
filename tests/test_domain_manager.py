@@ -22,39 +22,48 @@ class TestDomainManager(TestCase):
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    def test_domain_manager_creates_directory(self):
-        """Test that DomainManager creates a directory if it doesn't exist."""
+    @patch('assist.domain_manager.clone_repo')
+    def test_domain_manager_creates_directory(self, mock_clone):
+        """Test that DomainManager calls clone_repo if directory doesn't exist."""
         test_path = os.path.join(self.temp_dir, "test_domain")
-        dm = DomainManager(repo_path=test_path)
+        dm = DomainManager(repo_path=test_path, repo="https://example.com/repo.git")
 
-        self.assertTrue(os.path.isdir(test_path))
         self.assertEqual(dm.domain(), test_path)
+        self.assertEqual(dm.repo, "https://example.com/repo.git")
+        # Should have called clone since directory doesn't exist
+        mock_clone.assert_called_once_with("https://example.com/repo.git", test_path)
 
-    def test_domain_manager_uses_existing_directory(self):
-        """Test that DomainManager uses an existing directory."""
+    @patch('assist.domain_manager.git_repo')
+    def test_domain_manager_uses_existing_directory(self, mock_git_repo):
+        """Test that DomainManager uses an existing directory with remote."""
         test_path = os.path.join(self.temp_dir, "existing_domain")
         os.makedirs(test_path)
 
+        # Mock that this is already a git repo with remote
+        mock_git_repo.return_value = "https://example.com/repo.git"
+
         dm = DomainManager(repo_path=test_path)
         self.assertEqual(dm.domain(), test_path)
+        self.assertEqual(dm.repo, "https://example.com/repo.git")
 
-    def test_domain_manager_with_temp_dir(self):
+    @patch('assist.domain_manager.clone_repo')
+    def test_domain_manager_with_temp_dir(self, mock_clone):
         """Test that DomainManager creates a temp dir when no path given."""
-        dm = DomainManager()
+        dm = DomainManager(repo="https://example.com/repo.git")
 
         # Should have created a directory
         self.assertTrue(os.path.isdir(dm.domain()))
         # Should start with /tmp (on most systems)
         self.assertTrue(dm.domain().startswith('/tmp') or dm.domain().startswith('/var'))
 
-    @patch('assist.domain_manager.subprocess.run')
-    def test_changes_returns_empty_for_non_repo(self, mock_run):
-        """Test that changes() returns empty list for non-git repo."""
+    def test_domain_manager_requires_remote(self):
+        """Test that DomainManager requires a repository with remote."""
         test_path = os.path.join(self.temp_dir, "non_repo")
-        dm = DomainManager(repo_path=test_path, repo=None)
 
-        changes = dm.changes()
-        self.assertEqual(changes, [])
+        with self.assertRaises(ValueError) as ctx:
+            DomainManager(repo_path=test_path, repo=None)
+
+        self.assertIn("requires a repository with a remote", str(ctx.exception))
 
     @patch('assist.domain_manager.subprocess.run')
     def test_git_diff_with_changes(self, mock_run):
@@ -177,9 +186,14 @@ class TestDomainManagerIntegration(TestCase):
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    def test_domain_manager_directory_structure(self):
+    @patch('assist.domain_manager.git_repo')
+    def test_domain_manager_directory_structure(self, mock_git_repo):
         """Test that domain manager creates proper directory structure."""
         test_path = os.path.join(self.temp_dir, "domain")
+
+        # Mock that this is already a git repo with remote
+        mock_git_repo.return_value = "https://example.com/repo.git"
+
         dm = DomainManager(repo_path=test_path)
 
         # Create a subdirectory
@@ -199,7 +213,8 @@ class TestDomainManagerIntegration(TestCase):
             content = f.read()
         self.assertEqual(content, "* Tasks\n")
 
-    def test_domain_manager_handles_empty_directory(self):
+    @patch('assist.domain_manager.clone_repo')
+    def test_domain_manager_handles_empty_directory(self, mock_clone):
         """Test that DomainManager works with pre-existing empty directories."""
         # Simulate what ThreadManager does: create an empty working directory
         test_path = os.path.join(self.temp_dir, "empty_domain")
@@ -209,7 +224,7 @@ class TestDomainManagerIntegration(TestCase):
         self.assertTrue(os.path.isdir(test_path))
         self.assertEqual(len(os.listdir(test_path)), 0)
 
-        # Create DomainManager without a repo (won't clone, but should work)
-        dm = DomainManager(repo_path=test_path, repo=None)
+        # Create DomainManager with a repo URL (would clone in real scenario)
+        dm = DomainManager(repo_path=test_path, repo="https://example.com/repo.git")
         self.assertEqual(dm.domain(), test_path)
         self.assertTrue(os.path.isdir(dm.domain()))
