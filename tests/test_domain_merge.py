@@ -7,13 +7,16 @@ from assist.domain_manager import DomainManager
 
 class TestDomainMerge(unittest.TestCase):
     def setUp(self):
-        """Create a test git repository with a branch."""
+        """Create a test git repository with a remote."""
         self.temp_dir = tempfile.mkdtemp()
-        self.repo_path = os.path.join(self.temp_dir, "test_repo")
-        os.makedirs(self.repo_path)
 
-        # Initialize git repo
-        subprocess.run(['git', 'init'], cwd=self.repo_path, check=True)
+        # Create a bare repo to act as remote
+        self.remote_dir = os.path.join(self.temp_dir, "remote.git")
+        subprocess.run(['git', 'init', '--bare', self.remote_dir], check=True, capture_output=True)
+
+        # Clone it to create a working repo
+        self.repo_path = os.path.join(self.temp_dir, "work")
+        subprocess.run(['git', 'clone', self.remote_dir, self.repo_path], check=True, capture_output=True)
         subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=self.repo_path, check=True)
         subprocess.run(['git', 'config', 'user.name', 'Test User'], cwd=self.repo_path, check=True)
 
@@ -23,15 +26,15 @@ class TestDomainMerge(unittest.TestCase):
             f.write("# Test Repo\n")
         subprocess.run(['git', 'add', '.'], cwd=self.repo_path, check=True)
         subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=self.repo_path, check=True)
+        subprocess.run(['git', 'push', 'origin', 'main'], cwd=self.repo_path, check=True, capture_output=True)
 
-        # Create a feature branch
-        subprocess.run(['git', 'checkout', '-b', 'feature/test'], cwd=self.repo_path, check=True)
-
-        # Make changes on feature branch
+        # Create and push feature branch
+        subprocess.run(['git', 'checkout', '-b', 'feature/test'], cwd=self.repo_path, check=True, capture_output=True)
         with open(test_file, 'a') as f:
             f.write("\n## Features\n- Feature 1\n- Feature 2\n")
         subprocess.run(['git', 'add', '.'], cwd=self.repo_path, check=True)
         subprocess.run(['git', 'commit', '-m', 'Add features'], cwd=self.repo_path, check=True)
+        subprocess.run(['git', 'push', '-u', 'origin', 'feature/test'], cwd=self.repo_path, check=True, capture_output=True)
 
     def tearDown(self):
         """Clean up test repository."""
@@ -40,8 +43,8 @@ class TestDomainMerge(unittest.TestCase):
 
     def test_merge_to_main_without_model(self):
         """Test merge without AI model (uses fallback summary)."""
-        # Create DomainManager with local repo (no remote)
-        dm = DomainManager(repo_path=self.repo_path, repo=None)
+        # Create DomainManager with repo that has remote
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
 
         # Verify we're on feature branch
         result = subprocess.run(
@@ -77,24 +80,34 @@ class TestDomainMerge(unittest.TestCase):
         self.assertNotEqual(current, 'feature/test', "Should not be on original branch")
 
         # Verify new branch has no diff against main
-        dm_after = DomainManager(repo_path=self.repo_path, repo=None)
+        dm_after = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
         diffs_after = dm_after.main_diff()
         self.assertEqual(len(diffs_after), 0, "New branch should have no diff against main after merge")
 
         # Verify main has the changes
-        subprocess.run(['git', 'checkout', 'main'], cwd=self.repo_path, check=True)
+        subprocess.run(['git', 'checkout', 'main'], cwd=self.repo_path, check=True, capture_output=True)
         readme_path = os.path.join(self.repo_path, "README.md")
         with open(readme_path, 'r') as f:
             content = f.read()
         self.assertIn('Features', content)
         self.assertIn('Feature 1', content)
 
+        # Verify remote branch was deleted
+        result = subprocess.run(
+            ['git', 'ls-remote', '--heads', 'origin', 'feature/test'],
+            cwd=self.repo_path,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        self.assertEqual('', result.stdout.strip(), "Remote feature branch should be deleted")
+
     def test_merge_on_main_raises_error(self):
         """Test that merging while on main raises an error."""
         # Checkout main
-        subprocess.run(['git', 'checkout', 'main'], cwd=self.repo_path, check=True)
+        subprocess.run(['git', 'checkout', 'main'], cwd=self.repo_path, check=True, capture_output=True)
 
-        dm = DomainManager(repo_path=self.repo_path, repo=None)
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
 
         with self.assertRaises(ValueError) as ctx:
             dm.merge_to_main()
@@ -104,58 +117,37 @@ class TestDomainMerge(unittest.TestCase):
     def test_merge_with_no_changes_raises_error(self):
         """Test that merging with no changes raises an error."""
         # Create a branch with no changes
-        subprocess.run(['git', 'checkout', 'main'], cwd=self.repo_path, check=True)
-        subprocess.run(['git', 'checkout', '-b', 'empty-branch'], cwd=self.repo_path, check=True)
+        subprocess.run(['git', 'checkout', 'main'], cwd=self.repo_path, check=True, capture_output=True)
+        subprocess.run(['git', 'checkout', '-b', 'empty-branch'], cwd=self.repo_path, check=True, capture_output=True)
+        subprocess.run(['git', 'push', '-u', 'origin', 'empty-branch'], cwd=self.repo_path, check=True, capture_output=True)
 
-        dm = DomainManager(repo_path=self.repo_path, repo=None)
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
 
         with self.assertRaises(ValueError) as ctx:
             dm.merge_to_main()
 
         self.assertIn("No changes to merge", str(ctx.exception))
 
-    def test_merge_with_no_repo_raises_error(self):
-        """Test that merging without a repo raises an error."""
-        # Create DomainManager without a repo
-        dm = DomainManager(repo_path=self.temp_dir, repo=None)
+    def test_merge_requires_remote(self):
+        """Test that DomainManager requires a remote."""
+        # Create a local repo without remote
+        local_dir = os.path.join(self.temp_dir, "no_remote")
+        os.makedirs(local_dir)
+        subprocess.run(['git', 'init'], cwd=local_dir, check=True, capture_output=True)
 
         with self.assertRaises(ValueError) as ctx:
-            dm.merge_to_main()
+            DomainManager(repo_path=local_dir, repo=None)
 
-        self.assertIn("no repository configured", str(ctx.exception))
+        self.assertIn("requires a repository with a remote", str(ctx.exception))
 
     def test_merge_deletes_old_remote_branch(self):
         """Test that merge deletes the old remote branch after squash merge."""
-        # Create a bare repo to act as remote
-        remote_dir = os.path.join(self.temp_dir, "remote.git")
-        subprocess.run(['git', 'init', '--bare', remote_dir], check=True)
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
 
-        # Clone it to create a working repo
-        work_dir = os.path.join(self.temp_dir, "work")
-        subprocess.run(['git', 'clone', remote_dir, work_dir], check=True)
-        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], cwd=work_dir, check=True)
-        subprocess.run(['git', 'config', 'user.name', 'Test User'], cwd=work_dir, check=True)
-
-        # Create initial commit
-        test_file = os.path.join(work_dir, "README.md")
-        with open(test_file, 'w') as f:
-            f.write("# Test Repo\n")
-        subprocess.run(['git', 'add', '.'], cwd=work_dir, check=True)
-        subprocess.run(['git', 'commit', '-m', 'Initial commit'], cwd=work_dir, check=True)
-        subprocess.run(['git', 'push', 'origin', 'main'], cwd=work_dir, check=True)
-
-        # Create and push feature branch
-        subprocess.run(['git', 'checkout', '-b', 'feature/test'], cwd=work_dir, check=True)
-        with open(test_file, 'a') as f:
-            f.write("\n## Features\n")
-        subprocess.run(['git', 'add', '.'], cwd=work_dir, check=True)
-        subprocess.run(['git', 'commit', '-m', 'Add features'], cwd=work_dir, check=True)
-        subprocess.run(['git', 'push', '-u', 'origin', 'feature/test'], cwd=work_dir, check=True)
-
-        # Verify remote branch exists
+        # Verify remote branch exists before merge
         result = subprocess.run(
             ['git', 'ls-remote', '--heads', 'origin', 'feature/test'],
-            cwd=work_dir,
+            cwd=self.repo_path,
             stdout=subprocess.PIPE,
             text=True,
             check=True
@@ -163,13 +155,12 @@ class TestDomainMerge(unittest.TestCase):
         self.assertIn('feature/test', result.stdout, "Remote branch should exist before merge")
 
         # Perform merge
-        dm = DomainManager(repo_path=work_dir, repo=remote_dir)
         summary = dm.merge_to_main(summary_model=None)
 
         # Verify remote branch was deleted
         result = subprocess.run(
             ['git', 'ls-remote', '--heads', 'origin', 'feature/test'],
-            cwd=work_dir,
+            cwd=self.repo_path,
             stdout=subprocess.PIPE,
             text=True,
             check=True

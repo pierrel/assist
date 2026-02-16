@@ -219,6 +219,15 @@ class DomainManager:
     def __init__(self,
                  repo_path: str | None = None,
                  repo: str | None = None):
+        """Initialize DomainManager with a repository.
+
+        Args:
+            repo_path: Path to local repository
+            repo: Remote repository URL
+
+        Raises:
+            ValueError: If no repository is configured (neither repo_path with remote nor repo URL)
+        """
         if repo_path:
             self.repo_path = repo_path
         else:
@@ -228,51 +237,49 @@ class DomainManager:
         existing_remote = git_repo(self.repo_path)
         self.repo = existing_remote or repo
 
+        # Require a remote repository
+        if not self.repo:
+            raise ValueError(
+                "DomainManager requires a repository with a remote. "
+                "Provide either a repo URL or a repo_path that already has a remote configured."
+            )
+
         # Check if directory exists and if it's empty
         repo_exists = os.path.isdir(self.repo_path)
         is_empty = not os.listdir(self.repo_path) if repo_exists else True
 
         # Clone if: we have a repo URL, it's not already a git repo, and (directory doesn't exist OR is empty)
-        if self.repo and not existing_remote and (not repo_exists or is_empty):
+        if not existing_remote and (not repo_exists or is_empty):
             clone_repo(self.repo, self.repo_path)
-        elif not self.repo and not repo_exists:
-            os.makedirs(self.repo_path, exist_ok=True)
 
     def changes(self) -> List[Change]:
-        if self.repo or is_git_repo(self.repo_path):
-            return git_diff(self.repo_path)
-        else:
-            return []
+        return git_diff(self.repo_path)
 
     def main_diff(self) -> List[Change]:
-        if self.repo or is_git_repo(self.repo_path):
-            return git_diff_main(self.repo_path)
-        else:
-            return []
+        return git_diff_main(self.repo_path)
 
     def domain(self) -> str:
         return self.repo_path
 
     def sync(self, commit_message: str) -> None:
-        if self.repo:
-            git_commit(self.repo_path, commit_message)
-            git_push(self.repo_path)
+        git_commit(self.repo_path, commit_message)
+        git_push(self.repo_path)
 
     def merge_to_main(self, summary_model=None) -> str:
         """Merge current branch into main with AI-generated summary.
 
         Steps:
         1. Generate merge commit summary using AI model
-        2. Pull latest main
-        3. Merge main into current branch
-        4. Squash merge current branch into main
-        5. Push main to origin
+        2. Fetch and pull latest main from origin
+        3. Squash merge current branch into main
+        4. Push main to origin
+        5. Delete old remote branch
+        6. Create new timestamped branch
+        7. Push new branch to origin
 
         Returns the merge commit message.
         Raises subprocess.CalledProcessError if any git command fails.
         """
-        if not (self.repo or is_git_repo(self.repo_path)):
-            raise ValueError("Cannot merge: no repository configured")
 
         # Get current branch
         cur = subprocess.run(
@@ -320,17 +327,14 @@ Follow the style of recent commits if applicable. Do not include any explanation
             # Fallback: use first file changed
             summary = f"Merge {current_branch}: {diffs[0].path}"
 
-        # Fetch latest from origin (if there is a remote)
-        has_remote = self.repo is not None
-        if has_remote:
-            subprocess.run(['git', '-C', self.repo_path, 'fetch', 'origin'], check=True)
+        # Fetch latest from origin
+        subprocess.run(['git', '-C', self.repo_path, 'fetch', 'origin'], check=True)
 
         # Checkout main
         subprocess.run(['git', '-C', self.repo_path, 'checkout', 'main'], check=True)
 
-        # Pull main to make sure we're up to date (only if remote exists)
-        if has_remote:
-            subprocess.run(['git', '-C', self.repo_path, 'pull', 'origin', 'main'], check=True)
+        # Pull main to make sure we're up to date
+        subprocess.run(['git', '-C', self.repo_path, 'pull', 'origin', 'main'], check=True)
 
         # Merge current branch into main (now that we're on main)
         try:
@@ -347,24 +351,21 @@ Follow the style of recent commits if applicable. Do not include any explanation
         # Commit the squash merge
         subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', summary], check=True)
 
-        # Push main to origin with the squashed merge (only if remote exists)
-        if has_remote:
-            subprocess.run(['git', '-C', self.repo_path, 'push', 'origin', 'main'], check=True)
+        # Push main to origin with the squashed merge
+        subprocess.run(['git', '-C', self.repo_path, 'push', 'origin', 'main'], check=True)
 
         # Delete the old remote branch since it's been merged
         # This happens AFTER pushing main to ensure the merge is safely on the remote first
-        if has_remote:
-            subprocess.run(
-                ['git', '-C', self.repo_path, 'push', 'origin', '--delete', current_branch],
-                check=False  # Don't fail if branch doesn't exist on remote
-            )
+        subprocess.run(
+            ['git', '-C', self.repo_path, 'push', 'origin', '--delete', current_branch],
+            check=False  # Don't fail if branch doesn't exist on remote
+        )
 
         # Create a new branch off main for future work (reuses thread creation logic)
         # This ensures new prompts don't affect main directly
         new_branch = create_timestamped_branch(self.repo_path)
 
-        # If there's a remote, push the new branch
-        if has_remote:
-            subprocess.run(['git', '-C', self.repo_path, 'push', '--set-upstream', 'origin', new_branch], check=True)
+        # Push the new branch to origin
+        subprocess.run(['git', '-C', self.repo_path, 'push', '--set-upstream', 'origin', new_branch], check=True)
 
         return summary
