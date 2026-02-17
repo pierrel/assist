@@ -22,7 +22,7 @@ logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
-DEFAULT_DOMAIN = get_domain()
+DEFAULT_DOMAIN = get_domain()  # May be None if not configured
 DESCRIPTION_CACHE: Dict[str, str] = {}
 
 def get_cached_description(tid: str) -> str:
@@ -294,8 +294,10 @@ async def index() -> str:
 async def create_thread():
     chat = MANAGER.new()
     tid = chat.thread_id
-    DomainManager(MANAGER.thread_default_working_dir(tid),
-                  DEFAULT_DOMAIN)
+    # Only create DomainManager if domain is configured
+    if DEFAULT_DOMAIN:
+        DomainManager(MANAGER.thread_default_working_dir(tid),
+                      DEFAULT_DOMAIN)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 

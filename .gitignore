@@ -12,3 +12,11 @@ coverage.xml
 llm-config.yml
 /edd/history/
 /playground
+.deploy.env
+threads.db
+.test-results.db
+*.db
+/reference/
+config.yml
+/config.yml
+/assist.egg-info/
