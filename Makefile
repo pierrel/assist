@@ -7,23 +7,38 @@ DEPLOY_PATH ?= /opt/assist
 SERVICE_NAME ?= assist-web
 PYTHON ?= python3.14
 
+# Function to run commands with development environment
+define with-dev-env
+	@if [ -f .dev.env ]; then \
+		echo "→ Loading development environment from .dev.env"; \
+		export $$(grep -v '^#' .dev.env | grep -v '^$$' | xargs) && $(1); \
+	else \
+		echo "⚠  Warning: .dev.env not found"; \
+		$(1); \
+	fi
+endef
+
+# Function to run commands with production environment
+define with-prod-env
+	@if [ -f .deploy.env ]; then \
+		echo "→ Loading production environment from .deploy.env"; \
+		export $$(grep -v '^#' .deploy.env | grep -v '^$$' | xargs) && $(1); \
+	else \
+		echo "⚠  Warning: .deploy.env not found"; \
+		$(1); \
+	fi
+endef
+
 .PHONY: eval test web deploy deploy-code deploy-service install-prod restart status logs setup-sudo help
 
 eval:
-	.venv/bin/pytest --junit-xml=edd/history/results-$(date +%Y%m%d-%H%M).xml edd/eval
+	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
 
 test:
-	.venv/bin/pytest --junit-xml=tests/history/results-$(date +%Y%m%d-%H%M).xml tests
+	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
 web:
-	@if [ -f .dev.env ]; then \
-		echo "→ Loading development environment from .dev.env"; \
-		export $$(grep -v '^#' .dev.env | grep -v '^$$' | xargs) && .venv/bin/python -m manage.web; \
-	else \
-		echo "⚠  Warning: .dev.env not found, using defaults"; \
-		echo "   Copy .dev.env.example to .dev.env and configure it"; \
-		.venv/bin/python -m manage.web; \
-	fi
+	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 # === Deployment Targets ===
 
