@@ -1,22 +1,18 @@
 """Utilities for managing chat models for the server.
 
 This module encapsulates the logic for selecting chat models. The default
-configuration uses the public OpenAI API with ``gpt-4o-mini``. A local
-``llm-config.yml`` file can override this behaviour by providing a custom
-OpenAI-compatible endpoint.
+configuration uses the public OpenAI API with ``gpt-4o-mini``. Configuration
+can be provided via environment variables.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
 from typing import Optional, Tuple
 
 import requests
-import yaml
 from langchain_core.language_models.chat_models import BaseChatModel
-
-from assist.config_manager import get_config, config_path
 
 try:  # pragma: no cover - optional dependency
     from langchain_openai import ChatOpenAI
@@ -68,21 +64,46 @@ def _test_local_llm_availability(config: OpenAIConfig) -> bool:
 
 @lru_cache(maxsize=1)
 def _load_custom_openai_config() -> Optional[OpenAIConfig]:
-    """Return the custom OpenAI configuration."""
-    raw = get_config()
-    missing = [key for key in ("url", "model", "api_key") if not raw.get(key)]
+    """Return the custom OpenAI configuration from environment variables.
+
+    Required environment variables:
+    - ASSIST_MODEL_URL: OpenAI-compatible API endpoint
+    - ASSIST_MODEL_NAME: Model identifier
+    - ASSIST_API_KEY: API key for authentication
+
+    Optional environment variables:
+    - ASSIST_CONTEXT_LEN: Context window size (default: 32768)
+    - ASSIST_TEST_URL_PATH: Path to test endpoint availability (e.g., /models)
+    """
+    url = os.getenv("ASSIST_MODEL_URL")
+    model = os.getenv("ASSIST_MODEL_NAME")
+    api_key = os.getenv("ASSIST_API_KEY")
+
+    # Check for required variables
+    missing = []
+    if not url:
+        missing.append("ASSIST_MODEL_URL")
+    if not model:
+        missing.append("ASSIST_MODEL_NAME")
+    if not api_key:
+        missing.append("ASSIST_API_KEY")
+
     if missing:
         missing_keys = ", ".join(sorted(missing))
         raise RuntimeError(
-            f"Config is missing required keys: {missing_keys}"
+            f"Missing required environment variables: {missing_keys}"
         )
 
+    # Optional variables with defaults
+    context_len = int(os.getenv("ASSIST_CONTEXT_LEN", "32768"))
+    test_url_path = os.getenv("ASSIST_TEST_URL_PATH")
+
     return OpenAIConfig(
-        url=str(raw["url"]),
-        model=str(raw["model"]),
-        api_key=str(raw["api_key"]),
-        test_url_path=str(raw["test_url_path"]),
-        context_len=int(raw["context_len"])
+        url=url,
+        model=model,
+        api_key=api_key,
+        test_url_path=test_url_path,
+        context_len=context_len
     )
 
 

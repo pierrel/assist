@@ -13,6 +13,7 @@ llm-config.yml
 /edd/history/
 /playground
 .deploy.env
+.dev.env
 threads.db
 .test-results.db
 *.db

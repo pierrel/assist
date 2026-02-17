@@ -16,7 +16,14 @@ test:
 	.venv/bin/pytest --junit-xml=tests/history/results-$(date +%Y%m%d-%H%M).xml tests
 
 web:
-	.venv/bin/python -m manage.web
+	@if [ -f .dev.env ]; then \
+		echo "→ Loading development environment from .dev.env"; \
+		export $$(grep -v '^#' .dev.env | grep -v '^$$' | xargs) && .venv/bin/python -m manage.web; \
+	else \
+		echo "⚠  Warning: .dev.env not found, using defaults"; \
+		echo "   Copy .dev.env.example to .dev.env and configure it"; \
+		.venv/bin/python -m manage.web; \
+	fi
 
 # === Deployment Targets ===
 
@@ -39,10 +46,12 @@ deploy-service:
 		DEPLOY_PATH=$(DEPLOY_PATH) \
 		SERVICE_NAME=$(SERVICE_NAME) \
 		ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
+		ASSIST_PORT='$(ASSIST_PORT)' \
 		ASSIST_MODEL_URL='$(ASSIST_MODEL_URL)' \
 		ASSIST_MODEL_NAME='$(ASSIST_MODEL_NAME)' \
 		ASSIST_API_KEY='$(ASSIST_API_KEY)' \
 		ASSIST_CONTEXT_LEN='$(ASSIST_CONTEXT_LEN)' \
+		ASSIST_TEST_URL_PATH='$(ASSIST_TEST_URL_PATH)' \
 		ASSIST_DOMAIN='$(ASSIST_DOMAIN)' \
 		'bash -s' < scripts/install-service.sh
 	@echo "✓ Service installed"
@@ -82,8 +91,14 @@ setup-sudo:
 	@echo "✓ Setup complete! You can now deploy from Emacs without password prompts."
 
 help:
-	@echo "Assist Deployment Commands:"
+	@echo "Assist Commands:"
 	@echo ""
+	@echo "Development:"
+	@echo "  make web            - Run web server locally (uses .dev.env)"
+	@echo "  make test           - Run tests"
+	@echo "  make eval           - Run evals"
+	@echo ""
+	@echo "Deployment:"
 	@echo "  make deploy         - Full deployment (code + service + restart)"
 	@echo "  make deploy-code    - Deploy code only (no restart)"
 	@echo "  make deploy-service - Install/update systemd service"
@@ -94,8 +109,9 @@ help:
 	@echo "  make setup-sudo     - Setup passwordless sudo (optional)"
 	@echo ""
 	@echo "Configuration:"
-	@echo "  Create .deploy.env from .deploy.env.example"
-	@echo "  Configure SSH host alias in ~/.ssh/config"
+	@echo "  Development: Copy .dev.env.example to .dev.env"
+	@echo "  Deployment:  Copy .deploy.env.example to .deploy.env"
+	@echo "  SSH:         Configure host alias in ~/.ssh/config"
 	@echo ""
-	@echo "Note: All commands work from Emacs. You'll be prompted for sudo password."
-	@echo "      Run 'make setup-sudo' once if you prefer passwordless operation."
+	@echo "Note: All deployment commands work from Emacs."
+	@echo "      Run 'make setup-sudo' once for passwordless operation."
