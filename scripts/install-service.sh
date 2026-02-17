@@ -20,10 +20,12 @@ sudo chown $USER:$USER "$ASSIST_THREADS_DIR"
 
 # Build environment variables section
 ENV_VARS=""
+[ -n "$ASSIST_PORT" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_PORT=$ASSIST_PORT\"\n"
 [ -n "$ASSIST_MODEL_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_MODEL_URL=$ASSIST_MODEL_URL\"\n"
 [ -n "$ASSIST_MODEL_NAME" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_MODEL_NAME=$ASSIST_MODEL_NAME\"\n"
 [ -n "$ASSIST_API_KEY" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_API_KEY=$ASSIST_API_KEY\"\n"
 [ -n "$ASSIST_CONTEXT_LEN" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_CONTEXT_LEN=$ASSIST_CONTEXT_LEN\"\n"
+[ -n "$ASSIST_TEST_URL_PATH" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_TEST_URL_PATH=$ASSIST_TEST_URL_PATH\"\n"
 [ -n "$ASSIST_DOMAIN" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_DOMAIN=$ASSIST_DOMAIN\"\n"
 
 # Generate service file from template and install it

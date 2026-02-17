@@ -7,7 +7,7 @@ Type=simple
 User={{USER}}
 Group={{USER}}
 WorkingDirectory={{DEPLOY_PATH}}
-Environment="PATH={{DEPLOY_PATH}}/.venv/bin"
+Environment="PATH={{DEPLOY_PATH}}/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="ASSIST_THREADS_DIR={{ASSIST_THREADS_DIR}}"
 {{ENVIRONMENT_VARS}}
 ExecStart={{DEPLOY_PATH}}/.venv/bin/python -m manage.web
