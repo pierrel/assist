@@ -13,7 +13,6 @@ import markdown
 from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
-from assist.config_manager import get_domain
 from assist.domain_manager import DomainManager
 
 # debug logging by default
@@ -22,7 +21,7 @@ logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
-DEFAULT_DOMAIN = get_domain()
+DEFAULT_DOMAIN = os.getenv("ASSIST_DOMAIN")  # Optional git repository
 DESCRIPTION_CACHE: Dict[str, str] = {}
 
 def get_cached_description(tid: str) -> str:
@@ -294,8 +293,10 @@ async def index() -> str:
 async def create_thread():
     chat = MANAGER.new()
     tid = chat.thread_id
-    DomainManager(MANAGER.thread_default_working_dir(tid),
-                  DEFAULT_DOMAIN)
+    # Only create DomainManager if domain is configured
+    if DEFAULT_DOMAIN:
+        DomainManager(MANAGER.thread_default_working_dir(tid),
+                      DEFAULT_DOMAIN)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -424,4 +425,5 @@ async def merge_thread(tid: str):
 if __name__ == "__main__":
     import uvicorn
     os.makedirs(ROOT, exist_ok=True)
-    uvicorn.run("manage.web:app", host="0.0.0.0", port=5050, log_level="info", reload=False)
+    port = int(os.getenv("ASSIST_PORT", "8000"))
+    uvicorn.run("manage.web:app", host="0.0.0.0", port=port, log_level="info", reload=False)
