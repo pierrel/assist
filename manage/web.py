@@ -94,7 +94,12 @@ def render_index() -> str:
           ul {{ line-height: 1.8; padding-left: 1rem; }}
           a {{ text-decoration: none; display: block; padding: .5rem .6rem; border-radius: 6px; }}
           a:active, a:focus {{ outline: none; }}
-          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; }}
+          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; cursor: pointer; }}
+          .new-thread-form {{ margin-bottom: 1.5rem; padding: 1rem; background: #f9f9f9; border-radius: 8px; border: 1px solid #ddd; }}
+          .new-thread-form textarea {{ width: 100%; min-height: 4rem; box-sizing: border-box; padding: .6rem; border: 1px solid #ccc; border-radius: 6px; font-family: inherit; font-size: 1rem; resize: vertical; }}
+          .new-thread-form textarea:focus {{ outline: 2px solid #4a90e2; border-color: #4a90e2; }}
+          .new-thread-btn {{ margin-top: .5rem; display: none; }}
+          .new-thread-btn.visible {{ display: block; }}
           @media (max-width: 480px) {{
             .btn {{ width: 100%; }}
           }}
@@ -104,15 +109,37 @@ def render_index() -> str:
         <div class="container">
           <div class="topbar">
             <h1 style="font-size:1.4rem; margin:0">Assist Web</h1>
-            <form action="/threads" method="post" style="margin:0">
-              <button class="btn" type="submit">New thread</button>
+          </div>
+
+          <div class="new-thread-form">
+            <form action="/threads/with-message" method="post" id="newThreadForm">
+              <textarea
+                id="initialMessage"
+                name="text"
+                placeholder="Type a message to start a new thread..."
+                oninput="toggleNewThreadButton()"
+              ></textarea>
+              <button class="btn new-thread-btn" id="newThreadBtn" type="submit">New Thread</button>
             </form>
           </div>
+
           <h2 style="font-size:1.2rem">Threads</h2>
           <ul>
             {items_html}
           </ul>
         </div>
+
+        <script>
+          function toggleNewThreadButton() {{
+            const textarea = document.getElementById('initialMessage');
+            const button = document.getElementById('newThreadBtn');
+            if (textarea.value.trim().length > 0) {{
+              button.classList.add('visible');
+            }} else {{
+              button.classList.remove('visible');
+            }}
+          }}
+        </script>
       </body>
     </html>
     """
@@ -297,6 +324,20 @@ async def create_thread():
     if DEFAULT_DOMAIN:
         DomainManager(MANAGER.thread_default_working_dir(tid),
                       DEFAULT_DOMAIN)
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+@app.post("/threads/with-message")
+async def create_thread_with_message(background_tasks: BackgroundTasks, text: str = Form(...)):
+    # Create new thread
+    chat = MANAGER.new()
+    tid = chat.thread_id
+    # Only create DomainManager if domain is configured
+    if DEFAULT_DOMAIN:
+        DomainManager(MANAGER.thread_default_working_dir(tid),
+                      DEFAULT_DOMAIN)
+    # Process initial message in background
+    background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
