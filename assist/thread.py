@@ -46,7 +46,8 @@ class Thread:
                  thread_id: str | None = None,
                  checkpointer=None,
                  model: BaseChatModel | None = None,
-                 max_concurrency: int = 5):
+                 max_concurrency: int = 5,
+                 sandbox_backend=None):
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
@@ -55,7 +56,8 @@ class Thread:
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
-                                  checkpointer=checkpointer)
+                                  checkpointer=checkpointer,
+                                  sandbox_backend=sandbox_backend)
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response"""
@@ -173,7 +175,8 @@ n    checkpointing via SqliteSaver.
 
     def get(self,
             thread_id: str,
-            working_dir: str | None = None) -> Thread:
+            working_dir: str | None = None,
+            sandbox_backend=None) -> Thread:
         tdir = os.path.join(self.root_dir, thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
@@ -183,7 +186,8 @@ n    checkpointing via SqliteSaver.
         return Thread(working_dir,
                       thread_id=thread_id,
                       checkpointer=self.checkpointer,
-                      model=self.model)
+                      model=self.model,
+                      sandbox_backend=sandbox_backend)
 
     def remove(self, thread_id: str) -> None:
         tdir = os.path.join(self.root_dir, thread_id)
@@ -205,7 +209,7 @@ n    checkpointing via SqliteSaver.
             except Exception:
                 pass
 
-    def new(self, working_dir: str|None = None) -> Thread:
+    def new(self, working_dir: str|None = None, sandbox_backend=None) -> Thread:
         # Derive a clean ID for directory: prefer timestamp+rand
         tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
         tdir = os.path.join(self.root_dir, tid)
@@ -213,7 +217,8 @@ n    checkpointing via SqliteSaver.
         if not working_dir:
             working_dir = self.make_default_working_dir(tdir)
 
-        return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer, model=self.model)
+        return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
+                      model=self.model, sandbox_backend=sandbox_backend)
 
     def close(self) -> None:
         try:

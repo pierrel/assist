@@ -1,9 +1,14 @@
+import logging
 import os
 import subprocess
 import tempfile
 from typing import List
 from pydantic import BaseModel
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
+
+SANDBOX_IMAGE = "assist-sandbox"
 
 class Change(BaseModel):
     path: str
@@ -216,6 +221,15 @@ def git_repo(path: str) -> str | None:
         return None
 
 class DomainManager:
+    """Manages domain repositories and optional Docker sandbox containers.
+
+    Docker lifecycle is class-level: one Docker client shared across all instances,
+    with a container registry keyed by repo_path for cleanup.
+    """
+
+    _docker_client = None
+    _containers: dict[str, "docker.models.containers.Container"] = {}  # type: ignore[name-defined]
+
     def __init__(self,
                  repo_path: str | None = None,
                  repo: str | None = None):
@@ -223,10 +237,10 @@ class DomainManager:
 
         Args:
             repo_path: Path to local repository
-            repo: Remote repository URL
+            repo: Remote repository URL (optional — sandbox works without git)
 
         Raises:
-            ValueError: If no repository is configured (neither repo_path with remote nor repo URL)
+            ValueError: If repo_path has a remote but it conflicts with repo arg
         """
         if repo_path:
             self.repo_path = repo_path
@@ -237,31 +251,32 @@ class DomainManager:
         existing_remote = git_repo(self.repo_path)
         self.repo = existing_remote or repo
 
-        # Require a remote repository
-        if not self.repo:
-            raise ValueError(
-                "DomainManager requires a repository with a remote. "
-                "Provide either a repo URL or a repo_path that already has a remote configured."
-            )
+        # Git setup is optional — only clone if we have a remote URL
+        if self.repo:
+            repo_exists = os.path.isdir(self.repo_path)
+            is_empty = not os.listdir(self.repo_path) if repo_exists else True
 
-        # Check if directory exists and if it's empty
-        repo_exists = os.path.isdir(self.repo_path)
-        is_empty = not os.listdir(self.repo_path) if repo_exists else True
-
-        # Clone if: we have a repo URL, it's not already a git repo, and (directory doesn't exist OR is empty)
-        if not existing_remote and (not repo_exists or is_empty):
-            clone_repo(self.repo, self.repo_path)
+            if not existing_remote and (not repo_exists or is_empty):
+                clone_repo(self.repo, self.repo_path)
+        else:
+            os.makedirs(self.repo_path, exist_ok=True)
 
     def changes(self) -> List[Change]:
+        if not self.repo:
+            return []
         return git_diff(self.repo_path)
 
     def main_diff(self) -> List[Change]:
+        if not self.repo:
+            return []
         return git_diff_main(self.repo_path)
 
     def domain(self) -> str:
         return self.repo_path
 
     def sync(self, commit_message: str) -> None:
+        if not self.repo:
+            return
         git_commit(self.repo_path, commit_message)
         git_push(self.repo_path)
 
@@ -369,3 +384,72 @@ Follow the style of recent commits if applicable. Do not include any explanation
         subprocess.run(['git', '-C', self.repo_path, 'push', '--set-upstream', 'origin', new_branch], check=True)
 
         return summary
+
+    # --- Docker sandbox lifecycle ---
+
+    @classmethod
+    def _get_docker_client(cls):
+        """Lazily create and cache a Docker client."""
+        if cls._docker_client is None:
+            import docker
+            cls._docker_client = docker.from_env()
+        return cls._docker_client
+
+    def get_sandbox_backend(self):
+        """Return a DockerSandboxBackend for this domain, creating a container if needed.
+
+        Returns None if Docker is not available.
+        """
+        if self.repo_path in self._containers:
+            container = self._containers[self.repo_path]
+            # Check container is still running
+            try:
+                container.reload()
+                if container.status == "running":
+                    from assist.sandbox import DockerSandboxBackend
+                    return DockerSandboxBackend(container)
+            except Exception:
+                # Container gone, remove from registry
+                self._containers.pop(self.repo_path, None)
+
+        try:
+            client = self._get_docker_client()
+            container = client.containers.run(
+                SANDBOX_IMAGE,
+                detach=True,
+                volumes={self.repo_path: {"bind": "/workspace", "mode": "rw"}},
+                working_dir="/workspace",
+                stdin_open=True,
+                tty=False,
+                labels={"assist.sandbox": "true"},
+            )
+            self._containers[self.repo_path] = container
+            logger.info("Started sandbox container %s for %s", container.id[:12], self.repo_path)
+            from assist.sandbox import DockerSandboxBackend
+            return DockerSandboxBackend(container)
+        except Exception as e:
+            logger.warning("Docker sandbox unavailable: %s", e)
+            return None
+
+    def cleanup(self) -> None:
+        """Stop and remove the container for this domain."""
+        container = self._containers.pop(self.repo_path, None)
+        if container:
+            try:
+                container.stop(timeout=5)
+                container.remove(force=True)
+                logger.info("Cleaned up container for %s", self.repo_path)
+            except Exception as e:
+                logger.warning("Container cleanup failed: %s", e)
+
+    @classmethod
+    def cleanup_all(cls) -> None:
+        """Stop and remove all tracked sandbox containers."""
+        for path, container in list(cls._containers.items()):
+            try:
+                container.stop(timeout=5)
+                container.remove(force=True)
+                logger.info("Cleaned up container for %s", path)
+            except Exception as e:
+                logger.warning("Container cleanup failed for %s: %s", path, e)
+        cls._containers.clear()

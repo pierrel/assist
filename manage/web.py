@@ -23,6 +23,28 @@ ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
 DEFAULT_DOMAIN = os.getenv("ASSIST_DOMAIN")  # Optional git repository
 DESCRIPTION_CACHE: Dict[str, str] = {}
+DOMAIN_MANAGERS: Dict[str, DomainManager] = {}  # tid -> DomainManager
+
+
+def _get_domain_manager(tid: str) -> DomainManager | None:
+    """Get or create a DomainManager for a thread, caching by tid."""
+    if tid in DOMAIN_MANAGERS:
+        return DOMAIN_MANAGERS[tid]
+    twdir = MANAGER.thread_default_working_dir(tid)
+    try:
+        dm = DomainManager(twdir, DEFAULT_DOMAIN)
+        DOMAIN_MANAGERS[tid] = dm
+        return dm
+    except Exception:
+        return None
+
+
+def _get_sandbox_backend(tid: str):
+    """Get sandbox backend for a thread, or None if Docker is unavailable."""
+    dm = _get_domain_manager(tid)
+    if dm:
+        return dm.get_sandbox_backend()
+    return None
 
 def get_cached_description(tid: str) -> str:
     """Get thread description from cache, or read from FS and cache if miss."""
@@ -59,6 +81,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Clean up Docker sandbox containers
+        try:
+            DomainManager.cleanup_all()
+        except Exception:
+            pass
         # Close shared resources (e.g., sqlite connection) to avoid leaks
         try:
             MANAGER.close()
@@ -151,12 +178,12 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
 
     # Append diffs from domain repo (computed at render time)
     try:
-        twdir = MANAGER.thread_default_working_dir(tid)
-        dm = DomainManager(twdir)
-        diffs = dm.main_diff()
-        if diffs:
-            diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
-            msgs.append({"role": "diff", "content": diff_content})
+        dm = _get_domain_manager(tid)
+        if dm:
+            diffs = dm.main_diff()
+            if diffs:
+                diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
+                msgs.append({"role": "diff", "content": diff_content})
     except Exception:
         pass
 
@@ -342,28 +369,28 @@ async def create_thread_with_message(background_tasks: BackgroundTasks, text: st
 
 
 def _process_message(tid: str, text: str) -> None:
+    sandbox = _get_sandbox_backend(tid)
     try:
-        chat = MANAGER.get(tid)
+        chat = MANAGER.get(tid, sandbox_backend=sandbox)
     except FileNotFoundError:
         return
     resp = chat.message(text)
 
-    # Generate description is there is none
+    # Generate description if there is none
     get_cached_description(tid)
 
     # After message, sync changes if any
-    twdir = MANAGER.thread_default_working_dir(tid)
-    dm = DomainManager(twdir)
-    if dm.changes():
-        # resp is now a string (the assistant's response), use it as commit message
+    dm = _get_domain_manager(tid)
+    if dm and dm.changes():
         last_assistant = resp if resp else "assistant update"
-        dm.sync(last_assistant)        
+        dm.sync(last_assistant)
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
 async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
+    sandbox = _get_sandbox_backend(tid)
     try:
-        chat = MANAGER.get(tid)
+        chat = MANAGER.get(tid, sandbox_backend=sandbox)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
     return render_thread(tid, chat, captured=bool(captured), merged=bool(merged))
@@ -371,9 +398,8 @@ async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
 
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = Form(...)):
-    try:
-        chat = MANAGER.get(tid)
-    except FileNotFoundError:
+    tdir = os.path.join(MANAGER.root_dir, tid)
+    if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
@@ -433,8 +459,9 @@ async def merge_thread(tid: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    twdir = MANAGER.thread_default_working_dir(tid)
-    dm = DomainManager(twdir)
+    dm = _get_domain_manager(tid)
+    if not dm or not dm.repo:
+        raise HTTPException(status_code=400, detail="No git repository configured for this thread")
 
     # Get a model for summarizing
     from assist.model_manager import select_chat_model

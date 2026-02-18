@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web deploy deploy-code deploy-service install-prod restart status logs setup-sudo help
+.PHONY: eval test web deploy deploy-code deploy-service install-prod restart status logs setup-sudo help sandbox-build sandbox-shell
 
 eval:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
@@ -37,12 +37,18 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web:
+web: sandbox-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
+
+sandbox-build:
+	docker build -t assist-sandbox -f docker/Dockerfile.sandbox .
+
+sandbox-shell:
+	docker run --rm -it assist-sandbox bash
 
 # === Deployment Targets ===
 
-deploy: deploy-code deploy-service restart
+deploy: deploy-code sandbox-build deploy-service restart
 	@echo "✓ Deployment complete!"
 	@echo "Check status with: make status"
 	@echo "View logs with: make logs"
@@ -112,6 +118,8 @@ help:
 	@echo "  make web            - Run web server locally (uses .dev.env)"
 	@echo "  make test           - Run tests"
 	@echo "  make eval           - Run evals"
+	@echo "  make sandbox-build  - Build Docker sandbox image"
+	@echo "  make sandbox-shell  - Run interactive sandbox shell"
 	@echo ""
 	@echo "Deployment:"
 	@echo "  make deploy         - Full deployment (code + service + restart)"
