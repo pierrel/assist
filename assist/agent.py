@@ -15,6 +15,7 @@ from assist.backends import create_composite_backend, create_sandbox_composite_b
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
+from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,8 @@ def create_agent(model: BaseChatModel,
                                         backoff_factor=2)
     # Validate and fix JSON in tool call arguments
     json_validation_mw = JsonValidationMiddleware(strict=False)
+    # Strip tool calls with invalid names (e.g. '[]' hallucinated by small models)
+    tool_name_mw = ToolNameSanitizationMiddleware()
     logging_mw = ModelLoggingMiddleware("general-agent")
 
     # Context-aware tool eviction: evict results to filesystem if they would cause overflow
@@ -66,7 +69,7 @@ def create_agent(model: BaseChatModel,
         trigger_fraction=0.75,  # Evict if context would reach 75%
     )
 
-    mw = [retry_middle, json_validation_mw, context_eviction_mw]
+    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
@@ -79,7 +82,7 @@ def create_agent(model: BaseChatModel,
         runnable=create_context_agent(model,
                                       working_dir,
                                       checkpointer,
-                                      [retry_middle, json_validation_mw],
+                                      [retry_middle, json_validation_mw, tool_name_mw],
                                       sandbox_backend=sandbox_backend)
     )
 
@@ -89,7 +92,7 @@ def create_agent(model: BaseChatModel,
         runnable=create_research_agent(model,
                                        working_dir,
                                        checkpointer,
-                                       [retry_middle, json_validation_mw],
+                                       [retry_middle, json_validation_mw, tool_name_mw],
                                        sandbox_backend=sandbox_backend)
     )
 
