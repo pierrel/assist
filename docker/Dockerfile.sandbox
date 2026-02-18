@@ -17,5 +17,5 @@ RUN pacman -Syu --noconfirm && \
 RUN mkdir -p /workspace
 WORKDIR /workspace
 
-# Keep container alive
-CMD ["sleep", "infinity"]
+# Container self-destructs after 1 hour; --rm in containers.run() handles removal
+CMD ["sleep", "3600"]
