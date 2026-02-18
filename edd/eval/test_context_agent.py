@@ -15,9 +15,8 @@ class TestContextAgent(TestCase):
     from the local filesystem."""
 
     def create_agent(self, filesystem: dict):
-        # Create a temporary directory within /workspace for testing
-        root = os.path.join("/workspace", "test_context_agent")
-        os.makedirs(root, exist_ok=True)
+        # Create a temporary directory for testing
+        root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
 
         return AgentHarness(create_context_agent(self.model,
@@ -29,7 +28,9 @@ class TestContextAgent(TestCase):
     def test_surfaces_todo_files_for_task_request(self):
         """When the query implies a task, surface the task files directly."""
         agent, root = self.create_agent({
-            "README.org": "All of my todos are in gtd/inbox.org",
+            "README.org": "All important files are located in the /workspace directory. Key files include:
+            - Todos: gtd/inbox.org
+            - Fitness goals: fitness.org",
             "gtd": {"inbox.org": dedent("""\
                 * Tasks
                 ** TODO Fold laundry
@@ -210,7 +211,9 @@ class TestContextAgent(TestCase):
         """When surfacing .org files, should include formatting instructions
         so the caller knows how to properly edit them."""
         agent, root = self.create_agent({
-            "README.org": "All of my todos are in gtd/inbox.org",
+            "README.org": "All important files are located in the /workspace directory. Key files include:
+            - Todos: gtd/inbox.org
+            - Fitness goals: fitness.org",
             "gtd": {"inbox.org": dedent("""\
                 * Tasks
                 ** TODO Fold laundry

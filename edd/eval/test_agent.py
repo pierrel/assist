@@ -12,9 +12,8 @@ from .utils import read_file, create_filesystem, AgentTestMixin
 
 class TestAgent(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
-        # Create a temporary directory within /workspace for testing
-        root = os.path.join("/workspace", "test_agent")
-        os.makedirs(root, exist_ok=True)
+        # Create a temporary directory for testing
+        root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
 
         return AgentHarness(create_agent(self.model,
@@ -24,7 +23,9 @@ class TestAgent(AgentTestMixin, TestCase):
         self.model = select_chat_model("gpt-oss-20b", 0.1)
 
     def test_reads_readme(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
+        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+            - Todos: gtd/inbox.org
+            - Fitness goals: fitness.org",
                                          "gtd": {"inbox.org":
                                                  dedent("""* Tasks
                                                  ** TODO Fold laundry
@@ -34,7 +35,9 @@ class TestAgent(AgentTestMixin, TestCase):
         self.assertRegex(res, "inbox\\.org", "Should mention the inbox file")
 
     def test_adds_item_correctly(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
+        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+            - Todos: gtd/inbox.org
+            - Fitness goals: fitness.org",
                                          "gtd": {"inbox.org":
                                                  dedent("""\
                                                  * Tasks
@@ -58,7 +61,9 @@ class TestAgent(AgentTestMixin, TestCase):
 
 
     def test_finds_relevant_files_direct(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
+        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+            - Todos: gtd/inbox.org
+            - Fitness goals: fitness.org",
                                          "fitness.org": dedent("""\
                                          * 2025
                                          I swam 20mi in 3 months
@@ -78,7 +83,9 @@ class TestAgent(AgentTestMixin, TestCase):
         self.assertRegex(res, "miles|mi", "Should mention miles or shorthand mi")
 
     def test_finds_and_updates_relevant_files_direct(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
+        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+            - Todos: gtd/inbox.org
+            - Fitness goals: fitness.org",
                                          "fitness.org": dedent("""\
                                          * 2025
                                          I swam 20mi in 3 months
