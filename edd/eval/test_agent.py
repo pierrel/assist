@@ -12,8 +12,9 @@ from .utils import read_file, create_filesystem, AgentTestMixin
 
 class TestAgent(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
-        # Create a temporary directory for testing
-        root = tempfile.mkdtemp()
+        # Create a directory structure under /workspace for testing
+        root = os.path.join("/workspace", "test_filesystem")
+        os.makedirs(root, exist_ok=True)
         create_filesystem(root, filesystem)
 
         return AgentHarness(create_agent(self.model,

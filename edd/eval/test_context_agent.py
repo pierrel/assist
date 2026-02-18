@@ -15,8 +15,9 @@ class TestContextAgent(TestCase):
     from the local filesystem."""
 
     def create_agent(self, filesystem: dict):
-        # Create a temporary directory for testing
-        root = tempfile.mkdtemp()
+        # Create a directory structure under /workspace for testing
+        root = os.path.join("/workspace", "test_filesystem")
+        os.makedirs(root, exist_ok=True)
         create_filesystem(root, filesystem)
 
         return AgentHarness(create_context_agent(self.model,
