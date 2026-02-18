@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web deploy deploy-code deploy-service install-prod restart status logs setup-sudo help sandbox-build sandbox-shell
+.PHONY: eval test web deploy deploy-code deploy-sandbox-build deploy-service install-prod restart status logs setup-sudo help sandbox-build sandbox-shell
 
 eval:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
@@ -48,7 +48,7 @@ sandbox-shell:
 
 # === Deployment Targets ===
 
-deploy: deploy-code sandbox-build deploy-service restart
+deploy: deploy-code deploy-sandbox-build deploy-service restart
 	@echo "✓ Deployment complete!"
 	@echo "Check status with: make status"
 	@echo "View logs with: make logs"
@@ -60,6 +60,11 @@ deploy-code:
 		--exclude '.git' \
 		./ $(DEPLOY_HOST):$(DEPLOY_PATH)/
 	@echo "✓ Code deployed"
+
+deploy-sandbox-build:
+	@echo "→ Building sandbox image on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f docker/Dockerfile.sandbox .'
+	@echo "✓ Sandbox image built"
 
 deploy-service:
 	@echo "→ Installing systemd service..."
