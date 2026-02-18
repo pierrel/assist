@@ -15,9 +15,10 @@ class TestContextAgent(TestCase):
     from the local filesystem."""
 
     def create_agent(self, filesystem: dict):
-        # Create a directory structure under /workspace for testing
-        root = os.path.join("/workspace", "test_filesystem")
-        os.makedirs(root, exist_ok=True)
+        # Ensure the filesystem is nested under the "workspace" directory
+        if "workspace" not in filesystem:
+            filesystem = {"workspace": filesystem}
+        root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
 
         return AgentHarness(create_context_agent(self.model,
@@ -29,7 +30,7 @@ class TestContextAgent(TestCase):
     def test_surfaces_todo_files_for_task_request(self):
         """When the query implies a task, surface the task files directly."""
         agent, root = self.create_agent({
-            "README.org": "All important files are located in the /workspace directory. Key files include:
+            "workspace": {"README.org": "All important files are located in the /workspace directory. Key files include:
             - Todos: gtd/inbox.org
             - Fitness goals: fitness.org",
             "gtd": {"inbox.org": dedent("""\
@@ -212,7 +213,7 @@ class TestContextAgent(TestCase):
         """When surfacing .org files, should include formatting instructions
         so the caller knows how to properly edit them."""
         agent, root = self.create_agent({
-            "README.org": "All important files are located in the /workspace directory. Key files include:
+            "workspace": {"README.org": "All important files are located in the /workspace directory. Key files include:
             - Todos: gtd/inbox.org
             - Fitness goals: fitness.org",
             "gtd": {"inbox.org": dedent("""\

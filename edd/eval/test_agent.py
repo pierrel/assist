@@ -12,9 +12,10 @@ from .utils import read_file, create_filesystem, AgentTestMixin
 
 class TestAgent(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
-        # Create a directory structure under /workspace for testing
-        root = os.path.join("/workspace", "test_filesystem")
-        os.makedirs(root, exist_ok=True)
+        # Ensure the filesystem is nested under the "workspace" directory
+        if "workspace" not in filesystem:
+            filesystem = {"workspace": filesystem}
+        root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
 
         return AgentHarness(create_agent(self.model,
@@ -24,7 +25,7 @@ class TestAgent(AgentTestMixin, TestCase):
         self.model = select_chat_model("gpt-oss-20b", 0.1)
 
     def test_reads_readme(self):
-        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+        agent, root = self.create_agent({"workspace": {"README.org": "All important files are located in the /workspace directory. Key files include:
             - Todos: gtd/inbox.org
             - Fitness goals: fitness.org",
                                          "gtd": {"inbox.org":
@@ -36,7 +37,7 @@ class TestAgent(AgentTestMixin, TestCase):
         self.assertRegex(res, "inbox\\.org", "Should mention the inbox file")
 
     def test_adds_item_correctly(self):
-        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+        agent, root = self.create_agent({"workspace": {"README.org": "All important files are located in the /workspace directory. Key files include:
             - Todos: gtd/inbox.org
             - Fitness goals: fitness.org",
                                          "gtd": {"inbox.org":
@@ -62,7 +63,7 @@ class TestAgent(AgentTestMixin, TestCase):
 
 
     def test_finds_relevant_files_direct(self):
-        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+        agent, root = self.create_agent({"workspace": {"README.org": "All important files are located in the /workspace directory. Key files include:
             - Todos: gtd/inbox.org
             - Fitness goals: fitness.org",
                                          "fitness.org": dedent("""\
@@ -84,7 +85,7 @@ class TestAgent(AgentTestMixin, TestCase):
         self.assertRegex(res, "miles|mi", "Should mention miles or shorthand mi")
 
     def test_finds_and_updates_relevant_files_direct(self):
-        agent, root = self.create_agent({"README.org": "All important files are located in the /workspace directory. Key files include:
+        agent, root = self.create_agent({"workspace": {"README.org": "All important files are located in the /workspace directory. Key files include:
             - Todos: gtd/inbox.org
             - Fitness goals: fitness.org",
                                          "fitness.org": dedent("""\
