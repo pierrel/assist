@@ -215,7 +215,6 @@ class TestDomainManagerDocker(TestCase):
         dm.cleanup()
 
         mock_container.stop.assert_called_once_with(timeout=5)
-        mock_container.remove.assert_called_once_with(force=True)
         self.assertNotIn(test_path, DomainManager._containers)
 
     def test_cleanup_all(self):
@@ -226,9 +225,7 @@ class TestDomainManagerDocker(TestCase):
         DomainManager.cleanup_all()
 
         mock_c1.stop.assert_called_once()
-        mock_c1.remove.assert_called_once()
         mock_c2.stop.assert_called_once()
-        mock_c2.remove.assert_called_once()
         self.assertEqual(len(DomainManager._containers), 0)
 
     def test_domain_manager_without_git(self):

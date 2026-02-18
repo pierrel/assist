@@ -417,6 +417,7 @@ Follow the style of recent commits if applicable. Do not include any explanation
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
+                remove=True,
                 volumes={self.repo_path: {"bind": "/workspace", "mode": "rw"}},
                 working_dir="/workspace",
                 stdin_open=True,
@@ -432,23 +433,21 @@ Follow the style of recent commits if applicable. Do not include any explanation
             return None
 
     def cleanup(self) -> None:
-        """Stop and remove the container for this domain."""
+        """Stop the container for this domain. Removal is automatic (--rm)."""
         container = self._containers.pop(self.repo_path, None)
         if container:
             try:
                 container.stop(timeout=5)
-                container.remove(force=True)
                 logger.info("Cleaned up container for %s", self.repo_path)
             except Exception as e:
                 logger.warning("Container cleanup failed: %s", e)
 
     @classmethod
     def cleanup_all(cls) -> None:
-        """Stop and remove all tracked sandbox containers."""
+        """Stop all tracked sandbox containers. Removal is automatic (--rm)."""
         for path, container in list(cls._containers.items()):
             try:
                 container.stop(timeout=5)
-                container.remove(force=True)
                 logger.info("Cleaned up container for %s", path)
             except Exception as e:
                 logger.warning("Container cleanup failed for %s: %s", path, e)
