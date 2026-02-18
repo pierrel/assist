@@ -23,6 +23,18 @@ class TestDockerSandboxBackend(TestCase):
     def test_id_returns_short_container_id(self):
         self.assertEqual(self.sandbox.id, "abc123def456")
 
+    def test_resolve_prefixes_path(self):
+        self.assertEqual(self.sandbox._resolve("/myfile.txt"), "/workspace/myfile.txt")
+
+    def test_resolve_preserves_workspace_path(self):
+        self.assertEqual(self.sandbox._resolve("/workspace/myfile.txt"), "/workspace/myfile.txt")
+
+    def test_resolve_handles_relative_path(self):
+        self.assertEqual(self.sandbox._resolve("myfile.txt"), "/workspace/myfile.txt")
+
+    def test_resolve_handles_none(self):
+        self.assertIsNone(self.sandbox._resolve(None))
+
     def test_execute_success(self):
         self.container.exec_run.return_value = (0, b"hello world\n")
         resp = self.sandbox.execute("echo hello world")
@@ -31,7 +43,7 @@ class TestDockerSandboxBackend(TestCase):
         self.assertEqual(resp.exit_code, 0)
         self.assertFalse(resp.truncated)
         self.container.exec_run.assert_called_once_with(
-            ["bash", "-c", "echo hello world"], demux=False)
+            ["bash", "-c", "echo hello world"], demux=False, workdir="/workspace")
 
     def test_execute_nonzero_exit(self):
         self.container.exec_run.return_value = (1, b"error: not found\n")
