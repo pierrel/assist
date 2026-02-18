@@ -11,7 +11,7 @@ from openai import InternalServerError
 
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
-from assist.backends import create_composite_backend
+from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
@@ -26,14 +26,7 @@ def _create_standard_backend(working_dir: str):
     This backend excludes ephemeral files like question.txt and large_tool_results/
     from the stateful filesystem, using StateBackend instead.
     """
-    return create_composite_backend(
-        working_dir,
-        ["/question.txt",
-         "question.txt",
-         "/large_tool_results/",
-         "large_tool_results/",
-         "large_tool_results"]
-    )
+    return create_composite_backend(working_dir, STATEFUL_PATHS)
 
 
 class AgentHarness:
@@ -59,7 +52,8 @@ class AgentHarness:
 
 def create_agent(model: BaseChatModel,
                  working_dir: str,
-                 checkpointer=None) -> CompiledStateGraph:
+                 checkpointer=None,
+                 sandbox_backend=None) -> CompiledStateGraph:
     # Core middleware: retry, tool call limiting, JSON validation, and logging
     retry_middle = ModelRetryMiddleware(max_retries=6,
                                         backoff_factor=2)
@@ -74,7 +68,10 @@ def create_agent(model: BaseChatModel,
 
     mw = [retry_middle, json_validation_mw, context_eviction_mw]
 
-    backend = _create_standard_backend(working_dir)
+    if sandbox_backend:
+        backend = create_sandbox_composite_backend(sandbox_backend)
+    else:
+        backend = _create_standard_backend(working_dir)
 
     context_sub = CompiledSubAgent(
         name="context-agent",
@@ -82,7 +79,8 @@ def create_agent(model: BaseChatModel,
         runnable=create_context_agent(model,
                                       working_dir,
                                       checkpointer,
-                                      [retry_middle, json_validation_mw])
+                                      [retry_middle, json_validation_mw],
+                                      sandbox_backend=sandbox_backend)
     )
 
     research_sub = CompiledSubAgent(
@@ -91,7 +89,8 @@ def create_agent(model: BaseChatModel,
         runnable=create_research_agent(model,
                                        working_dir,
                                        checkpointer,
-                                       [retry_middle, json_validation_mw])
+                                       [retry_middle, json_validation_mw],
+                                       sandbox_backend=sandbox_backend)
     )
 
     agent = create_deep_agent(
@@ -103,16 +102,13 @@ def create_agent(model: BaseChatModel,
         subagents=[context_sub, research_sub]
     )
 
-    # ContextAwareToolEvictionMiddleware handles context overflow prevention
-    # by monitoring cumulative context usage. FilesystemMiddleware (built-in)
-    # provides backup eviction for extremely large individual results (>20k tokens default).
-
     return agent
 
 def create_context_agent(model: BaseChatModel,
                          working_dir: str,
                          checkpointer=None,
-                         middleware=[]) -> CompiledStateGraph:
+                         middleware=[],
+                         sandbox_backend=None) -> CompiledStateGraph:
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
@@ -126,7 +122,10 @@ def create_context_agent(model: BaseChatModel,
     )
     base_mw.append(context_eviction_mw)
 
-    backend = _create_standard_backend(working_dir)
+    if sandbox_backend:
+        backend = create_sandbox_composite_backend(sandbox_backend)
+    else:
+        backend = _create_standard_backend(working_dir)
     logging_mw = ModelLoggingMiddleware("context-agent")
 
     agent = create_deep_agent(
@@ -143,7 +142,8 @@ def create_context_agent(model: BaseChatModel,
 def create_research_agent(model: BaseChatModel,
                           working_dir: str,
                           checkpointer=None,
-                          middleware=[]) -> CompiledStateGraph:
+                          middleware=[],
+                          sandbox_backend=None) -> CompiledStateGraph:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     Includes DuckDuckGo web search and a critique/research/fact-check subagent trio.
@@ -161,7 +161,10 @@ def create_research_agent(model: BaseChatModel,
     )
     base_mw.append(context_eviction_mw)
 
-    backend = _create_standard_backend(working_dir)
+    if sandbox_backend:
+        backend = create_sandbox_composite_backend(sandbox_backend)
+    else:
+        backend = _create_standard_backend(working_dir)
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     research_sub_agent = {
