@@ -203,3 +203,56 @@ def create_research_agent(model: BaseChatModel,
     )
 
     return agent
+
+
+def create_dev_agent(model: BaseChatModel,
+                     working_dir: str,
+                     checkpointer=None,
+                     sandbox_backend=None) -> CompiledStateGraph:
+    """Create a software development agent for writing, testing, and improving code.
+
+    Runs inside a Docker sandbox and follows TDD practices.
+
+    Sub-agents:
+    - context-agent: Read-only codebase exploration (same as general agent)
+    - critique-agent: Reviews diffs for bugs, missing tests, and style issues
+    """
+    retry_middle = ModelRetryMiddleware(max_retries=6, backoff_factor=2)
+    json_validation_mw = JsonValidationMiddleware(strict=False)
+    tool_name_mw = ToolNameSanitizationMiddleware()
+    logging_mw = ModelLoggingMiddleware("dev-agent")
+    context_eviction_mw = ContextAwareToolEvictionMiddleware(trigger_fraction=0.75)
+
+    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
+
+    if sandbox_backend:
+        backend = create_sandbox_composite_backend(sandbox_backend)
+    else:
+        backend = _create_standard_backend(working_dir)
+
+    context_sub = CompiledSubAgent(
+        name="context-agent",
+        description="Discovers and surfaces relevant context from the project filesystem. Use this to understand project structure, find files, read code, and discover conventions. Read-only — will not modify files.",
+        runnable=create_context_agent(model,
+                                      working_dir,
+                                      checkpointer,
+                                      [retry_middle, json_validation_mw, tool_name_mw],
+                                      sandbox_backend=sandbox_backend)
+    )
+
+    critique_sub_agent = {
+        "name": "critique-agent",
+        "description": "Reviews code diffs for bugs, missing tests, style issues, and security concerns. Provide the full git diff output when calling this agent.",
+        "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2"),
+    }
+
+    agent = create_deep_agent(
+        model=model,
+        checkpointer=checkpointer or InMemorySaver(),
+        system_prompt=base_prompt_for("deepagents/dev_agent_instructions.md.j2"),
+        middleware=mw + [logging_mw],
+        backend=backend,
+        subagents=[context_sub, critique_sub_agent],
+    )
+
+    return agent
