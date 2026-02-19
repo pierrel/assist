@@ -33,7 +33,9 @@ $USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload ${SERVICE_NAME}
 $USER ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u ${SERVICE_NAME} *
 
 # File operations for deployment
+$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist
 $USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist/*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist
 $USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/systemd/system/${SERVICE_NAME}.service
 EOF
