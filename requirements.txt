@@ -31,6 +31,9 @@ pygments>=2.19.2
 # File search utility
 vgrep==0.1.4
 
+# Docker sandbox
+docker>=7.0.0
+
 # Testing
 pytest>=9.0.2
 pytest-playwright>=0.6.2

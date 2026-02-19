@@ -1,9 +1,12 @@
+import logging
 import os
 import subprocess
 import tempfile
 from typing import List
 from pydantic import BaseModel
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 class Change(BaseModel):
     path: str
@@ -216,6 +219,8 @@ def git_repo(path: str) -> str | None:
         return None
 
 class DomainManager:
+    """Manages domain git repositories."""
+
     def __init__(self,
                  repo_path: str | None = None,
                  repo: str | None = None):
@@ -223,10 +228,10 @@ class DomainManager:
 
         Args:
             repo_path: Path to local repository
-            repo: Remote repository URL
+            repo: Remote repository URL (optional — sandbox works without git)
 
         Raises:
-            ValueError: If no repository is configured (neither repo_path with remote nor repo URL)
+            ValueError: If repo_path has a remote but it conflicts with repo arg
         """
         if repo_path:
             self.repo_path = repo_path
@@ -237,31 +242,32 @@ class DomainManager:
         existing_remote = git_repo(self.repo_path)
         self.repo = existing_remote or repo
 
-        # Require a remote repository
-        if not self.repo:
-            raise ValueError(
-                "DomainManager requires a repository with a remote. "
-                "Provide either a repo URL or a repo_path that already has a remote configured."
-            )
+        # Git setup is optional — only clone if we have a remote URL
+        if self.repo:
+            repo_exists = os.path.isdir(self.repo_path)
+            is_empty = not os.listdir(self.repo_path) if repo_exists else True
 
-        # Check if directory exists and if it's empty
-        repo_exists = os.path.isdir(self.repo_path)
-        is_empty = not os.listdir(self.repo_path) if repo_exists else True
-
-        # Clone if: we have a repo URL, it's not already a git repo, and (directory doesn't exist OR is empty)
-        if not existing_remote and (not repo_exists or is_empty):
-            clone_repo(self.repo, self.repo_path)
+            if not existing_remote and (not repo_exists or is_empty):
+                clone_repo(self.repo, self.repo_path)
+        else:
+            os.makedirs(self.repo_path, exist_ok=True)
 
     def changes(self) -> List[Change]:
+        if not self.repo:
+            return []
         return git_diff(self.repo_path)
 
     def main_diff(self) -> List[Change]:
+        if not self.repo:
+            return []
         return git_diff_main(self.repo_path)
 
     def domain(self) -> str:
         return self.repo_path
 
     def sync(self, commit_message: str) -> None:
+        if not self.repo:
+            return
         git_commit(self.repo_path, commit_message)
         git_push(self.repo_path)
 
