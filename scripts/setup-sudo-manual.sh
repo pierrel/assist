@@ -11,6 +11,7 @@ fi
 
 DEPLOY_HOST="${DEPLOY_HOST:-assist-prod}"
 SERVICE_NAME="${SERVICE_NAME:-assist-web}"
+ASSIST_THREADS_DIR="${ASSIST_THREADS_DIR:-/var/lib/assist}"
 
 echo "=== Passwordless Sudo Setup ==="
 echo ""
@@ -32,8 +33,10 @@ $USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart ${SERVICE_NAME}
 $USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl status ${SERVICE_NAME}
 $USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload ${SERVICE_NAME}
 $USER ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u ${SERVICE_NAME} *
-$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist/*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chown * /var/lib/assist/*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p ${ASSIST_THREADS_DIR}
+$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p ${ASSIST_THREADS_DIR}/*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\:$USER ${ASSIST_THREADS_DIR}
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\:$USER ${ASSIST_THREADS_DIR}/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/systemd/system/${SERVICE_NAME}.service"
 
 # Create temp file on remote server
