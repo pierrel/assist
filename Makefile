@@ -78,7 +78,7 @@ deploy-service:
 		ASSIST_API_KEY='$(ASSIST_API_KEY)' \
 		ASSIST_CONTEXT_LEN='$(ASSIST_CONTEXT_LEN)' \
 		ASSIST_TEST_URL_PATH='$(ASSIST_TEST_URL_PATH)' \
-		ASSIST_DOMAIN='$(ASSIST_DOMAIN)' \
+		ASSIST_DOMAINS='$(ASSIST_DOMAINS)' \
 		'bash -s' < scripts/install-service.sh
 	@echo "✓ Service installed"
 
