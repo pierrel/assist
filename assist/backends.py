@@ -7,6 +7,8 @@ from deepagents.backends.protocol import BackendProtocol
 STATEFUL_PATHS = [
     "/question.txt",
     "question.txt",
+    "/dev_notes.txt",
+    "dev_notes.txt",
     "/large_tool_results/",
     "large_tool_results/",
     "large_tool_results",
