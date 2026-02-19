@@ -1,0 +1,21 @@
+FROM archlinux:base
+
+# Update system and install essentials
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+        python \
+        python-pip \
+        base-devel \
+        git \
+        grep \
+        findutils \
+        bash \
+	emacs \
+    && pacman -Scc --noconfirm
+
+# Create workspace directory
+RUN mkdir -p /workspace
+WORKDIR /workspace
+
+# Container self-destructs after 1 hour; --rm in containers.run() handles removal
+CMD ["sleep", "3600"]

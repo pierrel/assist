@@ -14,6 +14,7 @@ from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
 from assist.domain_manager import DomainManager
+from assist.sandbox_manager import SandboxManager
 
 # debug logging by default
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -21,8 +22,68 @@ logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
-DEFAULT_DOMAIN = os.getenv("ASSIST_DOMAIN")  # Optional git repository
+_raw = os.getenv("ASSIST_DOMAINS", "")
+DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}
+DOMAIN_MANAGERS: Dict[str, DomainManager] = {}  # tid -> DomainManager
+
+
+def _domain_label(url: str) -> str:
+    """'user@host:/path/to/life.git' -> 'life'"""
+    return url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+
+
+def _domain_selector_html() -> str:
+    """Return HTML for the domain selector in the new-thread form."""
+    if len(DOMAINS) > 1:
+        opts = "\n".join(
+            f'<option value="{html.escape(d)}">{html.escape(_domain_label(d))}</option>'
+            for d in DOMAINS
+        )
+        return (
+            '<select name="domain" style="margin-bottom:.5rem; padding:.4rem; '
+            'border:1px solid #ccc; border-radius:6px; font-size:1rem; width:100%;">'
+            f"{opts}</select>"
+        )
+    if len(DOMAINS) == 1:
+        return f'<input type="hidden" name="domain" value="{html.escape(DOMAINS[0])}" />'
+    return ""
+
+
+def _thread_domain_html(tid: str) -> str:
+    """Return a small badge showing the domain name for a thread, if any."""
+    dm = _get_domain_manager(tid)
+    if dm and dm.repo:
+        label = html.escape(_domain_label(dm.repo))
+        return (
+            f'<span style="display:inline-block; font-size:.8rem; color:#555; '
+            f'background:#f0f0f0; padding:.2rem .5rem; border-radius:4px; '
+            f'margin-bottom:.5rem;">{label}</span>'
+        )
+    return ""
+
+
+def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | None:
+    """Get or create a DomainManager for a thread, caching by tid.
+
+    For new threads pass *domain* (a git URL to clone).
+    For existing threads pass None — DomainManager auto-detects the remote.
+    """
+    if tid in DOMAIN_MANAGERS:
+        return DOMAIN_MANAGERS[tid]
+    twdir = MANAGER.thread_default_working_dir(tid)
+    try:
+        dm = DomainManager(twdir, domain)
+        DOMAIN_MANAGERS[tid] = dm
+        return dm
+    except Exception:
+        return None
+
+
+def _get_sandbox_backend(tid: str):
+    """Get sandbox backend for a thread, or None if Docker is unavailable."""
+    work_dir = MANAGER.thread_default_working_dir(tid)
+    return SandboxManager.get_sandbox_backend(work_dir)
 
 def get_cached_description(tid: str) -> str:
     """Get thread description from cache, or read from FS and cache if miss."""
@@ -59,6 +120,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # Clean up Docker sandbox containers
+        try:
+            SandboxManager.cleanup_all()
+        except Exception:
+            pass
         # Close shared resources (e.g., sqlite connection) to avoid leaks
         try:
             MANAGER.close()
@@ -113,6 +179,7 @@ def render_index() -> str:
 
           <div class="new-thread-form">
             <form action="/threads/with-message" method="post" id="newThreadForm">
+              {_domain_selector_html()}
               <textarea
                 id="initialMessage"
                 name="text"
@@ -151,12 +218,12 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
 
     # Append diffs from domain repo (computed at render time)
     try:
-        twdir = MANAGER.thread_default_working_dir(tid)
-        dm = DomainManager(twdir)
-        diffs = dm.main_diff()
-        if diffs:
-            diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
-            msgs.append({"role": "diff", "content": diff_content})
+        dm = _get_domain_manager(tid)
+        if dm:
+            diffs = dm.main_diff()
+            if diffs:
+                diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
+                msgs.append({"role": "diff", "content": diff_content})
     except Exception:
         pass
 
@@ -243,6 +310,7 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
         <div class="container">
           <div class="nav"><a href="/">← All threads</a></div>
           <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
+          {_thread_domain_html(tid)}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           {"<div class='success-msg'>Branch successfully merged to main!</div>" if merged else ""}
           <form action="/thread/{tid}/message" method="post">
@@ -317,53 +385,53 @@ async def index() -> str:
 
 
 @app.post("/threads")
-async def create_thread():
+async def create_thread(domain: str | None = Form(None)):
     chat = MANAGER.new()
     tid = chat.thread_id
-    # Only create DomainManager if domain is configured
-    if DEFAULT_DOMAIN:
-        DomainManager(MANAGER.thread_default_working_dir(tid),
-                      DEFAULT_DOMAIN)
+    selected = domain or (DOMAINS[0] if DOMAINS else None)
+    if selected:
+        DomainManager(MANAGER.thread_default_working_dir(tid), selected)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 @app.post("/threads/with-message")
-async def create_thread_with_message(background_tasks: BackgroundTasks, text: str = Form(...)):
-    # Create new thread
+async def create_thread_with_message(
+    background_tasks: BackgroundTasks,
+    text: str = Form(...),
+    domain: str | None = Form(None),
+):
     chat = MANAGER.new()
     tid = chat.thread_id
-    # Only create DomainManager if domain is configured
-    if DEFAULT_DOMAIN:
-        DomainManager(MANAGER.thread_default_working_dir(tid),
-                      DEFAULT_DOMAIN)
-    # Process initial message in background
+    selected = domain or (DOMAINS[0] if DOMAINS else None)
+    if selected:
+        DomainManager(MANAGER.thread_default_working_dir(tid), selected)
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 def _process_message(tid: str, text: str) -> None:
+    sandbox = _get_sandbox_backend(tid)
     try:
-        chat = MANAGER.get(tid)
+        chat = MANAGER.get(tid, sandbox_backend=sandbox)
     except FileNotFoundError:
         return
     resp = chat.message(text)
 
-    # Generate description is there is none
+    # Generate description if there is none
     get_cached_description(tid)
 
     # After message, sync changes if any
-    twdir = MANAGER.thread_default_working_dir(tid)
-    dm = DomainManager(twdir)
-    if dm.changes():
-        # resp is now a string (the assistant's response), use it as commit message
+    dm = _get_domain_manager(tid)
+    if dm and dm.changes():
         last_assistant = resp if resp else "assistant update"
-        dm.sync(last_assistant)        
+        dm.sync(last_assistant)
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
 async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
+    sandbox = _get_sandbox_backend(tid)
     try:
-        chat = MANAGER.get(tid)
+        chat = MANAGER.get(tid, sandbox_backend=sandbox)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
     return render_thread(tid, chat, captured=bool(captured), merged=bool(merged))
@@ -371,9 +439,8 @@ async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
 
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = Form(...)):
-    try:
-        chat = MANAGER.get(tid)
-    except FileNotFoundError:
+    tdir = os.path.join(MANAGER.root_dir, tid)
+    if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
@@ -433,8 +500,9 @@ async def merge_thread(tid: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
 
-    twdir = MANAGER.thread_default_working_dir(tid)
-    dm = DomainManager(twdir)
+    dm = _get_domain_manager(tid)
+    if not dm or not dm.repo:
+        raise HTTPException(status_code=400, detail="No git repository configured for this thread")
 
     # Get a model for summarizing
     from assist.model_manager import select_chat_model

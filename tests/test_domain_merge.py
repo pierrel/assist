@@ -128,17 +128,18 @@ class TestDomainMerge(unittest.TestCase):
 
         self.assertIn("No changes to merge", str(ctx.exception))
 
-    def test_merge_requires_remote(self):
-        """Test that DomainManager requires a remote."""
-        # Create a local repo without remote
+    def test_merge_without_remote_returns_no_changes(self):
+        """Test that DomainManager without remote returns empty changes."""
         local_dir = os.path.join(self.temp_dir, "no_remote")
         os.makedirs(local_dir)
         subprocess.run(['git', 'init'], cwd=local_dir, check=True, capture_output=True)
 
-        with self.assertRaises(ValueError) as ctx:
-            DomainManager(repo_path=local_dir, repo=None)
+        dm = DomainManager(repo_path=local_dir, repo=None)
 
-        self.assertIn("requires a repository with a remote", str(ctx.exception))
+        # Without a remote, git operations should be no-ops
+        self.assertIsNone(dm.repo)
+        self.assertEqual(dm.changes(), [])
+        self.assertEqual(dm.main_diff(), [])
 
     def test_merge_deletes_old_remote_branch(self):
         """Test that merge deletes the old remote branch after squash merge."""

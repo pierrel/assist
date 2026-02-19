@@ -17,7 +17,14 @@ See [README.org](README.org) for detailed concepts and architecture.
 
 - Python 3.13+ (3.14 recommended)
 - Git
+- Docker (for the sandbox — the agent executes commands inside a container)
 - An OpenAI-compatible model endpoint (local or remote)
+
+Your user must be in the `docker` group so the web process can start containers:
+```bash
+sudo usermod -aG docker $USER
+# Log out and back in for the group change to take effect
+```
 
 ### Local Development Setup
 
@@ -57,8 +64,8 @@ See [README.org](README.org) for detailed concepts and architecture.
    ASSIST_CONTEXT_LEN=78000
    ASSIST_TEST_URL_PATH=/models
 
-   # Optional: Local git repository for domain integration
-   ASSIST_DOMAIN=user@localhost:/path/to/repo.git
+   # Optional: Git repositories for domain integration (comma-separated)
+   ASSIST_DOMAINS=user@localhost:/path/to/repo.git
 
    # Local settings
    ASSIST_THREADS_DIR=/tmp/assist_threads
@@ -70,6 +77,8 @@ See [README.org](README.org) for detailed concepts and architecture.
    make web
    # Or manually: .venv/bin/python -m manage.web
    ```
+
+   This builds the sandbox Docker image and starts the server.
 
    The server will start on the port specified in `.dev.env` (default: 8000).
 
@@ -165,8 +174,8 @@ See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evalu
    ASSIST_THREADS_DIR=/var/lib/assist/threads
    ASSIST_PORT=5051
 
-   # Production Domain (optional - local repo on production server)
-   ASSIST_DOMAIN=/home/user/git/repo.git
+   # Production Domains (optional, comma-separated git URLs)
+   ASSIST_DOMAINS=/home/user/git/repo1.git,/home/user/git/repo2.git
    ```
 
 3. **Prepare the production server**
@@ -174,9 +183,12 @@ See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evalu
    # Create deployment directory
    ssh assist-prod 'sudo mkdir -p /opt/assist && sudo chown $USER:$USER /opt/assist'
 
-   # Install git and rsync (if not already installed)
-   ssh assist-prod 'sudo pacman -S git rsync'  # Arch Linux
-   # ssh assist-prod 'sudo apt install git rsync'  # Ubuntu/Debian
+   # Install git, rsync, and docker (if not already installed)
+   ssh assist-prod 'sudo pacman -S git rsync docker'  # Arch Linux
+   # ssh assist-prod 'sudo apt install git rsync docker.io'  # Ubuntu/Debian
+
+   # Enable Docker and add user to docker group
+   ssh assist-prod 'sudo systemctl enable --now docker && sudo usermod -aG docker $USER'
    ```
 
 4. **Set up passwordless sudo (optional)**
@@ -252,11 +264,11 @@ All configuration is done via environment variables. Different files are used fo
 
 | Variable               | Description                           | Default               |
 |------------------------|---------------------------------------|-----------------------|
-| `ASSIST_CONTEXT_LEN`   | Context window size (chars)           | `32768`               |
-| `ASSIST_TEST_URL_PATH` | Endpoint to test API availability     | None                  |
-| `ASSIST_DOMAIN`        | Git repository for domain integration | None                  |
-| `ASSIST_THREADS_DIR`   | Data storage location                 | `/tmp/assist_threads` |
-| `ASSIST_PORT`          | Server port                           | `8000`                |
+| `ASSIST_CONTEXT_LEN`   | Context window size (chars)              | `32768`               |
+| `ASSIST_TEST_URL_PATH` | Endpoint to test API availability        | None                  |
+| `ASSIST_DOMAINS`       | Git repositories, comma-separated        | None                  |
+| `ASSIST_THREADS_DIR`   | Data storage location                    | `/tmp/assist_threads` |
+| `ASSIST_PORT`          | Server port                              | `8000`                |
 
 See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 
@@ -268,13 +280,15 @@ See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 - Configuration: `.dev.env` (gitignored)
 - Data: `ASSIST_THREADS_DIR` (default: `/tmp/assist_threads`)
 - Model: Your local model endpoint
-- Domain: Your local git repository (optional)
+- Domains: Your local git repositories (optional)
+- Sandbox: Docker container per thread for isolated command execution
 
 ### Production Deployment
 - Configuration: `.deploy.env` (gitignored)
 - Data: `/var/lib/assist/threads` (persists across deployments)
 - Model: Production model endpoint
-- Domain: Production git repository (optional, local to server)
+- Domains: Production git repositories (optional, local to server)
+- Sandbox: Docker container per thread
 - Service: systemd manages the process
 - Logs: `journalctl -u assist-web`
 
@@ -287,8 +301,11 @@ assist/
 ├── assist/                 # Core application code
 │   ├── agent.py           # Agent implementation
 │   ├── model_manager.py   # Model selection and configuration
-│   ├── domain_manager.py  # Git repository management
+│   ├── domain_manager.py  # Git repository and sandbox management
+│   ├── sandbox.py         # Docker sandbox backend
 │   └── tools/             # Agent tools
+├── dockerfiles/           # Docker images
+│   └── Dockerfile.sandbox # Sandbox container (Arch-based, with git/python/emacs)
 ├── edd/                   # Agent evaluations
 │   ├── eval/              # Evaluation test suite
 │   └── history/           # Test results history
@@ -307,24 +324,39 @@ assist/
 
 ## Domain Integration (Optional)
 
-Assist can integrate with git repositories to manage changes:
+Assist can integrate with one or more git repositories. Each thread works with a single domain. When multiple domains are configured, the web UI shows a dropdown to choose which repository a new thread should use. The first domain is the default.
 
 ### Local Development
 ```bash
-# .dev.env
-ASSIST_DOMAIN=user@localhost:/path/to/repo.git
+# .dev.env — single repo
+ASSIST_DOMAINS=user@localhost:/path/to/repo.git
+
+# .dev.env — multiple repos (comma-separated)
+ASSIST_DOMAINS=user@localhost:/path/to/life.git,user@localhost:/path/to/work.git
 ```
 
 ### Production
 ```bash
-# Create a local bare repository on production server
-ssh assist-prod 'git init --bare /path/to/repo.git'
+# Create local bare repositories on production server
+ssh assist-prod 'git init --bare /path/to/repo1.git'
+ssh assist-prod 'git init --bare /path/to/repo2.git'
 
 # .deploy.env
-ASSIST_DOMAIN=/path/to/repo.git  # Local path on production server
+ASSIST_DOMAINS=/path/to/repo1.git,/path/to/repo2.git
 ```
 
 When enabled, each thread creates a git branch and can merge changes back to main.
+
+## Docker Sandbox
+
+The agent executes shell commands inside a Docker container rather than on the host. Each thread gets its own container with the domain repository bind-mounted at `/workspace`.
+
+The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
+```bash
+make sandbox-build
+```
+
+If Docker is unavailable, the agent falls back to running without a sandbox.
 
 ---
 
@@ -349,6 +381,21 @@ export $(grep -v '^#' .dev.env | xargs)
 ```bash
 # Test model endpoint
 curl $ASSIST_MODEL_URL/models
+```
+
+**Docker sandbox not working:**
+```bash
+# Verify Docker is running
+docker info
+
+# Verify your user is in the docker group
+groups | grep docker
+
+# Build the sandbox image manually
+make sandbox-build
+
+# Test the sandbox image
+make sandbox-shell
 ```
 
 ### Production Deployment

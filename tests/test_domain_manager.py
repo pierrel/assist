@@ -56,14 +56,16 @@ class TestDomainManager(TestCase):
         # Should start with /tmp (on most systems)
         self.assertTrue(dm.domain().startswith('/tmp') or dm.domain().startswith('/var'))
 
-    def test_domain_manager_requires_remote(self):
-        """Test that DomainManager requires a repository with remote."""
+    def test_domain_manager_works_without_remote(self):
+        """Test that DomainManager works without git remote (sandbox-only mode)."""
         test_path = os.path.join(self.temp_dir, "non_repo")
 
-        with self.assertRaises(ValueError) as ctx:
-            DomainManager(repo_path=test_path, repo=None)
+        dm = DomainManager(repo_path=test_path, repo=None)
 
-        self.assertIn("requires a repository with a remote", str(ctx.exception))
+        self.assertIsNone(dm.repo)
+        self.assertTrue(os.path.isdir(test_path))
+        self.assertEqual(dm.changes(), [])
+        self.assertEqual(dm.main_diff(), [])
 
     @patch('assist.domain_manager.subprocess.run')
     def test_git_diff_with_changes(self, mock_run):
