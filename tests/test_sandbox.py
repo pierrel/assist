@@ -10,6 +10,7 @@ from unittest.mock import patch, MagicMock, PropertyMock
 
 from assist.sandbox import DockerSandboxBackend, MAX_OUTPUT_CHARS
 from assist.domain_manager import DomainManager
+from assist.sandbox_manager import SandboxManager
 
 
 class TestDockerSandboxBackend(TestCase):
@@ -140,29 +141,25 @@ class TestDockerSandboxBackend(TestCase):
         self.assertEqual(responses[0].error, "file_not_found")
 
 
-class TestDomainManagerDocker(TestCase):
-    """Test DomainManager Docker lifecycle with mocked Docker client."""
+class TestSandboxManager(TestCase):
+    """Test SandboxManager Docker lifecycle with mocked Docker client."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         # Clear class-level state between tests
-        DomainManager._docker_client = None
-        DomainManager._containers.clear()
+        SandboxManager._docker_client = None
+        SandboxManager._containers.clear()
 
     def tearDown(self):
-        DomainManager._docker_client = None
-        DomainManager._containers.clear()
+        SandboxManager._docker_client = None
+        SandboxManager._containers.clear()
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
-    @patch('assist.domain_manager.git_repo')
     @patch('assist.sandbox.DockerSandboxBackend')
-    def test_get_sandbox_backend_creates_container(self, mock_backend_cls, mock_git_repo):
-        mock_git_repo.return_value = "https://example.com/repo.git"
+    def test_get_sandbox_backend_creates_container(self, mock_backend_cls):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
-
-        dm = DomainManager(repo_path=test_path)
 
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -170,78 +167,66 @@ class TestDomainManagerDocker(TestCase):
         mock_container.status = "running"
         mock_client.containers.run.return_value = mock_container
 
-        with patch.object(DomainManager, '_get_docker_client', return_value=mock_client):
-            sandbox = dm.get_sandbox_backend()
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
         mock_client.containers.run.assert_called_once()
         # Verify container is registered
-        self.assertIn(test_path, DomainManager._containers)
+        self.assertIn(test_path, SandboxManager._containers)
 
-    @patch('assist.domain_manager.git_repo')
-    def test_get_sandbox_backend_reuses_container(self, mock_git_repo):
-        mock_git_repo.return_value = "https://example.com/repo.git"
+    def test_get_sandbox_backend_reuses_container(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
-
-        dm = DomainManager(repo_path=test_path)
 
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.status = "running"
-        DomainManager._containers[test_path] = mock_container
+        SandboxManager._containers[test_path] = mock_container
 
-        sandbox = dm.get_sandbox_backend()
+        sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
         # Container should have been reloaded to check status
         mock_container.reload.assert_called_once()
 
-    @patch('assist.domain_manager.git_repo')
-    def test_get_sandbox_backend_returns_none_on_docker_error(self, mock_git_repo):
-        mock_git_repo.return_value = "https://example.com/repo.git"
+    def test_get_sandbox_backend_returns_none_on_docker_error(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
-
-        dm = DomainManager(repo_path=test_path)
 
         mock_client = MagicMock()
         mock_client.containers.run.side_effect = Exception("Docker not running")
 
-        with patch.object(DomainManager, '_get_docker_client', return_value=mock_client):
-            sandbox = dm.get_sandbox_backend()
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNone(sandbox)
 
-    @patch('assist.domain_manager.git_repo')
-    def test_cleanup_stops_and_removes_container(self, mock_git_repo):
-        mock_git_repo.return_value = "https://example.com/repo.git"
+    def test_cleanup_stops_and_removes_container(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
-        dm = DomainManager(repo_path=test_path)
-
         mock_container = MagicMock()
-        DomainManager._containers[test_path] = mock_container
+        SandboxManager._containers[test_path] = mock_container
 
-        dm.cleanup()
+        SandboxManager.cleanup(test_path)
 
         mock_container.stop.assert_called_once_with(timeout=5)
-        self.assertNotIn(test_path, DomainManager._containers)
+        self.assertNotIn(test_path, SandboxManager._containers)
 
     def test_cleanup_all(self):
         mock_c1 = MagicMock()
         mock_c2 = MagicMock()
-        DomainManager._containers = {"/path/a": mock_c1, "/path/b": mock_c2}
+        SandboxManager._containers = {"/path/a": mock_c1, "/path/b": mock_c2}
 
-        DomainManager.cleanup_all()
+        SandboxManager.cleanup_all()
 
         mock_c1.stop.assert_called_once()
         mock_c2.stop.assert_called_once()
-        self.assertEqual(len(DomainManager._containers), 0)
+        self.assertEqual(len(SandboxManager._containers), 0)
 
     def test_domain_manager_without_git(self):
-        """Test that DomainManager works without git remote (sandbox-only mode)."""
+        """Test that DomainManager works without git remote."""
         test_path = os.path.join(self.temp_dir, "no_git")
 
         dm = DomainManager(repo_path=test_path)

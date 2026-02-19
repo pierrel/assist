@@ -14,6 +14,7 @@ from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
 from assist.domain_manager import DomainManager
+from assist.sandbox_manager import SandboxManager
 
 # debug logging by default
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -81,10 +82,8 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
 
 def _get_sandbox_backend(tid: str):
     """Get sandbox backend for a thread, or None if Docker is unavailable."""
-    dm = _get_domain_manager(tid)
-    if dm:
-        return dm.get_sandbox_backend()
-    return None
+    work_dir = MANAGER.thread_default_working_dir(tid)
+    return SandboxManager.get_sandbox_backend(work_dir)
 
 def get_cached_description(tid: str) -> str:
     """Get thread description from cache, or read from FS and cache if miss."""
@@ -123,7 +122,7 @@ async def lifespan(app: FastAPI):
     finally:
         # Clean up Docker sandbox containers
         try:
-            DomainManager.cleanup_all()
+            SandboxManager.cleanup_all()
         except Exception:
             pass
         # Close shared resources (e.g., sqlite connection) to avoid leaks

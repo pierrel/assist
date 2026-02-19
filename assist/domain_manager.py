@@ -8,8 +8,6 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-SANDBOX_IMAGE = "assist-sandbox"
-
 class Change(BaseModel):
     path: str
     diff: str
@@ -221,14 +219,7 @@ def git_repo(path: str) -> str | None:
         return None
 
 class DomainManager:
-    """Manages domain repositories and optional Docker sandbox containers.
-
-    Docker lifecycle is class-level: one Docker client shared across all instances,
-    with a container registry keyed by repo_path for cleanup.
-    """
-
-    _docker_client = None
-    _containers: dict[str, "docker.models.containers.Container"] = {}  # type: ignore[name-defined]
+    """Manages domain git repositories."""
 
     def __init__(self,
                  repo_path: str | None = None,
@@ -384,71 +375,3 @@ Follow the style of recent commits if applicable. Do not include any explanation
         subprocess.run(['git', '-C', self.repo_path, 'push', '--set-upstream', 'origin', new_branch], check=True)
 
         return summary
-
-    # --- Docker sandbox lifecycle ---
-
-    @classmethod
-    def _get_docker_client(cls):
-        """Lazily create and cache a Docker client."""
-        if cls._docker_client is None:
-            import docker
-            cls._docker_client = docker.from_env()
-        return cls._docker_client
-
-    def get_sandbox_backend(self):
-        """Return a DockerSandboxBackend for this domain, creating a container if needed.
-
-        Returns None if Docker is not available.
-        """
-        if self.repo_path in self._containers:
-            container = self._containers[self.repo_path]
-            # Check container is still running
-            try:
-                container.reload()
-                if container.status == "running":
-                    from assist.sandbox import DockerSandboxBackend
-                    return DockerSandboxBackend(container)
-            except Exception:
-                # Container gone, remove from registry
-                self._containers.pop(self.repo_path, None)
-
-        try:
-            client = self._get_docker_client()
-            container = client.containers.run(
-                SANDBOX_IMAGE,
-                detach=True,
-                remove=True,
-                volumes={self.repo_path: {"bind": "/workspace", "mode": "rw"}},
-                working_dir="/workspace",
-                stdin_open=True,
-                tty=False,
-                labels={"assist.sandbox": "true"},
-            )
-            self._containers[self.repo_path] = container
-            logger.info("Started sandbox container %s for %s", container.id[:12], self.repo_path)
-            from assist.sandbox import DockerSandboxBackend
-            return DockerSandboxBackend(container)
-        except Exception as e:
-            logger.warning("Docker sandbox unavailable: %s", e)
-            return None
-
-    def cleanup(self) -> None:
-        """Stop the container for this domain. Removal is automatic (--rm)."""
-        container = self._containers.pop(self.repo_path, None)
-        if container:
-            try:
-                container.stop(timeout=5)
-                logger.info("Cleaned up container for %s", self.repo_path)
-            except Exception as e:
-                logger.warning("Container cleanup failed: %s", e)
-
-    @classmethod
-    def cleanup_all(cls) -> None:
-        """Stop all tracked sandbox containers. Removal is automatic (--rm)."""
-        for path, container in list(cls._containers.items()):
-            try:
-                container.stop(timeout=5)
-                logger.info("Cleaned up container for %s", path)
-            except Exception as e:
-                logger.warning("Container cleanup failed for %s: %s", path, e)
-        cls._containers.clear()
