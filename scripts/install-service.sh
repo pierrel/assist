@@ -26,7 +26,7 @@ ENV_VARS=""
 [ -n "$ASSIST_API_KEY" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_API_KEY=$ASSIST_API_KEY\"\n"
 [ -n "$ASSIST_CONTEXT_LEN" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_CONTEXT_LEN=$ASSIST_CONTEXT_LEN\"\n"
 [ -n "$ASSIST_TEST_URL_PATH" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_TEST_URL_PATH=$ASSIST_TEST_URL_PATH\"\n"
-[ -n "$ASSIST_DOMAIN" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_DOMAIN=$ASSIST_DOMAIN\"\n"
+[ -n "$ASSIST_DOMAINS" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_DOMAINS=$ASSIST_DOMAINS\"\n"
 
 # Generate service file from template and install it
 cat "$DEPLOY_PATH/scripts/assist-web.service.template" | \

@@ -21,18 +21,58 @@ logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
-DEFAULT_DOMAIN = os.getenv("ASSIST_DOMAIN")  # Optional git repository
+_raw = os.getenv("ASSIST_DOMAINS", "")
+DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}
 DOMAIN_MANAGERS: Dict[str, DomainManager] = {}  # tid -> DomainManager
 
 
-def _get_domain_manager(tid: str) -> DomainManager | None:
-    """Get or create a DomainManager for a thread, caching by tid."""
+def _domain_label(url: str) -> str:
+    """'user@host:/path/to/life.git' -> 'life'"""
+    return url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+
+
+def _domain_selector_html() -> str:
+    """Return HTML for the domain selector in the new-thread form."""
+    if len(DOMAINS) > 1:
+        opts = "\n".join(
+            f'<option value="{html.escape(d)}">{html.escape(_domain_label(d))}</option>'
+            for d in DOMAINS
+        )
+        return (
+            '<select name="domain" style="margin-bottom:.5rem; padding:.4rem; '
+            'border:1px solid #ccc; border-radius:6px; font-size:1rem; width:100%;">'
+            f"{opts}</select>"
+        )
+    if len(DOMAINS) == 1:
+        return f'<input type="hidden" name="domain" value="{html.escape(DOMAINS[0])}" />'
+    return ""
+
+
+def _thread_domain_html(tid: str) -> str:
+    """Return a small badge showing the domain name for a thread, if any."""
+    dm = _get_domain_manager(tid)
+    if dm and dm.repo:
+        label = html.escape(_domain_label(dm.repo))
+        return (
+            f'<span style="display:inline-block; font-size:.8rem; color:#555; '
+            f'background:#f0f0f0; padding:.2rem .5rem; border-radius:4px; '
+            f'margin-bottom:.5rem;">{label}</span>'
+        )
+    return ""
+
+
+def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | None:
+    """Get or create a DomainManager for a thread, caching by tid.
+
+    For new threads pass *domain* (a git URL to clone).
+    For existing threads pass None — DomainManager auto-detects the remote.
+    """
     if tid in DOMAIN_MANAGERS:
         return DOMAIN_MANAGERS[tid]
     twdir = MANAGER.thread_default_working_dir(tid)
     try:
-        dm = DomainManager(twdir, DEFAULT_DOMAIN)
+        dm = DomainManager(twdir, domain)
         DOMAIN_MANAGERS[tid] = dm
         return dm
     except Exception:
@@ -140,6 +180,7 @@ def render_index() -> str:
 
           <div class="new-thread-form">
             <form action="/threads/with-message" method="post" id="newThreadForm">
+              {_domain_selector_html()}
               <textarea
                 id="initialMessage"
                 name="text"
@@ -270,6 +311,7 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
         <div class="container">
           <div class="nav"><a href="/">← All threads</a></div>
           <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
+          {_thread_domain_html(tid)}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           {"<div class='success-msg'>Branch successfully merged to main!</div>" if merged else ""}
           <form action="/thread/{tid}/message" method="post">
@@ -344,26 +386,26 @@ async def index() -> str:
 
 
 @app.post("/threads")
-async def create_thread():
+async def create_thread(domain: str | None = Form(None)):
     chat = MANAGER.new()
     tid = chat.thread_id
-    # Only create DomainManager if domain is configured
-    if DEFAULT_DOMAIN:
-        DomainManager(MANAGER.thread_default_working_dir(tid),
-                      DEFAULT_DOMAIN)
+    selected = domain or (DOMAINS[0] if DOMAINS else None)
+    if selected:
+        DomainManager(MANAGER.thread_default_working_dir(tid), selected)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 @app.post("/threads/with-message")
-async def create_thread_with_message(background_tasks: BackgroundTasks, text: str = Form(...)):
-    # Create new thread
+async def create_thread_with_message(
+    background_tasks: BackgroundTasks,
+    text: str = Form(...),
+    domain: str | None = Form(None),
+):
     chat = MANAGER.new()
     tid = chat.thread_id
-    # Only create DomainManager if domain is configured
-    if DEFAULT_DOMAIN:
-        DomainManager(MANAGER.thread_default_working_dir(tid),
-                      DEFAULT_DOMAIN)
-    # Process initial message in background
+    selected = domain or (DOMAINS[0] if DOMAINS else None)
+    if selected:
+        DomainManager(MANAGER.thread_default_working_dir(tid), selected)
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
