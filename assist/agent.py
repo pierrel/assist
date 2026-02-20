@@ -12,6 +12,7 @@ from openai import InternalServerError
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS
+from assist.checkpoint_rollback import invoke_with_rollback
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
@@ -38,8 +39,11 @@ class AgentHarness:
         self.thread_id = thread_id or uuid.uuid1()
 
     def message(self, text: str) -> AIMessage:
-        resp = self.agent.invoke({"messages": [{"role": "user", "content": text}]},
-                                 {"configurable": {"thread_id": self.thread_id}})
+        resp = invoke_with_rollback(
+            self.agent,
+            {"messages": [{"role": "user", "content": text}]},
+            {"configurable": {"thread_id": self.thread_id}},
+        )
         return resp["messages"][-1].content
 
     def all_messages(self) -> list[AnyMessage]:
@@ -56,7 +60,10 @@ def create_agent(model: BaseChatModel,
                  checkpointer=None,
                  sandbox_backend=None) -> CompiledStateGraph:
     # Core middleware: retry, tool call limiting, JSON validation, and logging
-    retry_middle = ModelRetryMiddleware(max_retries=6,
+    # Only retry on transient server errors (5xx, timeouts, connection issues).
+    # BadRequestError (400) is handled by invoke_with_rollback via checkpoint rollback.
+    retry_middle = ModelRetryMiddleware(max_retries=3,
+                                        retry_on=(InternalServerError, TimeoutError, ConnectionError),
                                         backoff_factor=2)
     # Validate and fix JSON in tool call arguments
     json_validation_mw = JsonValidationMiddleware(strict=False)
@@ -226,7 +233,10 @@ def create_dev_agent(model: BaseChatModel,
     - context-agent: Read-only codebase exploration (same as general agent)
     - critique-agent: Reviews diffs for bugs, missing tests, and style issues
     """
-    retry_middle = ModelRetryMiddleware(max_retries=6, backoff_factor=2)
+    # Only retry on transient server errors; BadRequestError handled by checkpoint rollback.
+    retry_middle = ModelRetryMiddleware(max_retries=3,
+                                        retry_on=(InternalServerError, TimeoutError, ConnectionError),
+                                        backoff_factor=2)
     json_validation_mw = JsonValidationMiddleware(strict=False)
     tool_name_mw = ToolNameSanitizationMiddleware()
     logging_mw = ModelLoggingMiddleware("dev-agent")

@@ -12,6 +12,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
+from assist.checkpoint_rollback import invoke_with_rollback
 
 def render_tool_calls(message: AIMessage) -> str:
     calls = getattr(message, "tool_calls", None)
@@ -61,12 +62,13 @@ class Thread:
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response"""
-        result = self.agent.invoke(
+        result = invoke_with_rollback(
+            self.agent,
             {"messages": [{"role": "user", "content": text}]},
             {
                 "configurable": {"thread_id": self.thread_id},
                 "max_concurrency": self.max_concurrency
-            }
+            },
         )
         # Extract content from the last AIMessage
         messages = result.get("messages", [])
