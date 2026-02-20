@@ -96,13 +96,22 @@ def create_agent(model: BaseChatModel,
                                        sandbox_backend=sandbox_backend)
     )
 
+    dev_sub = CompiledSubAgent(
+        name="dev-agent",
+        description="Handles ALL software development tasks: writing code, editing code, fixing bugs, adding features, changing behaviour, updating tests, and modifying configuration files. Use this agent whenever the user's request requires creating or changing any source code, tests, or config.",
+        runnable=create_dev_agent(model,
+                                  working_dir,
+                                  checkpointer,
+                                  sandbox_backend=sandbox_backend)
+    )
+
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/general_instructions.md.j2"),
         middleware=mw + [logging_mw],
         backend=backend,
-        subagents=[context_sub, research_sub]
+        subagents=[context_sub, research_sub, dev_sub]
     )
 
     return agent
