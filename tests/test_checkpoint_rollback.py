@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import Mock, patch, PropertyMock
 from openai import BadRequestError
 
-from assist.checkpoint_rollback import invoke_with_rollback
+from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 
 
 def _make_bad_request_error(msg="Expecting ':' delimiter"):
@@ -197,3 +197,88 @@ class TestInvokeWithRollback:
         # 1 initial + 1 retry at cp-3 + 1 retry at cp-2 = 3 attempts
         # Should NOT try cp-1 or cp-0 because depth limit is 2
         assert agent.invoke.call_count == 3
+
+
+class TestRollbackRunnable:
+    """Tests for the RollbackRunnable wrapper used with subagents."""
+
+    def test_invoke_delegates_on_success(self):
+        """Successful invoke passes through to the underlying agent."""
+        agent = Mock()
+        agent.invoke.return_value = {"messages": ["ok"]}
+
+        wrapper = RollbackRunnable(agent)
+        result = wrapper.invoke(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"configurable": {"thread_id": "sub-1"}},
+        )
+
+        assert result == {"messages": ["ok"]}
+        assert agent.invoke.call_count == 1
+
+    def test_invoke_rolls_back_on_bad_request(self):
+        """BadRequestError triggers rollback inside the subagent."""
+        agent = Mock()
+        agent.invoke.side_effect = [
+            _make_bad_request_error(),
+            {"messages": ["recovered"]},
+        ]
+        agent.get_state_history.return_value = [
+            _make_checkpoint("cp-bad", step=1),
+            _make_checkpoint("cp-good", step=0),
+        ]
+
+        wrapper = RollbackRunnable(agent)
+        result = wrapper.invoke(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"configurable": {"thread_id": "sub-1"}},
+        )
+
+        assert result == {"messages": ["recovered"]}
+        assert agent.invoke.call_count == 2
+
+    def test_proxies_other_attributes(self):
+        """Attributes not on RollbackRunnable are proxied to the agent."""
+        agent = Mock()
+        agent.name = "test-agent"
+        agent.get_state.return_value = {"values": {}}
+
+        wrapper = RollbackRunnable(agent)
+        assert wrapper.name == "test-agent"
+        wrapper.get_state({"configurable": {"thread_id": "t1"}})
+        agent.get_state.assert_called_once()
+
+    def test_respects_custom_rollback_params(self):
+        """Custom max_retries_per_step and max_rollback_depth are honoured."""
+        agent = Mock()
+        agent.invoke.side_effect = _make_bad_request_error()
+        agent.get_state_history.return_value = [
+            _make_checkpoint("cp-bad", step=2),
+            _make_checkpoint("cp-1", step=1),
+            _make_checkpoint("cp-0", step=0),
+        ]
+
+        wrapper = RollbackRunnable(
+            agent,
+            max_retries_per_step=1,
+            max_rollback_depth=1,
+        )
+
+        with pytest.raises(BadRequestError):
+            wrapper.invoke(
+                {"messages": [{"role": "user", "content": "hi"}]},
+                {"configurable": {"thread_id": "sub-1"}},
+            )
+
+        # 1 initial + 1 retry at cp-1 = 2 (depth limit 1 prevents going to cp-0)
+        assert agent.invoke.call_count == 2
+
+    def test_invoke_with_no_config(self):
+        """If config is None, an empty dict is passed (no crash)."""
+        agent = Mock()
+        agent.invoke.return_value = {"messages": ["ok"]}
+
+        wrapper = RollbackRunnable(agent)
+        result = wrapper.invoke({"messages": [{"role": "user", "content": "hi"}]})
+
+        assert result == {"messages": ["ok"]}

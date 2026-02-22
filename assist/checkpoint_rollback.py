@@ -12,6 +12,25 @@ often take a different path and avoid the bad content entirely.
 
 Usage:
     result = invoke_with_rollback(agent, input_data, config)
+
+Subagent rollback (Option A — implemented):
+    Wrap each subagent's ``runnable`` with ``RollbackRunnable`` so that
+    when the subagent's internal ``invoke()`` hits a BadRequestError the
+    *subagent* graph is rolled back independently from the parent.  This
+    is safe for read-only subagents (context-agent) and additive-only
+    ones (research-agent).  The dev-agent is excluded for now because it
+    writes to the real filesystem and Docker sandbox — after rollback it
+    would not know what files it already modified.
+
+Future option (Option B — not yet implemented):
+    Use a ``wrap_tool_call`` middleware on the *parent* agent to catch
+    errors from the ``task`` tool (which invokes subagents).  On failure,
+    the parent agent's ``task`` tool result is replaced with an error
+    message so the parent can decide how to proceed (retry, skip, or
+    re-prompt).  This avoids subagent-level rollback entirely — the
+    parent stays in control — but it means the subagent's partial work
+    (file writes, Docker commands) still persists.  Worth exploring if
+    Option A proves insufficient for agents with real-world side effects.
 """
 import logging
 from typing import Any
@@ -109,3 +128,48 @@ def invoke_with_rollback(
 
     # Should not reach here, but just in case:
     raise RuntimeError("invoke_with_rollback: max attempts exceeded")
+
+
+class RollbackRunnable:
+    """Wrap a compiled LangGraph agent so that ``invoke()`` uses rollback.
+
+    This is designed to wrap subagent runnables passed to ``CompiledSubAgent``.
+    When the subagent's own ``invoke()`` hits a rollback-eligible error, it
+    rolls back through the *subagent's* checkpoints independently of the parent.
+
+    All other attributes (``get_state``, ``get_state_history``, ``stream``, etc.)
+    are proxied to the underlying agent so the wrapper is transparent.
+
+    Args:
+        agent: The compiled subagent graph.
+        max_retries_per_step: Passed to ``invoke_with_rollback``.
+        max_rollback_depth: Passed to ``invoke_with_rollback``.
+        rollback_on: Exception types that trigger rollback.
+    """
+
+    def __init__(
+        self,
+        agent: CompiledStateGraph,
+        *,
+        max_retries_per_step: int = 2,
+        max_rollback_depth: int = 3,
+        rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
+    ):
+        self._agent = agent
+        self._max_retries_per_step = max_retries_per_step
+        self._max_rollback_depth = max_rollback_depth
+        self._rollback_on = rollback_on
+
+    def invoke(self, input_data, config=None, **kwargs):
+        return invoke_with_rollback(
+            self._agent,
+            input_data,
+            config or {},
+            max_retries_per_step=self._max_retries_per_step,
+            max_rollback_depth=self._max_rollback_depth,
+            rollback_on=self._rollback_on,
+        )
+
+    def __getattr__(self, name):
+        # Proxy everything else to the underlying agent
+        return getattr(self._agent, name)
