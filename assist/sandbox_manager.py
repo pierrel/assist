@@ -1,6 +1,13 @@
 import logging
+import os
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def _rewrite_localhost(value: str) -> str:
+    """Replace localhost/127.0.0.1 references with host.docker.internal."""
+    return re.sub(r'localhost|127\.0\.0\.1', 'host.docker.internal', value)
 
 SANDBOX_IMAGE = "assist-sandbox"
 
@@ -50,6 +57,12 @@ class SandboxManager:
                 stdin_open=True,
                 tty=False,
                 labels={"assist.sandbox": "true"},
+                extra_hosts={"host.docker.internal": "host-gateway"},
+                environment={
+                    k: _rewrite_localhost(v)
+                    for k, v in os.environ.items()
+                    if k.startswith("ASSIST_")
+                },
             )
             cls._containers[work_dir] = container
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
