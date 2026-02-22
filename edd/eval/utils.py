@@ -1,6 +1,6 @@
 import os
 from unittest import TestCase
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, AIMessage
 
 
 class AgentTestMixin:
@@ -30,6 +30,31 @@ class AgentTestMixin:
             msg = f"Tool '{tool_name}' should have been called. Called tools: {tool_calls}"
 
         self.assertIn(tool_name, tool_calls, msg)
+
+    def assertSubAgentCall(self, agent, subagent_name: str, msg: str = None):
+        """
+        Assert that a specific subagent was called by the agent via the task tool.
+
+        Checks AIMessage tool_calls (outgoing calls) rather than ToolMessages (results),
+        so this passes even if the subagent itself errors out.
+
+        Args:
+            agent: The AgentHarness instance
+            subagent_name: The subagent_type value to look for (e.g. "dev-agent")
+            msg: Optional custom assertion message
+        """
+        subagent_calls = []
+        for m in agent.all_messages():
+            if isinstance(m, AIMessage) and m.tool_calls:
+                for tc in m.tool_calls:
+                    if tc.get("name") == "task":
+                        subagent = tc.get("args", {}).get("subagent_type", "")
+                        subagent_calls.append(subagent)
+
+        if msg is None:
+            msg = f"Subagent '{subagent_name}' should have been called via task tool. Called subagents: {subagent_calls}"
+
+        self.assertIn(subagent_name, subagent_calls, msg)
 
 
 def assertToolCall(test_case, agent, tool_name: str, msg: str = None):
