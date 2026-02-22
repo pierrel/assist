@@ -54,6 +54,10 @@ class Thread:
         self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = model or select_chat_model("mistral-nemo", 0.1)
         self.max_concurrency = max_concurrency
+        self.runconfig = {
+            "configurable": {"thread_id": self.thread_id},
+            "max_concurrency": self.max_concurrency
+        }
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
@@ -65,10 +69,7 @@ class Thread:
         result = invoke_with_rollback(
             self.agent,
             {"messages": [{"role": "user", "content": text}]},
-            {
-                "configurable": {"thread_id": self.thread_id},
-                "max_concurrency": self.max_concurrency
-            },
+            self.runconfig,
         )
         # Extract content from the last AIMessage
         messages = result.get("messages", [])
@@ -84,16 +85,13 @@ class Thread:
         # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
         return self.agent.stream(
             {"messages": [{"role": "user", "content": text}]},
-            {
-                "configurable": {"thread_id": self.thread_id},
-                "max_concurrency": self.max_concurrency
-            },
+            self.runconfig,
             stream_mode=["messages", "updates"]
         )
 
     def get_messages(self) -> list[dict]:
         """Return user/assistant messages from checkpointer state as role/content dicts."""
-        state = self.agent.get_state({"configurable": {"thread_id": self.thread_id}})
+        state = self.agent.get_state(self.runconfig)
         msgs = []
         for m in state.values.get("messages", []):
             if isinstance(m, HumanMessage):
@@ -109,7 +107,7 @@ class Thread:
 
 
     def get_raw_messages(self) -> List[AnyMessage]:
-        state = self.agent.get_state({"configurable": {"thread_id": self.thread_id}})
+        state = self.agent.get_state(self.runconfig)
         return state.values.get("messages", [])
 
     
