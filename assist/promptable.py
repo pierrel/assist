@@ -1,4 +1,5 @@
 import inspect
+from datetime import datetime, timezone
 
 from typing import Any
 
@@ -8,6 +9,9 @@ env = Environment(
     loader=PackageLoader("assist"),
     autoescape=select_autoescape(),
 )
+
+# Make current_datetime available in every template without explicit kwargs.
+env.globals["current_datetime"] = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def _folder_from_module(module: str) -> str:
