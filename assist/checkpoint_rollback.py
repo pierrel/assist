@@ -72,6 +72,7 @@ def invoke_with_rollback(
     """
     current_input = input_data
     current_config = config
+    thread_id = config.get("configurable", {}).get("thread_id", "?")
 
     # Captured once on the first failure so subsequent retries
     # roll back through the *original* history, not through
@@ -95,8 +96,17 @@ def invoke_with_rollback(
                 original_history = list(
                     agent.get_state_history(current_config)
                 )
+                logger.warning(
+                    "Rollback[%s]: %s on first attempt, "
+                    "%d checkpoints available (max_depth=%d, retries_per_step=%d)",
+                    thread_id, type(exc).__name__,
+                    len(original_history), max_rollback_depth, max_retries_per_step,
+                )
                 if len(original_history) < 2:
-                    # Only the bad (or no) checkpoint — can't roll back.
+                    logger.warning(
+                        "Rollback[%s]: only %d checkpoint(s) — cannot roll back, re-raising",
+                        thread_id, len(original_history),
+                    )
                     raise
 
             # --- Decide where to roll back to --------------------------
@@ -108,6 +118,10 @@ def invoke_with_rollback(
                 retries_at_depth = 1
 
             if depth >= max_rollback_depth:
+                logger.error(
+                    "Rollback[%s]: exhausted all %d depths — giving up",
+                    thread_id, max_rollback_depth,
+                )
                 raise
 
             # history[0] is the most recent (likely bad) checkpoint.
@@ -118,9 +132,11 @@ def invoke_with_rollback(
 
             target = original_history[target_idx]
             cp_id = target.config["configurable"].get("checkpoint_id")
+            step = target.metadata.get("step", "?")
             logger.warning(
-                "Rollback: depth=%d retry=%d/%d checkpoint=%s",
-                depth, retries_at_depth, max_retries_per_step, cp_id,
+                "Rollback[%s]: depth=%d retry=%d/%d → checkpoint=%s (step %s)",
+                thread_id, depth, retries_at_depth, max_retries_per_step,
+                cp_id, step,
             )
 
             current_config = target.config

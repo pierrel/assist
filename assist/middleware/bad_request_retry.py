@@ -169,6 +169,7 @@ class BadRequestRetryMiddleware(AgentMiddleware):
     def wrap_model_call(self, request: ModelRequest, handler) -> ModelResponse | AIMessage:
         """Intercept model calls and retry on BadRequestError with sanitization."""
         last_error = None
+        num_messages = len(request.messages)
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -180,10 +181,11 @@ class BadRequestRetryMiddleware(AgentMiddleware):
 
                 if remaining <= 0:
                     logger.error(
-                        "BadRequestRetryMiddleware: all %d retries exhausted. "
+                        "BadRequestRetry: exhausted %d retries (%d messages in context, "
+                        "%d total retries across session). Returning error to agent. "
                         "Error: %s",
-                        self.max_retries,
-                        str(exc)[:300],
+                        self.max_retries, num_messages, self._retry_count,
+                        str(exc)[:200],
                     )
                     # Return an AIMessage so the agent loop continues
                     return AIMessage(
@@ -198,11 +200,10 @@ class BadRequestRetryMiddleware(AgentMiddleware):
                 # Aggressive sanitization on later attempts
                 aggressive = attempt >= 1
                 logger.warning(
-                    "BadRequestRetryMiddleware: attempt %d/%d failed "
-                    "(aggressive=%s). Sanitizing and retrying. Error: %s",
-                    attempt + 1,
-                    self.max_retries + 1,
-                    aggressive,
+                    "BadRequestRetry: attempt %d/%d failed, %d messages, "
+                    "aggressive=%s. Error: %s",
+                    attempt + 1, self.max_retries + 1,
+                    num_messages, aggressive,
                     str(exc)[:200],
                 )
 
