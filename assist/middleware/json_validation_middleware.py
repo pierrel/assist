@@ -72,13 +72,32 @@ class JsonValidationMiddleware(AgentMiddleware):
             logger.warning(f"Could not fix JSON escapes: {json_str[:100]}...")
             return json_str
 
+    def _strip_control_chars(self, text: str) -> str:
+        """Strip control characters that break JSON serialization.
+
+        Removes null bytes and other non-printable control characters
+        (U+0000–U+001F) that are not valid JSON whitespace (\\n, \\r, \\t).
+        These characters cause BadRequestError 400 "Expecting ':' delimiter"
+        from vLLM even when passed inside a JSON string value, because
+        vLLM's own JSON parser trips over them.
+
+        Args:
+            text: Input string
+
+        Returns:
+            String with problematic control characters removed
+        """
+        # Keep \n (0x0A), \r (0x0D), \t (0x09) — they are valid JSON whitespace.
+        # Remove everything else in 0x00–0x1F range plus the lone DEL (0x7F).
+        return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+
     def _sanitize_string_content(self, text: str) -> str:
         """Sanitize string content to ensure it's JSON-safe.
 
         This ensures that when the string is embedded in JSON, it won't cause
         parsing errors. Handles:
+        - Null bytes and control characters (primary cause of 400 errors from vLLM)
         - Trailing backslashes (common in markdown)
-        - Control characters
         - Already-escaped sequences are preserved
 
         Args:
@@ -90,35 +109,53 @@ class JsonValidationMiddleware(AgentMiddleware):
         if not isinstance(text, str):
             return text
 
-        # Python's json.dumps will handle proper escaping, but we need to
-        # ensure the content doesn't have issues before it gets there.
-        # The main issue is trailing backslashes which aren't followed by
-        # a valid escape sequence.
+        # First pass: strip control characters that vLLM can't handle even
+        # when properly JSON-encoded (null bytes cause "Expecting ':' delimiter").
+        text = self._strip_control_chars(text)
 
-        # Test if the string is already properly escapable
+        # Second pass: ensure the result is JSON-serialisable.
         try:
             json.dumps(text)
             return text
         except (TypeError, ValueError):
-            # If there's an issue, try to fix it
             pass
 
-        # Escape backslashes that aren't part of valid escape sequences
-        # This is a bit tricky - we want to escape lone backslashes but not
-        # valid escape sequences like \n, \t, etc.
-
-        # Simple approach: if json.dumps fails, replace all backslashes
-        # and let json.dumps re-escape properly
+        # If json.dumps still fails, escape bare backslashes.
         sanitized = text.replace('\\', '\\\\')
-
-        # Test if it works now
         try:
             json.dumps(sanitized)
             return sanitized
         except (TypeError, ValueError):
-            # If still failing, just return original and log warning
             logger.warning(f"Could not sanitize string content: {text[:100]}...")
             return text
+
+    def _sanitize_content(self, content) -> tuple[Any, bool]:
+        """Sanitize message content (string or list of content parts).
+
+        Returns:
+            (sanitized_content, was_modified)
+        """
+        if isinstance(content, str):
+            sanitized = self._sanitize_string_content(content)
+            return sanitized, sanitized != content
+
+        if isinstance(content, list):
+            modified = False
+            result = []
+            for part in content:
+                if isinstance(part, dict):
+                    new_part = dict(part)
+                    if 'text' in new_part and isinstance(new_part['text'], str):
+                        san = self._sanitize_string_content(new_part['text'])
+                        if san != new_part['text']:
+                            new_part['text'] = san
+                            modified = True
+                    result.append(new_part)
+                else:
+                    result.append(part)
+            return result, modified
+
+        return content, False
 
 
     def _validate_tool_call(self, tool_call: dict) -> tuple[bool, str | None]:
@@ -243,13 +280,11 @@ class JsonValidationMiddleware(AgentMiddleware):
             # Create a copy to avoid modifying the original
             sanitized_msg = msg
 
-            # Check if this message has content that needs sanitization
-            if hasattr(msg, 'content') and isinstance(msg.content, str):
-                original_content = msg.content
-                sanitized_content = self._sanitize_string_content(original_content)
+            # Sanitize message content (handles both str and list[content_part])
+            if hasattr(msg, 'content') and msg.content is not None:
+                sanitized_content, content_changed = self._sanitize_content(msg.content)
 
-                if sanitized_content != original_content:
-                    # Need to modify the message
+                if content_changed:
                     if hasattr(msg, 'model_copy'):
                         sanitized_msg = msg.model_copy()
                     elif hasattr(msg, 'copy'):
@@ -275,7 +310,7 @@ class JsonValidationMiddleware(AgentMiddleware):
 
                         for key, value in args.items():
                             if isinstance(value, str):
-                                # Sanitize string arguments
+                                # Sanitize string arguments (strip control chars first)
                                 sanitized_value = self._sanitize_string_content(value)
 
                                 if sanitized_value != value:
