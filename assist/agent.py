@@ -17,6 +17,7 @@ from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
+from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -86,23 +87,21 @@ def create_agent(model: BaseChatModel,
     context_sub = CompiledSubAgent(
         name="context-agent",
         description="Discovers and surfaces relevant context from the user's local filesystem. Use this agent to find files, read content, and understand the user's file structure before taking action. It is read-only — it will not modify files.",
-        runnable=RollbackRunnable(
-            create_context_agent(model,
-                                 working_dir,
-                                 checkpointer,
-                                 [retry_middle, json_validation_mw, tool_name_mw],
-                                 sandbox_backend=sandbox_backend))
+        runnable=create_context_agent(model,
+                                      working_dir,
+                                      checkpointer,
+                                      [retry_middle, json_validation_mw, tool_name_mw],
+                                      sandbox_backend=sandbox_backend)
     )
 
     research_sub = CompiledSubAgent(
         name="research-agent",
         description="Used to conduct thorough research on external topics. The result of the research will be placed in a file and the file name/path will be returned. Provide a filename for more control.",
-        runnable=RollbackRunnable(
-            create_research_agent(model,
-                                  working_dir,
-                                  checkpointer,
-                                  [retry_middle, json_validation_mw, tool_name_mw],
-                                  sandbox_backend=sandbox_backend))
+        runnable=create_research_agent(model,
+                                       working_dir,
+                                       checkpointer,
+                                       [retry_middle, json_validation_mw, tool_name_mw],
+                                       sandbox_backend=sandbox_backend)
     )
 
     dev_sub = CompiledSubAgent(
@@ -129,7 +128,13 @@ def create_context_agent(model: BaseChatModel,
                          working_dir: str,
                          checkpointer=None,
                          middleware=[],
-                         sandbox_backend=None) -> CompiledStateGraph:
+                         sandbox_backend=None) -> RollbackRunnable:
+    """Create a read-only context agent for codebase exploration.
+
+    Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
+    rolls back to a previous checkpoint rather than crashing.  This is safe
+    because the context-agent is read-only (no filesystem side effects).
+    """
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
@@ -157,17 +162,21 @@ def create_context_agent(model: BaseChatModel,
         middleware=base_mw + middleware + [logging_mw],
     )
 
-    return agent
+    return RollbackRunnable(agent)
 
 
 def create_research_agent(model: BaseChatModel,
                           working_dir: str,
                           checkpointer=None,
                           middleware=[],
-                          sandbox_backend=None) -> CompiledStateGraph:
+                          sandbox_backend=None) -> RollbackRunnable:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     Includes DuckDuckGo web search and a critique/research/fact-check subagent trio.
+
+    Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
+    rolls back to a previous checkpoint.  Research agents only write additive
+    report files, so rollback is low-risk.
     """
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
@@ -220,7 +229,7 @@ def create_research_agent(model: BaseChatModel,
                    fact_check_sub_agent]
     )
 
-    return agent
+    return RollbackRunnable(agent)
 
 
 def create_dev_agent(model: BaseChatModel,
@@ -230,12 +239,16 @@ def create_dev_agent(model: BaseChatModel,
     """Create a software development agent for writing, testing, and improving code.
 
     Runs inside a Docker sandbox and follows TDD practices.
+    Uses BadRequestRetryMiddleware instead of checkpoint rollback — the dev-agent
+    writes to the real filesystem and Docker sandbox, so rollback would leave
+    orphaned side effects.  On BadRequestError the middleware sanitizes messages
+    and retries, keeping the agent moving forward.
 
     Sub-agents:
     - context-agent: Read-only codebase exploration (same as general agent)
     - critique-agent: Reviews diffs for bugs, missing tests, and style issues
     """
-    # Only retry on transient server errors; BadRequestError handled by checkpoint rollback.
+    # Only retry on transient server errors (5xx, timeouts, connection issues).
     retry_middle = ModelRetryMiddleware(max_retries=3,
                                         retry_on=(InternalServerError, TimeoutError, ConnectionError),
                                         backoff_factor=2)
@@ -243,8 +256,10 @@ def create_dev_agent(model: BaseChatModel,
     tool_name_mw = ToolNameSanitizationMiddleware()
     logging_mw = ModelLoggingMiddleware("dev-agent")
     context_eviction_mw = ContextAwareToolEvictionMiddleware(trigger_fraction=0.75)
+    # BadRequestError (400) — sanitize messages and retry instead of rollback.
+    bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
 
-    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
+    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw, context_eviction_mw]
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
@@ -254,12 +269,11 @@ def create_dev_agent(model: BaseChatModel,
     context_sub = CompiledSubAgent(
         name="context-agent",
         description="Discovers and surfaces relevant context from the project filesystem. Use this to understand project structure, find files, read code, and discover conventions. Read-only — will not modify files.",
-        runnable=RollbackRunnable(
-            create_context_agent(model,
-                                 working_dir,
-                                 checkpointer,
-                                 [retry_middle, json_validation_mw, tool_name_mw],
-                                 sandbox_backend=sandbox_backend))
+        runnable=create_context_agent(model,
+                                      working_dir,
+                                      checkpointer,
+                                      [retry_middle, json_validation_mw, tool_name_mw],
+                                      sandbox_backend=sandbox_backend)
     )
 
     critique_sub_agent = {
