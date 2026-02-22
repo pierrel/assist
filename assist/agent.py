@@ -12,7 +12,7 @@ from openai import InternalServerError
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS
-from assist.checkpoint_rollback import invoke_with_rollback
+from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
@@ -86,21 +86,23 @@ def create_agent(model: BaseChatModel,
     context_sub = CompiledSubAgent(
         name="context-agent",
         description="Discovers and surfaces relevant context from the user's local filesystem. Use this agent to find files, read content, and understand the user's file structure before taking action. It is read-only — it will not modify files.",
-        runnable=create_context_agent(model,
-                                      working_dir,
-                                      checkpointer,
-                                      [retry_middle, json_validation_mw, tool_name_mw],
-                                      sandbox_backend=sandbox_backend)
+        runnable=RollbackRunnable(
+            create_context_agent(model,
+                                 working_dir,
+                                 checkpointer,
+                                 [retry_middle, json_validation_mw, tool_name_mw],
+                                 sandbox_backend=sandbox_backend))
     )
 
     research_sub = CompiledSubAgent(
         name="research-agent",
         description="Used to conduct thorough research on external topics. The result of the research will be placed in a file and the file name/path will be returned. Provide a filename for more control.",
-        runnable=create_research_agent(model,
-                                       working_dir,
-                                       checkpointer,
-                                       [retry_middle, json_validation_mw, tool_name_mw],
-                                       sandbox_backend=sandbox_backend)
+        runnable=RollbackRunnable(
+            create_research_agent(model,
+                                  working_dir,
+                                  checkpointer,
+                                  [retry_middle, json_validation_mw, tool_name_mw],
+                                  sandbox_backend=sandbox_backend))
     )
 
     dev_sub = CompiledSubAgent(
@@ -252,11 +254,12 @@ def create_dev_agent(model: BaseChatModel,
     context_sub = CompiledSubAgent(
         name="context-agent",
         description="Discovers and surfaces relevant context from the project filesystem. Use this to understand project structure, find files, read code, and discover conventions. Read-only — will not modify files.",
-        runnable=create_context_agent(model,
-                                      working_dir,
-                                      checkpointer,
-                                      [retry_middle, json_validation_mw, tool_name_mw],
-                                      sandbox_backend=sandbox_backend)
+        runnable=RollbackRunnable(
+            create_context_agent(model,
+                                 working_dir,
+                                 checkpointer,
+                                 [retry_middle, json_validation_mw, tool_name_mw],
+                                 sandbox_backend=sandbox_backend))
     )
 
     critique_sub_agent = {
