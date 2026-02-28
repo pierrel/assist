@@ -6,6 +6,7 @@ from datetime import datetime
 
 from langchain_core.messages import AIMessage, AIMessageChunk
 
+from assist.env import load_dev_env
 from assist.thread import ThreadManager, Thread, render_tool_calls
 
 # Setup logging to file
@@ -46,6 +47,7 @@ def stream_message(thread: Thread, message: str):
 
 
 def main():
+    load_dev_env()
     working_dir = os.getcwd()
     thread_dir = tempfile.mkdtemp()
     print(f"Working directory: {working_dir}")
