@@ -8,6 +8,7 @@ from fastapi import FastAPI, Form, HTTPException, BackgroundTasks
 from contextlib import asynccontextmanager
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from assist.env import load_dev_env
 from assist.thread import Thread, ThreadManager
 import markdown
 from pygments import highlight
@@ -19,6 +20,8 @@ from assist.sandbox_manager import SandboxManager
 # debug logging by default
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger("assist.model").setLevel(logging.DEBUG)
+
+load_dev_env()
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
