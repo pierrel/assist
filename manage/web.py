@@ -148,7 +148,14 @@ def render_index() -> str:
     else:
         for tid in tids:
             title = get_cached_description(tid)
-            items.append(f'<li><a href="/thread/{tid}">{html.escape(title)}</a></li>')
+            items.append(
+                f'<li style="display:flex; align-items:center; gap:.5rem;">'
+                f'<a href="/thread/{tid}" style="flex:1">{html.escape(title)}</a>'
+                f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
+                f'<button type="submit" class="del-btn" '
+                f'onclick="return confirm(\'Delete this thread?\')">&#x2715;</button>'
+                f'</form></li>'
+            )
     items_html = "\n".join(items)
     return f"""
     <html>
@@ -160,8 +167,11 @@ def render_index() -> str:
           body {{ font-family: sans-serif; margin: 0; }}
           .container {{ max-width: 800px; margin: 0 auto; padding: var(--pad); }}
           .topbar {{ display: flex; gap: .5rem; flex-wrap: wrap; justify-content: space-between; align-items: center; }}
-          ul {{ line-height: 1.8; padding-left: 1rem; }}
+          ul {{ line-height: 1.8; padding-left: 1rem; list-style: none; }}
+          li {{ margin: .2rem 0; }}
           a {{ text-decoration: none; display: block; padding: .5rem .6rem; border-radius: 6px; }}
+          .del-btn {{ background: none; border: none; color: #999; cursor: pointer; font-size: 1.1rem; padding: .2rem .4rem; border-radius: 4px; }}
+          .del-btn:hover {{ color: #c00; background: #fee; }}
           a:active, a:focus {{ outline: none; }}
           .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; cursor: pointer; }}
           .new-thread-form {{ margin-bottom: 1.5rem; padding: 1rem; background: #f9f9f9; border-radius: 8px; border: 1px solid #ddd; }}
@@ -419,6 +429,7 @@ def _process_message(tid: str, text: str) -> None:
     except FileNotFoundError:
         return
     resp = chat.message(text)
+    MANAGER.touch(tid)
 
     # Generate description if there is none
     get_cached_description(tid)
@@ -447,6 +458,17 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
         raise HTTPException(status_code=404, detail="Thread not found")
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+@app.post("/thread/{tid}/delete")
+async def delete_thread(tid: str):
+    tdir = os.path.join(MANAGER.root_dir, tid)
+    if not os.path.isdir(tdir):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    MANAGER.soft_delete(tid)
+    DESCRIPTION_CACHE.pop(tid, None)
+    DOMAIN_MANAGERS.pop(tid, None)
+    return RedirectResponse(url="/", status_code=303)
 
 
 def _capture_conversation(tid: str, reason: str) -> None:
