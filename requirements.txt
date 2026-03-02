@@ -37,3 +37,6 @@ docker>=7.0.0
 # Testing
 pytest>=9.0.2
 pytest-playwright>=0.6.2
+
+# Scheduling
+apscheduler
