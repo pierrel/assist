@@ -1,0 +1,10 @@
+{
+  "thread_id": "",
+  "starting_prompt": "",
+  "scheduled_prompt": "",
+  "cron_schedule": "0 0 * * *",  // Default: Daily at midnight
+  "last_run": "",
+  "status": "active",
+  "created_at": "",
+  "last_updated": ""
+}
