@@ -170,8 +170,31 @@ n    checkpointing via SqliteSaver.
         self.model = select_chat_model("mistral-nemo", 0.1)
 
     def list(self) -> list[str]:
-        return [name for name in os.listdir(self.root_dir)
-                if os.path.isdir(os.path.join(self.root_dir, name)) and name != "__pycache__"]
+        """Return thread IDs filtered (no soft-deleted) and sorted by mtime descending."""
+        dirs = []
+        for name in os.listdir(self.root_dir):
+            dpath = os.path.join(self.root_dir, name)
+            if not os.path.isdir(dpath) or name == "__pycache__":
+                continue
+            if os.path.exists(os.path.join(dpath, ".deleted")):
+                continue
+            dirs.append((name, os.path.getmtime(dpath)))
+        dirs.sort(key=lambda x: x[1], reverse=True)
+        return [name for name, _ in dirs]
+
+    def soft_delete(self, thread_id: str) -> None:
+        """Mark a thread as deleted by writing a .deleted marker file."""
+        tdir = os.path.join(self.root_dir, thread_id)
+        if os.path.isdir(tdir):
+            marker = os.path.join(tdir, ".deleted")
+            with open(marker, "w") as f:
+                f.write(datetime.now().isoformat())
+
+    def touch(self, thread_id: str) -> None:
+        """Update mtime of thread dir so it sorts to the top of list()."""
+        tdir = os.path.join(self.root_dir, thread_id)
+        if os.path.isdir(tdir):
+            os.utime(tdir, None)
 
     def get(self,
             thread_id: str,

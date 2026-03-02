@@ -66,6 +66,7 @@ def main():
             if user_input.strip().lower() == "/quit":
                 break
             stream_message(chat, user_input)
+            tm.touch(chat.thread_id)
     finally:
         pass
 
