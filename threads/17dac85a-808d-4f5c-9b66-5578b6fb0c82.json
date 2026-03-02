@@ -1,0 +1,11 @@
+{
+    "thread_id": "17dac85a-808d-4f5c-9b66-5578b6fb0c82",
+    "name": "Test Thread",
+    "description": "Test Description",
+    "created_at": "2026-03-02T14:07:47.489069",
+    "updated_at": "2026-03-02T14:07:47.489070",
+    "status": "active",
+    "scheduled_prompt": "Test Scheduled Prompt",
+    "cron_schedule": "0 0 * * *",
+    "last_scheduled_run": null
+}

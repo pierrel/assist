@@ -168,6 +168,11 @@ n    checkpointing via SqliteSaver.
         self.checkpointer = SqliteSaver(self.conn)
         # Create and reuse one chat model for all threads
         self.model = select_chat_model("mistral-nemo", 0.1)
+        
+        # Initialize thread scheduler
+        from assist.thread_scheduler import ensure_threads_dir, load_thread_configs
+        ensure_threads_dir()
+        self.thread_configs = load_thread_configs()
 
     def list(self) -> list[str]:
         """Return thread IDs filtered (no soft-deleted) and sorted by mtime descending."""
@@ -232,13 +237,22 @@ n    checkpointing via SqliteSaver.
             except Exception:
                 pass
 
-    def new(self, working_dir: str|None = None, sandbox_backend=None) -> Thread:
+    def new(self, working_dir: str|None = None, sandbox_backend=None, thread_name: str = "", description: str = "", scheduled_prompt: str = None, cron_schedule: str = "0 0 * * *") -> Thread:
         # Derive a clean ID for directory: prefer timestamp+rand
         tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
         tdir = os.path.join(self.root_dir, tid)
         os.makedirs(tdir, exist_ok=True)
         if not working_dir:
             working_dir = self.make_default_working_dir(tdir)
+
+        # Create thread with scheduler configuration
+        from assist.thread_scheduler import create_thread as create_thread_scheduler
+        create_thread_scheduler(
+            thread_name=thread_name,
+            description=description,
+            scheduled_prompt=scheduled_prompt,
+            cron_schedule=cron_schedule,
+        )
 
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
                       model=self.model, sandbox_backend=sandbox_backend)
