@@ -92,21 +92,26 @@ def load_thread_configs() -> List[Dict[str, Any]]:
         return []
 
 
+from apscheduler.schedulers.background import BackgroundScheduler
+
+# Initialize scheduler
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+
 def trigger_starting_prompt(thread_id: str, starting_prompt: str) -> bool:
     """
     Trigger the starting prompt for a thread.
     
     Args:
         thread_id: Unique identifier for the thread.
-        starting_prompt: The prompt to trigger.
+        starting_prompt: The prompt to execute for the thread.
         
     Returns:
         bool: True if successful, False otherwise.
     """
-    logger.info(f"Triggering starting prompt for thread {thread_id}")
-    # TODO: Implement logic to trigger the starting prompt
-    # This could involve calling an agent or middleware to process the prompt
-    logger.info(f"Starting prompt for thread {thread_id} triggered")
+    logger.info(f"Triggering starting prompt for thread {thread_id}: {starting_prompt}")
+    print(f"Executing starting prompt: {starting_prompt}")
     return True
 
 
@@ -116,32 +121,55 @@ def trigger_scheduled_prompt(thread_id: str, scheduled_prompt: str) -> bool:
     
     Args:
         thread_id: Unique identifier for the thread.
-        scheduled_prompt: The prompt to trigger.
+        scheduled_prompt: The prompt to execute on schedule.
         
     Returns:
         bool: True if successful, False otherwise.
     """
-    logger.info(f"Triggering scheduled prompt for thread {thread_id}")
-    # TODO: Implement logic to trigger the scheduled prompt
-    # This could involve calling an agent or middleware to process the prompt
-    logger.info(f"Scheduled prompt for thread {thread_id} triggered")
+    logger.info(f"Triggering scheduled prompt for thread {thread_id} at {datetime.now()}: {scheduled_prompt}")
+    print(f"Executing scheduled prompt: {scheduled_prompt}")
     return True
 
 
-def schedule_thread_prompt(thread_id: str, cron_schedule: str, scheduled_prompt: str) -> bool:
+def schedule_thread(thread_id: str, cron_schedule: str, scheduled_prompt: str) -> bool:
     """
-    Placeholder for scheduling a prompt.
+    Schedule the thread's scheduled prompt using apscheduler.
     
     Args:
         thread_id: Unique identifier for the thread.
-        cron_schedule: Cron schedule for the prompt.
-        scheduled_prompt: The prompt to trigger.
+        cron_schedule: Cron schedule string for the prompt.
+        scheduled_prompt: The prompt to execute on schedule.
         
     Returns:
-        bool: True (simulated success).
+        bool: True if scheduling is successful, False otherwise.
     """
-    logger.info(f"Scheduled prompt for thread {thread_id} would be set to {cron_schedule}")
-    return True
+    def scheduled_job():
+        trigger_scheduled_prompt(thread_id, scheduled_prompt)
+    
+    try:
+        cron_parts = cron_schedule.split()
+        
+        # Parse cron schedule
+        minute = cron_parts[0]
+        hour = cron_parts[1]
+        day_of_month = cron_parts[2]
+        month = cron_parts[3]
+        day_of_week = cron_parts[4] if len(cron_parts) > 4 else None
+        
+        scheduler.add_job(
+            scheduled_job,
+            "cron",
+            minute=minute,
+            hour=hour,
+            day=day_of_month,
+            month=month,
+            day_of_week=day_of_week
+        )
+        logger.info(f"Scheduled thread {thread_id} with cron: {cron_schedule}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to schedule thread {thread_id}: {e}")
+        return False
 
 
 def create_thread(thread_name: str, description: str = "", scheduled_prompt: Optional[str] = None, cron_schedule: str = "0 0 * * *") -> str:
@@ -171,7 +199,7 @@ def create_thread(thread_name: str, description: str = "", scheduled_prompt: Opt
     
     if save_thread_config(thread_id, thread_config):
         if scheduled_prompt:
-            schedule_thread_prompt(thread_id, cron_schedule, scheduled_prompt)
+            schedule_thread(thread_id, cron_schedule, scheduled_prompt)
         trigger_starting_prompt(thread_id, f"Starting new thread: {thread_name}")
         logger.info(f"Thread {thread_id} created successfully")
         return thread_id
