@@ -1,3 +1,5 @@
+import glob
+import os
 import uuid
 import logging
 
@@ -56,6 +58,35 @@ class AgentHarness:
 
 
 
+_PROJECT_INDICATORS = [
+    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+    "Pipfile", "tox.ini",
+    "package.json", "tsconfig.json",
+    "Cargo.toml",
+    "go.mod",
+    "pom.xml", "build.gradle",
+    "Gemfile",
+    "Makefile", "CMakeLists.txt", "Dockerfile",
+]
+
+_PROJECT_INDICATOR_GLOBS = ["*.sln", "*.csproj"]
+
+
+def detect_project_indicators(path: str) -> list[str]:
+    """Scan *path* for common software-project files.
+
+    Returns the basenames of any indicator files found (top-level only).
+    """
+    found: list[str] = []
+    for name in _PROJECT_INDICATORS:
+        if os.path.isfile(os.path.join(path, name)):
+            found.append(name)
+    for pattern in _PROJECT_INDICATOR_GLOBS:
+        matches = glob.glob(os.path.join(path, pattern))
+        found.extend(os.path.basename(m) for m in matches)
+    return found
+
+
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
@@ -106,7 +137,7 @@ def create_agent(model: BaseChatModel,
 
     dev_sub = CompiledSubAgent(
         name="dev-agent",
-        description="Handles ALL software development tasks: writing code, editing code, fixing bugs, adding features, changing behaviour, updating tests, and modifying configuration files. Use this agent whenever the user's request requires creating or changing any source code, tests, or config.",
+        description="Handles ALL software development tasks: writing code, editing code, fixing bugs, adding features, changing behaviour, updating tests, modifying configuration files, understanding code, explaining code, debugging errors, reviewing code, and answering questions about the codebase. Use this agent for ANY request related to a software project.",
         runnable=create_dev_agent(model,
                                   working_dir,
                                   checkpointer,
@@ -116,7 +147,10 @@ def create_agent(model: BaseChatModel,
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/general_instructions.md.j2"),
+        system_prompt=base_prompt_for(
+            "deepagents/general_instructions.md.j2",
+            project_indicators=detect_project_indicators(working_dir),
+        ),
         middleware=mw + [logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, dev_sub]
