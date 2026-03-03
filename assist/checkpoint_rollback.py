@@ -36,6 +36,7 @@ import logging
 from typing import Any
 
 from openai import BadRequestError
+from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def invoke_with_rollback(
     *,
     max_retries_per_step: int = 2,
     max_rollback_depth: int = 3,
-    rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
+    rollback_on: tuple[type[Exception], ...] = (BadRequestError, GraphRecursionError),
 ) -> dict[str, Any]:
     """Invoke an agent with checkpoint-based rollback for state errors.
 
@@ -62,7 +63,7 @@ def invoke_with_rollback(
         max_rollback_depth: Maximum number of checkpoints to go back
             through before giving up.
         rollback_on: Exception types that trigger a rollback (default:
-            ``BadRequestError``).
+            ``(BadRequestError, GraphRecursionError)``).
 
     Returns:
         The agent's invoke result (dict with ``messages`` key).
