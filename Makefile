@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history
 
 eval:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
@@ -42,6 +42,12 @@ web: sandbox-build
 
 smoke:
 	$(call with-dev-env,./scripts/smoke_test.sh)
+
+pull-eval-history:
+	@echo "→ Pulling eval history from $(DEPLOY_HOST):$(DEPLOY_PATH)/edd/history/ ..."
+	@mkdir -p edd/history
+	@rsync -avz $(DEPLOY_HOST):$(DEPLOY_PATH)/edd/history/ edd/history/
+	@echo "✓ Eval history synced"
 
 sandbox-build:
 	docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .
@@ -129,6 +135,7 @@ help:
 	@echo "  make smoke          - Run smoke test against running server"
 	@echo "  make sandbox-build  - Build Docker sandbox image"
 	@echo "  make sandbox-shell  - Run interactive sandbox shell"
+	@echo "  make pull-eval-history - Pull eval results from deploy server"
 	@echo ""
 	@echo "Deployment:"
 	@echo "  make deploy         - Full deployment (code + service + restart)"
