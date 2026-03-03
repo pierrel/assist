@@ -162,7 +162,8 @@ def create_context_agent(model: BaseChatModel,
         middleware=base_mw + middleware + [logging_mw],
     )
 
-    return RollbackRunnable(agent)
+    # 100 graph steps ≈ 50 model calls — plenty for a read-only explorer.
+    return RollbackRunnable(agent, recursion_limit=100)
 
 
 def create_research_agent(model: BaseChatModel,
@@ -229,7 +230,8 @@ def create_research_agent(model: BaseChatModel,
                    fact_check_sub_agent]
     )
 
-    return RollbackRunnable(agent)
+    # 300 graph steps ≈ 150 model calls — research is multi-step but bounded.
+    return RollbackRunnable(agent, recursion_limit=300)
 
 
 def create_dev_agent(model: BaseChatModel,
