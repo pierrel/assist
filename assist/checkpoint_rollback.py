@@ -162,6 +162,9 @@ class RollbackRunnable:
         max_retries_per_step: Passed to ``invoke_with_rollback``.
         max_rollback_depth: Passed to ``invoke_with_rollback``.
         rollback_on: Exception types that trigger rollback.
+        recursion_limit: If set, injected into the config passed to the
+            agent to cap the number of graph steps (default: None = use
+            LangGraph default of 1000).
     """
 
     def __init__(
@@ -170,18 +173,23 @@ class RollbackRunnable:
         *,
         max_retries_per_step: int = 2,
         max_rollback_depth: int = 3,
-        rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
+        rollback_on: tuple[type[Exception], ...] = (BadRequestError, GraphRecursionError),
+        recursion_limit: int | None = None,
     ):
         self._agent = agent
         self._max_retries_per_step = max_retries_per_step
         self._max_rollback_depth = max_rollback_depth
         self._rollback_on = rollback_on
+        self._recursion_limit = recursion_limit
 
     def invoke(self, input_data, config=None, **kwargs):
+        config = config or {}
+        if self._recursion_limit is not None:
+            config["recursion_limit"] = self._recursion_limit
         return invoke_with_rollback(
             self._agent,
             input_data,
-            config or {},
+            config,
             max_retries_per_step=self._max_retries_per_step,
             max_rollback_depth=self._max_rollback_depth,
             rollback_on=self._rollback_on,
