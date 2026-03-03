@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell
 
 eval:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
@@ -39,6 +39,9 @@ test:
 
 web: sandbox-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
+
+smoke:
+	$(call with-dev-env,./scripts/smoke_test.sh)
 
 sandbox-build:
 	docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .
@@ -123,6 +126,7 @@ help:
 	@echo "  make web            - Run web server locally (uses .dev.env)"
 	@echo "  make test           - Run tests"
 	@echo "  make eval           - Run evals"
+	@echo "  make smoke          - Run smoke test against running server"
 	@echo "  make sandbox-build  - Build Docker sandbox image"
 	@echo "  make sandbox-shell  - Run interactive sandbox shell"
 	@echo ""
