@@ -151,12 +151,20 @@ def git_diff_main(repo_dir: str) -> List[Change]:
 
 
 def git_push(repo_dir: str) -> None:
-    """Push current branch to origin, setting upstream if needed."""
+    """Push current branch to origin, setting upstream if needed.
+
+    Logs a warning instead of raising on push failure so that the
+    local commit is preserved even when the remote is unreachable.
+    """
     # Determine current branch
     cur = subprocess.run(['git', '-C', repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
     branch = cur.stdout.strip()
-    subprocess.run(['git', '-C', repo_dir, 'push', '--set-upstream', 'origin', branch], check=True)
+    result = subprocess.run(['git', '-C', repo_dir, 'push', '--set-upstream', 'origin', branch],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.warning("git push failed for %s (branch %s): %s",
+                        repo_dir, branch, result.stderr.strip())
 
 
 def git_commit(repo_dir: str, message: str) -> None:
