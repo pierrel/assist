@@ -57,7 +57,8 @@ def git_diff(repo_dir: str) -> List[Change]:
             ['git', '-C', repo_dir, 'diff', '--no-color', '--', path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            encoding='utf-8',
+            errors='replace',
             check=False,
         )
         if d.returncode not in (0, 1):
@@ -81,7 +82,8 @@ def git_diff(repo_dir: str) -> List[Change]:
             ['git', '-C', repo_dir, 'diff', '--no-index', '--no-color', '--', '/dev/null', path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            encoding='utf-8',
+            errors='replace',
             check=False,
         )
         if d.returncode not in (0, 1):
@@ -115,7 +117,8 @@ def git_diff_main(repo_dir: str) -> List[Change]:
             ['git', '-C', repo_dir, 'diff', '--no-color', 'main...', '--', path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            encoding='utf-8',
+            errors='replace',
             check=False,
         )
         if d.returncode not in (0, 1):
@@ -139,7 +142,8 @@ def git_diff_main(repo_dir: str) -> List[Change]:
             ['git', '-C', repo_dir, 'diff', '--no-index', '--no-color', '--', '/dev/null', path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            encoding='utf-8',
+            errors='replace',
             check=False,
         )
         if d.returncode not in (0, 1):
