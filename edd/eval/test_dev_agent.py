@@ -135,6 +135,18 @@ class TestDevAgent(TestCase):
             if name in ('edit_file', 'edit')
         ]
 
+    def _task_calls(self, agent) -> list[tuple[str, str]]:
+        """Return [(agent_name, prompt), ...] from all ``task`` tool calls."""
+        return [
+            (args.get('agent', args.get('name', '')), args.get('description', args.get('prompt', '')))
+            for name, args in self._get_tool_calls(agent)
+            if name == 'task'
+        ]
+
+    def _tool_call_order(self, agent) -> list[str]:
+        """Return tool names in order of invocation."""
+        return [name for name, _ in self._get_tool_calls(agent)]
+
     # ------------------------------------------------------------------
     # Evals — ordered from simplest to most complex
     # ------------------------------------------------------------------
@@ -252,6 +264,118 @@ class TestDevAgent(TestCase):
             len(test_runs) > 0,
             f"Agent should run tests via execute. Executed: {commands}. "
             f"All tool calls: {[n for n, _ in self._get_tool_calls(agent)]}",
+        )
+
+    def test_uses_context_agent_before_changes(self):
+        """The dev agent should call context-agent BEFORE making any writes or edits."""
+        agent = self._create_agent()
+        self._invoke(agent,
+            "Add a logging statement to the top of every public method in "
+            "`assist/thread.py` that logs the method name when called."
+        )
+
+        call_order = self._tool_call_order(agent)
+        task_indices = [i for i, name in enumerate(call_order) if name == 'task']
+        write_indices = [i for i, name in enumerate(call_order)
+                         if name in ('write', 'write_file', 'edit', 'edit_file')]
+
+        # context-agent should be called (via task) at least once
+        task_calls = self._task_calls(agent)
+        context_calls = [
+            (name, prompt) for name, prompt in task_calls
+            if 'context' in name.lower()
+        ]
+        self.assertTrue(
+            len(context_calls) > 0,
+            f"Agent should call context-agent before making changes. "
+            f"Task calls: {task_calls}. All tool calls: {call_order}",
+        )
+
+        # The first task call should come before the first write/edit
+        if task_indices and write_indices:
+            self.assertLess(
+                task_indices[0], write_indices[0],
+                f"context-agent (task) should be called before any write/edit. "
+                f"First task at index {task_indices[0]}, "
+                f"first write/edit at index {write_indices[0]}",
+            )
+
+    def test_follows_existing_patterns(self):
+        """The dev agent should follow existing patterns when creating new code."""
+        agent = self._create_agent()
+        self._invoke(agent,
+            "Add a new middleware class called `RequestTimingMiddleware` in "
+            "`assist/middleware/request_timing.py` that logs how long each "
+            "model call takes. Follow the same patterns as the existing "
+            "middleware classes in the project."
+        )
+
+        # Should have created the file
+        written = self._written_paths(agent) + self._edited_paths(agent)
+        middleware_files = [p for p in written if 'timing' in p.lower() or 'middleware' in p.lower()]
+        self.assertTrue(
+            len(middleware_files) > 0,
+            f"Agent should create the middleware file. Modified: {written}",
+        )
+
+        # Verify the file exists in the sandbox and follows patterns
+        result = self.sandbox.execute(
+            "cat /workspace/assist/middleware/request_timing.py 2>/dev/null"
+        )
+        if result.exit_code == 0 and result.output.strip():
+            content = result.output
+            # Should use a class-based structure like other middleware
+            self.assertIn('class', content,
+                          "Middleware should be class-based like existing middleware")
+            # Should import from the middleware ecosystem
+            self.assertTrue(
+                'middleware' in content.lower() or 'Middleware' in content,
+                f"Should reference middleware patterns. Content preview: {content[:500]}",
+            )
+
+    def test_uses_research_agent(self):
+        """The dev agent should use research-agent for unfamiliar topics."""
+        agent = self._create_agent()
+        self._invoke(agent,
+            "Add rate limiting to the sandbox execute function using the "
+            "token bucket algorithm. Research how the token bucket algorithm "
+            "works and the best way to implement it in Python before writing code."
+        )
+
+        task_calls = self._task_calls(agent)
+        research_calls = [
+            (name, prompt) for name, prompt in task_calls
+            if 'research' in name.lower()
+        ]
+        self.assertTrue(
+            len(research_calls) > 0,
+            f"Agent should call research-agent for unfamiliar topics. "
+            f"Task calls: {task_calls}. "
+            f"All tool calls: {self._tool_call_order(agent)}",
+        )
+
+    def test_leverages_existing_utilities(self):
+        """The dev agent should reuse existing code instead of rewriting."""
+        agent = self._create_agent()
+        response = self._invoke(agent,
+            "Add a function that takes a Jinja2 template name and a dict "
+            "of variables, and returns the rendered string. Check the "
+            "existing codebase first — there may already be something you "
+            "can reuse."
+        )
+
+        # The agent should discover and reference promptable.py
+        response_lower = response.lower()
+        all_calls = self._get_tool_calls(agent)
+        all_content = response_lower + ' '.join(
+            str(args) for _, args in all_calls
+        ).lower()
+
+        self.assertTrue(
+            'promptable' in all_content or 'base_prompt_for' in all_content
+            or 'already exist' in response_lower or 'existing' in response_lower,
+            f"Agent should discover and reference existing promptable.py utility. "
+            f"Response preview: {response[:500]}",
         )
 
     def test_handles_basic_improvement(self):

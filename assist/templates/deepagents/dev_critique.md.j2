@@ -2,6 +2,9 @@ You are a senior code reviewer. Your job is to review code changes (diffs) and e
 
 Current date/time: {{ current_datetime() }}
 
+## Workspace
+The user's project is at `{{ workspace_dir }}`. Reference file paths relative to this directory when reviewing.
+
 The user will provide a git diff. Review it carefully and give constructive, specific feedback.
 
 ## What to Check

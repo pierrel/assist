@@ -110,6 +110,8 @@ def create_agent(model: BaseChatModel,
 
     mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
 
+    workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
+
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
     else:
@@ -150,6 +152,7 @@ def create_agent(model: BaseChatModel,
         system_prompt=base_prompt_for(
             "deepagents/general_instructions.md.j2",
             project_indicators=detect_project_indicators(working_dir),
+            workspace_dir=workspace_dir,
         ),
         middleware=mw + [logging_mw],
         backend=backend,
@@ -172,6 +175,8 @@ def create_context_agent(model: BaseChatModel,
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
+    workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
+
     base_mw = []
     if not has_json_validation:
         base_mw.append(JsonValidationMiddleware(strict=False))
@@ -191,7 +196,8 @@ def create_context_agent(model: BaseChatModel,
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/context_agent.md.j2"),
+        system_prompt=base_prompt_for("deepagents/context_agent.md.j2",
+                                      workspace_dir=workspace_dir),
         backend=backend,
         middleware=base_mw + middleware + [logging_mw],
     )
@@ -213,6 +219,8 @@ def create_research_agent(model: BaseChatModel,
     rolls back to a previous checkpoint.  Research agents only write additive
     report files, so rollback is low-risk.
     """
+    workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
+
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
@@ -256,7 +264,8 @@ def create_research_agent(model: BaseChatModel,
         model=model,
         tools=[search_internet, read_url],
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2"),
+        system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
+                                      workspace_dir=workspace_dir),
         backend=backend,
         middleware=base_mw + middleware + [logging_mw],
         subagents=[critique_sub_agent,
@@ -282,6 +291,7 @@ def create_dev_agent(model: BaseChatModel,
 
     Sub-agents:
     - context-agent: Read-only codebase exploration (same as general agent)
+    - research-agent: Researches patterns, libraries, and best practices
     - critique-agent: Reviews diffs for bugs, missing tests, and style issues
     """
     # Only retry on transient server errors (5xx, timeouts, connection issues).
@@ -296,6 +306,8 @@ def create_dev_agent(model: BaseChatModel,
     bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
 
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw, context_eviction_mw]
+
+    workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
@@ -312,19 +324,31 @@ def create_dev_agent(model: BaseChatModel,
                                       sandbox_backend=sandbox_backend)
     )
 
+    research_sub = CompiledSubAgent(
+        name="research-agent",
+        description="Researches patterns, libraries, frameworks, and best practices. Use this to understand how libraries work, find idiomatic patterns, or research the right approach before implementing.",
+        runnable=create_research_agent(model,
+                                       working_dir,
+                                       checkpointer,
+                                       [retry_middle, json_validation_mw, tool_name_mw],
+                                       sandbox_backend=sandbox_backend)
+    )
+
     critique_sub_agent = {
         "name": "critique-agent",
         "description": "Reviews code diffs for bugs, missing tests, style issues, and security concerns. Provide the full git diff output when calling this agent.",
-        "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2"),
+        "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2",
+                                         workspace_dir=workspace_dir),
     }
 
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/dev_agent_instructions.md.j2"),
+        system_prompt=base_prompt_for("deepagents/dev_agent_instructions.md.j2",
+                                      workspace_dir=workspace_dir),
         middleware=mw + [logging_mw],
         backend=backend,
-        subagents=[context_sub, critique_sub_agent],
+        subagents=[context_sub, research_sub, critique_sub_agent],
     )
 
     return agent
