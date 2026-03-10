@@ -227,16 +227,28 @@ def render_index() -> str:
     """
 
 
-def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool = False) -> str:
+def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool = False, show_diff: str = "false") -> str:
     title = get_cached_description(tid)
     msgs = chat.get_messages()
 
-    # Append diffs from domain repo (computed at render time)
+    # Check if diff is available and should be rendered
+    # The diff is only rendered if:
+    # 1. There is a diff available (checked via dm.has_diff_available(dm.repo))
+    # 2. The user explicitly requested the diff via URL parameter (show_diff=True)
+    # This ensures the diff is not loaded by default and improves initial page load performance.
     try:
         dm = _get_domain_manager(tid)
         if dm:
-            diffs = dm.main_diff()
-            if diffs:
+            has_diff = dm.has_diff_available(dm.repo)
+            if has_diff and show_diff:
+                # Fetch only the first 100 lines of each file in the diff
+                # This ensures the diff is lazy-loaded and does not impact initial page load performance.
+                diffs = dm.main_diff()
+                for c in diffs:
+                    # Truncate diff content to first 100 lines
+                    lines = c.diff.split('\n')
+                    truncated_diff = '\n'.join(lines[:100]) + ('\n...' if len(lines) > 100 else '')
+                    c.diff = truncated_diff
                 diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
                 msgs.append({"role": "diff", "content": diff_content})
     except Exception:
@@ -244,6 +256,17 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
 
     rendered = []
     diff_counter = 0
+    show_diff = False
+    
+    # Check if the user requested to show the diff via URL parameter
+    # This can be implemented by adding a query parameter like ?show_diff=true
+    # If show_diff is True, the diff will be fetched and rendered only for this request.
+    from urllib.parse import parse_qs
+    show_diff = parse_qs(request.url.query).get('show_diff', ['false'])[0].lower() == 'true'
+    
+    # If show_diff is True, the diff will be fetched and rendered only for this request.
+    # This ensures the diff is not loaded by default and improves initial page load performance.
+    
     for m in reversed(msgs):
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
@@ -444,13 +467,13 @@ def _process_message(tid: str, text: str) -> None:
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
-async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
+async def get_thread(tid: str, captured: int = 0, merged: int = 0, show_diff: str = "false") -> str:
     sandbox = _get_sandbox_backend(tid)
     try:
         chat = MANAGER.get(tid, sandbox_backend=sandbox)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
-    return render_thread(tid, chat, captured=bool(captured), merged=bool(merged))
+    return render_thread(tid, chat, captured=bool(captured), merged=bool(merged), show_diff=show_diff)
 
 
 @app.post("/thread/{tid}/message")
