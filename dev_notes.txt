@@ -1,0 +1,30 @@
+# Diff View Styling Investigation
+
+## Summary of Findings
+
+### 1. **Custom Diff Formatter**
+- **File**: `/workspace/manage/custom_diff_formatter.py`
+  - This file defines the custom styling for diff lines:
+    - Lines starting with `+` (added lines) are styled with a light green background (`#d4edda`).
+    - Lines starting with `-` (deleted lines) are styled with a light red background (`#f8d7da`).
+
+### 2. **Usage in `web.py`**
+- **File**: `/workspace/manage/web.py`
+  - The `render_diff` function uses `CustomHtmlFormatter` to render diffs with the custom styling:
+    ```python
+def render_diff(text: str) -> str:
+    formatter = CustomHtmlFormatter(nowrap=False)
+    return highlight(text, DiffLexer(), formatter)
+```
+
+### 3. **Next Steps**
+- **Restart the Application**: The changes to the diff styling will take effect only after the application is restarted or reloaded.
+- **Verify the Output**: After restarting, check if the diff view now displays:
+  - Lines starting with `+` in light green.
+  - Lines starting with `-` in light red.
+
+### 4. **Files Involved**
+- `/workspace/manage/custom_diff_formatter.py`: Contains the custom styling logic.
+- `/workspace/manage/web.py`: Uses the custom formatter in the `render_diff` function.
+
+---
