@@ -9,9 +9,12 @@ class CustomDiffStyle(Style):
         Token.Diff.Delete: "background-color: #f8d7da;",  # Light red for deleted lines
     }
 
-# Create a custom HtmlFormatter with the custom style
+# Custom HtmlFormatter for diff output with explicit styling for added and deleted lines.
+# - Lines starting with `+` (added) will have a light green background (#d4edda).
+# - Lines starting with `-` (deleted) will have a light red background (#f8d7da).
 class CustomHtmlFormatter(HtmlFormatter):
     def __init__(self, **options):
+        # Apply the custom style to enforce background colors for diff tokens
         options['style'] = CustomDiffStyle
         super().__init__(**options)
 
