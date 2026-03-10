@@ -15,6 +15,7 @@ import markdown
 from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
+from .custom_diff_formatter import CustomHtmlFormatter
 from assist.domain_manager import DomainManager
 from assist.sandbox_manager import SandboxManager
 
@@ -139,7 +140,8 @@ app = FastAPI(title="Assist Web", lifespan=lifespan)
 
 def render_diff(text: str) -> str:
     # Use Pygments to render unified diffs with HTML formatting
-    return highlight(text, DiffLexer(), HtmlFormatter(nowrap=False))
+    formatter = CustomHtmlFormatter(nowrap=False)
+return highlight(text, DiffLexer(), formatter)
 
 def render_index() -> str:
     items = []
