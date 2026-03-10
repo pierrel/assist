@@ -94,7 +94,53 @@ def git_diff(repo_dir: str) -> List[Change]:
     return changes
 
 
+class DomainManager:
+    def __init__(self, repo_dir: str):
+        self.repo = repo_dir
+
+    def has_diff_available(self) -> bool:
+        """Check if there are any diffs available in the repository.
+        
+        Returns:
+            bool: True if there are changes (diffs) available, False otherwise.
+        """
+        try:
+            changes = git_diff(self.repo)
+            return len(changes) > 0
+        except Exception:
+            return False
+
+    def main_diff(self) -> List[Change]:
+        """Return the main diffs available in the repository.
+        
+        Returns:
+            List[Change]: List of Change objects containing file paths and diffs.
+        """
+        return git_diff(self.repo)
+
+
+
+    def main_diff(self) -> List[Change]:
+        """Return diffs of current working tree compared to ``main``.
+
+        Includes tracked changes versus ``main`` and untracked files as added.
+        """
+        return git_diff_main(self.repo)
+
+
+def main_diff(self) -> List[Change]:
+    """Return diffs of current working tree compared to ``main``.
+
+    Includes tracked changes versus ``main`` and untracked files as added.
+    """
+    return git_diff_main(self.repo)
+
+
 def git_diff_main(repo_dir: str) -> List[Change]:
+    """Return diffs of current working tree compared to ``main``.
+
+    Includes tracked changes versus ``main`` and untracked files as added.
+    """
     """Return diffs of current working tree compared to ``main``.
 
     Includes tracked changes versus ``main`` and untracked files as added.
