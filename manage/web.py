@@ -141,7 +141,7 @@ app = FastAPI(title="Assist Web", lifespan=lifespan)
 def render_diff(text: str) -> str:
     # Use Pygments to render unified diffs with HTML formatting
     formatter = CustomHtmlFormatter(nowrap=False)
-return highlight(text, DiffLexer(), formatter)
+    return highlight(text, DiffLexer(), formatter)
 
 def render_index() -> str:
     items = []
