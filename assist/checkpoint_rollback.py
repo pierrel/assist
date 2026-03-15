@@ -33,6 +33,7 @@ Future option (Option B — not yet implemented):
     Option A proves insufficient for agents with real-world side effects.
 """
 import logging
+import uuid
 from typing import Any
 
 from openai import BadRequestError
@@ -183,7 +184,17 @@ class RollbackRunnable:
         self._recursion_limit = recursion_limit
 
     def invoke(self, input_data, config=None, **kwargs):
-        config = config or {}
+        config = dict(config or {})
+        # Give each subagent invocation its own thread_id so it uses the
+        # subagent's own InMemorySaver rather than inheriting CONFIG_KEY_CHECKPOINTER
+        # from the parent via var_child_runnable_config.  Without this, the first
+        # attempt saves checkpoints in the parent's checkpointer, but the rollback
+        # retry (which no longer carries CONFIG_KEY_CHECKPOINTER) uses the
+        # subagent's checkpointer — finding nothing — and raises EmptyInputError.
+        configurable = dict(config.get("configurable") or {})
+        if "thread_id" not in configurable:
+            configurable["thread_id"] = str(uuid.uuid4())
+        config["configurable"] = configurable
         if self._recursion_limit is not None:
             config["recursion_limit"] = self._recursion_limit
         return invoke_with_rollback(
