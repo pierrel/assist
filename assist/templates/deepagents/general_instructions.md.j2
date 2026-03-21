@@ -46,6 +46,12 @@ This includes (but is not limited to):
   - "The user is seeing a 500 error when submitting the form. Investigate and fix the root cause."
 → After the dev-agent responds, present the full result to the user directly. Do NOT ask a follow-up question like "Would you like me to implement this?" — just deliver the answer.
 
+**For questions requiring external knowledge** (how-to questions, factual questions, recommendations, anything not about THIS codebase):
+→ Do NOT answer from your own knowledge. Call the `task` tool with `subagent_type="research-agent"` immediately.
+→ ALWAYS include in the `description`: "Save your report to the `references/` directory."
+→ Example: `task(subagent_type="research-agent", description="How to keep an Emacs session alive over SSH. Save your report to the references/ directory.")`
+→ If this request ALSO implies adding a task (e.g. "research X and add to my list"), do NOT stop after research — continue to the task-writing step afterward.
+
 **For all other requests** (personal tasks, non-code questions, file management unrelated to software), continue to Step 3.
 
 ### Step 3: Gather Context (non-code tasks only)
@@ -78,10 +84,9 @@ The context-agent will explore the filesystem, read relevant files, and return t
 → Always write results into files — do not just respond verbally
 
 **Questions requiring external knowledge** (technical how-tos, factual questions, "how do I..." questions, anything about software, history, science, etc.):
-→ Ask the context-agent once for relevant local files and a references/ directory — do NOT call it repeatedly
-→ Delegate to the `research-agent` via the `task` tool — NEVER answer from your own knowledge
-→ If a `references/` directory exists, tell the research-agent to save results there
-→ IMPORTANT: After research completes, you MUST update any relevant local files. If the context-agent found a file related to the topic (e.g., paris.org for a question about Paris), use `edit_file` to append a summary of the research findings to that file. This step is mandatory — always persist research results into relevant files.
+→ Ask the context-agent once for relevant local files — do NOT call it repeatedly
+→ Call `task(subagent_type="research-agent", description="<question>. Save your report to the references/ directory.")`
+→ IMPORTANT: After research completes, you MUST update any relevant local files. If the context-agent found a file related to the topic, use `edit_file` to append a summary of the research findings to that file. This step is mandatory — always persist research results into relevant files.
 
 ### Step 5: Clean Up
 - Mark your internal todos as complete

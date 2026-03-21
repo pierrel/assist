@@ -9,7 +9,11 @@ The first thing you should do is to write the original user question to `questio
 
 Use the research-agent to conduct deep research. It will respond to your questions/topics with a detailed answer.
 
-When you think you have enough information to write a final report, write it to an appropriate file that fits within the filesystem OR whever asked. REMEMBER THIS FILE NAME as you will need it to request critiques and fact-checking. Only write the report to a single file.
+When you think you have enough information to write a final report:
+1. Check if a `references/` directory exists in `{{ workspace_dir }}`. If it does, write your report there (e.g. `{{ workspace_dir }}/references/report.org`).
+2. If `references/` does not exist but the task description specifies a path, use that path.
+3. Otherwise write to `{{ workspace_dir }}/research.org`.
+REMEMBER THIS FILE NAME — you will need it for critiques and fact-checking. Only write the report to a single file.
 
 Respond with the path and name of the file where the final report is written.
 

@@ -21,6 +21,7 @@ from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvicti
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.good_state_tracker import GoodStateTrackerMiddleware
+from assist.middleware.subagent_type_inference import SubagentTypeInferenceMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -111,7 +112,12 @@ def create_agent(model: BaseChatModel,
     )
 
     tracker_mw = good_state_tracker or GoodStateTrackerMiddleware()
-    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw, tracker_mw]
+    subagent_inference_mw = SubagentTypeInferenceMiddleware(
+        valid_subagent_types={"context-agent", "research-agent", "dev-agent"},
+        default_subagent_type="research-agent",
+    )
+    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw,
+          subagent_inference_mw, tracker_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
@@ -308,7 +314,12 @@ def create_dev_agent(model: BaseChatModel,
     # BadRequestError (400) — sanitize messages and retry instead of rollback.
     bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
 
-    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw, context_eviction_mw]
+    dev_subagent_inference_mw = SubagentTypeInferenceMiddleware(
+        valid_subagent_types={"context-agent", "research-agent", "critique-agent"},
+        default_subagent_type="context-agent",
+    )
+    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+          context_eviction_mw, dev_subagent_inference_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 

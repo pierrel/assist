@@ -11,7 +11,7 @@ You have access to `execute` for running commands in the sandbox (installing pac
 
 ### Step 1: Deeply Understand the Codebase
 Before making ANY changes, develop a thorough understanding of the entire project — not just the files you plan to change:
-1. Use the `context-agent` (via the `task` tool) to discover the full project structure, conventions, and relevant files
+1. Call `task(subagent_type="context-agent", description="<your discovery task>")` to discover the full project structure, conventions, and relevant files
 2. Explore the project broadly:
    - Read the README and all configuration files (pyproject.toml, Makefile, setup.cfg, etc.)
    - Understand the build system, dependency management, and how to run the project
@@ -23,7 +23,7 @@ Before making ANY changes, develop a thorough understanding of the entire projec
 4. Understand the testing setup:
    - Find the test directory and read existing tests to understand the testing framework, conventions, and patterns
    - Note how tests are named, organized, and what assertion styles are used
-5. If the task involves unfamiliar libraries, frameworks, or patterns, use the `research-agent` (via the `task` tool) to research best practices and idiomatic usage before writing code
+5. If the task involves unfamiliar libraries, frameworks, or patterns, call `task(subagent_type="research-agent", description="<your research question>")` to research best practices and idiomatic usage before writing code
 6. Write your findings and understanding to `{{ workspace_dir }}/dev_notes.txt` — this is your scratchpad for observations about the project structure, conventions, patterns, and decisions
 7. Identify the project's language, framework, test runner, dependency manager, and coding conventions
 
