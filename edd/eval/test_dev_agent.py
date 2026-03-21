@@ -136,9 +136,17 @@ class TestDevAgent(TestCase):
         ]
 
     def _task_calls(self, agent) -> list[tuple[str, str]]:
-        """Return [(agent_name, prompt), ...] from all ``task`` tool calls."""
+        """Return [(agent_name, prompt), ...] from all ``task`` tool calls.
+
+        The deepagents task tool uses ``subagent_type`` as the agent name
+        parameter.  Older keys (``agent``, ``name``) are kept as fallbacks
+        for backward compatibility.
+        """
         return [
-            (args.get('agent', args.get('name', '')), args.get('description', args.get('prompt', '')))
+            (
+                args.get('subagent_type', args.get('agent', args.get('name', ''))),
+                args.get('description', args.get('prompt', '')),
+            )
             for name, args in self._get_tool_calls(agent)
             if name == 'task'
         ]
