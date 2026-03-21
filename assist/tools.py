@@ -42,14 +42,14 @@ def read_url(url: str) -> str:
 
 def search_internet(
         query: str,
-        max_results: int = 5,
+        max_results: int = 3,
 ) -> str:
     """Used to search the internet for information on a given topic using a query string."""
     _rate_limit()
     try:
-        results = DDGS().text(query,
-                              max_results=max_results,
-                              backend="duckduckgo")
+        results = DDGS(timeout=10).text(query,
+                                        max_results=max_results,
+                                        backend="duckduckgo")
     except Exception:
         return "[]"
     normalized = [{"title": r["title"], "url": r["href"], "content": r["body"]} for r in results]

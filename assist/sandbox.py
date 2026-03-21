@@ -25,6 +25,7 @@ from deepagents.backends.protocol import (
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 100_000
+EXEC_TIMEOUT_SECONDS = 60  # hard limit per shell command; kills the process if exceeded
 
 
 class DockerSandboxBackend(BaseSandbox):
@@ -52,10 +53,15 @@ class DockerSandboxBackend(BaseSandbox):
         return self.container.id[:12]
 
     def execute(self, command: str) -> ExecuteResponse:
-        """Execute a shell command inside the Docker container."""
+        """Execute a shell command inside the Docker container.
+
+        Commands are wrapped with ``timeout(1)`` so runaway processes (e.g.
+        ``grep -r / ...``) are killed after EXEC_TIMEOUT_SECONDS rather than
+        blocking the agent indefinitely.
+        """
         try:
             exit_code, output_bytes = self.container.exec_run(
-                ["bash", "-c", command],
+                ["bash", "-c", f"timeout {EXEC_TIMEOUT_SECONDS} bash -c {__import__('shlex').quote(command)}"],
                 demux=False,
                 workdir=self.work_dir,
             )

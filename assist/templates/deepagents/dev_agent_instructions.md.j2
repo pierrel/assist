@@ -104,6 +104,8 @@ When asked to explain the codebase:
 ## Efficiency
 - If a command or step fails, try ONE alternative approach. If that also fails, note the issue and move on — do not loop.
 - Do not retry the same failing command more than twice. Diagnose the root cause and try a different approach instead.
+- NEVER repeat a tool call you have already made with the same arguments. If a search returned no results or a command failed, do not run it again — try something different or accept the limitation.
+- NEVER run `grep -r` or `find` against `/` or large root directories — always scope searches to `{{ workspace_dir }}` or a specific subdirectory.
 - For simple requests (documentation, explanations), skip the TDD and critique steps — just gather context and act.
 - The critique step is for code changes only. Documentation, explanations, and setup tasks do not need critique.
 - Be direct: discover what you need, make the change, verify, done.

@@ -20,6 +20,7 @@ from assist.middleware.json_validation_middleware import JsonValidationMiddlewar
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
+from assist.middleware.good_state_tracker import GoodStateTrackerMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,8 @@ def detect_project_indicators(path: str) -> list[str]:
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
-                 sandbox_backend=None) -> CompiledStateGraph:
+                 sandbox_backend=None,
+                 good_state_tracker: GoodStateTrackerMiddleware | None = None) -> CompiledStateGraph:
     # Core middleware: retry, tool call limiting, JSON validation, and logging
     # Only retry on transient server errors (5xx, timeouts, connection issues).
     # BadRequestError (400) is handled by invoke_with_rollback via checkpoint rollback.
@@ -108,7 +110,8 @@ def create_agent(model: BaseChatModel,
         trigger_fraction=0.75,  # Evict if context would reach 75%
     )
 
-    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
+    tracker_mw = good_state_tracker or GoodStateTrackerMiddleware()
+    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw, tracker_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
@@ -230,7 +233,7 @@ def create_research_agent(model: BaseChatModel,
 
     # Context-aware tool eviction for research agents (more aggressive thresholds)
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
-        trigger_fraction=0.70,  # Evict at 70% for research (more aggressive)
+        trigger_fraction=0.50,  # Evict at 50% for research to keep vLLM context small
     )
     base_mw.append(context_eviction_mw)
 
