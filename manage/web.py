@@ -430,7 +430,7 @@ def _process_message(tid: str, text: str) -> None:
         chat = MANAGER.get(tid, sandbox_backend=sandbox)
     except FileNotFoundError:
         return
-    resp = chat.message(text)
+    resp = chat.message(text)  # timeout is enforced inside Thread.message()
     MANAGER.touch(tid)
 
     # Generate description if there is none

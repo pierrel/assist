@@ -42,6 +42,40 @@ from langgraph.graph.state import CompiledStateGraph
 
 logger = logging.getLogger(__name__)
 
+_WRAP_UP_MESSAGE = (
+    "You have reached your step limit. Stop using tools immediately. "
+    "Write a concise final answer based on what you have found so far. "
+    "Do not call any more tools."
+)
+_WRAP_UP_RECURSION_LIMIT = 20
+
+
+def _wrap_up_after_recursion(
+    agent: CompiledStateGraph,
+    config: dict[str, Any],
+    thread_id: str,
+) -> dict[str, Any]:
+    """After a GraphRecursionError, ask the agent to summarise and finish.
+
+    Injects a wrap-up user message and re-invokes with a tiny recursion budget
+    so the agent can write a final answer without entering another long loop.
+    Falls back to returning whatever is already in the checkpointer state if
+    the wrap-up itself fails.
+    """
+    logger.warning("Recursion[%s]: step limit reached — requesting wrap-up", thread_id)
+    wrap_up_config = {**config, "recursion_limit": _WRAP_UP_RECURSION_LIMIT}
+    try:
+        return agent.invoke(
+            {"messages": [{"role": "user", "content": _WRAP_UP_MESSAGE}]},
+            wrap_up_config,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Recursion[%s]: wrap-up failed (%s) — returning current state", thread_id, exc
+        )
+        state = agent.get_state(config)
+        return state.values or {"messages": []}
+
 
 def invoke_with_rollback(
     agent: CompiledStateGraph,
@@ -50,7 +84,8 @@ def invoke_with_rollback(
     *,
     max_retries_per_step: int = 2,
     max_rollback_depth: int = 3,
-    rollback_on: tuple[type[Exception], ...] = (BadRequestError, GraphRecursionError),
+    rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
+    good_state_tracker=None,
 ) -> dict[str, Any]:
     """Invoke an agent with checkpoint-based rollback for state errors.
 
@@ -64,7 +99,10 @@ def invoke_with_rollback(
         max_rollback_depth: Maximum number of checkpoints to go back
             through before giving up.
         rollback_on: Exception types that trigger a rollback (default:
-            ``(BadRequestError, GraphRecursionError)``).
+            ``(BadRequestError,)``).
+        good_state_tracker: Optional ``GoodStateTrackerMiddleware`` instance.
+            When provided, rollback jumps directly to the most recent
+            known-good checkpoint instead of stepping back one at a time.
 
     Returns:
         The agent's invoke result (dict with ``messages`` key).
@@ -90,6 +128,8 @@ def invoke_with_rollback(
             return agent.invoke(current_input, current_config)
 
         except BaseException as exc:
+            if isinstance(exc, GraphRecursionError):
+                return _wrap_up_after_recursion(agent, current_config, thread_id)
             if not isinstance(exc, rollback_on):
                 raise
 
@@ -126,20 +166,34 @@ def invoke_with_rollback(
                 )
                 raise
 
-            # history[0] is the most recent (likely bad) checkpoint.
-            # history[1] is one step before it, etc.
-            target_idx = depth + 1
-            if target_idx >= len(original_history):
-                raise
+            # Prefer a known-good checkpoint from the tracker; fall back to
+            # stepping back one entry at a time through history.
+            target = None
+            if good_state_tracker:
+                target = good_state_tracker.best_rollback_target(original_history)
+                if target:
+                    cp_id = target.config["configurable"].get("checkpoint_id")
+                    step = target.metadata.get("step", "?")
+                    logger.warning(
+                        "Rollback[%s]: jumping to known-good checkpoint=%s (step %s)",
+                        thread_id, cp_id, step,
+                    )
 
-            target = original_history[target_idx]
-            cp_id = target.config["configurable"].get("checkpoint_id")
-            step = target.metadata.get("step", "?")
-            logger.warning(
-                "Rollback[%s]: depth=%d retry=%d/%d → checkpoint=%s (step %s)",
-                thread_id, depth, retries_at_depth, max_retries_per_step,
-                cp_id, step,
-            )
+            if target is None:
+                # history[0] is the most recent (likely bad) checkpoint.
+                # history[1] is one step before it, etc.
+                target_idx = depth + 1
+                if target_idx >= len(original_history):
+                    raise
+
+                target = original_history[target_idx]
+                cp_id = target.config["configurable"].get("checkpoint_id")
+                step = target.metadata.get("step", "?")
+                logger.warning(
+                    "Rollback[%s]: depth=%d retry=%d/%d → checkpoint=%s (step %s)",
+                    thread_id, depth, retries_at_depth, max_retries_per_step,
+                    cp_id, step,
+                )
 
             current_config = target.config
             current_input = None   # resume from the checkpoint
@@ -174,7 +228,7 @@ class RollbackRunnable:
         *,
         max_retries_per_step: int = 2,
         max_rollback_depth: int = 3,
-        rollback_on: tuple[type[Exception], ...] = (BadRequestError, GraphRecursionError),
+        rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
         recursion_limit: int | None = None,
     ):
         self._agent = agent

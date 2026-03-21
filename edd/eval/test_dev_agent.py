@@ -378,6 +378,32 @@ class TestDevAgent(TestCase):
             f"Response preview: {response[:500]}",
         )
 
+    def test_sandbox_execute_timeout(self):
+        """Sandbox execute() must kill commands that exceed EXEC_TIMEOUT_SECONDS.
+
+        This directly tests the hard timeout we added to DockerSandboxBackend.execute()
+        so that runaway commands (e.g. ``grep -r / ...``) cannot block the agent
+        indefinitely.  The shell ``timeout`` wrapper exits with code 124 when it
+        kills the child process.
+        """
+        import time
+        from assist.sandbox import EXEC_TIMEOUT_SECONDS
+
+        start = time.monotonic()
+        result = self.sandbox.execute("sleep 200")
+        elapsed = time.monotonic() - start
+
+        self.assertLess(
+            elapsed, EXEC_TIMEOUT_SECONDS + 10,
+            f"execute() must return within timeout ({EXEC_TIMEOUT_SECONDS}s) + 10s, "
+            f"but took {elapsed:.1f}s",
+        )
+        self.assertEqual(
+            result.exit_code, 124,
+            f"shell timeout exits with 124 when it kills the child; "
+            f"got {result.exit_code}. Output: {result.output[:200]}",
+        )
+
     def test_handles_basic_improvement(self):
         """The dev agent should make code improvements and write tests."""
         agent = self._create_agent()

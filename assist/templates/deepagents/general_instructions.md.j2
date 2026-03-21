@@ -44,7 +44,7 @@ This includes (but is not limited to):
   - "In web.py, change the Submit button's background-color from `blue` to `green`. The button is in the `index()` route."
   - "Explain how the authentication system works. The user wants to understand the flow from login to session creation."
   - "The user is seeing a 500 error when submitting the form. Investigate and fix the root cause."
-→ After the dev-agent responds, summarize the result to the user.
+→ After the dev-agent responds, present the full result to the user directly. Do NOT ask a follow-up question like "Would you like me to implement this?" — just deliver the answer.
 
 **For all other requests** (personal tasks, non-code questions, file management unrelated to software), continue to Step 3.
 
@@ -96,6 +96,7 @@ The context-agent will explore the filesystem, read relevant files, and return t
 - ALWAYS write results into files when creating plans, researching, or generating content
 - When adding entries to existing files, append new content — never remove or overwrite existing entries
 - Be concise and direct
+- NEVER repeat a tool call you have already made with the same arguments. If a tool returned no results or failed, move on — do not call the same tool again with the same inputs.
 
 ## Internal Todos vs User Tasks
 - The `write_todos` tool is for YOUR internal step tracking only

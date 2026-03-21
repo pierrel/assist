@@ -1,3 +1,5 @@
+import concurrent.futures
+import logging
 import os
 import time
 import tempfile
@@ -13,6 +15,7 @@ from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
 from assist.checkpoint_rollback import invoke_with_rollback
+from assist.middleware.good_state_tracker import GoodStateTrackerMiddleware
 
 def render_tool_calls(message: AIMessage) -> str:
     calls = getattr(message, "tool_calls", None)
@@ -56,21 +59,47 @@ class Thread:
         self.max_concurrency = max_concurrency
         self.runconfig = {
             "configurable": {"thread_id": self.thread_id},
-            "max_concurrency": self.max_concurrency
+            "max_concurrency": self.max_concurrency,
+            "recursion_limit": 50,  # general agent just routes — 50 steps (25 model calls) is plenty
         }
 
+        self.good_state_tracker = GoodStateTrackerMiddleware()
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
                                   checkpointer=checkpointer,
-                                  sandbox_backend=sandbox_backend)
+                                  sandbox_backend=sandbox_backend,
+                                  good_state_tracker=self.good_state_tracker)
+
+    # Wall-clock limit for a single message round-trip (env-configurable).
+    # Covers both web and CLI. The agent's recursion_limit is the primary
+    # brake; this is a safety net for unexpected hangs (e.g. slow vLLM calls).
+    MESSAGE_TIMEOUT = int(os.getenv("ASSIST_AGENT_TIMEOUT", "300"))
 
     def message(self, text: str) -> str:
-        """Continue the thread and return the last response"""
-        result = invoke_with_rollback(
-            self.agent,
-            {"messages": [{"role": "user", "content": text}]},
-            self.runconfig,
-        )
+        """Continue the thread and return the last response.
+
+        Runs invoke_with_rollback in a thread with a wall-clock timeout so
+        hung calls (network stalls, runaway sandbox commands) don't block
+        the caller indefinitely in either the web server or the CLI.
+        """
+        def _invoke():
+            return invoke_with_rollback(
+                self.agent,
+                {"messages": [{"role": "user", "content": text}]},
+                self.runconfig,
+                good_state_tracker=self.good_state_tracker,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_invoke)
+            try:
+                result = future.result(timeout=self.MESSAGE_TIMEOUT)
+            except concurrent.futures.TimeoutError:
+                logging.warning(
+                    "Thread %s: message timed out after %ds",
+                    self.thread_id, self.MESSAGE_TIMEOUT,
+                )
+                return ""
         # Extract content from the last AIMessage
         messages = result.get("messages", [])
         if messages:
