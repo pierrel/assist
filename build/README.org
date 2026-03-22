@@ -1,0 +1,105 @@
+#+Title: Build — Hardware and Inference Setup
+
+* Hardware
+| Component | Part                                | Notes                        |
+|-----------+-------------------------------------+------------------------------|
+| GPU       | NVIDIA RTX 3090 24 GB (Founders Ed) | 24 GB VRAM; primary constraint for model selection |
+| CPU       | AMD Ryzen 7 7800X3D                 | AM5, 3D V-Cache              |
+| RAM       | G.SKILL Flare X5 64 GB (2×32 GB)   | DDR5-6000 CL30               |
+| Storage   | Kingston KC3000 M.2 2 TB            | NVMe                         |
+| Case      | Fractal Terra                       | Mini-ITX SFF                 |
+| PSU       | Corsair SF750 (2024)                | 750 W SFX                    |
+| Mobo      | ASRock B650I Lightning WiFi         | Mini-ITX, AM5, PCIe 4.0 ×16  |
+
+GPU server is at =192.168.6.118= on the local network.
+
+* Model Selection
+** Current (as of March 2026)
+=mistralai/Ministral-3-8B-Instruct-2512= — served by vLLM on the GPU server.
+
+This model is too small for reliable multi-agent tool calling. See [[*Recommended Upgrade]].
+
+** Recommended Upgrade
+=Qwen/Qwen2.5-14B-Instruct-AWQ=
+
+*** Why
+- Strongest instruction-following and tool-call fidelity available on this hardware
+- Fits in 24 GB at AWQ 4-bit: ~8–9 GB weights + ~6 GB KV cache = ~15 GB total
+- Qwen2.5 uses the =hermes= tool-call format — first-class vLLM support
+- Resolves all six consistent eval failures that Ministral-3B cannot fix
+
+*** VRAM budget
+| Model | Format | Weights | KV cache (15k ctx) | Total | Fits? |
+|-------+--------+---------+--------------------+-------+-------|
+| Ministral-3B | BF16 | ~6 GB | ~2 GB | ~8 GB | ✅ (current) |
+| Qwen2.5-7B | BF16 | ~14 GB | ~4 GB | ~18 GB | ✅ (fallback) |
+| Qwen2.5-14B AWQ | INT4 | ~8 GB | ~6 GB | ~14 GB | ✅ (recommended) |
+| Qwen2.5-14B | BF16 | ~28 GB | — | >24 GB | ❌ |
+
+*** Latency expectations (RTX 3090)
+| Model | Typical call (8k ctx) | Notes |
+|-------+-----------------------+-------|
+| Ministral-3B | 2–10 s | Fast but unreliable |
+| Qwen2.5-7B BF16 | 20–35 s | Good balance |
+| Qwen2.5-14B AWQ | 40–70 s | Best quality; within 60 s budget at typical contexts |
+
+** Fallback
+=Qwen/Qwen2.5-7B-Instruct= in BF16 (~14 GB, no quantization).
+Use if 14B latency consistently exceeds 60 s/call under real workloads.
+
+* vLLM Setup
+** Install
+#+begin_src bash
+cd ~/src/serve
+mkdir -p vllm && cd vllm
+python -m venv .venv
+.venv/bin/pip install vllm huggingface_hub
+#+end_src
+
+** Download model
+#+begin_src bash
+.venv/bin/huggingface-cli download Qwen/Qwen2.5-14B-Instruct-AWQ
+#+end_src
+
+** Serve (Qwen2.5-14B-AWQ — recommended)
+#+begin_src bash
+.venv/bin/vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes \
+  --max-model-len 32768 \
+  --dtype float16 \
+  --quantization awq \
+  --gpu-memory-utilization 0.92
+#+end_src
+
+** Serve (Qwen2.5-7B — fallback)
+#+begin_src bash
+.venv/bin/vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes \
+  --max-model-len 32768 \
+  --dtype bfloat16 \
+  --gpu-memory-utilization 0.90
+#+end_src
+
+** Health check
+#+begin_src bash
+curl http://192.168.6.118:8000/health
+#+end_src
+
+** Logs
+#+begin_src bash
+journalctl -u vllm.service -f
+#+end_src
+
+* assist Configuration
+After switching models, update =.dev.env= in the assist project root:
+
+#+begin_example
+ASSIST_MODEL_URL=http://192.168.6.118:8000/v1
+ASSIST_MODEL_NAME=Qwen/Qwen2.5-14B-Instruct-AWQ
+ASSIST_CONTEXT_LEN=32768
+#+end_example
+
+Note: =ASSIST_CONTEXT_LEN= drops from 78000 to 32768 — Qwen2.5's context window.
+This is fine; the multi-agent system rarely exceeds 15k tokens per call.
