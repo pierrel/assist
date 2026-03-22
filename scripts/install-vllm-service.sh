@@ -34,7 +34,7 @@ ExecStart=$VLLM_PATH/.venv/bin/vllm serve $VLLM_MODEL \\
     --tool-call-parser hermes \\
     --max-model-len $VLLM_MAX_MODEL_LEN \\
     --dtype auto \\
-    --quantization awq \\
+    --quantization awq_marlin \\
     --gpu-memory-utilization $VLLM_GPU_MEM_UTIL
 Restart=on-failure
 RestartSec=15
