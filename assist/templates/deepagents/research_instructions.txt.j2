@@ -23,6 +23,8 @@ You can do this however many times you want until are you satisfied with the res
 
 Only edit the file once at a time (if you call this tool in parallel, there may be conflicts).
 
+MANDATORY REQUIREMENT: Every report file you write MUST end with a `*** Sources` section listing every URL used. Before saving the file, check that it contains `*** Sources`. If it does not, add it. A report without `*** Sources` is incomplete.
+
 Here are instructions for writing the final report:
 
 <report_instructions>
@@ -82,12 +84,13 @@ Format the report in clear org format with proper structure and include source r
 
 <citation_rules>
 - Assign each unique URL a single citation number in your text
-- End with *** Sources that lists each source with corresponding numbers
-- IMPORTANT: Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
+- MANDATORY: Every report MUST end with a `*** Sources` section listing all URLs used. A report without a Sources section is incomplete and will be rejected.
+- Number sources sequentially without gaps (1,2,3,4...) in the final list regardless of which sources you choose
 - Each source should be a separate line item in a list, so that in org format it is rendered as a list.
 - Example format:
-  [1] Source Title: URL
-  [2] Source Title: URL
+  *** Sources
+  - [1] Source Title: URL
+  - [2] Source Title: URL
 - Citations are extremely important. Make sure to include these, and pay a lot of attention to getting these right. Users will often use these citations to look into more information.
 </citation_rules>
 
