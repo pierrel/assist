@@ -259,7 +259,7 @@ Or manually:
   --tool-call-parser hermes \
   --max-model-len 32768 \
   --dtype auto \
-  --quantization awq \
+  --quantization awq_marlin \
   --gpu-memory-utilization 0.92
 #+end_src
 

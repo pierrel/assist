@@ -29,12 +29,12 @@ This model is too small for reliable multi-agent tool calling. See [[*Recommende
 - Resolves all six consistent eval failures that Ministral-3B cannot fix
 
 *** VRAM budget
-| Model | Format | Weights | KV cache (15k ctx) | Total | Fits? |
-|-------+--------+---------+--------------------+-------+-------|
-| Ministral-3B | BF16 | ~6 GB | ~2 GB | ~8 GB | ✅ (current) |
-| Qwen2.5-7B | BF16 | ~14 GB | ~4 GB | ~18 GB | ✅ (fallback) |
-| Qwen2.5-14B AWQ | INT4 | ~8 GB | ~6 GB | ~14 GB | ✅ (recommended) |
-| Qwen2.5-14B | BF16 | ~28 GB | — | >24 GB | ❌ |
+| Model           | Format | Weights | KV cache (15k ctx) | Total  | Fits?             |
+|-----------------+--------+---------+--------------------+--------+-------------------|
+| Ministral-3B    | BF16   | ~6 GB   | ~2 GB              | ~8 GB  | ✅ (current)     |
+| Qwen2.5-7B      | BF16   | ~14 GB  | ~4 GB              | ~18 GB | ✅ (fallback)    |
+| Qwen2.5-14B AWQ | INT4   | ~8 GB   | ~6 GB              | ~14 GB | ✅ (recommended) |
+| Qwen2.5-14B     | BF16   | ~28 GB  | —                  | >24 GB | ❌               |
 
 *** Latency expectations (RTX 3090)
 | Model | Typical call (8k ctx) | Notes |
@@ -71,7 +71,7 @@ python -m venv .venv
   --tool-call-parser hermes \
   --max-model-len 32768 \
   --dtype auto \
-  --quantization awq \
+  --quantization awq_marlin \
   --gpu-memory-utilization 0.92
 #+end_src
 
