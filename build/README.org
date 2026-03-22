@@ -90,6 +90,24 @@ Note: =--dtype auto= is preferred over =float16= with AWQ models.
   --gpu-memory-utilization 0.90
 #+end_src
 
+** Passwordless sudo for service management
+The Makefile targets use =sudo systemctl= over SSH without a TTY, which requires
+passwordless sudo. Run this once from the assist project root:
+
+#+begin_src bash
+make vllm-setup-sudo
+#+end_src
+
+This streams =scripts/setup-vllm-sudo.sh= to the GPU server, which installs
+=/etc/sudoers.d/vllm-service= with the required NOPASSWD entries for
+=systemctl=, =journalctl=, and =tee= scoped to the =vllm-serve= service.
+
+Verify with:
+
+#+begin_src bash
+make vllm-status
+#+end_src
+
 ** Managed via Makefile
 The assist project manages the vLLM service via =make= targets. From =~/src/assist=:
 

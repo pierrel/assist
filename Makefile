@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history vllm-install vllm-download vllm-service vllm-start vllm-stop vllm-restart vllm-status vllm-health vllm-logs vllm-setup
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history vllm-install vllm-download vllm-service vllm-setup-sudo vllm-start vllm-stop vllm-restart vllm-status vllm-health vllm-logs vllm-setup
 
 eval:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
@@ -196,6 +196,14 @@ vllm-logs:
 		ssh $$VLLM_USER@$$VLLM_HOST \
 			"sudo journalctl -u $$VLLM_SERVICE_NAME -f")
 
+vllm-setup-sudo:
+	@echo "→ Setting up passwordless sudo on $(VLLM_USER)@$(VLLM_HOST)..."
+	$(call with-dev-env, \
+		ssh $$VLLM_USER@$$VLLM_HOST \
+			VLLM_SERVICE_NAME=$$VLLM_SERVICE_NAME \
+			'bash -s' < scripts/setup-vllm-sudo.sh)
+	@echo "✓ Passwordless sudo configured for vLLM service management"
+
 vllm-setup: vllm-install vllm-download vllm-service
 	@echo "✓ vLLM setup complete. Run 'make vllm-start' to begin serving."
 
@@ -223,6 +231,7 @@ help:
 	@echo ""
 	@echo "vLLM Remote Service (GPU server):"
 	@echo "  make vllm-setup     - Full setup: install vLLM, download model, install service"
+	@echo "  make vllm-setup-sudo - Configure passwordless sudo on GPU server (run once)"
 	@echo "  make vllm-install   - Install vLLM in venv on GPU server"
 	@echo "  make vllm-download  - Download model weights on GPU server"
 	@echo "  make vllm-service   - Install/update systemd service on GPU server"
