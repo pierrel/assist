@@ -121,6 +121,7 @@ setup-sudo:
 	@ssh -t $(DEPLOY_HOST) \
 		SERVICE_NAME=$(SERVICE_NAME) \
 		DEPLOY_PATH=$(DEPLOY_PATH) \
+		ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
 		'bash -s' < scripts/setup-passwordless-sudo.sh
 	@echo ""
 	@echo "✓ Setup complete! You can now deploy from Emacs without password prompts."
