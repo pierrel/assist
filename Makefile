@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history vllm-install vllm-download vllm-service vllm-start vllm-stop vllm-restart vllm-status vllm-health vllm-logs vllm-setup
 
 eval:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
@@ -125,6 +125,81 @@ setup-sudo:
 	@echo ""
 	@echo "✓ Setup complete! You can now deploy from Emacs without password prompts."
 
+# === vLLM Remote Service Targets ===
+# Manage the vLLM inference server on the GPU server.
+# Configure via VLLM_* vars in .dev.env (see .dev.env.example).
+
+vllm-install:
+	@echo "→ Installing vLLM on $(VLLM_USER)@$(VLLM_HOST)..."
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) \
+			'mkdir -p $(VLLM_PATH) && \
+			 cd $(VLLM_PATH) && \
+			 python3 -m venv .venv && \
+			 .venv/bin/pip install --upgrade pip && \
+			 .venv/bin/pip install vllm huggingface_hub')
+	@echo "✓ vLLM installed"
+
+vllm-download:
+	@echo "→ Downloading model $(VLLM_MODEL) on $(VLLM_USER)@$(VLLM_HOST)..."
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) \
+			'$(VLLM_PATH)/.venv/bin/huggingface-cli download $(VLLM_MODEL)')
+	@echo "✓ Model download complete"
+
+vllm-service:
+	@echo "→ Installing vLLM systemd service on $(VLLM_USER)@$(VLLM_HOST)..."
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) \
+			VLLM_PATH=$(VLLM_PATH) \
+			VLLM_MODEL=$(VLLM_MODEL) \
+			VLLM_PORT=$(VLLM_PORT) \
+			VLLM_MAX_MODEL_LEN=$(VLLM_MAX_MODEL_LEN) \
+			VLLM_GPU_MEM_UTIL=$(VLLM_GPU_MEM_UTIL) \
+			VLLM_SERVICE_NAME=$(VLLM_SERVICE_NAME) \
+			'bash -s' < scripts/install-vllm-service.sh)
+	@echo "✓ vLLM service installed"
+
+vllm-start:
+	@echo "→ Starting $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) 'sudo systemctl start $(VLLM_SERVICE_NAME)')
+	@echo "✓ vLLM service started (model load may take 60-120s; use 'make vllm-health' to check)"
+
+vllm-stop:
+	@echo "→ Stopping $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) 'sudo systemctl stop $(VLLM_SERVICE_NAME)')
+	@echo "✓ vLLM service stopped"
+
+vllm-restart:
+	@echo "→ Restarting $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) 'sudo systemctl restart $(VLLM_SERVICE_NAME)')
+	@echo "✓ vLLM service restarted"
+
+vllm-status:
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) \
+			'sudo systemctl status $(VLLM_SERVICE_NAME) --no-pager')
+
+vllm-health:
+	@echo "→ Checking vLLM health at http://$(VLLM_HOST):$(VLLM_PORT)/health ..."
+	$(call with-dev-env, \
+		curl -sf http://$(VLLM_HOST):$(VLLM_PORT)/health \
+			&& echo "✓ vLLM is healthy" \
+			|| echo "✗ vLLM not responding (may still be loading)")
+
+vllm-logs:
+	@echo "→ Tailing logs from $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
+	@echo "  (Press Ctrl+C to exit)"
+	$(call with-dev-env, \
+		ssh $(VLLM_USER)@$(VLLM_HOST) \
+			'sudo journalctl -u $(VLLM_SERVICE_NAME) -f')
+
+vllm-setup: vllm-install vllm-download vllm-service
+	@echo "✓ vLLM setup complete. Run 'make vllm-start' to begin serving."
+
 help:
 	@echo "Assist Commands:"
 	@echo ""
@@ -141,11 +216,23 @@ help:
 	@echo "  make deploy         - Full deployment (code + service + restart)"
 	@echo "  make deploy-code    - Deploy code only (no restart)"
 	@echo "  make deploy-service - Install/update systemd service"
-	@echo "  make install-prod   - Install dependencies on remote"
+	@echo "  make deploy-install - Install dependencies on remote"
 	@echo "  make restart        - Restart the service"
 	@echo "  make status         - Check service status"
 	@echo "  make logs           - View service logs (live tail)"
 	@echo "  make setup-sudo     - Setup passwordless sudo (optional)"
+	@echo ""
+	@echo "vLLM Remote Service (GPU server):"
+	@echo "  make vllm-setup     - Full setup: install vLLM, download model, install service"
+	@echo "  make vllm-install   - Install vLLM in venv on GPU server"
+	@echo "  make vllm-download  - Download model weights on GPU server"
+	@echo "  make vllm-service   - Install/update systemd service on GPU server"
+	@echo "  make vllm-start     - Start vLLM service"
+	@echo "  make vllm-stop      - Stop vLLM service"
+	@echo "  make vllm-restart   - Restart vLLM service"
+	@echo "  make vllm-status    - Show systemd service status"
+	@echo "  make vllm-health    - HTTP health check against vLLM endpoint"
+	@echo "  make vllm-logs      - Tail vLLM logs (live)"
 	@echo ""
 	@echo "Configuration:"
 	@echo "  Development: Copy .dev.env.example to .dev.env"

@@ -64,23 +64,44 @@ python -m venv .venv
 ** Serve (Qwen2.5-14B-AWQ — recommended)
 #+begin_src bash
 .venv/bin/vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name Qwen/Qwen2.5-14B-Instruct-AWQ \
   --enable-auto-tool-choice \
   --tool-call-parser hermes \
   --max-model-len 32768 \
-  --dtype float16 \
+  --dtype auto \
   --quantization awq \
   --gpu-memory-utilization 0.92
 #+end_src
 
+Note: =--host 0.0.0.0= is required for LAN access — the default binds to localhost only.
+Note: =--dtype auto= is preferred over =float16= with AWQ models.
+
 ** Serve (Qwen2.5-7B — fallback)
 #+begin_src bash
 .venv/bin/vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --host 0.0.0.0 \
+  --port 8000 \
   --enable-auto-tool-choice \
   --tool-call-parser hermes \
   --max-model-len 32768 \
   --dtype bfloat16 \
   --gpu-memory-utilization 0.90
 #+end_src
+
+** Managed via Makefile
+The assist project manages the vLLM service via =make= targets. From =~/src/assist=:
+
+#+begin_src bash
+make vllm-setup    # one-time: install, download model, install systemd service
+make vllm-start    # start serving (model loads in 60-120s)
+make vllm-health   # check if ready
+make vllm-logs     # tail logs
+make vllm-restart  # restart after config change
+#+end_src
+
+See =.dev.env= for =VLLM_*= configuration vars (host, model, context length, etc).
 
 ** Health check
 #+begin_src bash
@@ -89,7 +110,7 @@ curl http://192.168.6.118:8000/health
 
 ** Logs
 #+begin_src bash
-journalctl -u vllm.service -f
+journalctl -u vllm-serve -f
 #+end_src
 
 * assist Configuration

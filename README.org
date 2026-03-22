@@ -211,12 +211,21 @@ cd ~/src/serve/vllm
 #+end_src
 
 **** 2. Restart vLLM with the new model
+Use the Makefile (recommended):
+#+begin_src bash
+make vllm-service   # re-install service with new config
+make vllm-restart
+#+end_src
+
+Or manually:
 #+begin_src bash
 .venv/bin/vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
   --enable-auto-tool-choice \
   --tool-call-parser hermes \
   --max-model-len 32768 \
-  --dtype float16 \
+  --dtype auto \
   --quantization awq \
   --gpu-memory-utilization 0.92
 #+end_src
@@ -224,6 +233,7 @@ cd ~/src/serve/vllm
 **** 3. Update .dev.env
 #+begin_example
 ASSIST_MODEL_NAME=Qwen/Qwen2.5-14B-Instruct-AWQ
+ASSIST_CONTEXT_LEN=32768
 #+end_example
 
 **** 4. Smoke test and eval
