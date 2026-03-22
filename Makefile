@@ -130,72 +130,71 @@ setup-sudo:
 # Configure via VLLM_* vars in .dev.env (see .dev.env.example).
 
 vllm-install:
-	@echo "→ Installing vLLM on $(VLLM_USER)@$(VLLM_HOST)..."
+	@echo "→ Installing vLLM on GPU server..."
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) \
-			'mkdir -p $(VLLM_PATH) && \
-			 cd $(VLLM_PATH) && \
+		ssh $$VLLM_USER@$$VLLM_HOST \
+			"mkdir -p $$VLLM_PATH && \
+			 cd $$VLLM_PATH && \
 			 python3 -m venv .venv && \
 			 .venv/bin/pip install --upgrade pip && \
-			 .venv/bin/pip install vllm huggingface_hub')
+			 .venv/bin/pip install vllm huggingface_hub")
 	@echo "✓ vLLM installed"
 
 vllm-download:
-	@echo "→ Downloading model $(VLLM_MODEL) on $(VLLM_USER)@$(VLLM_HOST)..."
+	@echo "→ Downloading model on GPU server..."
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) \
-			'$(VLLM_PATH)/.venv/bin/huggingface-cli download $(VLLM_MODEL)')
+		ssh $$VLLM_USER@$$VLLM_HOST \
+			"$$VLLM_PATH/.venv/bin/huggingface-cli download $$VLLM_MODEL")
 	@echo "✓ Model download complete"
 
 vllm-service:
-	@echo "→ Installing vLLM systemd service on $(VLLM_USER)@$(VLLM_HOST)..."
+	@echo "→ Installing vLLM systemd service on GPU server..."
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) \
-			VLLM_PATH=$(VLLM_PATH) \
-			VLLM_MODEL=$(VLLM_MODEL) \
-			VLLM_PORT=$(VLLM_PORT) \
-			VLLM_MAX_MODEL_LEN=$(VLLM_MAX_MODEL_LEN) \
-			VLLM_GPU_MEM_UTIL=$(VLLM_GPU_MEM_UTIL) \
-			VLLM_SERVICE_NAME=$(VLLM_SERVICE_NAME) \
+		ssh $$VLLM_USER@$$VLLM_HOST \
+			VLLM_PATH=$$VLLM_PATH \
+			VLLM_MODEL=$$VLLM_MODEL \
+			VLLM_PORT=$$VLLM_PORT \
+			VLLM_MAX_MODEL_LEN=$$VLLM_MAX_MODEL_LEN \
+			VLLM_GPU_MEM_UTIL=$$VLLM_GPU_MEM_UTIL \
+			VLLM_SERVICE_NAME=$$VLLM_SERVICE_NAME \
 			'bash -s' < scripts/install-vllm-service.sh)
 	@echo "✓ vLLM service installed"
 
 vllm-start:
-	@echo "→ Starting $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
+	@echo "→ Starting vLLM service..."
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) 'sudo systemctl start $(VLLM_SERVICE_NAME)')
+		ssh $$VLLM_USER@$$VLLM_HOST "sudo systemctl start $$VLLM_SERVICE_NAME")
 	@echo "✓ vLLM service started (model load may take 60-120s; use 'make vllm-health' to check)"
 
 vllm-stop:
-	@echo "→ Stopping $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
+	@echo "→ Stopping vLLM service..."
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) 'sudo systemctl stop $(VLLM_SERVICE_NAME)')
+		ssh $$VLLM_USER@$$VLLM_HOST "sudo systemctl stop $$VLLM_SERVICE_NAME")
 	@echo "✓ vLLM service stopped"
 
 vllm-restart:
-	@echo "→ Restarting $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
+	@echo "→ Restarting vLLM service..."
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) 'sudo systemctl restart $(VLLM_SERVICE_NAME)')
+		ssh $$VLLM_USER@$$VLLM_HOST "sudo systemctl restart $$VLLM_SERVICE_NAME")
 	@echo "✓ vLLM service restarted"
 
 vllm-status:
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) \
-			'sudo systemctl status $(VLLM_SERVICE_NAME) --no-pager')
+		ssh $$VLLM_USER@$$VLLM_HOST \
+			"sudo systemctl status $$VLLM_SERVICE_NAME --no-pager")
 
 vllm-health:
-	@echo "→ Checking vLLM health at http://$(VLLM_HOST):$(VLLM_PORT)/health ..."
+	@echo "→ Checking vLLM health..."
 	$(call with-dev-env, \
-		curl -sf http://$(VLLM_HOST):$(VLLM_PORT)/health \
+		curl -sf http://$$VLLM_HOST:$$VLLM_PORT/health \
 			&& echo "✓ vLLM is healthy" \
 			|| echo "✗ vLLM not responding (may still be loading)")
 
 vllm-logs:
-	@echo "→ Tailing logs from $(VLLM_SERVICE_NAME) on $(VLLM_USER)@$(VLLM_HOST)..."
-	@echo "  (Press Ctrl+C to exit)"
+	@echo "→ Tailing vLLM logs (Ctrl+C to exit)..."
 	$(call with-dev-env, \
-		ssh $(VLLM_USER)@$(VLLM_HOST) \
-			'sudo journalctl -u $(VLLM_SERVICE_NAME) -f')
+		ssh $$VLLM_USER@$$VLLM_HOST \
+			"sudo journalctl -u $$VLLM_SERVICE_NAME -f")
 
 vllm-setup: vllm-install vllm-download vllm-service
 	@echo "✓ vLLM setup complete. Run 'make vllm-start' to begin serving."
