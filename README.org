@@ -37,6 +37,39 @@ source .venv/bin/activate
 #+end_src
 
 In emacs: =M-x pyvenv-activate=
+** Deploying
+Configuration lives in =.deploy.env= (copy from =.deploy.env.example=) and
+=~/.ssh/config= (set up a host alias for =DEPLOY_HOST=).
+
+Full deployment (code + dependencies + service + restart):
+
+#+begin_src bash
+make deploy
+#+end_src
+
+Individual steps:
+
+#+begin_src bash
+make deploy-code       # rsync code to remote
+make deploy-install    # install Python dependencies on remote
+make deploy-service    # install/update the systemd service file
+make restart           # restart and follow logs
+make status            # check service status
+make logs              # tail live logs
+#+end_src
+
+*** Passwordless sudo (run once on the deploy server)
+=make restart=, =make status=, =make logs=, and =make deploy-service= all use
+=sudo= over SSH without a TTY. Run this once to configure passwordless sudo
+for those commands:
+
+#+begin_src bash
+make setup-sudo
+#+end_src
+
+This runs =scripts/setup-passwordless-sudo.sh= on the remote server, which
+installs =/etc/sudoers.d/assist-deploy= scoped to the =assist-web= service.
+
 ** Running
 Run the CLI
 
