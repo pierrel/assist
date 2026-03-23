@@ -5,10 +5,10 @@
 
 set -e
 
-VLLM_PATH="${VLLM_PATH:-/home/pierre/src/serve/vllm}"
-VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen2.5-14B-Instruct-AWQ}"
+VLLM_PATH="${VLLM_PATH:-/home/pierre/vllm}"
+VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3-14B-AWQ}"
 VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-32768}"
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-40960}"
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.92}"
 VLLM_SERVICE_NAME="${VLLM_SERVICE_NAME:-vllm-serve}"
 
@@ -31,8 +31,9 @@ ExecStart=$VLLM_PATH/.venv/bin/vllm serve $VLLM_MODEL \\
     --port $VLLM_PORT \\
     --served-model-name $VLLM_MODEL \\
     --enable-auto-tool-choice \\
-    --tool-call-parser hermes \\
+    --tool-call-parser qwen3_xml \\
     --reasoning-parser deepseek_r1 \\
+    --enable-prefix-caching \\
     --max-model-len $VLLM_MAX_MODEL_LEN \\
     --dtype auto \\
     --quantization awq_marlin \\

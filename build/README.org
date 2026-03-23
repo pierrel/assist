@@ -19,7 +19,7 @@ GPU server is at =192.168.6.118= on the local network.
 
 Context window: 40960 tokens (=max_position_embeddings= in model config).
 Requires =--reasoning-parser deepseek_r1= — Qwen3 outputs =<think>= blocks by default
-which interfere with the =hermes= tool-call parser. The reasoning parser strips
+which interfere with the =qwen3_xml= tool-call parser. The reasoning parser strips
 these tokens before tool calls are extracted.
 
 See [[*Candidate Models]] for the full evaluated shortlist and upgrade path.
@@ -42,7 +42,7 @@ Evaluated 2026-03-22 against RTX 3090 24 GB + vLLM constraints.
 | Model                 | BFCL (tool call) | IFEval | Notes                              |
 |-----------------------+------------------+--------+------------------------------------|
 | Qwen2.5-14B-AWQ       | 70.8             | ~89    | Current; hermes parser             |
-| Qwen3-14B-AWQ         | ~69 est.         | ~90+   | Qwen3 gen; hermes parser      |
+| Qwen3-14B-AWQ         | ~69 est.         | ~90+   | Qwen3 gen; qwen3_xml parser        |
 | Qwen2.5-32B-AWQ       | ~76              | ~92    | 16k ctx limit on 3090              |
 | Qwen3-30B-A3B-AWQ     | 69.1             | ~90+   | MoE: 3.3B active params, fast      |
 | Qwen3.5-27B-AWQ       | 68.5             | 95.0   | Blocked: vLLM bug #35743 (unfixed) |
@@ -69,15 +69,16 @@ vLLM serve command:
   --port 8000 \
   --served-model-name Qwen/Qwen3-14B-AWQ \
   --enable-auto-tool-choice \
-  --tool-call-parser hermes \
+  --tool-call-parser qwen3_xml \
   --reasoning-parser deepseek_r1 \
+  --enable-prefix-caching \
   --max-model-len 40960 \
   --dtype auto \
   --quantization awq_marlin \
   --gpu-memory-utilization 0.92
 #+end_src
 
-Note: Qwen3 uses the =hermes= tool-call format (same as Qwen2.5). Add =--reasoning-parser deepseek_r1= to strip thinking tokens.
+Note: Use =qwen3_xml= (not =hermes=) for Qwen3 — it handles the XML-style =<tool_call>= format correctly. Add =--enable-prefix-caching= for 20-40% TTFT speedup on repeated system prompts.
 
 *** #2 Capability jump: Qwen3-30B-A3B-AWQ (MoE)
 Only 3.3B parameters active per token (MoE), so it fits in ~21 GB at 32k
@@ -94,7 +95,7 @@ VLLM_USE_MODELSCOPE=True \
   --max-num-seqs 32 \
   --gpu-memory-utilization 0.90 \
   --enable-auto-tool-choice \
-  --tool-call-parser hermes \
+  --tool-call-parser qwen3_xml \
   --reasoning-parser deepseek_r1
 #+end_src
 
@@ -129,7 +130,7 @@ python -m venv .venv
   --port 8000 \
   --served-model-name Qwen/Qwen3-14B-AWQ \
   --enable-auto-tool-choice \
-  --tool-call-parser hermes \
+  --tool-call-parser qwen3_xml \
   --reasoning-parser deepseek_r1 \
   --max-model-len 40960 \
   --dtype auto \
