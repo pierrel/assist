@@ -31,7 +31,8 @@ ExecStart=$VLLM_PATH/.venv/bin/vllm serve $VLLM_MODEL \\
     --port $VLLM_PORT \\
     --served-model-name $VLLM_MODEL \\
     --enable-auto-tool-choice \\
-    --tool-call-parser hermes \\
+    --tool-call-parser qwen3_coder \\
+    --chat-template-kwargs '{"enable_thinking": false}' \\
     --max-model-len $VLLM_MAX_MODEL_LEN \\
     --dtype auto \\
     --quantization awq_marlin \\

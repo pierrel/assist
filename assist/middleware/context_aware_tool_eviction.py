@@ -12,6 +12,7 @@ results, this middleware:
 """
 import logging
 import json
+import os
 from typing import Callable, Any
 
 from langchain.agents.middleware import AgentMiddleware
@@ -46,23 +47,28 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
     def __init__(
         self,
         trigger_fraction: float = 0.75,
+        max_tokens: int | None = None,
         backend_factory: Callable[[ToolRuntime], Any] | None = None,
     ):
         """Initialize the middleware.
 
         Args:
             trigger_fraction: Fraction of max_input_tokens to trigger eviction (0.0-1.0)
+            max_tokens: Explicit context window size. If None, attempts to read from
+                agent state/config, falling back to 128000.
             backend_factory: Optional backend factory (uses agent's backend if None)
         """
         if not 0.0 <= trigger_fraction <= 1.0:
             raise ValueError(f"trigger_fraction must be between 0.0 and 1.0, got {trigger_fraction}")
 
         self.trigger_fraction = trigger_fraction
+        self.max_tokens_override = max_tokens
         self.backend_factory = backend_factory
         self._eviction_count = 0
 
         logger.info(
             f"ContextAwareToolEvictionMiddleware initialized: trigger={trigger_fraction:.0%}"
+            + (f", max_tokens={max_tokens}" if max_tokens else "")
         )
 
     def _get_backend(self, runtime: ToolRuntime) -> Any:
@@ -122,21 +128,21 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
         # Count tokens in all messages
         current_tokens = sum(self._count_message_tokens(msg) for msg in messages)
 
-        # Get max_input_tokens from model profile
-        # This should be set in the agent's model configuration
-        max_tokens = 128000  # Default fallback
+        # Determine max_tokens: explicit override > agent config > env var > fallback
+        if self.max_tokens_override is not None:
+            max_tokens = self.max_tokens_override
+        else:
+            max_tokens = int(os.getenv("ASSIST_CONTEXT_LEN", "128000"))
 
-        # Try to get from agent config
-        config = getattr(runtime, 'config', {})
-        configurable = config.get('configurable', {})
-
-        # Check various places where max_input_tokens might be
-        if 'max_input_tokens' in configurable:
-            max_tokens = configurable['max_input_tokens']
-        elif '_model_profile' in state:
-            profile = state['_model_profile']
-            if isinstance(profile, dict) and 'max_input_tokens' in profile:
-                max_tokens = profile['max_input_tokens']
+            # Also check agent config/state in case it was set there
+            config = getattr(runtime, 'config', {})
+            configurable = config.get('configurable', {})
+            if 'max_input_tokens' in configurable:
+                max_tokens = configurable['max_input_tokens']
+            elif '_model_profile' in state:
+                profile = state['_model_profile']
+                if isinstance(profile, dict) and 'max_input_tokens' in profile:
+                    max_tokens = profile['max_input_tokens']
 
         return current_tokens, max_tokens
 
