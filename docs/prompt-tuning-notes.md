@@ -1,12 +1,16 @@
-# Prompt Tuning Notes — Qwen2.5-14B-AWQ
+# Prompt Tuning Notes
 
 ## Context
 
-These notes capture behavioral observations from eval runs on 2026-03-22
-comparing Qwen2.5-14B-AWQ (new) against Ministral-3B (previous baseline).
+These notes capture behavioral observations from eval runs on 2026-03-22.
 
-Baseline (Ministral, 2026-03-21): **49/57 passing**
-First Qwen2.5-14B run (reverted prompts, 2026-03-22): TBD — eval in progress
+Model history:
+- Ministral-3B (baseline, 2026-03-21): **49/57 passing**
+- Qwen2.5-14B-AWQ (2026-03-22): 36/57 with prompt changes, reverted to re-baseline
+- Qwen3-14B-AWQ (2026-03-22): testing in progress
+
+**Important**: The observations in sections 1-6 below were from Qwen2.5-14B.
+Qwen3-14B has a different behavioral profile — see the Qwen3-specific section.
 
 ---
 
@@ -77,6 +81,31 @@ in the dev-agent prompt.
 
 ---
 
+## Qwen3-14B-AWQ Specific Issues
+
+### 7. Thinking mode breaks tool-call parsing (CRITICAL, OPERATIONAL)
+**Symptom**: Model outputs `<think>...</think>` reasoning block followed by
+`<tool_call>{"name": "ls", ...}</tool_call>` — but the entire thing arrives as
+plain text content, not as structured `tool_calls`. The model does 1 model call
+and "completes" without any tool calls being executed.
+**Root cause**: Qwen3's default thinking mode generates `<think>` tokens. The
+`qwen3_coder` parser in vLLM cannot extract tool calls when `<think>` blocks
+precede them in the same content stream.
+**Fix**: Add `--reasoning-parser deepseek_r1` to the vLLM serve command. This
+strips `<think>` blocks from the content before the tool-call parser runs.
+Verified working on vLLM 0.15.1.
+**Note**: `--chat-template-kwargs '{"enable_thinking": false}'` does NOT exist
+in vLLM 0.15.1. Do not use it.
+
+### 8. Context window is 40960, not 128k
+The research agent reported Qwen3-14B supports 128k context. This is true for
+the base model with YaRN scaling, but the **AWQ variant** has
+`max_position_embeddings=40960` baked into its `config.json`. Exceeding this
+causes a startup error. Do not set `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1` — positions
+beyond 40960 will produce NaN with RoPE.
+
+---
+
 ## Recommended Prompt Changes (conservative, one at a time)
 
 ### P1 — Fix context-agent ls path (HIGH CONFIDENCE, LOW RISK)
@@ -129,8 +158,13 @@ Hold until P1-P4 are validated.
 
 ## Process Recommendation
 
-1. Run full eval with reverted prompts (in progress)
-2. Apply P1 only, run full eval
-3. Apply P2, run full eval
-4. Apply P3, run full eval
-5. Compare each step before adding the next change
+1. Run full eval with Qwen3-14B + reverted prompts (establishes clean Qwen3 baseline)
+2. Compare Qwen3 baseline against Ministral baseline and Qwen2.5 run
+3. Apply P1 only, run full eval
+4. Apply P2, run full eval
+5. Apply P3, run full eval
+6. Compare each step before adding the next change
+
+Note: P1-P5 were designed for Qwen2.5-14B. They need re-validation with Qwen3.
+Some may be unnecessary (Qwen3 is a better instruction follower) and some may
+need different wording.
