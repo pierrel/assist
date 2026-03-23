@@ -15,37 +15,92 @@ GPU server is at =192.168.6.118= on the local network.
 
 * Model Selection
 ** Current (as of March 2026)
-=mistralai/Ministral-3-8B-Instruct-2512= — served by vLLM on the GPU server.
+=Qwen/Qwen2.5-14B-Instruct-AWQ= — upgraded from Ministral-3B-8B on 2026-03-22.
 
-This model is too small for reliable multi-agent tool calling. See [[*Recommended Upgrade]].
+See [[*Candidate Models]] for the full evaluated shortlist and upgrade path.
 
-** Recommended Upgrade
-=Qwen/Qwen2.5-14B-Instruct-AWQ=
+** Candidate Models
+Evaluated 2026-03-22 against RTX 3090 24 GB + vLLM constraints.
 
-*** Why
-- Strongest instruction-following and tool-call fidelity available on this hardware
-- Fits in 24 GB at AWQ 4-bit: ~8–9 GB weights + ~6 GB KV cache = ~15 GB total
-- Qwen2.5 uses the =hermes= tool-call format — first-class vLLM support
-- Resolves all six consistent eval failures that Ministral-3B cannot fix
+*** VRAM and fit summary
+| Model                    | Format      | Weights | KV cache (32k ctx) | Total     | 32k fits? | vLLM stable? |
+|--------------------------+-------------+---------+--------------------+-----------+-----------+--------------|
+| Ministral-3B (old)       | BF16        | ~6 GB   | ~2 GB              | ~8 GB     | ✅        | ✅           |
+| Qwen2.5-14B-AWQ (now)    | AWQ INT4    | ~9 GB   | ~6 GB              | ~15–16 GB | ✅        | ✅           |
+| Qwen3-14B-AWQ (#1 next)  | AWQ INT4    | ~9 GB   | ~7 GB              | ~16–18 GB | ✅        | ✅ (0.10+)   |
+| Qwen2.5-32B-AWQ          | AWQ INT4    | ~21 GB  | ~4 GB              | ~25 GB    | ⚠️ 16k   | ✅           |
+| Qwen3-30B-A3B-AWQ (#2)   | AWQ INT4    | ~17 GB  | ~4 GB              | ~21 GB    | ✅        | ✅ (0.8.5+)  |
+| Qwen3.5-27B-AWQ          | AWQ INT4    | ~15 GB  | ~5 GB              | ~20 GB    | ✅        | ❌ bugs      |
+| Mistral-Small-3.2-24B    | BF16        | ~48 GB  | —                  | >24 GB    | ❌        | partial      |
 
-*** VRAM budget
-| Model           | Format | Weights | KV cache (15k ctx) | Total  | Fits?             |
-|-----------------+--------+---------+--------------------+--------+-------------------|
-| Ministral-3B    | BF16   | ~6 GB   | ~2 GB              | ~8 GB  | ✅ (current)     |
-| Qwen2.5-7B      | BF16   | ~14 GB  | ~4 GB              | ~18 GB | ✅ (fallback)    |
-| Qwen2.5-14B AWQ | INT4   | ~8 GB   | ~6 GB              | ~14 GB | ✅ (recommended) |
-| Qwen2.5-14B     | BF16   | ~28 GB  | —                  | >24 GB | ❌               |
+*** Benchmark comparison
+| Model                 | BFCL (tool call) | IFEval | Notes                              |
+|-----------------------+------------------+--------+------------------------------------|
+| Qwen2.5-14B-AWQ       | 70.8             | ~89    | Current; hermes parser             |
+| Qwen3-14B-AWQ         | ~69 est.         | ~90+   | Qwen3 gen; qwen3_coder parser      |
+| Qwen2.5-32B-AWQ       | ~76              | ~92    | 16k ctx limit on 3090              |
+| Qwen3-30B-A3B-AWQ     | 69.1             | ~90+   | MoE: 3.3B active params, fast      |
+| Qwen3.5-27B-AWQ       | 68.5             | 95.0   | Blocked: vLLM bug #35743 (unfixed) |
 
-*** Latency expectations (RTX 3090)
-| Model | Typical call (8k ctx) | Notes |
-|-------+-----------------------+-------|
-| Ministral-3B | 2–10 s | Fast but unreliable |
-| Qwen2.5-7B BF16 | 20–35 s | Good balance |
-| Qwen2.5-14B AWQ | 40–70 s | Best quality; within 60 s budget at typical contexts |
+*** #1 Recommended next upgrade: Qwen/Qwen3-14B-AWQ
+Drop-in replacement for the current model. Same weight footprint (~9 GB),
+same context window, official AWQ from Qwen team. Qwen3-14B matches
+Qwen2.5-32B-Base on most benchmarks. Requires vLLM ≥0.10.
 
-** Fallback
-=Qwen/Qwen2.5-7B-Instruct= in BF16 (~14 GB, no quantization).
-Use if 14B latency consistently exceeds 60 s/call under real workloads.
+#+begin_src bash
+.venv/bin/huggingface-cli download Qwen/Qwen3-14B-AWQ
+#+end_src
+
+vLLM serve command:
+#+begin_src bash
+.venv/bin/vllm serve Qwen/Qwen3-14B-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name Qwen/Qwen3-14B-AWQ \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser deepseek_r1 \
+  --max-model-len 32768 \
+  --dtype auto \
+  --quantization awq_marlin \
+  --gpu-memory-utilization 0.90 \
+  --enable-prefix-caching
+#+end_src
+
+Note: use =qwen3_coder= not =hermes= for this model.
+
+*** #2 Capability jump: Qwen3-30B-A3B-AWQ (MoE)
+Only 3.3B parameters active per token (MoE), so it fits in ~21 GB at 32k
+and runs faster than a 30B dense model. BFCL 69.1. No official HuggingFace
+AWQ yet — use ModelScope community quantization.
+
+#+begin_src bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+VLLM_USE_MODELSCOPE=True \
+.venv/bin/vllm serve swift/Qwen3-30B-A3B-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-model-len 32768 \
+  --max-num-seqs 32 \
+  --gpu-memory-utilization 0.90 \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser deepseek_r1
+#+end_src
+
+*** Avoid for now: Qwen3.5-27B and Qwen3.5-35B-A3B
+Both use the GDN (Gated DeltaNet) architecture. Open vLLM bug #35743
+(filed 2026-03-02, unresolved): CUDA graph capture fails with
+=assert num_cache_lines >= batch= in =causal_conv1d_update=. Workaround
+requires =--enforce-eager= which disables CUDA graph optimisation.
+Revisit when vLLM ≥0.17 stable ships with GDN support.
+
+*** Avoid: Mistral-Small-3.2-24B
+Does not fit on a single 24 GB GPU at full precision (~48 GB). The only
+community AWQ has broken tool calling. Not viable for this hardware.
+
+** Current serve command
+=Qwen/Qwen2.5-14B-Instruct-AWQ= with =awq_marlin=:
 
 * vLLM Setup
 ** Install
