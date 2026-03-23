@@ -89,7 +89,7 @@ in the dev-agent prompt.
 plain text content, not as structured `tool_calls`. The model does 1 model call
 and "completes" without any tool calls being executed.
 **Root cause**: Qwen3's default thinking mode generates `<think>` tokens. The
-`qwen3_coder` parser in vLLM cannot extract tool calls when `<think>` blocks
+`hermes` parser in vLLM cannot extract tool calls when `<think>` blocks
 precede them in the same content stream.
 **Fix**: Add `--reasoning-parser deepseek_r1` to the vLLM serve command. This
 strips `<think>` blocks from the content before the tool-call parser runs.
