@@ -32,7 +32,7 @@ ExecStart=$VLLM_PATH/.venv/bin/vllm serve $VLLM_MODEL \\
     --served-model-name $VLLM_MODEL \\
     --enable-auto-tool-choice \\
     --tool-call-parser qwen3_coder \\
-    --chat-template-kwargs '{"enable_thinking": false}' \\
+    --reasoning-parser deepseek_r1 \\
     --max-model-len $VLLM_MAX_MODEL_LEN \\
     --dtype auto \\
     --quantization awq_marlin \\

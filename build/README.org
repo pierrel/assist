@@ -59,7 +59,7 @@ vLLM serve command:
   --served-model-name Qwen/Qwen3-14B-AWQ \
   --enable-auto-tool-choice \
   --tool-call-parser qwen3_coder \
-  --chat-template-kwargs '{"enable_thinking": false}' \
+  --reasoning-parser deepseek_r1 \
   --max-model-len 40960 \
   --dtype auto \
   --quantization awq_marlin \
