@@ -31,7 +31,7 @@ ExecStart=$VLLM_PATH/.venv/bin/vllm serve $VLLM_MODEL \\
     --port $VLLM_PORT \\
     --served-model-name $VLLM_MODEL \\
     --enable-auto-tool-choice \\
-    --tool-call-parser qwen3_xml \\
+    --tool-call-parser hermes \\
     --reasoning-parser deepseek_r1 \\
     --enable-prefix-caching \\
     --max-model-len $VLLM_MAX_MODEL_LEN \\
