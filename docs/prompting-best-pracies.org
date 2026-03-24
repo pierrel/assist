@@ -1,0 +1,24 @@
+Official Qwen sources:
+- https://qwenlm.github.io/blog/qwen3/
+- https://qwen.readthedocs.io/en/latest/framework/function_call.html
+- https://qwen.readthedocs.io/en/latest/framework/qwen_agent.html
+- https://github.com/QwenLM/Qwen-Agent
+- https://www.alibabacloud.com/help/en/model-studio/deep-thinking
+
+HuggingFace sources:
+- https://huggingface.co/Qwen/Qwen3-8B
+- https://huggingface.co/blog/qwen-3-chat-template-deep-dive
+- https://huggingface.co/Qwen/Qwen3-235B-A22B/discussions/20
+
+Community/inference providers:
+- https://fireworks.ai/blog/qwen-3
+- https://fireworks.ai/blog/qwen-3-decoded
+- https://github.com/QwenLM/Qwen3-Coder/issues/475
+- https://qwen3lm.com/qwen3-prompt-engineering-structured-output/
+
+General agentic prompting:
+- https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
+- https://simonwillison.net/guides/agentic-engineering-patterns/subagents/
+- https://www.promptingguide.ai/research/llm-agents
+- https://community.openai.com/t/prompting-best-practices-for-tool-use-function-calling/1123036
+- https://www.prompthub.us/blog/prompt-engineering-for-ai-agents
