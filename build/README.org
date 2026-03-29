@@ -1,0 +1,227 @@
+#+Title: Build — Hardware and Inference Setup
+
+* Hardware
+| Component | Part                                | Notes                        |
+|-----------+-------------------------------------+------------------------------|
+| GPU       | NVIDIA RTX 3090 24 GB (Founders Ed) | 24 GB VRAM; primary constraint for model selection |
+| CPU       | AMD Ryzen 7 7800X3D                 | AM5, 3D V-Cache              |
+| RAM       | G.SKILL Flare X5 64 GB (2×32 GB)   | DDR5-6000 CL30               |
+| Storage   | Kingston KC3000 M.2 2 TB            | NVMe                         |
+| Case      | Fractal Terra                       | Mini-ITX SFF                 |
+| PSU       | Corsair SF750 (2024)                | 750 W SFX                    |
+| Mobo      | ASRock B650I Lightning WiFi         | Mini-ITX, AM5, PCIe 4.0 ×16  |
+
+GPU server is at =192.168.6.118= on the local network.
+
+* Model Selection
+** Current (as of March 2026)
+=Qwen/Qwen3-14B-AWQ= — upgraded from Qwen2.5-14B-AWQ on 2026-03-22.
+
+Context window: 40960 tokens (=max_position_embeddings= in model config).
+Requires =--reasoning-parser deepseek_r1= — Qwen3 outputs =<think>= blocks by default
+which interfere with the =qwen3_xml= tool-call parser. The reasoning parser strips
+these tokens before tool calls are extracted.
+
+See [[*Candidate Models]] for the full evaluated shortlist and upgrade path.
+
+** Candidate Models
+Evaluated 2026-03-22 against RTX 3090 24 GB + vLLM constraints.
+
+*** VRAM and fit summary
+| Model                    | Format      | Weights | KV cache (32k ctx) | Total     | 32k fits? | vLLM stable? |
+|--------------------------+-------------+---------+--------------------+-----------+-----------+--------------|
+| Ministral-8B (old)       | FP8         | ~8 GB   | ~7 GB              | ~15 GB    | ✅ 78k    | ✅           |
+| Qwen2.5-14B-AWQ (prev)   | AWQ INT4    | ~9 GB   | ~6 GB              | ~15–16 GB | ✅        | ✅           |
+| Qwen3-14B-AWQ (now)      | AWQ INT4    | ~9 GB   | ~7 GB              | ~16–18 GB | ✅        | ✅ (0.10+)   |
+| Qwen2.5-32B-AWQ          | AWQ INT4    | ~21 GB  | ~4 GB              | ~25 GB    | ⚠️ 16k   | ✅           |
+| Qwen3-30B-A3B-AWQ (#2)   | AWQ INT4    | ~17 GB  | ~4 GB              | ~21 GB    | ✅        | ✅ (0.8.5+)  |
+| Qwen3.5-27B-AWQ          | AWQ INT4    | ~15 GB  | ~5 GB              | ~20 GB    | ✅        | ❌ bugs      |
+| Mistral-Small-3.2-24B    | BF16        | ~48 GB  | —                  | >24 GB    | ❌        | partial      |
+
+*** Benchmark comparison
+| Model                 | BFCL (tool call) | IFEval | Notes                              |
+|-----------------------+------------------+--------+------------------------------------|
+| Ministral-3-8B-2512   | —                | —      | Baseline 49/57 eval; mistral parser; FP8; 78k ctx |
+| Qwen2.5-14B-AWQ       | 70.8             | ~89    | hermes parser                      |
+| Qwen3-14B-AWQ         | ~69 est.         | ~90+   | Qwen3 gen; hermes parser; 46/57 eval |
+| Qwen2.5-32B-AWQ       | ~76              | ~92    | 16k ctx limit on 3090              |
+| Qwen3-30B-A3B-AWQ     | 69.1             | ~90+   | MoE: 3.3B active params, fast      |
+| Qwen3.5-27B-AWQ       | 68.5             | 95.0   | Blocked: vLLM bug #35743 (unfixed) |
+
+*** Qwen/Qwen3-14B-AWQ (current)
+Same weight footprint as Qwen2.5-14B (~9 GB), but with 40960 context
+(vs 32768) and stronger instruction following. Official AWQ from Qwen
+team. Qwen3-14B matches Qwen2.5-32B-Base on most benchmarks.
+
+Critical: Qwen3 has a "thinking mode" that outputs =<think>...</think>=
+blocks before tool calls. Without =--reasoning-parser deepseek_r1=, these
+blocks are included in the response content and the tool-call parser
+fails to extract the calls — they come back as raw text instead of
+structured tool_calls. The reasoning parser strips thinking tokens first.
+
+#+begin_src bash
+.venv/bin/huggingface-cli download Qwen/Qwen3-14B-AWQ
+#+end_src
+
+vLLM serve command:
+#+begin_src bash
+.venv/bin/vllm serve Qwen/Qwen3-14B-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name Qwen/Qwen3-14B-AWQ \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes \
+  --reasoning-parser deepseek_r1 \
+  --enable-prefix-caching \
+  --max-model-len 40960 \
+  --dtype auto \
+  --quantization awq_marlin \
+  --gpu-memory-utilization 0.92
+#+end_src
+
+Note: Use =hermes= (not =qwen3_xml=) — qwen3_xml fails to extract tool calls on vLLM 0.18.0 with this checkpoint. Add =--enable-prefix-caching= for 20-40% TTFT improvement.
+
+*** #2 Capability jump: Qwen3-30B-A3B-AWQ (MoE)
+Only 3.3B parameters active per token (MoE), so it fits in ~21 GB at 32k
+and runs faster than a 30B dense model. BFCL 69.1. No official HuggingFace
+AWQ yet — use ModelScope community quantization.
+
+#+begin_src bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+VLLM_USE_MODELSCOPE=True \
+.venv/bin/vllm serve swift/Qwen3-30B-A3B-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-model-len 32768 \
+  --max-num-seqs 32 \
+  --gpu-memory-utilization 0.90 \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes \
+  --reasoning-parser deepseek_r1
+#+end_src
+
+*** Avoid for now: Qwen3.5-27B and Qwen3.5-35B-A3B
+Both use the GDN (Gated DeltaNet) architecture. Open vLLM bug #35743
+(filed 2026-03-02, unresolved): CUDA graph capture fails with
+=assert num_cache_lines >= batch= in =causal_conv1d_update=. Workaround
+requires =--enforce-eager= which disables CUDA graph optimisation.
+Revisit when vLLM ≥0.17 stable ships with GDN support.
+
+*** Avoid: Mistral-Small-3.2-24B
+Does not fit on a single 24 GB GPU at full precision (~48 GB). The only
+community AWQ has broken tool calling. Not viable for this hardware.
+
+* vLLM Setup
+** Install
+#+begin_src bash
+cd ~/vllm
+python -m venv .venv
+.venv/bin/pip install vllm huggingface_hub
+#+end_src
+
+** Download model
+#+begin_src bash
+.venv/bin/huggingface-cli download Qwen/Qwen3-14B-AWQ
+#+end_src
+
+** Serve (Qwen3-14B-AWQ — current)
+#+begin_src bash
+.venv/bin/vllm serve Qwen/Qwen3-14B-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name Qwen/Qwen3-14B-AWQ \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes \
+  --reasoning-parser deepseek_r1 \
+  --max-model-len 40960 \
+  --dtype auto \
+  --quantization awq_marlin \
+  --gpu-memory-utilization 0.92
+#+end_src
+
+Note: =--host 0.0.0.0= is required for LAN access — the default binds to localhost only.
+Note: =--reasoning-parser deepseek_r1= is required — strips =<think>= blocks before tool-call parsing.
+
+** Serve (Ministral-8B-Instruct-2512 — original baseline)
+#+begin_src bash
+vllm serve mistralai/Ministral-3-8B-Instruct-2512 \
+  --tokenizer_mode mbistral \
+  --config_format mistral \
+  --load_format mistral \
+  --enable-auto-tool-choice \
+  --tool-call-parser mistral \
+  --quantization FP8 \
+  --max-model-len 78000
+#+end_src
+
+Note: Uses Mistral's native format loading (=--load_format mistral=, =--config_format mistral=) rather than the
+HuggingFace format. FP8 quantization. 78k context window. Eval baseline: 49/57 (86%).
+
+** Serve (Qwen2.5-14B-AWQ — previous)
+#+begin_src bash
+.venv/bin/vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name Qwen/Qwen2.5-14B-Instruct-AWQ \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes \
+  --max-model-len 32768 \
+  --dtype auto \
+  --quantization awq_marlin \
+  --gpu-memory-utilization 0.92
+#+end_src
+
+** Passwordless sudo for service management
+The Makefile targets use =sudo systemctl= over SSH without a TTY, which requires
+passwordless sudo. Run this once from the assist project root:
+
+#+begin_src bash
+make vllm-setup-sudo
+#+end_src
+
+This streams =scripts/setup-vllm-sudo.sh= to the GPU server, which installs
+=/etc/sudoers.d/vllm-service= with the required NOPASSWD entries for
+=systemctl=, =journalctl=, and =tee= scoped to the =vllm-serve= service.
+
+Verify with:
+
+#+begin_src bash
+make vllm-status
+#+end_src
+
+** Managed via Makefile
+The assist project manages the vLLM service via =make= targets. From =~/src/assist=:
+
+#+begin_src bash
+make vllm-setup    # one-time: install, download model, install systemd service
+make vllm-start    # start serving (model loads in 60-120s)
+make vllm-health   # check if ready
+make vllm-logs     # tail logs
+make vllm-restart  # restart after config change
+#+end_src
+
+See =.dev.env= for =VLLM_*= configuration vars (host, model, context length, etc).
+
+** Health check
+#+begin_src bash
+curl http://192.168.6.118:8000/health
+#+end_src
+
+** Logs
+#+begin_src bash
+journalctl -u vllm-serve -f
+#+end_src
+
+* assist Configuration
+After switching models, update =.dev.env= in the assist project root:
+
+#+begin_example
+ASSIST_MODEL_URL=http://192.168.6.118:8000/v1
+ASSIST_MODEL_NAME=Qwen/Qwen3-14B-AWQ
+ASSIST_CONTEXT_LEN=40960
+VLLM_MODEL=Qwen/Qwen3-14B-AWQ
+VLLM_MAX_MODEL_LEN=40960
+#+end_example
+
+=ASSIST_CONTEXT_LEN= must match the model's =max_position_embeddings=.
+The context-aware eviction middleware reads this value to set its threshold correctly.
