@@ -1,0 +1,1 @@
+Research the principles of ambient computing with a focus on leveraging large language models (LLMs). Save your findings to the references/ directory.
