@@ -234,6 +234,139 @@ instance. Terminate from the dashboard once the upload/download completes.
 Note: =awq_marlin= is vLLM's optimised AWQ kernel for Ampere GPUs (RTX 3090).
 It is faster than plain =awq= at inference time.
 
+* Quantizing Locally on the RTX 3090
+
+The RTX 3090's 24 GB VRAM cannot hold the full 28 GB BF16 model, so AutoAWQ
+must use CPU offloading: layers are streamed one at a time between system RAM
+and GPU rather than loaded all at once. Your 64 GB DDR5 is more than sufficient
+to hold the full model in system memory.
+
+*Expected time: 4–8 hours.* The calibration pass is the bottleneck — each of
+the 512 forward passes requires shuttling ~40 layers back and forth between RAM
+and GPU. The actual INT4 quantization after calibration is fast.
+
+Note: the GPU server will be fully occupied during this and cannot run vLLM at
+the same time.
+
+** Step 1: Set up the environment on the GPU server
+
+SSH into the GPU server and work inside the vLLM virtualenv (which already has
+the right Python version), or create a separate one:
+
+#+begin_src bash
+ssh pierre@192.168.6.118
+cd ~/vllm
+.venv/bin/pip install autoawq transformers accelerate huggingface_hub
+.venv/bin/huggingface-cli login   # paste your HF token
+#+end_src
+
+** Step 2: Download the base model
+
+Download separately first so progress is visible and resumable:
+
+#+begin_src bash
+.venv/bin/huggingface-cli download mistralai/Ministral-3-14B-Instruct-2512 \
+    --local-dir ~/models/Ministral-3-14B-Instruct-2512
+#+end_src
+
+This downloads ~28 GB. Expect 10–30 minutes depending on your connection.
+
+** Step 3: Run the quantization
+
+Save this as =~/vllm/quantize_local.py=:
+
+#+begin_src python
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+model_path = "/home/pierre/models/Ministral-3-14B-Instruct-2512"
+output_dir = "/home/pierre/models/Ministral-3-14B-Instruct-2512-AWQ-4bit"
+
+print("Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+print("Loading model with CPU offload (this may take a few minutes)...")
+model = AutoAWQForCausalLM.from_pretrained(
+    model_path,
+    low_cpu_mem_usage=True,
+    torch_dtype="auto",
+    device_map="auto",   # offloads layers exceeding VRAM to CPU/RAM
+)
+
+quant_config = {
+    "zero_point": True,
+    "q_group_size": 128,
+    "w_bit": 4,
+    "version": "GEMM",
+}
+
+print("Running AWQ calibration and quantization (expect 4–8 hours)...")
+model.quantize(tokenizer, quant_config=quant_config)
+
+print(f"Saving to {output_dir}...")
+model.save_quantized(output_dir)
+tokenizer.save_pretrained(output_dir)
+
+print("Done.")
+#+end_src
+
+Run it inside a =tmux= or =screen= session so it survives SSH disconnection:
+
+#+begin_src bash
+tmux new -s quant
+cd ~/vllm
+.venv/bin/python quantize_local.py
+# Detach with Ctrl+B then D; reattach later with: tmux attach -t quant
+#+end_src
+
+** Step 4: Verify the output
+
+Same verification step as the cloud route:
+
+#+begin_src bash
+ls -lh ~/models/Ministral-3-14B-Instruct-2512-AWQ-4bit/
+# Expect ~7–8 GB of *.safetensors files
+
+.venv/bin/python -c "
+import json
+with open('/home/pierre/models/Ministral-3-14B-Instruct-2512-AWQ-4bit/config.json') as f:
+    c = json.load(f)
+print('Architecture:', c.get('architectures'))
+print('Max position embeddings:', c.get('max_position_embeddings'))
+print('Quantization config:', c.get('quantization_config', {}).get('quant_type'))
+"
+#+end_src
+
+** Step 5: Serve
+
+#+begin_src bash
+.venv/bin/vllm serve /home/pierre/models/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name mistralai/Ministral-3-14B-Instruct-2512 \
+  --enable-auto-tool-choice \
+  --tool-call-parser mistral \
+  --quantization awq_marlin \
+  --max-model-len 32768 \
+  --dtype auto \
+  --gpu-memory-utilization 0.92
+#+end_src
+
+Or update the Makefile's =VLLM_MODEL= in =.dev.env= to point at the local path
+and use =make vllm-restart=.
+
+** If it runs out of memory
+
+Reduce =n_parallel_calib_samples= to lower peak memory during calibration:
+
+#+begin_src python
+model.quantize(
+    tokenizer,
+    quant_config=quant_config,
+    n_parallel_calib_samples=32,   # default is 64; lower = less RAM pressure
+)
+#+end_src
+
 * Troubleshooting
 
 ** "Architecture resolved as PixtralForConditionalGeneration"
