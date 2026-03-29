@@ -199,13 +199,3 @@ make vllm-restart  # restart after config change
 #+end_src
 
 See =.dev.env= for =VLLM_*= configuration vars (host, model, context length, etc).
-
-** Health check
-#+begin_src bash
-curl http://192.168.6.118:8000/health
-#+end_src
-
-** Logs
-#+begin_src bash
-journalctl -u vllm-serve -f
-#+end_src
