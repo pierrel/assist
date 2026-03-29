@@ -11,7 +11,6 @@
 | PSU       | Corsair SF750 (2024)                | 750 W SFX                    |
 | Mobo      | ASRock B650I Lightning WiFi         | Mini-ITX, AM5, PCIe 4.0 ×16  |
 
-GPU server is at =192.168.6.118= on the local network.
 
 * Model Selection
 ** Current (as of March 2026)
