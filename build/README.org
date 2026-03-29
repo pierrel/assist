@@ -11,7 +11,6 @@
 | PSU       | Corsair SF750 (2024)                | 750 W SFX                    |
 | Mobo      | ASRock B650I Lightning WiFi         | Mini-ITX, AM5, PCIe 4.0 ×16  |
 
-
 * Model Selection
 ** Current (as of March 2026)
 =Qwen/Qwen3-14B-AWQ= — upgraded from Qwen2.5-14B-AWQ on 2026-03-22.
@@ -210,17 +209,3 @@ curl http://192.168.6.118:8000/health
 #+begin_src bash
 journalctl -u vllm-serve -f
 #+end_src
-
-* assist Configuration
-After switching models, update =.dev.env= in the assist project root:
-
-#+begin_example
-ASSIST_MODEL_URL=http://192.168.6.118:8000/v1
-ASSIST_MODEL_NAME=Qwen/Qwen3-14B-AWQ
-ASSIST_CONTEXT_LEN=40960
-VLLM_MODEL=Qwen/Qwen3-14B-AWQ
-VLLM_MAX_MODEL_LEN=40960
-#+end_example
-
-=ASSIST_CONTEXT_LEN= must match the model's =max_position_embeddings=.
-The context-aware eviction middleware reads this value to set its threshold correctly.
