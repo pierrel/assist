@@ -1,0 +1,275 @@
+#+Title: Ministral-3-14B Quantization Guide
+
+* Background
+
+** What is quantization?
+
+A language model's weights are stored as floating-point numbers. By default,
+most models use BF16 (bfloat16): 16 bits per parameter. A 14B-parameter model
+therefore occupies ~28 GB of memory — more than a 24 GB RTX 3090 can hold.
+
+Quantization reduces the number of bits per parameter at the cost of some
+precision. The tradeoff:
+
+| Format   | Bits/param | 14B size | Quality loss    |
+|----------+------------+----------+-----------------|
+| BF16     |         16 | ~28 GB   | none (baseline) |
+| FP8      |          8 | ~14 GB   | negligible      |
+| AWQ INT4 |          4 | ~7–8 GB  | small (~1–3%)   |
+| INT3     |          3 | ~5 GB    | noticeable      |
+
+At 4-bit, a 14B model fits easily on the RTX 3090 (7–8 GB weights + KV cache).
+In practice, AWQ INT4 quality is close enough to BF16 that most benchmarks show
+<2% degradation — often imperceptible in real usage.
+
+** What is AWQ?
+
+AWQ (Activation-aware Weight Quantization) is a 4-bit quantization method from
+MIT (Lin et al., 2023). It is the best-performing 4-bit method for inference
+with vLLM and has first-class support via =--quantization awq_marlin=.
+
+The key insight: not all weights matter equally. Weights connected to
+high-activation channels (the ones the model uses most) are more sensitive to
+precision loss. Naively rounding everything to 4 bits destroys these channels.
+
+AWQ's process:
+1. Run a small *calibration dataset* through the full-precision model
+2. Measure which activation channels have the highest magnitudes (the "salient"
+   channels)
+3. Scale those weight channels up before quantization, then scale activations
+   back down at inference time — effectively giving salient weights higher
+   representational precision without using more bits
+4. Quantize all weights to INT4 with per-group granularity (group size 128)
+
+The result is a 4-bit model that behaves nearly identically to the BF16 original
+on the tasks the calibration data represents.
+
+** Do I need to provide my own calibration dataset?
+
+No. AutoAWQ ships with a default calibration set (512 samples from the Pile
+dataset) that works well out of the box. You can get a good quantization without
+supplying any data.
+
+That said, using domain-specific calibration data can improve quality for your
+use case. Since this model will do tool calling and multi-agent reasoning, a
+calibration set that includes function-call examples would be slightly better.
+This is optional and unlikely to make a measurable difference at 14B scale —
+larger models are more robust to calibration choice.
+
+** How long does it take?
+
+On a cloud A100 40 GB:
+- Download 14B model weights: ~10–15 min (depends on HuggingFace speed)
+- AWQ calibration pass: ~20–30 min
+- Quantization + save: ~5–10 min
+- Total: *45–60 minutes*
+
+Total cloud cost at ~$1.50/hr: *~$1–2*.
+
+* Prerequisites
+
+** HuggingFace account and token
+
+The Ministral models are gated — you must accept the license on HuggingFace
+before downloading.
+
+1. Go to =https://huggingface.co/mistralai/Ministral-3-14B-Instruct-2512=
+2. Accept the license agreement
+3. Generate an access token at =https://huggingface.co/settings/tokens=
+   (read-only scope is sufficient)
+
+** Where to upload the result (optional but recommended)
+
+Create a HuggingFace repository to store the quantized model:
+- =https://huggingface.co/new= → name it e.g. =Ministral-3-14B-Instruct-2512-AWQ-4bit=
+- Set to private if preferred
+
+* Cloud Provider Options
+
+You need a GPU with at least *40 GB VRAM* to load the full BF16 14B model.
+
+| Provider   | GPU         | VRAM | Est. price | Notes                          |
+|------------+-------------+------+------------+--------------------------------|
+| Lambda     | A100 SXM4   | 40GB | ~$1.29/hr  | Reliable, simple SSH access    |
+| RunPod     | A100 SXM4   | 40GB | ~$0.79/hr  | Spot pricing, may be preempted |
+| Vast.ai    | A100        | 40GB | ~$0.60/hr  | Cheapest; variable reliability |
+| RunPod     | A6000       | 48GB | ~$0.69/hr  | More VRAM headroom             |
+
+Lambda is recommended for simplicity. Vast.ai is cheapest if you're comfortable
+with spot-style reliability.
+
+An 80 GB A100 or H100 is fine too — it just has more VRAM than needed.
+
+* Step-by-Step Instructions
+
+** Step 1: Rent the instance
+
+On Lambda Labs (=lambdalabs.com=):
+1. Create an account and add a payment method
+2. Instances → Launch → select =A100 (40 GB SXM4)=
+3. Choose any region with availability
+4. Add your SSH public key
+5. Launch. Note the IP address.
+
+** Step 2: Connect and set up the environment
+
+#+begin_src bash
+ssh ubuntu@<instance-ip>
+
+# Install Python dependencies
+pip install autoawq transformers accelerate huggingface_hub
+
+# Log in to HuggingFace
+huggingface-cli login
+# Paste your HF token when prompted
+#+end_src
+
+** Step 3: Run the quantization
+
+Save this as =quantize.py= on the instance:
+
+#+begin_src python
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+model_id = "mistralai/Ministral-3-14B-Instruct-2512"
+output_dir = "Ministral-3-14B-Instruct-2512-AWQ-4bit"
+
+print("Loading tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+print("Loading model (this downloads ~28 GB)...")
+model = AutoAWQForCausalLM.from_pretrained(
+    model_id,
+    low_cpu_mem_usage=True,
+    torch_dtype="auto",
+)
+
+quant_config = {
+    "zero_point": True,
+    "q_group_size": 128,
+    "w_bit": 4,
+    "version": "GEMM",
+}
+
+print("Running AWQ calibration and quantization...")
+model.quantize(tokenizer, quant_config=quant_config)
+
+print(f"Saving to {output_dir}...")
+model.save_quantized(output_dir)
+tokenizer.save_pretrained(output_dir)
+
+print("Done.")
+#+end_src
+
+Run it:
+
+#+begin_src bash
+python quantize.py
+#+end_src
+
+The calibration pass uses the default Pile dataset (512 samples). You will see
+progress bars for each transformer layer — there are ~40 layers, so expect ~30
+minutes.
+
+** Step 4: Verify the output
+
+#+begin_src bash
+ls -lh Ministral-3-14B-Instruct-2512-AWQ-4bit/
+# Should show *.safetensors files totalling ~7–8 GB
+# Should include config.json, tokenizer files
+
+# Spot-check the config
+python -c "
+import json
+with open('Ministral-3-14B-Instruct-2512-AWQ-4bit/config.json') as f:
+    c = json.load(f)
+print('Architecture:', c.get('architectures'))
+print('Max position embeddings:', c.get('max_position_embeddings'))
+print('Quantization config:', c.get('quantization_config', {}).get('quant_type'))
+"
+#+end_src
+
+You should see:
+- Architecture: something like =[\"MistralForCausalLM"]= (NOT Pixtral)
+- max_position_embeddings: whatever the base model defines (likely 32768 or 131072)
+- quant_type: =awq=
+
+** Step 5: Upload to HuggingFace
+
+#+begin_src bash
+huggingface-cli upload <your-username>/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+    Ministral-3-14B-Instruct-2512-AWQ-4bit/ \
+    --repo-type model
+#+end_src
+
+Or, if you prefer to download directly to the GPU server instead:
+
+#+begin_src bash
+# From your local machine / GPU server:
+scp -r ubuntu@<instance-ip>:~/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+    /home/pierre/vllm/models/
+#+end_src
+
+** Step 6: Terminate the instance
+
+*Important:* Lambda charges until you explicitly terminate (not just stop) the
+instance. Terminate from the dashboard once the upload/download completes.
+
+* Serving the Quantized Model
+
+#+begin_src bash
+.venv/bin/vllm serve <your-username>/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --served-model-name mistralai/Ministral-3-14B-Instruct-2512 \
+  --enable-auto-tool-choice \
+  --tool-call-parser mistral \
+  --quantization awq_marlin \
+  --max-model-len 32768 \
+  --dtype auto \
+  --gpu-memory-utilization 0.92
+#+end_src
+
+Note: =awq_marlin= is vLLM's optimised AWQ kernel for Ampere GPUs (RTX 3090).
+It is faster than plain =awq= at inference time.
+
+* Troubleshooting
+
+** "Architecture resolved as PixtralForConditionalGeneration"
+The model config is pointing to a vision model. This means either the base model
+download was corrupted, or the quantizer copied config from the wrong model.
+Re-download the base model and re-run.
+
+** "Quantization method in config does not match awq_marlin"
+The saved model uses =compressed-tensors= format (Neural Magic's tool) rather than
+AutoAWQ format. Drop =--quantization awq_marlin= and let vLLM auto-detect, or
+explicitly pass =--quantization compressed-tensors=. This is what happened with
+the =cyankiwi= community model.
+
+** OOM during quantization
+If you hit out-of-memory during the calibration pass, reduce the number of
+calibration samples:
+
+#+begin_src python
+model.quantize(tokenizer, quant_config=quant_config, calib_data="pileval", n_parallel_calib_samples=64)
+#+end_src
+
+* Optional: Custom Calibration Dataset
+
+If you want to tune the quantization toward tool-calling quality, replace the
+default calibration data with function-call examples:
+
+#+begin_src python
+# Custom calibration samples — tool-call format
+calib_data = [
+    "[INST] What is the weather in Paris? [/INST] [TOOL_CALLS] [{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]",
+    "[INST] Search for recent news about AI. [/INST] [TOOL_CALLS] [{\"name\": \"search\", \"arguments\": {\"query\": \"AI news 2026\"}}]",
+    # ... add 50–200 more examples in your model's chat format
+]
+
+model.quantize(tokenizer, quant_config=quant_config, calib_data=calib_data)
+#+end_src
+
+At 14B scale the improvement is unlikely to be significant, but it costs nothing
+extra if you have the examples available.
