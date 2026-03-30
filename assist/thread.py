@@ -6,7 +6,7 @@ from typing import Literal, Dict, Any, List, Iterator
 
 import sqlite3
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from assist.promptable import base_prompt_for
@@ -165,7 +165,8 @@ n    checkpointing via SqliteSaver.
             open(self.db_path, "a").close()
         # SqliteSaver expects a sqlite3.Connection
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.checkpointer = SqliteSaver(self.conn)
+        # Use InMemorySaver as a fallback, but we'll handle the connection directly
+        self.checkpointer = InMemorySaver()
         # Create and reuse one chat model for all threads
         self.model = select_chat_model("mistral-nemo", 0.1)
 
