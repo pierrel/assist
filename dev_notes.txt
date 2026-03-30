@@ -1,0 +1,85 @@
+## Codebase Analysis: Diff Rendering and Web View
+
+### Overview
+The issue involves a web view failing to load very large diffs due to excessive data. The goal is to investigate and implement a solution to handle large diffs efficiently.
+
+---
+
+### Key Files and Components
+
+#### 1. **Diff Generation**
+- **File**: `/workspace/assist/domain_manager.py`
+- **Class**: `DomainManager`
+- **Methods**:
+  - `main_diff()`: Generates diffs between the current working tree and the `main` branch.
+  - `changes()`: Generates diffs for tracked and untracked changes.
+- **Logic**: Uses Git commands (`git diff`, `git ls-files`) to fetch diffs and returns a list of `Change` objects.
+
+#### 2. **Diff Rendering**
+- **File**: `/workspace/manage/web.py`
+- **Functions**:
+  - `render_diff(text: str) -> str`: Uses Pygments to render diffs in HTML format.
+  - `render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool = False) -> str`: Renders a thread, including diffs, and integrates them into the web view.
+- **Dependencies**:
+  - Pygments: Used for syntax highlighting and diff rendering.
+  - Markdown: Used for rendering assistant/tool messages.
+
+#### 3. **Web View Integration**
+- **File**: `/workspace/manage/web.py`
+- **Logic**:
+  - Diffs are appended to thread messages at render time.
+  - Collapsible containers allow users to hide/show diffs.
+  - No explicit truncation or pagination for large diffs.
+
+#### 4. **Test Coverage**
+- **Files**:
+  - `test_domain_manager.py`: Tests `DomainManager` and its diff generation methods.
+  - `test_domain_merge.py`: Tests merging logic and diff generation.
+- **Observations**:
+  - No explicit tests for `render_diff()` or `render_thread()`.
+  - Edge cases (e.g., empty diffs) are tested, but large diffs are not explicitly addressed.
+
+---
+
+### Current Behavior
+- **Large Diffs**: Rendered as-is using Pygments, which may cause performance issues or slow rendering.
+- **User Experience**: Collapsible containers allow users to hide/show diffs, but there is no server-side truncation or client-side pagination.
+
+---
+
+### Proposed Solution
+To handle large diffs efficiently, we can implement one or more of the following:
+
+1. **Truncation**: Truncate diffs after a certain number of lines or characters.
+2. **Pagination**: Split large diffs into smaller chunks and load them on demand.
+3. **Lazy Loading**: Load diffs only when the user explicitly requests them.
+4. **Summarization**: Provide a summary of changes (e.g., number of lines added/removed) and allow users to expand for details.
+
+---
+
+### Implementation Plan
+1. **Modify `render_diff()`**: Add logic to truncate or summarize large diffs.
+2. **Update `render_thread()`**: Integrate the new diff rendering logic and ensure it works seamlessly with the existing web view.
+3. **Add Configuration**: Introduce environment variables or configuration options to control truncation limits or pagination settings.
+4. **Write Tests**: Add explicit tests for the new rendering logic to ensure it handles large diffs efficiently.
+
+---
+
+### Next Steps
+1. **Implement Truncation Logic**: Modify `render_diff()` to truncate large diffs.
+2. **Update `render_thread()`**: Ensure diffs are rendered with the new logic.
+3. **Add Tests**: Write tests to verify the new rendering logic.
+4. **Run Full Test Suite**: Ensure no regressions are introduced.
+
+---
+
+### References
+- **Pygments**: Used for diff rendering. Can be configured to limit output.
+- **Git Commands**: Used for diff generation. Can be configured to limit output (e.g., `--stat` for summary).
+
+---
+
+### Open Questions
+1. Should truncation be configurable via environment variables?
+2. Should pagination be implemented on the client side (JavaScript) or server side (Python)?
+3. Should users be notified when diffs are truncated or summarized?

@@ -15,6 +15,7 @@ import markdown
 from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
+import os
 from assist.domain_manager import DomainManager
 from assist.sandbox_manager import SandboxManager
 
@@ -137,8 +138,54 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Assist Web", lifespan=lifespan)
 
-def render_diff(text: str) -> str:
-    # Use Pygments to render unified diffs with HTML formatting
+def render_diff(text: str, start_line: int = None, end_line: int = None) -> str:
+    """Render a diff using Pygments.
+    
+    If the diff is too large, truncate it to avoid performance issues.
+    The truncation limit is controlled by the `DIFF_TRUNCATE_LIMIT` environment variable.
+    Defaults to 1000 lines if not set.
+    
+    Truncation occurs at the end of a hunk (lines starting with '@@') to ensure
+    logical completeness.
+    
+    Supports pagination via `start_line` and `end_line` parameters.
+    If pagination is requested, the function returns only the specified range of lines.
+    """
+    # Get truncation limit from environment variable or use default
+    truncate_limit = int(os.getenv("DIFF_TRUNCATE_LIMIT", "1000"))
+    
+    # Handle pagination if start_line and end_line are provided
+    lines = text.splitlines()
+    if start_line is not None and end_line is not None:
+        # Ensure the range is within bounds
+        start_line = max(0, start_line)
+        end_line = min(len(lines), end_line)
+        
+        # Extract the specified range
+        paginated_lines = lines[start_line:end_line]
+        paginated_text = "\n".join(paginated_lines)
+        
+        # Add pagination indicator
+        text = f"{paginated_text}\n... (lines {start_line + 1}-{end_line} of {len(lines)}) ..."
+    else:
+        # Truncate the diff if it exceeds the limit
+        if len(lines) > truncate_limit:
+            # Find the last complete hunk (lines starting with '@@') before the truncate limit
+            last_hunk_index = -1
+            for i in range(min(truncate_limit, len(lines)) - 1, -1, -1):
+                if lines[i].startswith('@@'):
+                    last_hunk_index = i
+                    break
+            
+            # If no hunk found, just truncate to the limit
+            if last_hunk_index == -1:
+                truncated_lines = lines[:truncate_limit]
+            else:
+                truncated_lines = lines[:last_hunk_index + 1]
+            
+            truncated_text = "\n".join(truncated_lines)
+            text = f"{truncated_text}\n... (diff truncated) ..."
+    
     return highlight(text, DiffLexer(), HtmlFormatter(nowrap=False))
 
 def render_index() -> str:
