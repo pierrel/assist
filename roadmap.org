@@ -1,0 +1,43 @@
+* Observability
+** TODO Add sub-agent tracing to web conversation
+* Ministral upgrade
+The goal is to have a "home grown" ministral 3 14b running on vllm.
+** TODO Run the awq quantizer
+See [[file:~/src/assist/build/ministral-14b-quantization.org][quantization doc]] for instructions
+** TODO Test
+** TODO Push to huggingface
+* Dev updates
+The dev agent needs significant improvements
+** TODO Many more evals
+Consider checking out a version of this app to make changes to
+** TODO Language/project-specific guidance
+** TODO Ensure it reads the README every time
+* Research improvements
+Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
+** TODO Create some evals on how you want it to act
+Consider:
+1. URLs that do not work (404, etc)
+2. URLs that do not corroborate the information in the final report
+3. Better ways to search
+* Memory
+** TODO Come up with at least 3 memory plans
+Some considerations:
+- Direct the agent to store anything in the AGENTS.md file (probably start here)
+- Create a specific (saved on the server) memory file(s) for each (or all) domains
+- Some vector store of timestamped facts to be recalled
+
+Here is an old memory plan:
+#+begin_quote
+This could be done through the user expert agent. It should:
+1. Intercept any new user request (through a middleware) and be asked to pick out:
+   1. Any facts the user has shared. These should be stored in a timestamped file in a declarative format
+   2. The main topics of the request (emacs, veganism, etc) and save them to another that is also timestamped
+2.Insert into the prompt (again, through middleware) anything relevant to the user request before it reaches the model.
+
+All of these kinds of things should be stored in a special "/memories" directory that is global to the agent. There's just 1 memories directory that is not within the main filesystem. No other agent has access to this.
+
+There should be at least two new tools available to:
+1. Calculate topic "density" - The rate of occurrence of topics with some time decay component. This should help the user expert agent understand, if there is any ambiguity, what the user could be asking about. For example, if the user often asks about emacs, then the user expert agent could be used to shape the prompt for the main agent/llm so that this is made clear for example if the user simply asks "how do I split a window horizontally" it could be updated to "how do I split a window horizontally.\n# User context\nThe user is probably asking about this in the context of emacs".
+2. Pick out facts (from the facts file) relevant to the user prompt, for example if the user is asking for restaurant recommendations, and there's a fact that the user is vegan, then it should be made clear that the user is probably asking for restaurants that provide vegan options.
+#+end_quote
+** TODO Memory plan 1
