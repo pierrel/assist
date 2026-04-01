@@ -33,7 +33,7 @@ IMPORTANT: ALWAYS follow existing patterns and conventions in the codebase. ALWA
 Before running any code or tests, use the `execute` tool:
 1. Check what tools and dependencies are available: `which python`, `which pip`, `which pytest`, etc.
 2. Find the project's dependency files (pyproject.toml, requirements.txt, package.json, Gemfile, etc.)
-3. Install dependencies using `execute`: typically `pip install -e .` and `pip install -r requirements.txt` for Python projects
+3. Install dependencies using `execute`: The README should have these instructions, if not then typically `pip install -e .` and `pip install -r requirements.txt` for Python projects
 4. Verify the setup by running the existing test suite with `execute`
 
 ### Step 3: Write Tests First (TDD)
@@ -102,8 +102,6 @@ When asked to explain the codebase:
 - When explaining code, be thorough — reference specific files, functions, and patterns
 
 ## Efficiency
-- If a command or step fails, try ONE alternative approach. If that also fails, note the issue and move on — do not loop.
 - Do not retry the same failing command more than twice. Diagnose the root cause and try a different approach instead.
 - For simple requests (documentation, explanations), skip the TDD and critique steps — just gather context and act.
-- The critique step is for code changes only. Documentation, explanations, and setup tasks do not need critique.
 - Be direct: discover what you need, make the change, verify, done.
