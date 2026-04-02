@@ -117,10 +117,21 @@ On Lambda Labs (=lambdalabs.com=):
 ssh ubuntu@<instance-ip>
 
 pip install llmcompressor transformers accelerate datasets huggingface_hub
-
-huggingface-cli login
-# Paste your HF token when prompted
 #+end_src
+
+** Step 2b: Copy the model from the GPU server
+
+Since the model is already downloaded locally, rsync it to the cloud instance
+rather than re-downloading from HuggingFace:
+
+#+begin_src bash
+# Run this from the GPU server (or your local machine if it has the files)
+rsync -avz --progress \
+    /home/pierre/vllm/models/Ministral-3-14b-Instruct-2512/ \
+    ubuntu@<instance-ip>:~/models/Ministral-3-14b-Instruct-2512/
+#+end_src
+
+Expect ~10–20 min depending on your upload speed (~28 GB).
 
 ** Step 3: Run the quantization
 
@@ -132,16 +143,16 @@ from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
 
-MODEL_ID = "mistralai/Ministral-3-14B-Instruct-2512"
-OUTPUT_DIR = "Ministral-3-14B-Instruct-2512-W4A16"
+MODEL_PATH = "/root/models/Ministral-3-14b-Instruct-2512"
+OUTPUT_DIR = "/root/models/Ministral-3-14B-Instruct-2512-W4A16"
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 
-print("Loading model (~28 GB download)...")
-model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
+print("Loading model...")
+model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype="auto")
 
 print("Preparing calibration dataset...")
 ds = load_dataset("HuggingFaceH4/ultrachat_200k",
@@ -276,16 +287,7 @@ cd ~/vllm
 .venv/bin/huggingface-cli login   # paste your HF token
 #+end_src
 
-** Step 2: Download the base model
-
-#+begin_src bash
-.venv/bin/huggingface-cli download mistralai/Ministral-3-14B-Instruct-2512 \
-    --local-dir ~/models/Ministral-3-14B-Instruct-2512
-#+end_src
-
-This downloads ~28 GB. Expect 10–30 minutes depending on your connection.
-
-** Step 3: Run the quantization
+** Step 2: Run the quantization
 
 Save this as =~/vllm/quantize_local.py=:
 
@@ -295,8 +297,8 @@ from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
 
-MODEL_PATH = "/home/pierre/models/Ministral-3-14B-Instruct-2512"
-OUTPUT_DIR = "/home/pierre/models/Ministral-3-14B-Instruct-2512-W4A16"
+MODEL_PATH = "/home/pierre/vllm/models/Ministral-3-14b-Instruct-2512"
+OUTPUT_DIR = "/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16"
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
@@ -361,12 +363,12 @@ cd ~/vllm
 ** Step 4: Verify the output
 
 #+begin_src bash
-ls -lh ~/models/Ministral-3-14B-Instruct-2512-W4A16/
+ls -lh ~/vllm/models/Ministral-3-14B-Instruct-2512-W4A16/
 # Expect ~7–8 GB of *.safetensors files
 
 .venv/bin/python -c "
 import json
-with open('/home/pierre/models/Ministral-3-14B-Instruct-2512-W4A16/config.json') as f:
+with open('/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16/config.json') as f:
     c = json.load(f)
 print('Architecture:', c.get('architectures'))
 print('Max position embeddings:', c.get('max_position_embeddings'))
@@ -377,7 +379,7 @@ print('Quantization format:', c.get('quantization_config', {}).get('format'))
 ** Step 5: Serve
 
 #+begin_src bash
-.venv/bin/vllm serve /home/pierre/models/Ministral-3-14B-Instruct-2512-W4A16 \
+.venv/bin/vllm serve /home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16 \
   --host 0.0.0.0 \
   --port 8000 \
   --served-model-name mistralai/Ministral-3-14B-Instruct-2512 \
