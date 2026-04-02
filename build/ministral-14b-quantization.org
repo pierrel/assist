@@ -15,56 +15,59 @@ precision. The tradeoff:
 |----------+------------+----------+-----------------|
 | BF16     |         16 | ~28 GB   | none (baseline) |
 | FP8      |          8 | ~14 GB   | negligible      |
-| AWQ INT4 |          4 | ~7–8 GB  | small (~1–3%)   |
+| INT4     |          4 | ~7–8 GB  | small (~1–3%)   |
 | INT3     |          3 | ~5 GB    | noticeable      |
 
 At 4-bit, a 14B model fits easily on the RTX 3090 (7–8 GB weights + KV cache).
-In practice, AWQ INT4 quality is close enough to BF16 that most benchmarks show
+In practice, INT4 quality is close enough to BF16 that most benchmarks show
 <2% degradation — often imperceptible in real usage.
 
-** What is AWQ?
+** What is AWQ / GPTQ W4A16?
 
-AWQ (Activation-aware Weight Quantization) is a 4-bit quantization method from
-MIT (Lin et al., 2023). It is the best-performing 4-bit method for inference
-with vLLM and has first-class support via =--quantization awq_marlin=.
+Both are INT4 weight quantization methods. The algorithm used here is *GPTQ
+W4A16* (4-bit weights, 16-bit activations) via llm-compressor.
 
-The key insight: not all weights matter equally. Weights connected to
-high-activation channels (the ones the model uses most) are more sensitive to
-precision loss. Naively rounding everything to 4 bits destroys these channels.
+The key insight shared by both: not all weights are equally important. Weights
+connected to high-activation channels are more sensitive to precision loss.
+Both methods use a small *calibration dataset* to identify these channels and
+preserve them.
 
-AWQ's process:
-1. Run a small *calibration dataset* through the full-precision model
-2. Measure which activation channels have the highest magnitudes (the "salient"
-   channels)
-3. Scale those weight channels up before quantization, then scale activations
-   back down at inference time — effectively giving salient weights higher
-   representational precision without using more bits
-4. Quantize all weights to INT4 with per-group granularity (group size 128)
+W4A16 means:
+- *W4*: weights stored as INT4 (4 bits) — the memory saving
+- *A16*: activations kept in BF16 at runtime — no accuracy loss in the forward pass
 
-The result is a 4-bit model that behaves nearly identically to the BF16 original
-on the tasks the calibration data represents.
+The result is a model that uses 4x less memory than BF16 but computes in full
+16-bit precision where it matters.
+
+** Tooling: llm-compressor
+
+This guide uses *llm-compressor* (=https://github.com/vllm-project/llm-compressor=),
+the vLLM project's official quantization library. AutoAWQ (the previous tool)
+is deprecated as of 2026 and llm-compressor is its replacement.
+
+The output format is *compressed-tensors*, which vLLM auto-detects and loads
+natively — no =--quantization= flag needed when serving.
 
 ** Do I need to provide my own calibration dataset?
 
-No. AutoAWQ ships with a default calibration set (512 samples from the Pile
-dataset) that works well out of the box. You can get a good quantization without
-supplying any data.
+No. llm-compressor uses =HuggingFaceH4/ultrachat_200k= as its default
+calibration dataset (512 samples of chat conversations). This works well
+out of the box.
 
-That said, using domain-specific calibration data can improve quality for your
-use case. Since this model will do tool calling and multi-agent reasoning, a
-calibration set that includes function-call examples would be slightly better.
-This is optional and unlikely to make a measurable difference at 14B scale —
-larger models are more robust to calibration choice.
+Using domain-specific calibration data can improve quality for specific use
+cases. For tool-calling workloads, calibration samples containing function-call
+syntax would be marginally better — but at 14B scale the difference is unlikely
+to be measurable in real usage.
 
 ** How long does it take?
 
 On a cloud A100 40 GB:
-- Download 14B model weights: ~10–15 min (depends on HuggingFace speed)
-- AWQ calibration pass: ~20–30 min
-- Quantization + save: ~5–10 min
-- Total: *45–60 minutes*
+- Download 14B model weights: ~10–15 min
+- GPTQ calibration + quantization: ~10–20 min
+- Save: ~5 min
+- Total: *30–45 minutes*
 
-Total cloud cost at ~$1.50/hr: *~$1–2*.
+Total cloud cost at ~$1.50/hr: *~$1*.
 
 * Prerequisites
 
@@ -81,26 +84,23 @@ before downloading.
 ** Where to upload the result (optional but recommended)
 
 Create a HuggingFace repository to store the quantized model:
-- =https://huggingface.co/new= → name it e.g. =Ministral-3-14B-Instruct-2512-AWQ-4bit=
+- =https://huggingface.co/new= → name it e.g. =Ministral-3-14B-Instruct-2512-W4A16=
 - Set to private if preferred
 
 * Cloud Provider Options
 
 You need a GPU with at least *40 GB VRAM* to load the full BF16 14B model.
 
-| Provider   | GPU         | VRAM | Est. price | Notes                          |
-|------------+-------------+------+------------+--------------------------------|
-| Lambda     | A100 SXM4   | 40GB | ~$1.29/hr  | Reliable, simple SSH access    |
-| RunPod     | A100 SXM4   | 40GB | ~$0.79/hr  | Spot pricing, may be preempted |
-| Vast.ai    | A100        | 40GB | ~$0.60/hr  | Cheapest; variable reliability |
-| RunPod     | A6000       | 48GB | ~$0.69/hr  | More VRAM headroom             |
+| Provider | GPU       | VRAM | Est. price | Notes                          |
+|----------+-----------+------+------------+--------------------------------|
+| Lambda   | A100 SXM4 | 40GB | ~$1.29/hr  | Reliable, simple SSH access    |
+| RunPod   | A100 SXM4 | 40GB | ~$0.79/hr  | Spot pricing, may be preempted |
+| Vast.ai  | A100      | 40GB | ~$0.60/hr  | Cheapest; variable reliability |
+| RunPod   | A6000     | 48GB | ~$0.69/hr  | More VRAM headroom             |
 
-Lambda is recommended for simplicity. Vast.ai is cheapest if you're comfortable
-with spot-style reliability.
+Lambda is recommended for simplicity. An 80 GB A100 or H100 is fine too.
 
-An 80 GB A100 or H100 is fine too — it just has more VRAM than needed.
-
-* Step-by-Step Instructions
+* Step-by-Step Instructions (Cloud)
 
 ** Step 1: Rent the instance
 
@@ -116,10 +116,8 @@ On Lambda Labs (=lambdalabs.com=):
 #+begin_src bash
 ssh ubuntu@<instance-ip>
 
-# Install Python dependencies
-pip install autoawq transformers accelerate huggingface_hub
+pip install llmcompressor transformers accelerate datasets huggingface_hub
 
-# Log in to HuggingFace
 huggingface-cli login
 # Paste your HF token when prompted
 #+end_src
@@ -129,35 +127,59 @@ huggingface-cli login
 Save this as =quantize.py= on the instance:
 
 #+begin_src python
-from awq import AutoAWQForCausalLM
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from datasets import load_dataset
+from llmcompressor.modifiers.quantization import GPTQModifier
+from llmcompressor import oneshot
 
-model_id = "mistralai/Ministral-3-14B-Instruct-2512"
-output_dir = "Ministral-3-14B-Instruct-2512-AWQ-4bit"
+MODEL_ID = "mistralai/Ministral-3-14B-Instruct-2512"
+OUTPUT_DIR = "Ministral-3-14B-Instruct-2512-W4A16"
+NUM_CALIBRATION_SAMPLES = 512
+MAX_SEQUENCE_LENGTH = 2048
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(model_id)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-print("Loading model (this downloads ~28 GB)...")
-model = AutoAWQForCausalLM.from_pretrained(
-    model_id,
-    low_cpu_mem_usage=True,
-    torch_dtype="auto",
+print("Loading model (~28 GB download)...")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
+
+print("Preparing calibration dataset...")
+ds = load_dataset("HuggingFaceH4/ultrachat_200k",
+                  split=f"train_sft[:{NUM_CALIBRATION_SAMPLES}]")
+ds = ds.shuffle(seed=42)
+
+def preprocess(example):
+    return {"text": tokenizer.apply_chat_template(
+        example["messages"], tokenize=False)}
+
+ds = ds.map(preprocess)
+
+def tokenize(sample):
+    return tokenizer(sample["text"], padding=False,
+                     max_length=MAX_SEQUENCE_LENGTH,
+                     truncation=True, add_special_tokens=False)
+
+ds = ds.map(tokenize, remove_columns=ds.column_names)
+
+recipe = GPTQModifier(
+    targets="Linear",
+    scheme="W4A16",
+    ignore=["lm_head"],
+    group_size=128,
 )
 
-quant_config = {
-    "zero_point": True,
-    "q_group_size": 128,
-    "w_bit": 4,
-    "version": "GEMM",
-}
+print("Running GPTQ calibration and quantization...")
+oneshot(
+    model=model,
+    dataset=ds,
+    recipe=recipe,
+    max_seq_length=MAX_SEQUENCE_LENGTH,
+    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+)
 
-print("Running AWQ calibration and quantization...")
-model.quantize(tokenizer, quant_config=quant_config)
-
-print(f"Saving to {output_dir}...")
-model.save_quantized(output_dir)
-tokenizer.save_pretrained(output_dir)
+print(f"Saving to {OUTPUT_DIR}...")
+model.save_pretrained(OUTPUT_DIR, save_compressed=True)
+tokenizer.save_pretrained(OUTPUT_DIR)
 
 print("Done.")
 #+end_src
@@ -168,46 +190,43 @@ Run it:
 python quantize.py
 #+end_src
 
-The calibration pass uses the default Pile dataset (512 samples). You will see
-progress bars for each transformer layer — there are ~40 layers, so expect ~30
-minutes.
+Progress bars will appear per transformer layer (~40 layers). Expect ~15–20 min
+for the calibration pass on an A100.
 
 ** Step 4: Verify the output
 
 #+begin_src bash
-ls -lh Ministral-3-14B-Instruct-2512-AWQ-4bit/
+ls -lh Ministral-3-14B-Instruct-2512-W4A16/
 # Should show *.safetensors files totalling ~7–8 GB
-# Should include config.json, tokenizer files
 
-# Spot-check the config
 python -c "
 import json
-with open('Ministral-3-14B-Instruct-2512-AWQ-4bit/config.json') as f:
+with open('Ministral-3-14B-Instruct-2512-W4A16/config.json') as f:
     c = json.load(f)
 print('Architecture:', c.get('architectures'))
 print('Max position embeddings:', c.get('max_position_embeddings'))
-print('Quantization config:', c.get('quantization_config', {}).get('quant_type'))
+print('Quantization config:', c.get('quantization_config', {}).get('format'))
 "
 #+end_src
 
 You should see:
-- Architecture: something like =[\"MistralForCausalLM"]= (NOT Pixtral)
-- max_position_embeddings: whatever the base model defines (likely 32768 or 131072)
-- quant_type: =awq=
+- Architecture: =[\"MistralForCausalLM"]= (NOT Pixtral)
+- max_position_embeddings: the base model's value (likely 32768 or 131072)
+- format: =dense= or =dense-hessian= (compressed-tensors format)
 
 ** Step 5: Upload to HuggingFace
 
 #+begin_src bash
-huggingface-cli upload <your-username>/Ministral-3-14B-Instruct-2512-AWQ-4bit \
-    Ministral-3-14B-Instruct-2512-AWQ-4bit/ \
+huggingface-cli upload <your-username>/Ministral-3-14B-Instruct-2512-W4A16 \
+    Ministral-3-14B-Instruct-2512-W4A16/ \
     --repo-type model
 #+end_src
 
-Or, if you prefer to download directly to the GPU server instead:
+Or download directly to the GPU server:
 
 #+begin_src bash
-# From your local machine / GPU server:
-scp -r ubuntu@<instance-ip>:~/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+# From your GPU server:
+scp -r ubuntu@<instance-ip>:~/Ministral-3-14B-Instruct-2512-W4A16 \
     /home/pierre/vllm/models/
 #+end_src
 
@@ -218,51 +237,46 @@ instance. Terminate from the dashboard once the upload/download completes.
 
 * Serving the Quantized Model
 
+vLLM auto-detects the compressed-tensors format from the model config — no
+=--quantization= flag needed.
+
 #+begin_src bash
-.venv/bin/vllm serve <your-username>/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+.venv/bin/vllm serve <your-username>/Ministral-3-14B-Instruct-2512-W4A16 \
   --host 0.0.0.0 \
   --port 8000 \
   --served-model-name mistralai/Ministral-3-14B-Instruct-2512 \
   --enable-auto-tool-choice \
   --tool-call-parser mistral \
-  --quantization awq_marlin \
   --max-model-len 32768 \
   --dtype auto \
   --gpu-memory-utilization 0.92
 #+end_src
 
-Note: =awq_marlin= is vLLM's optimised AWQ kernel for Ampere GPUs (RTX 3090).
-It is faster than plain =awq= at inference time.
+If auto-detection fails for any reason, add =--quantization compressed-tensors=.
 
 * Quantizing Locally on the RTX 3090
 
-The RTX 3090's 24 GB VRAM cannot hold the full 28 GB BF16 model, so AutoAWQ
-must use CPU offloading: layers are streamed one at a time between system RAM
-and GPU rather than loaded all at once. Your 64 GB DDR5 is more than sufficient
-to hold the full model in system memory.
+The RTX 3090's 24 GB VRAM cannot hold the full 28 GB BF16 model at once.
+llm-compressor handles this with =sequential=True=, which processes one
+transformer layer at a time — loading it onto the GPU, calibrating, quantizing,
+then offloading before moving to the next. Your 64 GB DDR5 holds the full model
+in system memory throughout.
 
-*Expected time: 4–8 hours.* The calibration pass is the bottleneck — each of
-the 512 forward passes requires shuttling ~40 layers back and forth between RAM
-and GPU. The actual INT4 quantization after calibration is fast.
+*Expected time: 4–8 hours.* Each of 512 forward passes shuttles ~40 layers
+between RAM and GPU. The actual quantization after calibration is fast.
 
-Note: the GPU server will be fully occupied during this and cannot run vLLM at
-the same time.
+Note: the GPU will be fully occupied and cannot run vLLM at the same time.
 
 ** Step 1: Set up the environment on the GPU server
-
-SSH into the GPU server and work inside the vLLM virtualenv (which already has
-the right Python version), or create a separate one:
 
 #+begin_src bash
 ssh pierre@192.168.6.118
 cd ~/vllm
-.venv/bin/pip install autoawq transformers accelerate huggingface_hub
+.venv/bin/pip install llmcompressor transformers accelerate datasets huggingface_hub
 .venv/bin/huggingface-cli login   # paste your HF token
 #+end_src
 
 ** Step 2: Download the base model
-
-Download separately first so progress is visible and resumable:
 
 #+begin_src bash
 .venv/bin/huggingface-cli download mistralai/Ministral-3-14B-Instruct-2512 \
@@ -276,133 +290,173 @@ This downloads ~28 GB. Expect 10–30 minutes depending on your connection.
 Save this as =~/vllm/quantize_local.py=:
 
 #+begin_src python
-from awq import AutoAWQForCausalLM
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from datasets import load_dataset
+from llmcompressor.modifiers.quantization import GPTQModifier
+from llmcompressor import oneshot
 
-model_path = "/home/pierre/models/Ministral-3-14B-Instruct-2512"
-output_dir = "/home/pierre/models/Ministral-3-14B-Instruct-2512-AWQ-4bit"
+MODEL_PATH = "/home/pierre/models/Ministral-3-14B-Instruct-2512"
+OUTPUT_DIR = "/home/pierre/models/Ministral-3-14B-Instruct-2512-W4A16"
+NUM_CALIBRATION_SAMPLES = 512
+MAX_SEQUENCE_LENGTH = 2048
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(model_path)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 
-print("Loading model with CPU offload (this may take a few minutes)...")
-model = AutoAWQForCausalLM.from_pretrained(
-    model_path,
-    low_cpu_mem_usage=True,
-    torch_dtype="auto",
-    device_map="auto",   # offloads layers exceeding VRAM to CPU/RAM
+print("Loading model into CPU memory...")
+model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype="auto")
+
+print("Preparing calibration dataset...")
+ds = load_dataset("HuggingFaceH4/ultrachat_200k",
+                  split=f"train_sft[:{NUM_CALIBRATION_SAMPLES}]")
+ds = ds.shuffle(seed=42)
+
+def preprocess(example):
+    return {"text": tokenizer.apply_chat_template(
+        example["messages"], tokenize=False)}
+
+ds = ds.map(preprocess)
+
+def tokenize(sample):
+    return tokenizer(sample["text"], padding=False,
+                     max_length=MAX_SEQUENCE_LENGTH,
+                     truncation=True, add_special_tokens=False)
+
+ds = ds.map(tokenize, remove_columns=ds.column_names)
+
+recipe = GPTQModifier(
+    targets="Linear",
+    scheme="W4A16",
+    ignore=["lm_head"],
+    group_size=128,
 )
 
-quant_config = {
-    "zero_point": True,
-    "q_group_size": 128,
-    "w_bit": 4,
-    "version": "GEMM",
-}
+print("Running GPTQ calibration and quantization (expect 4–8 hours)...")
+oneshot(
+    model=model,
+    dataset=ds,
+    recipe=recipe,
+    max_seq_length=MAX_SEQUENCE_LENGTH,
+    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+    sequential=True,   # process one layer at a time to stay within 24 GB VRAM
+)
 
-print("Running AWQ calibration and quantization (expect 4–8 hours)...")
-model.quantize(tokenizer, quant_config=quant_config)
-
-print(f"Saving to {output_dir}...")
-model.save_quantized(output_dir)
-tokenizer.save_pretrained(output_dir)
+print(f"Saving to {OUTPUT_DIR}...")
+model.save_pretrained(OUTPUT_DIR, save_compressed=True)
+tokenizer.save_pretrained(OUTPUT_DIR)
 
 print("Done.")
 #+end_src
 
-Run it inside a =tmux= or =screen= session so it survives SSH disconnection:
+Run it inside a =tmux= session so it survives SSH disconnection:
 
 #+begin_src bash
 tmux new -s quant
 cd ~/vllm
 .venv/bin/python quantize_local.py
-# Detach with Ctrl+B then D; reattach later with: tmux attach -t quant
+# Detach: Ctrl+B then D
+# Reattach: tmux attach -t quant
 #+end_src
 
 ** Step 4: Verify the output
 
-Same verification step as the cloud route:
-
 #+begin_src bash
-ls -lh ~/models/Ministral-3-14B-Instruct-2512-AWQ-4bit/
+ls -lh ~/models/Ministral-3-14B-Instruct-2512-W4A16/
 # Expect ~7–8 GB of *.safetensors files
 
 .venv/bin/python -c "
 import json
-with open('/home/pierre/models/Ministral-3-14B-Instruct-2512-AWQ-4bit/config.json') as f:
+with open('/home/pierre/models/Ministral-3-14B-Instruct-2512-W4A16/config.json') as f:
     c = json.load(f)
 print('Architecture:', c.get('architectures'))
 print('Max position embeddings:', c.get('max_position_embeddings'))
-print('Quantization config:', c.get('quantization_config', {}).get('quant_type'))
+print('Quantization format:', c.get('quantization_config', {}).get('format'))
 "
 #+end_src
 
 ** Step 5: Serve
 
 #+begin_src bash
-.venv/bin/vllm serve /home/pierre/models/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+.venv/bin/vllm serve /home/pierre/models/Ministral-3-14B-Instruct-2512-W4A16 \
   --host 0.0.0.0 \
   --port 8000 \
   --served-model-name mistralai/Ministral-3-14B-Instruct-2512 \
   --enable-auto-tool-choice \
   --tool-call-parser mistral \
-  --quantization awq_marlin \
   --max-model-len 32768 \
   --dtype auto \
   --gpu-memory-utilization 0.92
 #+end_src
 
-Or update the Makefile's =VLLM_MODEL= in =.dev.env= to point at the local path
-and use =make vllm-restart=.
+Or update =VLLM_MODEL= in =.dev.env= to the local path and run =make vllm-restart=.
 
 ** If it runs out of memory
 
-Reduce =n_parallel_calib_samples= to lower peak memory during calibration:
+Reduce samples and/or sequence length:
 
 #+begin_src python
-model.quantize(
-    tokenizer,
-    quant_config=quant_config,
-    n_parallel_calib_samples=32,   # default is 64; lower = less RAM pressure
+oneshot(
+    model=model,
+    dataset=ds,
+    recipe=recipe,
+    max_seq_length=1024,            # reduce from 2048
+    num_calibration_samples=128,    # reduce from 512
+    sequential=True,
+)
+#+end_src
+
+For extreme cases, add =offload_hessians=True= to the =GPTQModifier=:
+
+#+begin_src python
+recipe = GPTQModifier(
+    targets="Linear",
+    scheme="W4A16",
+    ignore=["lm_head"],
+    group_size=128,
+    offload_hessians=True,   # trades memory for time
 )
 #+end_src
 
 * Troubleshooting
 
 ** "Architecture resolved as PixtralForConditionalGeneration"
-The model config is pointing to a vision model. This means either the base model
-download was corrupted, or the quantizer copied config from the wrong model.
-Re-download the base model and re-run.
+The model config is pointing to a vision model. This means the base model
+download was corrupted or the wrong model was used. Re-download and re-run.
 
-** "Quantization method in config does not match awq_marlin"
-The saved model uses =compressed-tensors= format (Neural Magic's tool) rather than
-AutoAWQ format. Drop =--quantization awq_marlin= and let vLLM auto-detect, or
-explicitly pass =--quantization compressed-tensors=. This is what happened with
-the =cyankiwi= community model.
+** vLLM doesn't load the quantized model
+Add =--quantization compressed-tensors= explicitly to the serve command if
+vLLM fails to auto-detect the format.
 
-** OOM during quantization
-If you hit out-of-memory during the calibration pass, reduce the number of
-calibration samples:
-
-#+begin_src python
-model.quantize(tokenizer, quant_config=quant_config, calib_data="pileval", n_parallel_calib_samples=64)
-#+end_src
+** OOM during calibration
+See the "If it runs out of memory" section above. The primary knobs are
+=num_calibration_samples=, =max_seq_length=, and =offload_hessians=.
 
 * Optional: Custom Calibration Dataset
 
-If you want to tune the quantization toward tool-calling quality, replace the
-default calibration data with function-call examples:
+To calibrate toward tool-calling quality, replace the ultrachat dataset:
 
 #+begin_src python
-# Custom calibration samples — tool-call format
-calib_data = [
+# Custom calibration samples in Mistral's tool-call format
+calib_texts = [
     "[INST] What is the weather in Paris? [/INST] [TOOL_CALLS] [{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\"}}]",
-    "[INST] Search for recent news about AI. [/INST] [TOOL_CALLS] [{\"name\": \"search\", \"arguments\": {\"query\": \"AI news 2026\"}}]",
-    # ... add 50–200 more examples in your model's chat format
+    "[INST] Search for recent AI news. [/INST] [TOOL_CALLS] [{\"name\": \"search\", \"arguments\": {\"query\": \"AI news 2026\"}}]",
+    # add 50–200 more examples
 ]
 
-model.quantize(tokenizer, quant_config=quant_config, calib_data=calib_data)
+from datasets import Dataset
+ds = Dataset.from_dict({"text": calib_texts})
+
+def tokenize(sample):
+    return tokenizer(sample["text"], padding=False,
+                     max_length=MAX_SEQUENCE_LENGTH,
+                     truncation=True, add_special_tokens=False)
+
+ds = ds.map(tokenize, remove_columns=ds.column_names)
+
+oneshot(model=model, dataset=ds, recipe=recipe,
+        max_seq_length=MAX_SEQUENCE_LENGTH,
+        num_calibration_samples=len(calib_texts))
 #+end_src
 
-At 14B scale the improvement is unlikely to be significant, but it costs nothing
-extra if you have the examples available.
+At 14B scale the improvement over ultrachat_200k is unlikely to be measurable,
+but it costs nothing extra if you have the examples available.
