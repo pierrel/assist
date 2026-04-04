@@ -148,8 +148,10 @@ from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
 
-MODEL_PATH = "/root/models/Ministral-3-14b-Instruct-2512"
-OUTPUT_DIR = "/root/models/Ministral-3-14B-Instruct-2512-W4A16"
+from pathlib import Path
+
+MODEL_PATH = Path("/root/models/Ministral-3-14b-Instruct-2512")
+OUTPUT_DIR = Path("/root/models/Ministral-3-14B-Instruct-2512-W4A16")
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
@@ -366,8 +368,10 @@ from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
 
-MODEL_PATH = "/home/pierre/vllm/models/Ministral-3-14b-Instruct-2512"
-OUTPUT_DIR = "/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16"
+from pathlib import Path
+
+MODEL_PATH = Path("/home/pierre/vllm/models/Ministral-3-14b-Instruct-2512")
+OUTPUT_DIR = Path("/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16")
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
