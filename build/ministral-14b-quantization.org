@@ -138,6 +138,11 @@ Expect ~10–20 min depending on your upload speed (~28 GB).
 Save this as =quantize.py= on the instance:
 
 #+begin_src python
+import logging
+import re
+import time
+from torch import nn
+from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
@@ -147,6 +152,52 @@ MODEL_PATH = "/root/models/Ministral-3-14b-Instruct-2512"
 OUTPUT_DIR = "/root/models/Ministral-3-14B-Instruct-2512-W4A16"
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
+
+
+class QuantizationProgress(logging.Handler):
+    """Intercepts llm-compressor log messages to show per-layer progress with ETA."""
+
+    PATTERNS = [
+        r'Compressing\s+(\S+)',
+        r'Quantizing\s+(\S+)',
+        r'module[:\s]+(\S+)',
+    ]
+
+    def __init__(self, model, ignore=("lm_head",)):
+        super().__init__()
+        total = sum(
+            1 for name, m in model.named_modules()
+            if isinstance(m, nn.Linear)
+            and not any(name.endswith(ig) for ig in ignore)
+        )
+        print(f"Layers to quantize: {total}")
+        self.pbar = tqdm(
+            total=total,
+            desc="Quantizing",
+            unit="layer",
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} layers "
+                       "[elapsed: {elapsed}, ETA: {remaining}]",
+        )
+        self.seen = set()
+        self.start = time.time()
+
+    def emit(self, record):
+        msg = record.getMessage()
+        for pattern in self.PATTERNS:
+            m = re.search(pattern, msg, re.IGNORECASE)
+            if m:
+                key = m.group(1)
+                if key not in self.seen:
+                    self.seen.add(key)
+                    self.pbar.update(1)
+                return
+
+    def close(self):
+        self.pbar.close()
+        elapsed = time.time() - self.start
+        print(f"Quantization complete in {elapsed / 60:.1f} min")
+        super().close()
+
 
 print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -179,6 +230,10 @@ recipe = GPTQModifier(
     group_size=128,
 )
 
+progress = QuantizationProgress(model)
+logging.getLogger("llmcompressor").addHandler(progress)
+logging.getLogger("llmcompressor").setLevel(logging.DEBUG)
+
 print("Running GPTQ calibration and quantization...")
 oneshot(
     model=model,
@@ -187,6 +242,9 @@ oneshot(
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
 )
+
+progress.close()
+logging.getLogger("llmcompressor").removeHandler(progress)
 
 print(f"Saving to {OUTPUT_DIR}...")
 model.save_pretrained(OUTPUT_DIR, save_compressed=True)
@@ -201,8 +259,14 @@ Run it:
 python quantize.py
 #+end_src
 
-Progress bars will appear per transformer layer (~40 layers). Expect ~15–20 min
-for the calibration pass on an A100.
+You will see output like:
+#+begin_example
+Layers to quantize: 280
+Quantizing:  45%|████████░░░░░░░░░░| 126/280 layers [elapsed: 08:32, ETA: 10:26]
+#+end_example
+
+If the ETA bar does not advance (log format mismatch), elapsed time is still shown.
+Expect ~15–20 min total on an A100.
 
 ** Step 4: Verify the output
 
@@ -292,6 +356,11 @@ cd ~/vllm
 Save this as =~/vllm/quantize_local.py=:
 
 #+begin_src python
+import logging
+import re
+import time
+from torch import nn
+from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
@@ -301,6 +370,52 @@ MODEL_PATH = "/home/pierre/vllm/models/Ministral-3-14b-Instruct-2512"
 OUTPUT_DIR = "/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16"
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
+
+
+class QuantizationProgress(logging.Handler):
+    """Intercepts llm-compressor log messages to show per-layer progress with ETA."""
+
+    PATTERNS = [
+        r'Compressing\s+(\S+)',
+        r'Quantizing\s+(\S+)',
+        r'module[:\s]+(\S+)',
+    ]
+
+    def __init__(self, model, ignore=("lm_head",)):
+        super().__init__()
+        total = sum(
+            1 for name, m in model.named_modules()
+            if isinstance(m, nn.Linear)
+            and not any(name.endswith(ig) for ig in ignore)
+        )
+        print(f"Layers to quantize: {total}")
+        self.pbar = tqdm(
+            total=total,
+            desc="Quantizing",
+            unit="layer",
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} layers "
+                       "[elapsed: {elapsed}, ETA: {remaining}]",
+        )
+        self.seen = set()
+        self.start = time.time()
+
+    def emit(self, record):
+        msg = record.getMessage()
+        for pattern in self.PATTERNS:
+            m = re.search(pattern, msg, re.IGNORECASE)
+            if m:
+                key = m.group(1)
+                if key not in self.seen:
+                    self.seen.add(key)
+                    self.pbar.update(1)
+                return
+
+    def close(self):
+        self.pbar.close()
+        elapsed = time.time() - self.start
+        print(f"Quantization complete in {elapsed / 60:.1f} min")
+        super().close()
+
 
 print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -333,6 +448,10 @@ recipe = GPTQModifier(
     group_size=128,
 )
 
+progress = QuantizationProgress(model)
+logging.getLogger("llmcompressor").addHandler(progress)
+logging.getLogger("llmcompressor").setLevel(logging.DEBUG)
+
 print("Running GPTQ calibration and quantization (expect 4–8 hours)...")
 oneshot(
     model=model,
@@ -342,6 +461,9 @@ oneshot(
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
     sequential=True,   # process one layer at a time to stay within 24 GB VRAM
 )
+
+progress.close()
+logging.getLogger("llmcompressor").removeHandler(progress)
 
 print(f"Saving to {OUTPUT_DIR}...")
 model.save_pretrained(OUTPUT_DIR, save_compressed=True)
