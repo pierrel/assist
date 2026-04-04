@@ -371,10 +371,9 @@ import re
 import time
 from torch import nn
 from tqdm import tqdm
-import huggingface_hub
-from tokenizers import Tokenizer
-from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM
-from datasets import load_dataset
+from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+from transformers import AutoModelForCausalLM
+from datasets import Dataset, load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
 
@@ -429,33 +428,26 @@ class QuantizationProgress(logging.Handler):
         super().close()
 
 
-print("Loading tokenizer...")
-# Ministral uses the Tekken tokenizer (TokenizersBackend) which transformers cannot
-# resolve by class name. Load tekken.json directly via the tokenizers library instead.
-tekken_path = huggingface_hub.hf_hub_download(MODEL_ID, "tekken.json")
-backend = Tokenizer.from_file(tekken_path)
-tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
+print("Loading tokenizer (via mistral_common — required for Tekken format)...")
+mt = MistralTokenizer.from_hf_hub(MODEL_ID)
+base_tok = mt.instruct_tokenizer.tokenizer
 
 print("Loading model (~28 GB, downloads to HuggingFace cache on first run)...")
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
 
 print("Preparing calibration dataset...")
-ds = load_dataset("HuggingFaceH4/ultrachat_200k",
-                  split=f"train_sft[:{NUM_CALIBRATION_SAMPLES}]")
-ds = ds.shuffle(seed=42)
+raw_ds = load_dataset("HuggingFaceH4/ultrachat_200k",
+                      split=f"train_sft[:{NUM_CALIBRATION_SAMPLES}]")
+raw_ds = raw_ds.shuffle(seed=42)
 
-def preprocess(example):
-    return {"text": tokenizer.apply_chat_template(
-        example["messages"], tokenize=False)}
+# Pre-tokenize using mistral_common so llm-compressor receives input_ids directly
+tokenized = []
+for example in raw_ds:
+    text = " ".join(msg["content"] for msg in example["messages"])
+    ids = base_tok.encode(text)[:MAX_SEQUENCE_LENGTH]
+    tokenized.append({"input_ids": ids})
 
-ds = ds.map(preprocess)
-
-def tokenize(sample):
-    return tokenizer(sample["text"], padding=False,
-                     max_length=MAX_SEQUENCE_LENGTH,
-                     truncation=True, add_special_tokens=False)
-
-ds = ds.map(tokenize, remove_columns=ds.column_names)
+ds = Dataset.from_list(tokenized)
 
 recipe = GPTQModifier(
     targets="Linear",
@@ -475,7 +467,8 @@ oneshot(
     recipe=recipe,
     max_seq_length=MAX_SEQUENCE_LENGTH,
     num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-    sequential=True,   # process one layer at a time to stay within 24 GB VRAM
+    sequential=True,        # process one layer at a time to stay within 24 GB VRAM
+    tokenizer=None,         # dataset is pre-tokenized; no tokenizer needed
 )
 
 progress.close()
