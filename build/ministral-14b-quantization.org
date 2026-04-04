@@ -433,6 +433,17 @@ mt = MistralTokenizer.from_hf_hub(MODEL_ID)
 base_tok = mt.instruct_tokenizer.tokenizer
 
 print("Loading model (~28 GB, downloads to HuggingFace cache on first run)...")
+# Workaround: "ministral3" text backbone type is missing from CONFIG_MAPPING in
+# transformers 4.57.x — register it before loading to avoid KeyError.
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+if "ministral3" not in CONFIG_MAPPING:
+    try:
+        from transformers.models.mistral3.configuration_mistral3 import Mistral3TextConfig
+        CONFIG_MAPPING.register("ministral3", Mistral3TextConfig)
+    except (ImportError, AttributeError):
+        from transformers import MistralConfig
+        CONFIG_MAPPING.register("ministral3", MistralConfig)
+
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
 
 print("Preparing calibration dataset...")
