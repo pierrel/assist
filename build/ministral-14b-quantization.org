@@ -351,9 +351,15 @@ Note: the GPU will be fully occupied and cannot run vLLM at the same time.
 #+begin_src bash
 ssh pierre@192.168.6.118
 cd ~/vllm
-.venv/bin/pip install llmcompressor transformers accelerate datasets huggingface_hub
-.venv/bin/huggingface-cli login   # paste your HF token
+.venv_llmcompressor/bin/pip install llmcompressor transformers accelerate datasets huggingface_hub
+.venv_llmcompressor/bin/huggingface-cli login   # paste your HF token
 #+end_src
+
+Note: the script uses the HuggingFace repo ID rather than the local model path.
+The locally downloaded model is in Mistral's native format (the format used for
+=--load_format mistral= in vLLM), which transformers cannot load directly. Using
+the HF repo ID downloads the model in HuggingFace format to =~/.cache/huggingface/hub/=
+the first time — subsequent runs reuse the cache.
 
 ** Step 2: Run the quantization
 
@@ -365,15 +371,13 @@ import re
 import time
 from torch import nn
 from tqdm import tqdm
-from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
 
-from pathlib import Path
-
-MODEL_PATH = Path("/home/pierre/vllm/models/Ministral-3-14b-Instruct-2512")
-OUTPUT_DIR = Path("/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16")
+MODEL_ID = "mistralai/Ministral-3-14B-Instruct-2512"
+OUTPUT_DIR = "/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16"
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
@@ -423,13 +427,11 @@ class QuantizationProgress(logging.Handler):
         super().close()
 
 
-assert MODEL_PATH.exists(), f"Model not found at {MODEL_PATH} — check the path"
-
 print("Loading tokenizer...")
-tokenizer = PreTrainedTokenizerFast.from_pretrained(str(MODEL_PATH), local_files_only=True)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-print("Loading model into CPU memory...")
-model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, local_files_only=True, torch_dtype="auto")
+print("Loading model (~28 GB, downloads to HuggingFace cache on first run)...")
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
 
 print("Preparing calibration dataset...")
 ds = load_dataset("HuggingFaceH4/ultrachat_200k",
