@@ -143,7 +143,7 @@ import re
 import time
 from torch import nn
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM
 from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
@@ -204,7 +204,7 @@ class QuantizationProgress(logging.Handler):
 assert MODEL_PATH.exists(), f"Model not found at {MODEL_PATH} — check the path"
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True, trust_remote_code=True)
+tokenizer = PreTrainedTokenizerFast.from_pretrained(str(MODEL_PATH), local_files_only=True)
 
 print("Loading model...")
 model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, local_files_only=True, torch_dtype="auto")
@@ -365,7 +365,7 @@ import re
 import time
 from torch import nn
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM
 from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
@@ -426,7 +426,7 @@ class QuantizationProgress(logging.Handler):
 assert MODEL_PATH.exists(), f"Model not found at {MODEL_PATH} — check the path"
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True, trust_remote_code=True)
+tokenizer = PreTrainedTokenizerFast.from_pretrained(str(MODEL_PATH), local_files_only=True)
 
 print("Loading model into CPU memory...")
 model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, local_files_only=True, torch_dtype="auto")
