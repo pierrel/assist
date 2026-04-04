@@ -371,7 +371,9 @@ import re
 import time
 from torch import nn
 from tqdm import tqdm
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import huggingface_hub
+from tokenizers import Tokenizer
+from transformers import PreTrainedTokenizerFast, AutoModelForCausalLM
 from datasets import load_dataset
 from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
@@ -428,7 +430,11 @@ class QuantizationProgress(logging.Handler):
 
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+# Ministral uses the Tekken tokenizer (TokenizersBackend) which transformers cannot
+# resolve by class name. Load tekken.json directly via the tokenizers library instead.
+tekken_path = huggingface_hub.hf_hub_download(MODEL_ID, "tekken.json")
+backend = Tokenizer.from_file(tekken_path)
+tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
 
 print("Loading model (~28 GB, downloads to HuggingFace cache on first run)...")
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, torch_dtype="auto")
