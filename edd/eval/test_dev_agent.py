@@ -20,7 +20,6 @@ import uuid
 from unittest import TestCase
 
 from langchain_core.messages import AIMessage, ToolMessage
-from langgraph.errors import GraphRecursionError
 
 from assist.model_manager import select_chat_model
 from assist.agent import create_dev_agent, AgentHarness
@@ -28,8 +27,6 @@ from assist.sandbox_manager import SandboxManager
 
 
 logger = logging.getLogger(__name__)
-
-RECURSION_LIMIT = 500
 
 
 def _project_root() -> str:
@@ -50,28 +47,61 @@ def _rsync_project(dest: str) -> None:
         '--exclude', '.deploy.env',
         '--exclude', 'edd',
         '--exclude', 'improvements',
+        '--exclude', '.mypy_cache',
+        '--exclude', 'venv',
+        '--exclude', 'node_modules',
+        '--exclude', 'playground',
+        '--exclude', 'comparisons',
+        '--exclude', 'generated',
+        '--exclude', 'eval_results',
+        '--exclude', '*.log',
+        '--exclude', 'logs',
         _project_root() + '/',
         dest + '/',
     ], check=True)
 
 
+def _cleanup_workspace(path: str) -> None:
+    """Remove workspace directory, using Docker to delete root-owned files.
+
+    When the sandbox runs commands (pip install, etc.) it creates files owned
+    by root inside the workspace volume.  shutil.rmtree fails on those.  We
+    use a throwaway alpine container to chmod and remove them first.
+    """
+    try:
+        subprocess.run(
+            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup',
+             'alpine', 'sh', '-c', 'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
+            check=False, timeout=60,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass  # best-effort
+    shutil.rmtree(path, ignore_errors=True)
+
+
 class TestDevAgent(TestCase):
-    """Evals for the software development agent in a Docker sandbox."""
+    """Evals for the software development agent in a Docker sandbox.
+
+    Each test gets its own workspace and sandbox container to ensure isolation.
+    Agent actions in one test (e.g. creating a venv) cannot affect subsequent tests.
+    """
 
     @classmethod
     def setUpClass(cls):
         cls.model = select_chat_model("gpt-oss-20b", 0.1)
-        cls.workspace = tempfile.mkdtemp(prefix="dev_agent_eval_")
-        _rsync_project(cls.workspace)
 
-        cls.sandbox = SandboxManager.get_sandbox_backend(cls.workspace)
-        if cls.sandbox is None:
-            raise RuntimeError("Docker sandbox unavailable — is Docker running and assist-sandbox built?")
+    def setUp(self):
+        self.workspace = tempfile.mkdtemp(prefix="dev_agent_eval_")
+        _rsync_project(self.workspace)
 
-    @classmethod
-    def tearDownClass(cls):
-        SandboxManager.cleanup(cls.workspace)
-        shutil.rmtree(cls.workspace, ignore_errors=True)
+        self.sandbox = SandboxManager.get_sandbox_backend(self.workspace)
+        if self.sandbox is None:
+            self.skipTest("Docker sandbox unavailable — is Docker running and assist-sandbox built?")
+
+    def tearDown(self):
+        SandboxManager.cleanup(self.workspace)
+        _cleanup_workspace(self.workspace)
 
     def _create_agent(self):
         return AgentHarness(create_dev_agent(
@@ -81,21 +111,8 @@ class TestDevAgent(TestCase):
         ))
 
     def _invoke(self, agent, text: str) -> str:
-        """Invoke the agent with a recursion limit.
-
-        If the agent hits the recursion limit, log it but don't fail —
-        we can still inspect the partial tool-call history.
-        """
-        try:
-            resp = agent.agent.invoke(
-                {"messages": [{"role": "user", "content": text}]},
-                {"configurable": {"thread_id": agent.thread_id},
-                 "recursion_limit": RECURSION_LIMIT},
-            )
-            return resp["messages"][-1].content
-        except GraphRecursionError:
-            logger.warning("Agent hit recursion limit (%d) — checking partial history", RECURSION_LIMIT)
-            return ""
+        """Invoke the agent and return the final response."""
+        return agent.message(text)
 
     # ------------------------------------------------------------------
     # Helpers to inspect agent message history
@@ -136,9 +153,17 @@ class TestDevAgent(TestCase):
         ]
 
     def _task_calls(self, agent) -> list[tuple[str, str]]:
-        """Return [(agent_name, prompt), ...] from all ``task`` tool calls."""
+        """Return [(agent_name, prompt), ...] from all ``task`` tool calls.
+
+        The deepagents task tool uses ``subagent_type`` as the agent name
+        parameter.  Older keys (``agent``, ``name``) are kept as fallbacks
+        for backward compatibility.
+        """
         return [
-            (args.get('agent', args.get('name', '')), args.get('description', args.get('prompt', '')))
+            (
+                args.get('subagent_type', args.get('agent', args.get('name', ''))),
+                args.get('description', args.get('prompt', '')),
+            )
             for name, args in self._get_tool_calls(agent)
             if name == 'task'
         ]
@@ -301,21 +326,37 @@ class TestDevAgent(TestCase):
             )
 
     def test_follows_existing_patterns(self):
-        """The dev agent should follow existing patterns when creating new code."""
+        """The dev agent should follow existing patterns when creating new code.
+
+        Uses two turns to test the planning-first TDD workflow:
+          Turn 1: agent explores, writes plan, asks for approval
+          Turn 2: user approves → agent implements following existing patterns
+        """
         agent = self._create_agent()
-        self._invoke(agent,
+        response_1 = self._invoke(agent,
             "Add a new middleware class called `RequestTimingMiddleware` in "
             "`assist/middleware/request_timing.py` that logs how long each "
             "model call takes. Follow the same patterns as the existing "
             "middleware classes in the project."
         )
 
-        # Should have created the file
+        # Phase 1: agent should explore and write a plan
+        task_calls = self._task_calls(agent)
+        context_calls = [(n, p) for n, p in task_calls if 'context' in n.lower()]
+        self.assertTrue(
+            len(context_calls) > 0,
+            f"Agent should call context-agent in phase 1. Task calls: {task_calls}",
+        )
+
+        # Phase 2: approve the plan → agent implements
+        self._invoke(agent, "The plan looks good, please proceed with the implementation.")
+
+        # Should have created the middleware file
         written = self._written_paths(agent) + self._edited_paths(agent)
         middleware_files = [p for p in written if 'timing' in p.lower() or 'middleware' in p.lower()]
         self.assertTrue(
             len(middleware_files) > 0,
-            f"Agent should create the middleware file. Modified: {written}",
+            f"Agent should create the middleware file after approval. Modified: {written}",
         )
 
         # Verify the file exists in the sandbox and follows patterns
@@ -379,7 +420,13 @@ class TestDevAgent(TestCase):
         )
 
     def test_handles_basic_improvement(self):
-        """The dev agent should make code improvements and write tests."""
+        """The dev agent should make code improvements and write tests.
+
+        Uses three turns to test the full planning-first TDD workflow:
+          Turn 1: agent explores, writes plan, asks for approval
+          Turn 2: user approves plan → agent writes failing tests, asks for approval
+          Turn 3: user approves tests → agent implements and all tests pass
+        """
         agent = self._create_agent()
         self._invoke(agent,
             "The `create_timestamped_branch` function in "
@@ -388,17 +435,36 @@ class TestDevAgent(TestCase):
             "clear ValueError if 'main' is missing. Write a test for this."
         )
 
-        # Should have modified code
-        modified = self._edited_paths(agent) + self._written_paths(agent)
+        # Phase 1: agent should explore and write a plan (no code yet)
+        task_calls_phase1 = self._task_calls(agent)
+        context_calls = [(n, p) for n, p in task_calls_phase1 if 'context' in n.lower()]
         self.assertTrue(
-            len(modified) > 0,
-            f"Agent should modify or create files. Tool calls: "
-            f"{[n for n, _ in self._get_tool_calls(agent)]}",
+            len(context_calls) > 0,
+            f"Agent should call context-agent in phase 1. Task calls: {task_calls_phase1}",
         )
 
-        # Should have written a test
-        test_files = [p for p in self._written_paths(agent) if 'test' in p.lower()]
+        # Phase 2: approve plan → agent writes failing tests
+        self._invoke(agent, "The plan looks good. Please write the tests.")
+
+        # Phase 3: approve tests → agent implements
+        self._invoke(agent, "Tests look correct. Please implement the fix.")
+
+        # Should have modified domain_manager.py
+        all_edited = self._edited_paths(agent)
+        all_written = self._written_paths(agent)
+        impl_files = [
+            p for p in (all_edited + all_written)
+            if 'domain_manager' in p.lower()
+        ]
+        self.assertTrue(
+            len(impl_files) > 0,
+            f"Agent should modify domain_manager.py. "
+            f"Edited: {all_edited}, Written: {all_written}",
+        )
+
+        # Should have written a test file
+        test_files = [p for p in all_written if 'test' in p.lower()]
         self.assertTrue(
             len(test_files) > 0,
-            f"Agent should write a test file. Written: {self._written_paths(agent)}",
+            f"Agent should write a test file. Written: {all_written}",
         )
