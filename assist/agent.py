@@ -46,7 +46,10 @@ class AgentHarness:
         resp = invoke_with_rollback(
             self.agent,
             {"messages": [{"role": "user", "content": text}]},
-            {"configurable": {"thread_id": self.thread_id}},
+            {
+                "configurable": {"thread_id": self.thread_id},
+                "recursion_limit": 5000,
+            },
         )
         return resp["messages"][-1].content
 
