@@ -114,14 +114,33 @@ class SubagentTypeInferenceMiddleware(AgentMiddleware):
         new_last = last.model_copy() if hasattr(last, "model_copy") else last.copy()
         new_last.tool_calls = patched_calls
 
-        # Keep additional_kwargs in sync (same as ToolNameSanitizationMiddleware)
+        # Build a lookup of patched args by tool call ID so we can also
+        # update the raw additional_kwargs["tool_calls"] (OpenAI format).
+        patched_args_by_id = {tc["id"]: tc.get("args", {}) for tc in patched_calls}
+
+        # Keep additional_kwargs in sync with the patched tool_calls.
+        # This updates the raw `function.arguments` JSON for any calls whose
+        # args were changed, so the checkpointer sees consistent data.
         if hasattr(new_last, "additional_kwargs"):
             ak_calls = new_last.additional_kwargs.get("tool_calls")
             if ak_calls:
-                patched_ids = {tc["id"] for tc in patched_calls}
+                import json
+                patched_ids = set(patched_args_by_id.keys())
+                new_ak_calls = []
+                for ak_tc in ak_calls:
+                    tc_id = ak_tc.get("id")
+                    if tc_id not in patched_ids:
+                        continue  # drop removed calls
+                    if tc_id in patched_args_by_id:
+                        # Update the function arguments to match the patched args
+                        new_ak_tc = dict(ak_tc)
+                        fn = dict(new_ak_tc.get("function", {}))
+                        fn["arguments"] = json.dumps(patched_args_by_id[tc_id])
+                        new_ak_tc["function"] = fn
+                        new_ak_calls.append(new_ak_tc)
+                    else:
+                        new_ak_calls.append(ak_tc)
                 new_last.additional_kwargs = dict(new_last.additional_kwargs)
-                new_last.additional_kwargs["tool_calls"] = [
-                    tc for tc in ak_calls if tc.get("id") in patched_ids
-                ]
+                new_last.additional_kwargs["tool_calls"] = new_ak_calls
 
         return {"messages": messages[:-1] + [new_last]}
