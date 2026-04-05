@@ -1,10 +1,18 @@
 * Observability
 ** TODO Add sub-agent tracing to web conversation
+Make it expandable from the main web ui. Not always expanded.
+* Basics
+** TODO Fix cli
+** TODO Prevent long diffs from crashing the browser
+** TODO PDF reading
+* Vision
+** TODO Test a single vision experiment
+** TODO 
 * Ministral upgrade
 The goal is to have a "home grown" ministral 3 14b running on vllm.
 ** TODO Run the awq quantizer
-See [[file:~/src/assist/build/ministral-14b-quantization.org][quantization doc]] for instructions
-** TODO Test
+Actually, just see the =more-quantization= dtach session in thinky.  
+** TODO Test (run all evals)
 ** TODO Push to huggingface
 * Dev updates
 The dev agent needs significant improvements
