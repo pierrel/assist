@@ -20,6 +20,7 @@ from assist.middleware.json_validation_middleware import JsonValidationMiddlewar
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
+from assist.middleware.subagent_type_inference import SubagentTypeInferenceMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -202,8 +203,8 @@ def create_context_agent(model: BaseChatModel,
         middleware=base_mw + middleware + [logging_mw],
     )
 
-    # 100 graph steps ≈ 50 model calls — plenty for a read-only explorer.
-    return RollbackRunnable(agent, recursion_limit=100)
+    # 500 graph steps ≈ 45 model calls with deepagents' ~11 nodes per cycle.
+    return RollbackRunnable(agent, recursion_limit=500)
 
 
 def create_research_agent(model: BaseChatModel,
@@ -304,8 +305,14 @@ def create_dev_agent(model: BaseChatModel,
     context_eviction_mw = ContextAwareToolEvictionMiddleware(trigger_fraction=0.75)
     # BadRequestError (400) — sanitize messages and retry instead of rollback.
     bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
+    # Infer subagent_type when the model omits it (common with smaller models).
+    subagent_inference_mw = SubagentTypeInferenceMiddleware(
+        valid_subagent_types={"context-agent", "research-agent", "critique-agent"},
+        default_subagent_type="context-agent",
+    )
 
-    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw, context_eviction_mw]
+    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+          context_eviction_mw, subagent_inference_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
@@ -351,4 +358,8 @@ def create_dev_agent(model: BaseChatModel,
         subagents=[context_sub, research_sub, critique_sub_agent],
     )
 
-    return agent
+    # The deepagents middleware architecture adds ~11 graph nodes per model-tool
+    # cycle, so the default recursion_limit=1000 allows only ~90 tool calls.
+    # A full TDD cycle (Phase 1: explore + plan; Phase 2: tests; Phase 3: impl)
+    # can require 150–300 tool calls.  Override to 5000 (≈ 450 tool calls).
+    return agent.with_config({"recursion_limit": 5000})
