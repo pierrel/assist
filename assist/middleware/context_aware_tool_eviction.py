@@ -140,6 +140,20 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
 
         return current_tokens, max_tokens
 
+    @staticmethod
+    def _strip_control_chars(text: str) -> str:
+        """Remove control characters that can cause BadRequestError.
+
+        Keeps \\n (0x0A), \\r (0x0D), \\t (0x09) — valid JSON whitespace.
+        Also strips ANSI escape sequences (ESC [ ... m patterns).
+        """
+        import re
+        # Strip ANSI escape sequences (e.g. colorized terminal output)
+        text = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', text)
+        # Strip other control characters (excluding tab, newline, carriage return)
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        return text
+
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
@@ -155,6 +169,17 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
         # Only process ToolMessage results (Commands are already handled)
         if not isinstance(tool_result, ToolMessage):
             return tool_result
+
+        # Sanitize tool result content to prevent BadRequestErrors
+        # (control chars and ANSI codes from terminal output can cause 400 errors)
+        if isinstance(tool_result.content, str):
+            sanitized = self._strip_control_chars(tool_result.content)
+            if sanitized != tool_result.content:
+                logger.debug(
+                    "Sanitized tool result: removed %d chars",
+                    len(tool_result.content) - len(sanitized)
+                )
+                tool_result = tool_result.model_copy(update={"content": sanitized})
 
         # Get current context and limits
         try:
