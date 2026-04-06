@@ -380,8 +380,14 @@ class TestDevAgentPlanningFlow(TestCase):
         )
 
         # All tests pass in the sandbox
+        # Try multiple Python paths — the agent may have created a venv
         final_test = self.sandbox.execute(
-            "cd /workspace && python -m pytest tests/ -x -q --tb=short 2>&1"
+            "cd /workspace && ("
+            "  venv/bin/python -m pytest tests/ -x -q --tb=short 2>&1 ||"
+            "  .venv/bin/python -m pytest tests/ -x -q --tb=short 2>&1 ||"
+            "  python3 -m pytest tests/ -x -q --tb=short 2>&1 ||"
+            "  python -m pytest tests/ -x -q --tb=short 2>&1"
+            ")"
         )
         self.assertEqual(
             final_test.exit_code, 0,
