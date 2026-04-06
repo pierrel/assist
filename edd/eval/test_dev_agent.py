@@ -449,22 +449,36 @@ class TestDevAgent(TestCase):
         # Phase 3: approve tests → agent implements
         self._invoke(agent, "Tests look correct. Please implement the fix.")
 
-        # Should have modified domain_manager.py
+        # Should have modified domain_manager.py (via tool OR sandbox grep)
         all_edited = self._edited_paths(agent)
         all_written = self._written_paths(agent)
         impl_files = [
             p for p in (all_edited + all_written)
             if 'domain_manager' in p.lower()
         ]
+        # Also check if the feature is in the sandbox
+        grep_result = self.sandbox.execute(
+            "grep -n 'ValueError.*main' /workspace/assist/domain_manager.py 2>/dev/null"
+        )
+        sandbox_has_impl = grep_result.exit_code == 0 and grep_result.output.strip()
         self.assertTrue(
-            len(impl_files) > 0,
+            len(impl_files) > 0 or sandbox_has_impl,
             f"Agent should modify domain_manager.py. "
-            f"Edited: {all_edited}, Written: {all_written}",
+            f"Tool modified: {all_edited + all_written}, "
+            f"Sandbox has impl: {sandbox_has_impl}",
         )
 
-        # Should have written a test file
-        test_files = [p for p in all_written if 'test' in p.lower()]
+        # Should have written a test file (via write tool OR via sandbox find)
+        test_files_written = [p for p in all_written if 'test' in p.lower()]
+        result = self.sandbox.execute(
+            "find /workspace -name 'test_*.py' -newer /workspace/pyproject.toml -not -path '*/venv/*' 2>/dev/null"
+        )
+        sandbox_test_files = [
+            l.strip() for l in result.output.strip().splitlines() if l.strip()
+        ]
         self.assertTrue(
-            len(test_files) > 0,
-            f"Agent should write a test file. Written: {all_written}",
+            len(test_files_written) > 0 or len(sandbox_test_files) > 0,
+            f"Agent should write a test file. "
+            f"Written via tool: {all_written}, "
+            f"Sandbox test files: {sandbox_test_files}",
         )
