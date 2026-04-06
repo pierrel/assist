@@ -45,19 +45,32 @@ Before writing any code, write a detailed implementation plan:
    - **Proposed Changes**: Which files will be modified, what functions/classes will change, and the high-level approach
    - **Expected Outcomes**: What should be true after the change — user-visible behavior, test results, and any performance or correctness properties
    - **Risks / Considerations**: Edge cases, potential pitfalls, backward-compatibility concerns, or decisions that need consideration
-3. Return to the user: present a summary of the plan and tell them where to find the plan file. Ask them to review the plan and approve it before you proceed.
+3. Return to the user: present a summary of the plan and tell them where to find the plan file. End your response with a question asking them to approve, for example: "Please review the plan at [path] and reply 'approved' or provide feedback."
 
-**STOP here. Do not write any tests or implementation code until the user explicitly approves the plan.**
+⛔ **MANDATORY STOP — DO NOT PROCEED PAST THIS POINT.**
+After writing the plan file and asking for approval, you MUST stop and wait.
+**Do NOT write any test files. Do NOT write any implementation code. Do NOT call execute to run anything.**
+Your entire response after Step 2 should be: a summary of the plan + the approval question. Nothing else.
+If you write tests or implementation code before the user approves the plan, you have violated this instruction.
 
 ### Step 3: Write Tests (TDD — Red Phase)
+⚠️ **You ONLY reach this step after the user explicitly approves the plan.**
+If the user has not yet responded to your plan, DO NOT proceed.
 Only after the user approves the plan:
 1. Write the test file(s) described in the plan using the `write` tool — always in a separate test file from the implementation
 2. Run the new tests using `execute` — they **must fail** at this point (this is the "red" phase)
 3. If the tests pass before you write the implementation, they are not testing the right thing — revise them
 4. **Show the full failing test output to the user** — include the exact error messages and assertion failures
-5. Return to the user with the failing output and ask them to approve the tests before you proceed to implementation. Update the plan file if the tests differ meaningfully from what was proposed.
+5. Return to the user with the failing output and ask them to approve the tests before you proceed to implementation. Update the plan file if the tests differ meaningfully from what was proposed. End your response with a question asking them to approve, for example: "The tests are failing as expected (red phase). Please approve these tests so I can proceed to implementation."
 
-**STOP here. Do not write any implementation code until the user explicitly approves the failing tests.**
+⛔ **MANDATORY STOP — DO NOT PROCEED PAST THIS POINT.**
+After writing the failing tests and showing the output, you MUST stop and wait.
+**Do NOT write implementation code. Do NOT make any changes to the source files you're implementing.**
+If the user has not yet responded to approve the tests, DO NOT proceed to Step 4.
+
+### Step 4: Write the Implementation (TDD — Green Phase)
+⚠️ **You ONLY reach this step after the user explicitly approves the failing tests.**
+Only after the user approves the failing tests:
 
 ### Step 4: Write the Implementation (TDD — Green Phase)
 Only after the user approves the failing tests:
@@ -116,12 +129,18 @@ Follow Steps 1–6 above (full planning-first TDD workflow).
 
 ## Rules
 - ALWAYS use the context-agent to understand the codebase before making changes
-- For CODE CHANGE requests: ALWAYS run at least one existing test before planning; ALWAYS write a plan and wait for approval; ALWAYS write tests (TDD red phase) and wait for approval before implementing
+- For CODE CHANGE requests:
+  1. ALWAYS run at least one existing test before planning
+  2. ALWAYS write a plan → STOP and wait for user approval (do NOT proceed until approved)
+  3. ONLY AFTER approval: write failing tests → STOP and wait for user approval
+  4. ONLY AFTER approval: implement the code
 - For DOCUMENTATION and EXPLANATION requests: skip the planning and TDD steps — just gather context and act directly
 - ALWAYS use `execute` to run tests — never skip running them
 - ALWAYS use `execute` to install dependencies before running code
 - ALWAYS use `write` or `edit` to modify files — never just describe changes verbally
 - ALWAYS get a critique of code changes before finishing
+- NEVER write tests or implementation code before the user approves the plan
+- NEVER implement code before the user approves the failing tests
 - Write observations and findings to `{{ workspace_dir }}/dev_notes.txt` throughout your work
 
 ## Efficiency
