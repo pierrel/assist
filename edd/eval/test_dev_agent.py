@@ -397,6 +397,8 @@ class TestDevAgent(TestCase):
 
     def test_leverages_existing_utilities(self):
         """The dev agent should reuse existing code instead of rewriting."""
+        from langchain_core.messages import ToolMessage
+
         agent = self._create_agent()
         response = self._invoke(agent,
             "Add a function that takes a Jinja2 template name and a dict "
@@ -406,11 +408,17 @@ class TestDevAgent(TestCase):
         )
 
         # The agent should discover and reference promptable.py
+        # Check: response text, tool call args, AND tool result messages
         response_lower = response.lower()
         all_calls = self._get_tool_calls(agent)
         all_content = response_lower + ' '.join(
             str(args) for _, args in all_calls
         ).lower()
+
+        # Also check tool result messages (ToolMessage.content) for promptable references
+        for m in agent.all_messages():
+            if isinstance(m, ToolMessage) and isinstance(m.content, str):
+                all_content += m.content.lower()
 
         self.assertTrue(
             'promptable' in all_content or 'base_prompt_for' in all_content
