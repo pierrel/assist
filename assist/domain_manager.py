@@ -2,7 +2,7 @@ import logging
 import os
 import subprocess
 import tempfile
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 class Change(BaseModel):
     path: str
     diff: str
+    warning: Optional[str] = None
 
 
 def create_timestamped_branch(repo_dir: str) -> str:
@@ -32,6 +33,15 @@ def clone_repo(repo_url: str, dest_dir: str) -> None:
     subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True)
     # Create a new branch assist/[timestamp]
     create_timestamped_branch(dest_dir)
+
+
+def truncate_diff(diff: str, max_lines: int = 1000) -> tuple[str, Optional[str]]:
+    """Truncate a diff string to a specified number of lines and return the truncated diff and a warning if truncated."""
+    lines = diff.splitlines()
+    if len(lines) > max_lines:
+        truncated = lines[:max_lines]
+        return "\n".join(truncated), "Diff truncated due to length"
+    return diff, None
 
 
 def git_diff(repo_dir: str) -> List[Change]:
@@ -64,7 +74,8 @@ def git_diff(repo_dir: str) -> List[Change]:
         if d.returncode not in (0, 1):
             raise RuntimeError(f"git diff failed for {path}: {d.stderr.strip()}")
         if d.stdout:
-            changes.append(Change(path=path, diff=d.stdout))
+            truncated_diff, warning = truncate_diff(d.stdout)
+            changes.append(Change(path=path, diff=truncated_diff, warning=warning))
 
     # Untracked files: show as diff from /dev/null
     ls = subprocess.run(
@@ -89,7 +100,8 @@ def git_diff(repo_dir: str) -> List[Change]:
         if d.returncode not in (0, 1):
             raise RuntimeError(f"git diff --no-index failed for {path}: {d.stderr.strip()}")
         if d.stdout:
-            changes.append(Change(path=path, diff=d.stdout))
+            truncated_diff, warning = truncate_diff(d.stdout)
+            changes.append(Change(path=path, diff=truncated_diff, warning=warning))
 
     return changes
 
@@ -98,6 +110,7 @@ def git_diff_main(repo_dir: str) -> List[Change]:
     """Return diffs of current working tree compared to ``main``.
 
     Includes tracked changes versus ``main`` and untracked files as added.
+    Truncates diffs exceeding 1000 lines and adds a warning message.
     """
     changes: List[Change] = []
 
