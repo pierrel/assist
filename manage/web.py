@@ -5,9 +5,9 @@ import subprocess
 import urllib.parse
 from typing import Dict
 
-from fastapi import FastAPI, Form, HTTPException, BackgroundTasks, Query
+from fastapi import FastAPI, Form, HTTPException, BackgroundTasks, Query, Request
 from contextlib import asynccontextmanager
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 from assist.env import load_dev_env
 from assist.thread import Thread, ThreadManager
@@ -32,8 +32,13 @@ DESCRIPTION_CACHE: Dict[str, str] = {}
 DOMAIN_MANAGERS: Dict[str, DomainManager] = {}  # tid -> DomainManager
 
 # Initialize background task queue and progress tracker
-TASK_QUEUE = BackgroundTaskQueue()
+# Initialize BackgroundTaskQueue and ProgressTracker
+TASK_QUEUE = BackgroundTaskQueue(PROGRESS_TRACKER)
 PROGRESS_TRACKER = ProgressTracker()
+
+# Import required modules for background tasks
+from manage.background_tasks import BackgroundTaskQueue
+from manage.progress_tracker import ProgressTracker
 
 
 def _domain_label(url: str) -> str:
@@ -429,6 +434,8 @@ async def create_thread_with_message(
 
 
 def _process_message(tid: str, text: str) -> None:
+    task_id = tid  # Use tid as task_id for simplicity
+    PROGRESS_TRACKER.update_progress(task_id, 0.1)  # Start progress
     sandbox = _get_sandbox_backend(tid)
     try:
         chat = MANAGER.get(tid, sandbox_backend=sandbox)

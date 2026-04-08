@@ -1,0 +1,27 @@
+Simulate failures in background tasks (e.g., Git clone fails, Docker setup fails) and verify the behavior of the following:
+
+1. **Background Task Execution**:
+   - Simulate a Git clone failure by raising an exception in the `_clone_repo` function.
+   - Simulate a Docker setup failure by raising an exception in the `_setup_docker` function.
+
+2. **Progress Tracking**:
+   - Verify that progress tracking correctly reflects the failure state (e.g., status should be `failed`, progress should not exceed 1.0).
+   - Ensure that errors are captured and stored in the task metadata.
+
+3. **Web View Responsiveness**:
+   - Check if the web view remains responsive (e.g., no crashes, UI remains interactive).
+   - Verify that error messages are displayed correctly in the UI.
+
+**Expected Behavior**:
+- Background tasks should fail gracefully without crashing the application.
+- Progress tracking should reflect the failure state.
+- Error messages should be displayed in the UI.
+
+**Return**:
+- A summary of the simulated failures, their outcomes, and recommendations for improvements.
+
+**Files to Focus On**:
+- `/workspace/manage/background_tasks.py`
+- `/workspace/manage/web.py`
+- `/workspace/test_background_task_progress.py`
+- `/workspace/test_progress_tracker.py`

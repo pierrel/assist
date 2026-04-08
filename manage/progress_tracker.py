@@ -55,6 +55,8 @@ class ProgressTracker:
                 self._tasks[task_id]["status"] = "completed"
             elif progress > 0.0:
                 self._tasks[task_id]["status"] = "in_progress"
+            elif progress == 0.0:
+                self._tasks[task_id]["status"] = "failed"
 
     def get_task_status(self, task_id: str) -> str:
         """
@@ -91,6 +93,18 @@ class ProgressTracker:
             Any: The result of the task.
         """
         return self._tasks.get(task_id, {}).get("result")
+        
+    def set_task_error(self, task_id: str, error: str) -> None:
+        """
+        Set the error of a task.
+        
+        Args:
+            task_id: The ID of the task.
+            error: The error message to set.
+        """
+        if task_id in self._tasks:
+            self._tasks[task_id]["error"] = error
+            self._tasks[task_id]["status"] = "failed"
 
     def get_task_error(self, task_id: str) -> Optional[str]:
         """
