@@ -19,11 +19,14 @@ class BackgroundTaskQueue:
             A dictionary to store task information and progress.
         _queue: asyncio.Queue
             A queue to manage task execution order.
+        _progress_tracker: ProgressTracker
+            A progress tracker to update progress for tasks.
     """
 
-    def __init__(self):
+    def __init__(self, progress_tracker=None):
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._queue = asyncio.Queue()
+        self._progress_tracker = progress_tracker
 
     def schedule_task(self, task_func: Callable, *args, **kwargs) -> str:
         """
@@ -47,7 +50,73 @@ class BackgroundTaskQueue:
             "result": None,
             "error": None,
         }
-        asyncio.create_task(self._queue.put(task_id))
+        
+        # Initialize progress tracker if not already done
+        if not self._progress_tracker:
+            from manage.progress_tracker import ProgressTracker
+            self._progress_tracker = ProgressTracker()
+            
+        # Track the task in the progress tracker
+        self._progress_tracker.track_task(task_id, task_func, *args, **kwargs)
+        asyncio.create_task(self._execute_task(task_id))
+        return task_id
+        
+    async def _execute_task(self, task_id: str) -> None:
+        """Execute a scheduled task and update its status and progress."""
+        task = self._tasks.get(task_id)
+        if not task:
+            return
+            
+        # Ensure progress tracker is initialized
+        if not self._progress_tracker:
+            from manage.progress_tracker import ProgressTracker
+            self._progress_tracker = ProgressTracker()
+            
+        # Set initial status to in_progress
+        task["status"] = "in_progress"
+        self._progress_tracker.update_progress(task_id, 0.0)
+            
+        try:
+            # Execute the task function directly
+            # This ensures that exceptions are caught and handled properly
+            result = task["task_func"](*task["args"], **task["kwargs"])
+            task["result"] = result
+            task["status"] = "completed"
+            task["progress"] = 1.0
+            
+            # Update progress tracker for success
+            self._progress_tracker.update_progress(task_id, 1.0)
+            
+        except Exception as e:
+            task["error"] = str(e)
+            task["status"] = "failed"
+            task["progress"] = 0.0
+            
+            # Update progress tracker for failure
+            self._progress_tracker.update_progress(task_id, 0.0)
+            self._progress_tracker.set_task_error(task_id, task["error"])
+        
+    def _schedule_task_sync_for_test(self, task_func: Callable, *args, **kwargs) -> str:
+        """Schedule a new task for testing without async.
+        
+        Args:
+            task_func: The function to execute as a background task.
+            *args: Positional arguments to pass to the task function.
+            **kwargs: Keyword arguments to pass to the task function.
+            
+        Returns:
+            str: The task ID.
+        """
+        task_id = str(uuid.uuid4())
+        self._tasks[task_id] = {
+            "status": "pending",
+            "progress": 0.0,
+            "task_func": task_func,
+            "args": args,
+            "kwargs": kwargs,
+            "result": None,
+            "error": None,
+        }
         return task_id
 
     def update_progress(self, task_id: str, progress: float) -> None:
