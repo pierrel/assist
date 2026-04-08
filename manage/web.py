@@ -31,6 +31,10 @@ DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}
 DOMAIN_MANAGERS: Dict[str, DomainManager] = {}  # tid -> DomainManager
 
+# Initialize background task queue and progress tracker
+TASK_QUEUE = BackgroundTaskQueue()
+PROGRESS_TRACKER = ProgressTracker()
+
 
 def _domain_label(url: str) -> str:
     """'user@host:/path/to/life.git' -> 'life'"""
