@@ -22,7 +22,7 @@ class TestContextAgent(TestCase):
                                                   root)), root
 
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
 
     def test_surfaces_todo_files_for_task_request(self):
         """When the query implies a task, surface the task files directly."""

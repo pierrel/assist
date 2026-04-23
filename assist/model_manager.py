@@ -81,7 +81,7 @@ def _build_openai_chat_model(
     return ChatOpenAI(**kwargs)
 
 
-def select_chat_model(model: str, temperature: float) -> BaseChatModel:
+def select_chat_model(temperature: float) -> BaseChatModel:
     """Return a chat model honoring the optional custom OpenAI configuration."""
 
     config = _load_custom_openai_config()

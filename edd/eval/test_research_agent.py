@@ -24,7 +24,7 @@ class TestResearchAgent(TestCase):
                                                   root)), root
     
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
         
     def test_follows_result_guidance(self):
         agent, root = self.create_agent({"reference": {"existing_research.org":"The capital of France is Paris"}})

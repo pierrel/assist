@@ -22,7 +22,7 @@ class TestAgentDevDelegation(AgentTestMixin, TestCase):
         return AgentHarness(create_agent(self.model, root)), root
 
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
 
     def _send(self, agent, text: str) -> None:
         """Send a message, ignoring recursion-limit errors from subagents.

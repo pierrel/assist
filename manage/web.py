@@ -534,7 +534,7 @@ async def merge_thread(tid: str):
     # Get a model for summarizing
     from assist.model_manager import select_chat_model
     try:
-        summary_model = select_chat_model("gpt-oss-20b", temperature=0.1)
+        summary_model = select_chat_model(temperature=0.1)
     except Exception:
         # If model fails to load, pass None and use fallback summary
         summary_model = None

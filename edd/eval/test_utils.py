@@ -15,7 +15,7 @@ from .utils import read_file, create_filesystem, assertToolCall, AgentTestMixin
 class TestAssertToolCallStandalone(TestCase):
     """Test the standalone assertToolCall function"""
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
 
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
@@ -64,7 +64,7 @@ class TestAssertToolCallMixin(AgentTestMixin, TestCase):
     """Test the AgentTestMixin that adds assertToolCall as a method"""
 
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
 
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()

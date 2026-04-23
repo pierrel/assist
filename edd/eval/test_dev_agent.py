@@ -89,7 +89,7 @@ class TestDevAgent(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = select_chat_model("gpt-oss-20b", 0.1)
+        cls.model = select_chat_model(0.1)
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp(prefix="dev_agent_eval_")
