@@ -118,7 +118,7 @@ def create_agent(model: BaseChatModel,
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
-    memories_path = os.path.join(working_dir, _MEMORY_FILE)
+    memories_path = os.path.join(workspace_dir, _MEMORY_FILE)
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
