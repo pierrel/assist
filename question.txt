@@ -1,0 +1,1 @@
+Research how to test the 'glm-4.6v flash' component or system. Focus on finding official documentation, testing methodologies, and any relevant technical guides. Return a summary of the findings with relevant links and a brief explanation of the testing process. Include any prerequisites, tools, or environments required for testing.

@@ -49,3 +49,5 @@ There should be at least two new tools available to:
 2. Pick out facts (from the facts file) relevant to the user prompt, for example if the user is asking for restaurant recommendations, and there's a fact that the user is vegan, then it should be made clear that the user is probably asking for restaurants that provide vegan options.
 #+end_quote
 ** TODO Memory plan 1
+* Test glm-4.6v flash
+** TODO Research findings about how to test this component
