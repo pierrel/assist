@@ -75,6 +75,8 @@ _PROJECT_INDICATORS = [
 
 _PROJECT_INDICATOR_GLOBS = ["*.sln", "*.csproj"]
 
+_MEMORY_FILE = "AGENTS.md"
+
 
 def detect_project_indicators(path: str) -> list[str]:
     """Scan *path* for common software-project files.
@@ -115,6 +117,8 @@ def create_agent(model: BaseChatModel,
     mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
+
+    memories_path = os.path.join(working_dir, _MEMORY_FILE)
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
@@ -157,10 +161,12 @@ def create_agent(model: BaseChatModel,
             "deepagents/general_instructions.md.j2",
             project_indicators=detect_project_indicators(working_dir),
             workspace_dir=workspace_dir,
+            memories_path=memories_path
         ),
         middleware=mw + [logging_mw],
         backend=backend,
-        subagents=[context_sub, research_sub, dev_sub]
+        subagents=[context_sub, research_sub, dev_sub],
+        memory=[memories_path]
     )
 
     return agent
