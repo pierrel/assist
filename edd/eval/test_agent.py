@@ -19,7 +19,7 @@ class TestAgent(AgentTestMixin, TestCase):
                                          root)), root
 
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
 
     def test_reads_readme(self):
         agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",

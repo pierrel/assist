@@ -52,7 +52,7 @@ class Thread:
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
-        self.model = model or select_chat_model("mistral-nemo", 0.1)
+        self.model = model or select_chat_model(0.1)
         self.max_concurrency = max_concurrency
         self.runconfig = {
             "configurable": {"thread_id": self.thread_id},
@@ -167,7 +167,7 @@ n    checkpointing via SqliteSaver.
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.checkpointer = SqliteSaver(self.conn)
         # Create and reuse one chat model for all threads
-        self.model = select_chat_model("mistral-nemo", 0.1)
+        self.model = select_chat_model(0.1)
 
     def list(self) -> list[str]:
         """Return thread IDs filtered (no soft-deleted) and sorted by mtime descending."""

@@ -233,7 +233,7 @@ def run_eval(num_turns: int = 10, verbose: bool = True) -> EvalMetrics:
         thread = thread_manager.new()
 
         # Create conversation driver (uses same model as agent for simplicity)
-        driver_model = select_chat_model("mistral-nemo", 0.7)  # Higher temp for variety
+        driver_model = select_chat_model(0.7)  # Higher temp for variety
         driver = ConversationDriver(driver_model)
 
         # Get initial prompt

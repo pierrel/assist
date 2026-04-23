@@ -118,7 +118,7 @@ def capture_conversation(thread: Thread, reason: str, improvements_dir: str) -> 
 
     # Create the capture agent with the capture directory as working dir
     # The agent can now safely access domain/ within its sandboxed working directory
-    model = select_chat_model("gpt-oss-20b", 0.1)
+    model = select_chat_model(0.1)
     agent = create_capture_agent(model, capture_dir)
 
     # Get first user message for context
@@ -181,7 +181,7 @@ class TestCaptured_{thread.thread_id.replace('-', '_')}(TestCase):
     \"\"\"
 
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
 
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
@@ -322,7 +322,7 @@ class TestCapturedConversation(TestCase):
     """
 
     def setUp(self):
-        self.model = select_chat_model("gpt-oss-20b", 0.1)
+        self.model = select_chat_model(0.1)
 
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
