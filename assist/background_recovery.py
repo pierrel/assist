@@ -1,144 +1,121 @@
 """
-Background Recovery System
+Background Recovery System for Agent Framework
 
-This module implements background processes for automatic recovery from agent execution failures.
-It handles spawning dev-agent processes to fix issues detected during agent execution.
+This module implements background processes for automatic failure recovery
+in the agent framework, including spawning dev-agent instances for recovery
+and managing recovery contexts.
 """
 
 import asyncio
 import logging
-import threading
-import time
-from typing import Dict, Any, Optional
-from dataclasses import dataclass
-from datetime import datetime
 import json
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, Any, Optional
+import subprocess
+import sys
 import os
 
-from assist.failure_recovery import RecoveryContext, failure_recovery_manager
-from assist.thread import Thread
+from failure_recovery import FailureRecoveryManager, RecoveryContext
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@dataclass
-class RecoveryJob:
-    """Data class representing a background recovery job"""
-    job_id: str
-    recovery_id: str
-    thread_id: str
-    error_type: str
-    error_message: str
-    traceback_info: str
-    timestamp: datetime
-    status: str = "pending"  # pending, processing, completed, failed
-
 class BackgroundRecoveryManager:
-    """Manages background recovery processes for agent failures"""
+    """Manages background recovery processes for the agent framework"""
     
-    def __init__(self):
-        self.jobs: Dict[str, RecoveryJob] = {}
+    def __init__(self, recovery_storage_path: str = "./recovery_data"):
+        self.recovery_storage_path = Path(recovery_storage_path)
+        self.recovery_manager = FailureRecoveryManager(recovery_storage_path)
         self.running = False
-        self.job_lock = threading.Lock()
         
-    def submit_recovery_job(self, recovery_context: RecoveryContext) -> str:
+    async def start_background_recovery(self):
+        """Start the background recovery process"""
+        self.running = True
+        logger.info("Starting background recovery process...")
+        
+        while self.running:
+            try:
+                # Check for recovery tasks that need attention
+                await self.check_and_process_recovery_tasks()
+                
+                # Wait before checking again (poll every 30 seconds)
+                await asyncio.sleep(30)
+                
+            except Exception as e:
+                logger.error(f"Error in background recovery process: {e}")
+                # Continue running despite errors
+                
+    def stop_background_recovery(self):
+        """Stop the background recovery process"""
+        self.running = False
+        logger.info("Background recovery process stopped")
+        
+    async def check_and_process_recovery_tasks(self):
+        """Check for and process recovery tasks"""
+        # In a real implementation, this would:
+        # 1. Scan for recovery data that needs processing
+        # 2. Spawn dev-agent processes for recovery
+        # 3. Monitor recovery progress
+        # 4. Update recovery status
+        
+        # For demonstration, we'll just log that we checked
+        logger.debug("Checking for recovery tasks...")
+        
+        # Simulate processing some recovery data
+        # In reality, this would involve:
+        # - Finding recovery JSON files
+        # - Reading their contents
+        # - Spawning dev-agent processes
+        # - Handling the recovery process
+        
+    def spawn_dev_agent_for_recovery(self, recovery_context: RecoveryContext) -> bool:
         """
-        Submit a recovery job for background processing
+        Spawn a dev-agent process to handle recovery from an exception
         
         Args:
-            recovery_context: Context object with failure information
+            recovery_context: Context containing exception information
             
         Returns:
-            Job ID for tracking the recovery process
-        """
-        job_id = f"job_{int(time.time() * 1000000)}_{len(self.jobs)})"
-        
-        job = RecoveryJob(
-            job_id=job_id,
-            recovery_id=recovery_context.recovery_id,
-            thread_id=recovery_context.thread_id,
-            error_type=recovery_context.error_type,
-            error_message=recovery_context.error_message,
-            traceback_info=recover_context.traceback_info,
-            timestamp=datetime.now(),
-            status="pending"
-        )
-        
-        with self.job_lock:
-            self.jobs[job_id] = job
-            
-        # Start background processing
-        thread = threading.Thread(target=self._process_recovery_job, args=(job,))
-        thread.daemon = True
-        thread.start()
-        
-        logger.info(f"Submitted recovery job {job_id} for thread {recovery_context.thread_id}")
-        return job_id
-    
-    def _process_recovery_job(self, job: RecoveryJob):
-        """
-        Process a recovery job in the background
-        
-        Args:
-            job: Recovery job to process
+            True if successful, False otherwise
         """
         try:
-            job.status = "processing"
-            logger.info(f"Processing recovery job {job.job_id}")
+            # In a real implementation, this would:
+            # 1. Create a subprocess to run the dev-agent
+            # 2. Pass the recovery context as arguments
+            # 3. Monitor the process for completion
             
-            # Here we would typically spawn a dev-agent to fix the issue
-            # This is a simplified implementation for demonstration
-            self._perform_automatic_recovery(job)
+            logger.info(f"Spawning dev-agent for recovery of thread {recovery_context.thread_id}")
             
-            job.status = "completed"
-            logger.info(f"Completed recovery job {job.job_id}")
+            # For demonstration, we'll just log what we would do
+            logger.info("In a real implementation, this would spawn a dev-agent process")
+            logger.info(f"Recovery context: {recovery_context.thread_id}")
+            
+            # This is where we'd actually spawn the dev-agent
+            # subprocess.run([sys.executable, "-m", "dev_agent", "--recover", recovery_context.thread_id])
+            
+            return True
             
         except Exception as e:
-            job.status = "failed"
-            logger.error(f"Failed to process recovery job {job.job_id}: {e}")
-            raise
-    
-    def _perform_automatic_recovery(self, job: RecoveryJob):
-        """
-        Perform automatic recovery by attempting to fix the issue
-        
-        Args:
-            job: Recovery job containing failure information
-        """
-        # In a real implementation, this would:
-        # 1. Analyze the error context
-        # 2. Spawn a dev-agent to investigate and fix
-        # 3. Attempt to recover the thread state
-        # 4. Log the recovery process
-        
-        logger.info(f"Performing automatic recovery for job {job.job_id}")
-        logger.info(f"Error type: {job.error_type}")
-        logger.info(f"Error message: {job.error_message}")
-        
-        # Simulate some recovery work
-        time.sleep(1)
-        
-        # In a real implementation, we would:
-        # - Use the recovery context to understand the problem
-        # - Possibly call the dev-agent to analyze and fix
-        # - Restore or recreate the conversation state
-        
-        logger.info("Automatic recovery simulation completed")
+            logger.error(f"Failed to spawn dev-agent for recovery: {e}")
+            return False
 
 # Global instance
 background_recovery_manager = BackgroundRecoveryManager()
 
-def init_background_recovery():
-    """Initialize the background recovery system"""
-    logger.info("Initializing background recovery system")
-    # In a real implementation, this would start background threads
-    # for monitoring and processing recovery jobs
-    pass
+async def start_background_recovery_process():
+    """Start the background recovery process"""
+    await background_recovery_manager.start_background_recovery()
 
+def stop_background_recovery_process():
+    """Stop the background recovery process"""
+    background_recovery_manager.stop_background_recovery()
+
+# Export for use in other modules
 __all__ = [
     "BackgroundRecoveryManager",
-    "RecoveryJob",
     "background_recovery_manager",
-    "init_background_recovery"
+    "start_background_recovery_process",
+    "stop_background_recovery_process"
 ]

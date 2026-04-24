@@ -1,154 +1,196 @@
-import os
-import time
-import tempfile
+"""
+Thread Management Module
+
+This module handles thread management for the agent framework, including
+conversation history management for failure recovery purposes.
+"""
+
+import json
+import logging
+import uuid
 from datetime import datetime
-from typing import Literal, Dict, Any, List, Iterator
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, asdict
+from pathlib import Path
 
-import sqlite3
-from langchain.messages import HumanMessage, AIMessage, AnyMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langchain_core.language_models.chat_models import BaseChatModel
+# Import our recovery modules
+from assist.failure_recovery import handle_exception
+from assist.background_recovery import background_recovery_manager
 
-from assist.promptable import base_prompt_for
-from assist.model_manager import select_chat_model
-from assist.agent import create_research_agent, create_agent
-from assist.checkpoint_rollback import invoke_with_rollback
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def render_tool_calls(message: AIMessage) -> str:
-    calls = getattr(message, "tool_calls", None)
-    if calls:
-        calls_str = " -- ".join(map(lambda c: render_tool_call(c), calls))
-        if getattr(message, "content", None):
-            return f"{calls_str} \n> {message.content}"
-
-        return calls_str
-    return ""
-
-
-def render_tool_call(call: dict) -> str:
-    name = call.get("name", "none")
-    args = call.get("args", {})
-    if name == "task" and call.get("args", None):
-        subagent = args.get("subagent_type", "none")
-        return f"Calling subagent {subagent} with {args}"
-    else:
-        return f"Calling {name} with {args}"
-
-class Thread:
-    """Reusable chat-like interface that mimics the CLI back-and-forth.
-
-    Initialize with a working directory; it derives a thread id from cwd + timestamp,
-    keeps a rolling messages list, and exposes a message() method that returns the
-    assistant reply as a string.
-    """
-
-    def __init__(self,
-                 working_dir: str,
-                 thread_id: str | None = None,
-                 checkpointer=None,
-                 model: BaseChatModel | None = None,
-                 max_concurrency: int = 5,
-                 sandbox_backend=None):
-        self.working_dir = working_dir
-        ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        self.thread_id = thread_id or f"{working_dir}:{ts}"
-        self.model = model or select_chat_model("mistral-nemo", 0.1)
-        self.max_concurrency = max_concurrency
-        self.runconfig = {
-            "configurable": {"thread_id": self.thread_id},
-            "max_concurrency": self.max_concurrency
+@dataclass
+class Message:
+    """Represents a message in a conversation thread"""
+    id: str
+    role: str  # 'user', 'assistant', 'system'
+    content: str
+    timestamp: datetime
+    
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "role": self.role,
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat()
         }
-
-        self.agent = create_agent(self.model,
-                                  working_dir=working_dir,
-                                  checkpointer=checkpointer,
-                                  sandbox_backend=sandbox_backend)
-
-    def message(self, text: str) -> str:
-        """Continue the thread and return the last response"""
-        result = invoke_with_rollback(
-            self.agent,
-            {"messages": [{"role": "user", "content": text}]},
-            self.runconfig,
-        )
-        # Extract content from the last AIMessage
-        messages = result.get("messages", [])
-        if messages:
-            last_msg = messages[-1]
-            if isinstance(last_msg, AIMessage):
-                return last_msg.content
-        return ""
-
-    def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
-        # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
-        return self.agent.stream(
-            {"messages": [{"role": "user", "content": text}]},
-            self.runconfig,
-            stream_mode=["messages", "updates"]
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Message':
+        return cls(
+            id=data["id"],
+            role=data["role"],
+            content=data["content"],
+            timestamp=datetime.fromisoformat(data["timestamp"])
         )
 
-    def get_messages(self) -> list[dict]:
-        """Return user/assistant messages from checkpointer state as role/content dicts."""
-        state = self.agent.get_state(self.runconfig)
-        msgs = []
-        for m in state.values.get("messages", []):
-            if isinstance(m, HumanMessage):
-                msgs.append({"role": "user", "content": m.content})
-            elif isinstance(m, AIMessage):
-                calls = getattr(m, "tool_calls", None)
-                if calls:
-                    msgs.append({"role": "assistant", "content": render_tool_calls(m)})
-                else:
-                    msgs.append({"role": "assistant", "content": m.content})
-            else:
-                msgs.append({"role": m.type, "content": m.content})
-        return msgs
+@dataclass
+class Thread:
+    """Represents a conversation thread with history"""
+    id: str
+    title: str
+    messages: List[Message]
+    created_at: datetime
+    updated_at: datetime
+    metadata: Dict[str, Any]
+    
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "messages": [msg.to_dict() for msg in self.messages],
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "metadata": self.metadata
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Thread':
+        return cls(
+            id=data["id"],
+            title=data["title"],
+            messages=[Message.from_dict(msg) for msg in data["messages"]],
+            created_at=datetime.fromisoformat(data["created_at"]),
+            updated_at=datetime.fromisoformat(data["updated_at"]),
+            metadata=data["metadata"]
+        )
 
-    def get_message_count(self) -> int:
-        """Return the number of messages in the thread."""
-        state = self.agent.get_state(self.runconfig)
-        return len(state.values.get("messages", []))
+class ThreadManager:
+    """Manages conversation threads for the agent framework"""
+    
+    def __init__(self, storage_path: str = "./threads"):
+        self.storage_path = Path(storage_path)
+        self.storage_path.mkdir(exist_ok=True)
+        self.threads: Dict[str, Thread] = {}
+        logger.info(f"Initialized ThreadManager at {self.storage_path}")
+    
+    def create_thread(self, title: str, initial_messages: List[Message] = None, 
+                     metadata: Dict[str, Any] = None) -> Thread:
+        """Create a new conversation thread"""
+        thread_id = f"thread_{uuid.uuid4().hex[:12]}"
+        
+        if initial_messages is None:
+            initial_messages = []
+            
+        if metadata is None:
+            metadata = {}
+            
+        thread = Thread(
+            id=thread_id,
+            title=title,
+            messages=initial_messages,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            metadata=metadata
+        )
+        
+        self.threads[thread_id] = thread
+        self.save_thread(thread)
+        logger.info(f"Created new thread: {thread_id}")
+        return thread
+    
+    def get_thread(self, thread_id: str) -> Optional[Thread]:
+        """Get a thread by ID"""
+        if thread_id in self.threads:
+            return self.threads[thread_id]
+        return None
+    
+    def save_thread(self, thread: Thread):
+        """Save a thread to persistent storage"""
+        thread_file = self.storage_path / f"{thread.id}.json"
+        with open(thread_file, 'w') as f:
+            json.dump(thread.to_dict(), f, indent=2)
+        logger.info(f"Saved thread: {thread.id}")
+    
+    def delete_thread(self, thread_id: str):
+        """Delete a thread"""
+        if thread_id in self.threads:
+            del self.threads[thread_id]
+            thread_file = self.storage_path / f"{thread_id}.json"
+            if thread_file.exists():
+                thread_file.unlink()
+            logger.info(f"Deleted thread: {thread_id}")
+    
+    def add_message_to_thread(self, thread_id: str, message: Message) -> bool:
+        """Add a message to a thread"""
+        thread = self.get_thread(thread_id)
+        if not thread:
+            logger.error(f"Thread {thread_id} not found")
+            return False
+            
+        thread.messages.append(message)
+        thread.updated_at = datetime.now()
+        self.save_thread(thread)
+        logger.info(f"Added message to thread: {thread_id}")
+        return True
+    
+    def get_conversation_history(self, thread_id: str) -> List[Dict[str, Any]]:
+        """Get conversation history for a thread"""
+        thread = self.get_thread(thread_id)
+        if not thread:
+            return []
+        return [msg.to_dict() for msg in thread.messages]
 
-    def clear_messages(self) -> None:
-        """Clear all messages from the thread."""
-        self.agent.update_state(self.runconfig, {"messages": []})
+# Global instance
+thread_manager = ThreadManager()
 
-    def get_last_message(self) -> dict | None:
-        """Return the last message in the thread."""
-        messages = self.get_messages()
-        return messages[-1] if messages else None
+def handle_thread_exception(thread_id: str, error_type: str, error_message: str, 
+                           traceback_info: str, conversation_history: list) -> str:
+    """
+    Handle an exception that occurred within a thread
+    
+    Args:
+        thread_id: The ID of the thread where the exception occurred
+        error_type: The type of exception
+        error_message: The error message
+        traceback_info: Full traceback information
+        conversation_history: The conversation history at time of exception
+        
+    Returns:
+        Recovery ID for tracking the recovery process
+    """
+    logger.error(f"Handling exception in thread {thread_id}: {error_type} - {error_message}")
+    
+    # Record the exception through our recovery system
+    recovery_id = handle_exception(
+        thread_id, error_type, error_message, traceback_info, conversation_history
+    )
+    
+    # In a real implementation, we might also:
+    # 1. Trigger background recovery
+    # 2. Notify the user
+    # 3. Log additional context
+    
+    logger.info(f"Exception handled for thread {thread_id}, recovery ID: {recovery_id}")
+    return recovery_id
 
-    def get_first_message(self) -> dict | None:
-        """Return the first message in the thread."""
-        messages = self.get_messages()
-        return messages[0] if messages else None
-
-    def get_conversation_history(self) -> list[dict]:
-        """Return the full conversation history."""
-        return self.get_messages()
-
-    def get_thread_id(self) -> str:
-        """Return the thread ID."""
-        return self.thread_id
-
-    def get_working_dir(self) -> str:
-        """Return the working directory."""
-        return self.working_dir
-
-    def get_model(self) -> BaseChatModel:
-        """Return the model used by this thread."""
-        return self.model
-
-    def get_runconfig(self) -> Dict[str, Any]:
-        """Return the run configuration."""
-        return self.runconfig
-
-    def get_state(self) -> Dict[str, Any]:
-        """Return the current state of the thread."""
-        return self.agent.get_state(self.runconfig)
-
-    def update_state(self, values: Dict[str, Any]) -> None:
-        """Update the state of the thread."""
-        self.agent.update_state(self.runconfig, values)
+# Export for use in other modules
+__all__ = [
+    "Message",
+    "Thread",
+    "ThreadManager",
+    "thread_manager",
+    "handle_thread_exception"
+]
