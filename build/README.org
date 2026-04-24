@@ -11,6 +11,40 @@
 | PSU       | Corsair SF750 (2024)                | 750 W SFX                    |
 | Mobo      | ASRock B650I Lightning WiFi         | Mini-ITX, AM5, PCIe 4.0 ×16  |
 
+* Current command
+Using Ministral 3 14B 4bit quantized
+#+begin_example
+ExecStart=/home/pierre/vllm/.venv/bin/vllm serve cyankiwi/Ministral-3-14B-Instruct-2512-AWQ-4bit \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --enable-auto-tool-choice \
+    --tool-call-parser mistral \
+    --max-model-len 32768 \
+    --dtype auto \
+    --gpu-memory-utilization 0.92
+#+end_example
+
+* Try qwen3.5
+Here's a starting command for vLLM 0.18.0 on a single 32GB GPU:
+
+  vllm serve Qwen/Qwen3-32B-AWQ \
+    --quantization awq_marlin \
+    --max-model-len 32768 \
+    --gpu-memory-utilization 0.92 \
+    --kv-cache-dtype fp8 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --reasoning-parser qwen3 \
+    --enable-prefix-caching
+
+  Key choices and what to tweak:
+
+  - awq_marlin — Marlin kernels are ~1.5–2× faster than plain AWQ on Ampere/Ada. Drop to awq if you hit a kernel error   on older GPUs.
+  - --max-model-len 32768 — Qwen3-32B supports 128K via YaRN, but KV cache for 128K won't fit in 32GB. Bump to 65536    if you need more context and your traffic is low-concurrency.
+  - --kv-cache-dtype fp8 — roughly halves KV cache memory with negligible quality loss. Remove if you see weirdness.
+  - --gpu-memory-utilization 0.92 — start here; raise to 0.95 if no OOM, lower if you also run anything else on the     GPU.
+  - Tool/reasoning parsers — hermes is the right tool-call parser for Qwen3; qwen3 reasoning parser separates           <think>...</think> content into a dedicated field for OpenAI-compatible clients. If qwen3 isn't recognized on your    build, try deepseek_r1 (compatible format) or omit and parse client-side. If Qwen/Qwen3-32B-AWQ isn't published, the strongest community quants are usually under cognitivecomputations/ or     Qwen/Qwen3-32B-FP8 (FP8 needs Hopper/Ada with FP8 support and ~32GB tight — leaves little room for KV cache).
+
 * Model Selection
 ** Current (as of March 2026)
 =Qwen/Qwen3-14B-AWQ= — upgraded from Qwen2.5-14B-AWQ on 2026-03-22.
