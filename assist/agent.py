@@ -106,13 +106,17 @@ def create_agent(model: BaseChatModel,
     # Strip tool calls with invalid names (e.g. '[]' hallucinated by small models)
     tool_name_mw = ToolNameSanitizationMiddleware()
     logging_mw = ModelLoggingMiddleware("general-agent")
+    # Failure detection middleware
+    failure_detection_mw = FailureDetectionMiddleware()
+    # User feedback middleware
+    user_feedback_mw = UserFeedbackMiddleware()
 
     # Context-aware tool eviction: evict results to filesystem if they would cause overflow
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
         trigger_fraction=0.75,  # Evict if context would reach 75%
     )
 
-    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
+    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw, failure_detection_mw, user_feedback_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
