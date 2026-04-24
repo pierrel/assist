@@ -1,0 +1,18 @@
+1. The failure recovery system consists of three main modules:
+   - failure_recovery.py: Core failure recording and storage
+   - background_recovery.py: Background processing for automatic recovery
+   - checkpoint_rollback.py: Checkpoint-based rollback for model errors
+
+2. The system is designed to handle automatic exception recovery during agent execution and user-driven response improvement.
+
+3. From examining the code, I can see that:
+   - failure_recovery.py implements the core FailureRecoveryManager that records exceptions
+   - background_recovery.py is meant to handle background recovery processes and is supposed to spawn dev-agent processes
+   - checkpoint_rollback.py implements rollback functionality for model errors
+
+4. However, looking at background_recovery.py, there are issues:
+   - Line 63 references 'recover_context' but it should be 'recovery_context'
+   - The _process_recovery_job method has a TODO comment indicating it's a simplified implementation
+   - The system seems to be designed to spawn dev-agent processes for recovery but the implementation is incomplete
+
+5. The dev-agent utilization appears to be partially implemented but incomplete - the system is designed to use dev-agent for automatic recovery but the actual implementation is missing or incomplete.
