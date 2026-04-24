@@ -26,7 +26,23 @@ class TestAgent(AgentTestMixin, TestCase):
         res = agent.message("How many cats do I have?")
         self.assertRegex(res, "3|three|Three", "Should correctly respond with the number 3")
 
-    def test_writes_memory(self):
+    def test_doesnt_include_tags(self):
+        agent, root = self.create_agent({"AGENTS.md": ""})
+        agent.message("I have 3 cats. Commit this to memory.")
+        memory_after = read_file(os.path.join(root, "AGENTS.md"))
+        self.assertNotEqual(memory_after, "",
+                            "Should have written something")
+        self.assertNotRegex(memory_after, "<agent_memory>",
+                            "Should not use the same format")
+
+    def test_writes_memory_explicit(self):
+        agent, root = self.create_agent({"AGENTS.md": ""})
+        agent.message("I have 3 cats. Commit this to memory.")
+        memory_after = read_file(os.path.join(root, "AGENTS.md"))
+        self.assertRegex(memory_after, "cats",
+                         "Should add the fact to memory")
+
+    def test_writes_memory_implicit(self):
         agent, root = self.create_agent({"AGENTS.md": ""})
         agent.message("I have 3 cats")
         memory_after = read_file(os.path.join(root, "AGENTS.md"))
