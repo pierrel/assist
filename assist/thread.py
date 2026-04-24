@@ -99,176 +99,56 @@ class Thread:
             elif isinstance(m, AIMessage):
                 calls = getattr(m, "tool_calls", None)
                 if calls:
-                    msgs.append({"role": "tools",
-                                 "content": render_tool_calls(m)})
-                elif m.content:
+                    msgs.append({"role": "assistant", "content": render_tool_calls(m)})
+                else:
                     msgs.append({"role": "assistant", "content": m.content})
+            else:
+                msgs.append({"role": m.type, "content": m.content})
         return msgs
 
-
-    def get_raw_messages(self) -> List[AnyMessage]:
+    def get_message_count(self) -> int:
+        """Return the number of messages in the thread."""
         state = self.agent.get_state(self.runconfig)
-        return state.values.get("messages", [])
+        return len(state.values.get("messages", []))
 
-    
-    def description(self) -> str:
-        """Return a short (<=5 words) description of the conversation so far.
+    def clear_messages(self) -> None:
+        """Clear all messages from the thread."""
+        self.agent.update_state(self.runconfig, {"messages": []})
 
-        Uses the underlying chat model directly. Raises ValueError if there
-        are no messages yet.
-        If description.txt exists in the thread directory, return it; otherwise compute and cache.
-        """
-        msgs = self.get_messages()
-        if not msgs:
-            raise ValueError("no messages to describe")
+    def get_last_message(self) -> dict | None:
+        """Return the last message in the thread."""
+        messages = self.get_messages()
+        return messages[-1] if messages else None
 
-        # Filter out "tools" role messages - LangChain doesn't recognize this role
-        # Only include user/assistant messages for description generation
-        filtered_msgs = [m for m in msgs if m.get("role") in ("user", "assistant")]
+    def get_first_message(self) -> dict | None:
+        """Return the first message in the thread."""
+        messages = self.get_messages()
+        return messages[0] if messages else None
 
-        if not filtered_msgs:
-            raise ValueError("no user/assistant messages to describe")
+    def get_conversation_history(self) -> list[dict]:
+        """Return the full conversation history."""
+        return self.get_messages()
 
-        prompt = {
-            "role": "system",
-            "content": base_prompt_for("deepagents/describe_system.md.j2"),
-        }
-        request = {
-            "role": "user",
-            "content": "Describe the conversation up until now",
-        }
-        resp = self.model.invoke([prompt] + filtered_msgs + [request])
-        desc = resp.content.strip()
+    def get_thread_id(self) -> str:
+        """Return the thread ID."""
+        return self.thread_id
 
-        return desc
+    def get_working_dir(self) -> str:
+        """Return the working directory."""
+        return self.working_dir
 
+    def get_model(self) -> BaseChatModel:
+        """Return the model used by this thread."""
+        return self.model
 
-class ThreadManager:
-    """Manage DeepAgentsThread instances persisted under a directory tree.
+    def get_runconfig(self) -> Dict[str, Any]:
+        """Return the run configuration."""
+        return self.runconfig
 
-    At the root directory, a sqlite DB named 'threads.db' is used for LangGraph
-n    checkpointing via SqliteSaver.
-    """
+    def get_state(self) -> Dict[str, Any]:
+        """Return the current state of the thread."""
+        return self.agent.get_state(self.runconfig)
 
-    DEFAULT_THREAD_WORKING_DIRECTORY = "domain"
-
-    def __init__(self, root_dir: str | None = None):
-        if root_dir:
-            self.root_dir = root_dir
-        else:
-            self.root_dir = tempfile.mkdtemp()
-            
-        os.makedirs(self.root_dir, exist_ok=True)
-        self.db_path = os.path.join(self.root_dir, "threads.db")
-        # Ensure DB file exists upfront
-        if not os.path.exists(self.db_path):
-            open(self.db_path, "a").close()
-        # SqliteSaver expects a sqlite3.Connection
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.checkpointer = SqliteSaver(self.conn)
-        # Create and reuse one chat model for all threads
-        self.model = select_chat_model("mistral-nemo", 0.1)
-
-    def list(self) -> list[str]:
-        """Return thread IDs filtered (no soft-deleted) and sorted by mtime descending."""
-        dirs = []
-        for name in os.listdir(self.root_dir):
-            dpath = os.path.join(self.root_dir, name)
-            if not os.path.isdir(dpath) or name == "__pycache__":
-                continue
-            if os.path.exists(os.path.join(dpath, ".deleted")):
-                continue
-            dirs.append((name, os.path.getmtime(dpath)))
-        dirs.sort(key=lambda x: x[1], reverse=True)
-        return [name for name, _ in dirs]
-
-    def soft_delete(self, thread_id: str) -> None:
-        """Mark a thread as deleted by writing a .deleted marker file."""
-        tdir = os.path.join(self.root_dir, thread_id)
-        if os.path.isdir(tdir):
-            marker = os.path.join(tdir, ".deleted")
-            with open(marker, "w") as f:
-                f.write(datetime.now().isoformat())
-
-    def touch(self, thread_id: str) -> None:
-        """Update mtime of thread dir so it sorts to the top of list()."""
-        tdir = os.path.join(self.root_dir, thread_id)
-        if os.path.isdir(tdir):
-            os.utime(tdir, None)
-
-    def get(self,
-            thread_id: str,
-            working_dir: str | None = None,
-            sandbox_backend=None) -> Thread:
-        tdir = os.path.join(self.root_dir, thread_id)
-        if not os.path.isdir(tdir):
-            raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
-        if not working_dir:
-            working_dir = self.make_default_working_dir(tdir)
-
-        return Thread(working_dir,
-                      thread_id=thread_id,
-                      checkpointer=self.checkpointer,
-                      model=self.model,
-                      sandbox_backend=sandbox_backend)
-
-    def remove(self, thread_id: str) -> None:
-        tdir = os.path.join(self.root_dir, thread_id)
-        if os.path.isdir(tdir):
-            # Best-effort delete
-            for root, dirs, files in os.walk(tdir, topdown=False):
-                for f in files:
-                    try:
-                        os.remove(os.path.join(root, f))
-                    except Exception:
-                        pass
-                for d in dirs:
-                    try:
-                        os.rmdir(os.path.join(root, d))
-                    except Exception:
-                        pass
-            try:
-                os.rmdir(tdir)
-            except Exception:
-                pass
-
-    def new(self, working_dir: str|None = None, sandbox_backend=None) -> Thread:
-        # Derive a clean ID for directory: prefer timestamp+rand
-        tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
-        tdir = os.path.join(self.root_dir, tid)
-        os.makedirs(tdir, exist_ok=True)
-        if not working_dir:
-            working_dir = self.make_default_working_dir(tdir)
-
-        return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
-                      model=self.model, sandbox_backend=sandbox_backend)
-
-    def close(self) -> None:
-        try:
-            if hasattr(self, "conn") and self.conn:
-                self.conn.close()
-        except Exception:
-            pass
-
-    def thread_dir(self, tid: str) -> str:
-        return os.path.join(self.root_dir, tid)
-
-    def thread_default_working_dir(self, tid: str) -> str:
-        return os.path.join(os.path.join(self.root_dir, tid),
-                            self.DEFAULT_THREAD_WORKING_DIRECTORY)
-
-    def make_default_working_dir(self, tdir: str) -> str:
-        wdir = self.DEFAULT_THREAD_WORKING_DIRECTORY
-        working_dir = os.path.join(tdir, wdir)
-        os.makedirs(working_dir, exist_ok=True)
-        
-        return working_dir
-
-
-
-
-    def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
+    def update_state(self, values: Dict[str, Any]) -> None:
+        """Update the state of the thread."""
+        self.agent.update_state(self.runconfig, values)
