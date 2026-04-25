@@ -21,6 +21,7 @@ from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvicti
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.subagent_type_inference import SubagentTypeInferenceMiddleware
+from assist.middleware.loop_detection import LoopDetectionMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -113,8 +114,9 @@ def create_agent(model: BaseChatModel,
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
         trigger_fraction=0.75,  # Evict if context would reach 75%
     )
+    loop_detection_mw = LoopDetectionMiddleware()
 
-    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw]
+    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw, loop_detection_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
@@ -196,6 +198,7 @@ def create_context_agent(model: BaseChatModel,
         trigger_fraction=0.75,
     )
     base_mw.append(context_eviction_mw)
+    base_mw.append(LoopDetectionMiddleware())
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
@@ -243,6 +246,7 @@ def create_research_agent(model: BaseChatModel,
         trigger_fraction=0.70,  # Evict at 70% for research (more aggressive)
     )
     base_mw.append(context_eviction_mw)
+    base_mw.append(LoopDetectionMiddleware())
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
@@ -320,8 +324,10 @@ def create_dev_agent(model: BaseChatModel,
         default_subagent_type="context-agent",
     )
 
+    loop_detection_mw = LoopDetectionMiddleware()
+
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
-          context_eviction_mw, subagent_inference_mw]
+          context_eviction_mw, loop_detection_mw, subagent_inference_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
