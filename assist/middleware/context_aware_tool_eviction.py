@@ -82,7 +82,7 @@ class ContextAwareToolEvictionMiddleware(AgentMiddleware):
             # Fallback: try to get from config
             from deepagents.backends import StateBackend
             logger.warning("Backend not found in state, using StateBackend as fallback")
-            return StateBackend(runtime)
+            return StateBackend()
 
         return backend
 
