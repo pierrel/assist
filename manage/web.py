@@ -1,5 +1,6 @@
 import logging, sys
 import html
+import json
 import os
 import subprocess
 import urllib.parse
@@ -7,7 +8,7 @@ from typing import Dict
 
 from fastapi import FastAPI, Form, HTTPException, BackgroundTasks, Query
 from contextlib import asynccontextmanager
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 
 from assist.env import load_dev_env
 from assist.thread import Thread, ThreadManager
@@ -89,6 +90,63 @@ def _get_sandbox_backend(tid: str):
     work_dir = MANAGER.thread_default_working_dir(tid)
     return SandboxManager.get_sandbox_backend(work_dir)
 
+
+# --- Thread status tracking ----------------------------------------------
+# Stages used for the async thread creation flow:
+#   initializing      - thread row created, background task queued
+#   cloning           - git clone in progress
+#   starting_sandbox  - docker container starting
+#   processing        - agent is running on a message
+#   ready             - idle, accepting input
+#   error             - something failed; see status["error"]
+INIT_STAGES = {"initializing", "cloning", "starting_sandbox"}
+BUSY_STAGES = INIT_STAGES | {"processing"}
+
+STAGE_LABELS = {
+    "initializing": "Setting up thread...",
+    "cloning": "Cloning repository...",
+    "starting_sandbox": "Starting sandbox container...",
+    "processing": "Processing your message...",
+}
+
+
+def _status_path(tid: str) -> str:
+    return os.path.join(MANAGER.thread_dir(tid), "status.json")
+
+
+def _get_status(tid: str) -> dict:
+    path = _status_path(tid)
+    if not os.path.isfile(path):
+        return {"stage": "ready"}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {"stage": "ready"}
+
+
+def _set_status(tid: str, stage: str, **kwargs) -> None:
+    path = _status_path(tid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {"stage": stage, **kwargs}
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def _thread_title(tid: str) -> str:
+    """Display title for a thread; placeholder if still initializing."""
+    status = _get_status(tid)
+    if status.get("stage") in BUSY_STAGES:
+        pending = (status.get("pending_message") or "").strip()
+        if pending:
+            short = pending.splitlines()[0]
+            return short[:60] + ("..." if len(short) > 60 or len(pending) > len(short) else "")
+        return "New thread"
+    return get_cached_description(tid)
+
+
 def get_cached_description(tid: str) -> str:
     """Get thread description from cache, or read from FS and cache if miss."""
     if tid in DESCRIPTION_CACHE:
@@ -117,6 +175,19 @@ def get_cached_description(tid: str) -> str:
 async def lifespan(app: FastAPI):
     # Ensure thread root exists at startup
     os.makedirs(ROOT, exist_ok=True)
+
+    # Recover any threads left mid-init by a previous server crash.
+    # Their background task is no longer running, so mark them errored
+    # so the user gets feedback instead of a forever-spinning page.
+    for tid in MANAGER.list():
+        status = _get_status(tid)
+        if status.get("stage") in BUSY_STAGES:
+            _set_status(
+                tid,
+                "error",
+                error="Server restarted while this thread was being set up.",
+                pending_message=status.get("pending_message", ""),
+            )
 
     # Populate description cache at startup
     for tid in MANAGER.list():
@@ -148,20 +219,38 @@ def render_index() -> str:
         items.append("<li><em>No threads yet</em></li>")
     else:
         for tid in tids:
-            title = get_cached_description(tid)
+            title = _thread_title(tid)
+            status = _get_status(tid)
+            stage = status.get("stage", "ready")
+            badge = ""
+            if stage in BUSY_STAGES:
+                badge = (
+                    f'<span style="font-size:.7rem; color:#555; background:#fff3cd;'
+                    f' border:1px solid #ffeeba; padding:.1rem .4rem; border-radius:10px;'
+                    f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
+                )
+            elif stage == "error":
+                badge = (
+                    '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
+                    ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
+                    ' margin-right:.4rem;">error</span>'
+                )
             items.append(
                 f'<li style="display:flex; align-items:center; gap:.5rem;">'
-                f'<a href="/thread/{tid}" style="flex:1">{html.escape(title)}</a>'
+                f'<a href="/thread/{tid}" style="flex:1">{badge}{html.escape(title)}</a>'
                 f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
                 f'<button type="submit" class="del-btn" '
                 f'onclick="return confirm(\'Delete this thread?\')">&#x2715;</button>'
                 f'</form></li>'
             )
     items_html = "\n".join(items)
+    any_busy = any(_get_status(tid).get("stage") in BUSY_STAGES for tid in tids)
+    refresh_tag = '<meta http-equiv="refresh" content="3" />' if any_busy else ""
     return f"""
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {refresh_tag}
         <title>Assist Web</title>
         <style>
           :root {{ --pad: 1rem; }}
@@ -227,20 +316,33 @@ def render_index() -> str:
     """
 
 
-def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool = False) -> str:
-    title = get_cached_description(tid)
-    msgs = chat.get_messages()
+def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged: bool = False) -> str:
+    status = _get_status(tid)
+    stage = status.get("stage", "ready")
+    busy = stage in BUSY_STAGES
+    is_init = stage in INIT_STAGES
+    title = _thread_title(tid)
 
-    # Append diffs from domain repo (computed at render time)
-    try:
-        dm = _get_domain_manager(tid)
-        if dm:
-            diffs = dm.main_diff()
-            if diffs:
-                diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
-                msgs.append({"role": "diff", "content": diff_content})
-    except Exception:
-        pass
+    # During the initial setup stages there is no agent state worth showing yet.
+    msgs: list[dict] = [] if is_init or chat is None else chat.get_messages()
+
+    # If the agent state has no user message yet but we have a pending one,
+    # show it as a user bubble so the page does not appear empty after redirect.
+    pending = (status.get("pending_message") or "").strip()
+    if busy and pending and not any(m.get("role") == "user" and m.get("content") == pending for m in msgs):
+        msgs.insert(0, {"role": "user", "content": pending})
+
+    # Append diffs from domain repo (computed at render time, only when repo is ready)
+    if not is_init:
+        try:
+            dm = _get_domain_manager(tid)
+            if dm:
+                diffs = dm.main_diff()
+                if diffs:
+                    diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
+                    msgs.append({"role": "diff", "content": diff_content})
+        except Exception:
+            pass
 
     rendered = []
     diff_counter = 0
@@ -279,11 +381,51 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
         cls = "user" if role == "user" else ("tools" if role == "tools" else "assistant")
         bubble = f"<div class=\"msg {cls}\"><div class=\"role\">{role}</div><div class=\"content\">{content_html}</div></div>"
         rendered.append(bubble)
+    if busy:
+        rendered.insert(
+            0,
+            '<div class="msg assistant placeholder">'
+            '<div class="role">assistant</div>'
+            '<div class="content"><span class="dots"><span>.</span><span>.</span><span>.</span></span></div>'
+            '</div>',
+        )
     body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
+
+    # Status banner
+    status_banner = ""
+    if busy:
+        label = STAGE_LABELS.get(stage, "Working...")
+        status_banner = (
+            f'<div class="status-banner">'
+            f'<span class="spinner"></span>'
+            f'<span>{html.escape(label)}</span>'
+            f'</div>'
+        )
+    elif stage == "error":
+        err = html.escape(status.get("error", "Unknown error"))
+        # description.txt is only written after the first successful turn, so
+        # its absence distinguishes a setup-time failure from a mid-conversation one.
+        had_prior_turn = os.path.isfile(
+            os.path.join(MANAGER.thread_dir(tid), "description.txt")
+        )
+        label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
+        status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
+
+    # Auto-refresh while the thread is still being set up / processing
+    refresh_tag = '<meta http-equiv="refresh" content="3" />' if busy else ""
+
+    # Disable the input form during the initial setup phase
+    form_disabled = "disabled" if is_init else ""
+    form_note = (
+        "Thread is being set up, please wait..."
+        if is_init
+        else "If you close or refresh, your message will still be processed."
+    )
     return f"""
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {refresh_tag}
         <title>{html.escape(title)}</title>
         <style>
           :root {{ --pad: 1rem; }}
@@ -314,6 +456,15 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
           .merge-btn {{ background: #28a745; color: white; border: 1px solid #1e7e34; padding: .5rem .75rem; font-size: .9rem; white-space: nowrap; }}
           .merge-btn:hover {{ background: #218838; border-color: #1c7430; }}
           .error-msg {{ background: #f8d7da; border: 1px solid #f5c6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #721c24; }}
+          .status-banner {{ display: flex; align-items: center; gap: .6rem; background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: .6rem .8rem; margin: .5rem 0; border-radius: 6px; font-size: .9rem; }}
+          .spinner {{ width: 14px; height: 14px; border: 2px solid #d6ad00; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: spin 1s linear infinite; }}
+          @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+          .placeholder .dots span {{ display: inline-block; animation: blink 1.4s infinite both; opacity: .2; font-weight: bold; font-size: 1.4rem; line-height: 0; }}
+          .placeholder .dots span:nth-child(2) {{ animation-delay: .2s; }}
+          .placeholder .dots span:nth-child(3) {{ animation-delay: .4s; }}
+          @keyframes blink {{ 0%, 80%, 100% {{ opacity: .2; }} 40% {{ opacity: 1; }} }}
+          form textarea[disabled] {{ background: #f5f5f5; cursor: not-allowed; }}
+          .btn[disabled] {{ background: #eee; color: #aaa; cursor: not-allowed; border-color: #ddd; }}
           @media (max-width: 480px) {{
             .msg {{ padding: .5rem .6rem; }}
             .button-group {{ flex-direction: column; }}
@@ -326,16 +477,17 @@ def render_thread(tid: str, chat: Thread, captured: bool = False, merged: bool =
           <div class="nav"><a href="/">← All threads</a></div>
           <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
           {_thread_domain_html(tid)}
+          {status_banner}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           {"<div class='success-msg'>Branch successfully merged to main!</div>" if merged else ""}
           <form action="/thread/{tid}/message" method="post">
             <label for="text">Your message</label><br/>
-            <textarea id="text" name="text" required placeholder="Type your message..."></textarea><br/>
+            <textarea id="text" name="text" required placeholder="Type your message..." {form_disabled}></textarea><br/>
             <div class="button-group">
-              <button class="btn" type="submit">Send</button>
-              <button class="btn btn-secondary" type="button" onclick="showCaptureModal()">Capture Conversation</button>
+              <button class="btn" type="submit" {form_disabled}>Send</button>
+              <button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>
             </div>
-            <div style="font-size:.85rem; color:#666; margin-top:.4rem;">If you close or refresh, your message will still be processed.</div>
+            <div style="font-size:.85rem; color:#666; margin-top:.4rem;">{form_note}</div>
           </form>
 
           <!-- Capture Modal -->
@@ -415,42 +567,93 @@ async def create_thread_with_message(
     text: str = Form(...),
     domain: str | None = Form(None),
 ):
+    # Reserve the thread directory synchronously so the redirect target is valid,
+    # but defer everything slow (clone, sandbox, agent, description) to the background.
     chat = MANAGER.new()
     tid = chat.thread_id
     selected = domain or (DOMAINS[0] if DOMAINS else None)
-    if selected:
-        DomainManager(MANAGER.thread_default_working_dir(tid), selected)
-    background_tasks.add_task(_process_message, tid, text)
+    _set_status(tid, "initializing", pending_message=text, domain=selected or "")
+    background_tasks.add_task(_initialize_thread, tid, text, selected)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
-def _process_message(tid: str, text: str) -> None:
-    sandbox = _get_sandbox_backend(tid)
+def _initialize_thread(tid: str, text: str, domain: str | None) -> None:
+    """Background task: clone the repo, start sandbox, process the first message."""
     try:
-        chat = MANAGER.get(tid, sandbox_backend=sandbox)
-    except FileNotFoundError:
-        return
-    resp = chat.message(text)
-    MANAGER.touch(tid)
+        if domain:
+            _set_status(tid, "cloning", pending_message=text, domain=domain)
+            try:
+                dm = DomainManager(MANAGER.thread_default_working_dir(tid), domain)
+                # Refresh cache: a previous render may have cached a no-remote DM.
+                DOMAIN_MANAGERS[tid] = dm
+            except Exception as e:
+                logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
+                _set_status(tid, "error", error=f"Clone failed: {e}", pending_message=text)
+                return
+        _process_message(tid, text)
+    except Exception as e:
+        logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
+        _set_status(tid, "error", error=str(e), pending_message=text)
 
-    # Generate description if there is none
-    get_cached_description(tid)
 
-    # After message, sync changes if any
-    dm = _get_domain_manager(tid)
-    if dm and dm.changes():
-        last_assistant = resp if resp else "assistant update"
-        dm.sync(last_assistant)
+def _process_message(tid: str, text: str) -> None:
+    # Carry the pending message in the status so the thread page can show
+    # it as a placeholder bubble while processing (cleared once status==ready).
+    pending_kwargs = {"pending_message": text}
+    try:
+        _set_status(tid, "starting_sandbox", **pending_kwargs)
+        sandbox = _get_sandbox_backend(tid)
+        try:
+            chat = MANAGER.get(tid, sandbox_backend=sandbox)
+        except FileNotFoundError:
+            return
+        _set_status(tid, "processing", **pending_kwargs)
+        resp = chat.message(text)
+        MANAGER.touch(tid)
+
+        # Generate description if there is none
+        try:
+            DESCRIPTION_CACHE.pop(tid, None)
+            get_cached_description(tid)
+        except Exception as e:
+            logging.warning("Description generation failed for %s: %s", tid, e)
+
+        # After message, sync changes if any
+        dm = _get_domain_manager(tid)
+        if dm and dm.changes():
+            last_assistant = resp if resp else "assistant update"
+            dm.sync(last_assistant)
+        _set_status(tid, "ready")
+    except Exception as e:
+        logging.error("Message processing failed for thread %s: %s", tid, e, exc_info=True)
+        _set_status(tid, "error", error=str(e), **pending_kwargs)
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
 async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
-    sandbox = _get_sandbox_backend(tid)
-    try:
-        chat = MANAGER.get(tid, sandbox_backend=sandbox)
-    except FileNotFoundError:
+    tdir = MANAGER.thread_dir(tid)
+    if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
+
+    stage = _get_status(tid).get("stage", "ready")
+    # During the initial setup stages there is no point constructing a Thread
+    # (which would also race with the background task starting the sandbox).
+    chat: Thread | None = None
+    if stage not in INIT_STAGES:
+        # Skip the sandbox during plain renders; it gets started by the
+        # background task when a message is being processed.
+        try:
+            chat = MANAGER.get(tid, sandbox_backend=None)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Thread not found")
     return render_thread(tid, chat, captured=bool(captured), merged=bool(merged))
+
+
+@app.get("/thread/{tid}/status")
+async def thread_status(tid: str):
+    if not os.path.isdir(MANAGER.thread_dir(tid)):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return JSONResponse(_get_status(tid))
 
 
 @app.post("/thread/{tid}/message")
