@@ -1,0 +1,164 @@
+* Problem
+There was an error during research where the agent was stuck in a write-file loop.
+* From claude conversation
+What went wrong
+
+  The agent got stuck in a degenerate write loop at the end of the run. Looking at the conversation history at          /home/pierre/deploy/assist/threads/20260424061644-1b5485b7/domain/conversation_history/e6b5559f-7637-4344-97e9-07ed2  56b7f91.md:                                                                                                                           
+  1. Lines 1–280 — research went normally: write question.txt (collided with leftover content from a prior thread, so   it used swimming_workout_question.txt), 5 web searches, write swimming_workout_report.md, run critique-agent, write
+  a v2 fixing the yardage math, run fact-check-agent.                                                                   2. Lines 280–583 — the model declares "I have completed the research" but then immediately calls write_file again
+  with a slightly different filename, repeatedly. The transcript ends mid-loop with Error: File already exists:         '/workspace/final_report.md' and no follow-up.
+                                                                                                                        The artifact damage is visible in domain/: nine near-identical report files all owned by root (the sandbox            container) with mtime 1969:
+  final_report.md            final_swimming_workout_report.md                                                           final_complete_report.md   completed_final_report.md       
+  final_output.md            final_output_report.md                                                                     report_final.md            swimming_workout_report.md
+  swimming_workout_report_v2.md                                                                                                         
+  Two compounding root causes                                                                                                           
+  1. write_file is no-clobber and the model doesn't recover gracefully. When it returns Error: File already exists,     the model invents a new filename (e.g. final_output.md → completed_final_report.md → report_final.md) instead of
+  switching to edit_file or letting the existing file stand. The system prompt even says "Only write the report to a    single file" — that constraint isn't enforced, just suggested.
+  2. The agent loop doesn't terminate after the model says it's done. Each "I have completed the research…" message is   followed by another tool call. Either the loop's stop condition is "no tool call" (and the model keeps making tool   calls) or there's no max-iterations check before the LLM call. The conversation just runs until something external
+  (turn limit / session timeout) cuts it off.                                                                                           
+  Suggested fixes (in /deploy/assist/code, ranked)                                                                       
+  - Make write_file overwrite by default, or add an overwrite=true arg and have the orchestrator prompt instruct the    report writer to use it. The current "create-only" semantics are why the model resorts to filename mutation.
+  - Add a hard cap on consecutive tool calls without progress (e.g. same tool + same error twice = stop), so a stuck    model can't burn through filename variants indefinitely.                                                              - Optionally, have the report writer agent track the canonical filename in its state and reject any further
+  write_file to a different name once the report has been written.                                                                      
+  Correction on my earlier note
+  I flagged a <system-reminder> in swimming_workout_question.txt as a possible prompt injection. It isn't — od -c       shows the file is exactly 268 bytes ending at …time off. with no injected content. The reminder I saw was my own
+  Claude Code harness appending a TaskCreate nudge to the Read tool result. So no research-agent change needed for      that — false alarm, sorry.
+
+* Proposed Solutions
+
+The two compounding root causes — no-clobber ~write_file~ + missing
+loop-termination — should be addressed together. Fixing only the tool
+removes /this/ trigger; adding a loop guard prevents the next variant
+of the same failure mode (e.g. a different tool that returns repeated
+errors).
+
+** Solution 1 — Make ~write_file~ recoverable (root cause #1)
+
+The ~write_file~ tool is provided by ~deepagents/middleware/filesystem.py~
+and returns the hardcoded error:
+
+#+begin_quote
+Cannot write to {file_path} because it already exists. Read and then
+make an edit, or write to a new path.
+#+end_quote
+
+The phrase "or write to a new path" is exactly the wrong nudge for a
+report-writing agent that has already settled on a canonical filename.
+The model latches onto it and starts mutating filenames.
+
+Two non-exclusive options:
+
+1. *Override the tool description / error message.* Wrap the deepagents
+   ~write_file~ tool so that when the file exists the error reads
+   roughly: "File ~{file_path}~ already exists. Use ~edit_file~ to
+   modify it, or stop — do NOT pick a different filename." This is a
+   ~_custom_tool_descriptions~-style override and a thin tool-wrapper;
+   no fork of deepagents needed.
+
+2. *Add an ~overwrite~ argument (default False).* Lets the report
+   writer explicitly opt in to overwriting its own canonical file
+   when iterating on critique/fact-check feedback. Default-False keeps
+   accidental clobbering off.
+
+Doing (1) alone removes the loop trigger we observed. (2) is a small
+ergonomic win for the iterate-on-critique flow.
+
+** Solution 2 — ~LoopDetectionMiddleware~ (root cause #2)
+
+A new middleware that fires in ~before_model~ (or ~after_model~) and
+inspects the tail of the message history. It triggers a hard stop
+when any of these patterns appears:
+
+- Same tool name + same error class ≥ 2 in a row.
+- ≥ 3 ~write_file~ calls to distinct but similar paths within a sliding
+  window of ~10 messages (filename-mutation signature).
+- Same tool + structurally-identical args ≥ 2 in a row, regardless of
+  outcome.
+
+On trigger, the middleware:
+
+- Returns a ~Command~ that injects a terminal ~AIMessage~ summarising the
+  last *successful* artifact path (read from state) and then ends the
+  graph (no further tool calls).
+- Logs a ~loop_detected~ event with the offending tool name and pattern
+  so we can build an eval around it.
+
+This belongs alongside the other middlewares in
+~assist/middleware/~ and would be wired into ~create_agent~,
+~create_research_agent~, and ~create_dev_agent~ in ~assist/agent.py~.
+It is /defence in depth/: even if Solution 1 covers ~write_file~, this
+catches the same anti-pattern in any other tool that grows a
+no-clobber semantics later.
+
+** Solution 3 — Canonical-output tracking for the research agent
+
+State-level enforcement of "Only write the report to a single file":
+
+- When the research agent's ~write_file~ first succeeds for a
+  ~*.md~/~*.org~ path, record it as ~final_report_path~ in agent state.
+- Subsequent ~write_file~ calls to a /different/ path return a
+  ~Command~ pointing the model at ~final_report_path~ with a directive
+  to use ~edit_file~ (or finish).
+
+This is more invasive than Solutions 1–2 (touches research-agent
+state schema), but it is the only one that turns the soft prompt
+constraint ("Only write the report to a single file") into a hard
+guarantee. Worth doing if Solutions 1+2 still miss edge cases in
+evals.
+
+** Solution 4 — Done-phrase termination heuristic
+
+If an ~AIMessage~ contains a "I have completed the research" /
+"final report is at" pattern AND the next step the model proposes is
+another ~write_file~, drop the tool call and terminate. Cheap to
+implement, narrow in scope, somewhat brittle (string-matching). Treat
+as a last-resort patch only if 1+2 prove insufficient.
+
+** Recommended combination
+
+Implement *Solution 1* + *Solution 2* together.
+
+- (1) eliminates the specific trigger from the linked transcript by
+  redirecting the model toward ~edit_file~ on collision.
+- (2) is a general-purpose safety net that bounds blast radius for any
+  future stuck-in-loop bug.
+
+Skip (3) and (4) until an eval (replaying or simulating the
+swimming-workout transcript) shows that 1+2 are not enough.
+
+** Implementation sketch
+
+#+begin_src text
+assist/middleware/loop_detection.py
+  class LoopDetectionMiddleware(AgentMiddleware):
+      def __init__(self, window=10, max_repeats=2, max_distinct_writes=3): ...
+      def before_model(self, state, runtime) -> Command | None:
+          # inspect last `window` tool messages
+          # if pattern matched: return Command(goto=END,
+          #   update={"messages": [AIMessage(...summary with final_report_path...)]})
+          # else: return None
+
+assist/tools.py  (or a new write_file wrapper)
+  def make_safe_write_file(deepagents_write_file):
+      # rewrap with overwrite arg + clearer collision error
+#+end_src
+
+Wiring (in ~assist/agent.py~):
+
+- Add ~LoopDetectionMiddleware()~ to ~mw~ in ~create_agent~,
+  ~create_research_agent~, ~create_dev_agent~.
+- Pass the ~write_file~ override via deepagents'
+  ~_custom_tool_descriptions~ (or a tool override hook) to all three
+  agent factories.
+
+** Eval plan
+
+1. Replay the failing transcript at
+   ~/home/pierre/deploy/assist/threads/20260424061644-1b5485b7/...~
+   against the patched agent in a unit-style eval; assert exactly one
+   ~write_file~ to a stable path.
+2. Add a synthetic eval in ~edd/eval/~ that mocks ~write_file~ to
+   return "already exists" forever, and asserts the loop-detection
+   middleware terminates within N model calls.
+3. Existing research-agent evals must still pass — the override
+   should not regress critique-then-edit flows.
