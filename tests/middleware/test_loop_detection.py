@@ -177,10 +177,16 @@ class TestDetectLoop:
         assert _detect_loop(events, 2, 3, 3, 10) is None
 
     def test_pattern_c_filename_mutation(self):
+        # Three distinct paths with mixed errors that don't normalise alike,
+        # so Pattern A doesn't fire. Pattern C catches it because the tool is
+        # mutating and at least one call errored.
         events = [
-            self._evt(args={"file_path": "/a"}, content="ok"),
-            self._evt(args={"file_path": "/b"}, content="ok"),
-            self._evt(args={"file_path": "/c"}, content="ok"),
+            self._evt(args={"file_path": "/a"},
+                      content="Error: permission denied", is_error=True),
+            self._evt(args={"file_path": "/b"},
+                      content="Error: disk full", is_error=True),
+            self._evt(args={"file_path": "/c"},
+                      content="Error: already exists", is_error=True),
         ]
         result = _detect_loop(events, 2, 3, 3, 10)
         assert result is not None
@@ -193,16 +199,41 @@ class TestDetectLoop:
         ]
         assert _detect_loop(events, 2, 3, 3, 10) is None
 
-    def test_different_tools_do_not_interleave(self):
+    def test_pattern_c_does_not_fire_for_read_only_tool(self):
+        # Three distinct read_file calls is exploration, not a loop —
+        # regression for thread 20260425110043-4822cf50.
         events = [
-            self._evt(tool="search", args={"q": "a"}),
-            self._evt(tool="search", args={"q": "b"}),
-            self._evt(tool="search", args={"q": "c"}),
+            self._evt(tool="read_file", args={"file_path": "/a"}, content="<contents of /a>"),
+            self._evt(tool="read_file", args={"file_path": "/b"}, content="<contents of /b>"),
+            self._evt(tool="read_file", args={"file_path": "/c"}, content="<contents of /c>"),
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10) is None
+
+    def test_pattern_c_does_not_fire_without_error(self):
+        # Three successful distinct write_file calls is normal
+        # multi-file work, not a thrash.
+        events = [
+            self._evt(args={"file_path": "/a"}, content="Wrote /a"),
+            self._evt(args={"file_path": "/b"}, content="Wrote /b"),
+            self._evt(args={"file_path": "/c"}, content="Wrote /c"),
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10) is None
+
+    def test_different_tools_do_not_interleave(self):
+        # Pattern C identifies the offending tool name when 3 distinct
+        # mutating calls share the same name. Custom tool name avoids the
+        # read-only allowlist.
+        events = [
+            self._evt(tool="custom_mutator", args={"q": "a"},
+                      content="Error: failed in mode A", is_error=True),
+            self._evt(tool="custom_mutator", args={"q": "b"},
+                      content="Error: failed in mode B", is_error=True),
+            self._evt(tool="custom_mutator", args={"q": "c"},
+                      content="Error: failed in mode C", is_error=True),
         ]
         result = _detect_loop(events, 2, 3, 3, 10)
-        # Pattern C fires for `search` because 3 distinct args in window.
         assert result is not None
-        assert result["tools"] == {"search"}
+        assert result["tools"] == {"custom_mutator"}
 
 
 class TestLastSuccessfulArtifact:
