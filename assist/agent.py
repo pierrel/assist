@@ -151,14 +151,14 @@ def create_agent(model: BaseChatModel,
                                        sandbox_backend=sandbox_backend)
     )
 
-    dev_sub = CompiledSubAgent(
-        name="dev-agent",
-        description="Handles ALL software development tasks: writing code, editing code, fixing bugs, adding features, changing behaviour, updating tests, modifying configuration files, understanding code, explaining code, debugging errors, reviewing code, and answering questions about the codebase. Use this agent for ANY request related to a software project.",
-        runnable=create_dev_agent(model,
-                                  working_dir,
-                                  checkpointer,
-                                  sandbox_backend=sandbox_backend)
-    )
+    # NOTE: the dev-agent subagent has been retired (Phase D of the skills
+    # migration — see docs/2026-04-25-skills-rearchitecture.org). The general
+    # agent now loads the dev skill (assist/skills/dev/SKILL.md) and handles
+    # code work itself in this conversation, preserving multi-turn context
+    # and the user channel through approvals/clarifications.
+    # `create_dev_agent` is retained for now so the dev-agent eval suite
+    # (test_dev_agent*.py) can keep validating the skill content against the
+    # legacy harness.
 
     critique_sub_agent = {
         "name": "critique-agent",
@@ -182,7 +182,7 @@ def create_agent(model: BaseChatModel,
         ),
         middleware=mw + [skills_mw, logging_mw],
         backend=backend,
-        subagents=[context_sub, research_sub, dev_sub, critique_sub_agent],
+        subagents=[context_sub, research_sub, critique_sub_agent],
         memory=[memories_path],
     )
 

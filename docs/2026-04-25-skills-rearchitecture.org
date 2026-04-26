@@ -99,6 +99,18 @@ The subagent-statelessness finding argues for *less* lingering between phases.  
 **** Phase D — retire the dev-agent subagent
 - Once Phase C is solid, remove =dev_sub= from =create_agent='s subagents list and remove =create_dev_agent=.  =dev_agent_instructions.md.j2= becomes deletable (its content lives in =dev/SKILL.md= now).
 
+***** Phase D execution (2026-04-26) — soft retire
+After Phase C validation passed (multi-turn evals + 2 improvements / 0 regressions on dev-agent suite), executed a *soft retire*:
+- Removed =dev_sub= from =create_agent='s subagents list.  The general agent no longer offers =dev-agent= as a delegation target.
+- Deleted =edd/eval/test_agent_dev_delegation.py= (its assertions about delegation are now obsolete).
+- *Kept* =create_dev_agent= and =dev_agent_instructions.md.j2= for now.  Reasons:
+  - =test_dev_agent.py= (12 evals, all passing in Phase A) and =test_dev_agent_planning_flow.py= still use =create_dev_agent= directly.  They validate the dev skill *content* via the legacy harness — useful coverage that we don't yet have a clean replacement for on the general-agent path.
+  - The thin host shell template (=dev_agent_instructions.md.j2=) just interpolates =skill_body=; removing it is mechanical but doesn't add architectural value beyond the soft retire.
+- Net effect: the dev-agent is no longer reachable through the production routing path (general agent never delegates to it).  It survives only as a test harness for the dev skill content.
+
+Future work (out of scope for this session):
+- Convert =test_dev_agent*.py= scenarios to run against the general agent + dev skill.  This is mechanical (swap =create_dev_agent= for =create_agent=, ensure the workspace has project_indicators) but the small model's reliability on multi-turn TDD via the general agent is the open question.  Once those scenarios pass on the general-agent path, =create_dev_agent= and =dev_agent_instructions.md.j2= can be deleted.
+
 *** Sandbox alignment (concurrent with Phase A)
 Today, =sandbox_backend= is plumbed through every agent factory in production via =assist/thread.py= → =create_agent= → subagent factories.  All production agents already share the sandbox.  The gap is in evals: =edd/eval/test_*.py= calls factories directly without a sandbox.
 
