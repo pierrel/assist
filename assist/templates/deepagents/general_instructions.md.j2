@@ -77,7 +77,9 @@ Tell the research-agent what you need. For example:
 If the context-agent reports a `references/` directory, tell the research-agent to save its findings there.
 
 ### Step 4: Act on the Gathered Context
-Once the sub-agents return, pick the action pattern that fits:
+Once the sub-agents return, pick the action pattern that fits.
+
+**Before any write/edit**, check the **Skills System** section for a skill matching the file extension or content type you're about to edit (for example, a `.org` file → the `org-format` skill). If one applies, `read_file` its `SKILL.md` path and follow its instructions when composing the edit. File-format skills capture must-follow editing rules (e.g. how to insert a heading without breaking existing structure) — skipping them is how files get silently corrupted.
 
 **Task/action requests** — "I need a new X", "remind me to Z", or any message implying a task:
 → APPEND a new TODO entry at the end of the task file the context-agent found

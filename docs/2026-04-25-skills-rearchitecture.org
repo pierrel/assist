@@ -1,0 +1,210 @@
+State: Not started
+* Problem
+The current architecture loses the user channel when work is delegated to a subagent (e.g. dev-agent), because subagents cannot reply to the user directly.  The supervising general agent paraphrases on the way back, and the next user turn starts a fresh dev-agent with no recollection of prior dev-specific context.
+
+We're using a small model (=stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ=), so we cannot solve this by making the system prompt larger and routing everything through one heavyweight top-level agent — the model gets confused by long, multi-domain instructions.
+
+* Proposed direction: skills-based re-architecture
+Move the dev/research/context-specific instructions out of dedicated subagents and into *skills* that are lazily loaded into a single top-level agent.  The conversation thread lives at the top level (user channel preserved), but the active context only contains the instructions relevant to the current task.
+
+This is essentially Option 1 from [[file:2026-04-25-dev-improvements.org][dev-improvements.org]] ("expand the general agent"), but with skills as the mechanism for keeping the base prompt small.
+
+** Why skills change the calculus
+- Subagent boundaries today are already doing skill-like context partitioning — each agent only loads its own system prompt when invoked.  Skills give us that benefit without losing the user channel.
+- Base prompt becomes short: "you're an assistant; here are the skills available."  Dev/research/context guidance becomes lazily-loaded content blocks.
+- Multi-turn dev work no longer loses user replies because the conversation never leaves the top-level agent.
+
+** Loading model: model-driven by default
+Skills follow the standard pattern: the agent sees skill names + descriptions on every turn and decides via tool call (=load_skill("name")=) when to pull the content in.  The trigger logic lives in the *description* the model reads ("Load when working with =.org= files"), not in our code.  This is uniform across skills and matches how Claude Code's skills work.
+
+*** Risk: the trigger decision is still a decision
+Skills only help if the model picks the right one.  Qwen3-Coder is reasonable but not great at meta-reasoning ("which skill applies?").  Mitigations that *don't* compromise the model-driven design:
+- Keep the skill set small (4–6 skills, non-overlapping descriptions).
+- Invest in skill descriptions: write them as triggers ("Load when X appears"), not as topics ("About X").
+- Treat each skill's eval as a probe of "can the model decide to load this?"  A skill whose eval keeps failing is signal that either the description needs work or this particular trigger is too subtle for the small model.
+
+*** Fallback: code-side auto-loading (only if model-driven fails)
+If a skill's eval shows the model consistently fails to load it when relevant, we *can* add a side channel — middleware that watches tool results / user messages for a regex and auto-injects the skill content.  Nothing in the agent loop prevents this; we control it.  But it's parallel infrastructure that bypasses the model's judgment, so demote it to fallback: only build it for a specific skill after model-driven loading is shown insufficient for that skill.  Don't build it preemptively.
+
+*** Risk: loading is one-way unless we also build unloading
+A long session that pivots (dev → research → dev) accumulates skill content in context.  Without an unload path, skills just delay context bloat rather than solving it.  Hook into the existing =ContextAwareToolEvictionMiddleware= so unused skills are evictable, or expose an explicit =unload_skill= tool.
+
+* Implementation sketch
+1. *Skills registry* — a small module mapping skill name → (description, markdown content).  The description is what the model sees on every turn; the content is loaded on demand.  Mirrors the existing =deepagents/*.md.j2= prompt files for content shape.
+2. *=load_skill= tool* — model-callable.  Injects the named skill's content as a SystemMessage (or appends to the system prompt).  Optional companion =unload_skill=.
+3. *Skill manifest in the base prompt* — append a short "Available skills" block to the top-level agent's system prompt: =name: description= for each skill.  This is the only way the model knows skills exist.
+4. *Port the dev-agent instructions first* — =deepagents/dev_agent_instructions.md.j2= is the highest-value test case (it's the source of the problem).  Migrate it to a skill, keep the rest as subagents initially.
+5. *Validate, then expand* — only collapse =context-agent= / =research-agent= into skills once the pattern is proven on dev work.  They're cheap and isolated as subagents today.
+
+** Skill 0 (warm-up): org-format guide
+Before the heavyweight dev-agent migration, port the org-format reference as the first skill.  It's small, self-contained, and has dedicated evals — a clean smoke test of the load-on-demand mechanism without behavioral confounds.
+
+*** Today's wiring (manual, always-on)
+- Reference content: =assist/templates/reference/org_format.md= (39 lines, pure markdown).
+- Injection: =assist/templates/deepagents/context_agent.md.j2:54= does =\{\% include "reference/org_format.md" \%\}= at template-render time.  The "you MUST end your response with the guide if any surfaced file is =.org=" instruction is on line 41 of the same template.
+- Scope: only the *context-agent* receives it (=assist/agent.py:212=).  It's unconditionally embedded in every context-agent invocation regardless of working dir contents.
+- Evals: =edd/eval/test_context_agent.py:207-229= (=test_includes_org_format_guidance_for_org_files=, *failing* per baseline) and =:231-247= (=test_no_org_format_guidance_for_non_org_files=, passing).
+
+*** Why the failing eval may be a salience problem
+The "MUST surface the guide" instruction sits on line 41 of a 54-line system prompt, with the 39-line guide itself attached after.  Small-model instruction-following degrades over long, multi-rule contexts.  Loading the guide *when an =.org= path actually appears* (tool result, user message, or surfaced file path) puts the instruction at a much more salient position — plausibly fixes the failing eval rather than just preserving it.
+
+*** Migration steps
+1. Register skill =org-format= in the skills registry.  Content = the existing =reference/org_format.md= plus a short directive at the top: "End your response with this guide whenever an =.org= file path appears in your context."
+2. Description (what the model sees in the manifest): something like ="org-format: Load when any .org file path appears in tool results or user messages.  Required before responding about org-mode files."=  The description must double as the trigger instruction.
+3. Remove the =\{\% include \%\}= and the line-41 instruction from =context_agent.md.j2=.
+4. Run the two evals: =test_context_agent::test_includes_org_format_guidance_for_org_files= (currently failing) and =test_no_org_format_guidance_for_non_org_files= (currently passing).
+5. *Decision point*: if the failing test now passes, model-driven loading works for this trigger and we have our reference pattern.  If it still fails, two diagnostic paths:
+   - Inspect a transcript: did the model call =load_skill= and ignore the content, or did it never call =load_skill=?  Different failure modes, different fixes.
+   - If the model never calls =load_skill=: try description rewording first.  If still failing, this is the case where the code-side fallback (auto-inject on =\.org\b= match) is justified — but only for this skill, not as a global pattern.
+6. Either way, capture what we learned in this doc before moving to the dev-agent skill.  The org-format eval is the canary for whether the small model can drive skill loading at all.
+
+*** Result of first canary run (2026-04-26)
+Implementation landed:
+- Skill at =assist/skills/org-format/SKILL.md= with frontmatter (name, description) plus content.  Content emphasizes the headline+body insertion failure mode (orphaning the previous heading's body) with explicit WRONG/RIGHT examples and an insertion procedure.
+- =/skills/= route added in =assist/backends.py= → =FilesystemBackend= rooted at =assist/skills/=.
+- =create_context_agent= passes =skills=["/skills/"]= to =create_deep_agent=.
+- =context_agent.md.j2= no longer includes =reference/org_format.md= and no longer carries the line-41 "REQUIRED for .org files" directive.
+
+Targeted eval results:
+- =test_no_org_format_guidance_for_non_org_files= → *PASS*
+- =test_includes_org_format_guidance_for_org_files= → *FAIL*
+
+Trace inspection (logs at =logs/skill0-org-format-2026-04-26/run-1.log=):
+- The deepagents =SkillsMiddleware= injects the manifest correctly.  System prompt contains the "Skills System" section listing =org-format= with description and path.
+- In *both* tests, the model made 4-5 tool calls (=ls=, =read_file= on README/inbox) but *never* called =read_file= on =/skills/org-format/SKILL.md=.  Progressive disclosure was not triggered.
+- Failing test response was a hallucinated successful write ("I've added the 'Buy groceries' reminder to your GTD inbox.org file..."), violating the read-only contract.  No org-format content surfaced.
+- The "negative" pass on the =.md= test is therefore *trivial*: the model didn't load the skill in either case; the =.md= test only checks the response *doesn't* contain org-format text, so a no-load case passes by default.
+
+Diagnostic conclusion: the skill manifest is well-formed and visible to the model; the small model is just *not exercising progressive disclosure* on its own.  This is consistent with the doc's pre-flight risk assessment ("Qwen3-Coder is reasonable but not great at meta-reasoning").  Description rewording is the next thing to try; if that fails, we have evidence that model-driven loading alone is insufficient for this model and the code-side fallback (auto-inject on =\.org\b=) is justified for this skill.
+
+*Open question for the user before iterating*: do we want to (a) keep iterating on description / context-agent prompt nudges to get model-driven loading to work, or (b) accept the canary result as evidence that the small model can't drive skill loading reliably and switch to a code-side trigger for org-format?  This decision shapes the dev-agent migration plan.
+
+*** Iterations 2-4 (2026-04-26)
+**** Iteration 2 — context-agent prompt nudge ("MUST read_file the skill")
+Strengthened the read-only contract in =context_agent.md.j2= ("never claim you wrote something") and added a new Step 3 (Consult Skills) explicitly directing the model to call =read_file= on any matching skill's =SKILL.md= path before responding.
+Result: same as iteration 1 — the model still never called =read_file= on =/skills/org-format/SKILL.md=.  In the failing test the model again hallucinated a successful write ("I've added a reminder to buy groceries..."), confirming the read-only contract was not being honoured at the model level even with strengthened wording.
+
+**** Iteration 3 — =ReadOnlyEnforcerMiddleware= + skill nudge
+Added =assist/middleware/read_only_enforcer.py= that intercepts =wrap_tool_call= and returns an error =ToolMessage= for =write_file=/=edit_file=/=execute=.  Wired into =create_context_agent= so the read-only contract is enforced architecturally rather than by prompt.
+Result (logs at =run-3.log=):
+- Hallucinated writes *eliminated*.  Model now correctly says "I cannot directly modify files as I am a read-only agent" and provides a paste-ready snippet for the caller.
+- First regex assertion (=asterisk|heading.*format|...=) now *passes* — response contains "asterisks" and "heading structure".
+- Second regex assertion (=body|section|content.*between|...=) still *fails* — response has no body-relationship content.
+- Model's response includes "According to the org-format skill, you should maintain the proper heading levels (asterisks) and structure" — referencing the skill by name but without ever calling =read_file= on its =SKILL.md= path.  This is *shallow disclosure*: the small model picks up surface keywords from the manifest description and uses them in the response without ever loading the full content.
+
+**** Iteration 4 — pack critical rule into the description
+Hypothesis: if the model only consumes the description and never reads SKILL.md, put the must-follow rules *in* the description.  Rewrote the org-format description to include the heading-body rule ("a heading's body is everything between that heading and the next heading at the same level or a higher level") and the insertion rule ("place new heading after the previous heading's full body — NOT immediately after").
+Verified the new description is injected verbatim into the system prompt's "Available Skills" block (run-4 probe).
+Result (logs at =run-4.log=): same regex failure pattern.  The model has the body rule directly in front of it on every turn, yet its response compresses to a much higher-level summary ("Headings start with asterisks; TODO items are marked with =** TODO=") and never surfaces the body or insertion rules to the caller.
+
+**** Verdict
+The bottleneck is not skill triggering, and it is not even progressive disclosure.  Even when the must-follow rules are *always* in the system prompt, the small model summarizes at its own abstraction level and drops the substantive content.  Patient prompt engineering on the description / context-agent prompt won't close this gap — we have evidence from three different angles (model-driven load, in-prompt forced load, content inlined in description) that the model isn't relaying skill content faithfully.
+
+Score across iterations on =test_includes_org_format_guidance_for_org_files=:
+| Iteration | File path surfaced | First regex (asterisk/heading) | Second regex (body/section) | Read-only honoured |
+|-----------+---------------------+--------------------------------+-------------------------------+---------------------|
+| 1 (skill, no enforcer) | yes | no | no | no (hallucinated write) |
+| 2 (skill + Step 3 nudge) | yes | no | no | no (hallucinated write) |
+| 3 (skill + Step 3 + read-only enforcer) | yes | *yes* | no | yes |
+| 4 (skill + Step 3 + enforcer + rich description) | yes | yes | no | yes |
+
+Real progress on three of four axes; the body-content axis is structurally blocked by the small model's compression behaviour.
+
+**** Open question for the user (next iteration)
+Two paths remain:
+- *Code-side trigger*: write a middleware that, when an =.org= path is detected in tool results, injects the SKILL.md content directly as a system message.  This bypasses the model's discretion entirely.  Doable as a per-skill fallback (still not the global default).  Likely makes the failing assertion pass because the rule will be in the response context immediately before the response is generated.
+- *Test/expectation revision*: accept that the small model paraphrases at a higher level and revise the eval to check for *paraphrased* compliance rather than verbatim body-rule keywords.  Cheaper but loses the substantive guarantee — the user editing the file may not see the body rule at all.
+
+The doc's pre-commitment was: code-side trigger is justified specifically when description-only triggering is shown insufficient *for this skill*.  We have that evidence now.
+
+**** Iteration 5 — architectural cleanup (skill on the right agent + custom middleware template)
+The user pointed out that placing the org-format skill on the *context-agent* was wrong: the context-agent is read-only and never produces .org content, so it doesn't need format-correctness rules.  The agent that *writes* (the general agent today; the dev-agent eventually) is the one that needs the skill.  Several follow-on cleanups landed in this iteration:
+
+***** Moves
+- Removed =skills=[SKILLS_ROUTE]= from =create_context_agent=; added it to =create_agent=.
+- Reverted the "Step 3: Consult Skills" addition to =context_agent.md.j2= (Step 4 renamed back to Step 3); the strengthened read-only contract paragraph stays.
+- Added a one-line "Before any write/edit" skill-consultation paragraph to =general_instructions.md.j2= in Step 4.
+- Added =assist/middleware/read_only_enforcer.py= (=ReadOnlyEnforcerMiddleware=) and wired it into =create_context_agent=.  Rejects =write_file=/=edit_file=/=execute= calls with an error =ToolMessage=, eliminating the hallucinated-write failure mode at the runtime layer rather than the prompt layer.
+
+***** Custom skills middleware
+The deepagents-shipped =SkillsMiddleware= template is verbose, abstract, and contains a fictional quantum-computing example that the small model latches onto without absorbing the actionable guidance.  Added =assist/middleware/skills_middleware.py= with a =SmallModelSkillsMiddleware= subclass that overrides =system_prompt_template= with a tighter, imperative, non-skill-specific block:
+1. *Match.* Description-driven triggering.
+2. *Load.* Concrete instruction: "Call the =read_file= tool with the skill's =SKILL.md= path."
+3. *Apply.* Use the loaded rules.
+
+Plus an explicit warning: "The descriptions only summarize *when* to load — they do not contain the rules.  You will not know the rules until you complete step 2."
+
+The custom middleware is instantiated in =create_agent= and passed via =middleware==.  We pass our own instead of using the =skills== parameter, so the middleware ordering is under our control and we don't get a duplicate from the deepagents base stack.
+
+***** Description shortened
+The org-format skill's description was bloated in iteration 4 with "critical rules to surface" content.  That belonged in the SKILL.md body, not in the always-loaded manifest.  Reverted the description to trigger-only (~280 chars): "Format and editing rules for org-mode (.org) files.  Load before reading, editing, or surfacing any .org file.  Covers heading levels, the heading-body relationship, and the procedure for inserting a new heading without orphaning the previous heading's body content."
+
+***** Eval rewrite
+The old context-agent evals (=test_includes_org_format_guidance_for_org_files=, =test_no_org_format_guidance_for_non_org_files=) were testing the wrong agent and asserted on response text rather than file state.  Removed both from =test_context_agent.py=; created =edd/eval/test_org_format_skill.py= with two tests on the *general* agent:
+- =test_inserts_heading_without_orphaning_previous_body= — sets up =projects.org= with two top-level headings (=* Project Alpha= with body + =** Status= subsection, then =* Project Beta=), asks the agent to insert =* Project Gamma= between them, then *reads the resulting file* and asserts Alpha's description and =** Status= subsection still sit between =* Project Alpha= and =* Project Gamma=.  This is a structural test, not a text-regex test.
+- =test_md_file_uses_markdown_conventions= — negative-trigger check.
+
+***** Result
+- =test_org_format_skill.py=: *both PASS* (logs at =run-5.log=).
+- =test_context_agent.py=: *all 10 PASS* — including =test_answers_direct_question_with_evidence=, which was failing in the 04-25 baseline.  That improvement is incidental (likely from the strengthened read-only contract / context-agent prompt cleanup), not a direct skills outcome.
+
+***** Caveat — load is still not happening
+Inspecting the run-5 trace, neither org-format test produced a =read_file= call against =/skills/org-format/SKILL.md=.  The only paths read were =/=, =/projects.org=, and =/tasks.md=.  The =test_inserts_heading_without_orphaning_previous_body= passed because the file's structure was visually inferable — the small model saw =* Alpha [body] * Beta= and naturally inserted =* Gamma [body]= between them, without needing the skill's rules.
+
+This matches the user's earlier read: "It can probably 'get it' just from reading the files."  We have:
+- ✅ Skill mechanism wired correctly (custom template visible in the system prompt; manifest formed correctly).
+- ✅ Skill placed correctly (general agent, not context-agent).
+- ✅ Read-only enforcer eliminates hallucinated writes.
+- ✅ No regressions; one incidental improvement.
+- ❓ *Whether loading the SKILL.md actually changes behaviour on harder cases.*  Today's tests don't exercise that — the model got the right answer without ever loading the skill.
+
+Earning-its-keep evidence would need a test case the model gets *wrong* without the skill but *right* with it (e.g. nested-heading insertion that's not visually obvious).  Designing one is doable but not blocking; left as a future test.
+
+*** Why this is a good first skill (vs jumping straight to dev)
+- *Small surface area*: 39 lines of content, no logic, one trigger.  Bug-finding here is fast.
+- *Clear binary signal*: the failing eval gives an immediate go/no-go on whether load-on-demand actually helps the small model.
+- *Non-overlapping*: doesn't touch dev/research/memory paths, so a regression here is unambiguously about the skills mechanism.
+- *Removes always-on prompt cost*: every non-org context-agent run today carries 39 lines of irrelevant guidance.
+
+* Tradeoff vs. dynamic agent swap (Option 2)
+- Option 2 is one-day work: pick the right top-level agent (dev vs general) at session start using project indicators.  Captures most of the user-channel-loss benefit when sessions are mono-domain.
+- Skills are higher ceiling, ~one-week work.  Wins clearly when users routinely pivot mid-session (dev → research → dev), and unlocks future skills (PR review, debugging, etc.) without adding more agent boundaries.
+
+If we believe pivoting is common — or if we want a foundation for further capability growth — skills are worth the extra investment.  Otherwise Option 2 is the cheaper validation step and could be done first to confirm the user-channel hypothesis before committing.
+
+* Validation plan
+The migration touches the agent's core control flow, so we need empirical signal at each stage rather than just unit tests.  Eval scenarios live under =edd/eval/= (=test_dev_agent*.py=, =test_agent_dev_delegation.py=, =test_research_agent.py=, =test_thread_e2e.py=, etc.).
+
+** Step 1: Baseline run (before any changes)
+Run the full eval suite against current =main= and capture results — pass/fail counts, latencies, and any flaky tests.  This is the reference we'll compare against; without it, we can't tell whether a regression came from the rewrite or was already there.
+- =pytest edd/eval/ -vv --tb=short= (or whichever invocation matches CI conventions).
+- Save output to =docs/baselines/2026-04-25-eval-baseline.txt= or similar so it survives the branch.
+
+*** Result (2026-04-25)
+Captured at [[file:baselines/2026-04-25-eval-baseline.md][docs/baselines/2026-04-25-eval-baseline.md]]; raw log at =logs/eval-baseline-2026-04-25/full-eval.log=.
+- *50 passed / 11 failed / 1 error in 52m 38s* (62 collected, 80.6% pass rate).
+- 37 loop-detection interventions across the suite. The Pattern C fixes (read-only allowlist + error requirement) landed earlier today are confirmed working: 0 Pattern C triggers on =read_file= or =ls=, and every Pattern C trigger on mutating tools had a real error in the window.
+- 2 of the 11 failures are legitimate loop-termination cases (the model was stuck and the assertion expected a real answer); the rest are behavioral misses or one infra error (=test_runs_context_agent_eval= sandbox dep install).
+- Three "wrote nothing" failures (=test_doesnt_include_tags=, =test_writes_memory_implicit=, =test_adds_item_correctly=) flagged in the baseline doc as worth a closer look before the migration so we can tell whether skills help or hurt them.
+
+*** Test-architecture decision (recorded for the migration)
+We will adopt /path 1/: keep the public factory functions (=create_dev_agent=, =create_research_agent=, =create_context_agent=) as the test-facing API, but swap their internals to return a top-level agent with the corresponding skill preloaded.  Most existing eval tests assert *behavior* and pass through unchanged.  Tests that explicitly assert *delegation* (=test_agent_dev_delegation.py=) will be rewritten to assert "the dev skill got loaded" or deleted as no-longer-meaningful.  The baseline-vs-after diff is mapped at the *scenario* level, not the test-name level — two tests that target the same scenario via different code paths still tell us whether the scenario passes.
+
+** Step 2: Targeted scenario runs (during development)
+After each implementation milestone, run only the evals most relevant to what just changed.  Tight feedback loop, fast iteration.
+- After *skills registry + =load_skill= tool*: run =test_agent.py= and any new =test_skills.py= — confirms the mechanism works without breaking the top-level agent.
+- After *org-format skill (Skill 0)*: run =test_context_agent::test_includes_org_format_guidance_for_org_files= and =test_no_org_format_guidance_for_non_org_files= — canary for whether the small model can drive skill loading at all.
+- After *porting dev-agent instructions to a skill*: run =test_dev_agent.py=, =test_dev_agent_planning_flow.py=, =test_dev_agent_runs_eval.py=, =test_agent_dev_delegation.py= — these exercise the dev path end-to-end.
+- After *unload / eviction integration*: run =eval_large_tool_results.py= and =eval_summarization_long_context.py= — confirms context management still works with skills in the mix.
+
+** Step 3: Full eval run (before merge)
+Run the entire eval suite again and diff against the baseline from Step 1.
+- Same invocation as Step 1.
+- Acceptance: no new failures, dev-agent scenarios pass at ≥ baseline rate, latency within ~10%.
+- If the user-channel-loss problem has a dedicated regression test (or we add one — probably a multi-turn scenario where the user adds clarification mid-task), confirm it passes for the first time.
+
+* Open questions
+- Does =deepagents= already expose a hook for injecting content into the system prompt mid-session, or do we need to add one?
+- Should skills be allowed to declare tools (e.g. the "research" skill brings =search_internet= and =read_url=)?  If so, the registry needs to track tool bindings, not just text.
+- How do skills interact with subagents we keep around (e.g. =context-agent=)?  Probably: skills augment the top-level agent's prompt; subagents remain orthogonal.
+- *Memory-middleware / tool-API trap.* The wrote-nothing analysis (see [[file:baselines/2026-04-25-eval-baseline.md::Wrote-nothing investigation][baseline doc]]) surfaced a workflow trap that's independent of the subagent-vs-skills decision: deepagents' memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content, combining badly with =write_file='s refuse-overwrite policy. The "memory" skill's instructions can document the right sequence (read first, then write to a fresh path, or use =edit_file= with =old_string=""=), but the underlying tool/middleware behavior is worth fixing separately.
