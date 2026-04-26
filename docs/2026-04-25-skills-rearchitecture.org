@@ -1,4 +1,28 @@
-State: Not started
+State: Done (2026-04-26)
+* Summary of what landed
+The skills re-architecture is complete.  Migration executed in four phases (A → D) over a single working day; details preserved below for posterity.
+
+- *Skills mechanism wired*: =deepagents=' built-in =SkillsMiddleware= is in use, fronted by our =SmallModelSkillsMiddleware= subclass with an imperative, small-model-friendly system-prompt template.  Skills live at =assist/skills/{name}/SKILL.md= and are routed via =/skills/= in the agent backend.  See [[file:2026-04-26-skills-system.org][skills-system.org]].
+- *Two skills shipped*:
+  - =org-format= — file-format guide for =.org= files; covers the heading-body insertion rule.  See [[file:2026-04-26-org-format-skill.org][org-format-skill.org]].
+  - =dev= — full TDD workflow, refactored out of the dev-agent's inline prompt.  See [[file:2026-04-26-dev-skill.org][dev-skill.org]].
+- *Dev-agent retired (soft)*: general agent now loads the =dev= skill and handles code work in the conversation thread instead of delegating.  Multi-turn TDD with explicit approvals + mid-task clarification — flows that were *architecturally blocked* by deepagents' subagent statelessness — now pass evals.  See [[file:2026-04-26-dev-skill.org][dev-skill.org]].
+- *Context-agent read-only contract enforced at runtime*: the =ReadOnlyEnforcerMiddleware= rejects =write_file=/=edit_file=/=execute= calls instead of trusting the prompt.  See [[file:2026-04-26-read-only-enforcer.org][read-only-enforcer.org]].
+
+Validation:
+- =test_dev_agent*.py= (legacy harness with skill content swapped in): 10/12 PASS, vs 04-25 baseline 2 *improvements*, 0 regressions.
+- =test_dev_skill_multi_turn.py= (new): 2/2 PASS — the migration's core hypothesis (multi-turn dev work) passes for the first time.
+- =test_org_format_skill.py= (new): 2/2 PASS.
+
+Open follow-ups (out of scope for this doc):
+- Hard retire of =create_dev_agent= and =dev_agent_instructions.md.j2= once =test_dev_agent.py= scenarios are converted to the general-agent path.
+- Sandbox parity in evals (production already sandboxes all agents; evals do not).
+- =write_file= vs =edit_file= tool-choice trap on existing files (loop-detection workaround in place; real fix in [[file:proposal-infinite-writes.org][proposal-infinite-writes.org]]).
+
+----
+
+The full migration history below is preserved as the design record.
+
 * Problem
 The current architecture loses the user channel when work is delegated to a subagent (e.g. dev-agent), because subagents cannot reply to the user directly.  The supervising general agent paraphrases on the way back, and the next user turn starts a fresh dev-agent with no recollection of prior dev-specific context.
 

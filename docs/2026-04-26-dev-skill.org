@@ -1,0 +1,48 @@
+State: Done
+* Problem
+The dev-agent had two structural limitations driving the "lost user channel" complaint in [[file:2026-04-25-dev-improvements.org][dev-improvements.org]]:
+
+1. *Subagents can't reply to the user directly.*  The supervising general agent paraphrases on the way back, and the next user turn starts a fresh dev-agent.
+
+2. *Subagent invocations are stateless.*  Every =task= call to a subagent rebuilds state from the parent (excluding =messages=) and overwrites =messages= with a single =HumanMessage= containing the description (=deepagents/middleware/subagents.py:344-365=).  No =thread_id= is propagated, so checkpointing doesn't help.  Calling the dev-agent twice in a row — "make a plan" → "execute the plan" — loses everything from the first call.
+
+The dev-agent prompt has explicit "end response and wait for approval" pauses between phases (after the plan, after red tests).  Those pauses *did not work* under the subagent architecture — when the subagent "ends and waits," it actually returns its full report and the next call starts blank.
+
+* Solution
+Migrate the dev-agent's instructions into a =dev= skill loaded by the general agent.  The conversation thread holds the work; multi-turn approvals and mid-task clarifications stay in one continuous context.
+
+Executed in four phases:
+
+** Phase A — author the skill, validate against legacy harness
+Refactored =deepagents/dev_agent_instructions.md.j2= (139 lines) into:
+- =assist/skills/dev/SKILL.md= — full TDD workflow: explore → plan → red tests → green impl → critique → respond.  Plus task-mode routing (code-change vs documentation vs explanation) and standing rules.  Frontmatter description is trigger-only.
+- =dev_agent_instructions.md.j2= — reduced to a thin host shell that interpolates the skill body via Jinja (=\{\{ skill_body \}\}=).  Provides workspace path, current datetime, tool inventory.
+- =assist/promptable.py= gained =read_skill_body(skill_name)= helper that strips YAML frontmatter and returns the markdown body.
+
+Validation: =test_dev_agent*.py= (12 evals against the existing dev-agent) — 10/12 PASS, 1 FAIL (same as 04-25 baseline), 1 ERROR (sandbox dep install, same as baseline).  *Two improvements vs baseline*: =test_explains_codebase= and =test_uses_research_agent= now pass.  *Zero regressions.*
+
+** Phase B — manifest visibility
+Auto-done.  The general agent already had =/skills/= wired through =SmallModelSkillsMiddleware=, so the new =dev= skill appeared in its manifest with no code changes.
+
+** Phase C — flip the routing
+- =deepagents/general_instructions.md.j2= Step 2 rewritten: instead of "delegate to dev-agent," the agent reads =/skills/dev/SKILL.md= and follows the workflow itself in this conversation, honouring the explicit pause points.
+- "Software Project Detected" block now embeds the dev skill body inline when =project_indicators= are present (small-model reliability path — avoids relying on progressive disclosure).
+- Added =critique-agent= to =create_agent='s subagents (the dev skill's Step 5 calls it).
+- New evals at =edd/eval/test_dev_skill_multi_turn.py=:
+  - =test_multi_turn_tdd_with_approvals= — three user turns: feature request → "approved, proceed" → "looks good, continue".
+  - =test_mid_task_clarification= — user adds "also =subtract=" mid-implementation; asserts both =def add= and =def subtract= land in =calculator.py=.
+
+*Both new evals pass.*  This is the migration's core hypothesis test: flows architecturally blocked by subagent statelessness now work.
+
+** Phase D — soft retire
+- Removed =dev_sub= from =create_agent='s subagents list.  General agent no longer offers dev-agent as a delegation target.
+- Deleted =edd/eval/test_agent_dev_delegation.py= (its assertions about delegation are obsolete).
+- *Kept* =create_dev_agent= and =dev_agent_instructions.md.j2=.  =test_dev_agent.py= (12 evals) still uses the legacy harness to validate the skill content; full removal pending conversion of those scenarios to the general-agent path.
+
+* Notes
+- Files added: =assist/skills/dev/SKILL.md=, =edd/eval/test_dev_skill_multi_turn.py=.
+- Files modified: =assist/agent.py=, =assist/promptable.py=, =assist/templates/deepagents/dev_agent_instructions.md.j2=, =assist/templates/deepagents/general_instructions.md.j2=.
+- File deleted: =edd/eval/test_agent_dev_delegation.py=.
+- The dev skill body is ~9KB.  When pre-loaded into the general agent's prompt for project sessions, the total system prompt is ~17KB — well under the 32KB context budget.
+- The =write_file= vs =edit_file= tool-choice trap on existing files showed up in =test_mid_task_clarification= iteration 1 (loop detection terminated).  The retry passed, so the trap is non-deterministic on this scenario; real fix is in [[file:proposal-infinite-writes.org][proposal-infinite-writes.org]].
+- Future work: convert =test_dev_agent*.py= scenarios to the general-agent path, then delete =create_dev_agent= and =dev_agent_instructions.md.j2= entirely.

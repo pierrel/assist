@@ -1,0 +1,36 @@
+State: Done
+* Problem
+The org-format reference (=assist/templates/reference/org_format.md=) was unconditionally embedded into the context-agent's system prompt via Jinja =\{\% include \%\}=, with a line-41 directive: "If ANY of the surfaced files are =.org= files, you MUST end your response with the Org Format Guide."  Two issues:
+1. *Wrong agent.*  The context-agent is read-only — it never produces =.org= content.  Format-correctness rules belong with the writer (general agent), not the reader.
+2. *Wrong loading model.*  Always-on inclusion paid the prompt cost on every context-agent run regardless of whether the workspace had =.org= files at all.
+3. *Failing eval.*  =test_includes_org_format_guidance_for_org_files= had been failing — the model was burying the format guidance under generic responses.
+
+The most common =.org= editing mistake — and the one users were complaining about — was inserting a new heading immediately after the previous heading, *orphaning the previous heading's body content* under the new heading.
+
+* Solution
+Convert the reference into a proper skill at =assist/skills/org-format/SKILL.md= and load it via the skills mechanism on the *general agent* (the writer) instead of the context-agent (the reader).
+
+** Skill content
+The =SKILL.md= body emphasizes the heading-body insertion rule with explicit WRONG/RIGHT diagrams and a step-by-step procedure:
+1. Identify the heading you're inserting after.
+2. Scan downward through its body, including any deeper-level subsections.
+3. Stop at the next heading at the SAME level or a HIGHER level (equal-or-fewer asterisks).
+4. Insert the new heading immediately *before* that next heading.
+
+Frontmatter description is trigger-only: "Format and editing rules for org-mode (.org) files.  Load before reading, editing, or surfacing any .org file."  Body holds the actual rules.
+
+** Removed legacy wiring
+- Dropped =\{\% include \%\}= and the line-41 "REQUIRED for .org files" directive from =deepagents/context_agent.md.j2=.
+- Skill is now in the general agent's manifest via the standard =/skills/= source.
+
+** Eval rewrite
+Two existing context-agent tests (=test_includes_org_format_guidance_for_org_files=, =test_no_org_format_guidance_for_non_org_files=) were testing the wrong agent and asserted on response *text*.  Replaced with =edd/eval/test_org_format_skill.py=:
+- =test_inserts_heading_without_orphaning_previous_body= — sets up a multi-section =.org= file, asks the general agent to insert a new heading between two existing ones, then *reads the file* and asserts the previous heading's body remains attached to it (file-state assertion, not text-regex).
+- =test_md_file_uses_markdown_conventions= — negative-trigger check: editing a =.md= file should not surface org content.
+
+* Notes
+- Files: =assist/skills/org-format/SKILL.md=, =edd/eval/test_org_format_skill.py=.
+- Removed: the org-format include from =assist/templates/deepagents/context_agent.md.j2=.  =assist/templates/reference/org_format.md= can be removed once we confirm nothing else references it.
+- Both new evals pass.
+- Caveat: in the new evals, the small model often gets the body-rule right just by reading the file's existing structure (it sees =* A [body] * B= and naturally inserts =* C [body]= between them).  We don't yet have hard evidence that *loading* the skill changes behaviour for this skill — but the skill is in place and ready when needed for trickier cases.
+- The skill description is the canary for whether the small model can drive progressive disclosure.  Across iterations on this skill, the model never called =read_file= on =/skills/org-format/SKILL.md= — it picked up surface keywords from the description but didn't load the body.  This finding drove the "pre-load skill body when project_indicators detected" pattern used for the dev skill.
