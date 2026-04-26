@@ -36,6 +36,61 @@ A long session that pivots (dev → research → dev) accumulates skill content 
 4. *Port the dev-agent instructions first* — =deepagents/dev_agent_instructions.md.j2= is the highest-value test case (it's the source of the problem).  Migrate it to a skill, keep the rest as subagents initially.
 5. *Validate, then expand* — only collapse =context-agent= / =research-agent= into skills once the pattern is proven on dev work.  They're cheap and isolated as subagents today.
 
+** Subagent statelessness — finding that strengthens the skills case (2026-04-26)
+While planning the dev-agent migration we traced the =task= tool runtime in =deepagents/middleware/subagents.py:344-365=:
+
+#+begin_src python
+subagent_state = {k: v for k, v in runtime.state.items() if k not in _EXCLUDED_STATE_KEYS}
+subagent_state["messages"] = [HumanMessage(content=description)]
+result = subagent.invoke(subagent_state)
+#+end_src
+
+Every =task= invocation excludes =messages=, =todos=, =structured_response=, =skills_metadata=, =memory_contents= from the parent's state, then overwrites =messages= with a single =HumanMessage= containing the task description.  No =thread_id= is threaded, so the checkpointer can't preserve cross-call state either.
+
+*Implication*: subagents are structurally one-shot.  Within a single thread, calling dev-agent twice (e.g. "make a plan" then "execute the plan") loses everything from the first call.  Today's dev-agent prompt papers over this by making every invocation a complete explore→plan→tests→impl→critique unit — a workaround, not a fix.  Multi-turn dev work (approvals, mid-task clarifications, plan-then-execute) is *architecturally not supported* by the subagent model.
+
+This is a stronger argument for skills than the original "user channel" framing: with a top-level agent loading the =dev= skill, the conversation thread *is* the dev work — multi-turn flows stay in one continuous context.
+
+** Dev-agent skill migration plan
+Naming: a single skill called =dev=.  TDD is implicit — we always do TDD; not a separate variant.
+
+*** Decomposition
+The current =dev_agent_instructions.md.j2= (139 lines) mixes three orthogonal concerns:
+1. Workflow — TDD steps 1-6 (~80 lines).  This is the dense, must-follow content.
+2. Task-mode routing — code-change vs docs vs explanation.  Negative space: "skip TDD if X."  Doesn't need a skill, needs a one-line rule on the host agent.
+3. Standing rules — best practices, efficiency.  Generic, can stay in host prompt or skill body.
+
+Start with *one* skill (=dev=) holding the TDD workflow.  Don't fragment further unless evidence shows specific phases need isolation.
+
+*** Phased migration
+
+**** Phase A — author the skill, preserve current behaviour
+- Author =assist/skills/dev/SKILL.md= by refactoring =dev_agent_instructions.md.j2=.  Strip dev-agent-specific bootstrapping (the host's workspace path / tool inventory).  Generalize tool references so the skill loads cleanly into any agent that has =execute= + filesystem tools.
+- Wire the skill into the existing =create_dev_agent= (replace the inline system prompt with a thin shell that loads the skill).
+- Run =test_dev_agent*.py= evals — should match baseline.  This validates the skill content is equivalent to the current prompt before we change any routing.
+
+**** Phase B — make the skill available to the general agent
+- Add =dev= to the general agent's skills source (it already has =/skills/= wired through =SmallModelSkillsMiddleware=, just adds another entry to the manifest).
+- *Don't* change routing yet — the general agent still delegates code tasks to dev-agent.  The skill is visible in the manifest but unused.  This phase confirms the manifest growth doesn't break anything.
+
+**** Phase C — flip the routing
+- Update =general_instructions.md.j2= Step 2: instead of "delegate to dev-agent" for code tasks, "load the =dev= skill and proceed yourself."
+- Run =test_thread_e2e.py= and the multi-turn dev-delegation tests.  The acceptance criterion: a multi-turn dev task where the user adds clarification mid-task should succeed without the second turn starting fresh.  This is the core hypothesis test.
+- Compare against Phase A baseline.  If skill-on-general-agent matches dev-agent on single-turn evals AND beats it on multi-turn, ship it.
+
+**** Phase D — retire the dev-agent subagent
+- Once Phase C is solid, remove =dev_sub= from =create_agent='s subagents list and remove =create_dev_agent=.  =dev_agent_instructions.md.j2= becomes deletable (its content lives in =dev/SKILL.md= now).
+
+*** Sandbox alignment (concurrent with Phase A)
+Today, =sandbox_backend= is plumbed through every agent factory in production via =assist/thread.py= → =create_agent= → subagent factories.  All production agents already share the sandbox.  The gap is in evals: =edd/eval/test_*.py= calls factories directly without a sandbox.
+
+Action: ensure every agent factory uses the sandbox by default, including in evals.  Context-agent included — it's read-only, so isolation isn't required, but consistent backend abstraction simplifies reasoning and matches production parity.
+
+*** Risks specific to dev (not present in org-format)
+1. *Multi-turn pauses* in TDD ("write the plan, end response, wait for approval").  Today natural for a subagent (returns to parent).  With a skill, the host agent has to honour the pause itself.  Need to verify the small model respects this.
+2. *Skill size* — ~80 lines.  Bigger than org-format (60).  Manifest description stays small; body only loads on demand.
+3. *Tool naming* — current prompt says =execute=, =write=, =edit=.  Generalize to canonical tool names so the skill works under any host.
+
 ** Skill 0 (warm-up): org-format guide
 Before the heavyweight dev-agent migration, port the org-format reference as the first skill.  It's small, self-contained, and has dedicated evals — a clean smoke test of the load-on-demand mechanism without behavioral confounds.
 
