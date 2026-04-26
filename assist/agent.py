@@ -11,7 +11,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langchain.agents.middleware import ModelRetryMiddleware
 from openai import InternalServerError
 
-from assist.promptable import base_prompt_for
+from assist.promptable import base_prompt_for, read_skill_body
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS, SKILLS_ROUTE
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
@@ -160,18 +160,29 @@ def create_agent(model: BaseChatModel,
                                   sandbox_backend=sandbox_backend)
     )
 
+    critique_sub_agent = {
+        "name": "critique-agent",
+        "description": "Reviews code diffs for bugs, missing tests, style issues, and security concerns. Provide the full git diff output when calling this agent.",
+        "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2",
+                                         workspace_dir=workspace_dir),
+    }
+
+    project_indicators = detect_project_indicators(working_dir)
+    dev_skill_body = read_skill_body("dev") if project_indicators else ""
+
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for(
             "deepagents/general_instructions.md.j2",
-            project_indicators=detect_project_indicators(working_dir),
+            project_indicators=project_indicators,
             workspace_dir=workspace_dir,
-            memories_path=memories_path
+            memories_path=memories_path,
+            dev_skill_body=dev_skill_body,
         ),
         middleware=mw + [skills_mw, logging_mw],
         backend=backend,
-        subagents=[context_sub, research_sub, dev_sub],
+        subagents=[context_sub, research_sub, dev_sub, critique_sub_agent],
         memory=[memories_path],
     )
 
@@ -373,7 +384,8 @@ def create_dev_agent(model: BaseChatModel,
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/dev_agent_instructions.md.j2",
-                                      workspace_dir=workspace_dir),
+                                      workspace_dir=workspace_dir,
+                                      skill_body=read_skill_body("dev")),
         middleware=mw + [logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],

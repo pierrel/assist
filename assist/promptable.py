@@ -33,6 +33,24 @@ def base_prompt_for(prompt_path: str, **kwargs: Any) -> str:
     return template.render(**kwargs)
 
 
+def read_skill_body(skill_name: str) -> str:
+    """Return the markdown body of a skill, stripping its YAML frontmatter.
+
+    Used when an agent's host prompt embeds skill content directly rather
+    than relying on progressive disclosure via SkillsMiddleware.
+    """
+    import os
+    skill_path = os.path.join(os.path.dirname(__file__),
+                              "skills", skill_name, "SKILL.md")
+    with open(skill_path, "r") as f:
+        content = f.read()
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            return parts[2].lstrip()
+    return content
+
+
 def prompt_for(prompt_name: str, *, module: str | None = None, **kwargs: Any) -> str:
     """Render ``prompt_name`` for ``module`` using optional ``kwargs``.
 
