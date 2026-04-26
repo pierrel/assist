@@ -244,13 +244,10 @@ def render_index() -> str:
                 f'</form></li>'
             )
     items_html = "\n".join(items)
-    any_busy = any(_get_status(tid).get("stage") in BUSY_STAGES for tid in tids)
-    refresh_tag = '<meta http-equiv="refresh" content="3" />' if any_busy else ""
     return f"""
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {refresh_tag}
         <title>Assist Web</title>
         <style>
           :root {{ --pad: 1rem; }}
@@ -411,9 +408,6 @@ def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged:
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
 
-    # Auto-refresh while the thread is still being set up / processing
-    refresh_tag = '<meta http-equiv="refresh" content="3" />' if busy else ""
-
     # Disable the input form during the initial setup phase
     form_disabled = "disabled" if is_init else ""
     form_note = (
@@ -425,7 +419,6 @@ def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged:
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {refresh_tag}
         <title>{html.escape(title)}</title>
         <style>
           :root {{ --pad: 1rem; }}
