@@ -22,9 +22,13 @@ B. Same tool + same args, repeated >= ``args_repeat_threshold`` times
    arguments back-to-back regardless of result.
 
 C. Same tool + >= ``distinct_args_threshold`` distinct arg sets within
-   the last ``distinct_args_window`` tool calls. Catches the
-   filename-mutation pattern even when individual error strings
-   differ.
+   the last ``distinct_args_window`` tool calls, where the tool has
+   mutating side effects and at least one of those calls errored.
+   Catches the filename-mutation pattern (``write_file foo.py`` →
+   error → ``foo2.py`` → error → ``foo_new.py``) even when individual
+   error strings differ. Read-only tools (``read_file``, ``ls``,
+   ``grep``, etc.) are exempt because distinct-args usage is the
+   normal shape of legitimate exploration.
 """
 
 import hashlib
@@ -52,6 +56,18 @@ _ERROR_PREFIXES = (
 _PATH_RE = re.compile(r"(/[\w./\\-]+)")
 _ID_RE = re.compile(r"\b[0-9a-f]{8,}\b", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"\b\d+\b")
+
+# Tools without mutating side effects. Pattern C (distinct-args thrash) does
+# not fire for these because reading multiple distinct files / running
+# multiple distinct queries is the normal shape of exploration, not a loop.
+_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "read_file",
+    "ls",
+    "glob",
+    "grep",
+    "read_url",
+    "search_internet",
+})
 
 
 def _looks_like_error(content: str) -> bool:
@@ -189,12 +205,20 @@ def _detect_loop(
         }
 
     # Pattern C: distinct-args thrash within recent window.
+    # Only fires for mutating tools that have errored at least once in the
+    # window — pure exploration (3 distinct read_file paths, etc.) is not a
+    # loop signal.
     recent = completed_events[-distinct_args_window:]
     by_tool: dict[str, set[str]] = {}
+    tool_errored: dict[str, bool] = {}
     for e in recent:
+        if e["tool_name"] in _READ_ONLY_TOOLS:
+            continue
         by_tool.setdefault(e["tool_name"], set()).add(e["args_sig"])
+        if e["is_error"]:
+            tool_errored[e["tool_name"]] = True
     for tool_name, sigs in by_tool.items():
-        if len(sigs) >= distinct_args_threshold:
+        if len(sigs) >= distinct_args_threshold and tool_errored.get(tool_name):
             return {
                 "pattern": "distinct-args-thrash",
                 "reason": (f"distinct-args-thrash: {tool_name} "
@@ -323,9 +347,11 @@ class LoopDetectionMiddleware(AgentMiddleware):
             repetitions in a row that constitute a loop. Default 2.
         args_repeat_threshold: Same-tool / same-args repetitions in a
             row that constitute a loop. Default 3.
-        distinct_args_threshold: Distinct arg-sets for a single tool
-            within ``distinct_args_window`` that constitute a loop.
-            Default 3.
+        distinct_args_threshold: Distinct arg-sets for a single
+            *mutating* tool within ``distinct_args_window`` that
+            constitute a loop, provided at least one of those calls
+            errored. Read-only tools (see ``_READ_ONLY_TOOLS``) are
+            exempt. Default 3.
         distinct_args_window: Sliding window for the distinct-args
             check. Default 10.
     """
