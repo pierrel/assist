@@ -1,0 +1,27 @@
+State: Done
+* Problem
+The general agent's system prompt grew to a size where the small model (=stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ=) struggled with multi-domain instructions.  Splitting work into subagents helped with prompt focus but introduced a different problem: subagent invocations are stateless (=task= calls reset =messages= to a single =HumanMessage= containing the description; see =deepagents/middleware/subagents.py:344-365=), and subagents lose the user channel.
+
+We needed a way to keep the conversation at the top-level agent while still keeping the active prompt focused — so the model only has the instructions relevant to the current task in front of it.
+
+* Solution
+Use =deepagents='s built-in =SkillsMiddleware= (Anthropic agent-skills spec) with progressive disclosure.  Skills live as markdown files at =assist/skills/{name}/SKILL.md= with YAML frontmatter (=name=, =description=) plus body content.  At session start the middleware reads each =SKILL.md='s frontmatter and injects a manifest into the system prompt: =name: description -> Read /skills/.../SKILL.md for full instructions=.  The agent calls the regular =read_file= tool to load full content on demand.
+
+** Backend wiring
+A new route in =assist/backends.py= maps =/skills/= to a =FilesystemBackend= rooted at the package's =assist/skills/= directory.  The composite backend handles this transparently — agents can read skill files via their normal backend API.
+
+** Custom middleware template (=SmallModelSkillsMiddleware=)
+The deepagents-shipped skills system prompt is verbose, abstract, and uses a fictional quantum-computing example.  Fine for strong models; the small model latches onto the example without absorbing the actionable instruction underneath.  We subclass =SkillsMiddleware= in =assist/middleware/skills_middleware.py= and override =system_prompt_template= with a tighter, imperative version:
+- States the mechanism in concrete tool terms ("call =read_file= with the path").
+- Tells the model the descriptions don't contain the rules — the SKILL.md does.
+- Removes fictional examples and abstract praise.
+- Generic — no skill-specific examples, so adding new skills doesn't require template updates.
+
+** Pre-loading skill content into the host prompt
+For known-domain sessions (e.g. =project_indicators= detected → software project), we embed the relevant skill body directly into the host agent's system prompt rather than relying on the model to exercise progressive disclosure.  Reason: the small model is unreliable at deciding to call =read_file= on the SKILL.md path, even with explicit "MUST read" directives.  Pre-loading sidesteps the discretion.  For ambiguous sessions, the manifest is still in the prompt and the model can load on demand.
+
+* Notes
+- Files: =assist/middleware/skills_middleware.py=, =assist/backends.py= (=SKILLS_ROUTE=), =assist/promptable.py= (=read_skill_body=).
+- Pattern for adding a new skill: drop a directory under =assist/skills/{name}/= with a =SKILL.md= containing trigger-only YAML frontmatter and the body content.  No code changes needed; the middleware picks it up at session start.
+- Trigger-only descriptions are mandatory.  The manifest is always loaded into context, so descriptions should describe *when* to load, not contain the rules.
+- Skills are not tools.  There is no =load_skill= tool — the model uses =read_file= with the path shown in the manifest.

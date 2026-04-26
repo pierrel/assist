@@ -1,0 +1,34 @@
+State: Done
+* Problem
+The =context-agent='s prompt declares a strict read-only contract: "You may =ls=, =glob=, =grep=, and read files.  You MUST NEVER write, create, edit, move, rename, or delete files."  But the contract was *purely instructional*.  The =deepagents= =FilesystemMiddleware= unconditionally exposes =write_file=, =edit_file=, and =execute= tools to every agent that uses it.
+
+When the small model (=Qwen3-Coder-30B=) was given a write-shaped prompt to a context-agent (e.g. "I need to add a reminder to buy groceries"), it would call =edit_file= or =write_file= and produce hallucinated success messages — "I've added the 'Buy groceries' reminder to your inbox.org file" — even though the prompt explicitly forbade it.  Strengthening the prompt with "you MUST NEVER claim to have written..." did not help.
+
+This was a real failure mode, observed across multiple eval iterations before the fix.
+
+* Solution
+Enforce the read-only contract at the runtime layer instead of relying on prompt adherence.  =assist/middleware/read_only_enforcer.py= defines =ReadOnlyEnforcerMiddleware=:
+
+#+begin_src python
+class ReadOnlyEnforcerMiddleware(AgentMiddleware):
+    def wrap_tool_call(self, request, handler):
+        tool_name = request.tool_call.get("name", "")
+        if tool_name in {"write_file", "edit_file", "execute"}:
+            return ToolMessage(
+                content=("Error: this agent is read-only and cannot call "
+                         f"'{tool_name}'. ..."),
+                tool_call_id=request.tool_call.get("id", ""),
+                name=tool_name,
+                status="error",
+            )
+        return handler(request)
+#+end_src
+
+Wired into =create_context_agent= alongside the other middleware.  The model can no longer succeed at calling a mutating tool — it gets an error =ToolMessage= back, which it then incorporates into a correct read-only response (e.g. "I cannot directly modify files as I am a read-only agent.  To add a reminder, you would need to manually edit =/gtd/inbox.org= to add: ...").
+
+* Notes
+- File: =assist/middleware/read_only_enforcer.py=.  Wired into =create_context_agent= in =assist/agent.py=.
+- Only applied to the context-agent.  The general agent and dev-agent need =write_file= / =edit_file= / =execute=.
+- Eliminates a whole class of small-model failure: hallucinated successful writes.  Before this middleware, the agent would generate plausible-sounding "I added X to file Y" responses with no actual write taking place.
+- Cost: ~50 lines including module docstring.  Net positive even if we eventually move to a stronger model — fabricating successful writes is bad behaviour we don't want regardless of model competence.
+- Approach is generalizable: a similar middleware could enforce other contracts at the runtime layer (e.g. a "no execute outside the workspace" rule).
