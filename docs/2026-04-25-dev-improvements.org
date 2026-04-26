@@ -1,4 +1,4 @@
-State: Not started
+State: Done (2026-04-26) — superseded by [[file:2026-04-25-skills-rearchitecture.org][skills-rearchitecture.org]] and [[file:2026-04-26-dev-skill.org][dev-skill.org]]. The "Expand the general agent" direction was chosen and shipped via the skills migration.
 * Problem
 The dev agent, as a subagent, cannot have a direct converation with the user. This causes the dev-specific context to be lost.
 * Proposed solution(s)
