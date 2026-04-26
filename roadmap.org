@@ -27,6 +27,24 @@ Consider:
 1. URLs that do not work (404, etc)
 2. URLs that do not corroborate the information in the final report
 3. Better ways to search
+* Reliability
+** TODO Make =write_file= recoverable on collision
+See [[file:docs/proposal-infinite-writes.org][docs/proposal-infinite-writes.org]] (Solution 1, "Make =write_file= recoverable").  Loop detection (Solution 2 of that doc) shipped already.  Without this fix, the small model still falls into the filename-mutation trap (=final_report.md= → =completed_final_report.md= → =report_final.md=…) when a write hits =Cannot write because it already exists=.  Hit the trap during the dev-skill migration evals (=test_mid_task_clarification=); loop detection caught it but the right fix is to make =write_file= overwrite-by-default or auto-rewrite to =edit_file= on collision.
+** TODO Self-healing flow on errors / suboptimal output
+See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].  Catch exceptions during agent execution and either spawn a remediation thread or surface for user-directed fix; reuse the "capture conversation" flow.
+* Configuration
+** TODO Auto-detect served model + context length
+See [[file:docs/2026-04-25-dynamic-model.org][docs/2026-04-25-dynamic-model.org]].  Probe the LLM endpoint at startup, cache the model name + context length, refresh on "model not found" errors.  Removes =ASSIST_MODEL_NAME=, =ASSIST_API_KEY=, =ASSIST_CONTEXT_LEN=, =ASSIST_TEST_URL_PATH= environment variables (any cleanup that simplifies =.dev.env= / =.deploy.env=).
+* Skills migration follow-ups
+The dev-agent → skill migration shipped in four phases (see [[file:docs/2026-04-25-skills-rearchitecture.org][docs/2026-04-25-skills-rearchitecture.org]]) but a few cleanups were left for later:
+** TODO Hard retire of dev-agent
+Convert =edd/eval/test_dev_agent.py=, =test_dev_agent_planning_flow.py=, and =test_dev_agent_runs_eval.py= to exercise the general agent + =dev= skill instead of =create_dev_agent= directly.  Once those scenarios pass, delete =assist/agent.py::create_dev_agent= and =assist/templates/deepagents/dev_agent_instructions.md.j2=.
+** TODO Sandbox parity in evals
+Production already passes =sandbox_backend= through every agent factory (see =assist/thread.py=).  Most evals (=test_agent.py=, =test_context_agent.py=, =test_org_format_skill.py=) still use the standard filesystem backend for speed.  Add a config knob (env var or pytest marker) so the suite can be run in sandbox-mode without slowing the fast path.
+** TODO Earn-its-keep test for the org-format skill
+Today's =test_org_format_skill.py= passes mainly because the small model can infer org structure from reading the file.  Design a test where the body-rule is *not* visually obvious (e.g. multi-level subheadings, no body content yet) — the kind of case that needs the skill's procedure.  Confirms the skill earns its slot in the manifest.
+** TODO Memory-middleware / tool-API trap
+Documented as an open question in the skills doc and partly overlaps with the =write_file= recoverability item above.  The deepagents memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content; combined with =write_file='s refuse-overwrite policy this produces a no-clean-exit loop.  Either fix needs both ends to align.
 * Memory
 ** TODO Come up with at least 3 memory plans
 Some considerations:

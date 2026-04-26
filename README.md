@@ -112,14 +112,26 @@ make eval
 ```
 
 **Available evaluations**:
-- `test_agent.py` - Core agent behavior (planning, task management, file operations)
-- `test_research_agent.py` - Research delegation and external knowledge handling
-- `test_context_agent.py` - Filesystem discovery and context gathering
-- `test_domain_integration.py` - Git integration and domain management
-- `eval_multi_turn_research.py` - Multi-turn conversation handling (10+ turns)
-- `eval_large_tool_results.py` - Context overflow handling with large tool results
 
-Results are saved to `edd/history/results-YYYYMMDD-HHMM.xml` in JUnit format.
+Per-agent:
+- `test_agent.py` — general agent: planning, routing, task management, file operations
+- `test_context_agent.py` — read-only filesystem discovery
+- `test_research_agent.py` — research delegation and external knowledge handling
+- `test_dev_agent.py`, `test_dev_agent_planning_flow.py`, `test_dev_agent_runs_eval.py` — legacy harness for the dev-agent (the dev skill now runs on the general agent; these still validate the skill content)
+
+Skill-specific:
+- `test_org_format_skill.py` — org-format skill: heading-body insertion rule
+- `test_dev_skill_multi_turn.py` — dev skill on the general agent: multi-turn TDD with approvals + mid-task clarification
+
+Cross-cutting:
+- `test_domain_integration.py` — git integration and domain management
+- `test_memory.py`, `test_various_failures.py` — memory + failure modes
+- `test_thread_e2e.py` — thread/conversation persistence
+- `eval_multi_turn_research.py` — long multi-turn research (10+ turns)
+- `eval_large_tool_results.py` — context overflow handling
+- `eval_summarization_long_context.py` — summarization in long contexts
+
+Results are saved to `edd/history/results-YYYYMMDD-HHMM.xml` in JUnit format.  Snapshot baselines for diffing live in `docs/baselines/`.
 
 See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evaluations.
 
@@ -298,27 +310,63 @@ See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 
 ```
 assist/
-├── assist/                 # Core application code
-│   ├── agent.py           # Agent implementation
-│   ├── model_manager.py   # Model selection and configuration
-│   ├── domain_manager.py  # Git repository and sandbox management
-│   ├── sandbox.py         # Docker sandbox backend
-│   └── tools/             # Agent tools
-├── dockerfiles/           # Docker images
-│   └── Dockerfile.sandbox # Sandbox container (Arch-based, with git/python/emacs)
-├── edd/                   # Agent evaluations
-│   ├── eval/              # Evaluation test suite
-│   └── history/           # Test results history
-├── manage/                # Management interfaces
-│   ├── web.py            # Web UI (FastAPI)
-│   └── cli.py            # CLI interface
-├── tests/                 # Unit/integration tests
-├── scripts/               # Deployment and setup scripts
-├── .dev.env.example      # Development config template
-├── .deploy.env.example   # Production config template
-├── Makefile              # Build and deployment commands
-└── README.md             # This file
+├── assist/                  # Core application code
+│   ├── agent.py             # Agent factories (general, context, research, dev)
+│   ├── promptable.py        # Jinja prompt rendering + skill body loading
+│   ├── model_manager.py     # Model selection and configuration
+│   ├── domain_manager.py    # Git repository and sandbox management
+│   ├── sandbox.py           # Docker sandbox backend
+│   ├── sandbox_manager.py   # Sandbox lifecycle and per-thread containers
+│   ├── thread.py            # Conversation thread state
+│   ├── backends.py          # CompositeBackend wiring (state + filesystem + skills)
+│   ├── checkpoint_rollback.py
+│   ├── env.py
+│   ├── git.py
+│   ├── tools.py             # Tool functions (read_url, search_internet, …)
+│   ├── middleware/          # Custom AgentMiddleware classes
+│   │   ├── skills_middleware.py        # SmallModelSkillsMiddleware
+│   │   ├── read_only_enforcer.py       # ReadOnlyEnforcerMiddleware
+│   │   ├── loop_detection.py           # LoopDetectionMiddleware
+│   │   ├── context_aware_tool_eviction.py
+│   │   └── …                           # other middleware
+│   ├── skills/              # Agent skills loaded via SkillsMiddleware
+│   │   ├── dev/SKILL.md     # TDD workflow + code-task routing
+│   │   └── org-format/SKILL.md
+│   └── templates/           # Jinja prompt templates
+│       ├── deepagents/      # Per-agent system prompts
+│       └── reference/       # Inline references (legacy; being moved into skills)
+├── dockerfiles/             # Docker images
+│   └── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
+├── edd/                     # Agent evaluations
+│   ├── eval/                # Evaluation test suite
+│   └── history/             # Test results history (JUnit XML)
+├── manage/                  # Management interfaces
+│   ├── web.py               # Web UI (FastAPI)
+│   └── cli.py               # CLI interface
+├── docs/                    # Per-improvement design records — see Documentation below
+│   └── baselines/           # Snapshot eval-suite results for diffing
+├── tests/                   # Unit/integration tests
+├── scripts/                 # Deployment and setup scripts
+├── roadmap.org              # Open work, organized by theme
+├── .dev.env.example         # Development config template
+├── .deploy.env.example      # Production config template
+├── Makefile                 # Build and deployment commands
+└── README.md                # This file
 ```
+
+## Documentation
+
+This repo keeps two kinds of design material side-by-side:
+
+- **`roadmap.org`** at the repo root — an opinionated, theme-organized list of open work. Items are written as `** TODO` with a short rationale and links to the underlying `docs/` proposal where one exists. This is the place to look (or to add) when you want to know *what's next*.
+- **`docs/*.org` (and a few `*.md`)** — one document per improvement, proposal, investigation, or diagnosis. Each `.org` proposal carries a `State:` header (`Not started` / `Done` / etc.) at the top, followed by `* Problem` and `* Solution` sections. `.md` files in `docs/` tend to be specific incident write-ups or external-source notes (e.g. paste from a conversation).
+
+Conventions:
+- New proposals: name them `YYYY-MM-DD-<short-slug>.org` and start with `State: Not started`. Add a corresponding `** TODO` entry under the appropriate section in `roadmap.org` linking back.
+- When a proposal lands, change the `State:` header to `Done (YYYY-MM-DD)` (and link the docs that describe the resulting code if helpful). The `roadmap.org` entry can be marked `** DONE`.
+- Keep proposals concise. Look at `docs/2026-04-26-skills-system.org` or `docs/2026-04-26-read-only-enforcer.org` for the expected shape; the long-running migration record at `docs/2026-04-25-skills-rearchitecture.org` is the exception, not the rule.
+
+Investigations and diagnoses (e.g. `docs/4822cf50-diagnosis.md`, `docs/2026-04-26-token-max-mismatch-investigation.md`) don't carry a `State:` header — they're snapshots, not commitments.
 
 ---
 
