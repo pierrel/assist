@@ -78,6 +78,24 @@ Start with *one* skill (=dev=) holding the TDD workflow.  Don't fragment further
 - Run =test_thread_e2e.py= and the multi-turn dev-delegation tests.  The acceptance criterion: a multi-turn dev task where the user adds clarification mid-task should succeed without the second turn starting fresh.  This is the core hypothesis test.
 - Compare against Phase A baseline.  If skill-on-general-agent matches dev-agent on single-turn evals AND beats it on multi-turn, ship it.
 
+***** New evals required for Phase C
+The subagent-statelessness finding implies two flows that *cannot pass* against the current architecture, and *should pass* after Phase C lands.  These don't exist as evals today because there was no point in writing them.  Add them as part of Phase C:
+1. *Multi-turn TDD with explicit approvals.*  Three user turns: turn 1 "add feature X" → agent presents plan → turn 2 "approved, proceed" → agent presents red tests → turn 3 "approved, implement" → agent commits green code.  Failure modes against today: dev-agent collapses everything into turn 1, OR each subsequent turn loses prior context and starts fresh.  Expected after Phase C: continuous context across all three turns, with the agent honouring the explicit pause points.
+2. *Mid-task clarification.*  Turn 1 "add feature X with rule R", agent starts work.  Turn 2 (mid-implementation) "wait, also handle case Y."  Failure mode against today: turn 2 spawns a new dev-agent with only "also handle case Y" as context — has no idea what feature X was.  Expected after Phase C: turn 2 lands in the same conversation, agent picks up where it left off, incorporates Y.
+
+***** Phase C risk: small model honouring "end response, wait" pauses
+Today, those pauses are enforced by the architecture — the subagent literally returns to its parent and the parent has to re-invoke for the next phase.  With the skill on the general agent, the model has to *choose* to stop after the plan and after red tests, rather than barrelling through to implementation.  We've seen the small model under-comply with prompt instructions; this is a real risk for Phase C.
+
+If the model barrels through, we still get most of the migration's value (multi-turn context preserved, mid-task clarifications work), but lose human-in-the-loop checkpoints.  Mitigations if needed:
+- =deepagents= supports =interrupt_on={"edit_file": True}=-style human-in-the-loop hooks.  Could enforce stops at write boundaries.
+- Add a pause-enforcement middleware that intercepts the model's first =edit_file= call after a "plan written" state and short-circuits with "Wait for user approval before proceeding."
+- Stronger prompt language and explicit checkpoint state in the skill.
+
+Don't pre-build mitigations.  Test first, then mitigate only if evals fail.
+
+**** Cadence
+The subagent-statelessness finding argues for *less* lingering between phases.  There's nothing useful to learn from extended time in Phase A or B beyond "doesn't break."  The real signal is in Phase C.  So: do Phase A, run dev evals once for content equivalence, move on.  Do Phase B, run general-agent evals once to confirm no regression, move on.  Spend the iteration budget on Phase C.
+
 **** Phase D — retire the dev-agent subagent
 - Once Phase C is solid, remove =dev_sub= from =create_agent='s subagents list and remove =create_dev_agent=.  =dev_agent_instructions.md.j2= becomes deletable (its content lives in =dev/SKILL.md= now).
 
