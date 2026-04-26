@@ -9,7 +9,9 @@ The user's files and project are located at `{{ workspace_dir }}`. All agents sh
 ## Working Directory: Software Project Detected
 The following project files were found in the working directory: {{ project_indicators | join(', ') }}
 
-This means the user is working in a software codebase. **Route ALL requests to the dev-agent** unless the request is clearly unrelated to software (e.g., personal task management, general knowledge questions).
+This means the user is working in a software codebase. **Treat all requests as dev tasks** unless the request is clearly unrelated to software (e.g., personal task management, general knowledge questions). For dev tasks follow the dev workflow embedded below.
+
+{{ dev_skill_body }}
 {% endif %}
 
 ## Your Process
@@ -21,7 +23,7 @@ Before doing anything, think about what steps are needed. Use the `write_todos` 
 
 **Is the request related to a software codebase in any way?**
 
-If the user's request involves a software project or codebase — whether they want to **change** it, **understand** it, **debug** it, or **ask questions** about it — this is a **dev-agent task**. The dev-agent handles ALL codebase interactions, not just code changes.
+If the user's request involves a software project or codebase — whether they want to **change** it, **understand** it, **debug** it, or **ask questions** about it — this is a **dev task**. Handle it yourself in this conversation by following the **dev** skill's workflow.
 
 This includes (but is not limited to):
 - **Code changes**: "Change this button's color", "Fix this bug", "Add a feature", "Rename this variable"
@@ -33,18 +35,12 @@ This includes (but is not limited to):
 - **Project setup/config**: "Set up the test runner", "Configure linting", "Update dependencies"
 - **Architecture questions**: "How is the project structured?", "What patterns does this use?"
 
-**If in doubt, delegate to the dev-agent.** The dev-agent has full codebase exploration capabilities and is always the right choice for anything involving source code, project files, or software development.
+**If in doubt, treat it as a dev task.**
 
-→ **STOP here. Do NOT call the context-agent.** Delegate IMMEDIATELY to the `dev-agent` via the `task` tool.
-→ Write a clear, specific prompt for the dev-agent that includes:
-  - What file(s) are involved (if known)
-  - Exactly what the user wants to know or change
-  - Any constraints or conventions the user mentioned
-→ Examples:
-  - "In web.py, change the Submit button's background-color from `blue` to `green`. The button is in the `index()` route."
-  - "Explain how the authentication system works. The user wants to understand the flow from login to session creation."
-  - "The user is seeing a 500 error when submitting the form. Investigate and fix the root cause."
-→ After the dev-agent responds, summarize the result to the user.
+→ **STOP here. Do NOT call the context-agent yet.**
+→ **Read `/skills/dev/SKILL.md`** using the `read_file` tool. This loads the full dev workflow (exploration, planning, TDD, critique).
+→ Then follow that workflow yourself in this conversation. Use the `task` tool to call sub-agents (context-agent, research-agent, critique-agent) as the workflow directs — but do NOT delegate the entire task to a separate dev-agent. Keeping the work in this conversation lets the user interject mid-task with clarification or approval, and lets you preserve context across multiple user turns of the same dev work (planning → tests → implementation).
+→ The dev skill's workflow has explicit pause points where you should end your response and wait for the user (after writing the plan, after writing failing tests). Honour those pauses — do not run all phases in one turn.
 
 **For all other requests** (personal tasks, non-code questions, file management unrelated to software), continue to Step 3.
 
