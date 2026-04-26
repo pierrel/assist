@@ -1,0 +1,93 @@
+State: Not started
+* Problem
+The skills migration ([[file:2026-04-25-skills-rearchitecture.org][skills-rearchitecture.org]]) shipped Phase D as a *soft retire*: =dev_sub= was removed from =create_agent='s subagents list, but =create_dev_agent=, =deepagents/dev_agent_instructions.md.j2=, and three legacy eval files were intentionally kept so we wouldn't lose coverage while figuring out what the general-agent path looks like under those scenarios.
+
+Soft-retire artefacts still in the tree (as of commit =2a4807c=):
+- =assist/agent.py::create_dev_agent= (factory, ~70 lines).
+- =assist/templates/deepagents/dev_agent_instructions.md.j2= (thin host shell that interpolates =read_skill_body("dev")=).
+- =edd/eval/test_dev_agent.py= (10 evals).
+- =edd/eval/test_dev_agent_planning_flow.py= (1 eval).
+- =edd/eval/test_dev_agent_runs_eval.py= (1 eval — currently ERROR'd in baseline due to a sandbox dep-install issue that's independent of the dev-agent itself).
+
+These three eval files are the only consumers of =create_dev_agent= outside =assist/agent.py= itself.  Verified via:
+=grep -nrE "create_dev_agent|dev_agent_instructions" assist/ manage/ tests/= → only the three test files plus the factory + comment in =assist/agent.py=.
+
+* Solution
+Convert the legacy eval files to exercise the general agent (=create_agent=) with the =dev= skill, then delete =create_dev_agent= and =dev_agent_instructions.md.j2=.
+
+** Conversion pattern
+All three legacy files share the same =_create_agent= helper shape:
+
+#+begin_src python
+self.workspace = tempfile.mkdtemp()
+self.sandbox = SandboxManager.get_sandbox_backend(self.workspace)
+if self.sandbox is None:
+    self.skipTest("Docker sandbox unavailable")
+
+# in _create_agent:
+return AgentHarness(create_dev_agent(
+    self.model,
+    working_dir=self.workspace,
+    sandbox_backend=self.sandbox,
+))
+#+end_src
+
+The conversion:
+
+#+begin_src python
+self.workspace = tempfile.mkdtemp()
+# Project-indicator so create_agent's general prompt pre-loads the dev skill body
+# (matches the pattern in test_dev_skill_multi_turn.py).
+with open(os.path.join(self.workspace, "pyproject.toml"), "w") as f:
+    f.write('[project]\nname = "test-project"\n')
+self.sandbox = SandboxManager.get_sandbox_backend(self.workspace)
+if self.sandbox is None:
+    self.skipTest("Docker sandbox unavailable")
+
+# in _create_agent:
+return AgentHarness(create_agent(
+    self.model,
+    working_dir=self.workspace,
+    sandbox_backend=self.sandbox,
+))
+#+end_src
+
+The =project_indicators= seed (=pyproject.toml=) is critical — without it, the general agent's prompt won't pre-load the dev skill body, and the small model is unreliable at exercising progressive disclosure on its own.  See the org-format-skill canary findings in [[file:2026-04-26-skills-system.org][skills-system.org]].
+
+** Per-file plan
+*** =edd/eval/test_dev_agent.py= (10 evals)
+- Convert =_create_agent= per the pattern above.
+- Add =pyproject.toml= seeding to =setUp=.
+- Replace =from assist.agent import create_dev_agent, AgentHarness= with =from assist.agent import create_agent, AgentHarness=.
+- Run the suite and compare to Phase A baseline (10/12 PASS, where the 12 includes test_dev_agent_planning_flow + test_dev_agent_runs_eval).  For =test_dev_agent.py= alone the Phase A reading was 10/10 PASS.  Acceptance criterion: ≥ 8/10 PASS, no NEW regressions vs Phase A.
+- Risk: the general agent has different middleware than the dev-agent (e.g. =BadRequestRetryMiddleware= isn't on the general agent today; if (1) lands first it will be).  The =SubagentTypeInferenceMiddleware= isn't on the general agent either — that's only used by the dev-agent's task tool.  Most evals don't exercise the =task= tool, so this should be fine.
+
+*** =edd/eval/test_dev_agent_planning_flow.py= (1 eval)
+- Same conversion.
+- This eval was the FAIL in the Phase A baseline ("Agent should report failing tests in phase 2").  Don't expect Phase D conversion to fix that.  Acceptance: same shape of outcome as Phase A.
+
+*** =edd/eval/test_dev_agent_runs_eval.py= (1 eval)
+- Same conversion.
+- Already ERROR'd in baseline due to a sandbox =RuntimeError: Dep install failed= unrelated to the agent.  If the conversion still ERRORs in the same way, leave it; if the conversion exposes a different failure, document and decide.
+
+** Hard delete
+Once all three converted suites match their Phase A acceptance criteria:
+- Delete =create_dev_agent= from =assist/agent.py= (the function plus its imports/comments).
+- Delete =assist/templates/deepagents/dev_agent_instructions.md.j2=.
+- Drop the explanatory comment in =assist/agent.py= (lines 154-161 from the soft-retire commit) since it'll no longer apply.
+- Remove the open-question / "future work" entries in the skills doc and roadmap that refer to this hard-retire (or mark them DONE).
+
+** Validation
+After hard-delete:
+1. =python -c "from assist.agent import create_dev_agent"= must fail with ImportError.
+2. =grep -rE "create_dev_agent|dev_agent_instructions" assist/ edd/ manage/ tests/= must only match the comment-removal trail (none, ideally).
+3. Re-run the converted dev-agent eval suite once more to confirm the deletion didn't break anything.
+4. Re-run =edd/eval/test_dev_skill_multi_turn.py= and =edd/eval/test_org_format_skill.py= to confirm no skill-system regression.
+
+* Notes / gotchas
+- The =SubagentTypeInferenceMiddleware= is wired into =create_dev_agent= but not into =create_agent=.  Its purpose is to coerce =subagent_type= when the model emits a =task= call without one — useful for small models confused by the parameter.  After conversion, the converted suite should run on the general agent without it.  If the small model starts hallucinating malformed =task= calls, consider extending =create_agent= to wire it in too — but cross that bridge if it shows up in the diff vs Phase A baseline.
+- =create_dev_agent= sets =recursion_limit=5000=; =create_agent= relies on =RollbackRunnable= or default limits.  The general agent's =AgentHarness.message= invocation in =assist/agent.py:46-55= already uses =recursion_limit=5000= explicitly, so this is at parity.
+- After hard-delete, =roadmap.org= entries to update:
+  - "Hard retire of dev-agent" → DONE.
+  - The relevant follow-up note in =docs/2026-04-25-skills-rearchitecture.org= ("Hard retire pending …") → strike or amend.
+- =edd/eval/test_dev_skill_multi_turn.py= already exercises the general agent + dev skill via =ThreadManager= (=multi-turn= and =mid-task clarification=).  The hard-retire doesn't depend on it but its pass status is the canary for whether we've broken anything in the skill loading path.
