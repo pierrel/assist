@@ -30,6 +30,10 @@ class TestDevSkillMultiTurn(TestCase):
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp()
+        # Project indicator so the general agent's prompt pre-loads the dev
+        # skill body (small-model reliability path).
+        with open(os.path.join(self.workspace, "pyproject.toml"), "w") as f:
+            f.write('[project]\nname = "test-project"\n')
         self.sandbox = SandboxManager.get_sandbox_backend(self.workspace)
         if self.sandbox is None:
             self.skipTest("Docker sandbox unavailable — is Docker running and assist-sandbox built?")
@@ -96,32 +100,42 @@ class TestDevSkillMultiTurn(TestCase):
         with no idea what 'add' was — only 'also add subtract' as
         context. With the skill on the general agent, turn 2 lands in
         the same conversation and the agent picks up where it left off.
+
+        Assertion targets the SANDBOX FILE STATE rather than response
+        text — the agent's narration is unreliable on the small model
+        (it sometimes summarises tersely with "I saved the output...").
+        File state is what we care about: did both functions land in
+        calculator.py?
         """
         thread = self._new_thread()
 
         # Turn 1: start the task.
-        resp1 = thread.message(
+        thread.message(
             "Create `calculator.py` in the workspace with an `add(a, b)` "
             "function. Use TDD."
         )
 
-        # Turn 2: add a requirement. Note we do NOT re-explain what
-        # we're working on. Turn 2 must rely on turn 1 context.
-        resp2 = thread.message(
+        # Turn 2: add a requirement. We do NOT re-explain the original
+        # task; turn 2 must rely on turn-1 context.
+        thread.message(
             "Actually, while you're at it, also add a `subtract(a, b)` function."
         )
-        # The agent's turn-2 response must reference 'add' (or the existing
-        # work from turn 1) AND 'subtract' (the new requirement). If turn 2
-        # only references subtract, context was lost.
-        self.assertRegex(
-            resp2.lower(),
-            r"add",
-            "Turn 2 should reference the original add() work from turn 1 — "
-            f"context must be preserved. Turn 2 response: {resp2[:500]}"
+
+        # File-state assertion: read calculator.py from the sandbox.
+        result = self.sandbox.execute("cat /workspace/calculator.py")
+        content = result.output if hasattr(result, "output") else str(result)
+
+        self.assertIn(
+            "def add",
+            content,
+            f"calculator.py must contain `def add` from turn 1's request. "
+            f"File contents: {content[:500]}"
         )
-        self.assertRegex(
-            resp2.lower(),
-            r"subtract",
-            "Turn 2 should also acknowledge the new subtract() requirement. "
-            f"Turn 2 response: {resp2[:500]}"
+        self.assertIn(
+            "def subtract",
+            content,
+            f"calculator.py must contain `def subtract` from turn 2's "
+            f"clarification — proves context from turn 1 carried into "
+            f"turn 2 (otherwise the agent would not know about the "
+            f"calculator.py file at all). File contents: {content[:500]}"
         )
