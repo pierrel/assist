@@ -248,20 +248,19 @@ class TestSandboxManager(TestCase):
 class TestSandboxCompositeBackend(TestCase):
     """Test create_sandbox_composite_backend factory."""
 
-    def test_factory_returns_callable(self):
-        from assist.backends import create_sandbox_composite_backend
-        mock_sandbox = MagicMock()
-        factory = create_sandbox_composite_backend(mock_sandbox)
-        self.assertTrue(callable(factory))
-
-    def test_factory_creates_composite_with_sandbox_default(self):
+    def test_returns_composite_backend(self):
         from assist.backends import create_sandbox_composite_backend
         from deepagents.backends import CompositeBackend
 
         mock_sandbox = MagicMock()
-        factory = create_sandbox_composite_backend(mock_sandbox)
+        backend = create_sandbox_composite_backend(mock_sandbox)
+        self.assertIsInstance(backend, CompositeBackend)
 
-        mock_rt = MagicMock()
-        backend = factory(mock_rt)
+    def test_composite_uses_sandbox_default(self):
+        from assist.backends import create_sandbox_composite_backend
+        from deepagents.backends import CompositeBackend
+
+        mock_sandbox = MagicMock()
+        backend = create_sandbox_composite_backend(mock_sandbox)
 
         self.assertIsInstance(backend, CompositeBackend)

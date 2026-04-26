@@ -1,0 +1,14 @@
+State: Not started
+* Problem
+The dev agent, as a subagent, cannot have a direct converation with the user. This causes the dev-specific context to be lost.
+* Proposed solution(s)
+Note: we're using small models here for the agent (=stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ= at the time of this writing) so this should be a factor with whatever direction is chosen.
+** Expand the general agent
+Have the general agent also be a dev agent with more purpose-built dev-specific subagents for specific agent tasks. Could also leverage the context agent with some extra guidance.
+
+Could be helpe with dev-specific skills that are only loaded as-needed. Skills are currently not implemented, so woud need to figure that out first.
+** Dynamic agent swap
+Determine the kind of domain and what the right "top-level" agent should be and instantiate that one.
+** Better sub-super-agent channels
+Create a more concrete way for super and sub-agents to communicate. For example, the general agent can first ask the dev agent for a plan/spec and to write all of it's findings (notes) to a specific file. The next call to the sub-agent (for test/eval writing, etc)
+* Some implementation thoughts

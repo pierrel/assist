@@ -10,7 +10,7 @@ from assist.agent import create_agent, AgentHarness
 
 from .utils import read_file, create_filesystem, AgentTestMixin
 
-class TestAgent(AgentTestMixin, TestCase):
+class TestMemory(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)

@@ -13,7 +13,7 @@ from openai import InternalServerError
 
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
-from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS
+from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS, SKILLS_ROUTE
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
@@ -22,6 +22,8 @@ from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddlew
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.subagent_type_inference import SubagentTypeInferenceMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
+from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
+from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -127,6 +129,8 @@ def create_agent(model: BaseChatModel,
     else:
         backend = _create_standard_backend(working_dir)
 
+    skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=[SKILLS_ROUTE])
+
     context_sub = CompiledSubAgent(
         name="context-agent",
         description="Discovers and surfaces relevant context from the user's local filesystem. Use this agent to find files, read content, and understand the user's file structure before taking action. It is read-only — it will not modify files.",
@@ -165,10 +169,10 @@ def create_agent(model: BaseChatModel,
             workspace_dir=workspace_dir,
             memories_path=memories_path
         ),
-        middleware=mw + [logging_mw],
+        middleware=mw + [skills_mw, logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, dev_sub],
-        memory=[memories_path]
+        memory=[memories_path],
     )
 
     return agent
@@ -199,6 +203,8 @@ def create_context_agent(model: BaseChatModel,
     )
     base_mw.append(context_eviction_mw)
     base_mw.append(LoopDetectionMiddleware())
+    # Enforce the read-only contract at the tool layer.
+    base_mw.append(ReadOnlyEnforcerMiddleware())
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)

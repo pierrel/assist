@@ -1,0 +1,11 @@
+State: Not started
+* Problem
+Sometimes errors/exceptions are encountered during agent execution or suboptimal actions/responses are returned.
+* Proposed solution
+Create a system where the agent (specifically the dev agent) is tasked with fixing the problem and attempts to fix. Re-write the "capture conversation" flow to use this when suboptimal responses/actions are noticed by the user and wire it into when an exception happens.
+* Some implementation thoughts
+Create a new thread with the appropriate context to allow the user to direct the conversation. The thread should have some flag so that issue encountered here are not pursued automatically (exception flow) and an endless recursion happens.
+
+Need to improve the dev agent so that this actually works.
+
+This should not run during evals.

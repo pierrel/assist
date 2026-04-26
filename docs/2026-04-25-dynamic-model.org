@@ -1,0 +1,8 @@
+* Problem
+Whenever I update the model on the llm-serving machine I need to update a bunch of small files (.dev.env, etc). We only ever have 1 model running right now, so the assist project shouldn't care.
+* Proposed solution
+Before sending an llm request, check which models are available and then cache the first one. Then make all requests read from this cached value. If there is an error about the model not being found, then refresh the cache.
+
+Also include the model length - there's only 1 model and it's instantiated with a model length - check metadata and similarly cache.
+
+As part of this change we can remove all =ASSIST_MODEL_NAME= and =ASSIST_API_KEY= and =ASSIST_CONTEXT_LEN= and =ASSIST_TEST_URL_PATH= (this last one isn't from the same problem but we should fix this anyway to reduce redundance).

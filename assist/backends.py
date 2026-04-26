@@ -1,3 +1,4 @@
+import os
 import tempfile
 
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
@@ -13,9 +14,14 @@ STATEFUL_PATHS = [
     "large_tool_results",
 ]
 
+SKILLS_ROUTE = "/skills/"
+SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
+
 
 def routes(stateful_paths: list[str]) -> dict:
-    return {path: StateBackend() for path in stateful_paths}
+    routes = {path: StateBackend() for path in stateful_paths}
+    routes[SKILLS_ROUTE] = FilesystemBackend(root_dir=SKILLS_DIR, virtual_mode=True)
+    return routes
 
 
 def create_composite_backend(fs_root: str = None,
