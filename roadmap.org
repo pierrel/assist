@@ -39,8 +39,8 @@ See [[file:docs/2026-04-26-token-max-mismatch-investigation.md][docs/2026-04-26-
 See [[file:docs/2026-04-25-dynamic-model.org][docs/2026-04-25-dynamic-model.org]].  Probe the LLM endpoint at startup, cache the model name + context length, refresh on "model not found" errors.  Removes =ASSIST_MODEL_NAME=, =ASSIST_API_KEY=, =ASSIST_CONTEXT_LEN=, =ASSIST_TEST_URL_PATH= environment variables (any cleanup that simplifies =.dev.env= / =.deploy.env=).
 * Skills migration follow-ups
 The dev-agent → skill migration shipped in four phases (see [[file:docs/2026-04-25-skills-rearchitecture.org][docs/2026-04-25-skills-rearchitecture.org]]) but a few cleanups were left for later:
-** TODO Hard retire of dev-agent
-Convert =edd/eval/test_dev_agent.py=, =test_dev_agent_planning_flow.py=, and =test_dev_agent_runs_eval.py= to exercise the general agent + =dev= skill instead of =create_dev_agent= directly.  Once those scenarios pass, delete =assist/agent.py::create_dev_agent= and =assist/templates/deepagents/dev_agent_instructions.md.j2=.
+** DONE Hard retire of dev-agent
+Done 2026-04-26.  =edd/eval/test_dev_agent.py=, =test_dev_agent_planning_flow.py=, and =test_dev_agent_runs_eval.py= now exercise the general agent + =dev= skill via =create_agent=.  =create_dev_agent= and =assist/templates/deepagents/dev_agent_instructions.md.j2= deleted.  See [[file:docs/2026-04-26-dev-agent-hard-retire.org][docs/2026-04-26-dev-agent-hard-retire.org]].
 ** TODO Sandbox parity in evals
 Production already passes =sandbox_backend= through every agent factory (see =assist/thread.py=).  Most evals (=test_agent.py=, =test_context_agent.py=, =test_org_format_skill.py=) still use the standard filesystem backend for speed.  Add a config knob (env var or pytest marker) so the suite can be run in sandbox-mode without slowing the fast path.
 ** TODO Earn-its-keep test for the org-format skill

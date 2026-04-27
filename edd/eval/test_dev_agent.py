@@ -22,7 +22,7 @@ from unittest import TestCase
 from langchain_core.messages import AIMessage, ToolMessage
 
 from assist.model_manager import select_chat_model
-from assist.agent import create_dev_agent, AgentHarness
+from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 
 
@@ -104,7 +104,10 @@ class TestDevAgent(TestCase):
         _cleanup_workspace(self.workspace)
 
     def _create_agent(self):
-        return AgentHarness(create_dev_agent(
+        # General agent + dev skill (post-Phase-D).  The rsync'd workspace
+        # has pyproject.toml at the top level, which trips create_agent's
+        # project_indicator detection and pre-loads the dev skill body.
+        return AgentHarness(create_agent(
             self.model,
             self.workspace,
             sandbox_backend=self.sandbox,

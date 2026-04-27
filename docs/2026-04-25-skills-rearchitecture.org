@@ -15,7 +15,7 @@ Validation:
 - =test_org_format_skill.py= (new): 2/2 PASS.
 
 Open follow-ups (out of scope for this doc):
-- Hard retire of =create_dev_agent= and =dev_agent_instructions.md.j2= once =test_dev_agent.py= scenarios are converted to the general-agent path.
+- Hard retire of =create_dev_agent= and =dev_agent_instructions.md.j2= once =test_dev_agent.py= scenarios are converted to the general-agent path.  *Done 2026-04-26* — see [[file:2026-04-26-dev-agent-hard-retire.org][2026-04-26-dev-agent-hard-retire.org]].
 - Sandbox parity in evals (production already sandboxes all agents; evals do not).
 - =write_file= vs =edit_file= tool-choice trap on existing files (loop-detection workaround in place; real fix in [[file:proposal-infinite-writes.org][proposal-infinite-writes.org]]).
 
