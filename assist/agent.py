@@ -102,23 +102,27 @@ def create_agent(model: BaseChatModel,
                  sandbox_backend=None) -> CompiledStateGraph:
     # Core middleware: retry, tool call limiting, JSON validation, and logging
     # Only retry on transient server errors (5xx, timeouts, connection issues).
-    # BadRequestError (400) is handled by invoke_with_rollback via checkpoint rollback.
+    # BadRequestError (400) is handled by invoke_with_rollback via checkpoint rollback,
+    # but BadRequestRetryMiddleware sanitizes + truncates messages on overflow first.
     retry_middle = ModelRetryMiddleware(max_retries=3,
                                         retry_on=(InternalServerError, TimeoutError, ConnectionError),
                                         backoff_factor=2)
+    # Catch BadRequestError (e.g. context overflow), sanitize & truncate, retry.
+    bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
     # Validate and fix JSON in tool call arguments
     json_validation_mw = JsonValidationMiddleware(strict=False)
     # Strip tool calls with invalid names (e.g. '[]' hallucinated by small models)
     tool_name_mw = ToolNameSanitizationMiddleware()
     logging_mw = ModelLoggingMiddleware("general-agent")
 
-    # Context-aware tool eviction: evict results to filesystem if they would cause overflow
+    # Context-aware tool eviction: evict results to filesystem if they would cause overflow.
+    # 0.60 trigger leaves margin for tokenizer disagreement vs the chars//4 estimate.
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
-        trigger_fraction=0.75,  # Evict if context would reach 75%
+        trigger_fraction=0.60,
     )
     loop_detection_mw = LoopDetectionMiddleware()
 
-    mw = [retry_middle, json_validation_mw, tool_name_mw, context_eviction_mw, loop_detection_mw]
+    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw, context_eviction_mw, loop_detection_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
@@ -208,9 +212,11 @@ def create_context_agent(model: BaseChatModel,
     if not has_json_validation:
         base_mw.append(JsonValidationMiddleware(strict=False))
 
-    # Context-aware tool eviction
+    # Catch BadRequestError, sanitize & truncate messages, retry.
+    base_mw.append(BadRequestRetryMiddleware(max_retries=3))
+    # Context-aware tool eviction (0.60 leaves margin for tokenizer disagreement).
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
-        trigger_fraction=0.75,
+        trigger_fraction=0.60,
     )
     base_mw.append(context_eviction_mw)
     base_mw.append(LoopDetectionMiddleware())
@@ -258,9 +264,13 @@ def create_research_agent(model: BaseChatModel,
     if not has_json_validation:
         base_mw.append(JsonValidationMiddleware(strict=False))
 
-    # Context-aware tool eviction for research agents (more aggressive thresholds)
+    # Catch BadRequestError, sanitize & truncate messages, retry.
+    base_mw.append(BadRequestRetryMiddleware(max_retries=3))
+    # Context-aware tool eviction for research agents (most aggressive — research
+    # accumulates web-search results and intermediate report drafts that bloat
+    # context fast).  0.55 keeps wide margin against the chars//4 estimate.
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
-        trigger_fraction=0.70,  # Evict at 70% for research (more aggressive)
+        trigger_fraction=0.55,
     )
     base_mw.append(context_eviction_mw)
     base_mw.append(LoopDetectionMiddleware())

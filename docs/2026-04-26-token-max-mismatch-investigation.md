@@ -4,6 +4,11 @@
 **Thread:** `20260426073544-71c17777`
 **Description:** Giants weekend season ticket packages and game time restrictions
 **Status at investigation time:** `{"stage": "ready"}`
+**Status of fixes (2026-04-26):** Recommendations 1, 3, and 4 applied to
+`assist/agent.py`. Regression eval at
+`edd/eval/test_research_multi_turn_token_regression.py` captures the failing
+turn sequence. Recommendation 2 (proactive message-trim middleware) deferred —
+see "Status" section at the bottom.
 
 ## The error
 
@@ -129,6 +134,40 @@ The research agent runs at `trigger_fraction=0.70` (`agent.py:246`) — slightly
 3. **Replace `chars // 4` with a tokenizer-aware estimate** for the eviction decision, or at minimum **lower `trigger_fraction`** to 0.60 to widen the safety margin against tokenizer disagreement.
 
 4. **Tune the research agent specifically** (`agent.py:245`) — 0.70 is still too generous given how it accumulates intermediate reports. Consider 0.55–0.60.
+
+## Status
+
+Applied 2026-04-26:
+
+- **#1 — `BadRequestRetryMiddleware` wired into general / context / research
+  agents.** `assist/agent.py:111` (general), `assist/agent.py:216` (context),
+  `assist/agent.py:268` (research). The dev-agent already had it. On
+  `BadRequestError` the middleware sanitizes messages, then on subsequent
+  retries truncates large tool-result messages to 20k chars and retries again.
+- **#3 — Lowered `trigger_fraction` on `ContextAwareToolEvictionMiddleware`.**
+  General/context dropped from 0.75 to 0.60; research dropped from 0.70 to
+  0.55. Widens the safety margin against the `chars // 4` token underestimate.
+  We did not replace `chars // 4` itself — the lower fractions are a cheaper
+  approximation of the same goal.
+- **#4 — Tuned research agent specifically.** `trigger_fraction=0.55` (down
+  from 0.70) on the research-only middleware list — more aggressive than
+  general/context because research accumulates web-search results and report
+  drafts faster.
+- **Regression eval added.** `edd/eval/test_research_multi_turn_token_regression.py`
+  runs the three failing turns through `ThreadManager` → general agent →
+  research subagent. Pass criterion: no `openai.BadRequestError` reaches the
+  caller.
+
+Deferred:
+
+- **#2 — Proactive message-trim or summarization middleware.** Not yet wired in.
+  The combination of (a) reactive `BadRequestRetryMiddleware` truncation on
+  retry and (b) lower `trigger_fraction` on tool-result eviction should cover
+  the regression. If the eval still surfaces overflows after the changes
+  above, revisit this — the right shape is a `wrap_model_call` middleware
+  that drops the oldest tool-result messages until the message list is under
+  some fraction of `max_input_tokens`. Tracked in `roadmap.org` under
+  Reliability.
 
 ## Files inspected
 
