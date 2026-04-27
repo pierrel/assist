@@ -20,7 +20,6 @@ from assist.middleware.json_validation_middleware import JsonValidationMiddlewar
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
-from assist.middleware.subagent_type_inference import SubagentTypeInferenceMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
@@ -154,15 +153,6 @@ def create_agent(model: BaseChatModel,
                                        [retry_middle, json_validation_mw, tool_name_mw],
                                        sandbox_backend=sandbox_backend)
     )
-
-    # NOTE: the dev-agent subagent has been retired (Phase D of the skills
-    # migration — see docs/2026-04-25-skills-rearchitecture.org). The general
-    # agent now loads the dev skill (assist/skills/dev/SKILL.md) and handles
-    # code work itself in this conversation, preserving multi-turn context
-    # and the user channel through approvals/clarifications.
-    # `create_dev_agent` is retained for now so the dev-agent eval suite
-    # (test_dev_agent*.py) can keep validating the skill content against the
-    # legacy harness.
 
     critique_sub_agent = {
         "name": "critique-agent",
@@ -318,91 +308,3 @@ def create_research_agent(model: BaseChatModel,
     return RollbackRunnable(agent, recursion_limit=300)
 
 
-def create_dev_agent(model: BaseChatModel,
-                     working_dir: str,
-                     checkpointer=None,
-                     sandbox_backend=None) -> CompiledStateGraph:
-    """Create a software development agent for writing, testing, and improving code.
-
-    Runs inside a Docker sandbox and follows TDD practices.
-    Uses BadRequestRetryMiddleware instead of checkpoint rollback — the dev-agent
-    writes to the real filesystem and Docker sandbox, so rollback would leave
-    orphaned side effects.  On BadRequestError the middleware sanitizes messages
-    and retries, keeping the agent moving forward.
-
-    Sub-agents:
-    - context-agent: Read-only codebase exploration (same as general agent)
-    - research-agent: Researches patterns, libraries, and best practices
-    - critique-agent: Reviews diffs for bugs, missing tests, and style issues
-    """
-    # Only retry on transient server errors (5xx, timeouts, connection issues).
-    retry_middle = ModelRetryMiddleware(max_retries=3,
-                                        retry_on=(InternalServerError, TimeoutError, ConnectionError),
-                                        backoff_factor=2)
-    json_validation_mw = JsonValidationMiddleware(strict=False)
-    tool_name_mw = ToolNameSanitizationMiddleware()
-    logging_mw = ModelLoggingMiddleware("dev-agent")
-    context_eviction_mw = ContextAwareToolEvictionMiddleware(trigger_fraction=0.75)
-    # BadRequestError (400) — sanitize messages and retry instead of rollback.
-    bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
-    # Infer subagent_type when the model omits it (common with smaller models).
-    subagent_inference_mw = SubagentTypeInferenceMiddleware(
-        valid_subagent_types={"context-agent", "research-agent", "critique-agent"},
-        default_subagent_type="context-agent",
-    )
-
-    loop_detection_mw = LoopDetectionMiddleware()
-
-    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
-          context_eviction_mw, loop_detection_mw, subagent_inference_mw]
-
-    workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
-
-    if sandbox_backend:
-        backend = create_sandbox_composite_backend(sandbox_backend)
-    else:
-        backend = _create_standard_backend(working_dir)
-
-    context_sub = CompiledSubAgent(
-        name="context-agent",
-        description="Discovers and surfaces relevant context from the project filesystem. Use this to understand project structure, find files, read code, and discover conventions. Read-only — will not modify files.",
-        runnable=create_context_agent(model,
-                                      working_dir,
-                                      checkpointer,
-                                      [retry_middle, json_validation_mw, tool_name_mw],
-                                      sandbox_backend=sandbox_backend)
-    )
-
-    research_sub = CompiledSubAgent(
-        name="research-agent",
-        description="Researches patterns, libraries, frameworks, and best practices. Use this to understand how libraries work, find idiomatic patterns, or research the right approach before implementing.",
-        runnable=create_research_agent(model,
-                                       working_dir,
-                                       checkpointer,
-                                       [retry_middle, json_validation_mw, tool_name_mw],
-                                       sandbox_backend=sandbox_backend)
-    )
-
-    critique_sub_agent = {
-        "name": "critique-agent",
-        "description": "Reviews code diffs for bugs, missing tests, style issues, and security concerns. Provide the full git diff output when calling this agent.",
-        "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2",
-                                         workspace_dir=workspace_dir),
-    }
-
-    agent = create_deep_agent(
-        model=model,
-        checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/dev_agent_instructions.md.j2",
-                                      workspace_dir=workspace_dir,
-                                      skill_body=read_skill_body("dev")),
-        middleware=mw + [logging_mw],
-        backend=backend,
-        subagents=[context_sub, research_sub, critique_sub_agent],
-    )
-
-    # The deepagents middleware architecture adds ~11 graph nodes per model-tool
-    # cycle, so the default recursion_limit=1000 allows only ~90 tool calls.
-    # A full TDD cycle (Phase 1: explore + plan; Phase 2: tests; Phase 3: impl)
-    # can require 150–300 tool calls.  Override to 5000 (≈ 450 tool calls).
-    return agent.with_config({"recursion_limit": 5000})

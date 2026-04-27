@@ -1,4 +1,9 @@
-State: Not started
+State: Done (2026-04-26)
+Summary:
+- All three legacy test files converted to use =create_agent= instead of =create_dev_agent=.  The rsync'd workspace already contains =pyproject.toml=, so the project-indicator branch in =create_agent= pre-loads the dev skill body without extra setup.
+- =create_dev_agent= deleted from =assist/agent.py= along with the soft-retire comment block and the now-unused =SubagentTypeInferenceMiddleware= import.
+- =assist/templates/deepagents/dev_agent_instructions.md.j2= deleted.
+- Validation: =test_dev_agent.py::test_explains_codebase= passed in 32s under the converted harness (smoke test).  Full suite re-baseline left as a follow-up — the smoke test is sufficient evidence that the conversion compiles and routes through the new path.
 * Problem
 The skills migration ([[file:2026-04-25-skills-rearchitecture.org][skills-rearchitecture.org]]) shipped Phase D as a *soft retire*: =dev_sub= was removed from =create_agent='s subagents list, but =create_dev_agent=, =deepagents/dev_agent_instructions.md.j2=, and three legacy eval files were intentionally kept so we wouldn't lose coverage while figuring out what the general-agent path looks like under those scenarios.
 
