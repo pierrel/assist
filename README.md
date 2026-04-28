@@ -84,7 +84,18 @@ sudo usermod -aG docker $USER
 
 ### Running Tests and Evaluations
 
-Assist includes two types of testing:
+Assist includes two types of testing — and **the distinction is by what the test calls, not how long it runs**:
+
+| Where | What | Touches the LLM? |
+|-------|------|------------------|
+| `tests/` | Unit + integration tests. Pure-Python, mocked tool calls, mocked model responses. Run on every change. | **No** |
+| `edd/eval/` | Agent evaluations. Drive the real model end-to-end and assert on observed agent behaviour. Network- and model-bound. | **Yes** |
+
+Where to put a new test:
+- Does it construct a `MagicMock` handler / synthetic `ToolMessage` / `ModelRequest` and assert on a transformation? → `tests/` (or `tests/middleware/` for middleware).
+- Does it call `select_chat_model`, `Thread`, `AgentHarness`, `create_agent`, `agent.invoke()`, or otherwise reach a model server? → `edd/eval/`.
+
+Mis-classification was an issue early on; the table above is the rule.
 
 **Unit/Integration Tests** (`tests/`):
 ```bash
@@ -93,6 +104,7 @@ make test
 
 # Run specific test file
 .venv/bin/pytest tests/test_domain_manager.py -v
+.venv/bin/pytest tests/middleware/test_loop_detection.py -v
 ```
 
 **Agent Evaluations** (`edd/`):
@@ -337,15 +349,16 @@ assist/
 │       └── reference/       # Inline references (legacy; being moved into skills)
 ├── dockerfiles/             # Docker images
 │   └── Dockerfile.sandbox   # Sandbox container (Arch-based, with git/python/emacs)
-├── edd/                     # Agent evaluations
-│   ├── eval/                # Evaluation test suite
+├── edd/                     # Agent evaluations (LLM-driven, network-bound)
+│   ├── eval/                # Evaluation test suite — anything that calls the real model
 │   └── history/             # Test results history (JUnit XML)
 ├── manage/                  # Management interfaces
 │   ├── web.py               # Web UI (FastAPI)
 │   └── cli.py               # CLI interface
 ├── docs/                    # Per-improvement design records — see Documentation below
 │   └── baselines/           # Snapshot eval-suite results for diffing
-├── tests/                   # Unit/integration tests
+├── tests/                   # Unit/integration tests (no LLM — mocked model + tools)
+│   └── middleware/          # Per-middleware unit tests (test_<module>.py)
 ├── scripts/                 # Deployment and setup scripts
 ├── roadmap.org              # Open work, organized by theme
 ├── .dev.env.example         # Development config template
