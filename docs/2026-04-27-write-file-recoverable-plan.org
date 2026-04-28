@@ -1,7 +1,7 @@
 State: Done (2026-04-27)
 * Outcome
 - =assist/middleware/write_collision.py= shipped.  20-test unit eval at
-  =edd/eval/test_write_collision_middleware.py= covers state, store,
+  =tests/middleware/test_write_collision.py= covers state, store,
   filesystem, and sandbox backend collision shapes; whitespace paths;
   pass-through for successful writes, unrelated errors, other tools,
   =Command= results, and list-of-parts content; sync and async
@@ -22,7 +22,7 @@ State: Done (2026-04-27)
   on these tests; the 04-25 baseline's PASS on
   =test_writes_memory_explicit= was stochastic noise.
 - Targeted regressions verified clean: =test_org_format_skill.py= 2/2
-  PASS, =test_write_collision_middleware.py= 20/20 PASS,
+  PASS, =tests/middleware/test_write_collision.py= 20/20 PASS,
   =test_research_multi_turn_token_regression.py= run in progress at
   the time of write-up (full result in commit message).
 * Review deltas applied (2026-04-27)
@@ -248,7 +248,7 @@ Acceptance criteria, in order:
    =ToolCallRequest= for =write_file= where the underlying handler
    returns the collision error.  Assert the middleware rewrites the
    result to the new message.  Lives at
-   =edd/eval/test_write_collision_middleware.py=.
+   =tests/middleware/test_write_collision.py=.
 
 2. *Memory-trap regression* (existing, =test_memory.py=):
    =test_doesnt_include_tags= and =test_writes_memory_implicit=
