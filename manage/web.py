@@ -212,6 +212,33 @@ def render_diff(text: str) -> str:
     # Use Pygments to render unified diffs with HTML formatting
     return highlight(text, DiffLexer(), HtmlFormatter(nowrap=False))
 
+def _get_merge_status(tid: str) -> tuple[str, str]:
+    """Get merge status for a thread.
+    
+    Returns:
+        Tuple of (status_type, status_text) where status_type is one of:
+        - "error" - error occurred during merge process
+        - "processing" - merge is in progress
+        - "success" - changes are ready to merge
+        - "" - no merge status available
+    """
+    try:
+        dm = _get_domain_manager(tid)
+        if not dm or not dm.repo:
+            return "", ""
+        
+        # Check if there are changes that could be merged
+        diffs = dm.main_diff()
+        if diffs:
+            return "success", "Changes ready to merge"
+        else:
+            # No changes, but we can still show status
+            return "", ""
+    except Exception:
+        # If we can't determine merge status, show error
+        return "error", "Error checking merge status"
+
+
 def render_index() -> str:
     items = []
     tids = MANAGER.list()
@@ -222,19 +249,51 @@ def render_index() -> str:
             title = _thread_title(tid)
             status = _get_status(tid)
             stage = status.get("stage", "ready")
-            badge = ""
+            
+            # Generate status badges
+            main_badge = ""
             if stage in BUSY_STAGES:
-                badge = (
+                main_badge = (
                     f'<span style="font-size:.7rem; color:#555; background:#fff3cd;'
                     f' border:1px solid #ffeeba; padding:.1rem .4rem; border-radius:10px;'
                     f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
                 )
             elif stage == "error":
-                badge = (
+                main_badge = (
                     '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
                     ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
                     ' margin-right:.4rem;">error</span>'
                 )
+            
+            # Add merge status badge if applicable
+            merge_status, merge_text = _get_merge_status(tid)
+            merge_badge = ""
+            if merge_status == "error":
+                merge_badge = (
+                    '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
+                    ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
+                    ' margin-right:.4rem;">merge error</span>'
+                )
+            elif merge_status == "processing":
+                merge_badge = (
+                    '<span style="font-size:.7rem; color:#555; background:#fff3cd;'
+                    ' border:1px solid #ffeeba; padding:.1rem .4rem; border-radius:10px;'
+                    ' margin-right:.4rem;">merging...</span>'
+                )
+            elif merge_status == "success":
+                merge_badge = (
+                    '<span style="font-size:.7rem; color:#155724; background:#d4edda;'
+                    ' border:1px solid #c3e6cb; padding:.1rem .4rem; border-radius:10px;'
+                    ' margin-right:.4rem;">changes ready</span>'
+                )
+            
+            # Ensure error status takes precedence
+            if stage == "error":
+                # Error takes precedence - show main error badge only
+                badge = main_badge
+            else:
+                badge = f"{main_badge}{merge_badge}"
+                
             items.append(
                 f'<li style="display:flex; align-items:center; gap:.5rem;">'
                 f'<a href="/thread/{tid}" style="flex:1">{badge}{html.escape(title)}</a>'
