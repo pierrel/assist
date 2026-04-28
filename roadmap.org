@@ -7,11 +7,9 @@ Make it expandable from the main web ui. Not always expanded.
 ** TODO PDF reading
 * Vision
 ** TODO Test a single vision experiment
-** TODO 
-* Ministral upgrade
-The goal is to have a "home grown" ministral 3 14b running on vllm.
+* Qwen upgrade
+See [[file:docs/2026-04-27-qwen-quantization-guide.md][quantization guide]].
 ** TODO Run the awq quantizer
-Actually, just see the =more-quantization= dtach session in thinky.  
 ** TODO Test (run all evals)
 ** TODO Push to huggingface
 * Dev updates
@@ -36,8 +34,16 @@ See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].
 ** TODO Proactive message-trim middleware (token-max-mismatch follow-up)
 See [[file:docs/2026-04-26-token-max-mismatch-investigation.md][docs/2026-04-26-token-max-mismatch-investigation.md]] recommendation #2 (deferred).  =BadRequestRetryMiddleware= currently catches context overflow reactively (sanitize + truncate on retry).  A =wrap_model_call= middleware that drops the oldest tool-result messages until the message list is under some fraction of =max_input_tokens= would prevent the wasted first-attempt model call.  Re-evaluate if =edd/eval/test_research_multi_turn_token_regression.py= still trips on overflow after the 2026-04-26 fixes.
 * Configuration
-** TODO Auto-detect served model + context length
-See [[file:docs/2026-04-25-dynamic-model.org][docs/2026-04-25-dynamic-model.org]].  Probe the LLM endpoint at startup, cache the model name + context length, refresh on "model not found" errors.  Removes =ASSIST_MODEL_NAME=, =ASSIST_API_KEY=, =ASSIST_CONTEXT_LEN=, =ASSIST_TEST_URL_PATH= environment variables (any cleanup that simplifies =.dev.env= / =.deploy.env=).
+** DONE Auto-detect served model + context length
+Done 2026-04-28.  =assist/model_manager.py= now probes
+=${ASSIST_MODEL_URL}/models= on first request, caches model id and
+=max_model_len=, and busts the cache on =model_not_found= upstream
+errors via a =BaseCallbackHandler= attached to every =ChatOpenAI=
+instance.  =ThreadManager.model= is lazy so the web server still boots
+without vLLM running.  Removed env vars: =ASSIST_MODEL_NAME=,
+=ASSIST_API_KEY= (now optional, defaults to =EMPTY=),
+=ASSIST_CONTEXT_LEN=, =ASSIST_TEST_URL_PATH=.  See
+[[file:docs/2026-04-28-dynamic-model-plan.org][docs/2026-04-28-dynamic-model-plan.org]].
 * Skills migration follow-ups
 The dev-agent → skill migration shipped in four phases (see [[file:docs/2026-04-25-skills-rearchitecture.org][docs/2026-04-25-skills-rearchitecture.org]]) but a few cleanups were left for later:
 ** DONE Hard retire of dev-agent
