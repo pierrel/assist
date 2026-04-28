@@ -1,5 +1,12 @@
 # Investigation: Thread 20260426073544-71c17777 BadRequestError
 
+**Note (2026-04-28):** `ASSIST_CONTEXT_LEN` and `ASSIST_MODEL_NAME` are
+no longer environment variables — both are auto-discovered from
+`${ASSIST_MODEL_URL}/models`. References to them below are preserved
+as historical context. The `max_input_tokens` value the middleware
+reads is now sourced from `OpenAIConfig.context_len`, populated by the
+probe.
+
 **Date:** 2026-04-26
 **Thread:** `20260426073544-71c17777`
 **Description:** Giants weekend season ticket packages and game time restrictions
