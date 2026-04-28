@@ -1,0 +1,316 @@
+State: Done (2026-04-27)
+* Outcome
+- =assist/middleware/write_collision.py= shipped.  20-test unit eval at
+  =edd/eval/test_write_collision_middleware.py= covers state, store,
+  filesystem, and sandbox backend collision shapes; whitespace paths;
+  pass-through for successful writes, unrelated errors, other tools,
+  =Command= results, and list-of-parts content; sync and async
+  invocation paths.
+- Wired into =create_agent= (=assist/agent.py:124-127=) and
+  =create_research_agent= (=:276=) before =LoopDetectionMiddleware=.
+  =create_context_agent= deliberately not wired (read-only enforcer
+  already blocks =write_file=).
+- Three review rounds before implementation (current-patterns,
+  langchain/deepagents best practices, small-LLM specifics) and three
+  review rounds after (correctness, readability, refactor).  All
+  deltas applied.
+- Memory tests (=test_memory.py=) re-run before and after my middleware
+  produced *identical* 1/4-PASS results — the failure mode in the
+  =test_doesnt_include_tags= / =test_writes_memory_explicit= cluster
+  is the *memory-middleware/tool-API trap*, not the write-collision
+  trap.  Tracked as a separate roadmap item.  My middleware is neutral
+  on these tests; the 04-25 baseline's PASS on
+  =test_writes_memory_explicit= was stochastic noise.
+- Targeted regressions verified clean: =test_org_format_skill.py= 2/2
+  PASS, =test_write_collision_middleware.py= 20/20 PASS,
+  =test_research_multi_turn_token_regression.py= run in progress at
+  the time of write-up (full result in commit message).
+* Review deltas applied (2026-04-27)
+Three reviews were run against the original draft.  All approved with
+specific deltas.  Deltas applied verbatim to the implementation:
+
+** From the "current patterns" review
+- Subagent middleware ordering: place =write_collision_mw= at
+  index 3 in =base_mw= for =create_research_agent= (before
+  =LoopDetectionMiddleware=).
+- Use defensive =request.tool_call.get("name", "")= and =.get("id", "")=
+  consistent with =read_only_enforcer.py:43,50=.
+- Pass through =Command= results unchanged (only act on
+  =ToolMessage=), mirroring
+  =context_aware_tool_eviction.py:170-171=.
+
+** From the "langchain/deepagents best practices" review
+- Implement *both* =wrap_tool_call= and =awrap_tool_call= so the
+  middleware works under sync and async invocation paths.
+- Filter by tool name with =request.tool.name if request.tool else
+  request.tool_call["name"]= (more robust than tool_call dict alone).
+- Preserve =status="error"= when constructing the rewritten
+  =ToolMessage= so =LoopDetectionMiddleware='s Pattern C still trips.
+- Anchor the detection regex with =^=; handle both backend shapes:
+  =Cannot write to {path} because it already exists= and =Error: File
+  already exists: {repr(path)}= (sandbox shape adds quotes via
+  =repr()=).  Strip surrounding quotes when extracting the path from
+  the sandbox shape.
+- Tool result is wrapped in a =ToolMessage= by the handler; mutate
+  =result.content= via =model_copy(update={"content": ...})=, not the
+  raw string.
+
+** From the "small-LLM" re-review (Qwen3-Coder-30B-A3B-Instruct-AWQ)
+The proposed error message text was rewritten.  Original:
+#+begin_quote
+Error: =/path= already exists.  To modify it, call =read_file=
+to see the current content, then call =edit_file= with the exact
+=old_string= and =new_string= you want to change.  Do NOT call
+=write_file= again with a different filename — the existing file is
+the one you should edit.
+#+end_quote
+
+Replaced with:
+#+begin_quote
+Error: the file `{path}` already exists. The correct next step is to
+EDIT this exact same file `{path}`, not to write a new one.
+
+Step 1: call `read_file` with path=`{path}` to see its current content.
+Step 2: call `edit_file` with path=`{path}`, plus `old_string` and
+`new_string` for the change you want.
+
+The path you must use is `{path}`.
+
+Example: edit_file(path="{path}", old_string="...", new_string="...")
+#+end_quote
+
+Rationale: path repeated 4×, two-step recipe in fixed order, positive
+"path you must use" framing instead of negative "do not", literal
+example tool call (Qwen3-Coder follows few-shots better than
+imperatives).  ~95 tokens — negligible against the 53,616 cap, even if
+loop-detection allows up to 3 collisions before tripping (~285 tokens
+worst case).
+- Backticks throughout (matches Markdown renderer the model sees in
+  tool messages); no org-mode equals-sign markup.
+
+** Risk addendum
+- *Small-model wording is load-bearing.*  Changes to the message
+  string require re-running the memory-trap regression
+  (=test_doesnt_include_tags=) because the model is sensitive to
+  phrasing of the redirect.
+
+** Notes
+- The dev skill (=assist/skills/dev/SKILL.md=) is silent on
+  =write_file= no-clobber behaviour.  The new runtime error is the
+  only signal the model gets on collision.  No skill edits planned.
+- =create_dev_agent= was deleted today (commit 634f564) — only three
+  factories need wiring: =create_agent= (yes), =create_research_agent=
+  (yes), =create_context_agent= (no — read-only enforcer blocks
+  =write_file= first).
+
+* Problem
+=write_file= is no-clobber.  When the model attempts to write to an
+existing path, the deepagents filesystem backend returns:
+
+#+begin_quote
+Cannot write to {file_path} because it already exists.  Read and then
+make an edit, or write to a new path.
+#+end_quote
+
+(=deepagents/backends/state.py:254=,
+=deepagents/backends/store.py:494,517=,
+=deepagents/backends/filesystem.py:367=, =deepagents/backends/sandbox.py:73=)
+
+The phrase "or write to a new path" is the wrong nudge for a small
+model that has already settled on a canonical filename: it picks a
+mutated name (=final_report.md= → =completed_final_report.md= →
+=report_final.md=…) and burns through tool calls.
+
+Loop detection (=LoopDetectionMiddleware= Pattern C) catches the
+runaway after a few cycles, but the failure is still real: the agent
+either gives up entirely or writes to the wrong file.  Symptoms in the
+2026-04-25 baseline:
+
+- =test_memory::test_doesnt_include_tags= — wrote to =/user_cats_info.md=
+  instead of =/AGENTS.md= because =AGENTS.md= already existed (with
+  middleware-synthetic placeholder content).
+- Research-agent transcripts in =threads/20260424061644-1b5485b7/domain/=
+  with nine near-identical report files.
+- =test_mid_task_clarification= flake during the dev-skill migration
+  (write_file collision on =calculator.py= during turn-2 clarification).
+
+Proposal source: =docs/proposal-infinite-writes.org= (Solution 1).
+
+* Goal
+Make =write_file= recoverable on collision: when the file exists,
+return an error that *positively redirects* the model to
+=edit_file=, without nudging it to invent a new filename.  The fix
+should be a small, well-scoped middleware that follows existing
+patterns (=ReadOnlyEnforcerMiddleware=, =ContextAwareToolEvictionMiddleware=)
+and works across all backends (state, store, composite, sandbox).
+
+Non-goals:
+- Solution 2 (=overwrite= arg): not in scope.  Adding tool args means
+  forking deepagents; out of proportion for what we need.
+- Solution 3 (canonical-output state tracking): not in scope.
+  Premature unless 1+ proves insufficient.
+
+* Approach
+A new middleware =WriteCollisionMiddleware= in =assist/middleware/=
+that intercepts =write_file= via =wrap_tool_call=.  After the tool
+returns, the middleware inspects the result; if it matches the
+collision-error signature, the result is rewritten to a clearer
+message before being added to the message list.
+
+** Why middleware (not tool description override)
+The proposal lists two implementation paths.  Tool description
+override (=_custom_tool_descriptions=) only affects the *tool
+description* shown to the model up front — it cannot rewrite the
+*runtime error message* the backend returns on collision.  The
+filename-mutation trap is triggered by the runtime error, not the
+description.  A =wrap_tool_call= middleware sees the actual error and
+can rewrite it.  This also keeps the fix backend-agnostic.
+
+** Detection signature
+The error string is hard-coded in deepagents in three backend files
+(state, store, filesystem) all using the same template:
+
+#+begin_quote
+Cannot write to {file_path} because it already exists. ...
+#+end_quote
+
+Plus the sandbox backend uses a slightly different shape:
+
+#+begin_quote
+Error: File already exists: {repr(path)}
+#+end_quote
+
+The middleware will detect both via a single regex: a leading "Cannot
+write to" OR "Error: File already exists:".
+
+** New error message
+Replace the deepagents text with one designed for a small model:
+
+#+begin_quote
+Error: =/path/to/file= already exists.  To modify it, call =read_file=
+to see the current content, then call =edit_file= with the exact
+=old_string= and =new_string= you want to change.  Do NOT call
+=write_file= again with a different filename — the existing file is
+the one you should edit.
+#+end_quote
+
+Three concrete properties:
+1. *Names the existing file.*  No ambiguity about which file.
+2. *Points at =edit_file=* with exact next steps (=read_file= first).
+   Positive redirection beats a "do not" instruction for a small
+   model.
+3. *Names the failure mode the small model is prone to* ("Do NOT call
+   write_file again with a different filename").  Negative
+   reinforcement of the specific bad behaviour.
+
+** File-level changes
+- =assist/middleware/write_collision.py= (new, ~50 lines).  Module
+  docstring, regex, =WriteCollisionMiddleware(AgentMiddleware)= class
+  with =wrap_tool_call=.  Mirrors the structure of
+  =read_only_enforcer.py=.
+- =assist/agent.py=: instantiate the middleware once in =create_agent=,
+  =create_research_agent=, =create_context_agent= (no-op there since
+  context agent is read-only, but we wire it in for defence in depth
+  if the read-only enforcer is ever relaxed).  Slot it *after* the
+  tool runs and *before* loop-detection sees the result, so the
+  rewritten error is what loop-detection observes.
+
+** Wiring order
+Current general-agent middleware list (=assist/agent.py:125=):
+
+#+begin_src python
+mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+      context_eviction_mw, loop_detection_mw]
+#+end_src
+
+Add =write_collision_mw= between =context_eviction_mw= and
+=loop_detection_mw=:
+
+#+begin_src python
+mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+      context_eviction_mw, write_collision_mw, loop_detection_mw]
+#+end_src
+
+Reasoning:
+- After =context_eviction_mw=: eviction acts on tool-result size, not
+  collision errors; collision errors are tiny so eviction is a no-op
+  for them.  Order doesn't matter functionally, just keeping
+  size-related middleware grouped.
+- *Before* =loop_detection_mw=: critical.  Loop detection's Pattern C
+  (=distinct-args-thrash=) treats the rewritten error as the
+  observable result; we want it to see the new message so its
+  "errored on the same kind of problem" check stays accurate.
+
+** Eval plan
+Acceptance criteria, in order:
+
+1. *Unit-style eval* (new, fast — no LLM): synthesise a
+   =ToolCallRequest= for =write_file= where the underlying handler
+   returns the collision error.  Assert the middleware rewrites the
+   result to the new message.  Lives at
+   =edd/eval/test_write_collision_middleware.py=.
+
+2. *Memory-trap regression* (existing, =test_memory.py=):
+   =test_doesnt_include_tags= and =test_writes_memory_implicit=
+   currently fail because the model can't recover from the collision
+   on =AGENTS.md=.  After the fix, =test_doesnt_include_tags= should
+   PASS or at minimum produce a single =edit_file= attempt instead of
+   spiraling into filename mutation.
+
+3. *Skill-system canary* (existing, =test_org_format_skill.py=,
+   =test_dev_skill_multi_turn::test_mid_task_clarification=): must
+   still pass — the fix should not regress write paths that don't
+   collide.
+
+4. *Existing single-test smoke* (=test_dev_agent::test_explains_codebase=):
+   must still pass.  Confirms the middleware addition doesn't break
+   the general agent.
+
+Out of scope tonight (10:30p PDT cutoff):
+- The full =edd/eval/= suite re-baseline runs overnight separately.
+  This plan validates the targeted unit + integration evals only.
+
+* Risks and gotchas
+- *Regex false positive*: the detection regex must not match
+  unrelated errors that happen to contain the substring "Cannot write
+  to".  Mitigation: anchor the regex to the start of the message
+  ("^Cannot write to ").  Test the false-positive case in the unit
+  eval.
+- *Sandbox backend shape difference*: the sandbox-specific error
+  ("Error: File already exists: ...") needs separate detection.
+  Covered by an OR in the regex.
+- *Async path*: deepagents has both =sync_write_file= and
+  =async_write_file=.  =wrap_tool_call= covers both because it
+  intercepts at the request level, not the function level.  Confirmed
+  by reading =deepagents/middleware/filesystem.py:805-848=.
+- *Other tools that share the wording*: =edit_file= can return
+  similar messages on file-not-found, but its error template doesn't
+  start with "Cannot write to".  Filtering by =request.tool_call["name"]
+  == "write_file"= avoids cross-tool contamination.
+- *Subagent paths*: subagents (=context-agent=, =research-agent=)
+  inherit middleware lists in =assist/agent.py= but only get the
+  subset passed in =[retry_middle, json_validation_mw, tool_name_mw]=.
+  We need to pass =write_collision_mw= explicitly to subagents that
+  can write — i.e. =research-agent=.  Context-agent has the
+  read-only enforcer and never gets to =write_file=.
+
+* Sequencing
+1. Plan (this doc) — done.
+2. Two parallel reviews:
+   a. Adherence to current middleware patterns + langchain/deepagents
+      best practices.
+   b. Small-LLM specifics (Qwen3-Coder-30B-A3B, 53,616-token context).
+3. Implementation: middleware module + agent.py wiring + unit eval.
+4. Code review (subagent team): correctness, readability, refactor
+   opportunities.
+5. Targeted eval: unit + memory-trap regression + canary.
+6. Iterate as needed.
+7. Stop all evals at 22:30 PDT for the overnight re-baseline.
+
+* Open questions for review
+- Should the new error mention loop-detection (e.g. "after 3 such
+  attempts the agent will be terminated")?  Probably no — that's
+  meta-information that may confuse the model more than it helps.
+- Should the middleware be wired into =create_dev_agent=?  The
+  function was deleted today (commit 634f564), so the question is
+  moot.  Note for the reviewer.
