@@ -23,6 +23,7 @@ from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+from assist.middleware.write_collision import WriteCollisionMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -119,9 +120,14 @@ def create_agent(model: BaseChatModel,
     context_eviction_mw = ContextAwareToolEvictionMiddleware(
         trigger_fraction=0.60,
     )
+    # Rewrite write_file collision errors so the small model is redirected to
+    # edit_file instead of inventing a new filename.  Must run before
+    # loop_detection_mw so the rewritten error is what the loop detector sees.
+    write_collision_mw = WriteCollisionMiddleware()
     loop_detection_mw = LoopDetectionMiddleware()
 
-    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw, context_eviction_mw, loop_detection_mw]
+    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+          context_eviction_mw, write_collision_mw, loop_detection_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
@@ -263,6 +269,11 @@ def create_research_agent(model: BaseChatModel,
         trigger_fraction=0.55,
     )
     base_mw.append(context_eviction_mw)
+    # Rewrite write_file collision errors before loop detection sees them —
+    # research-agent is the most likely path to hit the filename-mutation
+    # trap (multi-pass critique → "I have completed the research" → another
+    # write_file).
+    base_mw.append(WriteCollisionMiddleware())
     base_mw.append(LoopDetectionMiddleware())
 
     if sandbox_backend:
