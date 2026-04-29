@@ -813,10 +813,12 @@ def render_evals() -> str:
 
     rows_html = []
     for key in all_keys:
-        # Short display name: just the method part
+        # Short display name: method, with just the class name as subtitle
+        # (full module path lives in the tooltip — saves horizontal space).
         parts = key.split("::")
         short = html.escape(parts[-1])
-        class_part = html.escape("::".join(parts[:-1])) if len(parts) > 1 else ""
+        class_full = parts[0] if len(parts) > 1 else ""
+        class_part = html.escape(class_full.rsplit(".", 1)[-1])
         tooltip = html.escape(key)
 
         row_cells = (
