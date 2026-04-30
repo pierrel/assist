@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Software development workflow. Load before starting any task that involves writing, editing, debugging, reviewing, or explaining code in a software project. Covers the TDD workflow (explore → plan → red tests → green impl → critique), task-mode routing (code-change vs documentation vs explanation), and the standing rules for code work.
+description: Software development work in a code project. TRIGGER WORDS — code, codebase, project, repo, function, class, method, module, test, TDD, refactor, bug, debug, fix, implement, feature, pyproject.toml, package.json, Cargo.toml, go.mod, Makefile, Dockerfile. MUST load before any tool call that explores, explains, writes, edits, or runs code in a software project.
 ---
 
 # Software Development Workflow
