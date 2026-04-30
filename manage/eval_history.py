@@ -88,7 +88,9 @@ def _save_cache(cache: dict) -> None:
 def get_runs(limit: int = 10) -> list[dict]:
     """Return the last `limit` runs, refreshing the cache for any new/changed files.
 
-    Runs are sorted by ID (which encodes date-time), most-recent last.
+    Runs are sorted by ID (which encodes date-time), most-recent first — so
+    the web grid shows newest runs on the left and the user doesn't have to
+    scroll right to see the latest results.
     """
     cache = _load_cache()
     cached_by_file: dict[str, dict] = {r["file"]: r for r in cache.get("runs", [])}
@@ -123,4 +125,4 @@ def get_runs(limit: int = 10) -> list[dict]:
         cache["runs"] = all_runs
         _save_cache(cache)
 
-    return all_runs[-limit:]
+    return all_runs[-limit:][::-1]
