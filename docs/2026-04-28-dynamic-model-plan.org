@@ -1,0 +1,470 @@
+State: Draft (2026-04-28) — review deltas applied
+* Review deltas applied (2026-04-28)
+Two parallel reviews ran against the original draft.  Both approved
+with deltas; all are folded into the body below.  Summary:
+
+** From the langchain/patterns review
+- Risks section read =error.body.get("error", {}).get("code")= for the
+  =model_not_found= discriminator.  Wrong: =openai/_exceptions.py:50-65=
+  shows =APIError.__init__= already extracts =body["code"]= to
+  =self.code=.  Use =exc.code == "model_not_found"= directly.
+- =create_research_agent= and =create_context_agent= build their *own*
+  =base_mw= lists (=assist/agent.py:207-220=, =:259-277=); the
+  =middleware== parameter only carries a 3-item subset.
+  =ModelNotFoundMiddleware= must be instantiated *inside each
+  base_mw list*, not assumed to inherit.
+- Sibling-structure parity with =write_collision.py=: top-level
+  predicate (=_is_model_not_found(exc)=), class with both
+  =wrap_model_call= and =awrap_model_call= delegating to it, module
+  docstring shaped problem → behavior → ordering note.
+- Test plan: module globals don't auto-reset between tests like
+  =lru_cache= would.  Add a pytest fixture that clears =_cached_config=.
+- Log invalidation events at =warning= (matches
+  =BadRequestRetryMiddleware=).
+
+** Design revision: callback handler, not middleware (2026-04-28)
+The original plan proposed a =ModelNotFoundMiddleware=
+(=AgentMiddleware= subclass with =wrap_model_call= /
+=awrap_model_call=).  Reviewer feedback during iteration: the test
+file "doesn't look like middleware" — and on inspection, the user is
+right.  Middleware in this codebase *modifies* tool/model behavior
+(rewrite errors, retry, evict, block).  What we actually want is a
+*passive observer* that fires =invalidate_config_cache()= and
+otherwise stays out of the way.
+
+That's a =BaseCallbackHandler= subclass, not an =AgentMiddleware=.
+Updated design:
+
+#+begin_src python
+# in assist/model_manager.py — colocated with the cache
+class _ModelNotFoundCacheBuster(BaseCallbackHandler):
+    def on_llm_error(self, error, **kwargs):
+        if isinstance(error, openai.NotFoundError) and \
+           getattr(error, "code", None) == "model_not_found":
+            invalidate_config_cache()
+#+end_src
+
+Wired into =_build_openai_chat_model= via
+=kwargs["callbacks"] = [_ModelNotFoundCacheBuster()]=.  Wins:
+- Lives next to the cache it invalidates — single file, one concept.
+- No =agent.py= changes; no wiring across three factories; no
+  subagent inheritance gotcha.
+- Tests live next to other cache tests in
+  =tests/model_manager/test_dynamic_model.py= — no separate
+  middleware test file.
+- Smaller diff.
+
+The earlier "From the langchain/patterns review" deltas about
+=create_research_agent= / =create_context_agent= base_mw lists no
+longer apply — those agents inherit the underlying =ChatOpenAI=
+instance (which carries the callback) when built from the same
+=Thread.model=, so coverage is automatic.
+
+** Lazy =ThreadManager.model= (2026-04-28)
+Important constraint surfaced during plan review: the user starts the
+web server and vLLM in parallel; the web server must boot even when
+vLLM is unreachable.  Today this works because =ChatOpenAI(...)=
+construction is lazy (no network at init); the first =invoke()= is
+where vLLM is touched.
+
+The proposed probe in =_get_config()= would *break* that — calling
+=select_chat_model(0.1)= during =ThreadManager.__init__=
+(=assist/thread.py:170=, fired at module load via =manage/web.py:29=
+=MANAGER = ThreadManager(ROOT)=) would HTTP the vLLM endpoint at
+server startup.
+
+Fix: make =ThreadManager.model= a lazily-resolved attribute.  Smallest
+diff is a =@property= that calls =select_chat_model(0.1)= on first
+access and caches on the instance.  First access happens inside
+request handlers (=Thread.__init__=, =_initialize_thread=), so the
+probe fires when the first request arrives, not at boot.
+
+#+begin_src python
+class ThreadManager:
+    def __init__(self, root_dir: str | None = None):
+        # ... existing setup, but DROP `self.model = select_chat_model(0.1)` ...
+        self._model = None
+
+    @property
+    def model(self):
+        if self._model is None:
+            self._model = select_chat_model(0.1)
+        return self._model
+#+end_src
+
+Add a unit test that imports =manage.web= with the live probe
+monkeypatched to raise — verifies module load doesn't network.
+
+** From the deployment-safety review
+- *=Makefile=* (=:78-92=, target =deploy-service=) SSH-passes all
+  four removed vars to =install-service.sh=.  Original plan missed
+  this.  Drop those four lines.
+- *=README.md=* references the removed vars in four blocks
+  (=:62-65=, =:192-195=, =:282-292=, =:434=) — Quick Start, Production
+  deploy example, Required-Variables table, Optional-Variables table,
+  troubleshooting =grep=.  Original plan only mentioned "the env-var
+  table"; all four sites need updates.
+- =roadmap.org:38= and =docs/2026-04-26-token-max-mismatch-investigation.md=
+  also reference removed vars in multiple places.
+- *Existing OpenAI fallback at =model_manager.py:102= is broken
+  today*: =_build_openai_chat_model(model, ...)= references a name
+  =model= that's undefined at that scope (NameError on the
+  no-config branch).  This branch never runs in practice (every
+  deploy has =ASSIST_MODEL_URL= set), but it's a latent bug.  Plan
+  amended to either fix it (=model="gpt-4o-mini"= literal) or remove
+  it.  Recommendation: remove — we don't actually want a silent
+  fallback to public OpenAI; we want a loud error if the local
+  endpoint is misconfigured.
+- *Stale systemd unit during rollout* is inert (the new
+  =model_manager.py= just ignores the old =ASSIST_MODEL_NAME= /
+  =ASSIST_CONTEXT_LEN= envs).  But the plan should explicitly say
+  "re-run =make deploy-service= after merge" in the sequencing
+  section.
+- *=Makefile= and =install-service.sh= must change atomically* —
+  silent divergence is possible because the bash =[ -n ]= guards
+  fail open.  One commit, both files.
+- *Unit-test isolation*: any test that imports through
+  =assist.agent= will transitively call =select_chat_model=.  Add an
+  autouse fixture in =tests/conftest.py= that monkeypatches
+  =_get_config= so unit tests never network.
+- *=ASSIST_MODEL_URL= change requires service restart* (cache holds
+  old URL until process exit).  =invalidate_config_cache()= only
+  fires on =model_not_found=.  Document this; don't add a TTL.
+
+* Problem
+Updating the model on the llm-serving machine requires editing several
+small config surfaces in lock-step:
+
+- =.dev.env=  (=ASSIST_MODEL_NAME=, =ASSIST_CONTEXT_LEN=)
+- =.deploy.env=  (same)
+- the systemd unit on the deploy box  (regenerated by =scripts/install-service.sh=)
+
+We only ever serve one model at a time on the local vLLM endpoint, so
+the assist project shouldn't need to know its name or context window
+ahead of time.  The serving endpoint already exposes both via
+=GET /v1/models=:
+
+#+begin_src json
+{
+  "data": [{
+    "id": "stelterlab/Qwen3-Coder-30B-A3B-Instruct-AWQ",
+    "max_model_len": 53616,
+    ...
+  }]
+}
+#+end_src
+
+(Verified live against http://192.168.6.118:8000/v1/models on
+2026-04-28.)
+
+Source: =docs/2026-04-25-dynamic-model.org=, roadmap.org item.
+
+* Goal
+Probe the LLM endpoint at first use, cache the discovered model id and
+context length, and refresh the cache on a "model not found" error.
+Drop the now-redundant environment variables.
+
+The only env var that survives in the model-config layer is
+=ASSIST_MODEL_URL= (the endpoint base).  =ASSIST_API_KEY= becomes
+optional with a sensible local-vLLM default; =ASSIST_MODEL_NAME=,
+=ASSIST_CONTEXT_LEN=, and =ASSIST_TEST_URL_PATH= go away entirely.
+
+Non-goals:
+- Multi-model selection or routing.  We have one model.
+- Auto-retry of the failing request after cache refresh.  Refresh
+  happens on the *next* request — mid-flight retry is more complex
+  than warranted (see "Open questions" below).
+- Public-OpenAI parity for context length.  Real OpenAI's =/v1/models=
+  doesn't include =max_model_len=.  If anyone ever points this at real
+  OpenAI we'll need a default fallback then; not now.
+
+* Approach
+A small probe helper in =assist/model_manager.py= replaces
+=_load_custom_openai_config=.  Cache layout:
+
+#+begin_src python
+@dataclass(frozen=True)
+class OpenAIConfig:
+    url: str
+    model: str
+    api_key: str
+    context_len: int
+
+_cached_config: Optional[OpenAIConfig] = None
+_cache_lock = threading.Lock()
+
+def _probe_endpoint(url: str, api_key: str) -> OpenAIConfig:
+    """GET {url}/models, return config for the first model in the list."""
+    ...
+
+def _get_config() -> Optional[OpenAIConfig]:
+    """Return cached config or probe.  Returns None if URL unset."""
+    ...
+
+def invalidate_config_cache() -> None:
+    """Bust the cache.  Next _get_config() call re-probes."""
+    ...
+#+end_src
+
+** Why a probe (not env vars)
+- vLLM already serves the answer.  =/v1/models= returns =id= and
+  =max_model_len= in one call, no extra plumbing needed.
+- The serving config is already authoritative — keeping it duplicated
+  in three places (=.dev.env=, =.deploy.env=, systemd unit) is the
+  source of the bug.
+- A probe collapses three sources of truth into one: the live endpoint.
+
+** Why not =functools.lru_cache=
+The current code uses =@lru_cache(maxsize=1)= on
+=_load_custom_openai_config=.  =lru_cache= has =.cache_clear()= but
+isn't particularly elegant for the "invalidate on remote error" path,
+and it lives on the function object rather than as an explicit module
+state.  A module-level =Optional[OpenAIConfig]= with a =threading.Lock=
+makes the lifecycle obvious and gives us a clean
+=invalidate_config_cache()= entry point that can be called from
+anywhere.
+
+** API key handling
+=ChatOpenAI= requires *some* =api_key= (or it falls back to the
+=OPENAI_API_KEY= env var).  For local vLLM the value is meaningless —
+=sk-local-test-123= is a placeholder.
+
+Strategy:
+1. If =ASSIST_API_KEY= is set, use it (back-compat for any existing
+   deploy that has it set; same as today).
+2. Else if =OPENAI_API_KEY= is set (langchain's own default), let
+   =ChatOpenAI= use that.
+3. Else default to the constant string =EMPTY=.  vLLM accepts it; real
+   OpenAI rejects it (correct, since you need a real key for OpenAI
+   anyway).
+
+This removes =ASSIST_API_KEY= from =.dev.env= without breaking
+auth-required deployments.
+
+** Cache invalidation on "model not found"
+The OpenAI Python SDK raises =openai.NotFoundError= with =code=
+=model_not_found= when the requested model is no longer served.
+=langchain-openai= surfaces this as a =NotFoundError= during
+=invoke=/=ainvoke=.
+
+[Design revised — see "Design revision: callback handler" section
+above.  Implementation is a =BaseCallbackHandler= subclass attached to
+the =ChatOpenAI= instance via the =callbacks== kwarg, *not* an
+=AgentMiddleware=.  The text below is preserved as historical context;
+treat the callback-handler design as authoritative.]
+
+Plan: a tiny =ModelNotFoundMiddleware= wrapping =wrap_model_call= /
+=awrap_model_call= that catches =NotFoundError= with
+=model_not_found= code, calls =invalidate_config_cache()=, and
+re-raises.  The caller sees the error; next request re-probes and gets
+the new model.  No mid-flight retry — the request that triggered the
+mismatch fails, but the system self-heals on the next request.
+
+This is the same pattern as =bad_request_mw= in =assist/agent.py= —
+catch a specific upstream error, do a side effect, surface the error.
+
+Open question: do we want a one-shot in-flight retry?  See "Open
+questions" below.
+
+** File-level changes
+- =assist/model_manager.py=: replace =_load_custom_openai_config= with
+  =_get_config= + =_probe_endpoint= + =invalidate_config_cache=.
+  =OpenAIConfig= unchanged.  =select_chat_model= now does
+  =config = _get_config()=.
+- =assist/model_manager.py=: in addition to the probe/cache work,
+  add a small =_ModelNotFoundCacheBuster(BaseCallbackHandler)= class
+  that overrides =on_llm_error=.  It checks
+  =isinstance(error, openai.NotFoundError) and getattr(error, "code",
+  None) == "model_not_found"=, calls =invalidate_config_cache()=
+  (logged at =warning=), and returns.  Wire it into
+  =_build_openai_chat_model= via =kwargs["callbacks"] =
+  [_ModelNotFoundCacheBuster()]=.  *No =agent.py= changes are
+  required* — the callback rides on the =ChatOpenAI= instance and
+  fires for any =invoke=/=ainvoke= regardless of which agent factory
+  built the agent.
+- =assist/thread.py=: drop =self.model = select_chat_model(0.1)= from
+  =ThreadManager.__init__= (=:170=).  Replace with =self._model = None=
+  and a =@property model= that lazily calls =select_chat_model(0.1)=
+  on first access.  This preserves today's behavior of "web server
+  starts up without needing vLLM available" — the probe in
+  =_get_config()= only fires when the first request arrives.
+- =Makefile= (=:78-92=, =deploy-service= target): drop the four lines
+  that SSH-pass =ASSIST_MODEL_NAME=, =ASSIST_API_KEY=,
+  =ASSIST_CONTEXT_LEN=, =ASSIST_TEST_URL_PATH= to the install script.
+  Must change atomically with =install-service.sh= (one commit, both
+  files) — the bash =[ -n ]= guards fail open and would silently
+  diverge.
+- =scripts/install-service.sh= (=:21-29=): drop the four lines that
+  propagate the removed vars into systemd.  Keep =ASSIST_MODEL_URL=.
+- =.dev.env=: drop =ASSIST_MODEL_NAME=, =ASSIST_API_KEY=,
+  =ASSIST_CONTEXT_LEN=, =ASSIST_TEST_URL_PATH=.  Keep
+  =ASSIST_MODEL_URL=.
+- =.deploy.env=: same.  (=.deploy.env= is gitignored; verify
+  =git status= after edit to ensure no accidental tracking.)
+- =README.md=: four blocks to update, not one — =:62-65= (Quick Start
+  example), =:192-195= (Production deploy example), =:282-292=
+  (Required + Optional variable tables), =:434= (troubleshooting
+  =grep=).  Net result: only =ASSIST_MODEL_URL= (required) and
+  =ASSIST_API_KEY= (optional, only for real OpenAI) remain in the
+  table.  Add a short paragraph noting auto-discovery behavior.
+- =roadmap.org= (=:38=): mark the dynamic-model item complete (post-
+  implementation), and remove the var-name list from the body so it
+  doesn't outlive the change.
+- =docs/2026-04-26-token-max-mismatch-investigation.md= (=:39-48=,
+  =:174=): historical investigation record — append a one-line "Note
+  (2026-04-28): =ASSIST_CONTEXT_LEN= is now auto-discovered from
+  =/v1/models=; this doc remains for historical context."  Don't
+  rewrite the body.
+
+** Wiring order in agent.py
+*N/A under the revised design.*  The cache-invalidation hook lives on
+the =ChatOpenAI= instance via =callbacks== kwarg, not on the agent
+middleware stack.  The agent middleware list is unchanged from
+today's:
+
+#+begin_src python
+mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+      context_eviction_mw, write_collision_mw, loop_detection_mw]
+#+end_src
+
+* Eval plan
+Acceptance criteria:
+
+1. *Unit tests* (new, no LLM):
+   =tests/model_manager/test_dynamic_model.py=.
+   - =test_probe_extracts_model_and_context_len=: mock
+     =httpx.get('/v1/models')= to return the canonical vLLM payload;
+     assert =OpenAIConfig.model= and =.context_len= populated.
+   - =test_cache_returns_same_object_on_second_call=: two calls hit
+     the network once.
+   - =test_invalidate_forces_reprobe=: after =invalidate=, second call
+     hits the network again.
+   - =test_picks_first_model_when_multiple=: defines behavior for the
+     unlikely future case.
+   - =test_handles_missing_max_model_len=: vLLM payload without
+     =max_model_len= falls back to =32768= (current default) and
+     logs a warning.
+   - =test_api_key_fallback_chain=: =ASSIST_API_KEY= → =OPENAI_API_KEY=
+     → =EMPTY=.
+
+2. *Unit tests for the cache-buster callback* (new, no LLM):
+   colocated in =tests/model_manager/test_dynamic_model.py= (no
+   separate middleware test file — the buster is a callback handler,
+   not middleware).
+   - =test_invalidates_cache_on_model_not_found=: synthesise a
+     =_ModelNotFoundCacheBuster=, prime the cache, then call
+     =on_llm_error= with an =openai.NotFoundError= whose =code= is
+     =model_not_found=.  Assert the cache is busted on the next
+     =_get_config()=.
+   - =test_passes_through_other_errors=: a generic =NotFoundError=
+     without =code=model_not_found= leaves the cache populated.
+   - =test_async_callback=: same coverage via the async sibling
+     hook (=BaseCallbackHandler= exposes =async def on_llm_error=).
+
+3. *Test isolation* (new, =tests/conftest.py=): autouse fixture that
+   clears =assist.model_manager._cached_config= before each test and
+   monkeypatches =_get_config= to a static =OpenAIConfig= for any
+   test that imports through =assist.agent= transitively.  Module
+   globals don't auto-reset between tests like =@lru_cache= would,
+   and we don't want unit tests reaching for the live vLLM endpoint.
+
+4. *Lazy =ThreadManager.model= regression* (new, no LLM):
+   =tests/test_thread_manager_lazy.py= — monkeypatch
+   =assist.model_manager.select_chat_model= to raise; import
+   =manage.web=; assert no exception (proves module load doesn't
+   probe).  Then call any handler that touches =MANAGER.model=
+   (e.g. via a =Thread= construction) and assert =select_chat_model=
+   is invoked.
+
+5. *Live smoke test*:
+   - With nothing in =.dev.env= except =ASSIST_MODEL_URL=, run
+     =edd/eval/test_org_format_skill.py= (single test, fast).  Should
+     pass — proving auto-discovery works end-to-end.
+   - Run =python -c "from assist.model_manager import select_chat_model;
+     m = select_chat_model(0.1); print(m.model_name)"= and confirm
+     it prints the served model id.
+
+6. *Existing tests must still pass*:
+   - =tests/= unit suite (full).  No LLM, fast.
+   - One LLM-touching canary: =edd/eval/test_dev_agent::test_explains_codebase=.
+   Out of scope (overnight re-baseline handles full eval suite):
+   - The full =edd/eval/= suite.
+
+* Risks and gotchas
+- *Probe at import time vs first use*: probe at first call to
+  =select_chat_model=, not at module import.  Module import happens
+  during test collection and we don't want the test runner trying to
+  reach the vLLM endpoint.
+- *httpx vs requests vs urllib*: prefer =httpx= (already in deps via
+  =langchain_openai=).  No new dependency.
+- *Threading*: =threading.Lock= around the cache is enough — single
+  process, multiple agent threads in the web server.  No need for
+  asyncio locks.
+- *vLLM endpoint flake at startup*: if the probe fails the first time,
+  raise a clear =RuntimeError= that says "Could not reach
+  =${ASSIST_MODEL_URL}/models=; check that vLLM is running."  Don't
+  silently fall back to a default — we want loud failure so the
+  operator notices.
+- *Stale cache during a model swap*: this is the behavior the
+  middleware fixes.  Worst case: the request that catches the swap
+  fails with =NotFoundError=; the user sees an error, retries, and
+  the second request succeeds with the new model.  Acceptable.
+- *=NotFoundError= shape*: =openai.NotFoundError= is the SDK exception;
+  =code= is on the response body, not the exception attribute
+  directly.  Check =error.body.get("error", {}).get("code")= or the
+  =message= text.  Confirm during implementation.
+- *Subagents inherit the middleware list selectively*: per the
+  pattern documented in =write_collision.py=, only some subagent
+  factories get the full list.  =model_not_found_mw= should go on
+  *all* agent factories that make model calls — i.e. all of them.
+- *=conversation_history/= and =docs/2026-04-27-qwen-quantization-guide.md=
+  reference the removed vars*: history files are append-only, leave
+  alone.  The quantization guide has =export ASSIST_MODEL_NAME=...=
+  examples — update those to remove =MODEL_NAME= and =CONTEXT_LEN=
+  exports, keep =MODEL_URL=.
+
+* Open questions for review
+1. *Mid-flight retry on model_not_found?*  Currently planned: no.  The
+   alternative is to invalidate, re-probe, and resubmit the same
+   request inside the middleware.  This is more complex (need to
+   re-bind the agent's underlying ChatOpenAI to the new model) but
+   gives a smoother UX.  Recommendation: ship without mid-flight
+   retry, add later if it's actually painful.
+2. *Should we probe eagerly at web-server startup?*  Pro: fail fast
+   if vLLM is unreachable.  Con: slows down test runs that import the
+   server module.  Recommendation: lazy on first use, but expose a
+   =warm_cache()= helper that the web server's startup hook can call
+   if it wants eager validation.
+3. *Public-OpenAI fallback?*  Resolved during deployment-safety
+   review: the existing fallback branch at =model_manager.py:102=
+   (=_build_openai_chat_model(model, ...)=) is *already broken* —
+   =model= is undefined at that scope (NameError).  The branch never
+   runs in practice because every deploy has =ASSIST_MODEL_URL= set.
+   Decision: *remove* the dead branch, replace with a clear
+   =RuntimeError= ("=ASSIST_MODEL_URL= is required").  We don't want
+   a silent fallback to public OpenAI; we want a loud failure if the
+   local endpoint isn't configured.
+4. *Config-cache TTL?*  Currently: cache is process-lifetime, only
+   busted by =invalidate_config_cache()=.  Alternative: re-probe every
+   N minutes.  Recommendation: skip the TTL — it adds complexity
+   without solving a real problem (model swaps are rare and the
+   error-driven invalidation handles them).
+
+* Sequencing
+1. Plan (this doc) — done.
+2. Two parallel reviews — done.  Deltas folded above.
+3. Implementation: probe + cache + middleware + agent wiring + env
+   cleanup + README update + Makefile/install-service.sh
+   (atomically) + remove broken =gpt-4o-mini= fallback branch.
+4. Code review (subagent team): correctness, readability, refactor
+   opportunities.
+5. Targeted eval: unit tests + live smoke + canary.
+6. Iterate as needed.
+7. Stop all evals at 22:30 PDT for the overnight re-baseline.
+
+** Post-merge note for the operator
+After this lands and is merged, on the deploy host:
+=make deploy-service= must be re-run so the systemd unit is
+regenerated without the four removed =Environment== lines.  The old
+unit is *inert* (the new code ignores those envs) but should be
+cleaned up.  Add to the commit message.

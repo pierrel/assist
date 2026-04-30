@@ -1,3 +1,5 @@
+# Exploration guidelines
+Always read the README file before doing any work to understand project structure, patterns, and conventions.
 # Design guideline
 1. **Prime Directive: never design against the requirements**
    Design the architecture to *absorb change*, not to mirror today’s use cases. ([InfoQ][1])
