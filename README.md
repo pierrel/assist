@@ -446,6 +446,79 @@ keeps the surface area constant.
 
 ---
 
+## Memory
+
+The memory system is built on `MemoryMiddleware` from
+[deepagents](https://github.com/langchain-ai/deepagents) but with the
+same small-model-tuning treatment as Skills. Upstream's mechanism is
+**read happens automatically; write happens through `edit_file` with
+guidance prose**. Empirically the small model invents file names
+(`/user_info.md`) instead of writing to the configured `AGENTS.md`,
+or it acknowledges the fact in conversation and never calls a tool at
+all. Our variant in `assist/middleware/memory_middleware.py` keeps
+the auto-load read pathway unchanged and replaces the write pathway:
+
+- A dedicated **`save_memory(content=...)`** tool, registered by the
+  middleware, replaces "use `edit_file` against the memory path". The
+  model only chooses the content; the path and the append-vs-replace
+  strategy are baked into the tool. The tool returns a `Command` that
+  also updates `memory_contents` in agent state, so a subsequent turn
+  on the same thread sees the freshly-saved fact (the upstream
+  `before_agent` only loads once per session).
+- A short, imperative **system-prompt template** that ends with a
+  mandatory pre-action check — scan the latest user message for a
+  fact about the user that's not already in `<agent_memory>`, and if
+  found, call `save_memory` before any work tool.
+- A **fail-closed read-then-write**: if the existing memory file
+  can't be read (transient backend error, decode failure), the tool
+  refuses to write rather than clobbering with empty content.
+
+### The two layers of guidance
+
+Memory has fewer layers than Skills because there is only one memory
+file (no per-skill descriptions to write):
+
+1. **System prompt** (`assist/templates/deepagents/general_instructions.md.j2`)
+   — Step 0 names `save_memory` as a pre-action tool alongside
+   `load_skill`. Project-wide rules; never describes when to save
+   specifically.
+2. **Memory middleware prompt** (`SMALL_MODEL_MEMORY_PROMPT` in
+   `memory_middleware.py`) — how memory works in general: the
+   `<agent_memory>` frame, the `save_memory` tool, when to save vs.
+   not, the pre-action check. Generic — never names a specific user
+   fact or memory-file format.
+
+The agent never sees the memory path; it only ever sees the loaded
+content (inside `<agent_memory>` tags) and the `save_memory` tool.
+Adding a second source (e.g. a global `~/AGENTS.md`) would mean
+extending `sources=` in `agent.py` and updating the `_format_agent_memory`
+override — no prompt edits.
+
+### Concurrency note
+
+`save_memory` does a read-then-write of the entire memory file. The
+deepagents tool loop runs sequentially within a thread, so a single
+`save_memory` call per turn is safe. If the model ever emits two
+parallel `save_memory` tool calls in one assistant message, the
+second can clobber the first. We have not seen this in practice and
+do not lock; the constraint is documented at the tool-factory call
+site instead.
+
+### Adding a new memory source
+
+The current `SmallModelMemoryMiddleware.__init__` takes a single
+`memories_path: str`. Multi-source support would require:
+
+1. Widen the constructor to `memories_paths: list[str]` and pass the
+   list through to `super().__init__(sources=memories_paths)` — the
+   upstream load pathway already iterates `self.sources`.
+2. Decide the write strategy. The `save_memory` tool currently writes
+   to a single fixed path. Options for multi-source writes: add a
+   `target` enum argument the model picks, or register one tool per
+   source (e.g. `save_user_memory`, `save_project_memory`).
+
+---
+
 ## Project Structure
 
 ```
@@ -465,6 +538,7 @@ assist/
 │   ├── tools.py             # Tool functions (read_url, search_internet, …)
 │   ├── middleware/          # Custom AgentMiddleware classes
 │   │   ├── skills_middleware.py        # SmallModelSkillsMiddleware
+│   │   ├── memory_middleware.py        # SmallModelMemoryMiddleware
 │   │   ├── read_only_enforcer.py       # ReadOnlyEnforcerMiddleware
 │   │   ├── loop_detection.py           # LoopDetectionMiddleware
 │   │   ├── context_aware_tool_eviction.py
