@@ -64,15 +64,12 @@ Production already passes =sandbox_backend= through every agent factory (see =as
 Today's =test_org_format_skill.py= passes mainly because the small model can infer org structure from reading the file.  Design a test where the body-rule is *not* visually obvious (e.g. multi-level subheadings, no body content yet) — the kind of case that needs the skill's procedure.  Confirms the skill earns its slot in the manifest.
 ** TODO Memory-middleware / tool-API trap
 Documented as an open question in the skills doc and partly overlaps with the =write_file= recoverability item above.  The deepagents memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content; combined with =write_file='s refuse-overwrite policy this produces a no-clean-exit loop.  Either fix needs both ends to align.
-<<<<<<< Updated upstream
 ** TODO Make more evals around skill use
 The evals should test varying levels of skill mentions (implicit vs explicit) and check whether the appropriate skill(s) were loaded.
 ** TODO Implement small-llm compatible memory similar to what was done with skills
 Create more extensive evals for the memory implementation.
-=======
 ** TODO README cleanup and guidance
-Update the README to reflect how the skills system here works and how it is based largely ondeepagents but with these modifications? For example, how to format the description, how to keep things generic for more buildout of skills. And in general how guidance should be provided to the agent (system prompt: available agents and general guidance, skills prompt: how and when to use skills and skills list, skills: description: when to load and what its for, body: guidance for the agent on that specific)
->>>>>>> Stashed changes
+Update the README to reflect how the skills system here works and how it is based largely on deepagents but with these modifications? For example, how to format the description, how to keep things generic for more buildout of skills. And in general how guidance should be provided to the agent (system prompt: available agents and general guidance, skills prompt: how and when to use skills and skills list, skills: description: when to load and what its for, body: guidance for the agent on that specific)
 * Memory
 ** TODO Come up with at least 3 memory plans
 Some considerations:
