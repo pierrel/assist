@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_S = 10.0
 
+# HTTP request timeout for ChatOpenAI in seconds. Without this, a hung
+# upstream (vLLM stalled on a generation, network blip with no RST) can
+# leave the agent loop blocked on a single ``invoke()`` indefinitely —
+# which is how a single cron-launched eval run grew to 16 GB RSS over
+# 21 hours. 180s is comfortably above realistic generation latencies
+# for our local model and well below "noticeable hang" territory.
+_REQUEST_TIMEOUT_S = 180.0
+
 
 @dataclass(frozen=True)
 class OpenAIConfig:
@@ -187,6 +195,7 @@ def _build_openai_chat_model(
         model=model,
         temperature=temperature,
         max_retries=0,
+        timeout=_REQUEST_TIMEOUT_S,
         callbacks=[_ModelNotFoundCacheBuster()],
         base_url=base_url,
         api_key=api_key,
