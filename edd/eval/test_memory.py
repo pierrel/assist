@@ -49,4 +49,42 @@ class TestMemory(AgentTestMixin, TestCase):
         self.assertRegex(memory_after, "cats",
                          "Should add the fact to memory")
 
+    def test_writes_memory_explicit_feedback(self):
+        """Multi-turn: user gives explicit forward-looking feedback.
+
+        Turn 1 is a benign action; turn 2 gives the agent a rule
+        ("in the future ...") that should land in memory as a
+        persistent preference, not be acknowledged in prose only.
+        """
+        agent, root = self.create_agent({"AGENTS.md": ""})
+        agent.message("Show me a quick hello world.")
+        agent.message(
+            "In the future, write all code examples in Python."
+        )
+        memory_after = read_file(os.path.join(root, "AGENTS.md"))
+        self.assertRegex(
+            memory_after, "Python",
+            "Should capture the future-tense feedback as a "
+            "persistent preference."
+        )
+
+    def test_writes_memory_implicit_feedback(self):
+        """Multi-turn: user states a preference without 'remember' or
+        'in the future' framing.
+
+        Turn 1 is a benign action; turn 2 is a bare preference
+        statement ("I prefer X over Y") that the model should
+        recognize as a persistent fact and save — even though the
+        user did not explicitly ask for it to be remembered.
+        """
+        agent, root = self.create_agent({"AGENTS.md": ""})
+        agent.message("Show me a quick hello world.")
+        agent.message("I prefer Python over JavaScript.")
+        memory_after = read_file(os.path.join(root, "AGENTS.md"))
+        self.assertRegex(
+            memory_after, "Python",
+            "Should capture the bare preference statement even "
+            "without 'remember' or 'in the future' framing."
+        )
+
 

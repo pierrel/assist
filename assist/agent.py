@@ -22,6 +22,7 @@ from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
 
 
@@ -110,6 +111,7 @@ def create_agent(model: BaseChatModel,
         backend = _create_standard_backend(working_dir)
 
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=[SKILLS_ROUTE])
+    memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
     context_sub = CompiledSubAgent(
         name="context-agent",
@@ -144,12 +146,10 @@ def create_agent(model: BaseChatModel,
         system_prompt=base_prompt_for(
             "deepagents/general_instructions.md.j2",
             workspace_dir=workspace_dir,
-            memories_path=memories_path,
         ),
-        middleware=mw + [skills_mw, logging_mw],
+        middleware=mw + [skills_mw, memory_mw, logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
-        memory=[memories_path],
     )
 
     return agent
