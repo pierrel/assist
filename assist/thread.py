@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 import tempfile
 from datetime import datetime
@@ -166,8 +167,19 @@ n    checkpointing via SqliteSaver.
         # SqliteSaver expects a sqlite3.Connection
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.checkpointer = SqliteSaver(self.conn)
-        # Create and reuse one chat model for all threads
-        self.model = select_chat_model(0.1)
+        # Lazily resolve the chat model so the web server can boot before
+        # the LLM endpoint is reachable.  First request triggers the probe;
+        # the lock prevents two concurrent first-requests from probing twice.
+        self._model = None
+        self._model_lock = threading.Lock()
+
+    @property
+    def model(self):
+        if self._model is None:
+            with self._model_lock:
+                if self._model is None:
+                    self._model = select_chat_model(0.1)
+        return self._model
 
     def list(self) -> list[str]:
         """Return thread IDs filtered (no soft-deleted) and sorted by mtime descending."""

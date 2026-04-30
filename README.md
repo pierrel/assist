@@ -58,11 +58,12 @@ sudo usermod -aG docker $USER
    **Required settings in `.dev.env`:**
    ```bash
    # Local Model Configuration
+   # Model name and context length are auto-discovered from
+   # ${ASSIST_MODEL_URL}/models on first request — no need to set them.
    ASSIST_MODEL_URL=http://localhost:8000/v1
-   ASSIST_MODEL_NAME=your-model-name
-   ASSIST_API_KEY=your-api-key
-   ASSIST_CONTEXT_LEN=78000
-   ASSIST_TEST_URL_PATH=/models
+
+   # Optional: API key (defaults to "EMPTY", which vLLM accepts)
+   # ASSIST_API_KEY=your-api-key
 
    # Optional: Git repositories for domain integration (comma-separated)
    ASSIST_DOMAINS=user@localhost:/path/to/repo.git
@@ -188,11 +189,12 @@ See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evalu
    PYTHON=python3.14
 
    # Production Model Configuration
+   # Model name and context length are auto-discovered from
+   # ${ASSIST_MODEL_URL}/models on first request.
    ASSIST_MODEL_URL=http://production-server:8000/v1
-   ASSIST_MODEL_NAME=production-model
-   ASSIST_API_KEY=production-api-key
-   ASSIST_CONTEXT_LEN=78000
-   ASSIST_TEST_URL_PATH=/models
+
+   # Optional: API key (defaults to "EMPTY", which vLLM accepts)
+   # ASSIST_API_KEY=production-api-key
 
    # Production Settings
    ASSIST_THREADS_DIR=/var/lib/assist/threads
@@ -278,21 +280,23 @@ All configuration is done via environment variables. Different files are used fo
 
 ### Required Variables
 
-| Variable            | Description                    | Example                                  |
-|---------------------|--------------------------------|------------------------------------------|
-| `ASSIST_MODEL_URL`  | OpenAI-compatible API endpoint | `http://localhost:8000/v1`               |
-| `ASSIST_MODEL_NAME` | Model identifier               | `mistralai/Ministral-3-8B-Instruct-2512` |
-| `ASSIST_API_KEY`    | API authentication key         | `sk-your-api-key`                        |
+| Variable           | Description                    | Example                    |
+|--------------------|--------------------------------|----------------------------|
+| `ASSIST_MODEL_URL` | OpenAI-compatible API endpoint | `http://localhost:8000/v1` |
+
+The model identifier and context window are discovered automatically by
+calling `${ASSIST_MODEL_URL}/models` on the first request. The cache is
+busted automatically when the upstream returns `model_not_found` (e.g.
+after the operator swaps the model on the serving host).
 
 ### Optional Variables
 
-| Variable               | Description                           | Default               |
-|------------------------|---------------------------------------|-----------------------|
-| `ASSIST_CONTEXT_LEN`   | Context window size (chars)              | `32768`               |
-| `ASSIST_TEST_URL_PATH` | Endpoint to test API availability        | None                  |
-| `ASSIST_DOMAINS`       | Git repositories, comma-separated        | None                  |
-| `ASSIST_THREADS_DIR`   | Data storage location                    | `/tmp/assist_threads` |
-| `ASSIST_PORT`          | Server port                              | `8000`                |
+| Variable             | Description                                                                                              | Default               |
+|----------------------|----------------------------------------------------------------------------------------------------------|-----------------------|
+| `ASSIST_API_KEY`     | API key. Falls back to `OPENAI_API_KEY`, then to `"EMPTY"` (which vLLM accepts and real OpenAI rejects). | `"EMPTY"`             |
+| `ASSIST_DOMAINS`     | Git repositories, comma-separated                                                                        | None                  |
+| `ASSIST_THREADS_DIR` | Data storage location                                                                                    | `/tmp/assist_threads` |
+| `ASSIST_PORT`        | Server port                                                                                              | `8000`                |
 
 See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 
@@ -431,7 +435,7 @@ If Docker is unavailable, the agent falls back to running without a sandbox.
 cat .dev.env
 
 # Verify required variables
-grep -E "ASSIST_MODEL_URL|ASSIST_MODEL_NAME|ASSIST_API_KEY" .dev.env
+grep -E "ASSIST_MODEL_URL" .dev.env
 
 # Test manually
 export $(grep -v '^#' .dev.env | xargs)
