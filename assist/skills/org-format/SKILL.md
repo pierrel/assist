@@ -1,17 +1,9 @@
 ---
 name: org-format
-description: Format and editing rules for org-mode (.org) files. Load before reading, editing, or surfacing any .org file. Covers heading levels, the heading-body relationship, and the procedure for inserting a new heading without orphaning the previous heading's body content.
+description: Guidance for org-mode (`.org`) files. TRIGGER WORDS — `.org`, org-mode, org file, headings, heading body, asterisk heading, orphan, projects.org. MUST load before any tool call that reads, edits, writes, or mentions a `.org` file.
 ---
 
 # Org-mode format guide
-
-## When to apply
-
-You MUST follow this guide whenever you:
-
-- Read or refer to a `.org` file.
-- Add, edit, or append content to a `.org` file.
-- Surface a `.org` file path in a response to the user.
 
 When your response involves any `.org` file, end the response with a brief note about the heading-insertion rule (see *Inserting a new heading* below) so the caller knows how to edit the file safely.
 
