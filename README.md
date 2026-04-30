@@ -318,6 +318,130 @@ See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 
 ---
 
+## Skills
+
+The skills system is built on the `SkillsMiddleware` from
+[deepagents](https://github.com/langchain-ai/deepagents) but with a few
+modifications tuned for the small models we run locally (e.g.
+Qwen3-Coder-30B). Upstream's mechanism is **read the SKILL.md path with
+`read_file`** — the small model is unreliable at constructing that path
+from a description. Our variant in `assist/middleware/skills_middleware.py`
+keeps progressive disclosure but changes how the model interacts with it:
+
+- A dedicated **`load_skill(name=...)`** tool, registered by the
+  middleware, replaces the upstream "use `read_file` with this path"
+  mechanism. The model never sees skill paths.
+- A short, imperative **system-prompt template** that ends with a
+  mandatory pre-action check — scan the latest user message against
+  every skill description before any other tool call.
+- A **name-only skill listing** (`- **name**: description`) — upstream's
+  `-> Read \`{path}\` for full instructions` line is stripped so there
+  are no path strings for the model to copy.
+
+### The four layers of guidance
+
+We treat the prompt as four nested concentric rings, each more specific
+than the last. Keeping each layer focused on its own concern is what
+makes the system extensible — a new skill should land without editing
+the outer rings.
+
+1. **System prompt** (`assist/templates/deepagents/general_instructions.md.j2`)
+   — what agents exist, what general process to follow, and the
+   project-wide rules. Should never name a specific skill or describe
+   skill rules. May reference the **Skills** section abstractly.
+2. **Skills middleware prompt** (`SMALL_MODEL_SKILLS_PROMPT` in
+   `skills_middleware.py`) — how skills work in general: the
+   description-then-load contract, the `load_skill` tool, the pre-action
+   check. Generic — never names a specific skill.
+3. **Skill description** (YAML frontmatter `description:` field) — a
+   single sentence-block answering *when should the agent load this
+   skill*. Not what the rules are.
+4. **Skill body** (everything after the frontmatter in `SKILL.md`) —
+   the actual rules the agent applies once it has loaded the skill.
+
+A new skill is added by creating `assist/skills/<name>/SKILL.md` —
+nothing else needs to change. If you find yourself editing layer 1 or
+layer 2 to make a skill match, the description (layer 3) is wrong.
+
+### Writing a skill description
+
+The description is the only thing the model has to decide whether to
+load. It is matched against the user's latest message by the
+pre-action check (and by the model's general attention). Keep these
+constraints in mind:
+
+- **Front-load trigger keywords.** Empirically, the small model only
+  reliably matches a description when high-signal tokens appear early.
+  Putting natural prose first and a `TRIGGER WORDS — ...` list later
+  drops pass rate from ~95% to under 30%.
+- **Use a `TRIGGER WORDS — <comma-separated tokens>` segment** for
+  domain anchors: file extensions (`.org`), example filenames
+  (`projects.org`), and concrete topic words the user might say
+  (`asterisk heading`, `orphan`). These are the tokens that make
+  matching robust.
+- **Include a `MUST load before <conditions>` clause.** Without an
+  imperative-shaped condition, the model treats the description as
+  informational and skips loading. This is one of the few places
+  imperative wording earns its keep.
+- **Do not describe the rules.** Anything the body explains belongs in
+  the body, not the description. The agent only reads the description
+  to decide *whether* to load — once it loads, the body is what it
+  applies.
+- **Do not mention `read_file` or any tool name.** The middleware
+  exposes `load_skill`; the description is content, not mechanism.
+- A short friendly opening (≤ 8 words, e.g. `Guidance for org-mode
+  (\`.org\`) files.`) before the trigger list reads naturally and does
+  not measurably hurt match rate.
+
+Example (the `org-format` skill):
+
+```yaml
+---
+name: org-format
+description: Guidance for org-mode (`.org`) files. TRIGGER WORDS — `.org`, org-mode, org file, headings, heading body, asterisk heading, orphan, projects.org. MUST load before any tool call that reads, edits, writes, or mentions a `.org` file.
+---
+```
+
+### Writing a skill body
+
+The body is what the agent applies after `load_skill` returns. By the
+time the body is read the agent has already committed to applying the
+skill, so the body's job is to be a clear reference for the rules — not
+to re-justify loading.
+
+- Skip "When to apply" / "When to use" sections. The description (layer
+  3) already covered the trigger conditions, and the body is read only
+  once the skill matches.
+- Lead with a one-line H1 anchor (`# Org-mode format guide`) — this
+  small heading measurably improves the model's adherence to the rules
+  that follow.
+- Structure as concrete rules, examples, and procedures. Mark wrong vs.
+  right patterns side-by-side where helpful.
+
+### Adding a new skill
+
+1. Create `assist/skills/<skill-name>/SKILL.md` with frontmatter
+   (`name:` matching the directory, `description:` following the rules
+   above) and a body of rules.
+2. That's it. `SkillsMiddleware` discovers the skill via the
+   `/skills/` source path on next agent construction; the system prompt
+   automatically lists it; `load_skill(name="<skill-name>")` works.
+3. Add an eval under `edd/eval/` that exercises the trigger conditions
+   and the rules, similar to `test_org_format_skill.py` and
+   `test_skill_loading.py`.
+
+### Why the layered structure matters
+
+The four-layer split is what lets us add the eleventh skill without
+rewriting the outer prompts. If the skills prompt named "org-mode" or
+"markdown" as examples, every new file-format skill would tempt an
+edit. If the description summarized the rules, the body would drift
+out of sync. If the body re-justified loading, the description would
+get longer for no reason. Each layer answering exactly one question
+keeps the surface area constant.
+
+---
+
 ## Project Structure
 
 ```

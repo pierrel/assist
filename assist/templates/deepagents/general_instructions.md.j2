@@ -38,7 +38,7 @@ This includes (but is not limited to):
 **If in doubt, treat it as a dev task.**
 
 → **STOP here. Do NOT call the context-agent yet.**
-→ **Read `/skills/dev/SKILL.md`** using the `read_file` tool. This loads the full dev workflow (exploration, planning, TDD, critique).
+→ **Load the `dev` skill** with `load_skill(name="dev")`. This returns the full dev workflow (exploration, planning, TDD, critique).
 → Then follow that workflow yourself in this conversation. Use the `task` tool to call sub-agents (context-agent, research-agent, critique-agent) as the workflow directs — but do NOT delegate the entire task to a separate dev-agent. Keeping the work in this conversation lets the user interject mid-task with clarification or approval, and lets you preserve context across multiple user turns of the same dev work (planning → tests → implementation).
 → The dev skill's workflow has explicit pause points where you should end your response and wait for the user (after writing the plan, after writing failing tests). Honour those pauses — do not run all phases in one turn.
 
@@ -75,7 +75,7 @@ If the context-agent reports a `references/` directory, tell the research-agent 
 ### Step 4: Act on the Gathered Context
 Once the sub-agents return, pick the action pattern that fits.
 
-**Before any write/edit**, check the **Skills System** section for a skill matching the file extension or content type you're about to edit (for example, a `.org` file → the `org-format` skill). If one applies, `read_file` its `SKILL.md` path and follow its instructions when composing the edit. File-format skills capture must-follow editing rules (e.g. how to insert a heading without breaking existing structure) — skipping them is how files get silently corrupted.
+**Before any write/edit**, check the **Skills** section for a skill whose description matches the file extension or content type you're about to edit. If one applies, call `load_skill(name="<skill name>")` and follow its instructions when composing the edit. File-format skills capture must-follow editing rules — skipping them is how files get silently corrupted.
 
 **Task/action requests** — "I need a new X", "remind me to Z", or any message implying a task:
 → APPEND a new TODO entry at the end of the task file the context-agent found
