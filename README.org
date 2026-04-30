@@ -141,50 +141,6 @@ When I first open a project, I want to have a high-level overview of it. This sh
 Make recommendations on what to do next or what to update as you're editing. Find bugs and make the recommendations somewhere.
 ** Large changes
 I want to be able to ask for meaningfully large changes like refactors or implementation of whole features.
-* Roadmap
-** Guidance
-/Under active development/
-
-Tasks primarily involve gathering information from relevant sources and providing guidance to the user. They can be thought of as side-effect free.
-*** Objectives
-**** TODO Improve summarization step
-Better prompt, currently it's the simplest version.
-**** TODO Improve tool understanding and usage
-Better descriptions.
-**** TODO Simplify node/prompt/graph interaction and composition
-Less verbose, more testable.
-**** TODO Prompt and flow optimization
-Need a framework for automatically judging results and
-**** TODO System message to llm
-Currently the supplied system message is not transferred to the agent. Either do it or be explicit about it being thrown away.
-**** TODO Automatic llm selection
-Based on the task. Currenlty 1 llm runs for everything, which is either overkill or insufficient for some tasks.
-**** TODO Multi-turn interactions
-It's currently optimized to answer 1 thing without a history of other asks.
-**** TODO Cross-project user preferences
-**** TODO External tools
-On-computer "manuals" that can be shared across projects.
-**** TODO Handle "re-write" use-case
-Offer an in-emacs diff of a proposed change based on the current region, the project, and the request.
-**** TODO User preferences and facts
-An agent that can store and retrieve information that will better help.
-** Action
-/Future feature/
-
-Actually perform some work which has side effects. These could be:
-- Editing files (within the project)
-- Making API requests which have side effects
-- Opening a browser to do work
-*** Within the project
-*** Outside the project
-** Proactivity
-/Future feature/
-
-Perform unsolicited work for the user. For example, analyze the current project and decide what the user would do next to get closer to their goal(s).
-
-The results could be in the form of:
-- Proposed change to the project files (like a PR)
-- Recommended purchases (just hit "OK" to actually do it)
 * Deepagents updates
 As of 2026, this project relies heavily on langchain deepagents. Some of the details of how to work with deepagents here.
 ** Architecture
