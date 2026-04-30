@@ -104,9 +104,9 @@ class TestDevAgent(TestCase):
         _cleanup_workspace(self.workspace)
 
     def _create_agent(self):
-        # General agent + dev skill (post-Phase-D).  The rsync'd workspace
-        # has pyproject.toml at the top level, which trips create_agent's
-        # project_indicator detection and pre-loads the dev skill body.
+        # General agent + dev skill via load-on-demand.  The agent is
+        # expected to call load_skill(name="dev") on its own when the
+        # prompt or workspace looks like dev work.
         return AgentHarness(create_agent(
             self.model,
             self.workspace,

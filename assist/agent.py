@@ -1,4 +1,3 @@
-import glob
 import os
 import uuid
 import logging
@@ -11,7 +10,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langchain.agents.middleware import ModelRetryMiddleware
 from openai import InternalServerError
 
-from assist.promptable import base_prompt_for, read_skill_body
+from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS, SKILLS_ROUTE
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
@@ -65,35 +64,7 @@ class AgentHarness:
 
 
 
-_PROJECT_INDICATORS = [
-    "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
-    "Pipfile", "tox.ini",
-    "package.json", "tsconfig.json",
-    "Cargo.toml",
-    "go.mod",
-    "pom.xml", "build.gradle",
-    "Gemfile",
-    "Makefile", "CMakeLists.txt", "Dockerfile",
-]
-
-_PROJECT_INDICATOR_GLOBS = ["*.sln", "*.csproj"]
-
 _MEMORY_FILE = "AGENTS.md"
-
-
-def detect_project_indicators(path: str) -> list[str]:
-    """Scan *path* for common software-project files.
-
-    Returns the basenames of any indicator files found (top-level only).
-    """
-    found: list[str] = []
-    for name in _PROJECT_INDICATORS:
-        if os.path.isfile(os.path.join(path, name)):
-            found.append(name)
-    for pattern in _PROJECT_INDICATOR_GLOBS:
-        matches = glob.glob(os.path.join(path, pattern))
-        found.extend(os.path.basename(m) for m in matches)
-    return found
 
 
 def create_agent(model: BaseChatModel,
@@ -167,18 +138,13 @@ def create_agent(model: BaseChatModel,
                                          workspace_dir=workspace_dir),
     }
 
-    project_indicators = detect_project_indicators(working_dir)
-    dev_skill_body = read_skill_body("dev") if project_indicators else ""
-
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for(
             "deepagents/general_instructions.md.j2",
-            project_indicators=project_indicators,
             workspace_dir=workspace_dir,
             memories_path=memories_path,
-            dev_skill_body=dev_skill_body,
         ),
         middleware=mw + [skills_mw, logging_mw],
         backend=backend,
