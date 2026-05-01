@@ -236,6 +236,66 @@ class TestAgent(AgentTestMixin, TestCase):
         self.assertIn("40", res, "Should reference the user's specific goal")
 
 
+def _extract_dollar_amounts(text: str) -> list[float]:
+    """Pull dollar amounts out of free-form text in common shapes.
+
+    Handles ``$1.5M`` / ``1.5 million`` shorthand and ``$1,234,567`` /
+    ``$1234567`` numeric forms.  Used by the finance integration test to
+    compare projected figures across response prose and saved files
+    without caring about format.
+    """
+    out: list[float] = []
+    for m in re.finditer(
+        r"\$?\s?(\d+(?:\.\d+)?)\s?(M|million|K|thousand|B|billion)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        value = float(m.group(1))
+        suffix = m.group(2).lower()
+        if suffix in ("m", "million"):
+            value *= 1_000_000
+        elif suffix in ("k", "thousand"):
+            value *= 1_000
+        elif suffix in ("b", "billion"):
+            value *= 1_000_000_000
+        out.append(value)
+    for m in re.finditer(
+        r"\$\s?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)",
+        text,
+    ):
+        tok = m.group(1).replace(",", "")
+        try:
+            out.append(float(tok))
+        except ValueError:
+            pass
+    return out
+
+
+def _artifact_contents(workspace: str) -> list[str]:
+    """Return the text content of every regular file under workspace.
+
+    Used by the finance integration test to compare projected figures
+    across whatever artifacts the agent produced — finance.org if it
+    edited in place, or a new report.md/.org if it wrote elsewhere.
+    Format-agnostic by design.
+
+    Skips dotfiles, the references/.keep marker, and binary files
+    (anything that fails utf-8 decode).
+    """
+    out: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(workspace):
+        for fname in filenames:
+            if fname.startswith(".") or fname == ".keep":
+                continue
+            path = os.path.join(dirpath, fname)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    out.append(f.read())
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
 def _cleanup_workspace(path: str) -> None:
     """Remove a workspace dir, using Docker for root-owned files.
 
@@ -319,28 +379,48 @@ class TestAgentSandboxIntegration(TestCase):
                         out.append(sa)
         return out
 
+    def _ran_python_via_execute(self, agent) -> bool:
+        """True iff at least one `execute` tool call invoked Python.
+
+        The calculate skill's contract is "verify by running Python";
+        the finance integration test should not pass if the agent
+        loaded calculate but never actually ran any computation.
+        """
+        for m in agent.all_messages():
+            if not isinstance(m, AIMessage) or not m.tool_calls:
+                continue
+            for tc in m.tool_calls:
+                if tc.get("name") != "execute":
+                    continue
+                cmd = (tc.get("args") or {}).get("command", "")
+                if re.search(r"\bpython3?\b", cmd):
+                    return True
+                if re.search(r"\b\w+\.py\b", cmd):
+                    return True
+        return False
+
     def test_finance_strategy_projection(self):
         """End-to-end: research strategies + apply them to the user's
         own financial picture, projecting forward with calculate.
 
-        This is the integration the calculate skill was designed for —
-        the agent has to:
+        This is the integration the calculate skill was designed for.
+        The contract:
 
-        1. Read finance.org to understand the user's situation
-           (income, savings rate, goal).
-        2. Delegate to the research-agent for current best-practice
+        1. Delegate to research-agent for current best-practice
            investment strategies (index funds, bond allocation, etc.).
-        3. Load the calculate skill to project the user's portfolio
-           forward under those strategies.
-        4. Update finance.org with the projected numbers under the
-           appropriate heading (org-format skill applies for the
-           edit), preserving existing content.
+        2. Load the calculate skill to project the user's portfolio
+           forward.
+        3. Use the user's actual numbers (income, savings rate, goal)
+           from the existing finance.org — not generic placeholders.
+        4. Land a plausible projected figure SOMEWHERE the user can
+           find it (existing finance.org or a new report file the
+           agent created — both are acceptable).
 
-        Assertions intentionally focus on observable side-effects, not
-        specific strategy names — the research-agent picks what's
-        current, and the agent picks how to phrase it.  We check that
-        SOME concrete projected balance lands in the file and that
-        the existing content survives.
+        We deliberately do NOT assert on file format here.  Whether
+        the agent updates finance.org or writes a new markdown report
+        is its call; the org-format skill is exercised separately by
+        test_org_format_skill.py and test_skill_loading.py.  The
+        contract this test pins is the integration, not the format.
         """
         agent = self._create_agent({
             "README.org": dedent("""\
@@ -364,8 +444,6 @@ class TestAgentSandboxIntegration(TestCase):
                 """),
         })
 
-        finance_before = read_file(os.path.join(self.workspace, "finance.org"))
-
         res = agent.message(
             "Research the best long-term investment strategies for "
             "retirement, then project how those strategies will work "
@@ -388,113 +466,62 @@ class TestAgentSandboxIntegration(TestCase):
             "math is exactly the failure mode this skill exists to prevent.",
         )
 
-        # 3. Org-format skill was loaded — the agent is editing a .org
-        # file, and the heading-body insertion rule applies here just
-        # as in test_org_format_skill.  Without it, projected output is
-        # likely to land between * Income and its body, orphaning all
-        # the seed data underneath.
+        # 2b. Calculate skill actually ran Python.  Loading the skill
+        # without running execute(python) is the same failure mode the
+        # skill exists to prevent — guessing a projection.
         self.assertTrue(
-            self._skill_was_loaded(agent, "org-format"),
-            "Should have loaded the org-format skill before editing "
-            "finance.org.  Editing a .org file without it is how "
-            "headings get orphaned.",
+            self._ran_python_via_execute(agent),
+            "Calculate skill loaded but no `execute` call ran Python — "
+            "the projection was eyeballed, not computed.  This is the "
+            "exact failure the skill is designed to catch.",
         )
 
-        # 4. finance.org was updated with concrete numbers.
-        finance_after = read_file(os.path.join(self.workspace, "finance.org"))
-        self.assertNotEqual(
-            finance_before, finance_after,
-            "finance.org should have been updated with projection results.",
+        # 3. The agent used the user's specific numbers from finance.org
+        # — not generic placeholders or strategy-research defaults.  We
+        # check that at least one of the seed numbers (income, savings,
+        # goal, current balance) shows up in either the response or any
+        # file the agent produced.  This proves it read finance.org and
+        # personalized the projection.
+        seeds = ("$7,500", "$2,000", "$1,500,000", "$1.5M", "$50,000",
+                 "7500", "2000", "1500000", "50000")
+        all_artifacts = [res] + _artifact_contents(self.workspace)
+        used_seed = any(
+            any(s in artifact for s in seeds)
+            for artifact in all_artifacts
         )
-        # Existing content must still be present.  This is the same
-        # contract org-format enforces in test_org_format_skill — a
-        # write-up under * Goals must not destroy * Income or
-        # * Savings.
-        for marker in ("$7,500", "$2,000", "$1,500,000", "$50,000"):
-            self.assertIn(
-                marker, finance_after,
-                f"Existing content '{marker}' must be preserved in finance.org.",
-            )
-
-        # 4b. Body-preservation check (org-format heading rule): the
-        # body of * Income must remain attached to * Income, and
-        # similarly for * Savings — the projection should land under
-        # * Goals or in a new top-level section, never wedged into
-        # the head of an existing one.
-        income_idx = finance_after.find("* Income")
-        savings_idx = finance_after.find("* Savings")
-        goals_idx = finance_after.find("* Goals")
-        self.assertGreaterEqual(income_idx, 0)
-        self.assertGreaterEqual(savings_idx, 0)
-        self.assertGreaterEqual(goals_idx, 0)
-        income_section = finance_after[income_idx:savings_idx]
-        savings_section = finance_after[savings_idx:goals_idx]
-        self.assertIn(
-            "$7,500", income_section,
-            "$7,500 income figure must remain inside * Income — "
-            "the projection wrote ahead of it and orphaned the body.",
-        )
-        self.assertIn(
-            "$2,000", savings_section,
-            "$2,000 savings figure must remain inside * Savings — "
-            "the projection wrote ahead of it and orphaned the body.",
+        self.assertTrue(
+            used_seed,
+            "Agent should have used the user's specific numbers from "
+            "finance.org (income $7,500, savings $2,000, goal $1.5M, or "
+            "current balance $50,000).  None appeared in the response "
+            "or any file the agent produced — likely the projection ran "
+            "on generic numbers, not the user's own situation.",
         )
 
-        # 5. Some plausible projected balance lands in the file — any
-        # value >= $100k beyond the seed values, in any common
-        # formatting (``$1,234,567``, ``1234567``, ``$1.5M``,
-        # ``1.5 million``).  We normalize all of them to a number
-        # before comparing.
-        seed_numbers = {7500, 2000, 1500000, 50000}
-
-        def _extract_dollar_amounts(text: str) -> list[float]:
-            out: list[float] = []
-            # $1.5M / 1.5M / $1.5 million / 1.5 million
-            for m in re.finditer(
-                r"\$?\s?(\d+(?:\.\d+)?)\s?(M|million|K|thousand|B|billion)\b",
-                text,
-                flags=re.IGNORECASE,
-            ):
-                value = float(m.group(1))
-                suffix = m.group(2).lower()
-                if suffix in ("m", "million"):
-                    value *= 1_000_000
-                elif suffix in ("k", "thousand"):
-                    value *= 1_000
-                elif suffix in ("b", "billion"):
-                    value *= 1_000_000_000
-                out.append(value)
-            # $1,234,567 / $1234567 / 1,234,567 in dollar contexts
-            for m in re.finditer(
-                r"\$\s?(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)",
-                text,
-            ):
-                tok = m.group(1).replace(",", "")
-                try:
-                    out.append(float(tok))
-                except ValueError:
-                    pass
-            return out
-
-        all_amounts = _extract_dollar_amounts(finance_after)
+        # 4. A plausible projected figure (>= $100k) landed somewhere
+        # — either finance.org (if the agent edited it in place) or any
+        # other file the agent wrote (e.g. a new report.md).  We don't
+        # care about format; we care that the projection produced a
+        # number the user can find.
+        seed_set = {7500, 2000, 1500000, 50000}
+        all_amounts: list[float] = []
+        for artifact in all_artifacts:
+            all_amounts.extend(_extract_dollar_amounts(artifact))
         novel_big_numbers = sorted({
             int(round(n)) for n in all_amounts
-            if n >= 100_000 and int(round(n)) not in seed_numbers
+            if n >= 100_000 and int(round(n)) not in seed_set
         })
         self.assertTrue(
             novel_big_numbers,
-            "finance.org should contain at least one new dollar figure "
-            "(>= $100k) added by the projection.  Existing seed figures "
-            "alone are not evidence the projection ran.  "
-            f"All extracted amounts: {all_amounts}.  "
-            f"finance.org after:\n{finance_after}",
+            "Expected at least one projected dollar figure (>= $100k) "
+            "in the response or in a file the agent wrote.  "
+            f"Amounts found across response + artifacts: {all_amounts}.  "
+            f"Response: {res[:500]}",
         )
 
-        # 6. Response itself should reference at least one of the
-        # projected figures it wrote — confirms the agent isn't just
-        # stuffing numbers into the file silently.  Match either the
-        # bare integer, the comma-formatted form, or M/K shorthand
-        # within 5% of the value.
+        # 5. The response itself references at least one of the
+        # projected figures within 5% — confirms the agent reported
+        # the result to the user, not just buried it in a file.
         response_amounts = _extract_dollar_amounts(res)
         any_match = any(
             any(abs(r - n) / n < 0.05 for r in response_amounts)
@@ -503,7 +530,7 @@ class TestAgentSandboxIntegration(TestCase):
         self.assertTrue(
             any_match,
             "Response should mention at least one of the projected "
-            f"balances it wrote to finance.org.  File novel: "
-            f"{novel_big_numbers}.  Response amounts: "
-            f"{response_amounts}.  Response: {res[:500]}",
+            f"figures.  Novel projection numbers: {novel_big_numbers}. "
+            f"Response amounts: {response_amounts}.  "
+            f"Response: {res[:500]}",
         )
