@@ -99,6 +99,49 @@ class TestExtractEvents:
         events = _extract_events(messages, window=12)
         assert events[0]["is_error"] is True
 
+    def test_bounds_to_latest_human_message(self):
+        """Per-turn boundary: events from before the latest HumanMessage
+        must NOT appear in the returned list.
+
+        This is the structural fix for the cross-turn misfire described
+        in docs/loop-misfire.md.  ``_extract_events`` previously walked
+        the full message list, letting prior-turn tool calls stay in the
+        loop-detection window indefinitely and trigger false positives
+        on every subsequent turn.
+        """
+        messages = [
+            HumanMessage(content="turn 1"),
+            _ai_with_call("a1", "write_todos", {"todos": ["x"]}),
+            _tool_msg("a1", "Cannot write to /tmp/x because it already exists."),
+            _ai_with_call("a2", "write_todos", {"todos": ["y"]}),
+            _tool_msg("a2", "Cannot write to /tmp/y because it already exists."),
+            _ai_with_call("a3", "write_todos", {"todos": ["z"]}),
+            _tool_msg("a3", "Cannot write to /tmp/z because it already exists."),
+            HumanMessage(content="turn 2"),
+            _ai_with_call("b1", "write_todos", {"todos": ["fresh"]}),
+        ]
+        events = _extract_events(messages, window=12)
+        # Only the new turn's tool call should remain.  The unmatched
+        # b1 call is "incomplete" but still counts as one event.
+        assert len(events) == 1
+        assert events[0]["completed"] is False
+        assert events[0]["tool_name"] == "write_todos"
+
+    def test_no_human_message_walks_full_history(self):
+        """If there is no HumanMessage in the list (e.g. a synthetic
+        test or a harness that hasn't injected one yet), the function
+        operates on the full list — preserving today's behavior for
+        every existing test that does not lead with HumanMessage.
+        """
+        messages = [
+            _ai_with_call("c1", "write_file", {"file_path": "/a"}),
+            _tool_msg("c1", "Cannot write to /a because it already exists."),
+            _ai_with_call("c2", "write_file", {"file_path": "/b"}),
+            _tool_msg("c2", "Cannot write to /b because it already exists."),
+        ]
+        events = _extract_events(messages, window=12)
+        assert len(events) == 2
+
 
 # ---------------------------------------------------------------------------
 # Detection tests
@@ -253,6 +296,28 @@ class TestLastSuccessfulArtifact:
         ]
         assert _last_successful_artifact(messages) is None
 
+    def test_ignores_artifacts_from_prior_turn(self):
+        """Artifact lookup must respect the per-turn boundary.
+
+        Without this, a successful write from a prior turn bleeds into
+        the current turn's terminal message — exactly the bug from
+        docs/loop-misfire.md, where every post-loop turn cited
+        ``steam_link_linux_handheld_setup.md`` even though the current
+        turn never wrote it.
+        """
+        messages = [
+            HumanMessage(content="turn 1"),
+            _ai_with_call("c1", "write_file",
+                          {"file_path": "/canonical.md", "content": "..."}),
+            _tool_msg("c1", "Wrote /canonical.md"),
+            HumanMessage(content="turn 2"),
+            _ai_with_call("c2", "write_file", {"file_path": "/dup"}),
+            _tool_msg("c2", "Cannot write to /dup because it already exists."),
+        ]
+        # Within turn 2 there is no successful artifact; the prior turn's
+        # /canonical.md must not be surfaced.
+        assert _last_successful_artifact(messages) is None
+
 
 class TestLastErrorExcerpt:
     def test_returns_first_line_of_recent_error(self):
@@ -278,6 +343,25 @@ class TestLastErrorExcerpt:
             _ai_with_call("c1", "write_file", {"file_path": "/a"}),
             _tool_msg("c1", "Wrote /a"),
         ]
+        assert _last_error_excerpt(messages, {"write_file"}) is None
+
+    def test_ignores_errors_from_prior_turn(self):
+        """Error-excerpt lookup must respect the per-turn boundary.
+
+        Symmetric with the artifact-bounding fix: if an intervention
+        fires in the current turn but the only matching error is from
+        a prior turn, we must not quote that stale error in the
+        terminal message.
+        """
+        messages = [
+            HumanMessage(content="turn 1"),
+            _ai_with_call("c1", "write_file", {"file_path": "/a"}),
+            _tool_msg("c1", "Cannot write to /a because it already exists."),
+            HumanMessage(content="turn 2"),
+            _ai_with_call("c2", "write_file", {"file_path": "/b"}),
+            _tool_msg("c2", "Wrote /b"),
+        ]
+        # No errors in turn 2 — must not surface turn 1's error.
         assert _last_error_excerpt(messages, {"write_file"}) is None
 
     def test_skips_non_matching_tools(self):
@@ -573,3 +657,66 @@ class TestLoopDetectionMiddleware:
         # User-facing wording, not system-log.
         assert "saved" in content.lower()
         assert "loop detected" not in content.lower()
+
+    def test_does_not_misfire_after_completed_prior_turn(self):
+        """Replays the cross-turn misfire from docs/loop-misfire.md.
+
+        A prior turn completed and left a successful artifact + multiple
+        ``write_todos`` events in the conversation history.  The current
+        turn opens with a single ``write_todos`` call (typical
+        small-model fresh-task behavior).  Without per-turn bounding,
+        the prior turn's events stay in the loop window and pattern C
+        (distinct-args-thrash) fires instantly, producing a canned
+        terminal message even though the new turn has done nothing.
+
+        With the fix, ``_extract_events`` only sees post-HumanMessage
+        events — a single incomplete call — and the detector returns
+        None.
+        """
+        mw = LoopDetectionMiddleware()
+        prior_turn = [
+            HumanMessage(content="turn 1: do the thing"),
+            _ai_with_call("a1", "write_todos", {"todos": ["x"]}),
+            _tool_msg("a1", "Cannot write to /tmp/x because it already exists."),
+            _ai_with_call("a2", "write_todos", {"todos": ["y"]}),
+            _tool_msg("a2", "Cannot write to /tmp/y because it already exists."),
+            _ai_with_call("a3", "write_todos", {"todos": ["z"]}),
+            _tool_msg("a3", "Cannot write to /tmp/z because it already exists."),
+            _ai_with_call("a4", "write_file",
+                          {"file_path": "/workspace/result.md", "content": "..."}),
+            _tool_msg("a4", "Wrote /workspace/result.md"),
+        ]
+        new_turn = [
+            HumanMessage(content="turn 2: a totally new question"),
+            _ai_with_call("b1", "write_todos", {"todos": ["fresh"]}),
+        ]
+        result = mw.after_model({"messages": prior_turn + new_turn}, Mock())
+        # Critical: no intervention.  The new turn is one call deep.
+        assert result is None
+        assert mw._intervention_count == 0
+
+    def test_intra_turn_loop_still_fires(self):
+        """Sanity: a real loop within a single turn still triggers.
+
+        Same shape as ``test_strips_tool_calls_when_loop_detected``
+        but with multi-turn history preceding it — proves the per-turn
+        bound doesn't accidentally suppress legitimate loops.
+        """
+        mw = LoopDetectionMiddleware()
+        prior_turn = [
+            HumanMessage(content="turn 1"),
+            _ai_with_call("p1", "ls", {"path": "/"}),
+            _tool_msg("p1", "ok"),
+        ]
+        last = _ai_with_call("c3", "write_file", {"file_path": "/c"})
+        current_turn = [
+            HumanMessage(content="turn 2"),
+            _ai_with_call("c1", "write_file", {"file_path": "/a"}),
+            _tool_msg("c1", "Cannot write to /a because it already exists."),
+            _ai_with_call("c2", "write_file", {"file_path": "/b"}),
+            _tool_msg("c2", "Cannot write to /b because it already exists."),
+            last,
+        ]
+        result = mw.after_model({"messages": prior_turn + current_turn}, Mock())
+        assert result is not None
+        assert result["messages"][-1].tool_calls == []

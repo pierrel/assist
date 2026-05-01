@@ -38,7 +38,7 @@ import re
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,37 @@ def _normalise_args(args: Any) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
+def _current_turn_slice(messages: list) -> list:
+    """Return messages from the most recent ``HumanMessage`` onward.
+
+    Loop detection is per-turn: tool calls from a completed prior turn
+    must not contribute to the current turn's loop assessment, or every
+    new user message starts in the looping state described in
+    ``docs/loop-misfire.md``.
+
+    If no ``HumanMessage`` is present (synthetic test fixtures, harness
+    that hasn't injected one yet) the full list is returned — preserving
+    the historical behavior of every caller that doesn't lead with one.
+
+    Note: the slice is bounded by the *most recent* ``HumanMessage``,
+    not "the one ``HumanMessage`` per turn".  If two ``HumanMessage``s
+    appear back-to-back (user typing twice before the model replies),
+    only the later one is the boundary — harmless, since loop detection
+    cares about tool-call events and ``HumanMessage`` carries none.
+    Sub-agent calls in deepagents go through the ``task`` tool and
+    surface in the parent stream as ``AIMessage(tool_calls=...)`` +
+    ``ToolMessage`` — they do NOT inject fresh ``HumanMessage``
+    instances mid-turn, so the boundary stays one-to-one with user
+    turns.  If a future change starts injecting ``HumanMessage``s
+    mid-turn (e.g. HITL resume), this slice would over-truncate;
+    revisit then.
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[idx], HumanMessage):
+            return messages[idx:]
+    return messages
+
+
 def _extract_events(messages: list, window: int) -> list[dict]:
     """Collect recent (AIMessage tool_call, matching ToolMessage) pairs.
 
@@ -100,7 +131,10 @@ def _extract_events(messages: list, window: int) -> list[dict]:
     completed}``. ``completed`` is False for tool calls without a
     matching ToolMessage yet (i.e. the most-recent AI message before
     the tool node has run).
+
+    Bounded to the current user turn — see ``_current_turn_slice``.
     """
+    messages = _current_turn_slice(messages)
     tool_msgs: dict[str, ToolMessage] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage) and msg.tool_call_id:
@@ -233,7 +267,13 @@ def _detect_loop(
 def _last_error_excerpt(
     messages: list, tools: set[str], max_chars: int = 160
 ) -> str | None:
-    """Most recent error content for any tool in ``tools``, trimmed."""
+    """Most recent error content for any tool in ``tools``, trimmed.
+
+    Bounded to the current user turn — see ``_current_turn_slice``.
+    A stale error from a completed prior turn must not be quoted in
+    the current turn's terminal message.
+    """
+    messages = _current_turn_slice(messages)
     tool_msgs: dict[str, ToolMessage] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage) and msg.tool_call_id:
@@ -305,7 +345,14 @@ def _compose_terminal_message(detection: dict, messages: list) -> str:
 
 
 def _last_successful_artifact(messages: list) -> str | None:
-    """Most recent successful ``write_file``/``edit_file`` path, if any."""
+    """Most recent successful ``write_file``/``edit_file`` path, if any.
+
+    Bounded to the current user turn — see ``_current_turn_slice``.
+    Without this bound, a successful write from a prior turn surfaces
+    in the current turn's terminal message, producing the byte-identical
+    canned reply documented in ``docs/loop-misfire.md``.
+    """
+    messages = _current_turn_slice(messages)
     tool_msgs: dict[str, ToolMessage] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage) and msg.tool_call_id:
