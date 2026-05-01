@@ -79,14 +79,72 @@ def _resolve_api_key() -> str:
     )
 
 
-def _probe_endpoint(url: str, api_key: str) -> OpenAIConfig:
-    """Use the first entry from ``GET {url}/models`` — we serve one model
-    at a time, so there's no selection logic.
+def _server_root(url: str) -> str:
+    """Strip a trailing ``/v1`` (and any trailing slash) off the URL.
 
-    Raises ``RuntimeError`` if the endpoint is unreachable or returns no
-    models.  Falls back to 32768 (and logs a warning) if the entry is
-    missing ``max_model_len`` — vLLM always populates it, but real
-    OpenAI's ``/v1/models`` does not.
+    ``ASSIST_MODEL_URL`` points at the OpenAI-compatible base
+    (``http://host:port/v1``), but llama.cpp's ``/props`` endpoint lives
+    at the server root (``http://host:port/props``).  Both shapes — with
+    and without the ``/v1`` suffix — are accepted by callers, so this
+    normalises before composing the root-level probe URL.
+    """
+    base = url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return base
+
+
+def _probe_props_n_ctx(url: str, api_key: str) -> Optional[int]:
+    """Try llama.cpp's ``/props`` for the runtime per-slot context length.
+
+    Returns ``None`` when the endpoint is unreachable, returns non-200,
+    or omits ``default_generation_settings.n_ctx``.  ``None`` is the
+    "no signal — caller should fall back" answer; we deliberately do
+    NOT raise, because a missing ``/props`` is the expected shape on
+    vLLM and on real OpenAI.
+
+    The value is the per-slot ``n_ctx`` (which is what a single
+    conversation can actually use — llama.cpp divides ``-c`` across
+    ``--parallel`` slots).
+    """
+    probe_url = f"{_server_root(url)}/props"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = httpx.get(
+            probe_url, headers=headers, timeout=_PROBE_TIMEOUT_S
+        )
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return None
+
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+
+    settings = payload.get("default_generation_settings") or {}
+    n_ctx = settings.get("n_ctx")
+    if isinstance(n_ctx, int) and n_ctx > 0:
+        return n_ctx
+    return None
+
+
+def _probe_endpoint(url: str, api_key: str) -> OpenAIConfig:
+    """Discover the served model and its runtime context length.
+
+    Probe order:
+      1. ``GET {url}/models`` — required.  Yields the model id and, on
+         vLLM, ``max_model_len`` (the runtime context).
+      2. ``GET {server_root}/props`` — used as fallback when (1) lacks
+         ``max_model_len``.  llama.cpp surfaces the runtime context here
+         as ``default_generation_settings.n_ctx``.  We deliberately do
+         NOT use ``meta.n_ctx_train`` from /v1/models — that is the
+         model's *trained* length, which can exceed the configured
+         runtime ``-c`` value and would lead to context-overflow.
+
+    Falls back to 32768 (with a warning) only when neither probe
+    surfaces a value — i.e. neither vLLM's ``max_model_len`` nor
+    llama.cpp's ``/props`` is reachable.
     """
     probe_url = f"{url.rstrip('/')}/models"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -114,10 +172,17 @@ def _probe_endpoint(url: str, api_key: str) -> OpenAIConfig:
         raise RuntimeError(
             f"{probe_url} returned a model entry without an id: {entry!r}"
         )
+
     context_len = entry.get("max_model_len")
     if context_len is None:
+        # llama.cpp path: /v1/models doesn't carry the runtime context;
+        # try /props before resorting to the hardcoded default.
+        context_len = _probe_props_n_ctx(url, api_key)
+
+    if context_len is None:
         logger.warning(
-            "Model %s did not report max_model_len; falling back to 32768",
+            "Model %s did not report max_model_len and /props had no "
+            "n_ctx; falling back to 32768",
             model_id,
         )
         context_len = 32768
