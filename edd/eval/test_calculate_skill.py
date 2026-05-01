@@ -16,20 +16,18 @@ needs a real ``execute`` for Python — and walk a ladder of implicitness:
    skill word.  Implicit-loading rung.
 3. ``test_throwaway_cleanup`` — checks the skill's "don't litter" rule
    on a stdev question.
-4. ``test_does_not_load_on_non_math_prompt`` — anti-test.  The skill
-   must NOT load when the prompt has no computation in it; pins the
-   description against drift in the loose direction.
+4. ``test_does_not_load_on_non_math_prompt`` — anti-test.  Off-topic
+   prompt; calculate must not load.
+5. ``test_does_not_load_on_planning_prompt`` — anti-test, narrower.
+   A finance-adjacent prompt that does not ask for a number; pins the
+   description against drift in the loose direction (e.g. a stray
+   trigger word like ``retirement`` firing on "thinking about
+   retirement").
 
-Each test asserts:
-  (a) the agent loaded the calculate skill (load_skill or read_file path),
-  (b) the response contains a numerically-correct answer.
-
-Test 4 adds a side-channel cleanup check.
-
-These tests are written BEFORE the skill exists.  They are expected to
-fail at first run (load_skill returns "skill not found", numeric answers
-hallucinate).  That's the point — they pin the contract the skill has to
-satisfy.
+Each math test asserts: (a) the agent loaded the calculate skill,
+(b) the response contains a numerically-correct answer.  The two
+anti-tests assert calculate did not load.  Test 3 adds a side-channel
+whole-tree cleanup check.
 """
 import os
 import re
@@ -369,4 +367,33 @@ class TestCalculateSkill(TestCase):
             "Calculate skill loaded on a non-math prompt — the "
             "description is too aggressive.  Tighten its trigger words "
             "so it stays scoped to computation, not general questions.",
+        )
+
+    def test_does_not_load_on_planning_prompt(self):
+        """Anti-test — narrower.  Calculate must NOT load when the prompt
+        contains a finance-adjacent trigger word but does not actually
+        ask for a number.
+
+        The first anti-test ("capital of France") is fully off-topic and
+        easy to keep negative.  This one is closer to the trigger margin:
+        the prompt mentions "retirement", which is a word the description
+        explicitly avoided as a bare trigger because it false-fires on
+        prompts like this.  If a future loosening of the description
+        adds bare ``retirement`` (or ``invest``, ``balance``, etc.), this
+        test catches the regression before the loose description ships
+        and starts costing latency on unrelated turns.
+        """
+        agent = self._create_agent()
+
+        agent.message(
+            "I'm thinking about retirement — what should I be considering?"
+        )
+
+        self.assertFalse(
+            self._skill_was_loaded(agent, "calculate"),
+            "Calculate skill loaded on a finance-adjacent planning prompt "
+            "with no numeric question.  The MUST-load clause is keyed on "
+            "'answer involves a number' precisely to keep this case "
+            "negative; check the trigger word list for over-broad tokens "
+            "(retirement, invest, balance, growth, interest).",
         )
