@@ -20,6 +20,7 @@ from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvicti
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
+from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
@@ -97,9 +98,13 @@ def create_agent(model: BaseChatModel,
     # loop_detection_mw so the rewritten error is what the loop detector sees.
     write_collision_mw = WriteCollisionMiddleware()
     loop_detection_mw = LoopDetectionMiddleware()
+    # Innermost wrap_model_call middleware — recovers from empty terminal
+    # AIMessages after every outer retry/sanitization layer has had its turn.
+    empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
 
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
-          context_eviction_mw, write_collision_mw, loop_detection_mw]
+          context_eviction_mw, write_collision_mw, loop_detection_mw,
+          empty_response_recovery_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
 
@@ -138,6 +143,12 @@ def create_agent(model: BaseChatModel,
         "description": "Reviews code diffs for bugs, missing tests, style issues, and security concerns. Provide the full git diff output when calling this agent.",
         "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2",
                                          workspace_dir=workspace_dir),
+        # Safety middleware — same rationale as the research-flow dict
+        # subagents.  Without these, a critique iteration that loops
+        # or terminates with empty content propagates straight back to
+        # the parent.
+        "middleware": [LoopDetectionMiddleware(),
+                       EmptyResponseRecoveryMiddleware()],
     }
 
     agent = create_deep_agent(
@@ -182,6 +193,7 @@ def create_context_agent(model: BaseChatModel,
     )
     base_mw.append(context_eviction_mw)
     base_mw.append(LoopDetectionMiddleware())
+    base_mw.append(EmptyResponseRecoveryMiddleware())
     # Enforce the read-only contract at the tool layer.
     base_mw.append(ReadOnlyEnforcerMiddleware())
 
@@ -241,6 +253,7 @@ def create_research_agent(model: BaseChatModel,
     # write_file).
     base_mw.append(WriteCollisionMiddleware())
     base_mw.append(LoopDetectionMiddleware())
+    base_mw.append(EmptyResponseRecoveryMiddleware())
 
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
@@ -248,17 +261,29 @@ def create_research_agent(model: BaseChatModel,
         backend = _create_standard_backend(working_dir)
     logging_mw = ModelLoggingMiddleware("research-agent")
 
+    # Loop-detection + empty-response defenses are installed on every
+    # dict-spec subagent below.  Without them, the subagent's compiled
+    # graph runs only the deepagents default middleware (TodoList,
+    # Filesystem, Summarization, PatchToolCalls), which left the
+    # fact-check-agent unbounded — it ran 200+ `read_url` calls in
+    # a recent diag because nothing would short-circuit a model that
+    # kept "thinking of more references to verify".
+    def _subagent_safety_mw():
+        return [LoopDetectionMiddleware(), EmptyResponseRecoveryMiddleware()]
+
     research_sub_agent = {
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url],
+        "middleware": _subagent_safety_mw(),
     }
 
     critique_sub_agent = {
         "name": "critique-agent",
         "description": "Used to critique the final report. You MUST provide the file it should critique.",
         "system_prompt": base_prompt_for("deepagents/sub_critique.txt.j2"),
+        "middleware": _subagent_safety_mw(),
     }
 
     fact_check_sub_agent = {
@@ -266,6 +291,7 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url],
+        "middleware": _subagent_safety_mw(),
     }
 
     agent = create_deep_agent(

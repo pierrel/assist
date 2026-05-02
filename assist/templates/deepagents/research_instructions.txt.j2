@@ -13,9 +13,10 @@ When you think you have enough information to write a final report, write it to 
 
 Respond with the path and name of the file where the final report is written.
 
-You must call the critique-agent to get a critique of the final report. After that (if needed) you can do more research and edit the final report.
-You must call the fact-check-agent to ensure your references are sound and support your claims. After that (if needed) you can do more research and edit the final report.
-You can do this however many times you want until are you satisfied with the result.
+You may call the critique-agent zero or one time to get a critique of the final report.  If you do call it, address the most important critiques in a single edit and move on — do not re-critique.
+You may call the fact-check-agent zero or one time to verify your references support your claims.  If you do call it, address any mismatches in a single edit and move on — do not re-fact-check.
+
+Total subagent budget: at most 5 `task` calls across research-agent + critique-agent + fact-check-agent combined.  Once you have made 5 task calls, finalize the report with what you have rather than spawning more subagents.
 
 Only edit the file once at a time (if you call this tool in parallel, there may be conflicts).
 
