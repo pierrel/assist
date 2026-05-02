@@ -43,12 +43,23 @@ logger = logging.getLogger(__name__)
 _PROBE_TIMEOUT_S = 10.0
 
 # HTTP request timeout for ChatOpenAI in seconds. Without this, a hung
-# upstream (vLLM stalled on a generation, network blip with no RST) can
-# leave the agent loop blocked on a single ``invoke()`` indefinitely —
-# which is how a single cron-launched eval run grew to 16 GB RSS over
-# 21 hours. 180s is comfortably above realistic generation latencies
-# for our local model and well below "noticeable hang" territory.
-_REQUEST_TIMEOUT_S = 180.0
+# upstream (model stalled on a generation, network blip with no RST)
+# can leave the agent loop blocked on a single ``invoke()`` indefinitely
+# — which is how a single cron-launched eval run grew to 16 GB RSS
+# over 21 hours.
+#
+# 180s was right for the prior vLLM + Qwen3-Coder-30B-A3B-AWQ MoE
+# stack, where realistic generation finished in <60s.  The current
+# llama.cpp + Qwen3.6-27B Q4_K_M dense stack has a much wider
+# distribution: cheap tool-routing calls land in 5-20s, but a single
+# heavy synthesis call (research-agent + nested fact-check on a
+# >50k-token prompt) can need several minutes of pure prefill before
+# generation even starts.  Empirically, the reasoning-impact eval
+# saw both thinking_on and thinking_off time out at 180s on the
+# finance-synthesis case (see docs/2026-05-01-reasoning-impact-eval.org).
+# 600s gives meaningful headroom for those calls without going so
+# wide that a genuine hang is invisible.
+_REQUEST_TIMEOUT_S = 600.0
 
 
 @dataclass(frozen=True)
@@ -253,21 +264,44 @@ def _build_openai_chat_model(
     temperature: float,
     base_url: str,
     api_key: str,
+    enable_thinking: bool | None = None,
 ) -> BaseChatModel:
-    """Create a ``ChatOpenAI`` instance with the cache-buster callback."""
+    """Create a ``ChatOpenAI`` instance with the cache-buster callback.
 
-    return ChatOpenAI(
-        model=model,
-        temperature=temperature,
-        max_retries=0,
-        timeout=_REQUEST_TIMEOUT_S,
-        callbacks=[_ModelNotFoundCacheBuster()],
-        base_url=base_url,
-        api_key=api_key,
-    )
+    ``enable_thinking`` (Qwen3 family + llama.cpp): when explicitly
+    False, the chat-template kwarg ``enable_thinking=false`` is passed
+    via ``extra_body``, which prefills the assistant message with an
+    empty ``<think></think>`` block — the canonical way to disable
+    Qwen3 chain-of-thought.  When None or True, no ``extra_body`` is
+    set: True is Qwen3's own default, and None means "leave the upstream
+    behavior alone" so non-Qwen3 backends don't see a kwarg they may
+    not understand.
+    """
+
+    extra_body = None
+    if enable_thinking is False:
+        extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+
+    kwargs = {
+        "model": model,
+        "temperature": temperature,
+        "max_retries": 0,
+        "timeout": _REQUEST_TIMEOUT_S,
+        "callbacks": [_ModelNotFoundCacheBuster()],
+        "base_url": base_url,
+        "api_key": api_key,
+    }
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+
+    return ChatOpenAI(**kwargs)
 
 
-def select_chat_model(temperature: float) -> BaseChatModel:
+def select_chat_model(
+    temperature: float,
+    *,
+    enable_thinking: bool | None = None,
+) -> BaseChatModel:
     """Return a chat model bound to the auto-discovered local endpoint.
 
     Raises ``RuntimeError`` if ``ASSIST_MODEL_URL`` is unset.  This is
@@ -275,6 +309,11 @@ def select_chat_model(temperature: float) -> BaseChatModel:
     silent fallback to public OpenAI's ``gpt-4o-mini``, but the fallback
     branch was already broken (``model`` was undefined at that scope)
     and we don't actually want a quiet fallback to a remote API.
+
+    ``enable_thinking`` (default ``None``): see
+    ``_build_openai_chat_model``.  Used by the reasoning-impact eval
+    in ``edd/eval/test_reasoning_impact.py`` to A/B Qwen3 thinking
+    mode against latency.  Production callers leave it unset.
     """
 
     config = _get_config()
@@ -289,6 +328,7 @@ def select_chat_model(temperature: float) -> BaseChatModel:
         temperature=temperature,
         base_url=config.url,
         api_key=config.api_key,
+        enable_thinking=enable_thinking,
     )
     llm.profile = {"max_input_tokens": config.context_len}
     return llm

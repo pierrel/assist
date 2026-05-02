@@ -53,7 +53,7 @@ class Thread:
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
-        self.model = model or select_chat_model(0.1)
+        self.model = model or select_chat_model(0.1, enable_thinking=False)
         self.max_concurrency = max_concurrency
         self.runconfig = {
             "configurable": {"thread_id": self.thread_id},
@@ -178,7 +178,7 @@ n    checkpointing via SqliteSaver.
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
-                    self._model = select_chat_model(0.1)
+                    self._model = select_chat_model(0.1, enable_thinking=False)
         return self._model
 
     def list(self) -> list[str]:

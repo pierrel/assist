@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import urllib.parse
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from typing import Dict
 
 from fastapi import FastAPI, Form, HTTPException, BackgroundTasks, Query
@@ -19,8 +21,54 @@ from pygments.formatters import HtmlFormatter
 from assist.domain_manager import DomainManager
 from assist.sandbox_manager import SandboxManager
 
-# debug logging by default
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+
+def _configure_logging() -> None:
+    """Wire DEBUG-level logging to both stdout (live tail) and a per-session
+    file at ``logs/web-{YYYY-MM-DD-HHMMSS}.log``.
+
+    Stdout preserves the existing ``make web`` developer experience — you
+    still see the running tail in your terminal.  The file lets a future
+    session inspect what happened when the terminal scrollback is gone
+    (and lets us diagnose stuck requests after the fact).
+
+    File rotation: 50 MB per file, up to 5 backups (so a runaway session
+    can't fill the disk).  One main file per server start; rotated
+    overflow lands beside it as ``...log.1``, ``...log.2``, etc.
+    """
+    logs_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "logs",
+    )
+    os.makedirs(logs_dir, exist_ok=True)
+    log_path = os.path.join(
+        logs_dir,
+        f"web-{datetime.now():%Y-%m-%d-%H%M%S}.log",
+    )
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=50 * 1024 * 1024, backupCount=5
+    )
+    file_handler.setFormatter(formatter)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+    # Replace any handlers basicConfig may have left behind on import.
+    for existing in list(root.handlers):
+        root.removeHandler(existing)
+    root.addHandler(stream_handler)
+    root.addHandler(file_handler)
+    # Surface the chosen file so it's discoverable in the live tail.
+    logging.getLogger(__name__).info("Logging to %s", log_path)
+
+
+_configure_logging()
 logging.getLogger("assist.model").setLevel(logging.DEBUG)
 
 load_dev_env()
@@ -730,7 +778,7 @@ async def merge_thread(tid: str):
     # Get a model for summarizing
     from assist.model_manager import select_chat_model
     try:
-        summary_model = select_chat_model(temperature=0.1)
+        summary_model = select_chat_model(temperature=0.1, enable_thinking=False)
     except Exception:
         # If model fails to load, pass None and use fallback summary
         summary_model = None
