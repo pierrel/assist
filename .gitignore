@@ -11,6 +11,7 @@ src/assist.egg-info/
 coverage.xml
 llm-config.yml
 /edd/history/
+/logs/
 /playground
 .deploy.env
 .dev.env

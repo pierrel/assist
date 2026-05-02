@@ -340,3 +340,41 @@ class TestSelectChatModel(TestCase):
             any(isinstance(cb, _ModelNotFoundCacheBuster) for cb in callbacks),
             f"Expected _ModelNotFoundCacheBuster in callbacks; got {callbacks!r}",
         )
+
+    def test_enable_thinking_unset_omits_extra_body(self):
+        """Default — backwards-compat path.  No ``extra_body`` is sent
+        so non-Qwen3 backends don't see an unexpected kwarg.
+        """
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
+            llm = model_manager.select_chat_model(0.1)
+        # ChatOpenAI exposes the body via ``extra_body`` attribute (or
+        # ``model_kwargs``-adjacent — the langchain_openai version we
+        # pin populates ``extra_body`` directly).  Either form should
+        # be empty / unset.
+        eb = getattr(llm, "extra_body", None)
+        self.assertFalse(eb, f"Expected no extra_body; got {eb!r}")
+
+    def test_enable_thinking_false_sets_chat_template_kwargs(self):
+        """``enable_thinking=False`` is the only path that should mutate
+        the request — passes ``chat_template_kwargs.enable_thinking=False``
+        through ``extra_body`` to llama.cpp's chat template.
+        """
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
+            llm = model_manager.select_chat_model(0.1, enable_thinking=False)
+        eb = getattr(llm, "extra_body", None) or {}
+        self.assertEqual(
+            eb.get("chat_template_kwargs"),
+            {"enable_thinking": False},
+            f"extra_body should carry chat_template_kwargs; got {eb!r}",
+        )
+
+    def test_enable_thinking_true_omits_extra_body(self):
+        """``True`` is Qwen3's own default — no need to set anything.
+
+        We only ever opt OUT of thinking; opting in is the upstream
+        behavior and shouldn't add a payload.
+        """
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
+            llm = model_manager.select_chat_model(0.1, enable_thinking=True)
+        eb = getattr(llm, "extra_body", None)
+        self.assertFalse(eb, f"Expected no extra_body for True; got {eb!r}")
