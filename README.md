@@ -9,6 +9,85 @@ It is not just a coding assistant, but should be able to help with any project o
 
 See [README.org](README.org) for detailed concepts and architecture.
 
+## Current Capabilities
+
+Assist combines several pieces that are uncommon in off-the-shelf agent
+frameworks, tuned specifically to run well against small local models
+where reliability is harder than with frontier APIs.
+
+- **Endpoint auto-discovery.** Model name and runtime context length
+  are discovered from your local LLM endpoint on first request — probes
+  `GET /v1/models` first (vLLM convention) and falls back to llama.cpp's
+  `/props` for engines that don't expose `max_model_len`. No config drift
+  across `.dev.env`, `.deploy.env`, and the systemd unit; swap the model
+  on the server and the cache busts itself on the next call.
+
+- **Small-LLM-tuned memory.** Persistent facts and preferences live in
+  the workspace's `AGENTS.md` and auto-load on every session. The
+  standard deepagents memory mechanism asks the model to call
+  `edit_file` against a path it has to construct; small models routinely
+  pick the wrong path. Assist replaces that with a dedicated
+  `save_memory(content=...)` tool — the path is baked in, the model
+  only chooses what to remember. A pre-action prompt step makes it
+  capture user preferences automatically without being asked.
+
+- **Small-LLM-tuned skills.** Skills are progressively-disclosed
+  capability bundles under `assist/skills/<name>/SKILL.md`. Where
+  upstream expects the model to read the SKILL path itself, assist
+  exposes a single `load_skill(name=...)` tool — the model never sees
+  paths. A new skill is a single-file add: no system-prompt edits, no
+  registration. Description-driven matching means the right skill loads
+  even when the user hasn't named it (e.g. mentioning a `.org` file
+  triggers the `org-format` skill).
+
+- **Built-in sandboxing.** Every tool call that touches the filesystem
+  or runs code happens inside a per-thread Docker container with the
+  workspace bind-mounted at `/workspace`. Each shell command is bounded
+  by a wall-clock cap (default 600s) and on timeout returns concrete
+  adjustment guidance to the agent — so a runaway tool call gets a
+  recoverable error the model can act on, not an indefinite hang. If
+  Docker isn't available the agent transparently falls back to
+  unsandboxed execution.
+
+- **Specialized agents and skills out of the box.**
+  - **Research agent** with internet search (`search_internet`) and
+    URL fetch (`read_url`), plus critique and fact-check sub-agents for
+    multi-pass refinement of long-form output.
+  - **Context agent** for read-only filesystem exploration — finds the
+    right file, surfaces evidence, never modifies. Runs as a sub-agent
+    of the general agent so any task can ground itself in local context
+    before acting.
+  - **Dev agent + dev skill** for code work — TDD-style plan/test/implement
+    flow, designed to keep small models from skipping ahead.
+  - **Calculate skill** for arithmetic, statistics, simulations, and
+    financial projections — forces the agent to verify its answer by
+    running real Python rather than guessing a number.
+  - **Org-format skill** scopes editing rules to `.org` files
+    (heading-body discipline, no orphaned content) without affecting
+    other formats.
+
+- **Resilient context handling.** `ContextAwareToolEvictionMiddleware`
+  evicts large tool results to a stateful filesystem before they
+  overflow context. `BadRequestRetryMiddleware` catches context-overflow
+  errors from the server, sanitises and truncates, and retries.
+  `RollbackRunnable` snapshots each turn and restores on hard errors so
+  a transient failure doesn't end the thread.
+
+- **Loop and stall guards.** `LoopDetectionMiddleware` catches repeating
+  tool calls. `EmptyResponseRecoveryMiddleware` handles the case where a
+  small model returns a blank message. Together they keep agents from
+  getting stuck in degenerate states without human intervention.
+
+- **Git domain integration.** Each thread gets its own git branch in a
+  configured "domain" repo (your life repo, your work repo, etc.).
+  Agent edits stay isolated until you decide to merge from the web UI.
+  Multiple domains coexist — choose which one a new thread belongs to.
+
+- **Multiple frontends, one agent core.** Web UI (FastAPI), CLI
+  (`manage.cli`), and an Emacs integration (`assist/emacs/`) all share
+  the same agent runtime, the same `AGENTS.md` memory, and the same
+  domain repos.
+
 ---
 
 ## Quick Start
