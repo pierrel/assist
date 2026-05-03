@@ -32,7 +32,7 @@ endef
 .PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history
 
 eval:
-	$(call with-dev-env,.venv/bin/pytest --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
+	$(call with-dev-env,.venv/bin/pytest --timeout=600 --timeout-method=signal --junit-xml=edd/history/results-$$(date +%Y%m%d-%H%M).xml edd/eval)
 
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
