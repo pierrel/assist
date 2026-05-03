@@ -8,7 +8,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 from langchain.agents.middleware import ModelRetryMiddleware
-from openai import InternalServerError
+from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
@@ -77,8 +77,16 @@ def create_agent(model: BaseChatModel,
     # Only retry on transient server errors (5xx, timeouts, connection issues).
     # BadRequestError (400) is handled by invoke_with_rollback via checkpoint rollback,
     # but BadRequestRetryMiddleware sanitizes + truncates messages on overflow first.
+    # APIConnectionError covers TCP-level resets — observed on the
+    # pizza-dough thread 2026-05-02T21:16: a single LLM call hit
+    # `Connection reset by peer` (likely a `launch_fattn` CUDA-OOM
+    # crashing the llama-server slot mid-prefill on a long thread),
+    # the server itself stayed up, but the unretried request bubbled up
+    # as `openai.APIConnectionError` and ended the thread.  Adding
+    # APIConnectionError here means the next call retries cleanly
+    # against a healthy slot.
     retry_middle = ModelRetryMiddleware(max_retries=3,
-                                        retry_on=(InternalServerError, TimeoutError, ConnectionError),
+                                        retry_on=(APIConnectionError, InternalServerError, TimeoutError, ConnectionError),
                                         backoff_factor=2)
     # Catch BadRequestError (e.g. context overflow), sanitize & truncate, retry.
     bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
