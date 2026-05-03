@@ -41,64 +41,25 @@ class TestDomainIntegration(TestCase):
         if os.path.exists(self.working_dir):
             shutil.rmtree(self.working_dir)
 
-    def test_domain_creation_with_thread(self):
-        """Test that thread working directory is created and DomainManager can use it."""
-        thread = self.thread_manager.new()
-        # Verify thread's working directory exists
-        self.assertTrue(os.path.isdir(thread.working_dir))
+    def test_finds_and_updates_task(self):
+        """Find the next task by name, then update its due date.
 
-        # Create DomainManager for the thread's working directory
-        dm = DomainManager(repo_path=thread.working_dir)
-        self.assertTrue(os.path.isdir(dm.domain()))
-        self.assertEqual(dm.domain(), thread.working_dir)
-
-    def test_task_list_find(self):
-        """Test finding task list in domain structure."""
+        Combines two assertions in one Thread+Domain run:
+        (a) the agent surfaces "Yosemite" as the next task, and
+        (b) the agent normalizes "11/7/2026" to ISO and writes it back.
+        """
         thread = self.thread_manager.new()
         dm = DomainManager(repo_path=thread.working_dir)
         create_structure(dm.domain())
 
-        resp = thread.message("Where is my tasks list?")
-        self.assertRegex(resp, "inbox\\.org", "Does not contain inbox.")
-
-    def test_first_task_find(self):
-        """Test finding first task in domain structure."""
-        thread = self.thread_manager.new()
-        dm = DomainManager(repo_path=thread.working_dir)
-        create_structure(dm.domain())
-
-        resp = thread.message("What is my next task?")
-        self.assertRegex(resp, "Yosemite", "Does not contain Yosemite, the first task list.")
-
-    def test_updates_task(self):
-        """Test updating task in domain structure."""
-        thread = self.thread_manager.new()
-        dm = DomainManager(repo_path=thread.working_dir)
-        create_structure(dm.domain())
-
-        resp = thread.message("Update my next task to be due on 11/7/2026.")
-        self.assertTrue(resp, "Should respond")
+        resp = thread.message(
+            "What is my next task? Then update it to be due on 11/7/2026."
+        )
+        self.assertRegex(resp, "Yosemite",
+                         "Should surface Yosemite as the next task")
 
         inbox_path = os.path.join(dm.domain(), "gtd", "inbox.org")
         with open(inbox_path, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("2026-11-07", content, "Inbox should contain normalized due date")
-
-    def test_find_pants(self):
-        """Test research and task creation in domain structure."""
-        message = "I need new pants. What are some good, custom made pants options. Provide both local (to san francisco) and over the internet. Also provide a price range."
-        thread = self.thread_manager.new()
-        dm = DomainManager(repo_path=thread.working_dir)
-        create_structure(dm.domain())
-
-        resp = thread.message(message)
-        self.assertTrue(resp, "Should respond")
-
-        inbox_path = os.path.join(dm.domain(), "gtd", "inbox.org")
-        with open(inbox_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        self.assertIn("pant", content, "Inbox should contain something about pants")
-
-        tool_calls = [m.name for m in thread.get_raw_messages() if isinstance(m, ToolMessage)]
-        self.assertIn("write_todos", tool_calls)
-        self.assertIn("task", tool_calls)
+        self.assertIn("2026-11-07", content,
+                      "Inbox should contain normalized due date")

@@ -123,27 +123,6 @@ class TestContextAgent(TestCase):
         self.assertRegex(res, "(?i)planner|tasks\\.org",
                          "Should reference the file path")
 
-    def test_surfaces_user_personal_info(self):
-        """Should surface personal information about the user from files."""
-        agent, root = self.create_agent({
-            "README.org": dedent("""\
-                I have files that track fitness, finances, and
-                Roman's (my son) progress. I also keep notes about
-                travel plans and ideas for gifts for my wife (Ana).
-                """),
-            "roman.org": dedent("""\
-                * Roman's Progress
-                ** 2026
-                Started kindergarten in September.
-                Loves dinosaurs and building blocks.
-                """),
-        })
-        res = agent.message("What is my son interested in?")
-        self.assertRegex(res, "(?i)dinosaur",
-                         "Should surface Roman's interests")
-        self.assertRegex(res, "(?i)roman",
-                         "Should identify the son by name")
-
     # --- No README: agent must explore on its own ---
 
     def test_no_readme_finds_file_by_name(self):

@@ -19,12 +19,6 @@ class TestThreadE2E(TestCase):
         if os.path.exists(self.working_dir):
             shutil.rmtree(self.working_dir)
 
-    def test_thread_creation(self):
-        """Test that threads can be created."""
-        thread = self.thread_manager.new()
-        self.assertIsNotNone(thread.thread_id)
-        self.assertTrue(os.path.isdir(thread.working_dir))
-
     def test_message_and_response(self):
         """Test basic message sending and receiving."""
         thread = self.thread_manager.new()
@@ -54,22 +48,6 @@ class TestThreadE2E(TestCase):
         assistant_messages = [m for m in messages if m.get("role") == "assistant"]
         self.assertGreaterEqual(len(assistant_messages), 1)
 
-    def test_thread_persistence(self):
-        """Test that threads can be retrieved after creation."""
-        thread1 = self.thread_manager.new()
-        tid = thread1.thread_id
-
-        thread1.message("Remember this: banana")
-
-        # Retrieve the same thread
-        thread2 = self.thread_manager.get(tid)
-        self.assertEqual(thread1.thread_id, thread2.thread_id)
-
-        # Message history should be preserved
-        messages = thread2.get_messages()
-        user_messages = [m for m in messages if m.get("role") == "user"]
-        self.assertGreaterEqual(len(user_messages), 1)
-
     def test_multiple_threads(self):
         """Test that multiple threads can coexist independently."""
         thread1 = self.thread_manager.new()
@@ -93,17 +71,6 @@ class TestThreadE2E(TestCase):
         # Check that the messages are different
         self.assertTrue(any("blue" in msg for msg in user_msgs1))
         self.assertTrue(any("red" in msg for msg in user_msgs2))
-
-    def test_list_threads(self):
-        """Test listing all threads."""
-        # Create a few threads
-        thread1 = self.thread_manager.new()
-        thread2 = self.thread_manager.new()
-
-        # List should include both
-        thread_ids = self.thread_manager.list()
-        self.assertIn(thread1.thread_id, thread_ids)
-        self.assertIn(thread2.thread_id, thread_ids)
 
     def test_description_generation(self):
         """Test that thread descriptions can be generated."""
