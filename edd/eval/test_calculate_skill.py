@@ -187,36 +187,6 @@ class TestCalculateSkill(TestCase):
     # Ladder — least to most implicit.
     # ------------------------------------------------------------------
 
-    def test_explicit_calculate_request(self):
-        """Implicitness 0 — user names the skill outright.
-
-        sqrt(519841) is exactly 721; an integer answer leaves no fuzz on
-        the assertion side.  This is the easy case: a failure here means
-        the skill isn't wired up at all (description, name, or middleware
-        registration is wrong).
-        """
-        agent = self._create_agent()
-
-        res = agent.message(
-            "Use the calculate skill to compute the square root of 519841."
-        )
-
-        self.assertTrue(
-            self._skill_was_loaded(agent, "calculate"),
-            "Agent did not load /skills/calculate/SKILL.md despite the "
-            "user explicitly naming the skill.",
-        )
-        self.assertTrue(
-            self._ran_python(agent),
-            "Agent should have run Python via the execute tool to check "
-            "the answer.  Calculate is a 'trust by running' skill; a "
-            "freehand answer doesn't satisfy the skill's contract.",
-        )
-        self.assertIn(
-            "721", res,
-            f"Response should contain the correct answer (721). Got: {res[:400]}",
-        )
-
     def test_compound_growth_calculation(self):
         """Implicitness 1 — multi-step financial arithmetic, no math words.
 

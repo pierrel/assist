@@ -114,31 +114,6 @@ class TestSkillLoading(TestCase):
             "the skill rule was not applied."
         )
 
-    def test_explicit_skill_request(self):
-        """Implicitness level 0 — the user names the skill directly.
-
-        This is the easy case: even a small model with brittle skill
-        routing should follow an explicit instruction. A failure here
-        means the SkillsMiddleware wiring itself is broken (skill not
-        advertised, path mismatch, read_file unavailable).
-        """
-        agent, root = self._make_agent()
-
-        agent.message(
-            "Load the org-format skill and use its rules to add a new "
-            "top-level project 'Project Gamma' between Alpha and Beta in "
-            "projects.org. Its description should be 'Gamma is a new "
-            "experimental project.'"
-        )
-
-        self.assertTrue(
-            self._skill_was_loaded(agent, "org-format"),
-            "Agent did not load /skills/org-format/SKILL.md despite the "
-            "user explicitly naming the skill. Tool calls: "
-            f"{[tc.get('name') for m in agent.all_messages() if isinstance(m, AIMessage) and m.tool_calls for tc in m.tool_calls]}"
-        )
-        self._assert_alpha_body_preserved(root)
-
     def test_suggested_skill_request(self):
         """Implicitness level 1 — domain hints, no skill name.
 

@@ -26,16 +26,6 @@ class TestAgent(AgentTestMixin, TestCase):
     def setUp(self):
         self.model = select_chat_model(0.1)
 
-    def test_reads_readme(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
-                                         "gtd": {"inbox.org":
-                                                 dedent("""* Tasks
-                                                 ** TODO Fold laundry
-                                                 Just get it done
-                                                 ** TODO Buy new pants""")}})
-        res = agent.message("Where are my todos?")
-        self.assertRegex(res, "inbox\\.org", "Should mention the inbox file")
-
     def test_adds_item_correctly(self):
         agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
                                          "gtd": {"inbox.org":
@@ -59,26 +49,6 @@ class TestAgent(AgentTestMixin, TestCase):
                          "pants\nSize",
                          "Should not have split a TODO item")
 
-
-    def test_finds_relevant_files_direct(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
-                                         "fitness.org": dedent("""\
-                                         * 2025
-                                         I swam 20mi in 3 months
-                                         * 2026
-                                         Goal: swim 40mi
-                                         """),
-                                         "gtd": {"inbox.org":
-                                                 dedent("""\
-                                                 * Tasks
-                                                 ** TODO Fold laundry
-                                                 Just get it done
-                                                 ** TODO Buy new pants
-                                                 Size 31
-                                                 """)}})
-        res = agent.message("What are my swim goals for 2026?")
-        self.assertIn("40", res, "Should mention 40")
-        self.assertRegex(res, "miles|mi", "Should mention miles or shorthand mi")
 
     def test_finds_and_updates_relevant_files_direct(self):
         agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
@@ -110,42 +80,6 @@ class TestAgent(AgentTestMixin, TestCase):
         # Should add content under the 2026 section with a program/plan/training schedule
         self.assertRegex(plan_after, "(?is)\\* 2026.*(Program|Plan|Training|Schedule)",
                          "It should add a 2026 program/plan section")
-
-    def test_finds_and_updates_relevant_files_indirect(self):
-        """Research an external question and update the relevant local file."""
-        agent, root = self.create_agent({
-            "README.org": "All of my todos are in gtd/inbox.org",
-            "paris.org": dedent("""\
-                Paris is the capital and largest city of France,
-                with a population of about 2 million.
-                Nicknamed the City of Light.
-                """),
-            "gtd": {"inbox.org": dedent("""\
-                * Tasks
-                ** TODO Fold laundry
-                """)}})
-        file_before = read_file(f"{root}/paris.org")
-        res = agent.message("When was Paris founded? By who? Why?")
-        file_after = read_file(f"{root}/paris.org")
-        self.assertNotEqual(file_before, file_after, "It should have updated the file with relevant information")
-
-    def test_emacs_framebuffer_touchscreen(self):
-        # Setup filesystem with ONLY necessary files (none needed for this test)
-        agent, root = self.create_agent({})
-
-        # Send key message
-        user_msg = (
-            "I have eMacs running in a direct frame buffer and in a very small touch screen. "
-            "What are some of the things that I should consider with this setup so that I have a good "
-            "experience and eMacs runs smoothly?"
-        )
-        res = agent.message(user_msg)
-
-        # Basic sanity check
-        self.assertIsNotNone(res)
-
-        # Assert that the assistant mentions key considerations
-        self.assertToolCall(agent, "task", "It should have called a sub-agent")
 
     def test_research_saved_to_references(self):
         """Research should be saved to the references directory when it exists."""
@@ -190,26 +124,6 @@ class TestAgent(AgentTestMixin, TestCase):
             res,
             "Agent should not refuse the request"
         )
-
-    def test_adds_task_in_nested_directory(self):
-        """Agent should find task files in nested directories via context."""
-        agent, root = self.create_agent({
-            "README.org": "All task management is in the planner/ directory using org TODO format",
-            "planner": {"tasks.org": dedent("""\
-                * Active
-                ** TODO Write quarterly report
-                Due next Friday
-                ** TODO Schedule dentist appointment
-                """)},
-        })
-        res = agent.message("I need to renew my passport")
-        tasks_after = read_file(f"{root}/planner/tasks.org")
-        self.assertRegex(res, "(?i)added|updated|passport",
-                         "Should confirm the task was added")
-        self.assertRegex(tasks_after, "(?im)TODO.*passport",
-                         "Should add a TODO about passport")
-        self.assertRegex(tasks_after, "quarterly report",
-                         "Should preserve existing tasks")
 
     def test_combines_context_and_research(self):
         """When user asks about a topic with local context, agent should

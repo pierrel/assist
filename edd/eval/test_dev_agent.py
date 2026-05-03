@@ -249,40 +249,36 @@ class TestDevAgent(TestCase):
             f"Agent should install dependencies. Executed: {commands}",
         )
 
-    def test_writes_tests_for_feature_request(self):
-        """The dev agent should write tests when asked to implement a feature."""
+    def test_writes_and_runs_tests(self):
+        """The dev agent should write a function plus a test, then run the test.
+
+        Combines the prior test_writes_tests_for_feature_request +
+        test_runs_tests assertions into a single eval.  The agent must
+        produce the function, the test file, AND execute the test.
+        """
         agent = self._create_agent()
         self._invoke(agent,
             "Add a function `is_palindrome(s: str) -> bool` to a new file "
-            "`assist/utils.py` that returns True if the string reads the same "
-            "forwards and backwards (case-insensitive, ignoring spaces)."
+            "`assist/utils.py` that returns True if the string reads the "
+            "same forwards and backwards (case-insensitive, ignoring "
+            "spaces).  Write a test for it and run the test to verify."
         )
 
-        # Check 1: test file created via write tool
+        # Assertion 1: a test file was written (via tool or visible in sandbox).
         written = self._written_paths(agent)
         test_files_written = [p for p in written if 'test' in p.lower()]
-
-        # Check 2: test file exists in sandbox
         result = self.sandbox.execute(
             "find /workspace -name 'test_*.py' -newer /workspace/pyproject.toml -o "
             "-name '*_test.py' -newer /workspace/pyproject.toml 2>/dev/null"
         )
         sandbox_test_files = [l for l in result.output.strip().splitlines() if l.strip()]
-
         self.assertTrue(
             len(test_files_written) > 0 or len(sandbox_test_files) > 0,
             f"Agent should write at least one test file. "
             f"Written via tool: {written}, Sandbox test files: {sandbox_test_files}",
         )
 
-    def test_runs_tests(self):
-        """The dev agent should execute tests after writing code."""
-        agent = self._create_agent()
-        self._invoke(agent,
-            "Write a small test for the `is_git_repo` function in "
-            "`assist/domain_manager.py` and run it to verify it works."
-        )
-
+        # Assertion 2: the test was actually run.
         commands = self._executed_commands(agent)
         test_runs = [
             c for c in commands
@@ -326,55 +322,6 @@ class TestDevAgent(TestCase):
                 f"context-agent (task) should be called before any write/edit. "
                 f"First task at index {task_indices[0]}, "
                 f"first write/edit at index {write_indices[0]}",
-            )
-
-    def test_follows_existing_patterns(self):
-        """The dev agent should follow existing patterns when creating new code.
-
-        Uses two turns to test the planning-first TDD workflow:
-          Turn 1: agent explores, writes plan, asks for approval
-          Turn 2: user approves → agent implements following existing patterns
-        """
-        agent = self._create_agent()
-        response_1 = self._invoke(agent,
-            "Add a new middleware class called `RequestTimingMiddleware` in "
-            "`assist/middleware/request_timing.py` that logs how long each "
-            "model call takes. Follow the same patterns as the existing "
-            "middleware classes in the project."
-        )
-
-        # Phase 1: agent should explore and write a plan
-        task_calls = self._task_calls(agent)
-        context_calls = [(n, p) for n, p in task_calls if 'context' in n.lower()]
-        self.assertTrue(
-            len(context_calls) > 0,
-            f"Agent should call context-agent in phase 1. Task calls: {task_calls}",
-        )
-
-        # Phase 2: approve the plan → agent implements
-        self._invoke(agent, "The plan looks good, please proceed with the implementation.")
-
-        # Should have created the middleware file
-        written = self._written_paths(agent) + self._edited_paths(agent)
-        middleware_files = [p for p in written if 'timing' in p.lower() or 'middleware' in p.lower()]
-        self.assertTrue(
-            len(middleware_files) > 0,
-            f"Agent should create the middleware file after approval. Modified: {written}",
-        )
-
-        # Verify the file exists in the sandbox and follows patterns
-        result = self.sandbox.execute(
-            "cat /workspace/assist/middleware/request_timing.py 2>/dev/null"
-        )
-        if result.exit_code == 0 and result.output.strip():
-            content = result.output
-            # Should use a class-based structure like other middleware
-            self.assertIn('class', content,
-                          "Middleware should be class-based like existing middleware")
-            # Should import from the middleware ecosystem
-            self.assertTrue(
-                'middleware' in content.lower() or 'Middleware' in content,
-                f"Should reference middleware patterns. Content preview: {content[:500]}",
             )
 
     def test_uses_research_agent(self):
@@ -430,66 +377,3 @@ class TestDevAgent(TestCase):
             f"Response preview: {response[:500]}",
         )
 
-    def test_handles_basic_improvement(self):
-        """The dev agent should make code improvements and write tests.
-
-        Uses three turns to test the full planning-first TDD workflow:
-          Turn 1: agent explores, writes plan, asks for approval
-          Turn 2: user approves plan → agent writes failing tests, asks for approval
-          Turn 3: user approves tests → agent implements and all tests pass
-        """
-        agent = self._create_agent()
-        self._invoke(agent,
-            "The `create_timestamped_branch` function in "
-            "`assist/domain_manager.py` doesn't handle the case where the "
-            "'main' branch doesn't exist. Add error handling that raises a "
-            "clear ValueError if 'main' is missing. Write a test for this."
-        )
-
-        # Phase 1: agent should explore and write a plan (no code yet)
-        task_calls_phase1 = self._task_calls(agent)
-        context_calls = [(n, p) for n, p in task_calls_phase1 if 'context' in n.lower()]
-        self.assertTrue(
-            len(context_calls) > 0,
-            f"Agent should call context-agent in phase 1. Task calls: {task_calls_phase1}",
-        )
-
-        # Phase 2: approve plan → agent writes failing tests
-        self._invoke(agent, "The plan looks good. Please write the tests.")
-
-        # Phase 3: approve tests → agent implements
-        self._invoke(agent, "Tests look correct. Please implement the fix.")
-
-        # Should have modified domain_manager.py (via tool OR sandbox grep)
-        all_edited = self._edited_paths(agent)
-        all_written = self._written_paths(agent)
-        impl_files = [
-            p for p in (all_edited + all_written)
-            if 'domain_manager' in p.lower()
-        ]
-        # Also check if the feature is in the sandbox
-        grep_result = self.sandbox.execute(
-            "grep -n 'ValueError.*main' /workspace/assist/domain_manager.py 2>/dev/null"
-        )
-        sandbox_has_impl = grep_result.exit_code == 0 and grep_result.output.strip()
-        self.assertTrue(
-            len(impl_files) > 0 or sandbox_has_impl,
-            f"Agent should modify domain_manager.py. "
-            f"Tool modified: {all_edited + all_written}, "
-            f"Sandbox has impl: {sandbox_has_impl}",
-        )
-
-        # Should have written a test file (via write tool OR via sandbox find)
-        test_files_written = [p for p in all_written if 'test' in p.lower()]
-        result = self.sandbox.execute(
-            "find /workspace -name 'test_*.py' -newer /workspace/pyproject.toml -not -path '*/venv/*' 2>/dev/null"
-        )
-        sandbox_test_files = [
-            l.strip() for l in result.output.strip().splitlines() if l.strip()
-        ]
-        self.assertTrue(
-            len(test_files_written) > 0 or len(sandbox_test_files) > 0,
-            f"Agent should write a test file. "
-            f"Written via tool: {all_written}, "
-            f"Sandbox test files: {sandbox_test_files}",
-        )

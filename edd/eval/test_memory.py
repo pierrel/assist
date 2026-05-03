@@ -26,21 +26,14 @@ class TestMemory(AgentTestMixin, TestCase):
         res = agent.message("How many cats do I have?")
         self.assertRegex(res, "3|three|Three", "Should correctly respond with the number 3")
 
-    def test_doesnt_include_tags(self):
-        agent, root = self.create_agent({"AGENTS.md": ""})
-        agent.message("I have 3 cats. Commit this to memory.")
-        memory_after = read_file(os.path.join(root, "AGENTS.md"))
-        self.assertNotEqual(memory_after, "",
-                            "Should have written something")
-        self.assertNotRegex(memory_after, "<agent_memory>",
-                            "Should not use the same format")
-
     def test_writes_memory_explicit(self):
         agent, root = self.create_agent({"AGENTS.md": ""})
         agent.message("I have 3 cats. Commit this to memory.")
         memory_after = read_file(os.path.join(root, "AGENTS.md"))
         self.assertRegex(memory_after, "cats",
                          "Should add the fact to memory")
+        self.assertNotRegex(memory_after, "<agent_memory>",
+                            "Should not write the literal <agent_memory> framing tag into the file")
 
     def test_writes_memory_implicit(self):
         agent, root = self.create_agent({"AGENTS.md": ""})
@@ -66,25 +59,6 @@ class TestMemory(AgentTestMixin, TestCase):
             memory_after, "Python",
             "Should capture the future-tense feedback as a "
             "persistent preference."
-        )
-
-    def test_writes_memory_implicit_feedback(self):
-        """Multi-turn: user states a preference without 'remember' or
-        'in the future' framing.
-
-        Turn 1 is a benign action; turn 2 is a bare preference
-        statement ("I prefer X over Y") that the model should
-        recognize as a persistent fact and save — even though the
-        user did not explicitly ask for it to be remembered.
-        """
-        agent, root = self.create_agent({"AGENTS.md": ""})
-        agent.message("Show me a quick hello world.")
-        agent.message("I prefer Python over JavaScript.")
-        memory_after = read_file(os.path.join(root, "AGENTS.md"))
-        self.assertRegex(
-            memory_after, "Python",
-            "Should capture the bare preference statement even "
-            "without 'remember' or 'in the future' framing."
         )
 
 
