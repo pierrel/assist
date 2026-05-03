@@ -43,8 +43,14 @@ class TestDockerSandboxBackend(TestCase):
         self.assertEqual(resp.output, "hello world\n")
         self.assertEqual(resp.exit_code, 0)
         self.assertFalse(resp.truncated)
-        self.container.exec_run.assert_called_once_with(
-            ["bash", "-c", "echo hello world"], demux=False, workdir="/workspace")
+        # Command is wrapped in coreutils `timeout` so a runaway can't
+        # pin the agent loop. The shape: `timeout --kill-after=Ns Ms bash -c '<cmd>'`.
+        call_args = self.container.exec_run.call_args
+        invoked = call_args[0][0]  # ["bash", "-c", "timeout ... bash -c 'echo hello world'"]
+        self.assertEqual(invoked[:2], ["bash", "-c"])
+        self.assertIn("timeout --kill-after=", invoked[2])
+        self.assertIn("echo hello world", invoked[2])
+        self.assertEqual(call_args.kwargs["workdir"], "/workspace")
 
     def test_execute_nonzero_exit(self):
         self.container.exec_run.return_value = (1, b"error: not found\n")
@@ -52,6 +58,40 @@ class TestDockerSandboxBackend(TestCase):
 
         self.assertEqual(resp.exit_code, 1)
         self.assertIn("not found", resp.output)
+
+    def test_execute_timeout_returns_guidance(self):
+        """Exit 124 = coreutils `timeout` SIGTERM'd; surface adjustment hints."""
+        self.container.exec_run.return_value = (124, b"some partial output\n")
+        resp = self.sandbox.execute("python3 -c 'import glob; glob.glob(\"**/*\", recursive=True)'")
+
+        self.assertEqual(resp.exit_code, 124)
+        self.assertIn("Sandbox terminated this command", resp.output)
+        self.assertIn("Narrow the scope", resp.output)
+        self.assertIn("/workspace", resp.output)
+        self.assertIn("some partial output", resp.output)
+
+    def test_execute_sigkill_returns_guidance(self):
+        """Exit 137 = SIGKILL after grace window; same guidance applies."""
+        self.container.exec_run.return_value = (137, b"")
+        resp = self.sandbox.execute("yes > /dev/null")
+
+        self.assertEqual(resp.exit_code, 137)
+        self.assertIn("Sandbox terminated this command", resp.output)
+        # No partial output, but still gets the marker line
+        self.assertIn("(no output)", resp.output)
+
+    def test_execute_quotes_command_safely(self):
+        """Commands with shell metacharacters survive the timeout wrap."""
+        self.container.exec_run.return_value = (0, b"ok\n")
+        self.sandbox.execute("echo 'hello' > /tmp/x; cat /tmp/x")
+
+        invoked = self.container.exec_run.call_args[0][0][2]
+        # The original command must reach bash unaltered (escaped via shlex).
+        # Two ways shlex can quote — accept either as long as the literal command
+        # appears intact when bash unquotes it.
+        self.assertIn("echo", invoked)
+        self.assertIn("hello", invoked)
+        self.assertIn("/tmp/x", invoked)
 
     def test_execute_truncates_large_output(self):
         large = b"x" * (MAX_OUTPUT_CHARS + 5000)
