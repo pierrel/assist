@@ -10,6 +10,8 @@ where the host bind mount lives.
 """
 
 import logging
+import os
+import shlex
 
 from deepagents.backends.sandbox import BaseSandbox
 from deepagents.backends.protocol import (
@@ -25,6 +27,41 @@ from deepagents.backends.protocol import (
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 100_000
+
+# Wall-clock cap on a single sandbox command. Without this, a runaway
+# subprocess (e.g. small-model agent firing `glob("**/test*", cwd="/")`)
+# can spin at 99% CPU indefinitely while the agent loop blocks waiting
+# for output. Empirically observed 2026-05-03 — see
+# docs/2026-05-03-execute-tool-timeout.md.
+#
+# 600s matches the per-test pytest-timeout we use for evals. Anything
+# legitimately longer (a full suite run inside the sandbox, an unusually
+# slow `pip install`) can override via the env var.
+EXEC_TIMEOUT_SECONDS = int(os.getenv("ASSIST_SANDBOX_EXEC_TIMEOUT", "600"))
+
+# Coreutils `timeout` first sends SIGTERM, then SIGKILL after a grace
+# period. 5s gives a well-behaved process room to flush; an unkillable
+# busy loop hits SIGKILL and surfaces as exit 137.
+EXEC_KILL_GRACE_SECONDS = 5
+
+
+_TIMEOUT_GUIDANCE = (
+    "[Sandbox terminated this command after {timeout}s wall-clock limit.]\n"
+    "Try one of these adjustments and retry:\n"
+    "  - Narrow the scope: target a specific file or directory rather "
+    "than walking the whole tree (e.g. `grep PATTERN /workspace/specific/file` "
+    "instead of `grep -r PATTERN /`).\n"
+    "  - Check the working directory: shell commands run with cwd="
+    "`/workspace`. If you used `/` as a search root, you searched the "
+    "entire container filesystem (Python venv, system dirs) — almost "
+    "always a mistake.\n"
+    "  - Bound recursion: `find ... -maxdepth N`, `glob` with a tighter "
+    "pattern, or limit lines with `| head -N`.\n"
+    "  - If the command is genuinely long-running (a full pip install or "
+    "test suite), break it into smaller invocations.\n"
+    "Partial output (may be empty if the command was silent):\n"
+    "----\n"
+)
 
 
 class DockerSandboxBackend(BaseSandbox):
@@ -52,10 +89,21 @@ class DockerSandboxBackend(BaseSandbox):
         return self.container.id[:12]
 
     def execute(self, command: str) -> ExecuteResponse:
-        """Execute a shell command inside the Docker container."""
+        """Execute a shell command inside the Docker container.
+
+        The command is wrapped in coreutils `timeout` so that a runaway
+        subprocess can't pin the agent loop indefinitely.  On wall-clock
+        timeout the response prepends concrete adjustment guidance to the
+        partial output so the model can recover and try a different
+        approach instead of just seeing a generic "Error".
+        """
+        bounded = (
+            f"timeout --kill-after={EXEC_KILL_GRACE_SECONDS}s "
+            f"{EXEC_TIMEOUT_SECONDS}s bash -c {shlex.quote(command)}"
+        )
         try:
             exit_code, output_bytes = self.container.exec_run(
-                ["bash", "-c", command],
+                ["bash", "-c", bounded],
                 demux=False,
                 workdir=self.work_dir,
             )
@@ -64,6 +112,19 @@ class DockerSandboxBackend(BaseSandbox):
             return ExecuteResponse(output=f"Error executing command: {e}", exit_code=1)
 
         output = output_bytes.decode("utf-8", errors="replace") if output_bytes else ""
+
+        # 124 = `timeout` fired and SIGTERM'd; 137 = SIGKILL'd after the
+        # grace window because the subprocess didn't honor SIGTERM.  Both
+        # mean "we hit the wall-clock cap" from the agent's perspective.
+        if exit_code in (124, 137):
+            logger.warning(
+                "Sandbox command timed out (exit %d) after %ds: %r",
+                exit_code, EXEC_TIMEOUT_SECONDS, command[:200],
+            )
+            output = _TIMEOUT_GUIDANCE.format(timeout=EXEC_TIMEOUT_SECONDS) + (
+                output if output else "(no output)"
+            )
+
         truncated = len(output) > MAX_OUTPUT_CHARS
         if truncated:
             output = output[:MAX_OUTPUT_CHARS] + "\n... [output truncated]"
