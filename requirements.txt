@@ -128,6 +128,7 @@ pyflakes==3.4.0
 Pygments==2.19.2
 pylint==4.0.4
 pytest==9.0.2
+pytest-timeout==2.4.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.1
 python-multipart==0.0.21
