@@ -12,8 +12,10 @@ from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
-from assist.backends import create_composite_backend, create_sandbox_composite_backend, STATEFUL_PATHS, SKILLS_ROUTE
+from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
+from assist.research_cleanup import ReferencesCleanupRunnable
+from assist.sandbox import DockerSandboxBackend
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
@@ -119,6 +121,9 @@ def create_agent(model: BaseChatModel,
           empty_response_recovery_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
+    # Single-slashed path that's safe to interpolate without producing
+    # `//references/` in local mode (where workspace_dir == "/").
+    references_dir = os.path.join(workspace_dir, "references")
 
     memories_path = os.path.join(workspace_dir, _MEMORY_FILE)
 
@@ -142,7 +147,12 @@ def create_agent(model: BaseChatModel,
 
     research_sub = CompiledSubAgent(
         name="research-agent",
-        description="Used to conduct thorough research on external topics. The result of the research will be placed in a file and the file name/path will be returned. Provide a filename for more control.",
+        description=(
+            "Used to conduct thorough research on external topics. "
+            f"Reports are saved under '{references_dir}/'. "
+            "The result of the research will be placed in a file and the file "
+            "name/path will be returned. Provide a filename for more control."
+        ),
         runnable=create_research_agent(model,
                                        working_dir,
                                        checkpointer,
@@ -173,6 +183,7 @@ def create_agent(model: BaseChatModel,
         system_prompt=base_prompt_for(
             "deepagents/general_instructions.md.j2",
             workspace_dir=workspace_dir,
+            references_dir=references_dir,
         ),
         middleware=mw + [skills_mw, memory_mw, logging_mw],
         backend=backend,
@@ -271,10 +282,26 @@ def create_research_agent(model: BaseChatModel,
     base_mw.append(LoopDetectionMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
 
+    # Confine the research agent's filesystem reach to <working_dir>/references/.
+    # The agent (and its critique/fact-check sub-sub-agents, which inherit
+    # this backend via deepagents' subagent middleware) cannot
+    # accidentally resolve paths outside the references subdirectory in
+    # normal use (local mode blocks `..` traversal; sandbox mode prepends
+    # the prefix but does not normalize, see assist/research_cleanup.py).
+    # Cleanup of intermediate files happens in `ReferencesCleanupRunnable`
+    # outside the agent's loop.
     if sandbox_backend:
-        backend = create_sandbox_composite_backend(sandbox_backend)
+        # Sibling sandbox rooted at /workspace/references.  ``strip_prefixes``
+        # flattens any agent-supplied ``references/`` (or ``/references/``)
+        # so writes don't nest under the already-references-rooted workdir.
+        references_sandbox = DockerSandboxBackend(
+            sandbox_backend.container,
+            work_dir=sandbox_backend.work_dir + "/references",
+            strip_prefixes=("references",),
+        )
+        backend = create_sandbox_composite_backend(references_sandbox)
     else:
-        backend = _create_standard_backend(working_dir)
+        backend = create_references_backend(working_dir)
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     # Safety middleware installed on every dict-spec subagent below.
@@ -333,6 +360,24 @@ def create_research_agent(model: BaseChatModel,
     )
 
     # 300 graph steps ≈ 150 model calls — research is multi-step but bounded.
-    return RollbackRunnable(agent, recursion_limit=300)
+    rollback_runnable = RollbackRunnable(agent, recursion_limit=300)
+
+    # Wrap with the references-cleanup runnable so intermediate drafts
+    # and sub-sub-agent scratch files get pruned after the research call
+    # returns — only the final report stays in references/.  The wrapper
+    # uses the *parent* sandbox (work_dir=/workspace), not the references
+    # sibling, so its `mkdir -p /workspace/references` runs with a
+    # workdir that exists on the first call.
+    if sandbox_backend:
+        references_path = sandbox_backend.work_dir + "/references"
+        cleanup_sandbox = sandbox_backend
+    else:
+        references_path = os.path.join(working_dir, "references")
+        cleanup_sandbox = None
+    return ReferencesCleanupRunnable(
+        rollback_runnable,
+        references_path=references_path,
+        sandbox_backend=cleanup_sandbox,
+    )
 
 
