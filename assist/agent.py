@@ -39,6 +39,22 @@ def _create_standard_backend(working_dir: str):
     return create_composite_backend(working_dir, STATEFUL_PATHS)
 
 
+# Single source of truth for the retry-on tuple.  When adding a new
+# transient exception type to retry, change it here and every agent /
+# sub-agent factory picks it up.  Previously the tuple was duplicated
+# across `create_agent` and the dict-spec sub-agents — commit 1264c77
+# updated the top-level but missed the sub-agents, which left the
+# vegan-pizza thread (2026-05-03 18:09) unprotected against an
+# `APITimeoutError` (a subclass of `APIConnectionError`) inside a
+# sub-research-agent loop.
+def _make_retry_middleware():
+    return ModelRetryMiddleware(
+        max_retries=3,
+        retry_on=(APIConnectionError, InternalServerError, TimeoutError, ConnectionError),
+        backoff_factor=2,
+    )
+
+
 class AgentHarness:
     """Makes it easier to have conversations"""
     
@@ -73,21 +89,9 @@ def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
                  sandbox_backend=None) -> CompiledStateGraph:
-    # Core middleware: retry, tool call limiting, JSON validation, and logging
-    # Only retry on transient server errors (5xx, timeouts, connection issues).
-    # BadRequestError (400) is handled by invoke_with_rollback via checkpoint rollback,
-    # but BadRequestRetryMiddleware sanitizes + truncates messages on overflow first.
-    # APIConnectionError covers TCP-level resets — observed on the
-    # pizza-dough thread 2026-05-02T21:16: a single LLM call hit
-    # `Connection reset by peer` (likely a `launch_fattn` CUDA-OOM
-    # crashing the llama-server slot mid-prefill on a long thread),
-    # the server itself stayed up, but the unretried request bubbled up
-    # as `openai.APIConnectionError` and ended the thread.  Adding
-    # APIConnectionError here means the next call retries cleanly
-    # against a healthy slot.
-    retry_middle = ModelRetryMiddleware(max_retries=3,
-                                        retry_on=(APIConnectionError, InternalServerError, TimeoutError, ConnectionError),
-                                        backoff_factor=2)
+    # Core middleware: retry, tool call limiting, JSON validation, and logging.
+    # See `_make_retry_middleware` for the retry-on tuple rationale.
+    retry_middle = _make_retry_middleware()
     # Catch BadRequestError (e.g. context overflow), sanitize & truncate, retry.
     bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
     # Validate and fix JSON in tool call arguments
@@ -152,10 +156,14 @@ def create_agent(model: BaseChatModel,
         "system_prompt": base_prompt_for("deepagents/dev_critique.md.j2",
                                          workspace_dir=workspace_dir),
         # Safety middleware — same rationale as the research-flow dict
-        # subagents.  Without these, a critique iteration that loops
-        # or terminates with empty content propagates straight back to
-        # the parent.
-        "middleware": [LoopDetectionMiddleware(),
+        # subagents.  Includes the retry layers so a transient
+        # APIConnectionError (incl. APITimeoutError) inside the critique
+        # call doesn't kill the parent thread the way it killed the
+        # vegan-pizza thread on 2026-05-03 (which lost a sub-research-agent
+        # call to an unretried APITimeoutError).
+        "middleware": [_make_retry_middleware(),
+                       BadRequestRetryMiddleware(max_retries=3),
+                       LoopDetectionMiddleware(),
                        EmptyResponseRecoveryMiddleware()],
     }
 
@@ -269,15 +277,24 @@ def create_research_agent(model: BaseChatModel,
         backend = _create_standard_backend(working_dir)
     logging_mw = ModelLoggingMiddleware("research-agent")
 
-    # Loop-detection + empty-response defenses are installed on every
-    # dict-spec subagent below.  Without them, the subagent's compiled
-    # graph runs only the deepagents default middleware (TodoList,
-    # Filesystem, Summarization, PatchToolCalls), which left the
-    # fact-check-agent unbounded — it ran 200+ `read_url` calls in
-    # a recent diag because nothing would short-circuit a model that
+    # Safety middleware installed on every dict-spec subagent below.
+    # Includes the same retry/bad-request layers the top-level agent has,
+    # so a transient APIConnectionError (incl. APITimeoutError) deep in a
+    # sub-research-agent loop doesn't kill the parent thread.  Without
+    # the retry layers, a 600s LLM timeout on a single sub-agent call
+    # bubbles up as an unretried APITimeoutError and ends the thread —
+    # observed on the vegan-pizza thread 2026-05-03 18:09 after 90 min
+    # of work.  Without LoopDetection + EmptyResponseRecovery, the
+    # subagent's compiled graph runs only the deepagents defaults
+    # (TodoList, Filesystem, Summarization, PatchToolCalls), which once
+    # left the fact-check-agent unbounded — it ran 200+ `read_url`
+    # calls in a diag because nothing would short-circuit a model that
     # kept "thinking of more references to verify".
     def _subagent_safety_mw():
-        return [LoopDetectionMiddleware(), EmptyResponseRecoveryMiddleware()]
+        return [_make_retry_middleware(),
+                BadRequestRetryMiddleware(max_retries=3),
+                LoopDetectionMiddleware(),
+                EmptyResponseRecoveryMiddleware()]
 
     research_sub_agent = {
         "name": "research-agent",
