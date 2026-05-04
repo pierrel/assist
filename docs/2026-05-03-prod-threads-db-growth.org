@@ -1,0 +1,117 @@
+State: Not started
+* Problem
+=/home/pierre/deploy/assist/threads/threads.db= reached *187 GB* on
+2026-05-03.  This is the langgraph =SqliteSaver= checkpointer for the
+production assist-web service, holding state for all threads ever
+created in the UI.
+
+Observed sizes during today's session:
+- 2026-04-29: a single eval-leaked =threads.db= grew to 12 GB and
+  filled /tmp's per-user quota (broke the eval suite for two
+  nightlies).  That one was confined to a per-test temp dir; the prod
+  one accumulates without any reset.
+- 2026-05-03 17:59: =/home/pierre/deploy/assist/threads/threads.db=
+  was 187,214,426,112 bytes (=187 GB=).
+- /home has 1.1 TB free, so this is not a hard outage yet — but it
+  grows on the order of GB/day under normal use, and an eval-style
+  failure (multi-hour research-agent loop with full URL-content tool
+  results) inflates it disproportionately.
+
+** Root causes
+1. =SqliteSaver= snapshots the *full message list* into the DB on
+   every super-step.  A thread that runs 100 LLM calls with ~20k
+   tokens of context each writes ~2 MB × 100 = 200 MB of redundant
+   state.  Earlier snapshots stay in the DB to support rollback.
+2. Tool results inflate single calls: =read_url= returns 50-500 KB
+   of HTML per call, and the research agent makes 10-50 such calls
+   per thread.  Each result is in every snapshot from that point
+   forward.
+3. No prune / retention policy.  A thread the user "forgets about"
+   sits in the DB at full size forever.
+4. No cap on per-thread DB footprint at write time.  A runaway
+   thread (vegan-pizza, pizza-dough) writes the full message-list-
+   after-each-tool-call until it dies.
+
+* Solution
+Three layered changes, smallest first.  Each is independently
+shippable.
+
+** Layer 1 — Periodic =VACUUM= (cheapest, biggest one-time win)
+SQLite's =VACUUM= rebuilds the file in place, dropping freelist pages
+left by deleted rows.  If we add the eviction below, =VACUUM= is
+what actually reclaims disk.  Standalone, =VACUUM= today probably
+reclaims 30-50% on the existing 187 GB if any internal langgraph
+checkpoint deletion has been happening.
+
+Implementation: a daily systemd timer that runs ~3 AM:
+#+BEGIN_SRC bash
+sqlite3 /home/pierre/deploy/assist/threads/threads.db 'VACUUM;'
+#+END_SRC
+
+Risks:
+- =VACUUM= holds an exclusive lock; assist-web must be stopped or
+  paused for the duration.  At 187 GB this can take 10-30 min.
+- Disk needs ~2× the DB size temporarily (rewrites the file).  We
+  have 1.1 TB free, so OK.
+
+** Layer 2 — Per-thread checkpoint pruning (real bound on growth)
+Per-thread, keep only the last =N=10= checkpoints.  Older
+checkpoints go away; the thread loses the ability to roll back
+further than that window, but =RollbackRunnable= only reaches back
+1-2 turns in practice.
+
+Implementation: a wrapper over =SqliteSaver= (or a custom
+=BaseCheckpointSaver=) that on each =put()= deletes any checkpoint
+older than =RETAIN_LAST= for the same =thread_id=.  Or a daily prune
+script that walks all threads and trims.
+
+Risks:
+- =RollbackRunnable= depends on a previous checkpoint.  Pruning too
+  aggressively (=RETAIN_LAST=1=) breaks rollback.  N=10 is
+  conservative.
+- Per-thread cap doesn't help a single runaway thread that produces
+  a 10 GB last-snapshot.  Layer 3 covers that.
+
+** Layer 3 — Tool-result eviction at write time (cap per-checkpoint size)
+Before serializing a checkpoint to SQLite, walk the message list and
+replace large =ToolMessage= contents with a stub like =[evicted: 250
+KB HTML, see /workspace/large_tool_results/<id>]=.  The actual
+content goes to the bind-mounted workspace as a separate file, where
+it's cleaned up on thread deletion.
+
+Implementation: extend =ContextAwareToolEvictionMiddleware= so its
+eviction policy applies *before* the checkpoint write, not just
+before the next LLM call.  The two paths share the same goal (keep
+state small); the middleware already knows how to evict.  Today it's
+reactive (runs when context is about to overflow); for prod we want
+it proactive (every tool result over =EVICT_THRESHOLD_KB= goes
+straight to disk).
+
+Risks:
+- =RollbackRunnable= restoring a checkpoint with stub messages: the
+  agent re-reads context but the tool-result text is gone.  Either
+  (a) the middleware re-hydrates from disk on read, or (b) accept
+  rollback past an eviction loses fidelity.  (a) is the right
+  design.
+- Workspace-side files leak when a thread is deleted but its
+  =/large_tool_results/= isn't.  Deletion path needs to walk and
+  unlink.
+
+** Order of operations
+1. Ship Layer 1 (=VACUUM= timer).  Reclaims disk immediately, no
+   code risk.
+2. Ship Layer 2 (per-thread retention).  Bounds long-term growth.
+3. Ship Layer 3 (proactive tool-result eviction).  Bounds runaway-
+   thread spike size.
+
+* Out of scope
+- Eval-side =threads.db= bloat.  Solved separately by
+  =scripts/run-evals.sh='s wipe-per-run scratch dir (commit f9df751,
+  2026-05-03).  Eval state is now isolated and bounded by design;
+  prod has no equivalent and needs the layered approach above.
+- Replacing =SqliteSaver= with a different backend (Postgres, file-
+  per-thread JSON).  Bigger refactor; consider only if the layers
+  above prove insufficient.
+- Compressing the DB at rest.  SQLite has =sqlite-zstd= or similar,
+  but adds operational complexity.  =VACUUM= + retention should be
+  enough.
