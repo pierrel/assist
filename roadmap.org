@@ -36,6 +36,8 @@ Consider:
 2. URLs that do not corroborate the information in the final report
 3. Better ways to search
 * Reliability
+** TODO Bound production =threads.db= growth
+See [[file:docs/2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]].  =/home/pierre/deploy/assist/threads/threads.db= reached 187 GB on 2026-05-03 — langgraph =SqliteSaver= snapshots the full message list per super-step, large =read_url= tool results sit in every snapshot from that point forward, and there's no per-thread retention or per-checkpoint size cap.  Three-layer plan: periodic =VACUUM=, per-thread checkpoint retention (=RETAIN_LAST=10=), proactive tool-result eviction at write time.  Eval-side equivalent already shipped (commit f9df751).
 ** DONE Make =write_file= recoverable on collision
 See [[file:docs/proposal-infinite-writes.org][docs/proposal-infinite-writes.org]] (Solution 1, "Make =write_file= recoverable").  Loop detection (Solution 2 of that doc) shipped already.  Without this fix, the small model still falls into the filename-mutation trap (=final_report.md= → =completed_final_report.md= → =report_final.md=…) when a write hits =Cannot write because it already exists=.  Hit the trap during the dev-skill migration evals (=test_mid_task_clarification=); loop detection caught it but the right fix is to make =write_file= overwrite-by-default or auto-rewrite to =edit_file= on collision.
 ** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response
