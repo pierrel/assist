@@ -38,6 +38,22 @@ $USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist
 $USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/systemd/system/${SERVICE_NAME}.service
+
+# Daily VACUUM timer for the threads.db (Layer 1 of the prod
+# threads.db growth plan).  Installed by scripts/install-vacuum-timer.sh,
+# fired by the assist-vacuum.timer; \`make vacuum-now\` triggers a
+# manual run.
+$USER ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/systemd/system/assist-vacuum.service
+$USER ALL=(ALL) NOPASSWD: /usr/bin/cp ${DEPLOY_PATH}/scripts/assist-vacuum.timer.template /etc/systemd/system/assist-vacuum.timer
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl enable assist-vacuum.timer
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl enable --now assist-vacuum.timer
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl disable assist-vacuum.timer
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start assist-vacuum.service
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl start --wait assist-vacuum.service
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop assist-vacuum.timer
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl status assist-vacuum.service
+$USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl status assist-vacuum.timer
+$USER ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u assist-vacuum *
 EOF
 
 echo "Generated sudoers configuration:"
