@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily VACUUM of the assist threads.db
+
+[Timer]
+# 03:00 local time — well clear of the 23:00 nightly eval cron and
+# any user-facing traffic.
+OnCalendar=*-*-* 03:00:00
+# Catch up if the machine was off at the scheduled time.
+Persistent=true
+# Don't pile up if a previous run is still going (shouldn't happen
+# given the 2h TimeoutStartSec, but defense-in-depth).
+RandomizedDelaySec=0
+
+[Install]
+WantedBy=timers.target

@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history deploy-vacuum-timer vacuum-now
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -121,6 +121,27 @@ setup-sudo:
 	@echo ""
 	@echo "✓ Setup complete! You can now deploy from Emacs without password prompts."
 
+# Install the daily VACUUM timer.  One-time setup; prompts for sudo
+# the first time because new unit-file installs aren't in the
+# passwordless allowlist.
+deploy-vacuum-timer:
+	@echo "→ Installing assist-vacuum service + timer on $(DEPLOY_HOST)..."
+	@ssh -t $(DEPLOY_HOST) \
+		DEPLOY_PATH=$(DEPLOY_PATH) \
+		SERVICE_NAME=$(SERVICE_NAME) \
+		ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
+		'bash -s' < scripts/install-vacuum-timer.sh
+	@echo "✓ Vacuum timer installed"
+
+# Run VACUUM right now (manually triggers the same systemd unit the
+# daily timer fires).  Stops assist-web for the duration — at 187 GB
+# expect 10–30 minutes.
+vacuum-now:
+	@echo "→ Triggering assist-vacuum.service on $(DEPLOY_HOST) (synchronous)..."
+	@ssh $(DEPLOY_HOST) 'sudo systemctl start --wait assist-vacuum.service'
+	@echo "✓ VACUUM done"
+	@ssh $(DEPLOY_HOST) 'sudo journalctl -u assist-vacuum.service -n 5 --no-pager'
+
 help:
 	@echo "Assist Commands:"
 	@echo ""
@@ -142,6 +163,8 @@ help:
 	@echo "  make status         - Check service status"
 	@echo "  make logs           - View service logs (live tail)"
 	@echo "  make setup-sudo     - Setup passwordless sudo (optional)"
+	@echo "  make deploy-vacuum-timer - Install daily threads.db VACUUM timer"
+	@echo "  make vacuum-now     - Run VACUUM now (stops assist-web for the duration)"
 	@echo ""
 	@echo "Configuration:"
 	@echo "  Development: Copy .dev.env.example to .dev.env"

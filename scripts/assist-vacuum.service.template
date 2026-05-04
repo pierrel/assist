@@ -1,0 +1,21 @@
+[Unit]
+Description=VACUUM the assist threads.db (reclaims SQLite freelist pages)
+# Don't run while a prior VACUUM is still going — but timers are
+# already serialized, so this is just defense-in-depth.
+ConditionPathExists={{DEPLOY_PATH}}/scripts/vacuum-prod-db.sh
+
+[Service]
+Type=oneshot
+# Runs as root so it can systemctl-stop assist-web without a sudoers
+# entry; the script uses ``runuser -u {{USER}}`` for the sqlite3 call
+# so the rebuilt DB keeps {{USER}}'s ownership.
+User=root
+Environment=ASSIST_THREADS_DB={{ASSIST_THREADS_DIR}}/threads.db
+Environment=ASSIST_SERVICE={{SERVICE_NAME}}
+Environment=ASSIST_DB_OWNER={{USER}}
+ExecStart={{DEPLOY_PATH}}/scripts/vacuum-prod-db.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=assist-vacuum
+# At 187 GB the rebuild takes 10-30 min; allow generous wall time.
+TimeoutStartSec=2h
