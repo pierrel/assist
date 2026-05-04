@@ -26,27 +26,49 @@ PER_TEST_TIMEOUT="${PER_TEST_TIMEOUT:-600}"
 PER_FILE_TIMEOUT="${PER_FILE_TIMEOUT:-1800}"
 TS="$(date +%Y%m%d-%H%M)"
 
-# Move all eval-time tempfile activity off the /tmp tmpfs (16 GB,
-# per-user quota gets hit) onto the home filesystem (TB-scale).
-# Tests use tempfile.mkdtemp() as workspace roots; bind-mounted into
-# Docker sandboxes; langgraph SqliteSaver writes threads.db inside.
-# A crashed test on /tmp leaks a workspace + checkpointer; observed
-# 2026-04-29 a single threads.db grew to 12 GB and broke /tmp.
-export TMPDIR="${TMPDIR:-$HOME/eval-tmp}"
-mkdir -p "$TMPDIR"
+# All eval-time tempfile activity (test workspaces, langgraph SqliteSaver
+# threads.db, sandbox bind mounts) goes to a dedicated scratch dir that
+# is wiped at the START of every run. Reproducible state, bounded disk
+# use, isolated from prod's /home/pierre/deploy/assist/threads/threads.db
+# (which has its own growth issue tracked separately in roadmap).
+#
+# Default location: $HOME/deploy/assist/tmp/eval/
+# Override via EVAL_SCRATCH_DIR for testing the script itself.
+EVAL_SCRATCH_DIR="${EVAL_SCRATCH_DIR:-$HOME/deploy/assist/tmp/eval}"
+EVAL_SCRATCH_LOCK="$HOME/deploy/assist/tmp/eval.lock"
 
-# Best-effort cleanup of leaked workspaces older than 1 day. Ignores
-# permission errors from root-owned files inside crashed sandbox dirs
-# (those can be cleaned with a separate `docker run --rm -v <dir>:/x
-# alpine chmod -R 777 /x` if they accumulate).
-find "$TMPDIR" -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+# Path-validation guard: must resolve to exactly $HOME/deploy/assist/tmp/eval.
+# Anchored to $HOME (not just a tail-match) so a hostile EVAL_SCRATCH_DIR
+# override pointing at e.g. /some/other/user/deploy/assist/tmp/eval cannot
+# bypass the guard. Uses GNU realpath -m (paths needn't exist yet); this
+# script targets the Linux cron host.
+EVAL_SCRATCH_REAL="$(realpath -m "$EVAL_SCRATCH_DIR")"
+EXPECTED_REAL="$(realpath -m "$HOME/deploy/assist/tmp/eval")"
+if [ "$EVAL_SCRATCH_REAL" != "$EXPECTED_REAL" ]; then
+    echo "ERROR: EVAL_SCRATCH_DIR realpath ($EVAL_SCRATCH_REAL) is not the canonical $EXPECTED_REAL — refusing to wipe" >&2
+    exit 2
+fi
+
+# Single-writer lock — a second concurrent eval run sharing the wipe-dir
+# would corrupt state. Lock auto-releases when this script exits.
+mkdir -p "$(dirname "$EVAL_SCRATCH_LOCK")"
+exec 9>"$EVAL_SCRATCH_LOCK"
+if ! flock -n 9; then
+    echo "ERROR: another eval run holds $EVAL_SCRATCH_LOCK — exiting" >&2
+    exit 3
+fi
+
+# Wipe + recreate. Only runs after the realpath guard above.
+rm -rf "$EVAL_SCRATCH_DIR"
+mkdir -p "$EVAL_SCRATCH_DIR"
+export TMPDIR="$EVAL_SCRATCH_DIR"
 
 mkdir -p "$HISTORY_DIR"
 SUMMARY="$HISTORY_DIR/eval-summary-$TS.txt"
 
 echo "=== eval suite starting at $(date -Iseconds) ===" | tee -a "$SUMMARY"
 echo "  per-test timeout: ${PER_TEST_TIMEOUT}s, per-file timeout: ${PER_FILE_TIMEOUT}s" | tee -a "$SUMMARY"
-echo "  TMPDIR: $TMPDIR ($(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"}'))" | tee -a "$SUMMARY"
+echo "  TMPDIR: $TMPDIR (wiped, $(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"}'))" | tee -a "$SUMMARY"
 
 for f in edd/eval/test_*.py; do
     base="$(basename "$f" .py)"
