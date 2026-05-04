@@ -108,9 +108,21 @@ def create_references_backend(working_dir: str) -> CompositeBackend:
     Uses ``_ReferencesNormalizingBackend`` so paths like
     ``references/foo.org`` (which would otherwise nest under the already-
     references-rooted backend) get the leading ``references/`` stripped.
+
+    Construction must NOT create ``references/`` on disk.
+    ``ThreadManager.new()`` instantiates a ``Thread`` with
+    ``sandbox_backend=None`` synchronously inside ``POST /threads*``, and
+    ``Thread`` builds the research sub-agent eagerly via
+    ``create_research_agent`` → ``create_references_backend``.  If we
+    eagerly mkdir ``references/`` here, the workspace is no longer empty
+    when the background ``_initialize_thread`` later constructs
+    ``DomainManager`` — its ``is_empty`` check then short-circuits the
+    git clone, leaving the thread without a ``.git/`` and breaking the
+    post-run sync (prod incident 2026-05-04, thread 20260504091127-
+    183e8f35).  ``ReferencesCleanupRunnable._ensure_dir`` mkdirs at
+    invoke time; that is the right moment.
     """
     references_root = os.path.join(working_dir, "references")
-    os.makedirs(references_root, exist_ok=True)
     return CompositeBackend(
         default=_ReferencesNormalizingBackend(
             root_dir=references_root, virtual_mode=True,
