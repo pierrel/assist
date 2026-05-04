@@ -61,4 +61,43 @@ class TestMemory(AgentTestMixin, TestCase):
             "persistent preference."
         )
 
+    def test_writes_memory_two_consecutive_turns(self):
+        """Both turns add a fact; the second turn must see the first.
+
+        Exercises the cross-turn freshness contract: after the model
+        writes via ``edit_file``/``write_file`` on turn 1, turn 2's
+        rendered ``<agent_memory>`` block must reflect the new content
+        — otherwise the second write's anchor mismatches and the fact
+        is lost (or duplicated).
+        """
+        agent, root = self.create_agent({"AGENTS.md": ""})
+        agent.message("I have 3 cats.")
+        agent.message("I also have 2 dogs.")
+        memory_after = read_file(os.path.join(root, "AGENTS.md"))
+        self.assertRegex(memory_after, "cats",
+                         "Turn 1's fact must survive into the final file")
+        self.assertRegex(memory_after, "dogs",
+                         "Turn 2's fact must be persisted, not lost to a "
+                         "stale anchor mismatch")
+
+    def test_writes_memory_preserves_existing(self):
+        """Append, do not overwrite, when AGENTS.md already has content.
+
+        The save path is now `edit_file` (not a closure-bound append
+        tool), so the most plausible failure mode is the model
+        clobbering existing memory with just the new fact.  This test
+        seeds the file with two prior facts and expects all three
+        survive after the write.
+        """
+        seed = "User has 3 cats.\nUser prefers Python.\n"
+        agent, root = self.create_agent({"AGENTS.md": seed})
+        agent.message("I also have 2 dogs. Commit this to memory.")
+        memory_after = read_file(os.path.join(root, "AGENTS.md"))
+        self.assertRegex(memory_after, "cats",
+                         "Existing fact about cats should survive")
+        self.assertRegex(memory_after, "Python",
+                         "Existing fact about Python should survive")
+        self.assertRegex(memory_after, "dogs",
+                         "New fact about dogs should be appended")
+
 
