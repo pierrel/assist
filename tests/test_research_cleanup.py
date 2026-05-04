@@ -262,11 +262,28 @@ class TestResearchAgentWiring:
                 runnable = create_research_agent(MagicMock(), wd)
 
                 refs = os.path.join(wd, "references")
-                assert os.path.isdir(refs), "references dir not created"
+                # Construction must NOT create ``references/`` on disk —
+                # see prod incident 2026-05-04 thread 20260504091127-
+                # 183e8f35.  Eager mkdir here makes workspace non-empty
+                # before _initialize_thread's DomainManager is_empty
+                # check, silently skipping the clone.  The mkdir belongs
+                # in ReferencesCleanupRunnable._ensure_dir at invoke time.
+                assert not os.path.exists(refs), (
+                    "references dir was eagerly created — this regresses "
+                    "the empty-workspace contract DomainManager.changes() "
+                    "depends on."
+                )
                 assert isinstance(runnable, ReferencesCleanupRunnable)
                 assert isinstance(runnable._inner, RollbackRunnable)
                 assert runnable._references_path == refs
                 assert runnable._sandbox is None
+
+                # Invoke-time _ensure_dir() is the moment the dir gets
+                # created; verify that contract is honored.
+                runnable._ensure_dir()
+                assert os.path.isdir(refs), (
+                    "_ensure_dir() must create references/ at invoke time"
+                )
 
                 kwargs = fake.call_args.kwargs
                 backend = kwargs["backend"]
