@@ -267,10 +267,22 @@ class DomainManager:
     def changes(self) -> List[Change]:
         if not self.repo:
             return []
+        if not is_git_repo(self.repo_path):
+            logger.warning(
+                "changes() skipped: %s has self.repo=%s but is not a git repo",
+                self.repo_path, self.repo,
+            )
+            return []
         return git_diff(self.repo_path)
 
     def main_diff(self) -> List[Change]:
         if not self.repo:
+            return []
+        if not is_git_repo(self.repo_path):
+            logger.warning(
+                "main_diff() skipped: %s has self.repo=%s but is not a git repo",
+                self.repo_path, self.repo,
+            )
             return []
         return git_diff_main(self.repo_path)
 
