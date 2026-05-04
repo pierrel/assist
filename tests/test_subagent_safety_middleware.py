@@ -12,6 +12,10 @@ of the dict specs cannot silently drop it.
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
+from langchain.agents.middleware import ModelRetryMiddleware
+from openai import APIConnectionError, APITimeoutError
+
+from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.empty_response_recovery import (
     EmptyResponseRecoveryMiddleware,
 )
@@ -22,10 +26,31 @@ def _safety_mw_types_in(spec: dict) -> set[type]:
     return {type(m) for m in spec.get("middleware", [])}
 
 
-class TestSubagentSafetyMiddleware(TestCase):
-    """Each dict-spec subagent must carry both safety middlewares."""
+def _retry_middleware(spec: dict) -> ModelRetryMiddleware | None:
+    for m in spec.get("middleware", []):
+        if isinstance(m, ModelRetryMiddleware):
+            return m
+    return None
 
-    REQUIRED = {LoopDetectionMiddleware, EmptyResponseRecoveryMiddleware}
+
+class TestSubagentSafetyMiddleware(TestCase):
+    """Each dict-spec subagent must carry the safety middleware set.
+
+    The set includes the retry layers (ModelRetryMiddleware,
+    BadRequestRetryMiddleware) — without these, a transient
+    APIConnectionError (incl. APITimeoutError) deep in a sub-agent loop
+    bubbles up unretried and ends the parent thread.  Observed in the
+    wild on the vegan-pizza thread 2026-05-03 18:09 before this was
+    fixed; the regression here pins it so a future refactor can't
+    silently drop the retry layers again.
+    """
+
+    REQUIRED = {
+        ModelRetryMiddleware,
+        BadRequestRetryMiddleware,
+        LoopDetectionMiddleware,
+        EmptyResponseRecoveryMiddleware,
+    }
 
     def _capture_subagents(self, factory, *args, **kwargs):
         """Invoke ``factory`` with ``create_deep_agent`` patched to a no-op
@@ -89,4 +114,44 @@ class TestSubagentSafetyMiddleware(TestCase):
                 missing,
                 f"Subagent '{spec.get('name')}' missing safety middleware: "
                 f"{[m.__name__ for m in missing]}",
+            )
+
+    def test_subagent_retry_middleware_includes_apitimeout(self):
+        """The retry middleware on dict-spec subagents must catch
+        APITimeoutError, the failure mode that killed the vegan-pizza
+        thread before the retry layer was added to sub-agents.
+
+        APITimeoutError is a subclass of APIConnectionError; this test
+        guards against a future refactor that drops APIConnectionError
+        from the retry-on tuple (which would silently regress the
+        vegan-pizza fix).
+        """
+        from assist.agent import create_agent, create_research_agent
+
+        model = MagicMock()
+        all_dict_specs = []
+        for factory in (create_agent, create_research_agent):
+            subagents = self._capture_subagents(factory, model, working_dir="/tmp/x")
+            all_dict_specs.extend(
+                s for s in subagents if isinstance(s, dict) and "runnable" not in s
+            )
+        self.assertGreater(len(all_dict_specs), 0)
+
+        for spec in all_dict_specs:
+            retry = _retry_middleware(spec)
+            self.assertIsNotNone(
+                retry, f"Subagent '{spec.get('name')}' has no ModelRetryMiddleware",
+            )
+            # Defensive: assert the attribute exists before introspecting,
+            # so an upstream rename surfaces as a clear test failure rather
+            # than an opaque AttributeError on `.retry_on`.
+            self.assertTrue(
+                hasattr(retry, "retry_on"),
+                f"Subagent '{spec.get('name')}' retry middleware lacks "
+                f"retry_on attribute — langchain API change?",
+            )
+            self.assertTrue(
+                issubclass(APITimeoutError, retry.retry_on),
+                f"Subagent '{spec.get('name')}' retry_on={retry.retry_on} "
+                f"does not catch APITimeoutError",
             )
