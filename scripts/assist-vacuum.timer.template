@@ -1,10 +1,12 @@
 [Unit]
-Description=Daily VACUUM of the assist threads.db
+Description=Weekly VACUUM of the assist threads.db
 
 [Timer]
-# 03:00 local time — well clear of the 23:00 nightly eval cron and
-# any user-facing traffic.
-OnCalendar=*-*-* 03:00:00
+# Sunday 06:00 local time.  The nightly eval cron runs 23:00 with a
+# 360-minute (6 h) timeout, so it can still be holding the eval lock
+# until ~05:02 worst case.  06:00 leaves a comfortable margin and
+# vacuum-prod-db.sh additionally bails out if the eval lock is held.
+OnCalendar=Sun *-*-* 06:00:00
 # Catch up if the machine was off at the scheduled time.
 Persistent=true
 # Don't pile up if a previous run is still going (shouldn't happen

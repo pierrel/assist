@@ -16,9 +16,23 @@ set -euo pipefail
 DB="${ASSIST_THREADS_DB:?ASSIST_THREADS_DB not set}"
 SERVICE="${ASSIST_SERVICE:?ASSIST_SERVICE not set}"
 OWNER="${ASSIST_DB_OWNER:?ASSIST_DB_OWNER not set}"
+# /tmp/assist-eval.lock is the flock the nightly eval cron holds for
+# the duration of its 6h budget.  If it's held when we wake up, the
+# eval is still running — skip rather than racing it.  Override the
+# path via env to disable the check (e.g. ASSIST_EVAL_LOCK=/dev/null
+# in unit tests).
+EVAL_LOCK="${ASSIST_EVAL_LOCK:-/tmp/assist-eval.lock}"
 
 if [ ! -f "$DB" ]; then
     echo "[vacuum] $DB does not exist; nothing to do" >&2
+    exit 0
+fi
+
+# Bail if the nightly eval is still holding its flock.  Without -n
+# we'd block until eval finished, then run VACUUM at an unpredictable
+# hour — better to skip and let next week's scheduled run catch up.
+if [ -e "$EVAL_LOCK" ] && ! flock -n -x "$EVAL_LOCK" -c true 2>/dev/null; then
+    echo "[vacuum] $(date -Is) skipping: eval cron is still holding $EVAL_LOCK" >&2
     exit 0
 fi
 
