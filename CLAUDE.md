@@ -47,9 +47,25 @@ Treat any drop in pass rate compared to the prior step as a regression; investig
 
 The user often caps eval runs at a wall-clock time ("no evals past 10:30p"). Track the deadline. Do not start a new sweep that won't finish in time. Final summaries go to the user with: files touched, trial counts, stability numbers, reviewer pushback addressed, and any documented trade-offs.
 
+## Branching strategy
+
+Standard feature-branch flow.  Default to it for any non-trivial change.
+
+1. **Branch off `main` per feature.**  Pick a short, kebab-case name that describes the change (verb-led when natural — `confine-research-to-references`, `bound-threads-db-growth`, `add-skill-x`).  Avoid umbrella names like `<topic>-stabilization` that don't say what's actually being done.
+
+2. **Commit on the feature branch.**  Single coherent commit per logically distinct change.  `make a new commit, never amend` (per the wider Claude Code rules).  When the work is done locally, `git push -u origin <branch>` so the history is preserved even if the local clone goes away.
+
+3. **Merge to `main` when the branch is ready.**  "Ready" means: design + reviewer phases per the Two-phase development workflow above are complete, evals pass at the cadence appropriate to scope, and any reviewer findings are addressed.  Prefer fast-forward merges (`git merge --ff-only <branch>`) so `main` stays linear; if the branch has diverged, rebase rather than create merge commits.
+
+4. **Push `main`, then deploy.**  `git push origin main` first so the remote reflects what's about to be in production; deploy from there (whatever `make deploy-code` does on this host).  Never deploy from a feature branch.
+
+5. **Keep feature branches around briefly after merge.**  Don't immediately delete the local or remote branch — they're useful if a follow-up question or a quick revert is needed.  Garden them out periodically.
+
+Direct commits to `main` are reserved for trivial fixes (typo, doc tweak) that wouldn't benefit from review.  Anything that touches `assist/agent.py`, `assist/middleware/`, or evals goes through a feature branch.
+
 ## Project conventions to remember across phases
 
-- **No commits.** Default behavior is to leave changes uncommitted so the user can review the final diff. Confirm before any `git commit`.
+- **No commits without an explicit go-ahead.** Default behavior is to leave changes uncommitted so the user can review the final diff. Confirm before any `git commit`.  When the user does authorize a commit, follow the branching strategy above — don't commit directly to `main` for non-trivial work.
 - **No new docs unless asked.** Don't write tutorial docs, design docs, or README sections that weren't requested. If the user asks for documentation, mirror the existing format (Skills section in `README.md` is the template for middleware-style additions).
 - **Small-model targeting.** Code is run against Qwen3-Coder-30B-A3B-Instruct-AWQ on a local vLLM instance. Prompt and tool-surface decisions optimize for this model's failure modes, not GPT-4-class behavior. When evidence is needed, run the eval rather than reasoning from training-data intuitions.
 - **Eval-first contracts.** Tests in `edd/eval/` define what the system is supposed to do. When in doubt, the test wins. Don't change tests to accommodate the implementation; redesign the implementation to satisfy the existing tests.
