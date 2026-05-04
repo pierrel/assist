@@ -67,6 +67,31 @@ class TestDomainManager(TestCase):
         self.assertEqual(dm.changes(), [])
         self.assertEqual(dm.main_diff(), [])
 
+    @patch('assist.domain_manager.clone_repo')
+    def test_changes_returns_empty_when_repo_set_but_dir_not_git(self, mock_clone):
+        """Regression: prod thread 20260504091127-183e8f35 lost the user's
+        completed work because ``dm.changes()`` raised when the workspace
+        had ``self.repo`` set (a domain URL) but no ``.git/`` on disk.
+
+        Whatever caused the missing ``.git/`` (a clone that didn't take, a
+        sandbox tool wiping it mid-run, a race), ``changes()`` and
+        ``main_diff()`` must degrade to ``[]`` so ``_process_message``'s
+        post-run sync block doesn't unwind the whole thread.
+        """
+        test_path = os.path.join(self.temp_dir, "no_dot_git")
+        os.makedirs(test_path)
+        # Mock clone so __init__ doesn't try to actually clone — we want
+        # the post-init state where ``self.repo`` is set but the dir is
+        # not a real git repo.
+        dm = DomainManager(repo_path=test_path, repo="https://example.com/repo.git")
+        self.assertEqual(dm.repo, "https://example.com/repo.git")
+        # No ``.git/`` directory was created (mock_clone was a no-op).
+        self.assertFalse(os.path.isdir(os.path.join(test_path, ".git")))
+
+        # Both diff entry points must NOT raise; they must return [].
+        self.assertEqual(dm.changes(), [])
+        self.assertEqual(dm.main_diff(), [])
+
     @patch('assist.domain_manager.subprocess.run')
     def test_git_diff_with_changes(self, mock_run):
         """Test git_diff returns Change objects."""
