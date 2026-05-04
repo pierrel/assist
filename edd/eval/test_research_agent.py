@@ -27,9 +27,12 @@ class TestResearchAgent(TestCase):
         self.model = select_chat_model(0.1)
         
     def test_follows_result_guidance(self):
-        agent, root = self.create_agent({"reference": {"existing_research.org":"The capital of France is Paris"}})
-        res = agent.message("What is langgraph? Place results into /reference/langgraph.org")
-        files = files_in_directory(f"{root}/reference")
+        # research-agent is confined to <root>/references/, so the
+        # filename it's asked to use lands there regardless of what
+        # path prefix the user typed.
+        agent, root = self.create_agent({"references": {"existing_research.org":"The capital of France is Paris"}})
+        res = agent.message("What is langgraph? Save the result as langgraph.org")
+        files = files_in_directory(f"{root}/references")
         self.assertIn("langgraph.org", files, "Should create the requested file")
         # The response should mention the file, but the agent may also return
         # the filename via the last tool call rather than in text content
@@ -43,7 +46,9 @@ class TestResearchAgent(TestCase):
 
     def test_has_references_with_urls(self):
         agent, root = self.create_agent({"references": {"existing_research.org":"The capital of France is Paris"}})
-        res = agent.message("What is langgraph? Place the result into a .org file in the references directory.")
+        # research-agent's filesystem root is <root>/references/, so the
+        # agent just needs to save a .org file — no path prefix.
+        res = agent.message("What is langgraph? Save the result to a .org file.")
 
         # Extract the filename from the response
         # The agent should return the path to the written file

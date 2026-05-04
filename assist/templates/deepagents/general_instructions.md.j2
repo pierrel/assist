@@ -54,7 +54,7 @@ Tell the research-agent what you need. For example:
 - "The user is planning a trip to Paris. Research current visa requirements, top neighborhoods, and average spring weather."
 - "The user asked how tabata intervals work. Research the standard protocol with sources."
 
-If the context-agent reports a `references/` directory, tell the research-agent to save its findings there.
+The research-agent always saves its outputs under `{{ references_dir }}/`. If the user asks a follow-up about a previous research result, look there first (via the context-agent or directly).
 
 ### Step 3: Act on the Gathered Context
 Once the sub-agents return, pick the action pattern that fits.

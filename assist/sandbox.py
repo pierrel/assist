@@ -72,12 +72,43 @@ class DockerSandboxBackend(BaseSandbox):
         work_dir: Root directory inside the container where the bind mount lives.
     """
 
-    def __init__(self, container, work_dir: str = "/workspace"):
+    def __init__(self, container, work_dir: str = "/workspace",
+                 strip_prefixes: tuple[str, ...] = ()):
+        """Args:
+            container: A running Docker container object.
+            work_dir: Root directory inside the container that paths are
+                resolved against.
+            strip_prefixes: Optional tuple of leading path prefixes to
+                strip *before* resolution.  Used by the research-agent's
+                references-confined sibling so the agent writing to
+                ``references/foo.org`` doesn't nest under an already-
+                references-rooted ``work_dir``.  Each prefix is checked
+                in both bare (``"references/"``) and absolute
+                (``"/references/"``) form.
+        """
         self.container = container
         self.work_dir = work_dir.rstrip("/")
+        self._strip_prefixes = strip_prefixes
+
+    def _strip(self, path: str | None) -> str | None:
+        if not path or not self._strip_prefixes:
+            return path
+        for prefix in self._strip_prefixes:
+            for variant in (f"/{prefix.strip('/')}/", f"{prefix.strip('/')}/"):
+                if path.startswith(variant):
+                    stripped = path[len(variant):]
+                    return "/" + stripped if path.startswith("/") else stripped
+        return path
 
     def _resolve(self, path: str | None) -> str | None:
-        """Prefix path with work_dir if not already under it."""
+        """Prefix path with work_dir if not already under it.
+
+        Applies ``strip_prefixes`` first so an agent's accidental
+        ``references/foo.org`` (when the work_dir is already
+        ``/workspace/references``) gets flattened to ``foo.org`` before
+        the work_dir prefix is added.
+        """
+        path = self._strip(path)
         if not path:
             return path
         if path.startswith(self.work_dir):
