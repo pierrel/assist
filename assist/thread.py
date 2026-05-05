@@ -10,13 +10,13 @@ from typing import Literal, Dict, Any, Callable, List, Iterator
 
 import sqlite3
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
 from assist.checkpoint_rollback import invoke_with_rollback
+from assist.checkpointer import CheckpointRetentionSaver
 from assist.sandbox_manager import SandboxManager
 
 logger = logging.getLogger(__name__)
@@ -170,9 +170,13 @@ n    checkpointing via SqliteSaver.
         # Ensure DB file exists upfront
         if not os.path.exists(self.db_path):
             open(self.db_path, "a").close()
-        # SqliteSaver expects a sqlite3.Connection
+        # CheckpointRetentionSaver subclasses upstream SqliteSaver and
+        # prunes per-thread checkpoint history inline with each put().
+        # Behavior toggle: ASSIST_RETAIN_LAST env (default 10, 0=off).
+        # Layer 2 of the threads.db growth plan
+        # (docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org).
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.checkpointer = SqliteSaver(self.conn)
+        self.checkpointer = CheckpointRetentionSaver(self.conn)
         # Lazily resolve the chat model so the web server can boot before
         # the LLM endpoint is reachable.  First request triggers the probe;
         # the lock prevents two concurrent first-requests from probing twice.
