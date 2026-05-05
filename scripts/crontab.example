@@ -1,0 +1,20 @@
+# Example user-crontab entries for the deploy host.  Add to
+# `crontab -e` (no sudo — these are pierre's own jobs).
+#
+# Already in production:
+#
+#   0 23 * * * BASH_ENV=/home/pierre/.bashrc /usr/bin/flock -n /tmp/assist-eval.lock /usr/bin/timeout --kill-after=2m 360m /home/pierre/scripts/assist-test.sh
+#
+# Add for the threads.db VACUUM (Layer 1 of the prod growth plan,
+# docs/2026-05-03-prod-threads-db-growth.org):
+#
+#   0 6 * * 0 /usr/bin/flock -n /tmp/assist-eval.lock /home/pierre/deploy/assist/code/scripts/vacuum-prod-db.sh
+#
+# Why these arguments:
+#   - `0 6 * * 0` — Sunday 06:00 local.  Clears the 23:00 eval cron's
+#     360-min budget (worst-case finish ~05:02) with margin.
+#   - `flock -n /tmp/assist-eval.lock` — eval cron holds this lock for
+#     its whole run.  -n means "skip if held"; never let VACUUM race
+#     the eval (the script also has its own check, but cron-level
+#     flock is cheaper).
+#   - Absolute paths only — cron has no PATH context.

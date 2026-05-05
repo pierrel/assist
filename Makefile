@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history vacuum-now
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -121,6 +121,14 @@ setup-sudo:
 	@echo ""
 	@echo "✓ Setup complete! You can now deploy from Emacs without password prompts."
 
+# Run the threads.db VACUUM script on the deploy host — the same
+# script the weekly user-cron entry invokes.  Stops assist-web for
+# the duration; expect 10–30 minutes at 187 GB.  Uses the existing
+# passwordless sudo entries for systemctl stop/start assist-web.
+vacuum-now:
+	@echo "→ Triggering vacuum-prod-db.sh on $(DEPLOY_HOST) (synchronous)..."
+	@ssh $(DEPLOY_HOST) '$(DEPLOY_PATH)/scripts/vacuum-prod-db.sh'
+
 help:
 	@echo "Assist Commands:"
 	@echo ""
@@ -142,6 +150,7 @@ help:
 	@echo "  make status         - Check service status"
 	@echo "  make logs           - View service logs (live tail)"
 	@echo "  make setup-sudo     - Setup passwordless sudo (optional)"
+	@echo "  make vacuum-now     - Run threads.db VACUUM now (stops assist-web ~10–30 min)"
 	@echo ""
 	@echo "Configuration:"
 	@echo "  Development: Copy .dev.env.example to .dev.env"
