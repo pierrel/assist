@@ -1,9 +1,11 @@
+import logging
 import os
+import shutil
 import threading
 import time
 import tempfile
 from datetime import datetime
-from typing import Literal, Dict, Any, List, Iterator
+from typing import Literal, Dict, Any, Callable, List, Iterator
 
 import sqlite3
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
@@ -14,6 +16,9 @@ from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
 from assist.checkpoint_rollback import invoke_with_rollback
+from assist.sandbox_manager import SandboxManager
+
+logger = logging.getLogger(__name__)
 
 def render_tool_calls(message: AIMessage) -> str:
     calls = getattr(message, "tool_calls", None)
@@ -201,6 +206,71 @@ n    checkpointing via SqliteSaver.
             marker = os.path.join(tdir, ".deleted")
             with open(marker, "w") as f:
                 f.write(datetime.now().isoformat())
+
+    def hard_delete(
+        self,
+        tid: str,
+        on_delete: List[Callable[[str], None]] | None = None,
+    ) -> None:
+        """Permanently delete a thread: sandbox container, DB rows, dir.
+
+        Layer 0 of the threads.db growth plan
+        (docs/2026-05-04-threads-db-layer-0-thread-retention.org).
+
+        The order of operations is load-bearing.  See the design doc
+        "Approach" section for why each step happens before the next.
+        Briefly:
+
+        1. ``SandboxManager.cleanup`` first so any in-flight agent run
+           hits the existing ``SandboxContainerLostError`` path
+           cleanly instead of ENOENT/EIO from a yanked bind mount.
+        2. ``checkpointer.delete_thread`` — uses upstream
+           SqliteSaver's atomic per-schema DELETE
+           (langgraph/checkpoint/sqlite/__init__.py:477-494).
+        3. ``shutil.rmtree`` the per-thread directory.  Tolerates
+           ``FileNotFoundError`` so re-running on a half-deleted
+           thread succeeds (idempotency).
+        4. ``on_delete`` callbacks (if any) fire last, each guarded
+           by try/except so a misbehaving consumer can't break the
+           sweep.  ``manage/web.py`` passes one that evicts the
+           in-process domain/description caches; the retention CLI
+           passes none.
+        """
+        tdir = os.path.join(self.root_dir, tid)
+        work_dir = self.thread_default_working_dir(tid)
+
+        # 1. Stop the sandbox container before yanking its bind mount.
+        try:
+            SandboxManager.cleanup(work_dir)
+        except Exception as e:
+            logger.warning("Sandbox cleanup failed for %s: %s", tid, e)
+
+        # 2. Delete checkpointer rows via the upstream public API.
+        try:
+            self.checkpointer.delete_thread(tid)
+        except Exception as e:
+            logger.warning(
+                "checkpointer.delete_thread failed for %s: %s", tid, e
+            )
+
+        # 3. Wipe the on-disk directory.  Idempotent: a missing dir is
+        # fine — re-running on a half-deleted thread must succeed.
+        try:
+            shutil.rmtree(tdir, ignore_errors=False)
+        except FileNotFoundError:
+            pass
+
+        # 4. Run consumer-supplied callbacks.  Each is isolated so
+        # one bad callback can't break others or the sweep.
+        if on_delete:
+            for cb in on_delete:
+                try:
+                    cb(tid)
+                except Exception as e:
+                    logger.warning(
+                        "on_delete callback %r failed for %s: %s",
+                        cb, tid, e,
+                    )
 
     def touch(self, thread_id: str) -> None:
         """Update mtime of thread dir so it sorts to the top of list()."""

@@ -134,6 +134,8 @@ vacuum-now:
 	@ssh $(DEPLOY_HOST) \
 		ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
 		SERVICE_NAME=$(SERVICE_NAME) \
+		DEPLOY_PATH=$(DEPLOY_PATH) \
+		MIN_THREADS=$(or $(MIN_THREADS),100) \
 		'$(DEPLOY_PATH)/scripts/vacuum-prod-db.sh'
 
 help:

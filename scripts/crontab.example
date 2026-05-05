@@ -3,18 +3,23 @@
 # <DEPLOY_PATH> and <ASSIST_THREADS_DIR> with the values from your
 # .deploy.env on the dev side.
 #
-# Weekly threads.db VACUUM (Layer 1 of the prod growth plan, see
-# docs/2026-05-03-prod-threads-db-growth.org):
+# Weekly threads.db retention sweep + VACUUM (Layers 0 and 1 of the
+# prod growth plan, see docs/2026-05-03-prod-threads-db-growth.org
+# and docs/2026-05-04-threads-db-layer-0-thread-retention.org):
 #
-#   0 6 * * 0 SERVICE_NAME=assist-web ASSIST_THREADS_DIR=<ASSIST_THREADS_DIR> /usr/bin/flock -n /tmp/assist-eval.lock <DEPLOY_PATH>/scripts/vacuum-prod-db.sh
+#   0 6 * * 0 SERVICE_NAME=assist-web ASSIST_THREADS_DIR=<ASSIST_THREADS_DIR> DEPLOY_PATH=<DEPLOY_PATH> MIN_THREADS=100 /usr/bin/flock -n /tmp/assist-eval.lock <DEPLOY_PATH>/scripts/vacuum-prod-db.sh
 #
 # Why these arguments:
 #   - `0 6 * * 0` — Sunday 06:00 local.  Clears the nightly eval
 #     cron's window (23:00 + 360-min budget) with margin.
-#   - Inline env (SERVICE_NAME, ASSIST_THREADS_DIR) — the script
-#     refuses to start with these unset, so the cron line is the
-#     single place to override.
+#   - Inline env (SERVICE_NAME, ASSIST_THREADS_DIR, DEPLOY_PATH,
+#     MIN_THREADS) — the script refuses to start with these unset,
+#     so the cron line is the single place to override.
+#   - `MIN_THREADS=100` — Layer 0 retention floor: keep the 100 most-
+#     recent threads, hard-delete the rest before VACUUM.  Without
+#     pruning, VACUUM just rewrites the same multi-hundred-GB DB.
 #   - `flock -n /tmp/assist-eval.lock` — eval cron holds this lock
-#     for its whole run.  -n means "skip if held"; never let VACUUM
-#     race the eval.
+#     for its whole run.  -n means "skip if held"; never let the
+#     sweep+VACUUM race the eval.  The script also takes a separate
+#     flock on $threads_db.lock to serialize against `make vacuum-now`.
 #   - Absolute paths only — cron has no PATH context.
