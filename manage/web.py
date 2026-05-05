@@ -289,7 +289,7 @@ def render_index() -> str:
                 f'<a href="/thread/{tid}" style="flex:1">{badge}{html.escape(title)}</a>'
                 f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
                 f'<button type="submit" class="del-btn" '
-                f'onclick="return confirm(\'Delete this thread?\')">&#x2715;</button>'
+                f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
                 f'</form></li>'
             )
     items_html = "\n".join(items)
@@ -724,14 +724,24 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
+def _evict_caches(tid: str) -> None:
+    """on_delete callback: drop the thread from in-process caches.
+
+    Passed to ``MANAGER.hard_delete`` so the web process forgets a
+    thread the moment its dir + DB rows are gone.  Keeps
+    ``assist/thread.py`` web-agnostic — it never imports these
+    module-level dicts.
+    """
+    DOMAIN_MANAGERS.pop(tid, None)
+    DESCRIPTION_CACHE.pop(tid, None)
+
+
 @app.post("/thread/{tid}/delete")
 async def delete_thread(tid: str):
     tdir = os.path.join(MANAGER.root_dir, tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
-    MANAGER.soft_delete(tid)
-    DESCRIPTION_CACHE.pop(tid, None)
-    DOMAIN_MANAGERS.pop(tid, None)
+    MANAGER.hard_delete(tid, on_delete=[_evict_caches])
     return RedirectResponse(url="/", status_code=303)
 
 

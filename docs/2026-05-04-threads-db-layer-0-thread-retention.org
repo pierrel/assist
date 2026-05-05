@@ -24,23 +24,43 @@ pruning, =VACUUM= just rewrites the same 187 GB.  Layer 0 is what
 makes =VACUUM= effective.
 
 * Approach
-A single ~hard_delete(tid)~ in =assist/thread.py= replacing
-~soft_delete()~.  Both the user-initiated =POST /thread/{tid}/delete=
-handler and a daily retention sweeper call it.  Steps it performs:
+A single ~hard_delete(tid, on_delete=None)~ on ~ThreadManager= in
+=assist/thread.py= replacing the no-op ~soft_delete()~.  Both the
+user-initiated =POST /thread/{tid}/delete= handler and the
+retention sweeper call it.  Steps it performs, *in this order* (the
+order matters — see the SandboxContainerLostError note below):
 
-1. =DELETE FROM checkpoints WHERE thread_id=?= (and =writes=,
-   =checkpoint_blobs= — every table the SqliteSaver schema uses).
-2. =shutil.rmtree(thread_dir)= — wipes the per-thread cloned working
-   tree (often a full clone of =life.git= now that the clone bug is
-   fixed) along with the references/ directory and any
-   large_tool_results/ files.
-3. =SandboxManager.cleanup(work_dir)= — stops + removes any sandbox
-   container still bound to that thread.
-4. Evicts =DOMAIN_MANAGERS= and =DESCRIPTION_CACHE= entries.
+1. =SandboxManager.cleanup(work_dir)= FIRST — stops + removes any
+   sandbox container still bound to that thread.  Doing this before
+   the rmtree means the next agent exec (if any in-flight) hits a
+   Docker 404 and the existing =SandboxContainerLostError= path
+   fires cleanly.  Doing it after would leave the container alive
+   with its bind mount yanked underneath, producing ENOENT/EIO
+   instead.
+2. =MANAGER.checkpointer.delete_thread(tid)= — the upstream
+   SqliteSaver already implements this atomically across its
+   schema (=checkpoints= + =writes= in this version, see
+   =langgraph/checkpoint/sqlite/__init__.py:477-494=).  Don't hand-
+   roll the DELETEs; surviving an upstream schema bump is free if
+   we use the public API.
+3. =shutil.rmtree(thread_dir)= — wipes the per-thread cloned
+   working tree (often a full clone of =life.git=) along with
+   =references/= and any =large_tool_results/= files.
+4. Optional ~on_delete~ callbacks run for in-process consumers.
+   =manage/web.py= passes one that evicts =DOMAIN_MANAGERS= and
+   =DESCRIPTION_CACHE=.  The retention CLI passes none — those
+   caches don't exist in that process.  This keeps =assist/thread.py=
+   web-agnostic.
 
-The retention sweeper is a daily cron entry (or systemd timer):
-list threads sorted by mtime, take all but the most-recent
-=MIN_THREADS=, call ~hard_delete()~ on each.
+The retention sweeper runs *weekly, immediately before the
+existing Sunday VACUUM*, in the same cron job under the same
+=systemctl stop assist-web= window.  =scripts/vacuum-prod-db.sh=
+gains a pre-VACUUM step that lists threads sorted by mtime, takes
+all but the most-recent =MIN_THREADS=, and calls ~hard_delete()~
+on each.  Sweep-before-VACUUM means each Sunday's VACUUM operates
+on a freshly-trimmed DB and produces a tighter file; sweep-after
+would leave a week's worth of freelist pages sitting around until
+the *next* Sunday's VACUUM.
 
 * Key decisions (settled)
 - *MIN_THREADS=100* default.  Configurable via env.  No max-age
@@ -48,45 +68,79 @@ list threads sorted by mtime, take all but the most-recent
 - *User-initiated delete also hard-deletes immediately*, not soft-
   delete + sweep.  Single code path is simpler than two; "deleted"
   in the UI should mean really gone.
-- *Web UI: no new code path needed*.  The index already filters
-  with =MANAGER.list()= which iterates the threads dir; once the
-  dir is gone, the thread is invisible.
+- *Web UI: no new code path needed for the listing*.  The index
+  already filters with =MANAGER.list()= which iterates the threads
+  dir; once the dir is gone, the thread is invisible.  Tighten the
+  delete-button =confirm()= text from "Delete this thread?" to
+  "Permanently delete this thread? This cannot be undone." so
+  user-initiated deletes don't surprise.
+- *flock around sweep + VACUUM*.  =scripts/vacuum-prod-db.sh=
+  takes =flock $DB.lock= (or a sibling lock file) around the
+  combined sweep+VACUUM body.  Belt to the existing eval-cron
+  =flock /tmp/assist-eval.lock= 's suspenders — also prevents
+  =make vacuum-now= from racing the cron.
+- *Sweep CLI fails fast on co-writers*.  Before issuing any DB
+  writes, =assist.retention= shells out to =lsof "$DB"= and aborts
+  if any process other than itself has the file open.  The
+  =systemctl stop= covers assist-web; this catches stray dev
+  servers or REPL sessions.
 
 * Open questions
-- Daily sweep cadence: align with the existing eval cron at 23:00
-  (so retention runs after that night's evals can no longer affect
-  the picture)?  Or earlier in the day to keep the active-set
-  small while the user is using the system?  Lean toward 04:00
-  local — well clear of the eval cron and the Sunday VACUUM.
 - Sweep failures: a partial =hard_delete()= leaves a thread half-
   removed (DB rows gone, dir still there, or vice versa).  Need a
   reconciliation pass on startup that finds orphans and finishes
-  removing them.
+  removing them.  For v1 we accept best-effort: log and continue
+  on per-thread errors so one bad thread doesn't block the whole
+  sweep, then VACUUM still runs.
 - Retention floor when DB is small: skip the sweep entirely if
   =MANAGER.list()= already has =< MIN_THREADS= entries — pure
   optimization but avoids needless work.
+- Active-thread protection: not needed inside the cron because
+  =systemctl stop assist-web= has already halted all writers.
+  User-initiated delete during =processing= state is handled by
+  letting the in-flight call's next tool result fail when the dir
+  vanishes — the existing =SandboxContainerLostError= path catches
+  it and surfaces a clean error.
 
 * Files this touches
-- =assist/thread.py= — replace ~soft_delete~ with ~hard_delete~;
-  add startup orphan reconciliation.
-- =manage/web.py= — =POST /thread/{tid}/delete= calls the new
-  function; ~_thread_domain_html~ + ~_get_domain_manager~ tolerate
-  vanished threads.
-- =assist/sandbox_manager.py= — already has ~cleanup(work_dir)~;
-  may need a no-op-if-not-tracked branch for orphan reconciliation.
-- A new =scripts/retention-sweep.sh= analogous to
-  =scripts/vacuum-prod-db.sh=, run from cron with
-  =SERVICE_NAME= / =ASSIST_THREADS_DIR= passed in (no host paths in
-  the committed file — see =AGENTS.md= "Configuration & repository
-  hygiene").
+- =assist/thread.py= — add ~hard_delete(tid)~ alongside (or
+  replacing) ~soft_delete~.
+- =assist/retention.py= (new) — pure-Python sweep entry point:
+  ~prune_to_n_threads(threads_dir, min_threads)~ that walks the
+  dir by mtime and calls ~hard_delete~ for each candidate.
+  Also a ~__main__~ that reads =MIN_THREADS= /
+  =ASSIST_THREADS_DIR= from env so =scripts/vacuum-prod-db.sh=
+  can invoke it as a CLI.
+- =manage/web.py= — =POST /thread/{tid}/delete= calls
+  ~hard_delete~.  ~_get_domain_manager~ already returns =None= on
+  missing dir; verify ~_thread_domain_html~ tolerates vanished
+  threads similarly.
+- =scripts/vacuum-prod-db.sh= — between =systemctl stop= and the
+  =VACUUM=, invoke =python -m assist.retention= with the
+  =MIN_THREADS= env passed through from cron.  No new sudoers
+  entries needed; the script already runs as the deploy user.
+- =scripts/crontab.example= — add =MIN_THREADS=100= to the
+  inline env (or document it as overridable).
+- =.deploy.env.example= — also list =MIN_THREADS=100= so new
+  deploys discover the knob (per AGENTS.md "Configuration &
+  repository hygiene").
 
 * Test plan
 - =tests/test_thread_manager_lazy.py= already pins the
-  empty-working-dir contract.  Add tests for =hard_delete= covering
-  the four removal targets (DB rows, fs dir, sandbox, caches).
-- =tests/test_thread_manager_retention.py= (new): create N+5
-  threads with varying mtimes, run the sweeper, assert the N most-
-  recent survive.
+  empty-working-dir contract.  Add fixture-level integration tests
+  for =hard_delete= using a real temp =ThreadManager= + real
+  sqlite + mocked =SandboxManager= — mocks for sqlite would hide
+  any future schema mismatch.  Cover:
+  1. Three removal targets land (DB rows gone, dir gone, sandbox
+     cleanup called).
+  2. Optional ~on_delete~ callback runs with =tid=.
+  3. *Idempotency*: pre-create a half-deleted thread (DB rows gone,
+     dir present), call =hard_delete= again, assert second call
+     finishes cleanup without raising.
+- =tests/test_retention_sweep.py= (new): create N+5 threads with
+  varying mtimes, run =assist.retention.prune_to_n_threads=,
+  assert the N most-recent survive.  Plus a guard test that
+  =lsof= -reported foreign writers cause the CLI to abort.
 - Smoke: existing =scripts/smoke_test.sh= deletes its thread; with
   =hard_delete= in place, asserting the thread dir is gone is a
   one-line addition.
@@ -101,8 +155,16 @@ list threads sorted by mtime, take all but the most-recent
   delete is touched), let it bake, then ship the sweeper.
 
 * Order of operations
-1. Refactor ~soft_delete~ → ~hard_delete~ for user-initiated path.
-2. Tests.  Smoke to verify.
-3. Add the retention sweeper script + cron entry.
-4. Once stable, retire the =.deleted= marker file format from any
-   readers (it's a no-op once nothing writes it).
+1. Add ~hard_delete(tid)~ alongside ~soft_delete~ in
+   =assist/thread.py= + tests.
+2. Switch =POST /thread/{tid}/delete= to ~hard_delete~ in
+   =manage/web.py= + smoke.
+3. Add =assist/retention.py= with the sweep CLI + tests covering
+   keeps-N-most-recent.
+4. Wire =scripts/vacuum-prod-db.sh= to call the CLI between stop
+   and VACUUM; update =scripts/crontab.example= with =MIN_THREADS=
+   inline env.
+5. Run on prod once manually to verify, then let the next Sunday
+   cron handle it autonomously.
+6. After the first successful sweep, retire ~soft_delete~ and the
+   =.deleted= marker readers (small cleanup PR).
