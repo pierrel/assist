@@ -169,7 +169,11 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
     # if a future model decides to confidently fabricate.
     SENTINEL = "MOCK-RESULT-7K3F9P"
 
-    def mock_ddg_search(query: str, **kwargs):
+    def mock_ddg_search(self, query: str, **kwargs):
+        # ``self`` accepted because the patch replaces an *unbound*
+        # method on ``ddgs.ddgs.DDGS``; instance call-sites bind it as
+        # a method and pass the instance as the first arg.  Ignored
+        # otherwise.
         mock_invocations[0] += 1
         logger.info(
             f"Mock DDG search invoked (#{mock_invocations[0]}) with query: '{query}'"
@@ -186,8 +190,12 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
         )
         return [{"title": "Mock Result", "href": "https://example.com", "body": large_payload}]
 
-    # Patch the DDGS.text method BEFORE creating the agent
-    with patch('ddgs.DDGS.text', mock_ddg_search):
+    # ``ddgs.DDGS`` is a proxy class (``_DDGSProxy``) that delegates to
+    # the real implementation at ``ddgs.ddgs.DDGS``.  Instances returned
+    # by ``ddgs.DDGS()`` are the real class, so patching the proxy's
+    # ``text`` attribute is a no-op — calls go straight to
+    # ``ddgs.ddgs.DDGS.text`` (the real method).  Patch the real class.
+    with patch('ddgs.ddgs.DDGS.text', mock_ddg_search):
         with tempfile.TemporaryDirectory() as tmpdir:
             if verbose:
                 print(f"\n{'=' * 80}")
