@@ -36,8 +36,20 @@ Consider:
 2. URLs that do not corroborate the information in the final report
 3. Better ways to search
 * Reliability
-** TODO Bound production =threads.db= growth
-See [[file:docs/2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]].  =/home/pierre/deploy/assist/threads/threads.db= reached 187 GB on 2026-05-03 — langgraph =SqliteSaver= snapshots the full message list per super-step, large =read_url= tool results sit in every snapshot from that point forward, and there's no per-thread retention or per-checkpoint size cap.  Three-layer plan: periodic =VACUUM=, per-thread checkpoint retention (=RETAIN_LAST=10=), proactive tool-result eviction at write time.  Eval-side equivalent already shipped (commit f9df751).
+** Bound production =threads.db= growth
+Overall plan + history: [[file:docs/2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]].  Prod DB hit 187 GB on 2026-05-03 because nothing capped thread count, checkpoints per thread, or content per checkpoint.  Four layers, each with its own design doc and TODO below.
+
+*** TODO Layer 0 — Thread retention with hard delete
+See [[file:docs/2026-05-04-threads-db-layer-0-thread-retention.org][docs/2026-05-04-threads-db-layer-0-thread-retention.org]].  Replace =MANAGER.soft_delete= with a =hard_delete= that wipes DB rows + thread dir + sandbox container; add a daily sweeper that keeps only =MIN_THREADS=100= most-recent threads.  The biggest sustained-growth-bound win and the one that makes Layer 1 (VACUUM) actually reclaim disk.
+
+*** DONE Layer 1 — Weekly =VACUUM= via user cron
+Done 2026-05-04.  =scripts/vacuum-prod-db.sh= + =scripts/crontab.example= + =Makefile vacuum-now= target.  Sunday 06:00 fires =VACUUM= against =threads.db= with a =flock= guard against the 23:00 eval cron.  Branch =weekly-vacuum-cron=; design background in [[file:2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]] §"Layer 1".  Switching to =VACUUM INTO= is a follow-up to avoid the WAL-doubling penalty observed on the first manual run.
+
+*** TODO Layer 2 — Per-thread checkpoint retention
+See [[file:docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org][docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org]].  Wrapper over =SqliteSaver= that prunes older checkpoints in =put()= so each thread keeps only =RETAIN_LAST=10=.  Bounds per-thread DB footprint even for hour-long research loops.
+
+*** TODO Layer 3 — Tool-result eviction at write time
+See [[file:docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org][docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org]].  Extend =ContextAwareToolEvictionMiddleware= to evict large =ToolMessage= contents to =/workspace/large_tool_results/<id>= before the checkpoint write, leaving a stub in the message list.  Caps single-checkpoint size and prevents =read_url= blobs from accumulating across snapshots.  Eval-side equivalent already shipped (commit f9df751).
 ** DONE Make =write_file= recoverable on collision
 See [[file:docs/proposal-infinite-writes.org][docs/proposal-infinite-writes.org]] (Solution 1, "Make =write_file= recoverable").  Loop detection (Solution 2 of that doc) shipped already.  Without this fix, the small model still falls into the filename-mutation trap (=final_report.md= → =completed_final_report.md= → =report_final.md=…) when a write hits =Cannot write because it already exists=.  Hit the trap during the dev-skill migration evals (=test_mid_task_clarification=); loop detection caught it but the right fix is to make =write_file= overwrite-by-default or auto-rewrite to =edit_file= on collision.
 ** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response

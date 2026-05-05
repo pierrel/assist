@@ -1,0 +1,129 @@
+#+TITLE: Layer 3 — Tool-result eviction at write time
+#+DATE: 2026-05-04
+State: Not started
+
+Layer 3 of the prod =threads.db= growth plan (overview:
+[[file:2026-05-03-prod-threads-db-growth.org][2026-05-03-prod-threads-db-growth.org]]).  This layer caps the size
+of any *single checkpoint*.  Layer 0 bounds thread count; Layer 2
+bounds checkpoints per thread; Layer 3 bounds bytes per
+checkpoint.
+
+* Goal
+Before any checkpoint is serialized into =threads.db=, walk the
+message list and replace large =ToolMessage= contents with a
+short stub.  The actual content goes to a sibling file in the
+workspace where it can be cheaply read on demand and deleted with
+the thread.
+
+* Why this matters
+Today =read_url= can return 50–500 KB of HTML per call.  A
+research-agent loop makes 10–50 such calls.  Every checkpoint
+from that point forward holds the full text of every prior
+=read_url=, because =SqliteSaver= snapshots the full message
+list per super-step.  A 50-message research thread can write
+~2 MB × 50 = 100 MB into the DB *per checkpoint*; Layer 2 caps
+that at 10 checkpoints, so 1 GB per thread; Layer 0 bounds the
+fleet at 100 threads — but each thread can still bloat its
+share to a GB without Layer 3.
+
+* Approach
+Extend =ContextAwareToolEvictionMiddleware= so its eviction
+policy applies *before* the checkpoint write, not just before the
+next LLM call.  Today it's reactive (runs when context is about
+to overflow); for prod we want it proactive (every tool result
+over =EVICT_THRESHOLD_KB= goes straight to disk).
+
+When evicted, a =ToolMessage= becomes:
+
+#+begin_src python
+ToolMessage(
+    content="[evicted: 250 KB HTML, see /workspace/large_tool_results/<id>]",
+    tool_call_id=...,
+    additional_kwargs={"_evicted_to": "/workspace/large_tool_results/<id>"},
+)
+#+end_src
+
+The actual content goes to =$WORK_DIR/large_tool_results/<id>=
+(this path is already in =STATEFUL_PATHS= and routed through
+=StateBackend= for ephemerality during the live agent run; for
+checkpointing we route it to the bind-mounted workspace
+filesystem instead so it survives across turns).
+
+A small re-hydration helper on read: when =RollbackRunnable=
+restores a checkpoint, walk the messages and inflate any stub
+back to its full text by reading the on-disk file.  If the file
+is gone (the thread was deleted), surface a clean error rather
+than partially restoring.
+
+* Key decisions
+- *Threshold:* =EVICT_THRESHOLD_KB=20= as a starting guess.  Most
+  =read_url= results trip this; small grep / glob results don't.
+- *Storage location:* =$WORK_DIR/large_tool_results/<id>= — same
+  filesystem as the rest of the thread's bind mount, deletes
+  cleanly when Layer 0's =hard_delete= runs =shutil.rmtree= on the
+  thread dir.
+- *Naming:* content-hashed IDs (=sha256(content)[:16]=) so two
+  checkpoints with the same evicted result share a file —
+  cheap dedup across the rollback chain.
+- *Re-hydration:* opt-in per call site.  =RollbackRunnable= reads
+  back; the next LLM call's prompt prep does NOT (it sees the
+  stub, which is the whole point).
+
+* Open questions
+- Where exactly is the right hook?  =SqliteSaver.put= is upstream
+  code; we'd want the eviction middleware to mutate state before
+  =put= sees it.  Cleanest is a =BaseCheckpointSaver= wrapper that
+  pre-processes state, mirroring the Layer 2 wrapper.  Or the
+  middleware could do it on its way through the agent loop's
+  state update — but that ties Layer 3 to a specific middleware
+  position rather than catching every checkpoint.
+- Re-hydration semantics on partial loss: if 5 out of 10 evicted
+  files survive after a Layer 0 sweep of an adjacent thread,
+  do we serve a half-rehydrated checkpoint or fail?  Probably
+  fail loudly — easier than reasoning about half-state.
+- Interaction with sandbox-mode: in sandbox mode the workspace is
+  bind-mounted into the container.  The host can write evicted
+  files to the host's view; the agent reads them via the
+  container's view.  Verify path resolution still works (the
+  =DockerSandboxBackend._resolve= prefix handling we just fixed).
+
+* Files this touches
+- =assist/middleware/context_aware_tool_eviction.py= — add the
+  proactive write-time hook.
+- =assist/checkpointer.py= — the Layer 2 wrapper grows a pre-put
+  hook for eviction (or a sibling wrapper composes with it).
+- =assist/backends.py= — =STATEFUL_PATHS= entry already covers
+  =large_tool_results/=; verify it routes the way Layer 3
+  expects.
+- A re-hydration utility module — read the stub's
+  =additional_kwargs._evicted_to=, slurp the file, return the
+  inflated message.
+- Tests covering the round-trip: write a 100 KB tool result,
+  observe the stub in the checkpoint, restore via
+  =RollbackRunnable=, assert the rehydrated content matches.
+
+* Risk and rollback
+- *Lost re-hydration files leave dead messages.*  If something
+  between checkpoint write and read deletes the on-disk file
+  outside Layer 0's path, the stub references a missing file.
+  Layer 0's =hard_delete= is the only legitimate writer of those
+  paths today; assume that and surface anything else as a bug.
+- *Forward compatibility.*  An agent built without Layer 3
+  awareness reads the stub literally and might decide to
+  =read_file= it.  That's actually fine — the stub's text says
+  "see =/workspace/large_tool_results/<id>=" and the agent can
+  read the file directly.
+- *Storage-blob accounting:* =EVICT_THRESHOLD_KB= traded against
+  per-thread workspace size.  Bound it: cap total bytes of
+  evicted content per thread at, say, 1 GB — anything over goes
+  to =/dev/null= with a "[truncated, original was 5 MB]" stub.
+  Not strictly needed for v1.
+
+* Order of operations
+1. Add the =STATEFUL_PATHS= → workspace-fs route for
+   =large_tool_results/= (if not already there) so on-disk files
+   persist across the agent's own turn.
+2. Pre-put eviction hook + content-hashed file write.
+3. Re-hydration helper used by =RollbackRunnable=.
+4. Tests, then ship.
+5. Tune =EVICT_THRESHOLD_KB= based on observed checkpoint sizes.
