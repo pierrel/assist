@@ -4,10 +4,20 @@ This eval tests that the agent can handle tool results exceeding the context lim
 by using FilesystemMiddleware to evict large results to files.
 
 The test mocks the internet search tool to return a payload >78k tokens, then verifies:
-1. The agent doesn't crash with a context overflow error
-2. Large tool results are written to /large_tool_results/
-3. The agent can still complete the research task
-4. Context management middleware is working correctly
+1. The agent invokes ``search_internet`` (precondition; otherwise INCONCLUSIVE).
+2. The agent doesn't crash with a context overflow error.
+3. Large tool results are evicted somewhere — either:
+   - the existing path: ``/large_tool_results/`` entries in agent state (the
+     ``ContextAwareToolEvictionMiddleware`` writes here via ``StateBackend``), or
+   - the new path: on-disk blobs under ``<tmpdir>/<tid>/large_tool_results/``
+     that Layer 3 (``EvictionSaver``) writes at checkpoint-write time.
+4. The agent can still complete the research task.
+
+The model under test is small enough to answer many factual queries from
+training memory and skip search entirely.  The prompt is engineered to be
+unanswerable without the search result (it asks for the title of the first
+search result, which is only known via the mock) and is explicit that the
+tool MUST be used.
 """
 import os
 import sys
@@ -82,22 +92,38 @@ class EvalMetrics:
         self.agent_response = ""
         self.error_message = ""
         self.large_result_files = []
+        # Did the model actually invoke the mocked search?  When 0 the
+        # eviction path was never exercised — the eval is INCONCLUSIVE,
+        # not a fail.
+        self.mock_search_invoked = 0
+        # Layer 3 (EvictionSaver) writes evicted blobs to disk under
+        # <tmpdir>/<tid>/large_tool_results/<sha256_16>.  Independent
+        # signal from the in-state files-channel check.
+        self.layer3_disk_blobs: list[str] = []
 
     def print_summary(self):
         """Print evaluation summary."""
         print("\n" + "=" * 80)
         print("LARGE TOOL RESULTS EVAL SUMMARY")
         print("=" * 80)
+        print(f"Mock Search Invoked: {self.mock_search_invoked} time(s)")
         print(f"Task Completed: {'✅ YES' if self.completed else '❌ NO'}")
         print(f"Context Overflow Error: {'❌ YES' if self.context_overflow_error else '✅ NO'}")
-        print(f"Large Results Evicted: {'✅ YES' if self.large_tool_results_created else '❌ NO'}")
+        print(f"Large Results Evicted (state): {'✅ YES' if self.large_tool_results_created else '❌ NO'}")
+        print(f"Layer 3 Disk Blobs: {len(self.layer3_disk_blobs)}")
 
         if self.large_result_files:
-            print(f"\nLarge Result Files Created: {len(self.large_result_files)}")
+            print(f"\nLarge Result Files Created (state): {len(self.large_result_files)}")
             for filepath in self.large_result_files:
                 if Path(filepath).exists():
                     size = Path(filepath).stat().st_size
                     print(f"  - {filepath} ({size:,} bytes)")
+
+        if self.layer3_disk_blobs:
+            print(f"\nLayer 3 Eviction Blobs ({len(self.layer3_disk_blobs)}):")
+            for blob in self.layer3_disk_blobs[:3]:
+                size = Path(blob).stat().st_size if Path(blob).exists() else 0
+                print(f"  - {blob} ({size:,} bytes)")
 
         if self.agent_response:
             print(f"\nAgent Response Length: {len(self.agent_response)} characters")
@@ -108,13 +134,19 @@ class EvalMetrics:
 
         print("=" * 80)
 
-        # Determine pass/fail
-        if self.completed and not self.context_overflow_error and self.large_tool_results_created:
+        if self.context_overflow_error:
+            print("❌ EVAL FAILED: Context overflow error")
+            return 1
+        if self.mock_search_invoked == 0:
+            print("⚠️  EVAL INCONCLUSIVE: model did not invoke search tool — "
+                  "eviction path not exercised")
+            return 2
+        evicted = self.large_tool_results_created or bool(self.layer3_disk_blobs)
+        if self.completed and evicted:
             print("✅ EVAL PASSED: Context management working correctly")
             return 0
-        else:
-            print("❌ EVAL FAILED: Context management not working as expected")
-            return 1
+        print("❌ EVAL FAILED: Context management not working as expected")
+        return 1
 
 
 def run_eval(verbose: bool = True) -> EvalMetrics:
@@ -129,14 +161,29 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
     logger.info("Starting large tool results eval")
 
     metrics = EvalMetrics()
+    mock_invocations = [0]
+    # Sentinel string buried inside the mocked search result.  The
+    # eval prompt asks the agent to find this, which it can only do by
+    # actually invoking the search tool (no model would emit a random
+    # 12-character token from training).  Keeps the eval honest even
+    # if a future model decides to confidently fabricate.
+    SENTINEL = "MOCK-RESULT-7K3F9P"
 
-    # Create mock that returns very large payload
     def mock_ddg_search(query: str, **kwargs):
-        logger.info(f"Mock DDG search invoked with query: '{query}'")
+        mock_invocations[0] += 1
+        logger.info(
+            f"Mock DDG search invoked (#{mock_invocations[0]}) with query: '{query}'"
+        )
         large_payload = create_large_payload(target_tokens=80000)
-        logger.info(f"Returning large payload: {len(large_payload)} characters (~{len(large_payload)//4} tokens)")
-        # Return a list of dicts matching DDG's text() return format
-        # but with a huge body so str() produces a large payload
+        # Inject the sentinel near the top of the body so the agent
+        # finds it after a single read.
+        large_payload = (
+            f"SEARCH-VERIFICATION-CODE: {SENTINEL}\n\n" + large_payload
+        )
+        logger.info(
+            f"Returning large payload: {len(large_payload)} characters "
+            f"(~{len(large_payload)//4} tokens) with sentinel {SENTINEL}"
+        )
         return [{"title": "Mock Result", "href": "https://example.com", "body": large_payload}]
 
     # Patch the DDGS.text method BEFORE creating the agent
@@ -160,9 +207,22 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
                     print("📝 Asking agent to research president of France...")
                     print("   (This will trigger a search returning ~80k tokens)\n")
 
-                # Ask the agent to do research
-                # Make it explicit that internet research is needed
-                query = "Who is the current president of France? Please search the internet for this information and provide their full name, term in office, and recent achievements."
+                # Force the model into the search path.  Past runs
+                # showed Qwen3.6-27B answers factual questions from
+                # training memory and skips ``search_internet``
+                # entirely, so the eviction path was never exercised.
+                # The query below is unanswerable without invoking
+                # the mocked tool: it asks for a verification code
+                # buried in the mock's response body.
+                query = (
+                    "I need you to use the search_internet tool to look "
+                    "up information about France's government.  The search "
+                    "result will contain a SEARCH-VERIFICATION-CODE near "
+                    "the top of the body.  Find the code and report it "
+                    "back to me verbatim along with a brief summary of "
+                    "what was returned.  You MUST use search_internet — "
+                    "do not answer from your training data."
+                )
 
                 try:
                     response = thread.message(query)
@@ -194,22 +254,26 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
                             print(f"   {error_str}")
                         raise
 
-                # Check if large_tool_results files were created in agent state
-                # FilesystemMiddleware writes to state["files"], not physical filesystem
+                # Record mock invocations for the precondition check.
+                metrics.mock_search_invoked = mock_invocations[0]
+                if verbose:
+                    print(f"\nMock search invocations: {metrics.mock_search_invoked}")
+
+                # Check if large_tool_results files were created in agent state.
+                # ContextAwareToolEvictionMiddleware writes to state["files"]
+                # via StateBackend; entries land under /large_tool_results/.
                 try:
-                    # Get the final state from the thread
                     final_state = thread.agent.get_state({"configurable": {"thread_id": thread.thread_id}})
                     files_in_state = final_state.values.get("files", {})
 
-                    # Look for files in /large_tool_results/
                     large_result_files = [path for path in files_in_state.keys() if path.startswith("/large_tool_results/")]
 
                     if large_result_files:
                         metrics.large_tool_results_created = True
                         metrics.large_result_files = large_result_files
                         if verbose:
-                            print(f"\n✅ {len(large_result_files)} file(s) evicted to /large_tool_results/ in agent state")
-                            for filepath in large_result_files[:3]:  # Show first 3
+                            print(f"\n✅ {len(large_result_files)} file(s) in /large_tool_results/ in agent state")
+                            for filepath in large_result_files[:3]:
                                 file_data = files_in_state[filepath]
                                 if isinstance(file_data, dict):
                                     content = file_data.get("content", [])
@@ -217,15 +281,34 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
                                 else:
                                     content_len = len(str(file_data))
                                 print(f"   - {filepath}: {content_len:,} chars")
-                    else:
-                        if verbose:
-                            print(f"\n⚠️  No files in /large_tool_results/ in agent state")
-                            if files_in_state:
-                                print(f"   Files in state: {list(files_in_state.keys())[:5]}")
-                            print("   (Large tool results may not have been evicted)")
+                    elif verbose:
+                        print(f"\n⚠️  No files in /large_tool_results/ in agent state")
+                        if files_in_state:
+                            print(f"   Files in state: {list(files_in_state.keys())[:5]}")
                 except Exception as e:
                     if verbose:
                         print(f"\n⚠️  Could not check agent state for large_tool_results: {e}")
+
+                # Layer 3 (EvictionSaver) writes evicted blobs to disk under
+                # <tmpdir>/<tid>/large_tool_results/<sha256_16>.  Independent
+                # of the in-state check above — Layer 3 evicts both the
+                # messages channel and the files channel at checkpoint write
+                # time, so this directory should have at least one blob if
+                # eviction triggered.
+                try:
+                    import glob
+                    pattern = os.path.join(tmpdir, "*", "large_tool_results", "*")
+                    blobs = sorted(p for p in glob.glob(pattern) if os.path.isfile(p))
+                    metrics.layer3_disk_blobs = blobs
+                    if verbose and blobs:
+                        print(f"\n✅ Layer 3 wrote {len(blobs)} eviction blob(s) to disk:")
+                        for blob in blobs[:3]:
+                            print(f"   - {blob} ({Path(blob).stat().st_size:,} bytes)")
+                    elif verbose:
+                        print(f"\n⚠️  No Layer 3 eviction blobs on disk under {tmpdir}")
+                except Exception as e:
+                    if verbose:
+                        print(f"\n⚠️  Could not scan disk for Layer 3 blobs: {e}")
 
             except Exception as e:
                 logger.error(f"Eval failed with unexpected error: {e}", exc_info=True)
