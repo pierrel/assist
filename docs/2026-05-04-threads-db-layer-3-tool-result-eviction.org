@@ -70,7 +70,11 @@ unchanged below.
 initial commit + 7 from the reviewer-driven follow-up: =put_writes=
 eviction, =pending_writes= rehydration, files-channel writes,
 kill-switch in =put_writes=, idempotency-skip on messages and on
-files).  Full suite passes.  Run from =~/src/assist=:
+files).  Plus =3/3= in =tests/test_eviction_saver_integration.py=:
+=ThreadManager= correctly wires =EvictionSaver=, real file-backed
+=threads.db= round-trip (100 KB content evicted + rehydrated), and
+Layer 0's =hard_delete= cascades to wipe eviction blobs.  Full
+suite =321/321=.  Run from =~/src/assist=:
 #+begin_src
 .venv/bin/python -m pytest tests/test_eviction_saver.py
 .venv/bin/python -m pytest tests/  # full suite
@@ -81,12 +85,22 @@ files).  Full suite passes.  Run from =~/src/assist=:
    the =files= channel drain logic (paths with no leading slash, v1
    list-content format), and the round-trip on a real langgraph
    checkpoint (the tests use synthetic ones).
-2. *Eval cadence.*  Per CLAUDE.md: post-impl N=3 → reviewer findings
-   addressed → N=5 → stability N=10.  Likely affected suites:
-   =edd/eval/test_research_multi_turn_token_regression.py=,
-   =edd/eval/eval_large_tool_results.py=,
-   =edd/eval/eval_multi_turn_research.py=,
-   =edd/eval/test_research_agent.py=.
+2. *Eval cadence — caveat from this session.*  =eval_large_tool_results.py=
+   was run N=3 on the latest commit; all three trials returned
+   =Large Results Evicted: NO= but the agent completed the task
+   successfully.  Root cause: Qwen3.6-27B knows the answer to "who
+   is the president of France" from training and never invokes
+   =search_internet=, so the mocked DDG payload is never produced —
+   no large tool result, nothing to evict.  This is a pre-existing
+   eval-reliability issue, NOT a Layer 3 regression.  The integration
+   test added in this PR (=tests/test_eviction_saver_integration.py=)
+   covers what the eval was meant to prove: real =ThreadManager= + real
+   file-backed =threads.db= + 100 KB content survives the round-trip
+   without inflating the DB blob.  =test_research_multi_turn_token_regression=
+   timed out at 600s on its first trial waiting on real DDG searches —
+   network-bound, not Layer 3.  Running these properly requires either
+   mock-the-LLM or a query the model demonstrably cannot answer from
+   training; defer to a future eval-reliability PR.
 3. *Merge to main once approved.*  After Layer 2 lands too, fold
    =EvictionSaver= to subclass =CheckpointRetentionSaver= so prune
    and eviction share the same =put=.  Tests stay split.
