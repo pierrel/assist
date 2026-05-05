@@ -1,6 +1,106 @@
 #+TITLE: Layer 2 — Per-thread checkpoint retention
 #+DATE: 2026-05-04
-State: Implemented 2026-05-05 on branch =layer-2-checkpoint-retention=
+State: PR open 2026-05-05, awaiting review
+
+* Session handoff (2026-05-05)
+This section is for whoever picks the work back up.  The design
+sections below are unchanged history; this block tracks current
+state.
+
+** What's landed
+- Branch: =layer-2-checkpoint-retention= (forked from =main= at
+  =e8f7705=).
+- Commit: =816dc28= "threads-db Layer 2: per-thread checkpoint
+  retention" — wrapper + tests + doc.
+- Pushed to =origin/layer-2-checkpoint-retention=.
+- PR: https://github.com/pierrel/assist/pull/88 (base =main=).
+
+** What's in the diff
+- =assist/checkpointer.py= (new) — =CheckpointRetentionSaver=
+  subclass.  Override =put()= only; option (A) inline prune in one
+  =self.cursor()= block (single TX, single lock acq, single
+  commit).  Env switch =ASSIST_RETAIN_LAST= (default 10, =0= /
+  ="disabled"= / ="off"= / ="false"= = no-op pass-through).
+  Schema-drift assertion against =EXPECTED_TABLES = {checkpoints,
+  writes}= cached after first =put=.  Prune wrapped in
+  try/except — fail-open (INSERT survives a prune failure;
+  self-heals on next put).
+- =assist/thread.py= — swapped =SqliteSaver= import +
+  instantiation site at =ThreadManager.__init__= for the new
+  wrapper.  Did *not* override =delete_thread=; Layer 0's
+  =hard_delete= path uses upstream's per-table wipe unchanged.
+- =tests/test_checkpointer_retention.py= (new) — 17 tests
+  covering: basic prune, namespace isolation, thread isolation,
+  =writes=-table lockstep, =delete_thread= compat, rollback depth
+  (N=10 vs =max_rollback_depth=3=), retention disabled (N=0),
+  prune-fails-open, concurrent puts (two Python threads),
+  =aput= still raises, EXPLAIN QUERY PLAN uses PK index, schema
+  drift disables pruning, env-var parsing × 5.
+- This doc — corrections from the design review (2 tables not 3,
+  compound PK, sync-only saver, rollback depth resolved at 3).
+
+** Test status
+Local: =297/297= passing in the full suite, =17/17= in the new
+file.  Run from =~/src/assist=:
+#+begin_src
+.venv/bin/python -m pytest tests/test_checkpointer_retention.py
+.venv/bin/python -m pytest tests/  # full suite
+#+end_src
+
+** Pending — what the next session should do
+1. *Address PR review comments* on
+   https://github.com/pierrel/assist/pull/88 .  Expect feedback
+   on the option-A code-duplication of upstream's =put= body
+   (we mirror lines 380-436 of =langgraph-checkpoint-sqlite==3.0.3=
+   verbatim; the trade-off was justified by the single-TX
+   guarantee).
+2. *Merge to main* once approved.  Standard squash-or-merge per
+   project convention (Layer 0 used a regular merge — match it).
+3. *Deploy to prod*.  =make deploy= from =~/src/assist= ships the
+   change.  =ASSIST_RETAIN_LAST= is *not* in =.deploy.env=, which
+   means it falls back to the default (10).  No env edit needed
+   for the default rollout.
+4. *Smoke + observe*.  After =make deploy= and =make restart=:
+   - =make smoke= or =./scripts/smoke_test.sh= for the basic
+     end-to-end (tiny inference + assist-web reachability).
+   - Watch =journalctl -u assist-web -f= for
+     "CheckpointRetentionSaver: retaining last 10 checkpoints
+     per (thread_id, checkpoint_ns)" at startup.
+   - Run an eval suite (=make eval= or wait for the 23:00 cron;
+     see the eval-deadline memory note).  Confirm no regression
+     in pass rates.
+   - Optional: pick one chatty research-agent thread, then
+     =sqlite3 threads.db "SELECT thread_id, checkpoint_ns,
+     COUNT(*) FROM checkpoints GROUP BY thread_id, checkpoint_ns
+     ORDER BY 3 DESC LIMIT 10;"= — every (tid, ns) row should
+     show ≤10.
+5. *Decide whether to lower N*.  If observation shows rollback
+   never reaches near 10, drop the default to 5 in
+   =assist/checkpointer.py= (=DEFAULT_RETAIN_LAST=).  Code
+   already supports it; this is a one-line follow-up PR.
+
+** Kill switch (if Layer 2 misbehaves in prod)
+Add to =/home/pierre/deploy/assist/code/.deploy.env= on the prod
+host:
+#+begin_src
+ASSIST_RETAIN_LAST=0
+#+end_src
+Then =sudo systemctl restart assist-web=.  The wrapper becomes a
+no-op pass-through; behavior reverts to upstream =SqliteSaver=
+without a code rollback.
+
+** Known dev-environment gotcha
+The dev venv at =~/src/assist/.venv= was rebuilt at Python 3.14
+during this session (the system upgrade earlier on 2026-05-05
+removed =python3.13=; the existing venv's site-packages were at
+=lib/python3.13/site-packages/= and ImportError'd until rebuilt
+with =python3.14 -m venv .venv && .venv/bin/pip install -e . -r
+requirements.txt=).  See the
+=project_pacman_python_bump_breaks_venv.md= memory for the same
+failure mode on the deploy copy.  If a fresh clone or a future
+=pacman -Syu= breaks imports, rebuild the venv the same way.
+
+* Original design (history below)
 
 Layer 2 of the prod =threads.db= growth plan (overview:
 [[file:2026-05-03-prod-threads-db-growth.org][2026-05-03-prod-threads-db-growth.org]]; Layer 0 sibling:
