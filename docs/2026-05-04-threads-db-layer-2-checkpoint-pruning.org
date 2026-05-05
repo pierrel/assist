@@ -1,0 +1,88 @@
+#+TITLE: Layer 2 — Per-thread checkpoint retention
+#+DATE: 2026-05-04
+State: Not started
+
+Layer 2 of the prod =threads.db= growth plan (overview:
+[[file:2026-05-03-prod-threads-db-growth.org][2026-05-03-prod-threads-db-growth.org]]; Layer 0 sibling:
+[[file:2026-05-04-threads-db-layer-0-thread-retention.org][2026-05-04-threads-db-layer-0-thread-retention.org]]).  This layer
+caps how much DB a *single thread* contributes.  Layer 0 caps the
+thread count; Layer 2 caps the per-thread footprint.
+
+* Goal
+For each =thread_id=, retain only the most-recent =RETAIN_LAST=10=
+checkpoints.  Older checkpoints are dropped on every =put()=
+without waiting for a periodic sweep.
+
+* Why this matters even with Layer 0
+A single long-running thread can write hundreds of checkpoints —
+one per super-step.  Each checkpoint is a serialized snapshot of
+the *full* message list (langgraph =SqliteSaver= behavior, not
+configurable).  Without Layer 2, an hour-long research-agent loop
+inside a single thread can deposit several GB into the DB even
+when Layer 0 only keeps that thread among the latest 100.
+
+Layer 2 also bounds rollback depth, which =RollbackRunnable= uses.
+N=10 is generously larger than rollback's 1–2 turn reach in
+practice, so this loses no real recovery surface.
+
+* Approach
+Subclass =SqliteSaver= (or wrap it via the public =BaseCheckpointSaver=
+protocol) so that on every =put()= the wrapper:
+
+1. Calls the underlying =put()= as usual.
+2. =SELECT checkpoint_id FROM checkpoints WHERE thread_id=?
+   ORDER BY checkpoint_id DESC LIMIT -1 OFFSET 10= — the IDs to
+   delete.
+3. =DELETE FROM checkpoints WHERE thread_id=? AND checkpoint_id IN (...)=
+   plus the same against =writes= and =checkpoint_blobs= (the
+   SqliteSaver schema's three tables, joined on (=thread_id=,
+   =checkpoint_id=)).
+
+All deletes batched in a single transaction with the put.  No
+external timer, no startup pass.
+
+* Key decisions
+- *RETAIN_LAST=10* default, env-overridable.  Conservative; could
+  go to 5 once we measure rollback depth in practice.
+- *Sync prune on put*, not async sweep.  Avoids a "drift then
+  catch up" pattern; per-put cost is small (a few row deletes
+  with an index on =(thread_id, checkpoint_id)=).
+- *Implementation as a wrapper, not a fork.*  Subclassing keeps us
+  on the upstream code path; we only override =put= / =aput=.
+
+* Open questions
+- Does =RollbackRunnable= ever reach back further than 10 in the
+  agent flows we run?  Need to instrument or grep the rollback
+  code path before locking N=10 in.  Default could ship as
+  =RETAIN_LAST=20= and lower it after observation.
+- Async path: =aput= delegates to =put= via a thread executor in
+  upstream =SqliteSaver=; verify the wrapper covers both.
+- Multiple writers: prod has one writer process (assist-web), but
+  evals can run a second.  =DELETE= during a concurrent =put= is
+  fine within SQLite's WAL mode, but worth a stress test.
+
+* Files this touches
+- =assist/checkpointer.py= (new) — the wrapper class.
+- =assist/thread.py= — wire =ThreadManager.checkpointer= through
+  the new wrapper.
+- =tests/test_checkpointer_retention.py= (new) — write 15
+  checkpoints, assert only the last 10 survive in the DB.
+- =edd/eval/test_research_multi_turn_token_regression.py= and any
+  rollback-exercising tests — verify rollback past N still works
+  when N is generous (10) and surfaces a clean error when not.
+
+* Risk and rollback
+- *Pruning too aggressively breaks rollback.*  N=10 is the safety
+  margin.  If a flow needs deeper rollback, it'll fail with a
+  cleaner "checkpoint not found" error than silent corruption.
+- *Schema drift.*  langgraph upgrades that change the SqliteSaver
+  schema would silently break our DELETE statements.  Pin the
+  table list as a constant; emit a warning if upstream
+  introspection finds extra tables we don't know about.
+
+* Order of operations
+1. Wrapper + tests (no behavior change yet — wire it in but with
+   N=10000 effectively-disabled).
+2. Lower N=10 in dev; observe behavior across an eval suite run.
+3. Ship to prod.
+4. Lower N if observation supports it.

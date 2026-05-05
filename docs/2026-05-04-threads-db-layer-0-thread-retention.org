@@ -1,0 +1,108 @@
+#+TITLE: Layer 0 — Thread retention with hard delete
+#+DATE: 2026-05-04
+State: Not started
+
+Layer 0 of the prod =threads.db= growth plan (overview:
+[[file:2026-05-03-prod-threads-db-growth.org][2026-05-03-prod-threads-db-growth.org]]).  This layer was added
+after the original three-layer plan; it caps the *number of threads*
+that contribute to the DB.  Layer 2 caps checkpoints per thread;
+Layer 3 caps content per checkpoint.
+
+* Goal
+Keep the most-recently-touched =MIN_THREADS= threads (default 100,
+env-overridable).  Everything older is hard-deleted from the DB,
+the filesystem, and the in-memory caches.
+
+* Why this is the biggest sustained win
+Today =MANAGER.soft_delete()= writes a =.deleted= marker and leaves
+the thread directory + the SqliteSaver rows in place.  Disk and DB
+keep growing forever even when the user "deletes" threads in the
+UI.  After 5 months of normal use the prod DB hit 187 GB.  Layer 1
+(weekly =VACUUM=) only reclaims freelist pages from rows the
+checkpointer's own pruning happened to have removed; with no
+pruning, =VACUUM= just rewrites the same 187 GB.  Layer 0 is what
+makes =VACUUM= effective.
+
+* Approach
+A single ~hard_delete(tid)~ in =assist/thread.py= replacing
+~soft_delete()~.  Both the user-initiated =POST /thread/{tid}/delete=
+handler and a daily retention sweeper call it.  Steps it performs:
+
+1. =DELETE FROM checkpoints WHERE thread_id=?= (and =writes=,
+   =checkpoint_blobs= — every table the SqliteSaver schema uses).
+2. =shutil.rmtree(thread_dir)= — wipes the per-thread cloned working
+   tree (often a full clone of =life.git= now that the clone bug is
+   fixed) along with the references/ directory and any
+   large_tool_results/ files.
+3. =SandboxManager.cleanup(work_dir)= — stops + removes any sandbox
+   container still bound to that thread.
+4. Evicts =DOMAIN_MANAGERS= and =DESCRIPTION_CACHE= entries.
+
+The retention sweeper is a daily cron entry (or systemd timer):
+list threads sorted by mtime, take all but the most-recent
+=MIN_THREADS=, call ~hard_delete()~ on each.
+
+* Key decisions (settled)
+- *MIN_THREADS=100* default.  Configurable via env.  No max-age
+  rule — the count alone is enough.
+- *User-initiated delete also hard-deletes immediately*, not soft-
+  delete + sweep.  Single code path is simpler than two; "deleted"
+  in the UI should mean really gone.
+- *Web UI: no new code path needed*.  The index already filters
+  with =MANAGER.list()= which iterates the threads dir; once the
+  dir is gone, the thread is invisible.
+
+* Open questions
+- Daily sweep cadence: align with the existing eval cron at 23:00
+  (so retention runs after that night's evals can no longer affect
+  the picture)?  Or earlier in the day to keep the active-set
+  small while the user is using the system?  Lean toward 04:00
+  local — well clear of the eval cron and the Sunday VACUUM.
+- Sweep failures: a partial =hard_delete()= leaves a thread half-
+  removed (DB rows gone, dir still there, or vice versa).  Need a
+  reconciliation pass on startup that finds orphans and finishes
+  removing them.
+- Retention floor when DB is small: skip the sweep entirely if
+  =MANAGER.list()= already has =< MIN_THREADS= entries — pure
+  optimization but avoids needless work.
+
+* Files this touches
+- =assist/thread.py= — replace ~soft_delete~ with ~hard_delete~;
+  add startup orphan reconciliation.
+- =manage/web.py= — =POST /thread/{tid}/delete= calls the new
+  function; ~_thread_domain_html~ + ~_get_domain_manager~ tolerate
+  vanished threads.
+- =assist/sandbox_manager.py= — already has ~cleanup(work_dir)~;
+  may need a no-op-if-not-tracked branch for orphan reconciliation.
+- A new =scripts/retention-sweep.sh= analogous to
+  =scripts/vacuum-prod-db.sh=, run from cron with
+  =SERVICE_NAME= / =ASSIST_THREADS_DIR= passed in (no host paths in
+  the committed file — see =AGENTS.md= "Configuration & repository
+  hygiene").
+
+* Test plan
+- =tests/test_thread_manager_lazy.py= already pins the
+  empty-working-dir contract.  Add tests for =hard_delete= covering
+  the four removal targets (DB rows, fs dir, sandbox, caches).
+- =tests/test_thread_manager_retention.py= (new): create N+5
+  threads with varying mtimes, run the sweeper, assert the N most-
+  recent survive.
+- Smoke: existing =scripts/smoke_test.sh= deletes its thread; with
+  =hard_delete= in place, asserting the thread dir is gone is a
+  one-line addition.
+
+* Risk and rollback
+- *Data loss is permanent.*  Once a thread is hard-deleted there's
+  no soft-undelete window.  Mitigation: the threads.db.bak from
+  the previous Sunday VACUUM is the recovery surface for "I
+  accidentally deleted a thread I needed."  Document this.
+- The sweeper is the dangerous part.  Ship the user-initiated
+  delete first (small blast radius — only what the user asked to
+  delete is touched), let it bake, then ship the sweeper.
+
+* Order of operations
+1. Refactor ~soft_delete~ → ~hard_delete~ for user-initiated path.
+2. Tests.  Smoke to verify.
+3. Add the retention sweeper script + cron entry.
+4. Once stable, retire the =.deleted= marker file format from any
+   readers (it's a no-op once nothing writes it).
