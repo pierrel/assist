@@ -8,7 +8,11 @@ import shutil
 from unittest import TestCase
 from unittest.mock import patch, MagicMock, PropertyMock
 
-from assist.sandbox import DockerSandboxBackend, MAX_OUTPUT_CHARS
+from assist.sandbox import (
+    DockerSandboxBackend,
+    MAX_OUTPUT_CHARS,
+    SandboxContainerLostError,
+)
 from assist.domain_manager import DomainManager
 from assist.sandbox_manager import SandboxManager
 
@@ -122,6 +126,129 @@ class TestDockerSandboxBackend(TestCase):
 
         self.assertEqual(resp.exit_code, 1)
         self.assertIn("container stopped", resp.output)
+
+    def test_execute_container_not_found_raises_lost_error(self):
+        """Container 404 must raise, not become a tool result.
+
+        Regression: prod thread 20260504150948-c1545cf9 ran for ~40s
+        after its sandbox was stopped because every tool call returned
+        a 404 as a normal ExecuteResponse — the model ignored the
+        repeated errors and confabulated "Done. Created X" without
+        any file actually being written.  A typed exception forces
+        the web layer's per-request handler to mark the thread errored
+        with a clear user message.
+        """
+        from docker.errors import NotFound
+        self.container.exec_run.side_effect = NotFound(
+            "No such container: abc123def456"
+        )
+        with self.assertRaises(SandboxContainerLostError) as cm:
+            self.sandbox.execute("ls")
+        # Message includes the container id so the operator can
+        # correlate with `docker ps -a` history.
+        self.assertIn("abc123def456", str(cm.exception))
+
+
+class TestDockerSandboxBackendPathPrefixing(TestCase):
+    """ls / grep / glob must override deepagents' new protocol API
+    (NOT the deprecated *_info / *_raw siblings) so ``_resolve``
+    actually applies the ``/workspace`` prefix.
+
+    Regression: until 2026-05-04 our subclass overrode the deprecated
+    names; the framework called the new names; ``_resolve`` was dead
+    code; ``glob(path="/")`` walked the entire container filesystem.
+    Symptom: 99% CPU runaways pinned for minutes per call.
+    """
+
+    def setUp(self):
+        self.container = MagicMock()
+        self.container.id = "abc123def456"
+        # Mock exec_run so super().{ls,grep,glob} don't actually do
+        # filesystem work — we just want to capture what path argument
+        # they received.  Returning a benign tuple keeps BaseSandbox's
+        # parsing logic happy.
+        self.container.exec_run.return_value = (0, b"")
+        self.sandbox = DockerSandboxBackend(self.container)
+
+    def _last_command(self) -> str:
+        """Return the bash command from the most recent exec_run call."""
+        return self.container.exec_run.call_args[0][0][2]
+
+    def _decoded_paths_in(self, cmd: str) -> list[str]:
+        """Return absolute paths reachable from cmd.
+
+        deepagents' templates use both base64-encoded paths (glob, ls)
+        and literal-string paths (grep).  Recover both: try to decode
+        each shell-quoted token from base64 (keep the ones that look
+        like absolute paths), and also scan the raw command for any
+        ``/workspace`` literal.  Trailing slashes are normalized so
+        ``/workspace`` and ``/workspace/`` compare equal.
+        """
+        import base64
+        import re
+        out = []
+        for token in cmd.split("'"):
+            try:
+                d = base64.b64decode(token).decode("utf-8")
+            except Exception:
+                continue
+            if d.startswith("/"):
+                out.append(d.rstrip("/") or "/")
+        # Also pick up literal absolute paths (grep's form).
+        for m in re.findall(r"(?<![A-Za-z0-9])/[A-Za-z0-9_/.\-]*", cmd):
+            out.append(m.rstrip("/") or "/")
+        return out
+
+    def test_glob_resolves_root_to_workspace(self):
+        """glob(path='/') must search /workspace, not the container's /."""
+        self.sandbox.glob("**/Makefile", path="/")
+        decoded = self._decoded_paths_in(self._last_command())
+        self.assertIn(
+            "/workspace", decoded,
+            f"Expected glob path resolved to /workspace, got {decoded!r}",
+        )
+        self.assertNotIn(
+            "/", decoded,
+            f"Container-root path must not reach the glob subprocess: {decoded!r}",
+        )
+
+    def test_glob_resolves_relative_path_to_workspace(self):
+        self.sandbox.glob("*.py", path="src")
+        decoded = self._decoded_paths_in(self._last_command())
+        self.assertIn("/workspace/src", decoded)
+
+    def test_grep_resolves_root_to_workspace(self):
+        """grep(path='/') must search /workspace, not the container's /."""
+        self.sandbox.grep("TODO", path="/")
+        decoded = self._decoded_paths_in(self._last_command())
+        self.assertIn("/workspace", decoded)
+        self.assertNotIn("/", decoded)
+
+    def test_ls_resolves_root_to_workspace(self):
+        """ls('/') must list /workspace, not the container's /."""
+        self.sandbox.ls("/")
+        decoded = self._decoded_paths_in(self._last_command())
+        self.assertIn("/workspace", decoded)
+        self.assertNotIn("/", decoded)
+
+    def test_deprecated_overrides_are_gone(self):
+        """We must NOT define ls_info / grep_raw / glob_info — those
+        are deepagents' deprecated names and our overriding them was
+        the original bug.  Inheriting from BaseSandbox is correct.
+
+        This test is the regression bell: if a future change re-adds
+        an override under those names, the *_resolve dead-code path
+        comes back and the runaway-glob bug returns.
+        """
+        for deprecated in ("ls_info", "grep_raw", "glob_info"):
+            cls_method = DockerSandboxBackend.__dict__.get(deprecated)
+            self.assertIsNone(
+                cls_method,
+                f"DockerSandboxBackend.{deprecated} re-introduced — "
+                "this is the deprecated deepagents API; override "
+                f"{deprecated.split('_')[0]}() (the protocol's current "
+                "name) instead so _resolve actually fires.",
+            )
 
     def test_upload_files(self):
         self.container.put_archive.return_value = True

@@ -18,11 +18,13 @@ from deepagents.backends.protocol import (
     EditResult,
     ExecuteResponse,
     FileDownloadResponse,
-    FileInfo,
     FileUploadResponse,
-    GrepMatch,
+    GlobResult,
+    GrepResult,
+    LsResult,
     WriteResult,
 )
+from docker.errors import NotFound as DockerNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +52,11 @@ _TIMEOUT_GUIDANCE = (
     "Try one of these adjustments and retry:\n"
     "  - Narrow the scope: target a specific file or directory rather "
     "than walking the whole tree (e.g. `grep PATTERN /workspace/specific/file` "
-    "instead of `grep -r PATTERN /`).\n"
-    "  - Check the working directory: shell commands run with cwd="
-    "`/workspace`. If you used `/` as a search root, you searched the "
-    "entire container filesystem (Python venv, system dirs) — almost "
-    "always a mistake.\n"
+    "instead of `grep -r PATTERN /workspace`).\n"
+    "  - Pass a tighter root: the workspace at `/workspace` may hold "
+    "thousands of files (cloned repos, bundled PDFs, generated dirs). "
+    "Pass a specific subdirectory (e.g. `/workspace/notes/`) so you skip "
+    "trees that aren't relevant to the task.\n"
     "  - Bound recursion: `find ... -maxdepth N`, `glob` with a tighter "
     "pattern, or limit lines with `| head -N`.\n"
     "  - If the command is genuinely long-running (a full pip install or "
@@ -62,6 +64,28 @@ _TIMEOUT_GUIDANCE = (
     "Partial output (may be empty if the command was silent):\n"
     "----\n"
 )
+
+
+class SandboxContainerLostError(RuntimeError):
+    """The Docker sandbox container disappeared mid-thread.
+
+    Raised from ``DockerSandboxBackend.execute`` when ``container.exec_run``
+    sees a 404 from the Docker API — meaning the container was stopped or
+    removed (manually, by an OOM kill, by a daemon restart, by the
+    container's own 1h ``sleep 3600`` TTL expiring) while the agent was
+    still running.
+
+    Distinct from a regular per-command exec failure: a dead container
+    can never recover, so every subsequent tool call would also fail.
+    Returning the 404 as an ``ExecuteResponse`` (the way other exec
+    errors are returned) lets the model see a tool result it can ignore
+    — empirically Qwen3.6 happily replies "Done. Created X" after
+    repeated 404s, hallucinating the work it never did.
+
+    The agent loop should NOT catch this; it should bubble up to the
+    web layer's per-request exception handler so the thread is marked
+    errored with a clear message.
+    """
 
 
 class DockerSandboxBackend(BaseSandbox):
@@ -138,6 +162,18 @@ class DockerSandboxBackend(BaseSandbox):
                 demux=False,
                 workdir=self.work_dir,
             )
+        except DockerNotFound as e:
+            # Container is gone (stopped, removed, daemon-restarted, TTL
+            # expired).  Don't return this as a tool result — see the
+            # SandboxContainerLostError docstring for why.
+            logger.error(
+                "Sandbox container %s no longer exists; failing thread: %s",
+                self.container.id[:12], e,
+            )
+            raise SandboxContainerLostError(
+                f"Sandbox container {self.container.id[:12]} disappeared "
+                "mid-thread — please retry."
+            ) from e
         except Exception as e:
             logger.error("Docker exec failed: %s", e)
             return ExecuteResponse(output=f"Error executing command: {e}", exit_code=1)
@@ -167,9 +203,21 @@ class DockerSandboxBackend(BaseSandbox):
         )
 
     # --- File operations with path prefixing ---
+    #
+    # IMPORTANT: deepagents' SandboxBackendProtocol uses the methods
+    # named ``ls``, ``grep``, ``glob`` (returning structured Result
+    # types).  The sibling ``ls_info`` / ``grep_raw`` / ``glob_info``
+    # entry points in ``protocol.py`` are deprecated for v0.7 removal
+    # and warn on call.  Overriding the deprecated names — as we did
+    # before 2026-05-04 — left ``_resolve`` as dead code: every glob
+    # call from the agent went straight through ``BaseSandbox.glob``
+    # with no ``/workspace`` prefixing, so ``glob(path="/")`` walked
+    # the entire container filesystem (Python venv, system dirs) and
+    # ran the host CPU into the floor for minutes.  Override the new
+    # names so ``_resolve`` actually fires.
 
-    def ls_info(self, path: str) -> list[FileInfo]:
-        return super().ls_info(self._resolve(path))
+    def ls(self, path: str) -> LsResult:
+        return super().ls(self._resolve(path))
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
         return super().read(self._resolve(file_path), offset, limit)
@@ -181,12 +229,12 @@ class DockerSandboxBackend(BaseSandbox):
              replace_all: bool = False) -> EditResult:
         return super().edit(self._resolve(file_path), old_string, new_string, replace_all)
 
-    def grep_raw(self, pattern: str, path: str | None = None,
-                 glob: str | None = None) -> list[GrepMatch] | str:
-        return super().grep_raw(pattern, self._resolve(path or "/"), glob)
+    def grep(self, pattern: str, path: str | None = None,
+             glob: str | None = None) -> GrepResult:
+        return super().grep(pattern, self._resolve(path or "/"), glob)
 
-    def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
-        return super().glob_info(pattern, self._resolve(path))
+    def glob(self, pattern: str, path: str = "/") -> GlobResult:
+        return super().glob(pattern, self._resolve(path))
 
     # --- File transfer with path prefixing ---
 
