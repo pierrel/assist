@@ -44,7 +44,13 @@ sudo systemctl stop "$SERVICE"
 trap 'sudo systemctl start "$SERVICE"' EXIT
 
 start=$(date +%s)
-sqlite3 "$DB" 'VACUUM;'
+# VACUUM writes a temp database equal in size to the original.  By
+# default sqlite picks /tmp, which on this host is a 15 GB tmpfs —
+# nowhere near enough for a 187 GB DB.  Point it at the same big
+# filesystem the DB lives on.  Discovered the hard way with
+# "Error: stepping, database or disk is full (13)" at 18:53 PDT
+# 2026-05-04.
+SQLITE_TMPDIR="$(dirname "$DB")" sqlite3 "$DB" 'VACUUM;'
 elapsed=$(( $(date +%s) - start ))
 
 size_after=$(stat -c %s "$DB")
