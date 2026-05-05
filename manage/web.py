@@ -19,6 +19,7 @@ from pygments import highlight
 from pygments.lexers import DiffLexer
 from pygments.formatters import HtmlFormatter
 from assist.domain_manager import DomainManager
+from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 
 
@@ -665,6 +666,23 @@ def _process_message(tid: str, text: str) -> None:
             last_assistant = resp if resp else "assistant update"
             dm.sync(last_assistant)
         _set_status(tid, "ready")
+    except SandboxContainerLostError as e:
+        # Distinct status message: a dead container is recoverable —
+        # the user can simply retry — but they should know their
+        # previous turn's work didn't land.  Without this branch the
+        # generic except below shows a raw exception repr to the user.
+        logging.error("Sandbox lost for thread %s: %s", tid, e)
+        # Drop the cached backend so the next message spins up a new
+        # container instead of poking at the corpse of the old one.
+        DOMAIN_MANAGERS.pop(tid, None)
+        SandboxManager.cleanup(MANAGER.thread_default_working_dir(tid))
+        _set_status(
+            tid, "error",
+            error=("The sandbox container for this thread was lost mid-run. "
+                   "Your last message was not completed. Send the message "
+                   "again to retry in a fresh sandbox."),
+            **pending_kwargs,
+        )
     except Exception as e:
         logging.error("Message processing failed for thread %s: %s", tid, e, exc_info=True)
         _set_status(tid, "error", error=str(e), **pending_kwargs)

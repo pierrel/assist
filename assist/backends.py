@@ -40,14 +40,20 @@ class _ReferencesNormalizingBackend(FilesystemBackend):
     def edit(self, file_path, *args, **kwargs):
         return super().edit(self._normalize(file_path), *args, **kwargs)
 
-    def ls_info(self, path, *args, **kwargs):
-        return super().ls_info(self._normalize(path), *args, **kwargs)
+    # Override ls / grep / glob (the protocol's current API) — NOT
+    # ls_info / grep_raw / glob_info, which deepagents marks deprecated
+    # for v0.7 removal.  The framework calls the new names; overriding
+    # only the deprecated ones leaves ``_normalize`` as dead code (see
+    # the parallel comment in DockerSandboxBackend).
 
-    def grep_raw(self, pattern, path=None, glob=None):
-        return super().grep_raw(pattern, self._normalize(path), glob)
+    def ls(self, path, *args, **kwargs):
+        return super().ls(self._normalize(path), *args, **kwargs)
 
-    def glob_info(self, pattern, path="/", *args, **kwargs):
-        return super().glob_info(pattern, self._normalize(path), *args, **kwargs)
+    def grep(self, pattern, path=None, glob=None):
+        return super().grep(pattern, self._normalize(path), glob)
+
+    def glob(self, pattern, path="/", *args, **kwargs):
+        return super().glob(pattern, self._normalize(path), *args, **kwargs)
 
 STATEFUL_PATHS = [
     "/question.txt",
