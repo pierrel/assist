@@ -1,6 +1,98 @@
 #+TITLE: Layer 3 — Tool-result eviction at write time
 #+DATE: 2026-05-04
-State: Not started
+State: PR open 2026-05-05, awaiting review
+
+* Session handoff (2026-05-05)
+This block is for whoever picks the work back up.  Design history is
+unchanged below.
+
+** What's landed
+- Branch: =layer-3-tool-result-eviction= (forked from =main= at
+  =e8f7705=).
+- Commit: "threads-db Layer 3: per-checkpoint tool-result eviction".
+- File =assist/eviction_saver.py= (new) — =EvictionSaver(SqliteSaver)=
+  subclass.  Overrides =put= (pre-evict + flush + super), =get_tuple=
+  (rehydrate), =list= (rehydrate per-tuple).
+- Wired into =assist/thread.py= at =ThreadManager.__init__= with
+  =eviction_root=self.root_dir=.  Eviction blobs live under
+  =<root_dir>/<tid>/large_tool_results/<sha256_16>= so Layer 0's
+  =hard_delete= rmtree wipes them for free.
+- Env switch =ASSIST_EVICT_THRESHOLD_KB= (default 20; =0= /
+  =disabled= / =off= / =false= = no-op kill switch).  Listed in
+  =.deploy.env.example=.
+
+** Trade-offs locked in by the implementation
+- *Subclass over wrapper-by-composition.*  Mirrors Layer 2's pattern.
+  Composition story when Layer 2 merges: change the base class from
+  =SqliteSaver= to =CheckpointRetentionSaver= and pass both env kwargs
+  through.  Single one-line edit.
+- *Single file, NOT folded into Layer 2's =assist/checkpointer.py=.*
+  Layer 2 (PR #88) is unmerged so reusing the filename would create a
+  hard merge conflict.  Eviction lives in =assist/eviction_saver.py=.
+- *=ToolMessage= eviction only.*  Other message types (Human, AI) are
+  passed through.  Tool results are the bloat surface; user input
+  isn't.
+- *=files= channel drained too.*  Entries under =/large_tool_results/=
+  larger than threshold are stubbed with =_evicted_to= markers.
+  That's the channel the existing =ContextAwareToolEvictionMiddleware=
+  writes to via =StateBackend=; without draining, the middleware
+  merely moves bytes from =messages= to =files= inside the same
+  checkpoint, leaving DB size untouched.
+- *Rehydration in =get_tuple= / =list=, NOT in =RollbackRunnable=.*
+  Every read path (rollback, =agent.get_state=, web UI rendering)
+  goes through the saver, so the saver is the single place to
+  rehydrate.
+- *Best-effort eviction.*  Disk-write failure logs and falls back to
+  the un-evicted checkpoint.  Pre-Layer-3 behavior is the worst case;
+  never a regression.
+- *=O_EXCL= dedup by content hash.*  Two checkpoints with the same
+  bytes share a single file, scoped per-thread (no cross-thread
+  ref-counting in v1).
+- *=EvictionFileMissingError= on missing rehydration target.*  Better
+  to surface clean than half-rehydrate.
+
+** Test status
+=24/24= passing in =tests/test_eviction_saver.py=, =311/311= in the
+full suite.  Run from =~/src/assist=:
+#+begin_src
+.venv/bin/python -m pytest tests/test_eviction_saver.py
+.venv/bin/python -m pytest tests/  # full suite
+#+end_src
+
+** Pending — what the next session should do
+1. *Address PR review comments.*  Particular surfaces to check:
+   the =files= channel drain logic (paths with no leading slash, v1
+   list-content format), and the round-trip on a real langgraph
+   checkpoint (the tests use synthetic ones).
+2. *Eval cadence.*  Per CLAUDE.md: post-impl N=3 → reviewer findings
+   addressed → N=5 → stability N=10.  Likely affected suites:
+   =edd/eval/test_research_multi_turn_token_regression.py=,
+   =edd/eval/eval_large_tool_results.py=,
+   =edd/eval/eval_multi_turn_research.py=,
+   =edd/eval/test_research_agent.py=.
+3. *Merge to main once approved.*  After Layer 2 lands too, fold
+   =EvictionSaver= to subclass =CheckpointRetentionSaver= so prune
+   and eviction share the same =put=.  Tests stay split.
+4. *Deploy + smoke.*  =make deploy= from =~/src/assist=.  Watch
+   =journalctl -u assist-web -f= for the
+   "EvictionSaver: evicting tool results > 20 KB" startup line.
+   Spot-check =du -sh /home/pierre/deploy/assist/threads/<tid>/
+   large_tool_results/= on a chatty research thread to confirm
+   blobs are landing on disk.
+
+** Kill switch (if Layer 3 misbehaves in prod)
+Add to =/home/pierre/deploy/assist/code/.deploy.env= on the prod
+host:
+#+begin_src
+ASSIST_EVICT_THRESHOLD_KB=0
+#+end_src
+Then =sudo systemctl restart assist-web=.  The wrapper becomes a
+no-op pass-through; behavior reverts to upstream =SqliteSaver=
+without a code rollback.  Already-evicted checkpoints continue to
+rehydrate correctly because =get_tuple= / =list= rehydrate
+unconditionally — the kill switch only stops *new* evictions.
+
+* Original design (history below)
 
 Layer 3 of the prod =threads.db= growth plan (overview:
 [[file:2026-05-03-prod-threads-db-growth.org][2026-05-03-prod-threads-db-growth.org]]).  This layer caps the size
