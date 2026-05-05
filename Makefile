@@ -123,11 +123,18 @@ setup-sudo:
 
 # Run the threads.db VACUUM script on the deploy host — the same
 # script the weekly user-cron entry invokes.  Stops assist-web for
-# the duration; expect 10–30 minutes at 187 GB.  Uses the existing
-# passwordless sudo entries for systemctl stop/start assist-web.
+# the duration; expect minutes on a small DB, hours on a >100 GB
+# one.  Uses the existing passwordless sudo entries for systemctl
+# stop/start assist-web.
+#
+# Paths come from .deploy.env (ASSIST_THREADS_DIR, SERVICE_NAME) so
+# the committed script holds no host-specific defaults.
 vacuum-now:
 	@echo "→ Triggering vacuum-prod-db.sh on $(DEPLOY_HOST) (synchronous)..."
-	@ssh $(DEPLOY_HOST) '$(DEPLOY_PATH)/scripts/vacuum-prod-db.sh'
+	@ssh $(DEPLOY_HOST) \
+		ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
+		SERVICE_NAME=$(SERVICE_NAME) \
+		'$(DEPLOY_PATH)/scripts/vacuum-prod-db.sh'
 
 help:
 	@echo "Assist Commands:"

@@ -1,20 +1,20 @@
-# Example user-crontab entries for the deploy host.  Add to
-# `crontab -e` (no sudo — these are pierre's own jobs).
+# Example user-crontab entry for the deploy host.  Add the line to
+# `crontab -e` (no sudo — these are your own jobs).  Substitute
+# <DEPLOY_PATH> and <ASSIST_THREADS_DIR> with the values from your
+# .deploy.env on the dev side.
 #
-# Already in production:
-#
-#   0 23 * * * BASH_ENV=/home/pierre/.bashrc /usr/bin/flock -n /tmp/assist-eval.lock /usr/bin/timeout --kill-after=2m 360m /home/pierre/scripts/assist-test.sh
-#
-# Add for the threads.db VACUUM (Layer 1 of the prod growth plan,
+# Weekly threads.db VACUUM (Layer 1 of the prod growth plan, see
 # docs/2026-05-03-prod-threads-db-growth.org):
 #
-#   0 6 * * 0 /usr/bin/flock -n /tmp/assist-eval.lock /home/pierre/deploy/assist/code/scripts/vacuum-prod-db.sh
+#   0 6 * * 0 SERVICE_NAME=assist-web ASSIST_THREADS_DIR=<ASSIST_THREADS_DIR> /usr/bin/flock -n /tmp/assist-eval.lock <DEPLOY_PATH>/scripts/vacuum-prod-db.sh
 #
 # Why these arguments:
-#   - `0 6 * * 0` — Sunday 06:00 local.  Clears the 23:00 eval cron's
-#     360-min budget (worst-case finish ~05:02) with margin.
-#   - `flock -n /tmp/assist-eval.lock` — eval cron holds this lock for
-#     its whole run.  -n means "skip if held"; never let VACUUM race
-#     the eval (the script also has its own check, but cron-level
-#     flock is cheaper).
+#   - `0 6 * * 0` — Sunday 06:00 local.  Clears the nightly eval
+#     cron's window (23:00 + 360-min budget) with margin.
+#   - Inline env (SERVICE_NAME, ASSIST_THREADS_DIR) — the script
+#     refuses to start with these unset, so the cron line is the
+#     single place to override.
+#   - `flock -n /tmp/assist-eval.lock` — eval cron holds this lock
+#     for its whole run.  -n means "skip if held"; never let VACUUM
+#     race the eval.
 #   - Absolute paths only — cron has no PATH context.
