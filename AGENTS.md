@@ -123,3 +123,22 @@ Always follow these guidelines when writing code:
 
 # Documentation guidelines
 README files are always updated as new user-facing functionality is added or modified. Do not clutter the top-level README file(s) - always add sections as needed.
+
+# Configuration & repository hygiene
+Host-specific values — absolute paths inside someone's home directory, deploy hosts, service-specific identifiers — must never land in committed files. They go in `.dev.env` (local development) or `.deploy.env` (production); both are gitignored. Use the existing patterns:
+
+1. **Env vars in scripts.** Scripts read paths from env (e.g. `ASSIST_THREADS_DIR`, `DEPLOY_PATH`, `SERVICE_NAME`). Refuse to start with `: "${VAR:?explanation}"` rather than embedding a default that ships your machine layout to others. See `scripts/vacuum-prod-db.sh` for the pattern.
+
+2. **Makefile passes env over ssh.** Targets that run remote scripts pass the values from `.deploy.env` through ssh, e.g.:
+   ```make
+   vacuum-now:
+       @ssh $(DEPLOY_HOST) \
+           ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
+           SERVICE_NAME=$(SERVICE_NAME) \
+           '$(DEPLOY_PATH)/scripts/vacuum-prod-db.sh'
+   ```
+   See `deploy-service` and `vacuum-now` for the canonical pattern.
+
+3. **Examples / doc snippets.** Use angle-bracket placeholders (`<DEPLOY_PATH>`, `<ASSIST_THREADS_DIR>`) where a literal path would otherwise appear. Operators substitute their own values when they read the file.
+
+Before committing a script or example, grep your diff for your own `/home/<you>/...` and any production hostnames; if anything matches, lift it into env first.
