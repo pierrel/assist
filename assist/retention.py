@@ -100,6 +100,11 @@ def _check_no_foreign_writers(db_path: str) -> None:
     if not os.path.exists(db_path):
         return  # Nothing to guard.
 
+    # Try lsof first (richer output: PID, command, FD, mode); fall back
+    # to fuser if lsof isn't installed.  Both are part of the standard
+    # Linux toolset; psmisc (fuser) is on this host even though lsof
+    # isn't.  Refuse to run if neither is present — the foreign-writer
+    # guard is non-optional.
     try:
         result = subprocess.run(
             ["lsof", "--", db_path],
@@ -107,15 +112,50 @@ def _check_no_foreign_writers(db_path: str) -> None:
             text=True,
             check=False,
         )
+        # lsof returncode 1 = no holders (header-only or empty).
+        no_holders_codes = {1}
     except FileNotFoundError:
-        # ``lsof`` is not installed.  Per AGENTS-style guidance, this
-        # is a deploy-host hygiene problem; refuse to proceed.
-        print(
-            "[retention] lsof not found on PATH; refusing to run "
-            "without the foreign-writer guard.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        try:
+            result = subprocess.run(
+                ["fuser", db_path],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            # fuser returncode 1 = no holders.  stderr carries the
+            # filename echo; stdout is the pid list.
+            no_holders_codes = {1}
+        except FileNotFoundError:
+            print(
+                "[retention] neither lsof nor fuser found on PATH; "
+                "refusing to run without the foreign-writer guard.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # Normalize fuser output to lsof-shaped lines so the rest of
+        # the function doesn't branch.  fuser stdout is "pid pid pid"
+        # on a single line.
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split()
+            self_pid = str(os.getpid())
+            foreign = [pid for pid in pids if pid != self_pid]
+            if foreign:
+                print(
+                    f"[retention] foreign processes hold {db_path}: "
+                    f"{' '.join(foreign)} — refusing to sweep.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        elif result.returncode in no_holders_codes:
+            return
+        else:
+            print(
+                f"[retention] fuser returned unexpected code "
+                f"{result.returncode}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        return  # fuser branch handled the verdict; skip lsof parsing.
 
     # lsof returns 1 when there are no holders — that's the safe case.
     if result.returncode == 1:

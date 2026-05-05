@@ -235,3 +235,65 @@ class TestHardDeleteCallbackIsolation(TestCase):
                 self.assertEqual(_count_rows(mgr, "checkpoints", tid), 0)
             finally:
                 mgr.close()
+
+
+class TestHardDeletePermissionFallback(TestCase):
+    """Sandbox containers run as root inside, so they leave root-owned
+    files in ``domain/references/`` and ``domain/**/__pycache__``.
+    The invoking user can't ``rm`` those without ``chown -R`` (not in
+    our passwordless sudoers).  ``hard_delete`` falls back to a one-
+    shot Docker container as a privileged-rm escape hatch.
+
+    Surfaced from the manual one-time sweep on prod 2026-05-05 where
+    18 of 47 candidate threads had root-owned subdirs.
+    """
+
+    def test_eaccess_invokes_docker_rm_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                tid = "20260504000000-permission"
+                tdir = _seed_thread(mgr, tid)
+
+                with patch("assist.thread.SandboxManager.cleanup"), \
+                     patch("assist.thread.shutil.rmtree",
+                           side_effect=PermissionError("[Errno 13]")), \
+                     patch("assist.thread.subprocess.run") as mock_run:
+                    mock_run.return_value.returncode = 0
+                    mgr.hard_delete(tid)
+
+                mock_run.assert_called_once()
+                cmd = mock_run.call_args[0][0]
+                self.assertEqual(cmd[:3], ["docker", "run", "--rm"])
+                self.assertIn("-v", cmd)
+                # Bind-mount the PARENT and rm the basename — never
+                # bind-mount the full thread dir because rm-rf on the
+                # mount point itself fails.
+                self.assertIn(f"{os.path.dirname(tdir)}:/work", cmd)
+                self.assertIn(f"/work/{os.path.basename(tdir)}", cmd)
+
+            finally:
+                mgr.close()
+
+    def test_docker_unavailable_logs_and_continues(self):
+        """If both rmtree AND the docker fallback fail, hard_delete
+        must NOT raise — DB rows are already gone (step 2), so the
+        thread is invisible to the UI.  Lingering files become a
+        manual-cleanup problem, not a sweep-blocker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                tid = "20260504000000-nodocker"
+                _seed_thread(mgr, tid)
+
+                with patch("assist.thread.SandboxManager.cleanup"), \
+                     patch("assist.thread.shutil.rmtree",
+                           side_effect=PermissionError("[Errno 13]")), \
+                     patch("assist.thread.subprocess.run",
+                           side_effect=FileNotFoundError("docker not installed")):
+                    mgr.hard_delete(tid)
+
+                # DB rows still wiped despite the rmtree failure.
+                self.assertEqual(_count_rows(mgr, "checkpoints", tid), 0)
+            finally:
+                mgr.close()

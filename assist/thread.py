@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
 import tempfile
@@ -255,10 +256,40 @@ n    checkpointing via SqliteSaver.
 
         # 3. Wipe the on-disk directory.  Idempotent: a missing dir is
         # fine — re-running on a half-deleted thread must succeed.
+        # On EACCES, fall back to a privileged-rm via a one-shot Docker
+        # container.  Sandbox runs write root-owned files into
+        # ``domain/references/`` and ``domain/**/__pycache__``; the
+        # invoking user can't ``rm`` those without ``chown -R`` (not in
+        # the passwordless sudoers).  Pierre is in the docker group, so
+        # a tiny ``alpine`` container can ``rm -rf`` as root via the
+        # bind mount.  Long-term fix is to run the sandbox as a non-
+        # root UID; this keeps the weekly sweep self-sufficient until
+        # then.
         try:
             shutil.rmtree(tdir, ignore_errors=False)
         except FileNotFoundError:
             pass
+        except PermissionError:
+            parent = os.path.dirname(tdir)
+            basename = os.path.basename(tdir)
+            try:
+                subprocess.run(
+                    ["docker", "run", "--rm",
+                     "-v", f"{parent}:/work",
+                     "alpine", "rm", "-rf", f"/work/{basename}"],
+                    capture_output=True, check=True,
+                )
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                # If Docker isn't available either, log and continue —
+                # the DB rows are gone (step 2), so the thread is
+                # invisible to the UI even with the dir lingering.
+                # Manual cleanup needed.
+                logger.warning(
+                    "Privileged rmtree fallback failed for %s: %s. "
+                    "DB rows are gone; the working tree at %s remains "
+                    "and will need manual cleanup.",
+                    tid, e, tdir,
+                )
 
         # 4. Run consumer-supplied callbacks.  Each is isolated so
         # one bad callback can't break others or the sweep.
