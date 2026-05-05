@@ -38,6 +38,20 @@ unchanged below.
   writes to via =StateBackend=; without draining, the middleware
   merely moves bytes from =messages= to =files= inside the same
   checkpoint, leaving DB size untouched.
+- *=put_writes= overridden too.*  Each tool node's output flows
+  through =put_writes= before it lands in a checkpoint.  Without an
+  override, the =writes= table accumulates full tool-result content
+  per super-step until Layer 2's retention sweep removes the parent
+  checkpoint.  The override applies the same per-message and
+  per-files-entry eviction; rehydration walks =CheckpointTuple.pending_writes=
+  in =get_tuple= and =list= so callers see fully-restored writes.
+- *v1 → v2 file format upgrade is one-way.*  If an evicted files
+  entry was in the legacy =content: list[str]= (v1) shape, on
+  rehydration it comes back as the modern =content: str= (v2) shape.
+  The on-disk blob carries no format metadata and =StateBackend._normalize_content=
+  smooths the difference at read time, so callers don't notice.
+  Documented here so the next session doesn't chase the format
+  divergence as a bug.
 - *Rehydration in =get_tuple= / =list=, NOT in =RollbackRunnable=.*
   Every read path (rollback, =agent.get_state=, web UI rendering)
   goes through the saver, so the saver is the single place to
@@ -52,8 +66,11 @@ unchanged below.
   to surface clean than half-rehydrate.
 
 ** Test status
-=24/24= passing in =tests/test_eviction_saver.py=, =311/311= in the
-full suite.  Run from =~/src/assist=:
+=31/31= passing in =tests/test_eviction_saver.py= (24 from the
+initial commit + 7 from the reviewer-driven follow-up: =put_writes=
+eviction, =pending_writes= rehydration, files-channel writes,
+kill-switch in =put_writes=, idempotency-skip on messages and on
+files).  Full suite passes.  Run from =~/src/assist=:
 #+begin_src
 .venv/bin/python -m pytest tests/test_eviction_saver.py
 .venv/bin/python -m pytest tests/  # full suite

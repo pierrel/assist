@@ -36,7 +36,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -242,6 +242,53 @@ class EvictionSaver(SqliteSaver):
         new_checkpoint["channel_values"] = new_cv
         return new_checkpoint, side_effects
 
+    def _evict_one_message(
+        self,
+        msg: Any,
+        thread_id: str,
+        threshold_bytes: int,
+    ) -> tuple[Any, tuple[str, bytes] | None]:
+        """Evict a single ToolMessage if oversized.
+
+        Returns ``(new_msg, side_effect)`` where ``side_effect`` is the
+        ``(path, bytes)`` to flush, or ``None`` if the message is not
+        eligible (wrong type, too small, already evicted, copy failed).
+        """
+        if not isinstance(msg, ToolMessage):
+            return msg, None
+        ak = getattr(msg, "additional_kwargs", None) or {}
+        if EVICT_PATH_KEY in ak:
+            # Already evicted (idempotent re-put).  Catch the case
+            # where a stub somehow re-enters the write path without
+            # going through rehydration first.
+            return msg, None
+        content_bytes = _content_to_bytes(getattr(msg, "content", ""))
+        if len(content_bytes) <= threshold_bytes:
+            return msg, None
+        digest = hashlib.sha256(content_bytes).hexdigest()[:16]
+        path = self._eviction_path(thread_id, digest)
+        new_ak = {
+            **ak,
+            EVICT_PATH_KEY: path,
+            EVICT_SIZE_KEY: len(content_bytes),
+            EVICT_HASH_KEY: digest,
+        }
+        stub = (
+            f"[evicted: {len(content_bytes)} bytes tool result, "
+            f"see {LARGE_TOOL_RESULTS_PREFIX}{digest}]"
+        )
+        try:
+            new_msg = msg.model_copy(
+                update={"content": stub, "additional_kwargs": new_ak}
+            )
+        except Exception:
+            logger.exception(
+                "EvictionSaver: failed to copy ToolMessage; "
+                "skipping eviction for this message."
+            )
+            return msg, None
+        return new_msg, (path, content_bytes)
+
     def _evict_messages(
         self,
         messages: list | None,
@@ -253,42 +300,51 @@ class EvictionSaver(SqliteSaver):
             return None
         new_messages: list | None = None
         for i, msg in enumerate(messages):
-            if not isinstance(msg, ToolMessage):
-                continue
-            ak = getattr(msg, "additional_kwargs", None) or {}
-            if EVICT_PATH_KEY in ak:
-                # Already evicted in a prior put (idempotent).
-                continue
-            content_bytes = _content_to_bytes(getattr(msg, "content", ""))
-            if len(content_bytes) <= threshold_bytes:
-                continue
-            digest = hashlib.sha256(content_bytes).hexdigest()[:16]
-            path = self._eviction_path(thread_id, digest)
-            new_ak = {
-                **ak,
-                EVICT_PATH_KEY: path,
-                EVICT_SIZE_KEY: len(content_bytes),
-                EVICT_HASH_KEY: digest,
-            }
-            stub = (
-                f"[evicted: {len(content_bytes)} bytes tool result, "
-                f"see {LARGE_TOOL_RESULTS_PREFIX}{digest}]"
-            )
-            try:
-                new_msg = msg.model_copy(
-                    update={"content": stub, "additional_kwargs": new_ak}
-                )
-            except Exception:
-                logger.exception(
-                    "EvictionSaver: failed to copy ToolMessage; "
-                    "skipping eviction for this message."
-                )
+            new_msg, se = self._evict_one_message(msg, thread_id, threshold_bytes)
+            if se is None:
                 continue
             if new_messages is None:
                 new_messages = list(messages)
             new_messages[i] = new_msg
-            side_effects.append((path, content_bytes))
+            side_effects.append(se)
         return new_messages
+
+    def _evict_one_file(
+        self,
+        path: str,
+        fd: Any,
+        thread_id: str,
+        threshold_bytes: int,
+    ) -> tuple[Any, tuple[str, bytes] | None]:
+        """Evict a single files-channel entry if eligible.
+
+        Returns ``(new_fd, side_effect)`` or ``(fd, None)`` if not
+        eligible (path not under ``/large_tool_results/``, value not a
+        dict, too small, already evicted).
+        """
+        if not isinstance(path, str):
+            return fd, None
+        if not path.startswith(LARGE_TOOL_RESULTS_PREFIX):
+            return fd, None
+        if not isinstance(fd, dict):
+            return fd, None
+        if EVICT_PATH_KEY in fd:
+            return fd, None
+        content_bytes = _file_content_to_bytes(fd)
+        if len(content_bytes) <= threshold_bytes:
+            return fd, None
+        digest = hashlib.sha256(content_bytes).hexdigest()[:16]
+        evict_path = self._eviction_path(thread_id, digest)
+        stub: dict[str, Any] = {
+            EVICT_PATH_KEY: evict_path,
+            EVICT_SIZE_KEY: len(content_bytes),
+            EVICT_HASH_KEY: digest,
+            EVICT_ENCODING_KEY: fd.get("encoding", "utf-8"),
+        }
+        for k in ("created_at", "modified_at"):
+            if k in fd:
+                stub[k] = fd[k]
+        return stub, (evict_path, content_bytes)
 
     def _evict_files(
         self,
@@ -301,34 +357,53 @@ class EvictionSaver(SqliteSaver):
             return None
         new_files: dict | None = None
         for path, fd in files.items():
-            if not isinstance(path, str):
+            new_fd, se = self._evict_one_file(
+                path, fd, thread_id, threshold_bytes
+            )
+            if se is None:
                 continue
-            if not path.startswith(LARGE_TOOL_RESULTS_PREFIX):
-                continue
-            if not isinstance(fd, dict):
-                continue
-            if EVICT_PATH_KEY in fd:
-                # Already evicted (idempotent).
-                continue
-            content_bytes = _file_content_to_bytes(fd)
-            if len(content_bytes) <= threshold_bytes:
-                continue
-            digest = hashlib.sha256(content_bytes).hexdigest()[:16]
-            evict_path = self._eviction_path(thread_id, digest)
-            stub: dict[str, Any] = {
-                EVICT_PATH_KEY: evict_path,
-                EVICT_SIZE_KEY: len(content_bytes),
-                EVICT_HASH_KEY: digest,
-                EVICT_ENCODING_KEY: fd.get("encoding", "utf-8"),
-            }
-            for k in ("created_at", "modified_at"):
-                if k in fd:
-                    stub[k] = fd[k]
             if new_files is None:
                 new_files = dict(files)
-            new_files[path] = stub
-            side_effects.append((evict_path, content_bytes))
+            new_files[path] = new_fd
+            side_effects.append(se)
         return new_files
+
+    def _evict_write_value(
+        self,
+        channel: str,
+        value: Any,
+        thread_id: str,
+        threshold_bytes: int,
+        side_effects: list[tuple[str, bytes]],
+    ) -> Any | None:
+        """Evict large content from a single ``put_writes`` value.
+
+        Returns the new value if mutation happened, ``None`` if the
+        write is unchanged.  Handles three shapes per channel:
+
+        - ``messages``: a list of messages, or a single message
+          (langgraph's pregel emits both depending on the reducer).
+        - ``files``: a dict of ``path → FileData``.
+        - everything else: passes through.
+        """
+        if channel == "messages":
+            if isinstance(value, list):
+                return self._evict_messages(
+                    value, thread_id, threshold_bytes, side_effects
+                )
+            new_msg, se = self._evict_one_message(
+                value, thread_id, threshold_bytes
+            )
+            if se is None:
+                return None
+            side_effects.append(se)
+            return new_msg
+        if channel == "files":
+            if isinstance(value, dict):
+                return self._evict_files(
+                    value, thread_id, threshold_bytes, side_effects
+                )
+        return None
 
     def _flush_evictions(self, side_effects: list[tuple[str, bytes]]) -> None:
         """Write eviction blobs to disk.  Best-effort, content-hash dedup.
@@ -399,55 +474,109 @@ class EvictionSaver(SqliteSaver):
         new_checkpoint["channel_values"] = new_cv
         return new_checkpoint
 
+    def _rehydrate_one_message(self, msg: Any) -> Any | None:
+        """Return a rehydrated message, or ``None`` if ``msg`` is not a
+        stub (so the caller leaves it untouched)."""
+        ak = getattr(msg, "additional_kwargs", None)
+        if not isinstance(ak, dict) or EVICT_PATH_KEY not in ak:
+            return None
+        content_bytes = self._read_eviction(ak[EVICT_PATH_KEY])
+        cleaned_ak = {k: v for k, v in ak.items() if k not in EVICT_ALL_KEYS}
+        try:
+            return msg.model_copy(
+                update={
+                    "content": content_bytes.decode("utf-8", "replace"),
+                    "additional_kwargs": cleaned_ak,
+                }
+            )
+        except Exception:
+            logger.exception(
+                "EvictionSaver: failed to rehydrate ToolMessage; "
+                "leaving stub in place."
+            )
+            return None
+
     def _rehydrate_messages(self, messages: list | None) -> list | None:
         if not messages:
             return None
         new_messages: list | None = None
         for i, msg in enumerate(messages):
-            ak = getattr(msg, "additional_kwargs", None)
-            if not isinstance(ak, dict) or EVICT_PATH_KEY not in ak:
-                continue
-            content_bytes = self._read_eviction(ak[EVICT_PATH_KEY])
-            cleaned_ak = {k: v for k, v in ak.items() if k not in EVICT_ALL_KEYS}
-            try:
-                new_msg = msg.model_copy(
-                    update={
-                        "content": content_bytes.decode("utf-8", "replace"),
-                        "additional_kwargs": cleaned_ak,
-                    }
-                )
-            except Exception:
-                logger.exception(
-                    "EvictionSaver: failed to rehydrate ToolMessage; "
-                    "leaving stub in place."
-                )
+            new_msg = self._rehydrate_one_message(msg)
+            if new_msg is None:
                 continue
             if new_messages is None:
                 new_messages = list(messages)
             new_messages[i] = new_msg
         return new_messages
 
+    def _rehydrate_one_file(self, fd: Any) -> dict | None:
+        """Return a rehydrated FileData, or ``None`` if ``fd`` is not a stub.
+
+        The on-disk blob carries no format metadata, so rehydration
+        always restores to the v2 (modern) FileData shape: ``{"content":
+        str, "encoding": str, ...}``.  This is a one-way upgrade for
+        any v1 (``content: list[str]``) entries that were evicted —
+        ``StateBackend._normalize_content`` smooths the difference at
+        read time, so callers don't notice.
+        """
+        if not isinstance(fd, dict) or EVICT_PATH_KEY not in fd:
+            return None
+        content_bytes = self._read_eviction(fd[EVICT_PATH_KEY])
+        encoding = fd.get(EVICT_ENCODING_KEY, "utf-8")
+        content_str = content_bytes.decode(encoding, "replace")
+        restored: dict[str, Any] = {
+            "content": content_str,
+            "encoding": encoding,
+        }
+        for k in ("created_at", "modified_at"):
+            if k in fd:
+                restored[k] = fd[k]
+        return restored
+
     def _rehydrate_files(self, files: dict | None) -> dict | None:
         if not files or not isinstance(files, dict):
             return None
         new_files: dict | None = None
         for path, fd in files.items():
-            if not isinstance(fd, dict) or EVICT_PATH_KEY not in fd:
+            new_fd = self._rehydrate_one_file(fd)
+            if new_fd is None:
                 continue
-            content_bytes = self._read_eviction(fd[EVICT_PATH_KEY])
-            encoding = fd.get(EVICT_ENCODING_KEY, "utf-8")
-            content_str = content_bytes.decode(encoding, "replace")
-            restored: dict[str, Any] = {
-                "content": content_str,
-                "encoding": encoding,
-            }
-            for k in ("created_at", "modified_at"):
-                if k in fd:
-                    restored[k] = fd[k]
             if new_files is None:
                 new_files = dict(files)
-            new_files[path] = restored
+            new_files[path] = new_fd
         return new_files
+
+    def _rehydrate_write_value(self, channel: str, value: Any) -> Any | None:
+        """Rehydrate a single ``put_writes`` value.  Returns ``None`` if
+        the value is unchanged."""
+        if channel == "messages":
+            if isinstance(value, list):
+                return self._rehydrate_messages(value)
+            return self._rehydrate_one_message(value)
+        if channel == "files":
+            if isinstance(value, dict):
+                return self._rehydrate_files(value)
+        return None
+
+    def _rehydrate_pending_writes(
+        self, pending_writes: Sequence | None
+    ) -> list | None:
+        """Walk pending-writes (``[(task_id, channel, value), ...]``) and
+        rehydrate any stub values.  Returns ``None`` if nothing changed."""
+        if not pending_writes:
+            return None
+        new_writes: list | None = None
+        for i, entry in enumerate(pending_writes):
+            if not isinstance(entry, tuple) or len(entry) != 3:
+                continue
+            task_id, channel, value = entry
+            new_value = self._rehydrate_write_value(channel, value)
+            if new_value is None:
+                continue
+            if new_writes is None:
+                new_writes = list(pending_writes)
+            new_writes[i] = (task_id, channel, new_value)
+        return new_writes
 
     def _read_eviction(self, path: str) -> bytes:
         try:
@@ -489,16 +618,69 @@ class EvictionSaver(SqliteSaver):
             checkpoint_to_save = checkpoint
         return super().put(config, checkpoint_to_save, metadata, new_versions)
 
+    def put_writes(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
+        """Pre-process per-task writes before they land in the ``writes``
+        table.
+
+        Each tool node's output flows through ``put_writes`` first;
+        without eviction here, the ``writes`` table accumulates the
+        full ToolMessage content per super-step until Layer 2's
+        retention sweep removes the parent checkpoint.  Within that
+        window, the per-thread DB cost would be roughly checkpoint-size
+        × number-of-writes-per-checkpoint without this hook.
+        """
+        if self.evict_threshold_kb <= 0 or self.eviction_root is None:
+            return super().put_writes(config, writes, task_id, task_path)
+        thread_id = str(config["configurable"]["thread_id"])
+        threshold_bytes = self.evict_threshold_kb * 1024
+        side_effects: list[tuple[str, bytes]] = []
+        new_writes: list | None = None
+        try:
+            for i, entry in enumerate(writes):
+                if not isinstance(entry, tuple) or len(entry) != 2:
+                    continue
+                channel, value = entry
+                new_value = self._evict_write_value(
+                    channel, value, thread_id, threshold_bytes, side_effects
+                )
+                if new_value is None:
+                    continue
+                if new_writes is None:
+                    new_writes = list(writes)
+                new_writes[i] = (channel, new_value)
+            if side_effects:
+                self._flush_evictions(side_effects)
+        except Exception:
+            logger.exception(
+                "EvictionSaver: put_writes eviction failed for "
+                "thread_id=%r task_id=%r; falling back to un-evicted writes.",
+                thread_id, task_id,
+            )
+            return super().put_writes(config, writes, task_id, task_path)
+        return super().put_writes(
+            config,
+            new_writes if new_writes is not None else writes,
+            task_id,
+            task_path,
+        )
+
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         tup = super().get_tuple(config)
         if tup is None:
             return None
         rehydrated = self._rehydrate_checkpoint(tup.checkpoint)
-        if rehydrated is tup.checkpoint:
+        new_pending = self._rehydrate_pending_writes(tup.pending_writes)
+        if rehydrated is tup.checkpoint and new_pending is None:
             return tup
         return CheckpointTuple(
             tup.config, rehydrated, tup.metadata, tup.parent_config,
-            tup.pending_writes,
+            new_pending if new_pending is not None else tup.pending_writes,
         )
 
     def list(
@@ -513,10 +695,12 @@ class EvictionSaver(SqliteSaver):
             config, filter=filter, before=before, limit=limit
         ):
             rehydrated = self._rehydrate_checkpoint(tup.checkpoint)
-            if rehydrated is tup.checkpoint:
+            new_pending = self._rehydrate_pending_writes(tup.pending_writes)
+            if rehydrated is tup.checkpoint and new_pending is None:
                 yield tup
             else:
                 yield CheckpointTuple(
-                    tup.config, rehydrated, tup.metadata,
-                    tup.parent_config, tup.pending_writes,
+                    tup.config, rehydrated, tup.metadata, tup.parent_config,
+                    new_pending if new_pending is not None
+                    else tup.pending_writes,
                 )

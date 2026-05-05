@@ -457,6 +457,149 @@ class TestEvictionFilesUnderThreadDir(TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestPutWrites(TestCase):
+    """``put_writes`` is the per-task-write hook; it must also evict
+    large content so the ``writes`` table doesn't carry full ToolMessages
+    for the duration of Layer 2's retention window."""
+
+    def _put_checkpoint(self, saver, tid="t1"):
+        """Put an empty checkpoint so the FK-ish (thread_id, ns,
+        checkpoint_id) tuple exists for put_writes to reference."""
+        saver.put(_config(tid), _ckpt(0), {}, {})
+        return _config(tid) | {"configurable": {
+            "thread_id": tid, "checkpoint_ns": "", "checkpoint_id": "00000000",
+        }}
+
+    def test_large_message_in_writes_is_evicted(self):
+        with tempfile.TemporaryDirectory() as root:
+            saver, _ = _new_saver(threshold_kb=1, root=root)
+            cfg = self._put_checkpoint(saver, "t1")
+            big = "x" * 5000
+            saver.put_writes(
+                cfg, [("messages", [_tool_msg(big)])], task_id="task_1"
+            )
+            evict_dir = os.path.join(root, "t1", "large_tool_results")
+            self.assertTrue(os.path.isdir(evict_dir))
+            self.assertEqual(len(os.listdir(evict_dir)), 1)
+
+            # Raw row in the writes table does NOT contain the original.
+            cur = saver.conn.cursor()
+            cur.execute(
+                "SELECT value FROM writes WHERE thread_id='t1' AND task_id='task_1'"
+            )
+            for (raw,) in cur.fetchall():
+                self.assertNotIn(big.encode("utf-8"), bytes(raw))
+
+    def test_small_message_in_writes_passes_through(self):
+        with tempfile.TemporaryDirectory() as root:
+            saver, _ = _new_saver(threshold_kb=20, root=root)
+            cfg = self._put_checkpoint(saver, "t1")
+            saver.put_writes(
+                cfg, [("messages", [_tool_msg("hi")])], task_id="task_1"
+            )
+            self.assertFalse(
+                os.path.isdir(os.path.join(root, "t1", "large_tool_results"))
+            )
+
+    def test_pending_writes_rehydrated_in_get_tuple(self):
+        with tempfile.TemporaryDirectory() as root:
+            saver, _ = _new_saver(threshold_kb=1, root=root)
+            cfg = self._put_checkpoint(saver, "t1")
+            big = "y" * 5000
+            saver.put_writes(
+                cfg, [("messages", [_tool_msg(big)])], task_id="task_1"
+            )
+            tup = saver.get_tuple(_config("t1"))
+            self.assertIsNotNone(tup.pending_writes)
+            # Find the messages-channel write and assert its content
+            # is restored.
+            found = False
+            for entry in tup.pending_writes:
+                if len(entry) != 3:
+                    continue
+                _, channel, value = entry
+                if channel != "messages":
+                    continue
+                if isinstance(value, list):
+                    self.assertEqual(value[0].content, big)
+                else:
+                    self.assertEqual(value.content, big)
+                found = True
+            self.assertTrue(found, "no messages-channel write found in pending_writes")
+
+    def test_kill_switch_skips_put_writes_eviction(self):
+        with tempfile.TemporaryDirectory() as root:
+            saver, _ = _new_saver(threshold_kb=0, root=root)
+            cfg = self._put_checkpoint(saver, "t1")
+            big = "z" * 5000
+            saver.put_writes(
+                cfg, [("messages", [_tool_msg(big)])], task_id="task_1"
+            )
+            self.assertFalse(os.path.isdir(os.path.join(root, "t1")))
+
+    def test_files_channel_in_writes_is_evicted(self):
+        with tempfile.TemporaryDirectory() as root:
+            saver, _ = _new_saver(threshold_kb=1, root=root)
+            cfg = self._put_checkpoint(saver, "t1")
+            big = "w" * 5000
+            files = {
+                "/large_tool_results/abc": {"content": big, "encoding": "utf-8"},
+            }
+            saver.put_writes(cfg, [("files", files)], task_id="task_1")
+            evict_dir = os.path.join(root, "t1", "large_tool_results")
+            self.assertEqual(len(os.listdir(evict_dir)), 1)
+
+
+class TestSkipAlreadyEvictedMessage(TestCase):
+    """Pinning the idempotency contract documented in
+    ``_evict_one_message``: a ToolMessage already carrying
+    ``_evicted_to`` in ``additional_kwargs`` is skipped on re-put,
+    so disk doesn't get a duplicate file."""
+
+    def test_skip_path_message(self):
+        with tempfile.TemporaryDirectory() as root:
+            saver, _ = _new_saver(threshold_kb=1, root=root)
+            big = "x" * 5000
+            # Hand-construct a stub message identical to what eviction
+            # would produce, but feed it directly into put without
+            # going through rehydration first.
+            stub = ToolMessage(
+                content="[evicted: 5000 bytes tool result, see /large_tool_results/deadbeef]",
+                tool_call_id="call_x",
+                name="t",
+                additional_kwargs={
+                    "_evicted_to": "/nonexistent/path",
+                    "_evicted_size": len(big),
+                    "_evicted_sha256": "deadbeef" * 2,
+                },
+            )
+            saver.put(_config("t1"), _ckpt(0, messages=[stub]), {}, {})
+            # No new eviction file is written (the stub points to a
+            # nonexistent path that we never touch).
+            self.assertFalse(
+                os.path.isdir(os.path.join(root, "t1", "large_tool_results"))
+            )
+
+
+class TestSkipAlreadyEvictedFile(TestCase):
+    """Same idempotency pin for the files channel."""
+
+    def test_skip_path_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            saver, _ = _new_saver(threshold_kb=1, root=root)
+            stub_fd = {
+                "_evicted_to": "/nonexistent/path",
+                "_evicted_size": 5000,
+                "_evicted_sha256": "deadbeef" * 2,
+                "_evicted_encoding": "utf-8",
+            }
+            files = {"/large_tool_results/abc": stub_fd}
+            saver.put(_config("t1"), _ckpt(0, files=files), {}, {})
+            self.assertFalse(
+                os.path.isdir(os.path.join(root, "t1", "large_tool_results"))
+            )
+
+
 class TestStubMetadata(TestCase):
     def test_stub_records_size_and_hash(self):
         """Inspect the in-DB checkpoint (not rehydrated) to confirm the
