@@ -1,0 +1,75 @@
+#+TITLE: Bound LLM-call wall-clock with per-phase httpx timeouts
+#+DATE: 2026-05-06
+State: Shipped (PR #91, commit =2dfd86d=, deployed to prod 2026-05-06; merge pending)
+
+Slim retro — design + review happened in-session, this is the
+post-deploy summary.
+
+* Problem
+Per-thread queue (PR #90) caught a real prod incident on 2026-05-06:
+holder thread stuck ~15 minutes inside
+=httpcore.connection.connect_tcp.failed= retries against an unreachable
+=localhost:8000=.  Cooperative cancel point (=after_model=) couldn't
+fire while httpx was stuck — the holder finally died ~948s after
+acquire vs the 600s =hold_timeout=.
+
+Root cause: =assist/model_manager.py= passed =timeout=600.0= as a
+single scalar.  httpx interprets that as "all four phases share the
+600s budget," so a stuck TCP handshake burned the full 600s before
+raising.
+
+Note: =max_retries=0= on the OpenAI client was already in tree, so the
+"retry stacking across OpenAI SDK + middleware" hypothesis was wrong
+for this codebase.  =ModelRetryMiddleware= is the single retry layer.
+The architect caught that premise error in Phase 1.
+
+* Solution
+Split the single scalar into per-phase
+=httpx.Timeout(connect=10, read=600, write=60, pool=10)=, env-overridable
+via =ASSIST_LLM_*_TIMEOUT_S=.  =ModelRetryMiddleware.max_retries= also
+made env-overridable (=ASSIST_LLM_MAX_RETRIES=, default 3).
+
+** Key decisions
+- *=connect=10= is the load-bearing change.*  Connect-down endpoint
+  surfaces in ~10s instead of ~600s of httpcore retries.
+- *=read=600= unchanged.*  Matches the queue's =hold_timeout_s=600=
+  so the two layers share a budget.  Architect's =read=300=
+  recommendation pushed back — prior =180s= was empirically too tight
+  on the finance-synthesis prefill case
+  (=docs/2026-05-01-reasoning-impact-eval.org=).
+- *Bad env values fall back silently to defaults.*  New
+  =env_float= / =env_int= helpers in =assist/env.py=.  A typo in
+  =.deploy.env= must not hard-fail every thread on first model build.
+  This was a reviewer-flagged BLOCKER fix.
+- *Comment-tag =max_retries=0= as load-bearing* near
+  =_build_openai_chat_model= so a future drive-by edit doesn't
+  re-enable the OpenAI SDK's retries and resurrect retry-layer stacking.
+
+* Files
+- =assist/model_manager.py= — =_build_request_timeout()= helper, read
+  on every call (env reflects without module reload)
+- =assist/agent.py= — =_make_retry_middleware= reads =ASSIST_LLM_MAX_RETRIES=
+- =assist/env.py= — new =env_float= / =env_int= helpers with silent
+  fallback on missing/invalid input
+- =.deploy.env.example= — documented block for the 5 new knobs
+- =tests/model_manager/test_dynamic_model.py= — +4 tests
+- =tests/test_agent_retry_middleware.py= (new) — 4 tests
+- =tests/test_env_helpers.py= (new) — 8 tests
+
+* Test coverage
+- 326 pytest tests pass (queue + latency-bound coexist cleanly).
+- N=5 trials on =test_thread_e2e.py= (real LLM): 5/5 each.
+- Reviewer pass clean on resubmission.
+
+* Live validation
+Deployed 2026-05-06 09:26.  Verified live config:
+=connect=10 read=600 write=60 pool=10 max_retries=3=, clean uvicorn
+startup, HTTP 200 on the index in ~118ms.
+
+* Follow-ups
+- Optional further lower of =ASSIST_LLM_MAX_RETRIES= to 2 if endpoint
+  flakiness recurs in the wild.
+- Streaming default in =ChatOpenAI= is =False= today; if we ever
+  enable streaming, =read= becomes a true idle-byte timeout (vs the
+  current effective total-response cap), letting us tighten it
+  considerably.
