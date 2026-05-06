@@ -226,7 +226,9 @@ class TestRenderFileDiff:
 class TestFormatReviewMessage:
     def test_overall_only(self):
         out = _format_review_message("Looks good!", [], [])
-        assert out.startswith("## Code review\n\nLooks good!\n")
+        assert out.startswith("## Change review\n")
+        assert "I've reviewed the changes and have some comments." in out
+        assert "Looks good!" in out
         assert "### Per-line comments" not in out
 
     def test_lines_only(self):
@@ -234,11 +236,22 @@ class TestFormatReviewMessage:
             {"file": "foo.py", "row": 7, "lineText": "+def hello():", "comment": "rename"},
         ]
         out = _format_review_message("", comments, [])
-        assert "## Code review" in out
+        assert "## Change review" in out
+        assert "I've reviewed the changes and have some comments." in out
         assert "### Per-line comments" in out
         assert "**`foo.py`** at diff line 7:" in out
         assert "+def hello():" in out
         assert "rename" in out
+
+    def test_opener_precedes_overall_and_line_section(self):
+        comments = [{"file": "x.py", "row": 1, "lineText": "+x", "comment": "c"}]
+        out = _format_review_message("My overall thoughts.", comments, [])
+        idx_opener = out.find("I've reviewed the changes")
+        idx_overall = out.find("My overall thoughts.")
+        idx_section = out.find("### Per-line comments")
+        # Opener appears once and sits between header and overall comment.
+        assert out.count("I've reviewed the changes") == 1
+        assert 0 < idx_opener < idx_overall < idx_section
 
     def test_overall_and_lines(self):
         comments = [
@@ -349,6 +362,6 @@ class TestPostReviewRoute:
         assert r.headers["location"] == "/thread/thread-1?reviewed=1"
         assert len(scheduled) == 1
         assert scheduled[0][0] == "thread-1"
-        assert scheduled[0][1].startswith("## Code review")
+        assert scheduled[0][1].startswith("## Change review")
         assert "Looks good" in scheduled[0][1]
         assert "+x" in scheduled[0][1]
