@@ -145,16 +145,18 @@ def _get_sandbox_backend(tid: str):
 #   initializing      - thread row created, background task queued
 #   cloning           - git clone in progress
 #   starting_sandbox  - docker container starting
+#   queued            - waiting for another thread's LLM affinity hold
 #   processing        - agent is running on a message
 #   ready             - idle, accepting input
 #   error             - something failed; see status["error"]
 INIT_STAGES = {"initializing", "cloning", "starting_sandbox"}
-BUSY_STAGES = INIT_STAGES | {"processing"}
+BUSY_STAGES = INIT_STAGES | {"processing", "queued"}
 
 STAGE_LABELS = {
     "initializing": "Setting up thread...",
     "cloning": "Cloning repository...",
     "starting_sandbox": "Starting sandbox container...",
+    "queued": "Waiting for another thread to finish...",
     "processing": "Processing your message...",
 }
 
@@ -272,7 +274,16 @@ def render_index() -> str:
             status = _get_status(tid)
             stage = status.get("stage", "ready")
             badge = ""
-            if stage in BUSY_STAGES:
+            if stage == "queued":
+                # Distinguish "queued" visually from other busy stages so
+                # the user can tell their message is held behind another
+                # thread (vs. actively running).
+                badge = (
+                    f'<span style="font-size:.7rem; color:#1e3a5f; background:#e1ecf4;'
+                    f' border:1px solid #b6d4ef; padding:.1rem .4rem; border-radius:10px;'
+                    f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
+                )
+            elif stage in BUSY_STAGES:
                 badge = (
                     f'<span style="font-size:.7rem; color:#555; background:#fff3cd;'
                     f' border:1px solid #ffeeba; padding:.1rem .4rem; border-radius:10px;'
@@ -642,14 +653,25 @@ def _process_message(tid: str, text: str) -> None:
     # Carry the pending message in the status so the thread page can show
     # it as a placeholder bubble while processing (cleared once status==ready).
     pending_kwargs = {"pending_message": text}
+
+    def on_queue_state(stage: str) -> None:
+        # Called by ThreadAffinityQueue when this thread has to wait
+        # for another's hold ("queued") and again when the queue is
+        # acquired ("running" -> rewritten to "processing" for the UI).
+        ui_stage = "processing" if stage == "running" else stage
+        _set_status(tid, ui_stage, **pending_kwargs)
+
     try:
         _set_status(tid, "starting_sandbox", **pending_kwargs)
         sandbox = _get_sandbox_backend(tid)
         try:
-            chat = MANAGER.get(tid, sandbox_backend=sandbox)
+            chat = MANAGER.get(tid, sandbox_backend=sandbox,
+                               on_queue_state=on_queue_state)
         except FileNotFoundError:
             return
-        _set_status(tid, "processing", **pending_kwargs)
+        # The queue callback drives status from "starting_sandbox" through
+        # "queued" (if needed) and finally "processing" once acquired.
+        # Without the callback we'd jump straight to "processing" here.
         resp = chat.message(text)
         MANAGER.touch(tid)
 
