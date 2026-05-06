@@ -1,0 +1,134 @@
+#+TITLE: Web diff polish + review page
+#+DATE: 2026-05-06
+
+* Status
+Design — not yet implemented.
+
+* Problem
+
+The /Thread view/ in =manage/web.py= renders the branch-vs-main diff as a single Pygments-formatted HTML blob, hidden behind one collapse-all toggle, with a single =Merge to Main= button alongside.  Two issues:
+
+1. *Browser blow-up.* For a long-running thread that touches many files (or one big lockfile), the rendered diff inflates to megabytes of inline HTML.  Even collapsed, the browser still has to parse it; expanding it (or just visiting the page on a slow device) can hang the tab.  The roadmap has =Prevent long diffs from crashing the browser= for this reason.
+2. *Review ergonomics.* The current view is "all-or-nothing collapse + merge".  There is no per-file collapse, no GitHub-style red/green per-line background (Pygments' default is foreground-only), and no way to leave per-line comments before merging.  When the user wants to push back ("rename this var, redo the test"), they have to retype everything by hand into the message box.
+
+* Solution sketch
+
+Two surfaces:
+
+** Inline diff (main thread page) — polish + truncation
+- Replace the single =render_diff(combined_blob)= with a *per-file* render that emits one =<details>= block per =Change=.  Header shows =path= and =+N/-N= line counts; body is the unified diff with light-red/light-green per-line backgrounds.
+- *Per-file size cap.*  If a single file's diff exceeds =INLINE_FILE_LINE_CAP= (proposed: 600 lines) /or/ =INLINE_FILE_BYTE_CAP= (proposed: 64 KB), render only a placeholder ("File too large to preview here — open in review") with a link to =/thread/{tid}/review#file-N=.  Keeps the main page fast even when the agent rewrote a 5k-line lockfile.
+- *Total cap.*  After all per-file renders, if cumulative byte count of diff HTML still exceeds =INLINE_TOTAL_BYTE_CAP= (proposed: 256 KB), truncate the tail and show "+ N more files — open in review".  Defends against "200 small files" scenarios.
+- Add a *Review* button next to =Merge to Main=.  Same form-row, secondary styling.
+
+** Review page — =/thread/{tid}/review=
+- New route renders the *full* diff using the same per-file =<details>= blocks, but expanded by default for files under the inline cap and collapsed (with one-click expand) for larger ones.  No truncation here — the user explicitly opened this page.
+- Each diff line gets a stable =data-key="path::row"= attribute (1-based row index counting every line of that file's unified diff, including hunk headers).  Clicking a line opens a small inline comment editor anchored under that row.
+- A persistent header includes:
+  - "Overall comment" textarea
+  - "Submit review" button (posts to =POST /thread/{tid}/review=, redirects back to thread)
+  - "Cancel" link back to =/thread/{tid}=
+- *localStorage persistence* keyed =assist:review:{tid}=.  Shape:
+  #+begin_src js
+  {
+    schemaVersion: 1,
+    overall: "",
+    lines: [
+      { file: "src/foo.py", row: 42, lineText: "+    return x", comment: "..." },
+      ...
+    ],
+    updatedAt: "2026-05-06T20:34:11Z"
+  }
+  #+end_src
+  Page load rehydrates from this key; payloads with a different =schemaVersion= are dropped (with a one-shot toast) so a future format change doesn't blow up old drafts.  Every input/textarea blur (debounced) writes back.  On successful submit the key is cleared.
+- *Submit* (=POST /thread/{tid}/review=): server reformats the localStorage payload into a markdown message and routes it through the same =_process_message= path the existing =/message= endpoint uses.  Posts as a new user turn; the agent sees per-line context blocks plus the overall comment.
+  - *Empty-payload guard.*  Reject with 400 when overall comment is blank /and/ there are no line comments.  Avoids posting a bare "## Code review" header.
+  - *Busy-thread guard.*  Disable the Submit button client-side when =_get_status(tid).stage in BUSY_STAGES= at render time (mirrors =form_disabled= at =web.py:472=).  Server-side the queue still serializes correctly via =ThreadAffinityQueue= — the disable is purely UX.
+
+* Message format on submit
+
+#+begin_example
+## Code review
+
+[Overall comment, if any.]
+
+### Per-line comments
+
+**`assist/foo.py`** at diff line 42:
+
+```
++    return x
+```
+
+This should return `y`, not `x`.
+
+---
+
+**`assist/bar.py`** at diff line 100:
+
+```
+-    old_value
++    new_value
+```
+
+Why the rename?  `new_value` is used elsewhere as a flag.
+#+end_example
+
+The =diff line N= reference is stable for the lifetime of the diff (deterministic from =git diff main...=) but does *not* survive new commits — that's fine: the user is reviewing a snapshot, and any follow-up turn from the agent invalidates the snapshot anyway.  We snapshot the line text in localStorage so even if the user reloads after the agent commits something new, their in-progress comments still display the line they originally clicked.
+
+For *renamed files*, =git diff main...= emits =rename from X / rename to Y= headers in the diff body and =Change.path= is the new name.  The submit-message context block prefixes the file label with =(renamed from X)= when those headers are present so the agent doesn't have to guess.  For *binary files*, =git diff= emits a single =Binary files ... differ= line with no hunks; =render_file_diff= short-circuits to a non-clickable "binary" badge row (no =data-key=, no comment affordance).
+
+* Files to touch
+
+- =manage/web.py=
+  - Delete =render_diff= (no remaining callers after this lands; YAGNI).
+  - New =render_file_diff(change: Change, file_idx: int, *, full: bool) -> str= that hand-rolls line-by-line iteration to emit per-file HTML with row-stable =data-key= attributes and per-line CSS classes.  =full=False= applies the inline cap; =full=True= renders everything.
+  - New CSS: =.diff-add= (background =#e6ffec=, border-left =#abf2bc=), =.diff-del= (background =#ffebe9=, border-left =#ffabab=), =.diff-ctx= (background =#fff=), =.diff-hunk= (background =#ddf4ff=, color =#57606a=, font-weight 600), =.diff-binary= (italic, =#666=).  Same palette in both pages.
+  - =render_thread= — replace the single diff block with the new per-file collapse stack; add =Review= button next to =Merge to Main= (only when there are changes).
+  - New =render_review_page(tid, chat, busy: bool) -> str= with the full review UI + JS.
+  - New routes: =GET /thread/{tid}/review=, =POST /thread/{tid}/review=.
+  - New helper =_format_review_message(overall: str, comments: list[dict], changes: list[Change]) -> str= that reads rename headers off =Change.diff= and prefixes "(renamed from X)" when applicable.
+- =roadmap.org= — mark =Prevent long diffs from crashing the browser= as DONE (this feature subsumes it) and add a new DONE entry "Web diff review" with the doc link.
+- =tests/test_web_review.py= (new, flat path matching =tests/test_domain_manager.py= et al.) — see Test coverage.
+- No changes to =assist/domain_manager.py=, =assist/thread.py=, =assist/thread_queue.py=, or any agent/middleware code.  This is purely a web-UI change.
+
+* Trade-offs and decisions
+
+- *Server-rendered diff vs. JS-rendered.*  Server-rendered.  Reuses the =Change= data already produced by =git_diff_main= and avoids shipping a diff parser to the client.  Client gets pre-formatted HTML; comments and folding are pure DOM manipulation.
+- *Line addressing by =path::row= (raw diff index) vs. =path::file_lineno=.*  Raw diff index — works for delete-only lines, hunk headers, and binary placeholders without special-casing.  The user-visible reference in the submit message uses "diff line N" wording so it's clear what N means.
+- *Pagination on the review page.*  Skipped.  Per-file =<details>= collapsed-by-default for large files is enough.  If a single thread ever produces hundreds of files, we revisit.
+- *Comment editor: inline vs. modal.*  Inline (anchored under the clicked row).  GitHub-style.  Easier to see comment-in-context.
+- *localStorage shape vs. cookies vs. server-side draft.*  localStorage.  Drafts are intentionally client-only — no sync across browsers, no DB schema change, no race with =threads.db=.  The user's stated requirement ("add comments, leave, come back, persist") fits the storage perfectly.
+- *Submit posts as a regular thread turn (new user message).*  Yes.  The whole point is that the agent reads the review and acts on it.  Reusing =_process_message= means the existing busy/queued/error UX applies.
+
+* Test coverage
+
+Unit tests in =tests/test_web_review.py= (new, flat path):
+- =render_file_diff(full=False)= produces stable =data-key= values and correct per-line CSS classes for adds, dels, context, and hunk-header lines.
+- =render_file_diff(full=False)= short-circuits to the placeholder when the file exceeds the inline cap.
+- =render_file_diff= renders the binary-file placeholder for "Binary files ... differ" diffs without emitting clickable rows.
+- =_format_review_message= produces the expected markdown when given (overall, [(file, row, lineText, comment), ...]) and prefixes "(renamed from X)" when the diff carries =rename from=/=rename to= headers.
+- =_format_review_message= raises on empty (no overall, no line comments).
+- =POST /thread/{tid}/review= rejects missing/empty payloads with 400 and routes a valid one through =_process_message=.
+
+Smoke (manual): run =make web=, point at a thread with real diffs, click Review, leave a few comments, refresh (verify persistence), submit, verify message lands in thread.
+
+No =edd/eval/= test — pure web-UI plumbing, no agent reasoning behavior at stake.
+
+* Risks
+
+- *Pygments lexer mismatch.*  Hand-rolling the per-line iteration means I lose Pygments' inline-token coloring (e.g., python keyword highlighting inside diff lines).  Acceptable trade-off — GitHub itself doesn't do that for diff context.  If we want it back, run Pygments per source language inside each =+/-= line as a follow-up.
+- *XSS via comment text.*  All localStorage values pass through =html.escape= server-side when formatting the submit message; the rendered review page never echoes localStorage back into the DOM as HTML.
+- *Big-diff edge cases.*  =git diff= can emit "Binary files differ" — render as a non-clickable row with a "binary" badge.  Empty =Change.diff= shouldn't happen given the existing =if d.stdout:= guard in =git_diff_main=.
+
+* Out of scope
+
+- Threaded replies on comments.  Single comment per line per submission.
+- Comment edits after submit (just resubmit).
+- Per-file approval state (GitHub's "viewed" checkbox).
+- File-tree sidebar.  Add later if reviewing more than ~10 files at once becomes common.
+
+* Follow-ups
+
+- =roadmap.org= entry for "Prevent long diffs from crashing the browser" can be marked DONE once this lands (this feature subsumes it).
+- Consider a "Mark viewed" checkbox per file.  Not needed for v1.

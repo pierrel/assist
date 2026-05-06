@@ -15,10 +15,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from assist.env import load_dev_env
 from assist.thread import Thread, ThreadManager
 import markdown
-from pygments import highlight
-from pygments.lexers import DiffLexer
-from pygments.formatters import HtmlFormatter
-from assist.domain_manager import DomainManager
+from assist.domain_manager import Change, DomainManager
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 
@@ -259,9 +256,233 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Assist Web", lifespan=lifespan)
 
-def render_diff(text: str) -> str:
-    # Use Pygments to render unified diffs with HTML formatting
-    return highlight(text, DiffLexer(), HtmlFormatter(nowrap=False))
+
+# --- Diff rendering ------------------------------------------------------
+# The inline view on /thread/{tid} shows per-file diffs with a hard cap so
+# a regenerated lockfile (or a 5k-line refactor) can't kill the browser.
+# The full-fat view lives at /thread/{tid}/review and renders everything.
+INLINE_FILE_LINE_CAP = 600
+INLINE_FILE_BYTE_CAP = 64 * 1024
+INLINE_TOTAL_BYTE_CAP = 256 * 1024
+
+# Submit-message format: ``render_thread`` recognises a user message
+# that opens with this header as a review submission and renders it as
+# markdown rather than escaped plain text.  Stable across the test
+# suite — update with care.
+_REVIEW_HEADER = "## Code review"
+
+# Diff lines that aren't user-comment-worthy: file/index headers and the
+# "no newline at end of file" marker.  Hunk headers and +/-/context rows
+# are clickable on the review page.
+_META_PREFIXES = (
+    "diff --git ", "index ", "similarity index ", "dissimilarity index ",
+    "rename from ", "rename to ", "copy from ", "copy to ",
+    "new file mode", "deleted file mode", "old mode", "new mode",
+    "--- ", "+++ ",
+    "\\ ",  # "\ No newline at end of file"
+)
+
+
+def _classify_diff_line(line: str) -> str:
+    """Return CSS class suffix for a unified-diff line.
+
+    Returns one of: 'meta', 'hunk', 'add', 'del', 'ctx'.  Order of checks
+    matters: '+++' / '---' headers must be caught as meta before falling
+    into the +/- branches.
+    """
+    for p in _META_PREFIXES:
+        if line.startswith(p):
+            return "meta"
+    if line.startswith("@@"):
+        return "hunk"
+    if line.startswith("+"):
+        return "add"
+    if line.startswith("-"):
+        return "del"
+    return "ctx"
+
+
+def _is_clickable(kind: str) -> bool:
+    """Per-line comments only attach to hunk headers and content rows."""
+    return kind in ("hunk", "add", "del", "ctx")
+
+
+def _diff_stats(diff: str) -> tuple[int, int]:
+    """Return (additions, deletions) counting only +/- content lines.
+
+    Skips the +++/--- file headers.
+    """
+    adds = dels = 0
+    for line in diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            adds += 1
+        elif line.startswith("-"):
+            dels += 1
+    return adds, dels
+
+
+def _is_binary_diff(diff: str) -> bool:
+    """git diff emits one 'Binary files ... differ' line for binary files."""
+    return any(
+        line.startswith("Binary files ") and line.endswith(" differ")
+        for line in diff.splitlines()
+    )
+
+
+def _rename_pair(diff: str) -> tuple[str, str] | None:
+    """Return (old_path, new_path) if the diff carries rename headers, else None."""
+    old = new = None
+    for line in diff.splitlines():
+        if line.startswith("rename from "):
+            old = line[len("rename from "):].strip()
+        elif line.startswith("rename to "):
+            new = line[len("rename to "):].strip()
+        if old and new:
+            return old, new
+    return None
+
+
+def render_file_diff(
+    change: Change, file_idx: int, *, full: bool, tid: str | None = None,
+) -> str:
+    """Render one file's diff as a collapsible <details> block.
+
+    *full=False* (inline view): truncate when the file exceeds the inline
+    cap and emit no per-line click affordances.  *full=True* (review
+    page): render every row with stable data-* attributes for the click
+    handler.
+
+    *tid* is required for inline (full=False) renders so the truncation
+    placeholder can link to ``/thread/{tid}/review``.  Passed in
+    directly rather than templated post-hoc, since a diff line can
+    contain the literal token ``{tid}`` and we'd silently corrupt it.
+    """
+    path_attr = html.escape(change.path, quote=True)
+    file_id = f"file-{file_idx}"
+    adds, dels = _diff_stats(change.diff)
+    stats_html = (
+        f'<span class="diff-stats">'
+        f'<span class="add">+{adds}</span> '
+        f'<span class="del">−{dels}</span>'
+        f'</span>'
+    )
+
+    # Binary files: short header, no clickable rows.
+    if _is_binary_diff(change.diff):
+        body = '<div class="diff-binary">Binary file — no preview available.</div>'
+        return (
+            f'<details class="diff-file" id="{file_id}" {"open" if full else ""}>'
+            f'<summary><span>{html.escape(change.path)}</span>{stats_html}'
+            f'<span class="diff-binary-badge">binary</span></summary>'
+            f'{body}</details>'
+        )
+
+    lines = change.diff.splitlines()
+    n_lines = len(lines)
+    n_bytes = len(change.diff.encode("utf-8", errors="replace"))
+
+    if not full and (n_lines > INLINE_FILE_LINE_CAP or n_bytes > INLINE_FILE_BYTE_CAP):
+        if tid is None:
+            raise ValueError("render_file_diff(full=False) requires tid for the truncation link")
+        body = (
+            f'<div class="diff-truncated">Diff too large to preview here '
+            f'({n_lines} lines, {n_bytes // 1024} KB). '
+            f'<a href="/thread/{html.escape(tid, quote=True)}/review#{file_id}">Open in review</a> '
+            f'to see the full diff.</div>'
+        )
+        return (
+            f'<details class="diff-file" id="{file_id}">'
+            f'<summary><span>{html.escape(change.path)}</span>{stats_html}'
+            f'<span class="diff-truncated-badge">truncated</span></summary>'
+            f'{body}</details>'
+        )
+
+    rows: list[str] = []
+    for row_idx, line in enumerate(lines, start=1):
+        kind = _classify_diff_line(line)
+        cls = f"diff-row diff-{kind}"
+        # Collapse trailing whitespace in display while keeping the raw
+        # text in data-linetext for the submit-message context block.
+        text_html = html.escape(line) if line else "&nbsp;"
+        if full and _is_clickable(kind):
+            data = (
+                f' data-key="{path_attr}::{row_idx}"'
+                f' data-file="{path_attr}"'
+                f' data-row="{row_idx}"'
+                f' data-linetext="{html.escape(line, quote=True)}"'
+            )
+        else:
+            data = ""
+        rows.append(f'<div class="{cls}"{data}>{text_html}</div>')
+
+    body = f'<div class="diff-rows">{"".join(rows)}</div>'
+    return (
+        f'<details class="diff-file" id="{file_id}" {"open" if full else ""}>'
+        f'<summary><span>{html.escape(change.path)}</span>{stats_html}</summary>'
+        f'{body}</details>'
+    )
+
+
+_DIFF_CSS = """
+.diff-file { margin: .6rem 0; border: 1px solid #d0d7de; border-radius: 6px; overflow: hidden; background: #fff; }
+.diff-file > summary { padding: .5rem .75rem; background: #f6f8fa; cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; list-style: none; }
+.diff-file > summary::-webkit-details-marker { display: none; }
+.diff-file > summary::before { content: "▶"; font-size: .7rem; color: #57606a; transition: transform .15s; }
+.diff-file[open] > summary::before { transform: rotate(90deg); }
+.diff-file[open] > summary { border-bottom: 1px solid #d0d7de; }
+.diff-stats { font-size: .75rem; font-family: ui-monospace, monospace; }
+.diff-stats .add { color: #1a7f37; }
+.diff-stats .del { color: #cf222e; }
+.diff-binary-badge, .diff-truncated-badge { font-size: .7rem; background: #ddf4ff; color: #0969da; border: 1px solid #b6e3ff; padding: .05rem .4rem; border-radius: 10px; }
+.diff-truncated-badge { background: #fff8c5; color: #9a6700; border-color: #d4a72c; }
+.diff-rows { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; line-height: 1.4; overflow-x: auto; }
+.diff-row { padding: 0 .5rem; white-space: pre; min-height: 1.2em; border-left: 3px solid transparent; }
+.diff-row.diff-add { background: #e6ffec; border-left-color: #abf2bc; }
+.diff-row.diff-del { background: #ffebe9; border-left-color: #ffabab; }
+.diff-row.diff-ctx { background: #fff; }
+.diff-row.diff-hunk { background: #ddf4ff; color: #57606a; font-weight: 600; }
+.diff-row.diff-meta { background: #f6f8fa; color: #57606a; font-size: .75rem; }
+.diff-row[data-key] { cursor: pointer; }
+.diff-row[data-key]:hover { outline: 1px solid #0969da; outline-offset: -1px; }
+.diff-binary { padding: .6rem .75rem; color: #57606a; font-style: italic; font-size: .85rem; }
+.diff-truncated { padding: .6rem .75rem; background: #fff8c5; color: #57606a; font-size: .85rem; }
+.diff-truncated a { color: #0969da; text-decoration: underline; }
+.diff-overflow { padding: .6rem .75rem; background: #fff8c5; border: 1px solid #d4a72c; border-radius: 6px; color: #57606a; font-size: .85rem; margin: .6rem 0; }
+"""
+
+
+def _render_inline_diffs(tid: str, changes: list[Change]) -> str:
+    """Render the per-file collapsible diff stack for the thread page.
+
+    Applies the inline truncation rules so a long diff can't kill the
+    browser.  Each placeholder for an over-cap file links to the review
+    page for the actual content.
+    """
+    if not changes:
+        return ""
+    rendered: list[str] = []
+    total_bytes = 0
+    truncated_after: int | None = None
+    for idx, change in enumerate(changes):
+        block = render_file_diff(change, idx, full=False, tid=tid)
+        total_bytes += len(block)
+        if total_bytes > INLINE_TOTAL_BYTE_CAP:
+            truncated_after = idx
+            break
+        rendered.append(block)
+    body = "\n".join(rendered)
+    if truncated_after is not None:
+        remaining = len(changes) - truncated_after
+        body += (
+            f'<div class="diff-overflow">'
+            f'+ {remaining} more file{"s" if remaining != 1 else ""} '
+            f'— <a href="/thread/{tid}/review">open the review page</a> '
+            f'to see them all.'
+            f'</div>'
+        )
+    return body
 
 def render_index() -> str:
     items = []
@@ -373,7 +594,13 @@ def render_index() -> str:
     """
 
 
-def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged: bool = False) -> str:
+def render_thread(
+    tid: str,
+    chat: Thread | None,
+    captured: bool = False,
+    merged: bool = False,
+    reviewed: bool = False,
+) -> str:
     status = _get_status(tid)
     stage = status.get("stage", "ready")
     busy = stage in BUSY_STAGES
@@ -389,48 +616,49 @@ def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged:
     if busy and pending and not any(m.get("role") == "user" and m.get("content") == pending for m in msgs):
         msgs.insert(0, {"role": "user", "content": pending})
 
-    # Append diffs from domain repo (computed at render time, only when repo is ready)
+    # Compute diff vs main (only when repo is ready) — rendered as its own
+    # top-of-page block, separate from the message bubbles, so the per-file
+    # collapse stack and the Merge / Review buttons sit together.
+    diffs: list[Change] = []
     if not is_init:
         try:
             dm = _get_domain_manager(tid)
             if dm:
                 diffs = dm.main_diff()
-                if diffs:
-                    diff_content = "\n".join([f"{c.path}\n{c.diff}\n" for c in diffs])
-                    msgs.append({"role": "diff", "content": diff_content})
         except Exception:
             pass
 
+    diff_block_html = ""
+    if diffs:
+        diff_files_html = _render_inline_diffs(tid, diffs)
+        diff_block_html = f"""
+        <div class="diff-container">
+          <div class="diff-actions">
+            <a class="btn btn-secondary review-btn" href="/thread/{tid}/review">Review</a>
+            <form action="/thread/{tid}/merge" method="post" style="margin: 0;">
+              <button class="btn merge-btn" type="submit"
+                      onclick="return confirm('Merge this branch into main? This will squash all commits.');">
+                Merge to Main
+              </button>
+            </form>
+          </div>
+          <div class="diff-files">
+            {diff_files_html}
+          </div>
+        </div>
+        """
+
     rendered = []
-    diff_counter = 0
     for m in reversed(msgs):
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
-        if role == "diff":
-            # Render diffs using Pygments for proper coloring/formatting
-            # But wrap in collapsible container that's hidden by default
-            diff_counter += 1
-            diff_id = f"diff-{diff_counter}"
-            diff_content = render_diff(raw)
-            content_html = f"""
-            <div class="diff-container">
-                <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                    <button class="diff-toggle" onclick="toggleDiff('{diff_id}')" style="flex: 1; min-width: 200px;">
-                        <span class="toggle-icon">▶</span> Show diff
-                    </button>
-                    <form action="/thread/{tid}/merge" method="post" style="margin: 0;">
-                        <button class="btn merge-btn" type="submit" onclick="return confirm('Merge this branch into main? This will squash all commits.');">
-                            Merge to Main
-                        </button>
-                    </form>
-                </div>
-                <div id="{diff_id}" class="diff-content" style="display: none;">
-                    {diff_content}
-                </div>
-            </div>
-            """
-        elif role == "assistant" or role == "tools":
+        if role == "assistant" or role == "tools":
             # Render assistant and tool content as Markdown to HTML
+            content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
+        elif role == "user" and raw.startswith(_REVIEW_HEADER):
+            # Review submissions are markdown-formatted (headers, fenced
+            # blocks).  Render them as such so the user sees the same
+            # structure the agent receives, instead of escaped backticks.
             content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
         else:
             # Human/user content is plain text with basic escaping
@@ -500,14 +728,13 @@ def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged:
           .modal-content textarea {{ width: 100%; min-height: 100px; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }}
           .modal-content label {{ display: block; margin-bottom: .5rem; font-weight: 500; }}
           .button-group {{ display: flex; gap: .5rem; margin-top: 1rem; }}
-          .diff-container {{ margin: .5rem 0; }}
-          .diff-toggle {{ background: #f8f9fa; border: 1px solid #dee2e6; padding: .5rem .75rem; border-radius: 6px; cursor: pointer; font-size: .9rem; width: 100%; text-align: left; display: flex; align-items: center; gap: .5rem; transition: background .2s; }}
-          .diff-toggle:hover {{ background: #e9ecef; }}
-          .toggle-icon {{ display: inline-block; transition: transform .2s; font-size: .8rem; }}
-          .toggle-icon.expanded {{ transform: rotate(90deg); }}
-          .diff-content {{ margin-top: .5rem; overflow-x: auto; }}
+          .diff-container {{ margin: 1rem 0 .5rem; }}
+          .diff-actions {{ display: flex; justify-content: flex-end; gap: .5rem; margin-bottom: .6rem; flex-wrap: wrap; }}
           .merge-btn {{ background: #28a745; color: white; border: 1px solid #1e7e34; padding: .5rem .75rem; font-size: .9rem; white-space: nowrap; }}
           .merge-btn:hover {{ background: #218838; border-color: #1c7430; }}
+          .review-btn {{ display: inline-flex; align-items: center; padding: .5rem .75rem; font-size: .9rem; white-space: nowrap; text-decoration: none; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; }}
+          .review-btn:hover {{ background: #eaeef2; }}
+          {_DIFF_CSS}
           .error-msg {{ background: #f8d7da; border: 1px solid #f5c6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #721c24; }}
           .status-banner {{ display: flex; align-items: center; gap: .6rem; background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: .6rem .8rem; margin: .5rem 0; border-radius: 6px; font-size: .9rem; }}
           .spinner {{ width: 14px; height: 14px; border: 2px solid #d6ad00; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: spin 1s linear infinite; }}
@@ -533,6 +760,8 @@ def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged:
           {status_banner}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           {"<div class='success-msg'>Branch successfully merged to main!</div>" if merged else ""}
+          {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}
+          {f'<script>try {{ localStorage.removeItem("assist:review:" + {json.dumps(tid)}); }} catch (_) {{}}</script>' if reviewed else ""}
           <form action="/thread/{tid}/message" method="post">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..." {form_disabled}></textarea><br/>
@@ -566,21 +795,6 @@ def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged:
             function hideCaptureModal() {{
               document.getElementById('captureModal').style.display = 'none';
             }}
-            function toggleDiff(diffId) {{
-              const diffContent = document.getElementById(diffId);
-              const toggleButton = event.currentTarget;
-              const toggleIcon = toggleButton.querySelector('.toggle-icon');
-
-              if (diffContent.style.display === 'none') {{
-                diffContent.style.display = 'block';
-                toggleIcon.classList.add('expanded');
-                toggleButton.innerHTML = toggleButton.innerHTML.replace('Show diff', 'Hide diff');
-              }} else {{
-                diffContent.style.display = 'none';
-                toggleIcon.classList.remove('expanded');
-                toggleButton.innerHTML = toggleButton.innerHTML.replace('Hide diff', 'Show diff');
-              }}
-            }}
             // Close modal when clicking outside
             window.onclick = function(event) {{
               const modal = document.getElementById('captureModal');
@@ -590,10 +804,317 @@ def render_thread(tid: str, chat: Thread | None, captured: bool = False, merged:
             }}
           </script>
           <hr/>
+          {diff_block_html}
           <div>
             {body}
           </div>
         </div>
+      </body>
+    </html>
+    """
+
+
+# --- Review page ---------------------------------------------------------
+
+
+def _format_review_message(
+    overall: str,
+    comments: list[dict],
+    changes: list[Change],
+) -> str:
+    """Build the markdown message posted to the thread on review submit.
+
+    *comments* is the localStorage payload's ``lines`` list, one dict
+    per per-line comment with keys ``file``, ``row``, ``lineText``,
+    ``comment``.  *changes* is the same ``main_diff()`` snapshot the
+    review page rendered, used to detect renames so the agent doesn't
+    have to guess that "foo.py" is the new name of "old_foo.py".
+
+    Raises ValueError when both *overall* and *comments* are empty —
+    the caller (``POST /thread/{tid}/review``) maps this to 400.
+    """
+    overall = (overall or "").strip()
+    cleaned: list[dict] = []
+    for c in comments or []:
+        text = (c.get("comment") or "").strip()
+        if not text:
+            continue
+        cleaned.append({
+            "file": c.get("file") or "",
+            "row": c.get("row"),
+            "lineText": c.get("lineText") or "",
+            "comment": text,
+        })
+    if not overall and not cleaned:
+        raise ValueError("Review must include an overall comment or at least one line comment.")
+
+    rename_map: dict[str, str] = {}
+    for ch in changes or []:
+        pair = _rename_pair(ch.diff)
+        if pair:
+            old, new = pair
+            rename_map[ch.path] = old if ch.path == new else (new if ch.path == old else "")
+
+    parts: list[str] = [_REVIEW_HEADER, ""]
+    if overall:
+        parts.append(overall)
+        parts.append("")
+    if cleaned:
+        parts.append("### Per-line comments")
+        parts.append("")
+        for i, c in enumerate(cleaned):
+            label = f"`{c['file']}`"
+            old = rename_map.get(c["file"])
+            if old:
+                label += f" (renamed from `{old}`)"
+            row = c["row"]
+            row_str = f" at diff line {row}" if isinstance(row, int) else ""
+            parts.append(f"**{label}**{row_str}:")
+            parts.append("")
+            parts.append("```")
+            parts.append(c["lineText"])
+            parts.append("```")
+            parts.append("")
+            parts.append(c["comment"])
+            if i != len(cleaned) - 1:
+                parts.append("")
+                parts.append("---")
+                parts.append("")
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def render_review_page(tid: str, chat: Thread | None) -> str:
+    """Render the full-fat diff review page at ``/thread/{tid}/review``.
+
+    Per-file ``<details>`` blocks contain every line of every changed
+    file, each clickable to attach an inline comment.  The header
+    carries an overall textarea and the Submit button (disabled when
+    the thread is busy).  All draft state is kept client-side in
+    ``localStorage`` until the user hits Submit.
+    """
+    title = _thread_title(tid)
+    status = _get_status(tid)
+    busy = status.get("stage") in BUSY_STAGES
+
+    diffs: list[Change] = []
+    try:
+        dm = _get_domain_manager(tid)
+        if dm:
+            diffs = dm.main_diff()
+    except Exception:
+        pass
+
+    if not diffs:
+        return f"""
+        <html><head>
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>Review — {html.escape(title)}</title>
+          <style>body {{ font-family: sans-serif; margin: 0; }}
+                 .container {{ max-width: 900px; margin: 0 auto; padding: 1rem; }}
+                 .nav a {{ text-decoration: none; padding: .4rem .6rem; border-radius: 6px; }}</style>
+        </head><body>
+          <div class="container">
+            <div class="nav"><a href="/thread/{tid}">← Back to thread</a></div>
+            <h1 style="font-size:1.3rem">Review</h1>
+            <p><em>No diff to review — the working tree matches main.</em></p>
+          </div>
+        </body></html>
+        """
+
+    files_html = "\n".join(render_file_diff(c, i, full=True) for i, c in enumerate(diffs))
+    submit_disabled = "disabled" if busy else ""
+    busy_note = (
+        '<div class="busy-note">Thread is busy — submit will be available once it finishes.</div>'
+        if busy else ""
+    )
+
+    return f"""
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Review — {html.escape(title)}</title>
+        <style>
+          body {{ font-family: sans-serif; margin: 0; background: #fff; }}
+          .container {{ max-width: 1100px; margin: 0 auto; padding: 1rem; }}
+          .nav a {{ text-decoration: none; padding: .4rem .6rem; border-radius: 6px; color: #0969da; }}
+          h1 {{ font-size: 1.3rem; margin: .5rem 0; }}
+          .review-header {{ position: sticky; top: 0; background: #fff; padding: .8rem 0; border-bottom: 1px solid #d0d7de; z-index: 10; margin-bottom: 1rem; }}
+          .review-header textarea {{ width: 100%; min-height: 4rem; box-sizing: border-box; padding: .6rem; border: 1px solid #d0d7de; border-radius: 6px; font-family: inherit; font-size: .95rem; resize: vertical; }}
+          .review-header label {{ display: block; font-size: .85rem; color: #57606a; margin-bottom: .3rem; }}
+          .review-actions {{ display: flex; align-items: center; gap: .6rem; margin-top: .6rem; flex-wrap: wrap; }}
+          .submit-btn {{ background: #1a7f37; color: #fff; border: 1px solid #156529; padding: .55rem 1.1rem; font-size: .95rem; font-weight: 600; border-radius: 6px; cursor: pointer; }}
+          .submit-btn:hover:not(:disabled) {{ background: #156529; }}
+          .submit-btn:disabled {{ background: #94d3a2; border-color: #94d3a2; color: #fff; cursor: not-allowed; }}
+          .cancel-link {{ color: #57606a; text-decoration: none; font-size: .9rem; padding: .55rem .8rem; }}
+          .cancel-link:hover {{ color: #24292f; }}
+          .comment-count {{ font-size: .85rem; color: #57606a; }}
+          .busy-note {{ background: #fff8c5; border: 1px solid #d4a72c; padding: .5rem .75rem; border-radius: 6px; color: #57606a; font-size: .85rem; margin-top: .5rem; }}
+          .comment-editor {{ margin: .3rem .8rem .6rem 1.5rem; padding: .5rem; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; }}
+          .comment-editor textarea {{ width: 100%; min-height: 3.5rem; box-sizing: border-box; padding: .5rem; border: 1px solid #d0d7de; border-radius: 4px; font-family: inherit; font-size: .9rem; resize: vertical; }}
+          .comment-editor .editor-actions {{ display: flex; justify-content: flex-end; gap: .4rem; margin-top: .4rem; }}
+          .comment-editor button {{ font-size: .85rem; padding: .3rem .7rem; border-radius: 4px; cursor: pointer; border: 1px solid #d0d7de; background: #fff; color: #57606a; }}
+          .comment-editor button:hover {{ background: #f6f8fa; }}
+          {_DIFF_CSS}
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="nav"><a href="/thread/{tid}">← Back to thread</a></div>
+          <h1>Review — {html.escape(title)}</h1>
+          <form id="reviewForm" action="/thread/{tid}/review" method="post">
+            <input type="hidden" id="payload" name="payload" value="" />
+            <div class="review-header">
+              <label for="overall">Overall comment</label>
+              <textarea id="overall" name="overall_display"
+                        placeholder="Optional general comment about the change..."></textarea>
+              <div class="review-actions">
+                <button type="submit" class="submit-btn" {submit_disabled}>Submit review</button>
+                <a href="/thread/{tid}" class="cancel-link">Cancel</a>
+                <span id="comment-count" class="comment-count">No line comments yet</span>
+              </div>
+              {busy_note}
+              <div style="font-size:.8rem; color:#57606a; margin-top:.5rem">
+                Click any line in the diff below to leave a comment.  Drafts persist in this browser until you submit.
+              </div>
+            </div>
+            <div class="diff-files">
+              {files_html}
+            </div>
+          </form>
+        </div>
+        <script>
+          (function() {{
+            const tid = {json.dumps(tid)};
+            const KEY = "assist:review:" + tid;
+            const SCHEMA_VERSION = 1;
+            let state = {{ schemaVersion: SCHEMA_VERSION, overall: "", lines: [], updatedAt: null }};
+
+            function load() {{
+              try {{
+                const raw = localStorage.getItem(KEY);
+                if (!raw) return;
+                const parsed = JSON.parse(raw);
+                if (parsed && parsed.schemaVersion === SCHEMA_VERSION) state = parsed;
+              }} catch (_) {{}}
+            }}
+            function save() {{
+              state.updatedAt = new Date().toISOString();
+              try {{ localStorage.setItem(KEY, JSON.stringify(state)); }} catch (_) {{}}
+            }}
+            function clearStorage() {{
+              try {{ localStorage.removeItem(KEY); }} catch (_) {{}}
+            }}
+
+            function attachEditor(row, initialText) {{
+              let editor = row.nextElementSibling;
+              if (editor && editor.classList && editor.classList.contains("comment-editor")) {{
+                if (initialText !== undefined) editor.querySelector("textarea").value = initialText;
+                editor.querySelector("textarea").focus();
+                return editor;
+              }}
+              editor = document.createElement("div");
+              editor.className = "comment-editor";
+              const ta = document.createElement("textarea");
+              ta.value = initialText || "";
+              ta.placeholder = "Comment on this line...";
+              ta.addEventListener("input", persistFromDOM);
+              ta.addEventListener("blur", persistFromDOM);
+              const actions = document.createElement("div");
+              actions.className = "editor-actions";
+              const remove = document.createElement("button");
+              remove.type = "button";
+              remove.textContent = "Remove";
+              remove.addEventListener("click", () => {{ editor.remove(); persistFromDOM(); }});
+              actions.appendChild(remove);
+              editor.appendChild(ta);
+              editor.appendChild(actions);
+              row.parentNode.insertBefore(editor, row.nextSibling);
+              ta.focus();
+              return editor;
+            }}
+
+            function persistFromDOM() {{
+              const overall = document.getElementById("overall").value;
+              const lines = [];
+              document.querySelectorAll(".comment-editor").forEach(ed => {{
+                const row = ed.previousElementSibling;
+                if (!row || !row.dataset || !row.dataset.key) return;
+                const text = ed.querySelector("textarea").value.trim();
+                if (!text) return;
+                lines.push({{
+                  file: row.dataset.file,
+                  row: parseInt(row.dataset.row, 10),
+                  lineText: row.dataset.linetext,
+                  comment: text,
+                }});
+              }});
+              state = {{ schemaVersion: SCHEMA_VERSION, overall, lines, updatedAt: new Date().toISOString() }};
+              save();
+              updateCount();
+            }}
+
+            function updateCount() {{
+              const n = state.lines.length;
+              const el = document.getElementById("comment-count");
+              if (!el) return;
+              el.textContent = n === 0 ? "No line comments yet" : (n + " line comment" + (n === 1 ? "" : "s"));
+            }}
+
+            function rehydrate() {{
+              document.getElementById("overall").value = state.overall || "";
+              const rows = document.querySelectorAll(".diff-row[data-key]");
+              for (const c of state.lines) {{
+                for (const row of rows) {{
+                  if (row.dataset.file === c.file && parseInt(row.dataset.row, 10) === c.row) {{
+                    // Auto-open the parent <details> so saved comments are visible.
+                    let el = row.closest("details");
+                    if (el) el.open = true;
+                    attachEditor(row, c.comment);
+                    break;
+                  }}
+                }}
+              }}
+              updateCount();
+            }}
+
+            document.addEventListener("click", function(ev) {{
+              const row = ev.target.closest(".diff-row[data-key]");
+              if (!row) return;
+              if (ev.target.closest(".comment-editor")) return;
+              attachEditor(row);
+            }});
+            document.getElementById("overall").addEventListener("input", persistFromDOM);
+            document.getElementById("reviewForm").addEventListener("submit", function(ev) {{
+              const overall = document.getElementById("overall").value.trim();
+              const lines = [];
+              document.querySelectorAll(".comment-editor").forEach(ed => {{
+                const row = ed.previousElementSibling;
+                if (!row || !row.dataset || !row.dataset.key) return;
+                const text = ed.querySelector("textarea").value.trim();
+                if (!text) return;
+                lines.push({{
+                  file: row.dataset.file,
+                  row: parseInt(row.dataset.row, 10),
+                  lineText: row.dataset.linetext,
+                  comment: text,
+                }});
+              }});
+              if (!overall && lines.length === 0) {{
+                ev.preventDefault();
+                alert("Add an overall comment or at least one line comment before submitting.");
+                return;
+              }}
+              document.getElementById("payload").value = JSON.stringify({{overall, lines}});
+              // Don't clear localStorage here — if the POST fails (network
+              // hiccup, 4xx), the user keeps their draft.  The thread
+              // page wipes the key on the ``?reviewed=1`` redirect, which
+              // only fires after the server has accepted the submission.
+            }});
+
+            load();
+            rehydrate();
+          }})();
+        </script>
       </body>
     </html>
     """
@@ -711,7 +1232,7 @@ def _process_message(tid: str, text: str) -> None:
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
-async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
+async def get_thread(tid: str, captured: int = 0, merged: int = 0, reviewed: int = 0) -> str:
     tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
@@ -727,7 +1248,12 @@ async def get_thread(tid: str, captured: int = 0, merged: int = 0) -> str:
             chat = MANAGER.get(tid, sandbox_backend=None)
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Thread not found")
-    return render_thread(tid, chat, captured=bool(captured), merged=bool(merged))
+    return render_thread(
+        tid, chat,
+        captured=bool(captured),
+        merged=bool(merged),
+        reviewed=bool(reviewed),
+    )
 
 
 @app.get("/thread/{tid}/status")
@@ -850,6 +1376,58 @@ async def merge_thread(tid: str):
         # Unexpected error
         logging.error(f"Merge failed for thread {tid}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Merge failed: {str(e)}")
+
+
+@app.get("/thread/{tid}/review", response_class=HTMLResponse)
+async def get_review(tid: str) -> str:
+    tdir = MANAGER.thread_dir(tid)
+    if not os.path.isdir(tdir):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    chat: Thread | None = None
+    try:
+        chat = MANAGER.get(tid, sandbox_backend=None)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return render_review_page(tid, chat)
+
+
+@app.post("/thread/{tid}/review")
+async def post_review(tid: str, background_tasks: BackgroundTasks, payload: str = Form(...)):
+    """Accept the localStorage payload, format it as a thread message, queue it.
+
+    Reuses ``_process_message`` so the submission flows through
+    ``ThreadAffinityQueue`` and surfaces the same busy/queued/error
+    UI as a regular ``/message`` post.
+    """
+    tdir = MANAGER.thread_dir(tid)
+    if not os.path.isdir(tdir):
+        raise HTTPException(status_code=404, detail="Thread not found")
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Malformed review payload")
+
+    overall = (data.get("overall") or "").strip() if isinstance(data, dict) else ""
+    comments = data.get("lines") if isinstance(data, dict) else []
+    if not isinstance(comments, list):
+        comments = []
+
+    # Snapshot the current diff for rename-detection in the formatter.
+    changes: list[Change] = []
+    try:
+        dm = _get_domain_manager(tid)
+        if dm:
+            changes = dm.main_diff()
+    except Exception:
+        pass
+
+    try:
+        message = _format_review_message(overall, comments, changes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    background_tasks.add_task(_process_message, tid, message)
+    return RedirectResponse(url=f"/thread/{tid}?reviewed=1", status_code=303)
 
 
 def _status_cell_style(status: str | None) -> str:
