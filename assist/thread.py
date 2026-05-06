@@ -18,6 +18,7 @@ from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
 from assist.checkpoint_rollback import invoke_with_rollback
 from assist.sandbox_manager import SandboxManager
+from assist.thread_queue import THREAD_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +56,18 @@ class Thread:
                  checkpointer=None,
                  model: BaseChatModel | None = None,
                  max_concurrency: int = 5,
-                 sandbox_backend=None):
+                 sandbox_backend=None,
+                 on_queue_state: Callable[[str], None] | None = None):
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
         self.model = model or select_chat_model(0.1, enable_thinking=False)
         self.max_concurrency = max_concurrency
+        # Notified with "queued" if another thread is holding the LLM
+        # queue when this Thread.message() runs, then "running" once
+        # acquired.  Callers (e.g. manage.web) wire this to the
+        # status.json so the UI can show "queued".
+        self.on_queue_state = on_queue_state
         self.runconfig = {
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency
@@ -72,12 +79,18 @@ class Thread:
                                   sandbox_backend=sandbox_backend)
 
     def message(self, text: str) -> str:
-        """Continue the thread and return the last response"""
-        result = invoke_with_rollback(
-            self.agent,
-            {"messages": [{"role": "user", "content": text}]},
-            self.runconfig,
-        )
+        """Continue the thread and return the last response.
+
+        Acquires the per-thread LLM affinity queue for the duration of
+        the agent loop so concurrent threads don't thrash llama.cpp's
+        single KV-cache slot.  See ``assist/thread_queue.py``.
+        """
+        with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
+            result = invoke_with_rollback(
+                self.agent,
+                {"messages": [{"role": "user", "content": text}]},
+                self.runconfig,
+            )
         # Extract content from the last AIMessage
         messages = result.get("messages", [])
         if messages:
@@ -90,11 +103,16 @@ class Thread:
         if not isinstance(text, str):
             raise TypeError("text must be a string")
         # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
-        return self.agent.stream(
-            {"messages": [{"role": "user", "content": text}]},
-            self.runconfig,
-            stream_mode=["messages", "updates"]
-        )
+        # Wrap the iterator in a generator so the queue is held for the
+        # full streaming lifetime, not just the call to .stream().
+        def _gen():
+            with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
+                yield from self.agent.stream(
+                    {"messages": [{"role": "user", "content": text}]},
+                    self.runconfig,
+                    stream_mode=["messages", "updates"]
+                )
+        return _gen()
 
     def get_messages(self) -> list[dict]:
         """Return user/assistant messages from checkpointer state as role/content dicts."""
@@ -312,7 +330,8 @@ n    checkpointing via SqliteSaver.
     def get(self,
             thread_id: str,
             working_dir: str | None = None,
-            sandbox_backend=None) -> Thread:
+            sandbox_backend=None,
+            on_queue_state: Callable[[str], None] | None = None) -> Thread:
         tdir = os.path.join(self.root_dir, thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
@@ -323,7 +342,8 @@ n    checkpointing via SqliteSaver.
                       thread_id=thread_id,
                       checkpointer=self.checkpointer,
                       model=self.model,
-                      sandbox_backend=sandbox_backend)
+                      sandbox_backend=sandbox_backend,
+                      on_queue_state=on_queue_state)
 
     def remove(self, thread_id: str) -> None:
         tdir = os.path.join(self.root_dir, thread_id)
@@ -345,7 +365,8 @@ n    checkpointing via SqliteSaver.
             except Exception:
                 pass
 
-    def new(self, working_dir: str|None = None, sandbox_backend=None) -> Thread:
+    def new(self, working_dir: str|None = None, sandbox_backend=None,
+            on_queue_state: Callable[[str], None] | None = None) -> Thread:
         # Derive a clean ID for directory: prefer timestamp+rand
         tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
         tdir = os.path.join(self.root_dir, tid)
@@ -354,7 +375,8 @@ n    checkpointing via SqliteSaver.
             working_dir = self.make_default_working_dir(tdir)
 
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
-                      model=self.model, sandbox_backend=sandbox_backend)
+                      model=self.model, sandbox_backend=sandbox_backend,
+                      on_queue_state=on_queue_state)
 
     def close(self) -> None:
         try:
