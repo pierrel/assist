@@ -27,6 +27,7 @@ from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
+from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -118,7 +119,7 @@ def create_agent(model: BaseChatModel,
 
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
           context_eviction_mw, write_collision_mw, loop_detection_mw,
-          empty_response_recovery_mw]
+          ThreadQueueMiddleware(), empty_response_recovery_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
     # Single-slashed path that's safe to interpolate without producing
@@ -220,6 +221,7 @@ def create_context_agent(model: BaseChatModel,
     )
     base_mw.append(context_eviction_mw)
     base_mw.append(LoopDetectionMiddleware())
+    base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
     # Enforce the read-only contract at the tool layer.
     base_mw.append(ReadOnlyEnforcerMiddleware())
@@ -280,6 +282,7 @@ def create_research_agent(model: BaseChatModel,
     # write_file).
     base_mw.append(WriteCollisionMiddleware())
     base_mw.append(LoopDetectionMiddleware())
+    base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
 
     # Confine the research agent's filesystem reach to <working_dir>/references/.
@@ -321,6 +324,7 @@ def create_research_agent(model: BaseChatModel,
         return [_make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
                 LoopDetectionMiddleware(),
+                ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
     research_sub_agent = {
