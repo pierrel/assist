@@ -53,11 +53,13 @@ Standard feature-branch flow.  Default to it for any non-trivial change.
 
 1. **Branch off `main` per feature.**  Pick a short, kebab-case name that describes the change (verb-led when natural — `confine-research-to-references`, `bound-threads-db-growth`, `add-skill-x`).  Avoid umbrella names like `<topic>-stabilization` that don't say what's actually being done.
 
-2. **Commit on the feature branch.**  Single coherent commit per logically distinct change.  `make a new commit, never amend` (per the wider Claude Code rules).  When the work is done locally, `git push -u origin <branch>` so the history is preserved even if the local clone goes away.
+   **Always branch off `main` — never off another feature branch.**  Stacked PRs entangle two unrelated changes in one diff: the reviewer can't tell which lines belong to which feature, and merging one rebases the other.  If your work depends on an unmerged branch, *wait for it to merge* (or ask the user to merge it) before starting yours.  Don't optimize for "deploy preserves both fixes" — preserving prod state is the deploy step's problem, not the branching step's.
+
+2. **Commit on the feature branch.**  Multiple commits per logically distinct change are fine; the user reviews the final diff at PR time.  `make a new commit, never amend` (per the wider Claude Code rules).  When the work is done locally, `git push -u origin <branch>` so the history is preserved even if the local clone goes away.
 
 3. **Merge to `main` when the branch is ready.**  "Ready" means: design + reviewer phases per the Two-phase development workflow above are complete, evals pass at the cadence appropriate to scope, and any reviewer findings are addressed.  Prefer fast-forward merges (`git merge --ff-only <branch>`) so `main` stays linear; if the branch has diverged, rebase rather than create merge commits.
 
-4. **Push `main`, then deploy.**  `git push origin main` first so the remote reflects what's about to be in production; deploy from there (whatever `make deploy-code` does on this host).  Never deploy from a feature branch.
+4. **Deploying from the feature branch is OK — but only one feature branch at a time.**  Per the user's saved preference, you may `make deploy-code` directly from the feature branch (don't wait for the merge to `main`).  But understand the trade-off: deploying a *second* feature branch will replace the first on prod — `rsync --delete` doesn't preserve unrelated changes from the previous deploy.  If multiple unmerged features need to be live simultaneously, merge the older one to `main` first so the newer feature branch can rebase onto it before deploying.
 
 5. **Keep feature branches around briefly after merge.**  Don't immediately delete the local or remote branch — they're useful if a follow-up question or a quick revert is needed.  Garden them out periodically.
 
