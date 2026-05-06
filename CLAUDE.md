@@ -65,7 +65,7 @@ Direct commits to `main` are reserved for trivial fixes (typo, doc tweak) that w
 
 ## Project conventions to remember across phases
 
-- **No commits without an explicit go-ahead.** Default behavior is to leave changes uncommitted so the user can review the final diff. Confirm before any `git commit`.  When the user does authorize a commit, follow the branching strategy above — don't commit directly to `main` for non-trivial work.
+- **Commits to feature branches don't need explicit confirmation; commits to `main` do.**  On a feature branch, commit and push as the work progresses — the user reviews the diff at PR time, not before each commit.  Direct commits to `main` (or anything that lands on `main` without going through a PR + review) still require the user's explicit go-ahead.
 - **No new docs unless asked.** Don't write tutorial docs, design docs, or README sections that weren't requested. If the user asks for documentation, mirror the existing format (Skills section in `README.md` is the template for middleware-style additions).
 - **Small-model targeting.** Code is run against Qwen3-Coder-30B-A3B-Instruct-AWQ on a local vLLM instance. Prompt and tool-surface decisions optimize for this model's failure modes, not GPT-4-class behavior. When evidence is needed, run the eval rather than reasoning from training-data intuitions.
 - **Eval-first contracts.** Tests in `edd/eval/` define what the system is supposed to do. When in doubt, the test wins. Don't change tests to accommodate the implementation; redesign the implementation to satisfy the existing tests.
