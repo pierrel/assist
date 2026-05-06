@@ -269,7 +269,8 @@ INLINE_TOTAL_BYTE_CAP = 256 * 1024
 # that opens with this header as a review submission and renders it as
 # markdown rather than escaped plain text.  Stable across the test
 # suite — update with care.
-_REVIEW_HEADER = "## Code review"
+_REVIEW_HEADER = "## Change review"
+_REVIEW_OPENER = "I've reviewed the changes and have some comments. Please address them."
 
 # Diff lines that aren't user-comment-worthy: file/index headers and the
 # "no newline at end of file" marker.  Hunk headers and +/-/context rows
@@ -855,7 +856,7 @@ def _format_review_message(
             old, new = pair
             rename_map[ch.path] = old if ch.path == new else (new if ch.path == old else "")
 
-    parts: list[str] = [_REVIEW_HEADER, ""]
+    parts: list[str] = [_REVIEW_HEADER, "", _REVIEW_OPENER, ""]
     if overall:
         parts.append(overall)
         parts.append("")
