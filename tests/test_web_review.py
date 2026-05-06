@@ -346,8 +346,10 @@ class TestPostReviewRoute:
         def fake_process(tid, text):
             scheduled.append((tid, text))
 
-        monkeypatch.setattr(web, "_process_message", fake_process)
-        monkeypatch.setattr(web, "_get_domain_manager", lambda tid: None)
+        # Patch the modules where these names are defined; route
+        # handlers look them up via the threads / state namespaces.
+        monkeypatch.setattr("manage.web.threads._process_message", fake_process)
+        monkeypatch.setattr("manage.web.review._get_domain_manager", lambda tid: None)
 
         payload = {
             "overall": "Looks good",
