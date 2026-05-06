@@ -28,6 +28,7 @@ from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
 from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
+from assist.env import env_int
 
 
 logger = logging.getLogger(__name__)
@@ -51,8 +52,13 @@ def _create_standard_backend(working_dir: str):
 # `APITimeoutError` (a subclass of `APIConnectionError`) inside a
 # sub-research-agent loop.
 def _make_retry_middleware():
+    # Default 3 retries (4 total attempts).  Overridable via
+    # ASSIST_LLM_MAX_RETRIES so an operator can tighten this without
+    # a redeploy when an endpoint outage means retrying just spends
+    # wall-clock budget before the inevitable failure.  Bad values
+    # silently fall back to the default — see ``env_int``.
     return ModelRetryMiddleware(
-        max_retries=3,
+        max_retries=env_int("ASSIST_LLM_MAX_RETRIES", 3),
         retry_on=(APIConnectionError, InternalServerError, TimeoutError, ConnectionError),
         backoff_factor=2,
     )
