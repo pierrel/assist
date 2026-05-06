@@ -1,11 +1,79 @@
 #+TITLE: Layer 2 — Per-thread checkpoint retention
 #+DATE: 2026-05-04
-State: PR open 2026-05-05, awaiting review
+State: PR #88 open since 2026-05-05, awaiting review (no review activity yet)
 
-* Session handoff (2026-05-05)
+* Session handoff (latest at top, last updated 2026-05-06)
 This section is for whoever picks the work back up.  The design
 sections below are unchanged history; this block tracks current
 state.
+
+** Update 2026-05-06 — Layer 3 has shipped without Layer 2
+Significant context shift: *Layer 3 (per-checkpoint tool-result
+eviction) was deployed to prod 2026-05-05 13:20 PDT* on its own
+feature branch (PR #89, branch =layer-3-tool-result-eviction=).
+Layer 2 is still unmerged.
+
+What this means for Layer 2:
+- *Composition order has flipped.*  Layer 3's =EvictionSaver=
+  currently subclasses upstream =SqliteSaver= directly, not
+  =CheckpointRetentionSaver=.  When Layer 2 merges, the integration
+  is one-line: change =class EvictionSaver(SqliteSaver):= →
+  =class EvictionSaver(CheckpointRetentionSaver):= and
+  thread =retain_last= through the constructor.  See the Layer 3
+  doc's "Pending" section item 2 for the merge-order options.
+- *No file conflict on merge.*  Layer 3 lives in
+  =assist/eviction_saver.py= (separate file from Layer 2's
+  =assist/checkpointer.py=) precisely so the two PRs don't
+  collide.  Both modify =assist/thread.py= at
+  =ThreadManager.__init__=, but each substitutes a different
+  saver class — the merge will require choosing the composition
+  (likely =EvictionSaver(...)= wrapping the retention base).
+- *Layer 2 still useful.*  Layer 3 caps =per-checkpoint= bytes;
+  Layer 2 caps =per-thread checkpoint count=.  Without Layer 2, a
+  long-running thread can still accumulate hundreds of (now-small)
+  checkpoint rows in the DB.  The two are multiplicative — the
+  bound becomes =100 threads × 10 checkpoints × 250 KB stub
+  size= rather than =100 × 10 × 100 MB=.  See the relative-gains
+  chat in the session log; both layers have a meaningful slot.
+
+** Prod state at 2026-05-06
+- =threads.db= = 175 GB (unchanged from yesterday's deploy).  No
+  Sunday VACUUM has run since Layer 3 deployed; expect significant
+  reclamation when the next one fires.  Layer 2 will accelerate
+  this once it merges by deleting old checkpoint rows so VACUUM
+  has more freelist to reclaim.
+- 85 thread directories under =/home/pierre/deploy/assist/threads/=
+  (under MIN_THREADS=100, so the next sweep won't prune any).
+- Two threads have produced Layer 3 disk artifacts, totalling
+  192 KB.  No Layer 2 activity (it's not deployed yet).
+
+** Cross-cutting observations from the Layer 3 session
+Worth scanning before re-engaging with Layer 2:
+- *Editable-install side-finding.*  The dev =.venv= had
+  =.venv/src/assist/= as a stale snapshot from a prior
+  =pip install --src= flow.  Scripts run as
+  =.venv/bin/python <script.py>= imported the stale code
+  because =sys.path[0]= is the script's directory and the
+  editable finder's MAPPING pointed at the snapshot.  Fix:
+  =.venv/bin/pip install -e . --no-deps=.  If Layer 2 work
+  involves running scripts (not pytest, which adds project
+  root to sys.path itself), check this first.
+- *Eval-reliability finding.*  =eval_large_tool_results.py=
+  was patching =ddgs.DDGS.text= but =ddgs.DDGS= is a thin
+  proxy class; instances use =ddgs.ddgs.DDGS=.  Fix
+  committed on Layer 3 branch (=68a6e38=) to patch
+  =ddgs.ddgs.DDGS.text= and accept =self= in the mock.  If
+  Layer 2 reviewers want to run that eval against this branch
+  too, cherry-pick that one-file change first or just be
+  aware of the issue.
+- *Memory notes.*  Two new feedback memories from the session:
+  =feedback_deploy_from_feature_branch.md= (user OK'd
+  feature-branch deploys; CLAUDE.md's blanket prohibition is
+  not absolute) and =feedback_thread_failure_should_terminate.md=
+  (don't build heal-and-retry for sandbox/long-request
+  failures; let the thread die and the user start a new one).
+  Neither directly affects Layer 2 design but both are worth
+  scanning.
 
 ** What's landed
 - Branch: =layer-2-checkpoint-retention= (forked from =main= at
@@ -49,35 +117,54 @@ file.  Run from =~/src/assist=:
 
 ** Pending — what the next session should do
 1. *Address PR review comments* on
-   https://github.com/pierrel/assist/pull/88 .  Expect feedback
-   on the option-A code-duplication of upstream's =put= body
-   (we mirror lines 380-436 of =langgraph-checkpoint-sqlite==3.0.3=
-   verbatim; the trade-off was justified by the single-TX
-   guarantee).
-2. *Merge to main* once approved.  Standard squash-or-merge per
+   https://github.com/pierrel/assist/pull/88 .  No review activity
+   yet.  Expect feedback if any on the option-A code-duplication of
+   upstream's =put= body (we mirror lines 380-436 of
+   =langgraph-checkpoint-sqlite==3.0.3= verbatim; the trade-off was
+   justified by the single-TX guarantee).
+2. *Resolve merge-order with Layer 3.*  Layer 3 is already in prod
+   on a feature branch.  When Layer 2 merges to main, Layer 3's
+   branch needs a follow-up edit to swap =class EvictionSaver(SqliteSaver):=
+   to =class EvictionSaver(CheckpointRetentionSaver):= and pass
+   =retain_last= through the constructor.  Either order works; the
+   final state is identical.  Coordinate with the Layer 3 doc's
+   merge-order section.
+3. *Merge to main* once approved.  Standard squash-or-merge per
    project convention (Layer 0 used a regular merge — match it).
-3. *Deploy to prod*.  =make deploy= from =~/src/assist= ships the
+4. *Deploy to prod*.  =make deploy= from =~/src/assist= ships the
    change.  =ASSIST_RETAIN_LAST= is *not* in =.deploy.env=, which
-   means it falls back to the default (10).  No env edit needed
-   for the default rollout.
-4. *Smoke + observe*.  After =make deploy= and =make restart=:
+   means it falls back to the default (10).  No env edit needed for
+   the default rollout.  *Note:* the user has authorized
+   feature-branch deploys (see
+   =feedback_deploy_from_feature_branch.md= memory) — don't block
+   on merge if a quick prod test is wanted first.
+5. *Smoke + observe*.  After deploy + restart:
    - =make smoke= or =./scripts/smoke_test.sh= for the basic
      end-to-end (tiny inference + assist-web reachability).
    - Watch =journalctl -u assist-web -f= for
      "CheckpointRetentionSaver: retaining last 10 checkpoints
      per (thread_id, checkpoint_ns)" at startup.
-   - Run an eval suite (=make eval= or wait for the 23:00 cron;
-     see the eval-deadline memory note).  Confirm no regression
-     in pass rates.
+   - Run an eval suite (=make eval=).  Confirm no regression in
+     pass rates.  Be aware of the eval mock-path bug noted above
+     if running =eval_large_tool_results.py= on this branch.
    - Optional: pick one chatty research-agent thread, then
      =sqlite3 threads.db "SELECT thread_id, checkpoint_ns,
      COUNT(*) FROM checkpoints GROUP BY thread_id, checkpoint_ns
-     ORDER BY 3 DESC LIMIT 10;"= — every (tid, ns) row should
-     show ≤10.
-5. *Decide whether to lower N*.  If observation shows rollback
-   never reaches near 10, drop the default to 5 in
-   =assist/checkpointer.py= (=DEFAULT_RETAIN_LAST=).  Code
-   already supports it; this is a one-line follow-up PR.
+     ORDER BY 3 DESC LIMIT 10;"= — every (tid, ns) row should show
+     ≤10.
+6. *Decide whether to lower N*.  After Layer 2 has been live for a
+   week, if observation shows rollback never reaches near 10, drop
+   the default to 5 in =assist/checkpointer.py=
+   (=DEFAULT_RETAIN_LAST=).  Code already supports it; one-line
+   follow-up PR.
+7. *Watch the threads.db reduction curve.*  Layer 2 will free
+   freelist pages on every put (deleting old checkpoint rows).  The
+   next Sunday VACUUM after Layer 2 deploys should produce a
+   meaningful drop in the .db file size — meaningful in the same
+   ballpark as Layer 0's one-time cleanup, since it removes the
+   per-thread historical accumulation.  Track =du -sh
+   /home/pierre/deploy/assist/threads/threads.db= weekly and note
+   the ratio before/after.
 
 ** Kill switch (if Layer 2 misbehaves in prod)
 Add to =/home/pierre/deploy/assist/code/.deploy.env= on the prod
