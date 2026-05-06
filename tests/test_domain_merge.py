@@ -10,9 +10,14 @@ class TestDomainMerge(unittest.TestCase):
         """Create a test git repository with a remote."""
         self.temp_dir = tempfile.mkdtemp()
 
-        # Create a bare repo to act as remote
+        # Create a bare repo to act as remote.  ``-b main`` is needed
+        # so the test doesn't depend on the runner's
+        # ``init.defaultBranch`` config — without it, CI runners that
+        # leave the default at ``master`` produce a working clone on
+        # ``master``, and the subsequent ``git push origin main`` below
+        # fails.
         self.remote_dir = os.path.join(self.temp_dir, "remote.git")
-        subprocess.run(['git', 'init', '--bare', self.remote_dir], check=True, capture_output=True)
+        subprocess.run(['git', 'init', '--bare', '-b', 'main', self.remote_dir], check=True, capture_output=True)
 
         # Clone it to create a working repo
         self.repo_path = os.path.join(self.temp_dir, "work")
