@@ -37,29 +37,44 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
+from assist.env import env_float
+
 logger = logging.getLogger(__name__)
 
 
 _PROBE_TIMEOUT_S = 10.0
 
-# HTTP request timeout for ChatOpenAI in seconds. Without this, a hung
-# upstream (model stalled on a generation, network blip with no RST)
-# can leave the agent loop blocked on a single ``invoke()`` indefinitely
-# — which is how a single cron-launched eval run grew to 16 GB RSS
-# over 21 hours.
+
+# Per-phase httpx Timeout for ChatOpenAI's underlying client.  Without
+# this — i.e. with the prior single-scalar ``timeout=600`` — a stuck
+# TCP handshake against an unreachable endpoint burned the full 600s
+# of httpcore connect retries before raising.  Splitting the four
+# phases lets connect fail fast (10s) while still giving long
+# generations the headroom they empirically need (read=600s, matches
+# the per-thread queue ``hold_timeout_s``).
 #
-# 180s was right for the prior vLLM + Qwen3-Coder-30B-A3B-AWQ MoE
-# stack, where realistic generation finished in <60s.  The current
-# llama.cpp + Qwen3.6-27B Q4_K_M dense stack has a much wider
-# distribution: cheap tool-routing calls land in 5-20s, but a single
-# heavy synthesis call (research-agent + nested fact-check on a
-# >50k-token prompt) can need several minutes of pure prefill before
-# generation even starts.  Empirically, the reasoning-impact eval
-# saw both thinking_on and thinking_off time out at 180s on the
-# finance-synthesis case (see docs/2026-05-01-reasoning-impact-eval.org).
-# 600s gives meaningful headroom for those calls without going so
-# wide that a genuine hang is invisible.
-_REQUEST_TIMEOUT_S = 600.0
+# Read note on ``read``: this is httpx's *idle-byte* timeout, not a
+# total-response cap.  With a streaming endpoint a slow generation
+# that emits tokens continuously will not trip it.  ChatOpenAI's
+# default ``streaming=False`` means ``read`` is effectively the cap
+# on time-from-request-write to first response byte; for genuinely
+# long synthesis calls operators can bump ``ASSIST_LLM_READ_TIMEOUT_S``.
+#
+# Each value is read on every ``_build_request_timeout`` call.  In
+# practice ``ThreadManager.model`` is a lazy property cached for the
+# process lifetime, so in production the env is consulted once at
+# first-message time and a systemd restart is required to pick up
+# new values.  The on-call read still simplifies tests and avoids
+# stale module-level constants.
+
+
+def _build_request_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=env_float("ASSIST_LLM_CONNECT_TIMEOUT_S", 10.0),
+        read=env_float("ASSIST_LLM_READ_TIMEOUT_S", 600.0),
+        write=env_float("ASSIST_LLM_WRITE_TIMEOUT_S", 60.0),
+        pool=env_float("ASSIST_LLM_POOL_TIMEOUT_S", 10.0),
+    )
 
 
 @dataclass(frozen=True)
@@ -285,8 +300,13 @@ def _build_openai_chat_model(
     kwargs = {
         "model": model,
         "temperature": temperature,
+        # max_retries=0 disables the OpenAI Python SDK's built-in
+        # retry layer.  The single retry layer for transient errors
+        # is ModelRetryMiddleware in assist/agent.py — keeping retries
+        # in one place gives uniform logging and predictable bounds
+        # on per-call wall-clock.
         "max_retries": 0,
-        "timeout": _REQUEST_TIMEOUT_S,
+        "timeout": _build_request_timeout(),
         "callbacks": [_ModelNotFoundCacheBuster()],
         "base_url": base_url,
         "api_key": api_key,
