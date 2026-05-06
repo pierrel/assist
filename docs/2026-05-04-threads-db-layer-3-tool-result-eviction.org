@@ -1,10 +1,63 @@
 #+TITLE: Layer 3 — Tool-result eviction at write time
 #+DATE: 2026-05-04
-State: PR open 2026-05-05, awaiting review
+State: deployed to prod 2026-05-05; PR #89 still open / awaiting review
 
-* Session handoff (2026-05-05)
+* Session handoff (latest at top, last updated 2026-05-06)
 This block is for whoever picks the work back up.  Design history is
 unchanged below.
+
+** Production observation block (2026-05-06)
+Layer 3 has been live in prod for ~24h (deployed 2026-05-05 13:20
+PDT direct from the feature branch — user authorized
+feature-branch deploy, see
+=/home/pierre/.claude/projects/-home-pierre-src-assist/memory/feedback_deploy_from_feature_branch.md=).
+
+What we've observed so far:
+- =threads.db= still 175 GB.  Did NOT shrink at deploy as expected
+  — the next Sunday VACUUM is still pending, and Layer 3 only caps
+  *new* checkpoint growth, not the historical bloat (that's Layer 0
+  + Layer 1's job).
+- 24h of organic traffic produced only =192 KB= total Layer 3
+  on-disk artifacts (=140K + 52K=) across two threads, plus the
+  =EvictionSaver= startup log line for every thread restart.  That
+  is consistent with: most queries do not hit the 20 KB threshold;
+  the eviction win shows up in research-heavy sessions.
+- Zero =EvictionFileMissingError= or saver-side errors in the
+  journal.  No measured behavior regressions from the agent loop
+  through the eviction round-trip.
+- Two unrelated error patterns appeared during the observation
+  period — both pre-existing, NOT Layer 3:
+  1. =SandboxContainerLostError= recurring for a couple of
+     long-lived threads where the cached =DockerSandboxBackend= keeps
+     hitting a dead container ID across retries.  Pattern
+     understood; user's design preference is "thread should die
+     rather than heal-and-retry," see memory note.  Out of scope
+     for Layer 3.
+  2. =httpx.TimeoutException= bursts when llama.cpp is running
+     =--parallel 1=: parallel sub-agent requests serialize through
+     a single inference slot and the 10-min request timeout
+     (=_REQUEST_TIMEOUT_S = 600.0= in =assist/model_manager.py:62=)
+     fires under heavy load.  =ModelRetryMiddleware= recovers but
+     the user wants to reduce the timeout — folded into the
+     "thread should die" design memo above.
+
+** Deploy environment side-finding (2026-05-05)
+The dev =.venv= had a stale editable install under
+=.venv/src/assist/= that was being imported by scripts run as
+=.venv/bin/python <script.py>= because =sys.path[0]= is the
+script's directory (not the project root) — so any =import assist=
+fell through to the editable finder's MAPPING, which still pointed
+at the snapshot.  Symptoms: stale =model_manager.py= without the
+=_resolve_api_key= fallback, missing =assist/eviction_saver.py=
+import, and =evals running against the old code without us
+realising=.
+
+Fix: =.venv/bin/pip install -e . --no-deps= rewrites the editable
+finder MAPPING to point at =/home/pierre/src/assist/assist/=.
+Cosmetic for prod (the deployed venv at =/home/pierre/deploy/...=
+is a fresh editable install during =deploy-install=) but worth
+knowing if a future session sees similar "this code looks deployed
+but doesn't behave like it" symptoms.
 
 ** What's landed
 - Branch: =layer-3-tool-result-eviction= (forked from =main= at
@@ -80,36 +133,67 @@ suite =321/321=.  Run from =~/src/assist=:
 .venv/bin/python -m pytest tests/  # full suite
 #+end_src
 
+** Eval results (final, post-iteration)
+Three rounds of iteration:
+
+1. *First N=3* (commit =67fa9a1=, mocked DDG via
+   =patch('ddgs.DDGS.text', ...)=): 0/3 evictions observed.  Root
+   cause: =ddgs.DDGS= is a thin =_DDGSProxy=; instances bind
+   =text= from the real =ddgs.ddgs.DDGS= class.  Patching the proxy
+   was a no-op and real DDG was being hit.
+
+2. *Mock-path fix* (commit =68a6e38=, =patch('ddgs.ddgs.DDGS.text',
+   ...)= with =self= accepted in the mock signature): N=6 (3 of the
+   2-eval suite, then 3 of just the large-tool-results eval): 3 PASS,
+   3 INCONCLUSIVE, 0 FAIL.  When the model invokes =search_internet=,
+   the full path triggers cleanly: middleware evicts, Layer 3 catches
+   the files-channel write at =put_writes=, blobs land on disk under
+   the per-thread eviction dir, and the agent completes the task using
+   the rehydrated content.  When the model decides not to delegate to
+   the research sub-agent (model variance under temperature=0.1), the
+   mock never fires and we get =rc=2= (INCONCLUSIVE) — distinct from
+   FAIL, doesn't penalize Layer 3 for model unreliability.
+
+3. *Hardened prompt* (same commit =68a6e38=): added
+   =SEARCH-VERIFICATION-CODE: MOCK-RESULT-7K3F9P= sentinel buried
+   in the mocked search body.  The eval prompt now requires the
+   agent to find and quote that exact code, which is impossible to
+   fabricate from training data.  When the model does invoke search,
+   this confirms the rehydration round-trip end-to-end (model sees
+   the sentinel back through the eviction → stub → rehydrate path).
+
+The =test_research_multi_turn_token_regression= eval is
+network-bound on real DDG and consistently times out at 600-700s on
+trial 1.  Deferred to a separate eval-reliability PR; not a useful
+signal source for Layer 3 today.
+
 ** Pending — what the next session should do
-1. *Address PR review comments.*  Particular surfaces to check:
-   the =files= channel drain logic (paths with no leading slash, v1
-   list-content format), and the round-trip on a real langgraph
-   checkpoint (the tests use synthetic ones).
-2. *Eval cadence — caveat from this session.*  =eval_large_tool_results.py=
-   was run N=3 on the latest commit; all three trials returned
-   =Large Results Evicted: NO= but the agent completed the task
-   successfully.  Root cause: Qwen3.6-27B knows the answer to "who
-   is the president of France" from training and never invokes
-   =search_internet=, so the mocked DDG payload is never produced —
-   no large tool result, nothing to evict.  This is a pre-existing
-   eval-reliability issue, NOT a Layer 3 regression.  The integration
-   test added in this PR (=tests/test_eviction_saver_integration.py=)
-   covers what the eval was meant to prove: real =ThreadManager= + real
-   file-backed =threads.db= + 100 KB content survives the round-trip
-   without inflating the DB blob.  =test_research_multi_turn_token_regression=
-   timed out at 600s on its first trial waiting on real DDG searches —
-   network-bound, not Layer 3.  Running these properly requires either
-   mock-the-LLM or a query the model demonstrably cannot answer from
-   training; defer to a future eval-reliability PR.
-3. *Merge to main once approved.*  After Layer 2 lands too, fold
-   =EvictionSaver= to subclass =CheckpointRetentionSaver= so prune
-   and eviction share the same =put=.  Tests stay split.
-4. *Deploy + smoke.*  =make deploy= from =~/src/assist=.  Watch
-   =journalctl -u assist-web -f= for the
-   "EvictionSaver: evicting tool results > 20 KB" startup line.
-   Spot-check =du -sh /home/pierre/deploy/assist/threads/<tid>/
-   large_tool_results/= on a chatty research thread to confirm
-   blobs are landing on disk.
+1. *Address PR review comments.*  No reviews on PR #89 yet.  Likely
+   surfaces if questions come: the =files= channel drain logic
+   (paths with no leading slash, v1 list-content format), idempotent
+   re-put behavior on stub messages, and the round-trip on a real
+   langgraph checkpoint.  Tests cover all three.
+2. *Merge order.*  Layer 2 (PR #88) is still unmerged.  Cleanest
+   sequence: merge Layer 2 first, then on this branch swap the base
+   class from =SqliteSaver= to =CheckpointRetentionSaver= and pass
+   =retain_last= through alongside =evict_threshold_kb=.  Single
+   one-line edit.  Or merge in the opposite order — Layer 2 PR
+   re-bases on top of Layer 3 and the same edit lands there
+   instead.  Either way the final code is identical.
+3. *Prod observability after a week.*  Layer 3 has been live since
+   2026-05-05 13:20 PDT.  Re-run =du -sh
+   /home/pierre/deploy/assist/threads/threads.db= and =du -sh
+   /home/pierre/deploy/assist/threads/*/large_tool_results/= weekly.
+   Expect: =threads.db= bounded (no longer drifting up by GB/day);
+   eviction-blob disk usage scales with research-heavy traffic.  If
+   blobs balloon past, say, 1 GB total, consider a per-thread cap
+   (currently un-bounded; punted as v1 non-goal in the original
+   design).
+4. *Threshold tuning.*  Default =ASSIST_EVICT_THRESHOLD_KB=20= is a
+   guess.  After a week of prod data, if observation shows that
+   typical tool-result sizes cluster either much higher or much
+   lower, consider adjusting via =.deploy.env=.  No code change
+   required.
 
 ** Kill switch (if Layer 3 misbehaves in prod)
 Add to =/home/pierre/deploy/assist/code/.deploy.env= on the prod
