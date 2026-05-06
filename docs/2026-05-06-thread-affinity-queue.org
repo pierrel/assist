@@ -1,0 +1,83 @@
+#+TITLE: Per-thread LLM affinity queue
+#+DATE: 2026-05-06
+State: Shipped (PR #90, commit =57ffa93=, merged to main 2026-05-06)
+
+This is a slim retro doc — the design and review conversation
+happened in-session, so the record here is the post-merge summary
+plus the bits worth carrying forward.
+
+* Problem
+Concurrent =Thread.message()= calls thrashed llama.cpp's =--parallel 1=
+KV cache: every cross-thread turn paid a full prefill because the
+slot's cached prefix only matches one conversation at a time.  Prefill
+cost grew from O(T) to O(T²) per agent.
+
+Napkin math (Qwen3-Coder-30B-A3B at ~3000 tok/s prefill, ~80 tok/s
+decode, 10-turn loops, ~1k-token deltas):
+- 1 thread alone: ~28s.
+- 2 threads concurrent, slot thrashes: ~86s wall-clock (3.1× vs single).
+- 2 threads sequential (no contention): ~56s wall-clock (2× vs single).
+
+The fix is *affinity, not fairness*: don't interleave turns of
+different threads; let the holder finish before any waiter starts.
+
+* Solution
+=ThreadAffinityQueue= primitive at =assist/thread_queue.py= serializes
+=Thread.message()= entries.  Holder runs the whole call to completion;
+waiters FIFO behind it.
+
+** Key decisions
+- *Per-burst affinity* — one =Thread.message()= per acquire, not
+  per-LLM-call (already serialized by llama.cpp) and not per-agent-loop
+  (would starve waiters).
+- *Reentrancy gated on contextvar identity*, not bare =thread_id=.
+  A web double-click → two background tasks for one tid on different
+  OS threads queues, doesn't free-ride the holder.  This was a
+  reviewer-flagged BLOCKER fix.
+- *Watchdog + cooperative cancel.*  =hold_timeout_s=600= flips
+  =handle.expired=; =ThreadQueueMiddleware.after_model= raises
+  =ThreadHoldExpired= between LLM calls.  Honors the saved-feedback
+  rule "threads die on infrastructure failure rather than
+  heal-and-retry."
+- *In-process scope.*  Module-level singleton inside the =assist-web=
+  process.  Eval CLIs in separate processes get their own (empty)
+  queue — intentional.
+- *New UI state =queued=* with a distinct blue badge.  Reuses the
+  existing =/thread/{tid}/status= polling, no JS changes.
+
+* Files
+- =assist/thread_queue.py= (new) — primitive
+- =assist/middleware/thread_queue_middleware.py= (new) — cooperative cancel
+- =assist/thread.py= — wraps =Thread.message= and =Thread.stream_message=
+  in the context manager; =on_queue_state= callback plumbed through
+  =ThreadManager.get= / =new=
+- =assist/agent.py= — =ThreadQueueMiddleware= added to all 3 agent
+  factories + dict-spec subagent safety stack
+- =manage/web.py= — =queued= stage in =BUSY_STAGES=, blue badge in
+  =render_index=, callback wiring in =_process_message=
+- =tests/test_thread_queue.py= (14 unit), =tests/test_thread_queue_integration.py= (6),
+  =tests/middleware/test_thread_queue_middleware.py= (3)
+- =edd/eval/test_thread_queue.py= — end-to-end eval
+
+* Test coverage
+- 23 unit + integration tests pass.
+- Eval pinning the contract (two real concurrent threads serialize,
+  second observes =queued= for nonzero duration) at N=10/10 stability.
+
+* Live validation
+Real prod incident on 2026-05-06 ~08:44: queue caught a pre-existing
+failure mode (httpx connect-tcp retry storm in the holder).  Both
+contracts held — =QueueWaitTimeout= for the waiter, =ThreadHoldExpired=
+for the holder when its =after_model= finally ran.  Holder eventually
+died ~948s after acquire vs the 600s =hold_timeout= because
+=after_model= couldn't fire while httpx was stuck.  Drove the
+follow-up work in [[file:2026-05-06-bound-llm-call-latency.org][2026-05-06-bound-llm-call-latency.org]].
+
+* Follow-ups
+- Latency-bound LLM call timeouts (PR #91) — reduces the
+  holder-stuck case from ~948s to ~10s.
+- The hold timeout is a *detection-latency* bound, not a
+  wall-clock-release bound: =wrap_model_call= retries inside
+  =EmptyResponseRecoveryMiddleware= / =BadRequestRetryMiddleware= can
+  run one or two more LLM calls past expiration.  Documented in the
+  module docstring.
