@@ -158,25 +158,26 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Review — {html.escape(title)}</title>
         <style>
-          body {{ font-family: sans-serif; margin: 0; background: #fff; }}
+          body {{ font-family: sans-serif; margin: 0; background: #fff; -webkit-tap-highlight-color: rgba(0,0,0,0.05); }}
           .container {{ max-width: 1100px; margin: 0 auto; padding: 1rem; }}
-          .nav a {{ text-decoration: none; padding: .4rem .6rem; border-radius: 6px; color: #0969da; }}
+          .nav a {{ text-decoration: none; padding: .6rem .8rem; min-height: 44px; display: inline-flex; align-items: center; border-radius: 6px; color: #0969da; touch-action: manipulation; }}
           h1 {{ font-size: 1.3rem; margin: .5rem 0; }}
           .review-header {{ position: sticky; top: 0; background: #fff; padding: .8rem 0; border-bottom: 1px solid #d0d7de; z-index: 10; margin-bottom: 1rem; }}
-          .review-header textarea {{ width: 100%; min-height: 4rem; box-sizing: border-box; padding: .6rem; border: 1px solid #d0d7de; border-radius: 6px; font-family: inherit; font-size: .95rem; resize: vertical; }}
+          /* font-size: 16px on every editable input prevents iOS zoom on focus. */
+          .review-header textarea {{ width: 100%; min-height: 4.5rem; box-sizing: border-box; padding: .7rem; border: 1px solid #d0d7de; border-radius: 6px; font-family: inherit; font-size: 16px; resize: vertical; }}
           .review-header label {{ display: block; font-size: .85rem; color: #57606a; margin-bottom: .3rem; }}
           .review-actions {{ display: flex; align-items: center; gap: .6rem; margin-top: .6rem; flex-wrap: wrap; }}
-          .submit-btn {{ background: #1a7f37; color: #fff; border: 1px solid #156529; padding: .55rem 1.1rem; font-size: .95rem; font-weight: 600; border-radius: 6px; cursor: pointer; }}
+          .submit-btn {{ background: #1a7f37; color: #fff; border: 1px solid #156529; padding: .7rem 1.2rem; min-height: 44px; font-size: 16px; font-weight: 600; border-radius: 6px; cursor: pointer; touch-action: manipulation; }}
           .submit-btn:hover:not(:disabled) {{ background: #156529; }}
           .submit-btn:disabled {{ background: #94d3a2; border-color: #94d3a2; color: #fff; cursor: not-allowed; }}
-          .cancel-link {{ color: #57606a; text-decoration: none; font-size: .9rem; padding: .55rem .8rem; }}
+          .cancel-link {{ color: #57606a; text-decoration: none; font-size: .95rem; padding: .7rem .9rem; min-height: 44px; display: inline-flex; align-items: center; touch-action: manipulation; }}
           .cancel-link:hover {{ color: #24292f; }}
           .comment-count {{ font-size: .85rem; color: #57606a; }}
           .busy-note {{ background: #fff8c5; border: 1px solid #d4a72c; padding: .5rem .75rem; border-radius: 6px; color: #57606a; font-size: .85rem; margin-top: .5rem; }}
-          .comment-editor {{ margin: .3rem .8rem .6rem 1.5rem; padding: .5rem; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; }}
-          .comment-editor textarea {{ width: 100%; min-height: 3.5rem; box-sizing: border-box; padding: .5rem; border: 1px solid #d0d7de; border-radius: 4px; font-family: inherit; font-size: .9rem; resize: vertical; }}
-          .comment-editor .editor-actions {{ display: flex; justify-content: flex-end; gap: .4rem; margin-top: .4rem; }}
-          .comment-editor button {{ font-size: .85rem; padding: .3rem .7rem; border-radius: 4px; cursor: pointer; border: 1px solid #d0d7de; background: #fff; color: #57606a; }}
+          .comment-editor {{ margin: .3rem .5rem .6rem 1rem; padding: .6rem; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; }}
+          .comment-editor textarea {{ width: 100%; min-height: 4rem; box-sizing: border-box; padding: .6rem; border: 1px solid #d0d7de; border-radius: 4px; font-family: inherit; font-size: 16px; resize: vertical; }}
+          .comment-editor .editor-actions {{ display: flex; justify-content: flex-end; gap: .4rem; margin-top: .5rem; }}
+          .comment-editor button {{ font-size: .9rem; padding: .55rem .9rem; min-height: 36px; border-radius: 4px; cursor: pointer; border: 1px solid #d0d7de; background: #fff; color: #57606a; touch-action: manipulation; }}
           .comment-editor button:hover {{ background: #f6f8fa; }}
           {_DIFF_CSS}
         </style>
