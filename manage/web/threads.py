@@ -37,6 +37,7 @@ from manage.web.state import (
     _get_domain_manager,
     _get_sandbox_backend,
     _get_status,
+    _has_unmerged_changes,
     _set_status,
     _thread_domain_html,
     _thread_title,
@@ -76,11 +77,20 @@ def render_index() -> str:
                     ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
                     ' margin-right:.4rem;">error</span>'
                 )
+            elif _has_unmerged_changes(tid):
+                # Soft amber, distinct from yellow (busy) and red (error).
+                # Strictly secondary to the process-state badges above —
+                # only shows when the thread is otherwise idle.
+                badge = (
+                    '<span style="font-size:.7rem; color:#7c4a1d; background:#fef0e0;'
+                    ' border:1px solid #fbcfa0; padding:.1rem .4rem; border-radius:10px;'
+                    ' margin-right:.4rem;">unmerged</span>'
+                )
             items.append(
-                f'<li style="display:flex; align-items:center; gap:.5rem;">'
-                f'<a href="/thread/{tid}" style="flex:1">{badge}{html.escape(title)}</a>'
+                f'<li>'
+                f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
                 f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
-                f'<button type="submit" class="del-btn" '
+                f'<button type="submit" class="del-btn" aria-label="Delete thread" '
                 f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
                 f'</form></li>'
             )
@@ -92,20 +102,32 @@ def render_index() -> str:
         <title>Assist Web</title>
         <style>
           :root {{ --pad: 1rem; }}
-          body {{ font-family: sans-serif; margin: 0; }}
+          body {{ font-family: sans-serif; margin: 0; -webkit-tap-highlight-color: rgba(0,0,0,0.05); }}
           .container {{ max-width: 800px; margin: 0 auto; padding: var(--pad); }}
           .topbar {{ display: flex; gap: .5rem; flex-wrap: wrap; justify-content: space-between; align-items: center; }}
-          ul {{ line-height: 1.8; padding-left: 1rem; list-style: none; }}
-          li {{ margin: .2rem 0; }}
-          a {{ text-decoration: none; display: block; padding: .5rem .6rem; border-radius: 6px; }}
-          .del-btn {{ background: none; border: none; color: #999; cursor: pointer; font-size: 1.1rem; padding: .2rem .4rem; border-radius: 4px; }}
+          ul {{ line-height: 1.4; padding-left: 0; list-style: none; }}
+          /* Each row is flex so the title link expands to fill, leaving the
+             delete button anchored on the right.  min-height matches Apple's
+             44 pt touch-target guidance — enough to tap reliably on mobile. */
+          li {{ margin: .4rem 0; display: flex; align-items: stretch; gap: .25rem; }}
+          .thread-link {{ flex: 1; display: flex; align-items: center; padding: .85rem .8rem; border-radius: 6px; min-height: 44px; text-decoration: none; color: inherit; touch-action: manipulation; }}
+          .thread-link:hover {{ background: #f3f6fa; }}
+          .thread-link:active {{ background: #e7edf4; }}
+          .del-btn {{ background: none; border: none; color: #999; cursor: pointer; font-size: 1.4rem; padding: 0 .8rem; border-radius: 6px; min-width: 44px; min-height: 44px; touch-action: manipulation; }}
           .del-btn:hover {{ color: #c00; background: #fee; }}
+          .del-btn:active {{ background: #fdd; }}
           a:active, a:focus {{ outline: none; }}
-          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; cursor: pointer; }}
+          /* inline-flex so the same .btn class works on both <button>
+             and <a> (e.g., the Evals link in the topbar): the 44 px
+             min-height needs flex centering or the text floats up. */
+          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; color: inherit; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
           .new-thread-form {{ margin-bottom: 1.5rem; padding: 1rem; background: #f9f9f9; border-radius: 8px; border: 1px solid #ddd; }}
-          .new-thread-form textarea {{ width: 100%; min-height: 4rem; box-sizing: border-box; padding: .6rem; border: 1px solid #ccc; border-radius: 6px; font-family: inherit; font-size: 1rem; resize: vertical; }}
+          /* font-size: 16px (not 1rem) explicitly prevents iOS Safari from
+             auto-zooming on focus.  Anything below 16px triggers the zoom. */
+          .new-thread-form textarea {{ width: 100%; min-height: 5rem; box-sizing: border-box; padding: .8rem; border: 1px solid #ccc; border-radius: 6px; font-family: inherit; font-size: 16px; resize: vertical; }}
           .new-thread-form textarea:focus {{ outline: 2px solid #4a90e2; border-color: #4a90e2; }}
-          .new-thread-btn {{ margin-top: .5rem; display: none; }}
+          .new-thread-form select {{ font-size: 16px; padding: .6rem; min-height: 44px; }}
+          .new-thread-btn {{ margin-top: .6rem; display: none; }}
           .new-thread-btn.visible {{ display: block; }}
           @media (max-width: 480px) {{
             .btn {{ width: 100%; }}
@@ -116,7 +138,7 @@ def render_index() -> str:
         <div class="container">
           <div class="topbar">
             <h1 style="font-size:1.4rem; margin:0">Assist Web</h1>
-            <a href="/evals" class="btn" style="font-size:.9rem; padding:.4rem .8rem">Evals</a>
+            <a href="/evals" class="btn">Evals</a>
           </div>
 
           <div class="new-thread-form">
@@ -273,29 +295,35 @@ def render_thread(
         <title>{html.escape(title)}</title>
         <style>
           :root {{ --pad: 1rem; }}
-          body {{ font-family: sans-serif; margin: 0; }}
+          body {{ font-family: sans-serif; margin: 0; -webkit-tap-highlight-color: rgba(0,0,0,0.05); }}
           .container {{ max-width: 800px; margin: 0 auto; padding: var(--pad); }}
-          .nav a {{ display: inline-block; padding: .4rem .6rem; border-radius: 6px; text-decoration: none; }}
+          /* inline-flex centers the back-link text vertically inside
+             the 44 px min-height; inline-block leaves the text floating
+             at the top of the box. */
+          .nav a {{ display: inline-flex; align-items: center; padding: .6rem .8rem; min-height: 44px; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
           .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
           .msg.user {{ background: #e6f3ff; border: 1px solid #b5dbff; }}
           .msg.assistant {{ background: #f6f6f6; border: 1px solid #ddd; }}
           .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
-          form textarea {{ width: 100%; min-height: 6rem; height: 24vh; box-sizing: border-box; }}
+          /* font-size: 16px on every editable form input — prevents iOS
+             Safari from auto-zooming into the field on focus.  Anything
+             below 16px (including 0.95rem) triggers the zoom. */
+          form textarea {{ width: 100%; min-height: 6rem; height: 24vh; box-sizing: border-box; padding: .6rem; font-family: inherit; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }}
           form {{ margin-top: 1rem; }}
-          .btn {{ padding: .6rem 1rem; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 1rem; cursor: pointer; }}
+          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; color: inherit; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
           .btn-secondary {{ background: #ddd; }}
           .success-msg {{ background: #d4edda; border: 1px solid #c3e6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #155724; }}
           .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); }}
-          .modal-content {{ background: #fff; margin: 10% auto; padding: 1.5rem; width: 90%; max-width: 500px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+          .modal-content {{ background: #fff; margin: 10% auto; padding: 1.5rem; width: min(95%, 500px); border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); box-sizing: border-box; }}
           .modal-content h3 {{ margin-top: 0; }}
-          .modal-content textarea {{ width: 100%; min-height: 100px; padding: .5rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }}
+          .modal-content textarea {{ width: 100%; min-height: 100px; padding: .6rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; font-size: 16px; box-sizing: border-box; }}
           .modal-content label {{ display: block; margin-bottom: .5rem; font-weight: 500; }}
           .button-group {{ display: flex; gap: .5rem; margin-top: 1rem; }}
           .diff-container {{ margin: 1rem 0 .5rem; }}
           .diff-actions {{ display: flex; justify-content: flex-end; gap: .5rem; margin-bottom: .6rem; flex-wrap: wrap; }}
-          .merge-btn {{ background: #28a745; color: white; border: 1px solid #1e7e34; padding: .5rem .75rem; font-size: .9rem; white-space: nowrap; }}
+          .merge-btn {{ background: #28a745; color: white; border: 1px solid #1e7e34; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; touch-action: manipulation; }}
           .merge-btn:hover {{ background: #218838; border-color: #1c7430; }}
-          .review-btn {{ display: inline-flex; align-items: center; padding: .5rem .75rem; font-size: .9rem; white-space: nowrap; text-decoration: none; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; }}
+          .review-btn {{ display: inline-flex; align-items: center; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; text-decoration: none; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; touch-action: manipulation; }}
           .review-btn:hover {{ background: #eaeef2; }}
           {_DIFF_CSS}
           .error-msg {{ background: #f8d7da; border: 1px solid #f5c6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #721c24; }}

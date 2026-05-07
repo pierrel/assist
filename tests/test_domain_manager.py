@@ -255,3 +255,86 @@ class TestDomainManagerIntegration(TestCase):
         dm = DomainManager(repo_path=test_path, repo="https://example.com/repo.git")
         self.assertEqual(dm.domain(), test_path)
         self.assertTrue(os.path.isdir(dm.domain()))
+
+
+class TestHasChangesVsMain(TestCase):
+    """Real-git tests for ``DomainManager.has_changes_vs_main``.
+
+    Used by the index page to decide whether to render the "unmerged"
+    status badge per thread.  Build a real on-disk git repo with a
+    main branch + a feature branch, then exercise the four cases:
+    clean, tracked diff, untracked file, and no-repo.
+    """
+
+    def setUp(self):
+        import subprocess
+        self.temp_dir = tempfile.mkdtemp()
+        self.repo_path = os.path.join(self.temp_dir, "repo")
+        os.makedirs(self.repo_path)
+        # Initialize a repo with a single commit on main.
+        run = lambda *args: subprocess.run(
+            args, cwd=self.repo_path, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        run("git", "init", "-q", "-b", "main")
+        run("git", "config", "user.email", "test@example.com")
+        run("git", "config", "user.name", "Test")
+        with open(os.path.join(self.repo_path, "seed.txt"), "w") as f:
+            f.write("seed\n")
+        run("git", "add", "seed.txt")
+        run("git", "commit", "-q", "-m", "seed")
+        # Branch off main; the assist threads always operate on a
+        # non-main branch (see create_timestamped_branch in the
+        # production flow).
+        run("git", "checkout", "-q", "-b", "assist/test")
+
+    def tearDown(self):
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def _dm(self):
+        return DomainManager(repo_path=self.repo_path, repo="origin")
+
+    def test_returns_false_for_clean_tree_freshly_branched(self):
+        # No diff vs main, no untracked files.
+        self.assertFalse(self._dm().has_changes_vs_main())
+
+    def test_returns_true_for_committed_tracked_diff(self):
+        import subprocess
+        with open(os.path.join(self.repo_path, "seed.txt"), "w") as f:
+            f.write("modified\n")
+        subprocess.run(
+            ["git", "add", "seed.txt"], cwd=self.repo_path, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "edit"], cwd=self.repo_path, check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.assertTrue(self._dm().has_changes_vs_main())
+
+    def test_returns_true_for_uncommitted_tracked_diff(self):
+        # The realistic mid-turn case: agent edited a file but hasn't
+        # hit ``dm.sync()`` yet.  ``git diff main...`` only compares
+        # committed branch state to the merge-base and would miss
+        # this — must also check the working tree against HEAD.
+        with open(os.path.join(self.repo_path, "seed.txt"), "w") as f:
+            f.write("uncommitted edit\n")
+        self.assertTrue(self._dm().has_changes_vs_main())
+
+    def test_returns_true_for_untracked_file_only(self):
+        # Tracked tree matches main, but a new file sits on disk
+        # uncommitted.  The user has work to ship — badge it.
+        with open(os.path.join(self.repo_path, "new.txt"), "w") as f:
+            f.write("untracked\n")
+        self.assertTrue(self._dm().has_changes_vs_main())
+
+    def test_returns_false_when_self_repo_is_none(self):
+        # DomainManager with no remote: nothing to compare against.
+        # Suppress clone_repo so the constructor does not try to clone.
+        with patch("assist.domain_manager.clone_repo"):
+            dm = DomainManager(repo_path=self.repo_path, repo=None)
+        # Sanity: the constructor should have nulled-out repo via
+        # git_repo() returning None on a repo with no `origin` remote.
+        self.assertIsNone(dm.repo)
+        self.assertFalse(dm.has_changes_vs_main())

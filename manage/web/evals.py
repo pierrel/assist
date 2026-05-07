@@ -31,7 +31,7 @@ def render_evals() -> str:
         <html><head><title>Eval Results</title>
         <style>body{{font-family:sans-serif;margin:0}}
         .container{{max-width:1200px;margin:0 auto;padding:1rem}}
-        .nav a{{text-decoration:none;padding:.4rem .6rem;border-radius:6px}}</style></head>
+        .nav a{{display:inline-flex;align-items:center;min-height:44px;padding:.6rem .8rem;border-radius:6px;text-decoration:none;touch-action:manipulation}}</style></head>
         <body><div class="container">
         <div class="nav"><a href="/">← Back</a></div>
         <h1 style="font-size:1.4rem">Eval Results</h1>{body}</div></body></html>"""
@@ -118,7 +118,7 @@ def render_evals() -> str:
         <style>
           body {{ font-family: sans-serif; margin: 0; }}
           .container {{ max-width: 100%; padding: 1rem; }}
-          .nav a {{ text-decoration: none; padding: .4rem .6rem; border-radius: 6px; }}
+          .nav a {{ display: inline-flex; align-items: center; min-height: 44px; padding: .6rem .8rem; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
           .table-wrap {{ overflow-x: auto; margin-top: 1rem; }}
           table {{ border-collapse: collapse; font-size: .85rem; }}
           th {{ padding: .4rem .5rem; border: 1px solid #ddd; background: #f5f5f5;
@@ -205,7 +205,7 @@ def render_eval_detail(run_id: str, test_key: str) -> str:
         <style>
           body {{ font-family: sans-serif; margin: 0; }}
           .container {{ max-width: 900px; margin: 0 auto; padding: 1rem; }}
-          .nav a {{ text-decoration: none; padding: .4rem .6rem; border-radius: 6px; }}
+          .nav a {{ display: inline-flex; align-items: center; min-height: 44px; padding: .6rem .8rem; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
           .badge {{ display: inline-block; padding: .3rem .8rem; border-radius: 12px;
                     font-weight: 600; font-size: .9rem; }}
         </style>
