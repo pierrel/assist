@@ -290,7 +290,14 @@ def _gather_search_hits(text: str, term: str) -> list[tuple[int, list[str]]]:
 
 
 def read_pdf(path: str, search: str | None = None, pages: str | None = None) -> str:
-    """Read text out of a PDF, three modes:
+    """PDF reader — use this for ANY ``.pdf`` file.
+
+    NEVER use ``read_file`` on a ``.pdf``: that tool returns the file
+    as a multimodal content block this model cannot consume, which
+    causes the next API call to 400.  ``read_pdf`` extracts the text
+    via ``pdftotext`` and returns plain text.
+
+    Three modes — pick the smallest that answers the question:
 
     - **Orient** (no other args): returns ``PDF: <path> | <N> pages |
       <KB> KB`` followed by the first page's text (capped to ~500
