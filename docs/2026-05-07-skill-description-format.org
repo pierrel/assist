@@ -29,7 +29,9 @@ This is a hypothesis.  The deliverable is the eval data confirming or rejecting 
 {topical summary, one sentence}.  EXAMPLES — "{example user message}"; "{example user message}".  MUST load before {condition}.
 #+end_src
 
-Two examples target the most-common implicit-mention shapes for that skill.  Keep them short — one user-message-style fragment each, no agent-side framing.  Drop "TRIGGER WORDS"; keep the "MUST load before {condition}" tail because it's the trigger for the pre-action check, not vocabulary.
+Two to three examples target the most-common shapes for that skill.  Keep them short — one user-message-style fragment each, no agent-side framing.  Drop "TRIGGER WORDS"; keep the "MUST load before {condition}" tail because it's the trigger for the pre-action check, not vocabulary.
+
+*How many examples?*  Default is two.  Use three when the skill body teaches multiple distinct request shapes that no single example pair can span (e.g. =pdf= teaches orient / read-range / find — three distinct verbs the model has to recognize, settled during the pdf pilot's reviewer pass).  Don't pad to two when one shape covers the skill, and don't expand past three — the cost of a token-bloated description on every turn outweighs the gain from a fourth example.
 
 Pilot draft (=pdf=):
 
