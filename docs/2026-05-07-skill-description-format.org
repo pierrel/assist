@@ -1,0 +1,70 @@
+#+TITLE: Skill description format — TRIGGER WORDS → short examples
+#+DATE: 2026-05-07
+
+* Status
+Design.  Migration plan, no code yet.  Pilot on =pdf=, then =calculate=, =dev=, =org-format=.  Single feature branch off =main=, one PR built up skill-by-skill.
+
+* Problem
+
+All four shipped skills (=calculate=, =dev=, =org-format=, =pdf=) use the same description shape inherited from the original migration:
+
+#+begin_src
+{topical summary}.  TRIGGER WORDS — w1, w2, w3, ...  MUST load before {condition}.
+#+end_src
+
+The keyword list is what the small model is supposed to scan against the user's message (per =SmallModelSkillsMiddleware='s pre-action check, see =assist/middleware/skills_middleware.py:52=).  Two known failure modes:
+
+1. *Vocabulary mismatch on implicit mentions.*  The user says "what does the manual say about Q3" — no listed trigger word fires unless we exhaustively listed every synonym.  We can't.
+2. *List length pressure.*  The =pdf= description already lists 13 trigger words to cover obvious synonyms.  =dev= has 17.  Each new skill adds the same kind of vocabulary inflation, and the listing is loaded on every turn.
+
+* Hypothesis
+
+A short concrete example — a user-message-shaped sentence — pattern-matches better than a flat keyword list, because the small model is an autoregressive next-token predictor that recognizes phrase shape, not just vocabulary tokens.  Two examples covering different request shapes (orient vs. read; lookup vs. write) generalize further than fifteen synonyms of the same noun.
+
+This is a hypothesis.  The deliverable is the eval data confirming or rejecting it per skill.
+
+* Proposed format
+
+#+begin_src
+{topical summary, one sentence}.  EXAMPLES — "{example user message}"; "{example user message}".  MUST load before {condition}.
+#+end_src
+
+Two examples target the most-common implicit-mention shapes for that skill.  Keep them short — one user-message-style fragment each, no agent-side framing.  Drop "TRIGGER WORDS"; keep the "MUST load before {condition}" tail because it's the trigger for the pre-action check, not vocabulary.
+
+Pilot draft (=pdf=):
+
+#+begin_src
+Reading PDF files via shell tools (pdfinfo, pdftotext) inside the sandbox.  EXAMPLES — "what does the treatment guide say about dosage"; "summarize page 12 of report.pdf".  MUST load before answering any question about a .pdf file in the workspace.
+#+end_src
+
+Tradeoffs:
+- *Token cost per turn.*  Two short examples (~20 words) replace ~13 keywords (~13 words).  Modest growth.  Multiplied across four skills it's ~30 extra words in the per-turn preamble.  Acceptable; will measure exactly during pilot.
+- *Choosing examples.*  Bad examples bias the model toward narrow request shapes.  Pick examples that cover the spectrum of how users phrase intent for that skill (orient vs. read for =pdf=; explicit-number vs. compute-this-for-me for =calculate=).
+- *Loss of explicit keyword anchor.*  Some users will type the exact word ("PDF", "dosage", "compute") — examples lose direct lexical match.  Mitigation: pick examples that include the natural noun ("PDF", ".pdf") so common explicit mentions still hit lexically.
+
+* Eval cadence
+
+Per CLAUDE.md.  For each skill:
+
+1. *Baseline N=3* on the existing TRIGGER format.  Records the floor before the change.
+2. *Post-impl N=3* on the new EXAMPLES format.  If load-rate or pass-rate drops, redesign the examples — don't scale to N=5 on a regression.
+3. *Post-review N=5* after reviewer findings are addressed.
+4. *Stability N=10* — skip unless N=5 shows instability (per CLAUDE.md the skip is allowed when the wall-clock cost outweighs the gain).
+
+Eval-window rule: avoid 23:00–03:00 local (nightly cron, see saved =reference_nightly_eval_window=).
+
+* Rollout
+
+One skill at a time on a single branch (=skill-description-format-migration= or similar, off =main=).  Each skill goes through the full design → impl → reviewer → eval loop.  Build commits up on the branch as we go; PR opens after all four are migrated and stable.
+
+Order:
+1. =pdf= — fresh evals, smallest description, low blast radius.  Pilot.
+2. =calculate= — well-covered eval suite (=test_calculate_skill.py=); precise pass/fail.
+3. =org-format= — overlaps with roadmap L86 ("earn-its-keep test").  Decide during the migration whether to fold the harder-eval work in or split it into a follow-up.
+4. =dev= — largest description, loaded most often, highest blast radius.  Save for last so the format is fully settled by the time we touch it.
+
+* Out of scope
+
+- Rewriting skill *bodies*.  This migration is description-only; the body stays as-is.
+- Adding new skills.
+- Changing =SmallModelSkillsMiddleware= or its preamble.  If the new format suggests a preamble tweak (e.g. teaching "scan against examples, not just keywords"), that's a follow-up.
