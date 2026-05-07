@@ -117,7 +117,10 @@ def render_index() -> str:
           .del-btn:hover {{ color: #c00; background: #fee; }}
           .del-btn:active {{ background: #fdd; }}
           a:active, a:focus {{ outline: none; }}
-          .btn {{ padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 16px; cursor: pointer; touch-action: manipulation; }}
+          /* inline-flex so the same .btn class works on both <button>
+             and <a> (e.g., the Evals link in the topbar): the 44 px
+             min-height needs flex centering or the text floats up. */
+          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; color: inherit; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
           .new-thread-form {{ margin-bottom: 1.5rem; padding: 1rem; background: #f9f9f9; border-radius: 8px; border: 1px solid #ddd; }}
           /* font-size: 16px (not 1rem) explicitly prevents iOS Safari from
              auto-zooming on focus.  Anything below 16px triggers the zoom. */
@@ -135,7 +138,7 @@ def render_index() -> str:
         <div class="container">
           <div class="topbar">
             <h1 style="font-size:1.4rem; margin:0">Assist Web</h1>
-            <a href="/evals" class="btn" style="font-size:.9rem; padding:.4rem .8rem">Evals</a>
+            <a href="/evals" class="btn">Evals</a>
           </div>
 
           <div class="new-thread-form">
@@ -294,7 +297,10 @@ def render_thread(
           :root {{ --pad: 1rem; }}
           body {{ font-family: sans-serif; margin: 0; -webkit-tap-highlight-color: rgba(0,0,0,0.05); }}
           .container {{ max-width: 800px; margin: 0 auto; padding: var(--pad); }}
-          .nav a {{ display: inline-block; padding: .6rem .8rem; min-height: 44px; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
+          /* inline-flex centers the back-link text vertically inside
+             the 44 px min-height; inline-block leaves the text floating
+             at the top of the box. */
+          .nav a {{ display: inline-flex; align-items: center; padding: .6rem .8rem; min-height: 44px; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
           .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
           .msg.user {{ background: #e6f3ff; border: 1px solid #b5dbff; }}
           .msg.assistant {{ background: #f6f6f6; border: 1px solid #ddd; }}
@@ -304,7 +310,7 @@ def render_thread(
              below 16px (including 0.95rem) triggers the zoom. */
           form textarea {{ width: 100%; min-height: 6rem; height: 24vh; box-sizing: border-box; padding: .6rem; font-family: inherit; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }}
           form {{ margin-top: 1rem; }}
-          .btn {{ padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; font-size: 16px; cursor: pointer; touch-action: manipulation; }}
+          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; color: inherit; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
           .btn-secondary {{ background: #ddd; }}
           .success-msg {{ background: #d4edda; border: 1px solid #c3e6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #155724; }}
           .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); }}
