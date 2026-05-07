@@ -1,10 +1,6 @@
 FROM archlinux:base
 
-# Update system and install essentials.  poppler ships pdftotext +
-# pdfinfo, which the agent invokes via execute() when the pdf skill
-# is loaded.  Sandbox image rebuild is required (`make
-# deploy-sandbox-build`) after any change to this list before the
-# new packages are reachable in fresh containers.
+# Update system and install essentials
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm \
         python \
@@ -15,6 +11,7 @@ RUN pacman -Syu --noconfirm && \
         findutils \
         bash \
 	emacs \
+        # for pdftotext, supporting the pdf skill
         poppler \
     && pacman -Scc --noconfirm
 
