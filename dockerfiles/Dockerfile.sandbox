@@ -13,12 +13,13 @@ RUN pacman -Syu --noconfirm && \
 	emacs \
     && pacman -Scc --noconfirm
 
-# poppler ships pdftotext + pdfinfo for the read_pdf tool.  Separate
-# RUN layer so the layer above stays cache-reusable across PDF-related
-# changes; pulls poppler (~30 MB) plus cairo/fontconfig/freetype
-# (~80 MB).  Sandbox image rebuild is required (`make
-# deploy-sandbox-build`) before the tool works in any thread that
-# boots a fresh container.
+# poppler ships pdftotext + pdfinfo, used by the agent via execute()
+# when the pdf skill is loaded.  Separate RUN layer so the layer
+# above stays cache-reusable across PDF-related changes; pulls
+# poppler (~30 MB) plus cairo/fontconfig/freetype (~80 MB).
+# Sandbox image rebuild is required (`make deploy-sandbox-build`)
+# before pdftotext is reachable in any thread that boots a fresh
+# container.
 #
 # pacman -Syy refreshes the package DB before installing — Arch
 # mirrors rotate package versions frequently, so a layer rebuilt
