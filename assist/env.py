@@ -4,6 +4,37 @@ from __future__ import annotations
 import os
 
 
+def env_float(name: str, default: float) -> float:
+    """Read a float-valued env var with silent fallback on missing/invalid.
+
+    Used for tuning knobs in ``.deploy.env``: a typo in the value
+    should not hard-fail every thread on first model build with a
+    bare ``ValueError``.  The default wins on both unset and
+    unparseable values.
+    """
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def env_int(name: str, default: int) -> int:
+    """Read an int-valued env var with silent fallback on missing/invalid.
+
+    See :func:`env_float` for the rationale.
+    """
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def load_dev_env() -> None:
     """Load ``.dev.env`` from the project root if it exists.
 
