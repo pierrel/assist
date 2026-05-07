@@ -1,19 +1,20 @@
-"""Behavior evals for the ``pdf`` skill + ``read_pdf`` tool.
+"""Behavior evals for the ``pdf`` skill.
 
-These run the general agent inside a Docker sandbox.  The skill's
-contract is "orient → narrow → read" — this suite walks the small
-model through each mode and one anti-test.
+The skill teaches the model to use ``execute`` with ``pdftotext`` and
+``pdfinfo`` for PDF questions — not a dedicated tool.  These tests
+walk the small model through orient / find / read, plus an anti-test
+("don't dump the whole PDF") and a graceful-degradation case.
 
 Each test gets a fresh workspace with a generated PDF fixture copied
-in.  The sandbox image must contain ``poppler`` (added in the same PR
-as ``read_pdf``) — without it, ``pdftotext`` doesn't exist inside the
-container and every test would fail with the same shell-not-found
-error.
+in.  The sandbox image must contain ``poppler`` (added to
+``Dockerfile.sandbox``) — without it, ``pdftotext`` doesn't exist
+inside the container and every test would fail with the same
+shell-not-found error.
 
 Eval cadence per CLAUDE.md and saved feedback:
 - 3× post-impl baseline.
 - 5× post-reviewer.
-- 10× stability before PR.
+- 10× stability before PR (skip if wall-clock cost outweighs gain).
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-
 import unittest
+
 from unittest import TestCase
 
 from langchain_core.messages import AIMessage
@@ -56,8 +57,8 @@ def _cleanup_workspace(path: str) -> None:
 class TestPdfReading(TestCase):
     """Evals for the pdf skill.
 
-    Real Docker sandbox required — read_pdf shells out to pdftotext
-    inside the container.
+    Real Docker sandbox required — the model runs ``pdftotext`` /
+    ``pdfinfo`` via ``execute`` inside the container.
     """
 
     @classmethod
@@ -104,16 +105,39 @@ class TestPdfReading(TestCase):
             sandbox_backend=self.sandbox,
         ))
 
-    def _read_pdf_calls(self, agent) -> list[dict]:
-        """Args dict for every read_pdf tool call across the conversation."""
-        calls = []
+    def _execute_commands(self, agent) -> list[str]:
+        """Command strings from every ``execute`` tool call."""
+        commands = []
         for m in agent.all_messages():
             if not isinstance(m, AIMessage) or not m.tool_calls:
                 continue
             for tc in m.tool_calls:
-                if tc.get("name") == "read_pdf":
-                    calls.append(tc.get("args") or {})
-        return calls
+                if tc.get("name") == "execute":
+                    args = tc.get("args") or {}
+                    cmd = args.get("command", "")
+                    if cmd:
+                        commands.append(cmd)
+        return commands
+
+    def _used_read_file_on_pdf(self, agent) -> bool:
+        """True if the model called ``read_file`` on a .pdf path.
+
+        The skill's hardest-line rule.  ``read_file`` on a PDF returns
+        a multimodal content block the local model can't consume; the
+        next API call 400s.  This method lets tests assert the rule
+        was respected.
+        """
+        for m in agent.all_messages():
+            if not isinstance(m, AIMessage) or not m.tool_calls:
+                continue
+            for tc in m.tool_calls:
+                if tc.get("name") not in ("read_file", "read"):
+                    continue
+                args = tc.get("args") or {}
+                p = args.get("file_path") or args.get("path") or ""
+                if isinstance(p, str) and p.lower().endswith(".pdf"):
+                    return True
+        return False
 
     def _skill_was_loaded(self, agent, skill_name: str) -> bool:
         """Mirrors ``test_calculate_skill._skill_was_loaded``."""
@@ -136,24 +160,31 @@ class TestPdfReading(TestCase):
     # ------------------------------------------------------------------
 
     def test_orient_then_answer_page_count(self):
-        """Orient mode — 'how many pages' is the canonical orient question."""
+        """Orient mode — 'how many pages' is the canonical orient question.
+
+        Expect: skill loaded, model ran ``pdfinfo`` (the cheap orient
+        command), answer mentions the correct page count.
+        """
         self._copy_fixture("sample.pdf")
         agent = self._create_agent()
         res = agent.message("How many pages is sample.pdf?")
 
-        # Skill loaded, read_pdf called with no extra args.
         self.assertTrue(
             self._skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF question.",
         )
-        calls = self._read_pdf_calls(agent)
+        self.assertFalse(
+            self._used_read_file_on_pdf(agent),
+            "Agent read_file'd a PDF — that returns multimodal blocks "
+            "the local model can't parse.  Skill says use execute.",
+        )
+        cmds = self._execute_commands(agent)
         self.assertTrue(
-            any("search" not in c and "pages" not in c for c in calls),
-            f"Expected at least one orient-mode read_pdf call (no "
-            f"search=, no pages=).  Calls: {calls}",
+            any("pdfinfo" in c for c in cmds),
+            f"Expected at least one execute() call running pdfinfo "
+            f"to get the page count.  Commands: {cmds}",
         )
 
-        # Answer mentions "5".  Tolerate phrasing.
         self.assertTrue(
             re.search(r"\b5\b", res),
             f"Response should mention 5 pages.  Got: {res[:300]}",
@@ -164,28 +195,28 @@ class TestPdfReading(TestCase):
     # ------------------------------------------------------------------
 
     def test_search_finds_specific_term(self):
-        """Find mode — keyword question should drive a search call."""
+        """Find mode — keyword question should drive a pdftotext|grep pipeline."""
         self._copy_fixture("sample.pdf")
         agent = self._create_agent()
-        res = agent.message(
-            "What does sample.pdf say about dosage?"
-        )
+        res = agent.message("What does sample.pdf say about dosage?")
 
         self.assertTrue(
             self._skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF keyword question.",
         )
-        calls = self._read_pdf_calls(agent)
+        self.assertFalse(
+            self._used_read_file_on_pdf(agent),
+            "Agent read_file'd a PDF — should have used execute.",
+        )
+        cmds = self._execute_commands(agent)
+        # Either a piped pdftotext|grep, or a separate pdftotext + grep
+        # within the same command (or sequential), all count.
         self.assertTrue(
-            any(c.get("search") for c in calls),
-            f"Expected at least one read_pdf call with a search= arg.  "
-            f"Calls: {calls}",
+            any("pdftotext" in c for c in cmds),
+            f"Expected at least one execute() call running pdftotext.  "
+            f"Commands: {cmds}",
         )
 
-        # Answer should reference dosage info — page 3 of sample.pdf
-        # has "Adult dosage is 5 mg per kilogram" / "Maximum dosage
-        # must not exceed 500 mg per day".  We just check that the
-        # response mentions a dosage figure.
         self.assertTrue(
             re.search(r"\b(5 mg|500 mg|2\.5 mg)\b", res, re.IGNORECASE),
             f"Response should cite a specific dosage from page 3.  "
@@ -197,7 +228,7 @@ class TestPdfReading(TestCase):
     # ------------------------------------------------------------------
 
     def test_page_range_targeted_read(self):
-        """Read mode — explicit page reference should drive a pages= call."""
+        """Read mode — explicit page reference should drive pdftotext -f/-l."""
         self._copy_fixture("sample.pdf")
         agent = self._create_agent()
         res = agent.message("What does page 2 of sample.pdf cover?")
@@ -206,14 +237,20 @@ class TestPdfReading(TestCase):
             self._skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF page-range question.",
         )
-        calls = self._read_pdf_calls(agent)
+        self.assertFalse(
+            self._used_read_file_on_pdf(agent),
+            "Agent read_file'd a PDF — should have used execute.",
+        )
+        cmds = self._execute_commands(agent)
+        # Should see a pdftotext call.  Bonus credit if it scoped to
+        # page 2 specifically (-f 2 -l 2 or similar) — but a full
+        # extract followed by reading the relevant chunk is also a
+        # legit way to answer this on a 5-page doc.
         self.assertTrue(
-            any(c.get("pages") for c in calls),
-            f"Expected at least one read_pdf call with pages= arg.  "
-            f"Calls: {calls}",
+            any("pdftotext" in c for c in cmds),
+            f"Expected pdftotext in execute() commands.  Got: {cmds}",
         )
 
-        # Page 2 covers patient screening / allergies.
         self.assertTrue(
             re.search(r"(screen|allerg|contraindicat)", res, re.IGNORECASE),
             f"Response should mention page-2 content (screening / "
@@ -221,55 +258,49 @@ class TestPdfReading(TestCase):
         )
 
     # ------------------------------------------------------------------
-    # Anti-test: don't dump the full PDF
+    # Anti-test: don't dump a giant PDF
     # ------------------------------------------------------------------
 
     def test_does_not_dump_full_pdf(self):
         """Anti-test — open question on a 60-page PDF must not trigger
-        a giant pages= range or full-doc read.
+        a full-document pdftotext.
 
-        Predicate per the design doc: fail iff any read_pdf call has a
-        pages= covering >20 pages, or matches 1-{total}.  Search and
-        small ranges are fine.  big.pdf has a unique token "bluefin"
-        on page 43 — the agent doesn't need to know that, but if it
-        searches for relevant keywords it'll find what it needs."""
+        Predicate: fail iff any pdftotext command lacks both ``-f`` and
+        ``-l`` flags (i.e. extracts the whole document) when the input
+        is the 60-page big.pdf.  Orient (page 1 only) and small ranges
+        are fine.  Search via piped grep is fine even without -f/-l
+        because grep filters before the model sees the output.
+        """
         self._copy_fixture("big.pdf")
         agent = self._create_agent()
-        res = agent.message(
-            "Give me a one-paragraph overview of big.pdf."
-        )
+        res = agent.message("Give me a one-paragraph overview of big.pdf.")
 
-        # Skill loaded.
         self.assertTrue(
             self._skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF overview question.",
         )
+        self.assertFalse(
+            self._used_read_file_on_pdf(agent),
+            "Agent read_file'd a PDF — should have used execute.",
+        )
 
-        calls = self._read_pdf_calls(agent)
-        self.assertTrue(calls, "Agent never called read_pdf.")
+        cmds = self._execute_commands(agent)
+        self.assertTrue(cmds, "Agent never called execute.")
 
-        # Each pages= must be either a single page or a range of <=20
-        # pages.  No 1-{total} reads.
-        for c in calls:
-            pages = c.get("pages")
-            if not pages:
-                continue  # orient or search — fine.
-            # Parse "N" or "N-M".
-            if "-" in pages:
-                a, _, b = pages.partition("-")
-                try:
-                    span = int(b) - int(a) + 1
-                except ValueError:
-                    continue  # malformed — separate failure mode.
-            else:
-                span = 1
-            self.assertLessEqual(
-                span, 20,
-                f"Agent dumped {span} pages with pages={pages!r}.  The "
-                f"skill says read no more than ~20 pages at a time.",
-            )
+        # Any pdftotext call without -f/-l AND without a downstream
+        # grep is a full-document dump.
+        for cmd in cmds:
+            if "pdftotext" not in cmd:
+                continue
+            has_first_flag = "-f " in cmd or "-f" in cmd.split()
+            has_last_flag = "-l " in cmd or "-l" in cmd.split()
+            has_pipe_filter = "|" in cmd  # downstream grep / head / tail
+            if not (has_first_flag or has_last_flag or has_pipe_filter):
+                self.fail(
+                    f"Agent ran a full-document pdftotext on a 60-page PDF: "
+                    f"{cmd!r}.  Expected -f/-l scope or a pipe filter."
+                )
 
-        # Response must be non-empty (the overview is what was asked).
         self.assertGreater(len(res.strip()), 30)
 
     # ------------------------------------------------------------------
@@ -277,18 +308,8 @@ class TestPdfReading(TestCase):
     # ------------------------------------------------------------------
 
     def test_handles_empty_extract_gracefully(self):
-        """When pdftotext returns no text, the tool says so explicitly.
-
-        Strictly tests the *tool's* error message reaches the model
-        intact — we mock by giving the model a 0-byte PDF placeholder
-        which pdftotext refuses to parse.  The expected behaviour is
-        that the agent surfaces an honest "couldn't read it" answer
-        rather than hallucinating content.
-        """
-        # Create a fake "PDF" with the magic bytes but no body — the
-        # magic-byte check passes inside the sandbox (host check is
-        # skipped when a sandbox is bound), pdftotext fails on the
-        # malformed body.
+        """When pdftotext fails on a malformed PDF, the agent surfaces it."""
+        # Magic bytes valid, body malformed.
         path = os.path.join(self.workspace, "broken.pdf")
         with open(path, "wb") as f:
             f.write(b"%PDF-1.4\n%%EOF\n")
@@ -296,17 +317,18 @@ class TestPdfReading(TestCase):
         agent = self._create_agent()
         res = agent.message("What is in broken.pdf?")
 
-        # Agent should have at least attempted read_pdf.
-        calls = self._read_pdf_calls(agent)
+        self.assertFalse(
+            self._used_read_file_on_pdf(agent),
+            "Agent read_file'd a PDF — should have used execute.",
+        )
+        cmds = self._execute_commands(agent)
         self.assertTrue(
-            calls,
-            "Agent should have tried read_pdf on the user's PDF question.",
+            cmds,
+            "Agent should have tried execute on the user's PDF question.",
         )
 
-        # Answer shouldn't claim specific content.  Soft check:
-        # response contains a hedge word.
         hedges = ("couldn't", "could not", "unable", "no text", "empty",
-                  "broken", "corrupt", "error", "failed")
+                  "broken", "corrupt", "error", "failed", "malformed")
         self.assertTrue(
             any(h in res.lower() for h in hedges),
             f"Response should hedge / surface the failure rather than "

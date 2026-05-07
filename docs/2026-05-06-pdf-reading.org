@@ -1,8 +1,22 @@
-#+TITLE: PDF reading — extract, search, page-range
+#+TITLE: PDF reading — skill teaching ``execute`` commands
 #+DATE: 2026-05-06
 
 * Status
-Design — not yet implemented.
+Implemented (skill-only, option A).  Evals 5/5 baseline at the previous tool-based revision; full re-eval scheduled for 03:00 local to avoid the 23:00 nightly cron.
+
+* Architectural pivot — option A over the hybrid
+
+The original design (and first implementation) added a host-side =read_pdf= tool that orchestrated =sandbox.execute("pdftotext ...")= internally — a hybrid that violated the sandbox boundary.  The user pushed back: "implement a tool that works within the context of the sandbox env... it should be either 'here are the (execute) commands you can run' or the tool works outside the sandbox."
+
+That's right.  The hybrid had concrete costs:
+
+- A new =_active_sandbox= ContextVar to plumb the sandbox handle into a function that shouldn't need it.
+- A =MAX_OUTPUT_CHARS= cap from =sandbox.execute= leaked into the tool as a =truncated= flag the caller had to surface.
+- A magic-byte check that worked host-side but had to be skipped sandbox-side, papered over with a "Syntax Error: May not be a PDF" heuristic.
+- A new entry in =_READ_ONLY_TOOLS= for loop detection — a parallel mini-policy that wouldn't exist if the model just called =execute=.
+- Doesn't scale: every new file type (images, archives, audio metadata) would need its own tool with its own ContextVar dance.
+
+*Option A* — what shipped — keeps the sandbox boundary clean.  The =pdf= skill teaches the model to run =pdftotext= and =pdfinfo= via =execute= directly.  Zero new tool surface, zero ContextVar plumbing, zero new middleware exemption.  Linear scaling: images become a skill teaching =imagemagick=, archives a skill teaching =unzip=.
 
 * Problem
 
@@ -14,7 +28,23 @@ The agent cannot use PDFs today.  Three independent gaps:
 
 Past that — even if extraction works — *blasting a 200-page PDF into context wastes the budget the small model needs for reasoning*.  The roadmap entry is a bare TODO; the user's framing during this session was "if there's a big file, we should only need to extract relevant parts".  A v1 that loads everything is wrong even before the hardware concerns.
 
-* Solution
+* Solution (post-pivot)
+
+** Skill teaches three idioms — orient, find, read
+
+The =pdf= skill body teaches the small model exactly the shell commands it needs.  All three modes flow through =execute=:
+
+| Mode | Command | Use when |
+|------+---------+----------|
+| Orient | =execute('pdfinfo foo.pdf')= or =\| grep Pages= | First contact.  Page count + metadata. |
+| Find | =execute('pdftotext foo.pdf - \| grep -i -A2 -B1 "term"')= | You have a keyword. =grep= cap means context bytes stay small. |
+| Read | =execute('pdftotext -f 5 -l 10 foo.pdf -')= | You know which pages you want. |
+
+Anti-patterns called out explicitly: never =read_file('foo.pdf')= (returns multimodal block the local Qwen endpoint can't parse, next request 400s); never =cat= a PDF; don't dump the whole document.
+
+* Original solution sketch (replaced)
+
+The original design proposed a single =read_pdf(path, search=None, pages=None)= tool with three modes baked in.  Below preserved for context — all of it was deleted in the pivot.
 
 ** One tool, three modes — orient, find, read
 
@@ -125,20 +155,17 @@ RUN pacman -S --noconfirm poppler && pacman -Scc --noconfirm
 
 First sandbox-build after this change rebuilds the new layer; layers above stay cached.  =make deploy-sandbox-build= must run on the deploy host before the new tool works in any thread that boots a fresh container.
 
-* Files to touch
+* Files to touch (post-pivot)
 
 | File | Change |
 |------+--------|
-| =dockerfiles/Dockerfile.sandbox= | Add =poppler= as a separate =RUN= layer (see above). |
-| =assist/tools.py= | Add =read_pdf(path, search=None, pages=None)=.  Reads via the active sandbox handle. |
-| =assist/sandbox.py= or =sandbox_manager.py= | Add a =_active_sandbox= ContextVar (or equivalent) so =read_pdf= can find the per-turn sandbox; set it in the existing tool-call wrap site. |
-| =assist/agent.py= | Wire =read_pdf= into *every* agent factory: =create_agent= (line 187, the general agent), the research/fact-check/research-sub paths (lines 340/355/361), and the context-agent factory (line 241).  =read_url= is currently only on the research path — that's the bug to avoid copying. |
-| =assist/middleware/loop_detection.py= | Add =read_pdf= to the special-cased tool list (line ~68 for =read_url=).  Repeated =read_pdf= calls on different page ranges or different searches of the *same* PDF are expected, not a loop. |
-| =assist/skills/pdf/SKILL.md= | New skill teaching the orient/find/read pattern. |
-| =edd/eval/test_pdf_reading.py= | 5 evals (see below). |
-| =tests/test_tools.py= (new or extend existing) | Unit tests for =read_pdf=. |
-| =tests/fixtures/pdf/= | Small generated PDF fixtures (multi-page, image-only, encrypted).  This directory does not exist yet — adding it is a minor convention call. |
+| =dockerfiles/Dockerfile.sandbox= | Add =poppler= as a separate =RUN= layer.  Still required — the model invokes =pdftotext= / =pdfinfo= via =execute= inside the sandbox. |
+| =assist/skills/pdf/SKILL.md= | New skill teaching the =execute= idioms with concrete command examples.  Includes anti-patterns (never =read_file= on a PDF) and edge cases (encrypted, image-only, malformed). |
+| =edd/eval/test_pdf_reading.py= | Five behavior evals.  Assertions inspect the model's =execute= command strings (substring match for =pdfinfo= / =pdftotext=) instead of tool-call args.  Anti-test: any =pdftotext= command without =-f=, =-l=, or a downstream pipe filter is a fail (full-document dump). |
+| =tests/fixtures/pdf/= | Three generated fixtures (=sample.pdf=, =big.pdf=, =encrypted.pdf=) + a checked-in =generate.py= that uses reportlab + pypdf (dev-only deps). |
 | =roadmap.org= | Mark =PDF reading= DONE on ship. |
+
+*No changes* to =assist/tools.py=, =assist/agent.py=, =assist/sandbox.py=, =assist/thread.py=, or =assist/middleware/loop_detection.py= — the skill-only design needs zero code outside the prompt + Dockerfile + evals.
 
 * Edge cases
 
