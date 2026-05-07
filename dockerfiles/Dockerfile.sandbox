@@ -1,6 +1,10 @@
 FROM archlinux:base
 
-# Update system and install essentials
+# Update system and install essentials.  poppler ships pdftotext +
+# pdfinfo, which the agent invokes via execute() when the pdf skill
+# is loaded.  Sandbox image rebuild is required (`make
+# deploy-sandbox-build`) after any change to this list before the
+# new packages are reachable in fresh containers.
 RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm \
         python \
@@ -11,21 +15,8 @@ RUN pacman -Syu --noconfirm && \
         findutils \
         bash \
 	emacs \
+        poppler \
     && pacman -Scc --noconfirm
-
-# poppler ships pdftotext + pdfinfo, used by the agent via execute()
-# when the pdf skill is loaded.  Separate RUN layer so the layer
-# above stays cache-reusable across PDF-related changes; pulls
-# poppler (~30 MB) plus cairo/fontconfig/freetype (~80 MB).
-# Sandbox image rebuild is required (`make deploy-sandbox-build`)
-# before pdftotext is reachable in any thread that boots a fresh
-# container.
-#
-# pacman -Syy refreshes the package DB before installing — Arch
-# mirrors rotate package versions frequently, so a layer rebuilt
-# weeks after the upstream `pacman -Syu` will hit 404 on stale
-# package URLs without this.
-RUN pacman -Syy --noconfirm && pacman -S --noconfirm poppler && pacman -Scc --noconfirm
 
 # Create workspace directory
 RUN mkdir -p /workspace
