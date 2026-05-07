@@ -38,6 +38,11 @@ class _FakeResp:
     truncated: bool = False
 
 
+def _scripted(needle: str, code: int, out: str, truncated: bool = False):
+    """Build a script entry with optional truncation flag."""
+    return (needle, code, out, truncated)
+
+
 class _FakeSandbox:
     """Minimal ``execute`` stub that scripts pdfinfo/pdftotext output.
 
@@ -48,16 +53,25 @@ class _FakeSandbox:
     commands raise so test failures are obvious.
     """
 
-    def __init__(self, script: list[tuple[str, int, str]]):
-        self._script = list(script)
+    def __init__(self, script):
+        # Accept legacy 3-tuples (needle, code, out) as well as the
+        # newer 4-tuples that include a ``truncated`` flag.
+        normalised = []
+        for entry in script:
+            if len(entry) == 3:
+                needle, code, out = entry
+                normalised.append((needle, code, out, False))
+            else:
+                normalised.append(entry)
+        self._script = normalised
         self.calls: list[str] = []
 
     def execute(self, command: str):
         self.calls.append(command)
-        for i, (needle, code, out) in enumerate(self._script):
+        for i, (needle, code, out, truncated) in enumerate(self._script):
             if needle in command:
                 self._script.pop(i)
-                return _FakeResp(output=out, exit_code=code)
+                return _FakeResp(output=out, exit_code=code, truncated=truncated)
         raise AssertionError(f"unscripted sandbox command: {command!r}")
 
 
@@ -236,8 +250,11 @@ class TestReadPdfErrorPaths:
         assert "password-protected" in out
 
     def test_pdftotext_failure_returns_short_error(self):
+        # An unfamiliar non-Syntax-Error blowup that doesn't match the
+        # non-PDF or encrypted heuristics should fall through to the
+        # generic "pdftotext failed" message with the raw output.
         sb, token = _with_sandbox([
-            ("pdftotext -f 1 -l 1", 1, "Syntax Error: PDF file is damaged\n"),
+            ("pdftotext -f 1 -l 1", 1, "Internal Error: PDF file is damaged\n"),
         ])
         try:
             out = read_pdf("bad.pdf", pages="1")
@@ -245,6 +262,42 @@ class TestReadPdfErrorPaths:
             _release(token)
         assert out.startswith("Error: pdftotext failed:")
         assert "PDF file is damaged" in out
+
+    def test_non_pdf_error_inside_sandbox_rewritten_to_friendly(self):
+        # Magic-byte check skips when a sandbox is bound (path is
+        # container-relative), so ``pdftotext`` catches the not-a-PDF
+        # case.  Its raw ``Syntax Error: May not be a PDF file ...``
+        # gets rewritten to the design's promised friendly message.
+        sb, token = _with_sandbox([
+            ("pdftotext -f 1 -l 1", 1,
+             "Syntax Error: May not be a PDF file (continuing anyway)\n"),
+        ])
+        try:
+            out = read_pdf("notes.txt")
+        finally:
+            _release(token)
+        assert out == "Error: not a PDF: notes.txt"
+
+    def test_search_truncation_appends_warning(self):
+        sb, token = _with_sandbox([
+            ("pdftotext", 0, "page1 has term\n\x0cpage2 has term\n", True),
+        ])
+        try:
+            out = read_pdf("huge.pdf", search="term")
+        finally:
+            _release(token)
+        assert "Found 'term'" in out
+        assert "truncated at the sandbox output cap" in out
+
+    def test_search_no_truncation_no_warning(self):
+        sb, token = _with_sandbox([
+            ("pdftotext", 0, "page1 has term\n\x0cpage2 nothing\n", False),
+        ])
+        try:
+            out = read_pdf("small.pdf", search="term")
+        finally:
+            _release(token)
+        assert "truncated at the sandbox output cap" not in out
 
 
 # --- Host fallback ------------------------------------------------------
@@ -282,6 +335,21 @@ class TestReadPdfHostFallback:
         out = read_pdf(SAMPLE_PDF, pages="3")
         assert "=== PAGE 3 ===" in out
         assert "Adult dosage" in out
+
+    def test_encrypted_real_fixture(self):
+        encrypted = os.path.join(FIXTURE_DIR, "encrypted.pdf")
+        if not os.path.exists(encrypted):
+            pytest.skip("encrypted.pdf fixture missing — regenerate.")
+        out = read_pdf(encrypted)
+        assert "password-protected" in out
+
+    def test_pages_upper_bound_silently_caps(self):
+        # Design promise: pages=50-100 against a 5-page PDF doesn't
+        # error; pdftotext caps silently at the document's actual end.
+        out = read_pdf(SAMPLE_PDF, pages="3-100")
+        assert "=== PAGE 3 ===" in out
+        # No "Error:" prefix.
+        assert not out.startswith("Error:")
 
 
 class TestReadPdfMagicByteCheck:

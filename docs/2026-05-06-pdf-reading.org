@@ -208,6 +208,13 @@ Cadence per CLAUDE.md and saved feedback:
 
 * Reviewer findings folded in
 
+** Implementation reviewer (post-coding)
+- *IMPORTANT:* Sandbox-mode non-PDF returned a raw =Syntax Error: May not be a PDF file= because =_check_pdf_magic= skips when a sandbox is bound.  Added =_looks_like_non_pdf_error= heuristic in the three pdftotext-failure handlers — non-PDFs now surface the design's promised =Error: not a PDF: <path>= regardless of which side the check ran on.
+- *IMPORTANT:* Find mode runs =pdftotext= on the whole document, but the sandbox caps =execute= output at ~100 KB; a 200-page PDF would silently lose its tail.  =_run_in_sandbox_or_host= now propagates =ExecuteResponse.truncated= as a third tuple element; find mode appends a clear =Note: PDF text was truncated...= warning when set, with a hint to narrow via =pages=.  Skill's "Big PDFs and the search cap" section reinforces this for the model.
+- *NIT:* Raw error capping — =out.strip()[:200]= ran =.strip()= on the full combined stdout/stderr first, allocating a copy on a runaway error.  Fixed to =out[:1000].strip()[:200]=.
+- *NIT:* Added two real-fixture tests in =TestReadPdfHostFallback= (encrypted PDF, out-of-range upper bound) that the design called out but the original test list missed.
+
+** Architect (pre-coding)
 The architect (=Plan= agent) reviewed an earlier draft and surfaced three blockers + several IMPORTANTs.  Captured here so the retro reads cleanly:
 
 - *BLOCKER:* Wrong tool-registration call sites.  =read_url= is only on the research-agent path; the general agent (=create_agent=, what users actually talk to) takes no =tools=.  Folded into Files-to-touch — =read_pdf= goes on every factory.
