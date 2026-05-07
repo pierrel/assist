@@ -1,0 +1,221 @@
+#+TITLE: PDF reading — extract, search, page-range
+#+DATE: 2026-05-06
+
+* Status
+Design — not yet implemented.
+
+* Problem
+
+The agent cannot use PDFs today.  Three independent gaps:
+
+1. *Sandbox has no PDF tools.*  =dockerfiles/Dockerfile.sandbox= installs Python, pip, git, grep, findutils, bash, and emacs.  No =pdftotext=, no =poppler=.  Even if the model wanted to extract text via shell, the binary isn't there.
+2. *=read_file= returns base64 on binaries.*  deepagents' sandbox backend detects UTF-8 decode failures and base64-encodes the result.  =read_file('foo.pdf')= gives the model a useless blob.
+3. *No PDF skill or tool.*  Nothing tells the model "this is how you read a PDF".
+
+Past that — even if extraction works — *blasting a 200-page PDF into context wastes the budget the small model needs for reasoning*.  The roadmap entry is a bare TODO; the user's framing during this session was "if there's a big file, we should only need to extract relevant parts".  A v1 that loads everything is wrong even before the hardware concerns.
+
+* Solution
+
+** One tool, three modes — orient, find, read
+
+Add a single =read_pdf= tool.  All args optional except =path=.  The three useful arg combinations match how a person reads a big PDF:
+
+| Mode | Args | Returns |
+|------+------+---------|
+| Orient | =read_pdf("foo.pdf")= | =PDF: foo.pdf | 47 pages | 21 KB= header + first page text (~500 chars).  Tells the model "what am I looking at?". |
+| Find  | =read_pdf("foo.pdf", search="dosage")= | Up to 5 matching pages with 3-line context per hit, page numbers in =[3, 17, 45]= form.  Grep-on-PDF. |
+| Read  | =read_pdf("foo.pdf", pages="5-10")= | Full text of pages 5..10 with inline =\=== PAGE N \===\= markers. |
+
+A small model already understands the existing =read_file(path, offset, limit)= shape; this is the same idea adapted to PDFs.
+
+*Combination rules.*  =search + pages= is rejected with a clear error in v1 (don't overload).  Either argument missing produces orient mode + missing-arg.
+
+*Page range syntax.*  =pages= accepts a single page (=pages="5"=) or a single inclusive range (=pages="5-10"=).  Comma lists (=pages="5,7,12"=) deferred to v2 — clearer to the small model.
+
+*Output format examples.*
+
+Orient:
+#+begin_example
+PDF: workspace/treatment-guide.pdf | 47 pages | 21 KB
+
+=== PAGE 1 ===
+[first page text up to ~500 chars]
+#+end_example
+
+Find:
+#+begin_example
+Found 'dosage' on pages [3, 17, 45] (3 hits, capped at 5)
+
+=== PAGE 3 (around match) ===
+... administered dosage of 5 mg/kg ...
+
+=== PAGE 17 (around match) ===
+... maximum dosage exceeded ...
+#+end_example
+
+Read:
+#+begin_example
+=== PAGE 5 ===
+[full text of page 5]
+
+=== PAGE 6 ===
+[full text of page 6]
+...
+#+end_example
+
+The =\=== PAGE N \===\= markers are stable across all three modes so the model can grep / split / reference pages downstream.
+
+** Backend: shell out to =pdftotext= /inside the sandbox/
+
+Use =poppler= (Arch's name for poppler-utils) in the sandbox.  Two binaries: =pdftotext= for text and =pdfinfo= for the page count in orient mode.  =pdftotext -f N -l M file.pdf -= writes pages N..M to stdout — fast, battle-tested, no Python dependency.
+
+*Critical:* =pdftotext= must run /inside the sandbox container/, not host-side.  Unlike =read_url= (which is just an outbound HTTP call from the host Python process), =read_pdf= operates on files the model wrote to its sandbox workspace.  Those files live at =/workspace/foo.pdf= /inside/ the container — bind-mounted to the host, but with container-uid ownership.  A naive host-side =subprocess.run(["pdftotext", path])= would either resolve the wrong path (the model passes =foo.pdf= or =/workspace/foo.pdf=, not the host bind path) or hit permission errors on root-owned eval workspaces.
+
+The implementation:
+
+#+begin_src python
+def read_pdf(path: str, search: str | None = None, pages: str | None = None) -> str:
+    sandbox = _get_active_sandbox()  # contextvar set per turn
+    if sandbox is not None:
+        return sandbox.execute(_build_pdftotext_command(path, search, pages))
+    # Host fallback for evals that run without a sandbox.
+    return subprocess.run(...).stdout
+#+end_src
+
+Plumbing the sandbox handle into a tool function needs a contextvar (the agent runs each tool in a thread that doesn't otherwise know which sandbox it's bound to).  See =assist/sandbox_manager.py= for how to obtain one; if no clean hook exists, add a thin =_active_sandbox= ContextVar set in the agent middleware that already wraps tool calls.
+
+Trade-offs considered:
+- =pypdf= (pure Python).  No Dockerfile change but slower, weaker layout handling, and we'd need to add it to the sandbox's pip install path.  Reject — adding one =pacman -S poppler= line is cleaner than maintaining a Python PDF parser.
+- =pdfplumber= / =pymupdf=.  Same reasoning as =pypdf=.
+- *Host-side =pdftotext= via bind-mount path translation.*  Possible (translate =/workspace/foo.pdf= → =<thread_dir>/workspace/foo.pdf=) but brittle: ownership/permission mismatches in eval setups (see =test_calculate_skill.py='s =_cleanup_workspace= chmod dance) make host-side reads of sandbox-written files unreliable.  Reject.
+
+** Skill: =pdf=
+
+New =assist/skills/pdf/SKILL.md= with the orient/find/read pattern as the headline rule.  Auto-discovered by =SmallModelSkillsMiddleware= via its presence in =assist/skills/= — no separate registration step (matches =calculate=, =org-format=, =dev=).
+
+*Trigger words.*  =PDF=, =.pdf=, =page=, =document=, =extract=, plus common synonyms users actually say: =manual=, =report=, =paper=, =brochure=, =handbook=, =whitepaper=, =RFP=, =spec sheet=.  The skill also fires when a workspace listing reveals a =.pdf= file regardless of phrasing.
+
+Body teaches:
+
+- *Orient first* on any unknown PDF — page count + page 1 give the model enough to plan.
+- *Use =search= for keyword lookup*, not full extract.  Better than reading every page.
+- *Use =pages= for known sections* (after orient or search).
+- *Don't paste the full PDF into a follow-up message* — reference page numbers.
+- *After eviction:* if =read_pdf='s output got replaced by an =/large_tool_results/...= preview (because the result was big), re-call =read_pdf= with a narrower =pages= or a =search=.  Do *not* =read_file= the eviction blob — it'll just round-trip the same big text and re-evict.
+
+** Caching strategy: none in v1
+
+Each =read_pdf= call shells out fresh.  =pdftotext= on a 50-page PDF runs in ~50 ms locally; even in a cold sandbox the cost is dominated by container/process startup.  Add caching only if evals show extraction time hurting agent latency.
+
+** Sandbox change
+
+=dockerfiles/Dockerfile.sandbox= — add =poppler= as a /separate/ =RUN= layer so the existing layer cache stays valid for incremental rebuilds:
+
+#+begin_src dockerfile
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+        python python-pip base-devel git grep findutils bash emacs \
+    && pacman -Scc --noconfirm
+
+# Separate layer so the layer above is cache-reusable across PDF feature
+# changes; pulls poppler (≈30 MB) plus cairo/fontconfig/freetype deps
+# (≈80 MB).
+RUN pacman -S --noconfirm poppler && pacman -Scc --noconfirm
+#+end_src
+
+First sandbox-build after this change rebuilds the new layer; layers above stay cached.  =make deploy-sandbox-build= must run on the deploy host before the new tool works in any thread that boots a fresh container.
+
+* Files to touch
+
+| File | Change |
+|------+--------|
+| =dockerfiles/Dockerfile.sandbox= | Add =poppler= as a separate =RUN= layer (see above). |
+| =assist/tools.py= | Add =read_pdf(path, search=None, pages=None)=.  Reads via the active sandbox handle. |
+| =assist/sandbox.py= or =sandbox_manager.py= | Add a =_active_sandbox= ContextVar (or equivalent) so =read_pdf= can find the per-turn sandbox; set it in the existing tool-call wrap site. |
+| =assist/agent.py= | Wire =read_pdf= into *every* agent factory: =create_agent= (line 187, the general agent), the research/fact-check/research-sub paths (lines 340/355/361), and the context-agent factory (line 241).  =read_url= is currently only on the research path — that's the bug to avoid copying. |
+| =assist/middleware/loop_detection.py= | Add =read_pdf= to the special-cased tool list (line ~68 for =read_url=).  Repeated =read_pdf= calls on different page ranges or different searches of the *same* PDF are expected, not a loop. |
+| =assist/skills/pdf/SKILL.md= | New skill teaching the orient/find/read pattern. |
+| =edd/eval/test_pdf_reading.py= | 5 evals (see below). |
+| =tests/test_tools.py= (new or extend existing) | Unit tests for =read_pdf=. |
+| =tests/fixtures/pdf/= | Small generated PDF fixtures (multi-page, image-only, encrypted).  This directory does not exist yet — adding it is a minor convention call. |
+| =roadmap.org= | Mark =PDF reading= DONE on ship. |
+
+* Edge cases
+
+- *Encrypted PDF.*  =pdftotext= exits non-zero with "Error: Incorrect password".  Tool catches and returns a clear "PDF appears to be password-protected — cannot extract" message.
+- *Image-only PDF (scanned).*  =pdftotext= produces empty output per page.  Detect "no extractable text on N pages — may be image-based; OCR not currently supported" and return that as the orient result.
+- *Missing file.*  Return =Error: file not found: foo.pdf=.  No traceback to the model.
+- *Wrong file type.*  Magic-byte check =b'%PDF-'= at the start.  Refuse non-PDFs with =Error: not a PDF= rather than letting =pdftotext= error.
+- *Out-of-range pages.*  =pages="50-100"= against a 47-page PDF.  =pdftotext -l 100= silently caps at 47, which is fine — return whatever it produced.  =pages="100-50"= (inverted) → reject with clear error.
+- *Very wide pages (one giant block).*  Default =pdftotext= reflows; that's right for prose.  Add a =layout=True= arg only if eval failures show table data garbled.
+
+* Test coverage
+
+** Unit (=tests/test_tools.py=)
+- =test_read_pdf_orient_returns_metadata=: extract on a fixture PDF, assert page count + first page text appear.
+- =test_read_pdf_search_returns_matching_pages=: search for a known token, assert correct page numbers.
+- =test_read_pdf_pages_returns_only_those_pages=: assert ==== PAGE N ===\= markers match requested range and no other pages appear.
+- =test_read_pdf_missing_file_returns_error=: clean error string.
+- =test_read_pdf_rejects_non_pdf=: text file with =.pdf= extension; magic-byte check fires.
+- =test_read_pdf_rejects_search_with_pages=: combination check.
+- =test_read_pdf_handles_encrypted_pdf=: encrypted fixture → password-protected error.
+
+Fixtures: small generated PDFs in =tests/fixtures/=.  Generate with reportlab or check in.  Check-in is simpler — keeps the test suite hermetic.
+
+** Behavior evals (=edd/eval/test_pdf_reading.py=)
+Five tests, mirroring the small-model behavior the skill is supposed to drive:
+
+1. =test_orient_then_answer_page_count= — User asks "how many pages is treatment-guide.pdf?" with a fixture PDF in the workspace.  Asserts: =read_pdf= called with no =search= or =pages=, response includes correct count.
+2. =test_search_finds_specific_term= — User asks "what does the document say about dosage?".  Asserts: =read_pdf= called with =search=, the answer cites a page number from the hits.
+3. =test_page_range_targeted_read= — User asks for "the first three pages of foo.pdf".  Asserts: =read_pdf= called with =pages="1-3"=.
+4. =test_does_not_dump_full_pdf= — User asks an open question about a long PDF (≥50 pages).  Anti-test predicate: *fail iff* any =read_pdf= call has a =pages= range covering more than 20 pages, or a =pages= range that matches the full document (=1-{total}=).  Calls with no =pages= (orient mode) and small ranges or =search= are explicitly OK — they're the encouraged path.  Distinguishing the two needs the harness's existing tool-call inspection (see =test_calculate_skill.py:138-150= for the =all_messages()= pattern).
+5. =test_handles_image_only_pdf= — Fixture is a scanned PDF with no extractable text.  Assert the agent surfaces the "image-based, OCR not available" message rather than hallucinating an answer.
+
+Cadence per CLAUDE.md and saved feedback:
+- 3× post-impl baseline.
+- 5× post-reviewer.
+- 10× stability before PR.
+
+* Trade-offs and decisions
+
+- *One tool with mode-based args vs three tools.*  One tool.  The three modes share path parsing, magic-byte check, error handling — splitting them would duplicate that.  Small model handles a single tool with two optional args fine; the docstring + skill spell out the modes.
+- *Shell out vs pure Python.*  Shell out to =pdftotext=.  Battle-tested, fast, no Python dep churn.  Costs one =pacman= line in the Dockerfile; gains a stable extractor.
+- *No URL handling for PDFs in v1.*  =read_url= returning garbled text for PDF URLs is a separate fix — flagged but deferred.  Once =read_pdf= is in, the natural follow-up is "if =read_url= sees =Content-Type: application/pdf=, download to /tmp and run =read_pdf= on it".
+- *No OCR.*  Image-only PDFs return a clear error.  Adding tesseract is a substantial sandbox-image change and a different skill — out of scope.
+- *No semantic search in v1.*  Keyword =search= is enough for "find the section about dosage".  If evals show it misses, layer embeddings later.
+- *No caching.*  =pdftotext= is fast; if profiling shows it's a hotspot, sidecar a =.txt= next to the PDF.
+
+* Risks
+
+- *Sandbox image rebuild required to ship.*  =make deploy-sandbox-build= must run on the deploy host before the new tool works in any thread that boots a fresh container.  Existing in-flight containers stay on the old image until restart — flag in the deploy notes.
+- *Small model picks orient mode when search would be better.*  Mitigation: the skill's first headline rule is "search before reading whole pages".  Eval =test_does_not_dump_full_pdf= catches drift.
+- *=pdftotext= layout glitches on tables.*  Default reflow can mash columns together.  Acceptable for v1 prose use; add =layout= arg if a real eval hits this.
+
+* Out of scope
+
+- =read_url= → PDF detection (follow-up after v1).
+- OCR for image-only / scanned PDFs.
+- Form-field extraction (=pdftotext -form= / =pdftk=).
+- Vector / semantic search.
+- PDF generation / writing.
+- Multi-PDF cross-search ("find this across every PDF in the workspace").
+
+* Follow-ups (when v1 ships)
+
+- Update =read_url= to detect PDF =Content-Type= and download → =read_pdf=.
+- Reconsider OCR if eval data shows scanned PDFs are common in user workflows.
+- Sidecar =.pdf.txt= cache if extraction shows up in latency profiles.
+
+* Reviewer findings folded in
+
+The architect (=Plan= agent) reviewed an earlier draft and surfaced three blockers + several IMPORTANTs.  Captured here so the retro reads cleanly:
+
+- *BLOCKER:* Wrong tool-registration call sites.  =read_url= is only on the research-agent path; the general agent (=create_agent=, what users actually talk to) takes no =tools=.  Folded into Files-to-touch — =read_pdf= goes on every factory.
+- *BLOCKER:* Sandbox-vs-host execution.  PDFs live inside the container; =pdftotext= must run there too.  Folded into the Backend section with the sandbox-execute pattern + ContextVar plumbing note.
+- *BLOCKER:* Anti-test predicate ambiguity.  "Did not dump full PDF" was tautological because v1 has no all-pages mode.  Tightened in test §4 to "fail iff =pages= range > 20 pages or matches =1-{total}=".
+- *IMPORTANT:* Skill triggers missed common synonyms.  Added =manual=, =report=, =paper=, =brochure=, =handbook=, =whitepaper=, =RFP=, =spec sheet=.
+- *IMPORTANT:* Eviction interaction.  Big =read_pdf= results get redirected to =/large_tool_results/...=.  Added a skill rule: re-call =read_pdf= with a narrower scope, do not =read_file= the eviction blob.
+- *IMPORTANT:* =pdfinfo= needed for orient page count (=pdftotext= alone doesn't expose it).  Both binaries ship with =poppler=.
+- *IMPORTANT:* Loop-detection middleware would treat repeated =read_pdf= calls as a loop.  Added to Files-to-touch.
+- *IMPORTANT:* Dockerfile layer cache.  Putting =poppler= on a separate =RUN= preserves cache for upstream layers; called out in Sandbox change.
+- *NIT:* =pages="5-10"= shape is inconsistent with =read_file='s =offset/limit=.  Acknowledged in the docstring; not changing.

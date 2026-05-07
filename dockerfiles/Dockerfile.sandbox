@@ -13,6 +13,19 @@ RUN pacman -Syu --noconfirm && \
 	emacs \
     && pacman -Scc --noconfirm
 
+# poppler ships pdftotext + pdfinfo for the read_pdf tool.  Separate
+# RUN layer so the layer above stays cache-reusable across PDF-related
+# changes; pulls poppler (~30 MB) plus cairo/fontconfig/freetype
+# (~80 MB).  Sandbox image rebuild is required (`make
+# deploy-sandbox-build`) before the tool works in any thread that
+# boots a fresh container.
+#
+# pacman -Syy refreshes the package DB before installing — Arch
+# mirrors rotate package versions frequently, so a layer rebuilt
+# weeks after the upstream `pacman -Syu` will hit 404 on stale
+# package URLs without this.
+RUN pacman -Syy --noconfirm && pacman -S --noconfirm poppler && pacman -Scc --noconfirm
+
 # Create workspace directory
 RUN mkdir -p /workspace
 WORKDIR /workspace
