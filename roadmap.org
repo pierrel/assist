@@ -98,6 +98,8 @@ Today's =test_org_format_skill.py= passes mainly because the small model can inf
 Documented as an open question in the skills doc and partly overlaps with the =write_file= recoverability item above.  The deepagents memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content; combined with =write_file='s refuse-overwrite policy this produces a no-clean-exit loop.  Either fix needs both ends to align.
 ** TODO Make more evals around skill use
 The evals should test varying levels of skill mentions (implicit vs explicit) and check whether the appropriate skill(s) were loaded.
+** TODO Migrate skill descriptions from TRIGGER WORDS to short examples
+All four skills (=calculate=, =dev=, =org-format=, =pdf=) currently use the =TRIGGER WORDS — w1, w2, ...= description format inherited from the original migration.  Hypothesis: short concrete examples in the description load better on implicit mentions than a flat keyword list, because the small model pattern-matches against shape rather than vocabulary.  Migration plan: one skill at a time on a single branch/PR, design + reviewer per skill, eval cadence 3/3/5 (skip N=10 unless instability shows up).  Pilot: =pdf=.  Per-skill load-rate evals double as the deliverable for the [[Make more evals around skill use]] item above.
 ** TODO Implement small-llm compatible memory similar to what was done with skills
 Create more extensive evals for the memory implementation.
 ** TODO README cleanup and guidance
