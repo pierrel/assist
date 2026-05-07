@@ -1,6 +1,6 @@
 ---
 name: org-format
-description: Guidance for org-mode (`.org`) files. TRIGGER WORDS — `.org`, org-mode, org file, headings, heading body, asterisk heading, orphan, projects.org. MUST load before any tool call that reads, edits, writes, or mentions a `.org` file.
+description: Editing or creating org-mode (`.org`) files without breaking heading structure. EXAMPLES — "add a new section to notes.org under the Q3 plans heading"; "tweak the second bullet under Inbox in todo.org". MUST load before any tool call that reads, edits, writes, or mentions a `.org` file.
 ---
 
 # Org-mode format guide
