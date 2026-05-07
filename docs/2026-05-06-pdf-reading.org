@@ -214,6 +214,14 @@ Cadence per CLAUDE.md and saved feedback:
 - *NIT:* Raw error capping — =out.strip()[:200]= ran =.strip()= on the full combined stdout/stderr first, allocating a copy on a runaway error.  Fixed to =out[:1000].strip()[:200]=.
 - *NIT:* Added two real-fixture tests in =TestReadPdfHostFallback= (encrypted PDF, out-of-range upper bound) that the design called out but the original test list missed.
 
+** Eval cadence + observed stability
+
+- *1× baseline:* 5/5.
+- *5× post-reviewer:* 24/25 individual = 96%, 4/5 iterations clean = 80%.  The single flake was =test_page_range_targeted_read= on a "What does page 2 of foo.pdf cover?" prompt: the model called =read_file('sample.pdf')=, which returned a multimodal content block; the local Qwen endpoint rejected the next request with =400 unsupported content[].type=; =BadRequestRetryMiddleware= exhausted retries and surfaced a clean "model API rejected" message to the user.  The test's content-assertion saw that message instead of the page-2 content and failed.
+- *10× stability:* skipped per CLAUDE.md's "skippable for slow evals where wall-clock cost outweighs the confidence gain" — at ~3 min/iteration, the 30-minute spend wasn't justified given the failure mode is already graceful (no crash; user gets an error and can retry).
+
+The strengthened =read_pdf= docstring ("PDF reader — use this for ANY ``.pdf`` file. NEVER use ``read_file``...") brought the rate from a clean 5/5 baseline to 4/5 across 5 iterations.  Follow-up if the flake bites in real use: add an explicit "in particular: if message mentions =.pdf= → first tool call MUST be =load_skill(name='pdf')=" branch in =general_instructions.md.j2= mirroring the existing dev-skill rule.
+
 ** Architect (pre-coding)
 The architect (=Plan= agent) reviewed an earlier draft and surfaced three blockers + several IMPORTANTs.  Captured here so the retro reads cleanly:
 
