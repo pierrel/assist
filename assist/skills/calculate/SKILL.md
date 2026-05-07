@@ -1,6 +1,6 @@
 ---
 name: calculate
-description: Numeric computation in Python — arithmetic, statistics, projections, financial planning. TRIGGER WORDS — calculate, compute, sqrt, stdev, mean, median, variance, project, projection, projecting, compound interest, savings rate, percent return, contribution. MUST load before any prompt whose answer involves a number.
+description: Numeric computation in Python — arithmetic, statistics, projections, financial planning. EXAMPLES — "what's 17% of 4280"; "what's the future value of $20k at 5% over 10 years"; "stdev of 7, 13, 21, 35, 52, 78, 91, 104". MUST load before any prompt whose answer involves a number.
 ---
 
 # Calculate — run-then-answer guide
