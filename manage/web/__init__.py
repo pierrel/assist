@@ -73,11 +73,5 @@ from manage.web.threads import (  # noqa: E402,F401
     render_thread,
 )
 
-
-if __name__ == "__main__":
-    import os
-    import uvicorn
-
-    os.makedirs(ROOT, exist_ok=True)
-    port = int(os.getenv("ASSIST_PORT", "8000"))
-    uvicorn.run("manage.web:app", host="0.0.0.0", port=port, log_level="info", reload=False)
+# ``python -m manage.web`` resolves to ``manage/web/__main__.py``;
+# nothing here is meant to run on import.
