@@ -112,22 +112,29 @@ def _parse_page_range(pages: str, total_pages: int | None = None) -> tuple[int, 
     return first, last
 
 
-def _run_in_sandbox_or_host(command: str) -> tuple[int, str]:
+def _run_in_sandbox_or_host(command: str) -> tuple[int, str, bool]:
     """Run ``command`` (a shell string) in the active sandbox if any, else on the host.
 
-    Returns ``(exit_code, combined_output)``.  Sandbox path uses the
-    container's ``execute(...)``; host path uses ``subprocess.run`` with
-    ``shell=True``.  The host fallback exists for unit tests and any
-    eval setup that runs without a sandbox bound.
+    Returns ``(exit_code, combined_output, truncated)``.  Sandbox path
+    uses the container's ``execute(...)``; host path uses
+    ``subprocess.run`` with ``shell=True``.  The host fallback exists
+    for unit tests and any eval setup that runs without a sandbox
+    bound.
+
+    ``truncated`` is forwarded from the sandbox's ExecuteResponse —
+    the sandbox caps at ~100 KB combined stdout/stderr, so a very
+    long PDF in find mode could silently lose later pages.  Callers
+    should append a clear warning when ``truncated`` is True.
     """
     sandbox = get_active_sandbox()
     if sandbox is not None:
         resp = sandbox.execute(command)
-        return (resp.exit_code if resp.exit_code is not None else 0), resp.output
+        code = resp.exit_code if resp.exit_code is not None else 0
+        return code, resp.output, bool(getattr(resp, "truncated", False))
     proc = subprocess.run(
         command, shell=True, capture_output=True, text=True,
     )
-    return proc.returncode, (proc.stdout + proc.stderr)
+    return proc.returncode, (proc.stdout + proc.stderr), False
 
 
 def _check_pdf_magic(path: str) -> str | None:
@@ -162,7 +169,9 @@ def _pdfinfo_pages(path: str) -> tuple[int, int | None]:
     missing, etc.) so the caller can format a friendly message instead
     of returning a half-extracted blob.
     """
-    code, out = _run_in_sandbox_or_host(f"pdfinfo {shlex.quote(path)}")
+    code, out, _truncated = _run_in_sandbox_or_host(
+        f"pdfinfo {shlex.quote(path)}"
+    )
     if code != 0:
         return code, None
     for line in out.splitlines():
@@ -174,11 +183,17 @@ def _pdfinfo_pages(path: str) -> tuple[int, int | None]:
     return code, None
 
 
-def _pdftotext(path: str, first: int | None = None, last: int | None = None) -> tuple[int, str]:
-    """Run ``pdftotext`` and return ``(exit_code, text)``.
+def _pdftotext(
+    path: str, first: int | None = None, last: int | None = None,
+) -> tuple[int, str, bool]:
+    """Run ``pdftotext`` and return ``(exit_code, text, truncated)``.
 
     With *first* and *last* set, restricts to that page range.  Without
     them, extracts the whole document.
+
+    ``truncated`` propagates from the sandbox's output cap (~100 KB).
+    Whole-document calls (find mode, big PDFs) can hit this; callers
+    should append a clear "results may be incomplete" warning.
     """
     parts = ["pdftotext"]
     if first is not None:
@@ -187,6 +202,19 @@ def _pdftotext(path: str, first: int | None = None, last: int | None = None) -> 
         parts.extend(["-l", str(last)])
     parts.extend([shlex.quote(path), "-"])
     return _run_in_sandbox_or_host(" ".join(parts))
+
+
+def _looks_like_non_pdf_error(out: str) -> bool:
+    """pdftotext's diagnostic when handed a non-PDF.
+
+    We surface a friendly ``Error: not a PDF: <path>`` instead of the
+    raw ``Syntax Error: May not be a PDF file (continuing anyway)``
+    blurb so the model gets the same message regardless of whether
+    the magic-byte check ran (host fallback) or pdftotext caught it
+    inside the sandbox.
+    """
+    head = out.lower()
+    return "may not be a pdf" in head or "syntax error" in head
 
 
 def _format_orient(path: str, page_count: int | None, first_page_text: str) -> str:
@@ -299,11 +327,15 @@ def read_pdf(path: str, search: str | None = None, pages: str | None = None) -> 
             first, last = _parse_page_range(pages)
         except ValueError as e:
             return f"Error: {e}"
-        code, out = _pdftotext(path, first=first, last=last)
+        code, out, _truncated = _pdftotext(path, first=first, last=last)
         if code != 0:
             if "Incorrect password" in out or "encrypted" in out.lower():
                 return f"Error: {path} is password-protected — cannot extract."
-            return f"Error: pdftotext failed: {out.strip()[:200]}"
+            if _looks_like_non_pdf_error(out):
+                return f"Error: not a PDF: {path}"
+            # Cap the raw error before strip()+slice to avoid building
+            # a multi-MB intermediate string on a runaway pdftotext.
+            return f"Error: pdftotext failed: {out[:1000].strip()[:200]}"
         page_texts = _split_into_pages(out)
         if not page_texts:
             return f"No text found in pages {pages} of {path}."
@@ -317,24 +349,39 @@ def read_pdf(path: str, search: str | None = None, pages: str | None = None) -> 
     # --- Find mode --------------------------------------------------
     if search is not None:
         # We need the whole document text to grep through; pdftotext is
-        # fast enough that re-running per page would be wasteful.
-        code, out = _pdftotext(path)
+        # fast enough that re-running per page would be wasteful.  The
+        # sandbox caps execute output at ~100 KB though, so a 200-page
+        # document may have its tail truncated — we surface that to
+        # the model so it knows search results aren't authoritative.
+        code, out, truncated = _pdftotext(path)
         if code != 0:
             if "Incorrect password" in out or "encrypted" in out.lower():
                 return f"Error: {path} is password-protected — cannot extract."
-            return f"Error: pdftotext failed: {out.strip()[:200]}"
+            if _looks_like_non_pdf_error(out):
+                return f"Error: not a PDF: {path}"
+            return f"Error: pdftotext failed: {out[:1000].strip()[:200]}"
         hits = _gather_search_hits(out, search)
-        return _format_search(path, search, hits)
+        result = _format_search(path, search, hits)
+        if truncated:
+            result += (
+                "\nNote: PDF text was truncated at the sandbox output "
+                "cap; later pages were not searched.  If the term you "
+                "want is past the cap, narrow with `pages=` after "
+                "orienting.\n"
+            )
+        return result
 
     # --- Orient mode ------------------------------------------------
     # Try pdftotext first so encrypted PDFs surface a clean error
     # regardless of pdfinfo's behaviour (encrypted PDFs frequently
     # cause pdfinfo to fail too, and the test scripts that case).
-    code, first_page_out = _pdftotext(path, first=1, last=1)
+    code, first_page_out, _truncated = _pdftotext(path, first=1, last=1)
     if code != 0:
         if "Incorrect password" in first_page_out or "encrypted" in first_page_out.lower():
             return f"Error: {path} is password-protected — cannot extract."
-        return f"Error: pdftotext failed: {first_page_out.strip()[:200]}"
+        if _looks_like_non_pdf_error(first_page_out):
+            return f"Error: not a PDF: {path}"
+        return f"Error: pdftotext failed: {first_page_out[:1000].strip()[:200]}"
     info_code, page_count = _pdfinfo_pages(path)
     # Page count is nice-to-have; if pdfinfo fails (rare for non-encrypted
     # PDFs that pdftotext just succeeded on) we render orient mode

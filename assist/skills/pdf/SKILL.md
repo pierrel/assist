@@ -33,6 +33,10 @@ For a PDF you've never seen:
 
 The agent's tool-result eviction middleware will replace any large `read_pdf` output with a short preview pointing at `/large_tool_results/<id>`. **Don't `read_file` that path** — it'll round-trip the same big text and re-evict. Instead, re-call `read_pdf` with a narrower scope: a smaller `pages` range, or a `search` for the specific term.
 
+## Big PDFs and the search cap
+
+`search` extracts the whole document under the hood, then greps. The sandbox caps that intermediate text at ~100 KB — for a document past ~100 pages the tool returns a `Note: PDF text was truncated...` warning. When you see that warning, narrow with `pages=` after orienting (the table of contents on page 1 usually points at the right section) instead of trusting the search to have covered every page.
+
 ## Edge cases
 
 - **Encrypted PDF** — `read_pdf` returns "Error: ... is password-protected — cannot extract." Tell the user; don't guess at contents.
