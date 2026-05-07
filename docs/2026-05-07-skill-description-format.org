@@ -70,3 +70,15 @@ Order:
 - Rewriting skill *bodies*.  This migration is description-only; the body stays as-is.
 - Adding new skills.
 - Changing =SmallModelSkillsMiddleware= or its preamble.  If the new format suggests a preamble tweak (e.g. teaching "scan against examples, not just keywords"), that's a follow-up.
+
+* Lessons banked during the pdf pilot
+
+Captured here before applying to =calculate=, =org-format=, =dev=:
+
+1. *Don't tune examples to the eval.*  The architect's first pdf draft picked example phrasings that mirrored two of the five eval prompts almost verbatim ("how many pages is sample.pdf" → "how many pages is report.pdf"; "what does sample.pdf say about dosage" → "what does the manual say about dosage").  The reviewer caught it as a Goodhart risk.  The fix landed the same shape coverage but with one example moved to a phrasing unlike any current eval prompt.  Bake this into the architect's brief for subsequent skills: pick examples that cover *real-user* request shapes, then sanity-check that they don't accidentally mirror the eval.  If alignment ends up high anyway, treat it as a signal that the eval needs more cases — not that the examples need to be edited to be different.  This is now also captured durably in =CLAUDE.md= under "Project conventions".
+
+2. *Two-cap was too tight; allow three with mode-coverage justification.*  =pdf= teaches three modes (orient / read-range / find).  Two examples can't span them.  See §"Proposed format" above for the updated rule.  Same reasoning likely applies to =calculate= (explicit-arithmetic vs. word-problem vs. multi-step).
+
+3. *Token cost shrank, did not grow.*  Predicted ~30 extra words across 4 skills; pdf alone shrank by ~21 words because the old format carried both a topical synonym list AND a TRIGGER list.  The "preamble token bloat" concern was over-calibrated.  Revisit the prediction during =dev= (longest current description).
+
+4. *The eval cannot validate the format hypothesis.*  Pass-rate at ceiling (15/15 at baseline) means the eval can only detect *regressions*, not *improvements*.  The "phrase shape generalizes better than keyword vocabulary" claim is genuinely under-tested by the existing per-skill evals — most prompts contain a literal =.pdf= token or other strong lexical anchor.  Confirming or rejecting the hypothesis needs either new evals with implicit-only mentions, or production telemetry on real load-rate.  Track that as a follow-up after all four skills migrate.
