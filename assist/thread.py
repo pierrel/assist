@@ -17,6 +17,7 @@ from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
 from assist.checkpoint_rollback import invoke_with_rollback
+from assist.sandbox import reset_active_sandbox, set_active_sandbox
 from assist.sandbox_manager import SandboxManager
 from assist.thread_queue import THREAD_QUEUE
 
@@ -72,6 +73,11 @@ class Thread:
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency
         }
+        # Stored separately from create_agent's plumbing so the message
+        # entry points can publish it on the active-sandbox ContextVar
+        # for tools (e.g. read_pdf) that need to run shell commands
+        # inside the same container the agent is using.
+        self._sandbox_backend = sandbox_backend
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
@@ -84,13 +90,21 @@ class Thread:
         Acquires the per-thread LLM affinity queue for the duration of
         the agent loop so concurrent threads don't thrash llama.cpp's
         single KV-cache slot.  See ``assist/thread_queue.py``.
+
+        Also publishes ``self._sandbox_backend`` on the active-sandbox
+        ContextVar so plain-function tools (``read_pdf``) can shell
+        out inside the same container the agent is using.
         """
-        with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
-            result = invoke_with_rollback(
-                self.agent,
-                {"messages": [{"role": "user", "content": text}]},
-                self.runconfig,
-            )
+        token = set_active_sandbox(self._sandbox_backend)
+        try:
+            with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
+                result = invoke_with_rollback(
+                    self.agent,
+                    {"messages": [{"role": "user", "content": text}]},
+                    self.runconfig,
+                )
+        finally:
+            reset_active_sandbox(token)
         # Extract content from the last AIMessage
         messages = result.get("messages", [])
         if messages:
@@ -104,14 +118,20 @@ class Thread:
             raise TypeError("text must be a string")
         # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
         # Wrap the iterator in a generator so the queue is held for the
-        # full streaming lifetime, not just the call to .stream().
+        # full streaming lifetime, not just the call to .stream().  The
+        # active-sandbox ContextVar must be set/reset around the same
+        # generator scope so streaming tool calls see the right handle.
         def _gen():
-            with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
-                yield from self.agent.stream(
-                    {"messages": [{"role": "user", "content": text}]},
-                    self.runconfig,
-                    stream_mode=["messages", "updates"]
-                )
+            token = set_active_sandbox(self._sandbox_backend)
+            try:
+                with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
+                    yield from self.agent.stream(
+                        {"messages": [{"role": "user", "content": text}]},
+                        self.runconfig,
+                        stream_mode=["messages", "updates"]
+                    )
+            finally:
+                reset_active_sandbox(token)
         return _gen()
 
     def get_messages(self) -> list[dict]:

@@ -66,6 +66,7 @@ _READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "glob",
     "grep",
     "read_url",
+    "read_pdf",  # different page ranges / searches of one PDF are expected, not a loop
     "search_internet",
 })
 
