@@ -378,3 +378,60 @@ class TestSelectChatModel(TestCase):
             llm = model_manager.select_chat_model(0.1, enable_thinking=True)
         eb = getattr(llm, "extra_body", None)
         self.assertFalse(eb, f"Expected no extra_body for True; got {eb!r}")
+
+
+class TestRequestTimeoutAndRetries(TestCase):
+    """Pin the per-phase httpx Timeout shape and the OpenAI client's
+    ``max_retries=0`` invariant.  Both are construction-time config —
+    no networking required to assert on them.
+    """
+
+    def test_timeout_is_httpx_timeout_with_default_per_phase_values(self):
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
+            llm = model_manager.select_chat_model(0.1)
+        timeout = llm.request_timeout
+        import httpx as _httpx
+        self.assertIsInstance(timeout, _httpx.Timeout)
+        self.assertEqual(timeout.connect, 10.0)
+        self.assertEqual(timeout.read, 600.0)
+        self.assertEqual(timeout.write, 60.0)
+        self.assertEqual(timeout.pool, 10.0)
+
+    def test_openai_client_max_retries_is_zero(self):
+        # Load-bearing: ModelRetryMiddleware in assist/agent.py is the
+        # single retry layer.  If a future drive-by edit re-enables
+        # the OpenAI SDK's own retries, retries stack and per-call
+        # wall-clock balloons — see incident note 2026-05-06.
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
+            llm = model_manager.select_chat_model(0.1)
+        self.assertEqual(llm.max_retries, 0)
+
+    def test_env_overrides_apply_to_each_phase(self):
+        with patch.dict("os.environ", {
+            "ASSIST_MODEL_URL": "http://x/v1",
+            "ASSIST_LLM_CONNECT_TIMEOUT_S": "3.5",
+            "ASSIST_LLM_READ_TIMEOUT_S": "120.0",
+            "ASSIST_LLM_WRITE_TIMEOUT_S": "30.0",
+            "ASSIST_LLM_POOL_TIMEOUT_S": "5.0",
+        }):
+            llm = model_manager.select_chat_model(0.1)
+        timeout = llm.request_timeout
+        self.assertEqual(timeout.connect, 3.5)
+        self.assertEqual(timeout.read, 120.0)
+        self.assertEqual(timeout.write, 30.0)
+        self.assertEqual(timeout.pool, 5.0)
+
+    def test_garbage_env_falls_back_to_defaults(self):
+        # A typo in .deploy.env (e.g. ``ASSIST_LLM_CONNECT_TIMEOUT_S=1Os``
+        # — capital-O instead of zero) must not hard-fail every thread
+        # on first model build.  The agent factory should silently fall
+        # back to the default value.
+        with patch.dict("os.environ", {
+            "ASSIST_MODEL_URL": "http://x/v1",
+            "ASSIST_LLM_CONNECT_TIMEOUT_S": "garbage",
+            "ASSIST_LLM_READ_TIMEOUT_S": "also-bad",
+        }):
+            llm = model_manager.select_chat_model(0.1)
+        timeout = llm.request_timeout
+        self.assertEqual(timeout.connect, 10.0)
+        self.assertEqual(timeout.read, 600.0)
