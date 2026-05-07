@@ -12,8 +12,6 @@ where the host bind mount lives.
 import logging
 import os
 import shlex
-from contextvars import ContextVar
-from typing import Any
 
 from deepagents.backends.sandbox import BaseSandbox
 from deepagents.backends.protocol import (
@@ -31,48 +29,6 @@ from docker.errors import NotFound as DockerNotFound
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 100_000
-
-# --- Per-turn active-sandbox handle -------------------------------------
-# Tools registered as plain Python functions in ``assist/tools.py`` (e.g.
-# ``read_pdf``) need to run shell commands inside the sandbox container
-# the model is currently using.  Tool functions don't get the sandbox as
-# a parameter — they're called by the agent loop without that context —
-# so we expose it via a ContextVar that ``Thread.message`` /
-# ``Thread.stream_message`` set around the invoke.
-#
-# Keep the value typed as Any so this module doesn't import the
-# DockerSandboxBackend symbol before it's defined.  Callers should treat
-# the value as having an ``execute(command: str) -> ExecuteResponse``
-# method (the SandboxBackendProtocol).
-_active_sandbox: ContextVar[Any | None] = ContextVar(
-    "_active_sandbox", default=None,
-)
-
-
-def get_active_sandbox():
-    """Return the sandbox bound to the current thread of execution, or None.
-
-    None means we're running outside an agent turn (e.g. a unit test with
-    no thread set up, or a host-side helper).  Tools must handle both
-    cases — typically by falling back to a host-process subprocess when
-    the sandbox is not available.
-    """
-    return _active_sandbox.get()
-
-
-def set_active_sandbox(sandbox):
-    """Bind ``sandbox`` to the current ContextVar context.
-
-    Returns a token the caller passes back to :func:`reset_active_sandbox`
-    to restore the prior value.  The pair is meant to be used in a
-    try/finally around an agent invocation.
-    """
-    return _active_sandbox.set(sandbox)
-
-
-def reset_active_sandbox(token) -> None:
-    """Restore the active-sandbox ContextVar to its previous value."""
-    _active_sandbox.reset(token)
 
 # Wall-clock cap on a single sandbox command. Without this, a runaway
 # subprocess (e.g. small-model agent firing `glob("**/test*", cwd="/")`)

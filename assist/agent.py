@@ -11,7 +11,7 @@ from langchain.agents.middleware import ModelRetryMiddleware
 from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
-from assist.tools import read_pdf, read_url, search_internet
+from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
@@ -194,10 +194,6 @@ def create_agent(model: BaseChatModel,
         ),
         middleware=mw + [skills_mw, memory_mw, logging_mw],
         backend=backend,
-        # read_pdf needs to be on the *general* agent (this one) and on
-        # every subagent path that does research, since users will paste
-        # PDFs anywhere.  read_url stays research-only by precedent.
-        tools=[read_pdf],
         subagents=[context_sub, research_sub, critique_sub_agent],
     )
 
@@ -249,10 +245,6 @@ def create_context_agent(model: BaseChatModel,
                                       workspace_dir=workspace_dir),
         backend=backend,
         middleware=base_mw + middleware + [logging_mw],
-        # Context agent is read-only but the workspace can include PDFs
-        # the user wants summarized; expose read_pdf so it can extract
-        # text rather than choking on base64.
-        tools=[read_pdf],
     )
 
     # 500 graph steps ≈ 45 model calls with deepagents' ~11 nodes per cycle.
@@ -345,7 +337,7 @@ def create_research_agent(model: BaseChatModel,
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
-        "tools": [search_internet, read_url, read_pdf],
+        "tools": [search_internet, read_url],
         "middleware": _subagent_safety_mw(),
     }
 
@@ -360,13 +352,13 @@ def create_research_agent(model: BaseChatModel,
         "name": "fact-check-agent",
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
-        "tools": [read_url, read_pdf],
+        "tools": [read_url],
         "middleware": _subagent_safety_mw(),
     }
 
     agent = create_deep_agent(
         model=model,
-        tools=[search_internet, read_url, read_pdf],
+        tools=[search_internet, read_url],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
                                       workspace_dir=workspace_dir),
