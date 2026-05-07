@@ -286,6 +286,56 @@ class DomainManager:
             return []
         return git_diff_main(self.repo_path)
 
+    def has_changes_vs_main(self) -> bool:
+        """True iff the working tree has unmerged work compared to ``main``.
+
+        Cheaper than :meth:`main_diff` when only a bool is needed —
+        used by the index page to decide whether to render an
+        "unmerged" status badge per thread.  Three independent checks
+        — ``True`` if any signals dirty:
+
+        - ``git diff --quiet HEAD`` exits 1 if the working tree or
+          index has any uncommitted edits to tracked files.  Critical
+          because the assist flow can sit between an edit and the
+          end-of-turn ``sync()`` commit; the user expects the badge
+          to fire on tracked-but-uncommitted dirt too.
+        - ``git diff --quiet main...`` exits 1 if any *committed* work
+          on this branch is not in ``main``.  Catches the post-sync
+          "ready to merge" steady state.
+        - ``git ls-files --others --exclude-standard`` lists any
+          untracked-but-not-ignored files; if non-empty, the thread
+          has new files that haven't been committed yet.
+
+        For each git invocation we treat any returncode other than
+        the documented 0 (clean) / 1 (dirty) as "no info, assume
+        clean" rather than falsely badging every thread as unmerged
+        — e.g., when the repo has no ``main`` branch yet.
+        """
+        if not self.repo:
+            return False
+        if not is_git_repo(self.repo_path):
+            return False
+        # 1. Working tree + index vs HEAD (tracked but uncommitted).
+        worktree = subprocess.run(
+            ['git', '-C', self.repo_path, 'diff', '--quiet', 'HEAD'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if worktree.returncode == 1:
+            return True
+        # 2. Branch commits vs main merge-base.
+        committed = subprocess.run(
+            ['git', '-C', self.repo_path, 'diff', '--quiet', 'main...'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if committed.returncode == 1:
+            return True
+        # 3. Untracked files (independent of either diff).
+        untracked = subprocess.run(
+            ['git', '-C', self.repo_path, 'ls-files', '--others', '--exclude-standard'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        )
+        return bool(untracked.stdout.strip())
+
     def domain(self) -> str:
         return self.repo_path
 

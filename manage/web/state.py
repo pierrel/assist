@@ -98,8 +98,9 @@ def _domain_selector_html() -> str:
             for d in DOMAINS
         )
         return (
-            '<select name="domain" style="margin-bottom:.5rem; padding:.4rem; '
-            'border:1px solid #ccc; border-radius:6px; font-size:1rem; width:100%;">'
+            '<select name="domain" style="margin-bottom:.5rem; padding:.6rem; '
+            'border:1px solid #ccc; border-radius:6px; font-size:16px; width:100%; '
+            'min-height:44px;">'
             f"{opts}</select>"
         )
     if len(DOMAINS) == 1:
@@ -141,6 +142,28 @@ def _get_sandbox_backend(tid: str):
     """Get sandbox backend for a thread, or None if Docker is unavailable."""
     work_dir = MANAGER.thread_default_working_dir(tid)
     return SandboxManager.get_sandbox_backend(work_dir)
+
+
+def _has_unmerged_changes(tid: str) -> bool:
+    """True if this thread's working tree has unmerged work vs main.
+
+    Used by the index page to surface an "unmerged" badge on threads
+    that finished a turn but haven't been merged yet.  Wraps
+    ``DomainManager.has_changes_vs_main`` and swallows any exception
+    (a transient git error here mustn't 500 the index page).
+    """
+    dm = _get_domain_manager(tid)
+    if not dm:
+        return False
+    try:
+        return dm.has_changes_vs_main()
+    except Exception as e:
+        # Log at debug so a future "why is the badge wrong?" debug
+        # session has a paper trail without spamming the live tail.
+        logging.getLogger(__name__).debug(
+            "has_changes_vs_main failed for %s: %s", tid, e,
+        )
+        return False
 
 
 def _evict_caches(tid: str) -> None:

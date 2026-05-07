@@ -1,0 +1,98 @@
+#+TITLE: Mobile-friendly UI tweaks + unmerged status badge
+#+DATE: 2026-05-06
+
+* Status
+Design — not yet implemented.
+
+* Problem
+
+The web UI was designed assuming a desktop browser.  Used on a small phone (iPhone 13 mini, 375 px viewport) it has several pain points:
+
+1. *Tap targets are too small.*  Thread rows on the index are bare =<a>= links with =.5rem .6rem= padding; the delete =×= button is 24×24 px, well below Apple's 44×44 pt minimum.  Tapping the wrong one is easy.
+2. *iOS Safari zooms in when focusing form inputs.*  Multiple textareas in the app have an effective font-size below 16 px, which triggers Safari's auto-zoom on focus and makes the page jarring to fill out:
+   - =form textarea= on the thread page: no font-size set → browser default (~13 px).
+   - =.modal-content textarea= (capture modal): same.
+   - =.review-header textarea= on the review page: =font-size: .95rem= (= 15.2 px).
+   - =.comment-editor textarea= (per-line review comments): =font-size: .9rem= (= 14.4 px).
+   - =.new-thread-form textarea= on the index page: =font-size: 1rem= (= 16 px) — should be safe, but the user reports zoom anyway, so set explicitly to be unambiguous.
+3. *Form inputs are visually cramped on a small screen.*  The new-thread textarea has =min-height: 4rem= and =.6rem= padding — fine on desktop, awkward to type into on a 5.4″ phone.
+4. *No "this thread has unfinished work" affordance on the index.*  The thread list only shows process state (queued / processing / busy / error).  After a turn completes successfully but the user hasn't merged, the thread looks identical to one that's been merged — no indicator that "you still have work to ship from this thread".
+
+* Solution
+
+** New unmerged status badge
+- Add =DomainManager.has_changes_vs_main() -> bool= that runs three independent cheap checks and returns True if any signal dirty:
+  1. =git diff --quiet HEAD= — exits 1 if the working tree or index has tracked-file edits not yet committed.  Critical because the assist flow can sit between an edit and the end-of-turn =sync()= commit; without this the badge would miss mid-turn dirt.  (Caught by the post-implementation reviewer pass — a real gap.)
+  2. =git diff --quiet main...= — exits 1 if any *committed* work on this branch is not in =main=.
+  3. =git ls-files --others --exclude-standard= — non-empty if untracked-but-not-ignored files exist.
+- Add a thin =_has_unmerged_changes(tid)= helper in =manage/web/state.py= that wraps the call and swallows exceptions.
+- In =render_index= (=manage/web/threads.py=), append an =elif _has_unmerged_changes(tid):= branch /after/ the existing busy/queued/error branches.  The user explicitly asked for this badge to be *secondary* to process states — a queued or errored thread should still show that state, not "unmerged".  Soft-amber palette to distinguish from the existing yellow (busy) and red (error): =bg=#fef0e0=, =border=#fbcfa0=, =color=#7c4a1d=.
+
+** iOS zoom fix
+- *Single rule:* every editable form input (textarea, =<input type="text">=, =<select>=) gets an explicit =font-size: 16px= (not =1rem=, to avoid any rem-base computation surprise).  Apply per-page:
+  - =form textarea= (thread page) — currently unset.
+  - =.modal-content textarea= (capture modal) — currently unset.
+  - =.new-thread-form textarea= (index) — currently 1rem; set to 16px explicitly.
+  - =.review-header textarea= and =.comment-editor textarea= (review page) — currently 0.9-0.95rem.
+- The diff display lines stay at 0.8rem.  They are read-only =<div>= elements; iOS doesn't zoom on tapping a non-editable element.
+
+** Bigger tap targets
+- Thread row on index: bump =<a>= padding to =.85rem .8rem= and add =min-height: 44px=, plus =display: flex; align-items: center=.  Whole row becomes a comfortable tap target.
+- Delete =×= button: =min-width: 44px; min-height: 44px=; bump font-size to 1.4rem.  Add a hover/active state so it's obvious which one fires.
+- New-thread submit button: =min-height: 44px= when visible.
+- Send / Capture buttons on the thread page: =min-height: 44px=.
+- Submit-review and Cancel on the review page: =min-height: 44px=.
+
+** Form input ergonomics
+- New-thread textarea: bump =min-height: 5rem=, =padding: .8rem= (was .6rem) — easier to tap into and type.
+- Thread page textarea: no change to =min-height= (already 6rem), but enable =font-size: 16px= as above.
+
+** Other small phone wins
+- Add =touch-action: manipulation= to all buttons and the =.del-btn=, eliminating iOS Safari's 300ms tap delay.
+- Add =-webkit-tap-highlight-color: rgba(0,0,0,0.05)= for visible tap feedback (vs. iOS's default heavy blue).
+- Modal width on small screens: bump =.modal-content= max-width to fit 95% of a 375 px viewport more comfortably (was =width: 90%=, =max-width: 500px=).  Switch to =width: min(95%, 500px)= so it fills the small screen and caps cleanly on desktop.
+- Increase row spacing between thread items (margin =.4rem 0=, was =.2rem=) — gives the eye/finger a moment.
+
+* Files to touch
+
+- =assist/domain_manager.py= — add =has_changes_vs_main()= method.
+- =manage/web/state.py= — add =_has_unmerged_changes(tid)= helper.
+- =manage/web/threads.py= — wire badge into =render_index=, update CSS for index + thread page (font sizes, tap targets, modal width).
+- =manage/web/review.py= — update CSS for review page (font sizes, tap targets).
+- =roadmap.org= — add DONE entry.
+- =tests/test_domain_manager.py= — add tests for =has_changes_vs_main()= covering: clean tree, tracked diff, untracked files, no repo, post-merge.
+
+No agent / middleware / eval changes.  Pure web-UI work.
+
+* Trade-offs
+
+- *=font-size: 16px= vs. =1rem=.*  16px is the magic number iOS Safari uses to decide whether to zoom; using rem leaves it ambiguous if html font-size is ever overridden.  Hard-coded 16px is a small accessibility cost (no scaling with user prefs) but worth the predictability for form inputs specifically.  Display text still uses rem.
+- *Per-thread cost on the index page.*  =has_changes_vs_main()= runs up to two subprocess calls per thread, only for threads in the =ready= state.  For =MIN_THREADS=100= worth of threads on the index, that's ~100-200 forks per page render in the worst case (when every thread is idle).  Cache later if it shows up in load times; for now go direct.
+- *Disabling the 300ms tap delay (=touch-action: manipulation=).*  Standard mobile-web move.  No accessibility regression — pinch-to-zoom on the page itself still works since we don't lock =user-scalable=.
+- *Hard-coded =44px= min-height.*  Trades vertical density for tap-friendliness on mobile.  Desktop loses a couple rows worth of vertical real estate, but the existing 800-px container has room.
+
+* Test coverage
+
+- =tests/test_domain_manager.py= (new =TestHasChangesVsMain=):
+  - Returns False for a clean tree freshly branched off main.
+  - Returns True for a *committed* tracked diff vs main.
+  - Returns True for an *uncommitted* tracked-file edit (mid-turn dirty state — surfaced by the reviewer; the original two-check version missed this).
+  - Returns True for an untracked file in a clean-vs-main tree.
+  - Returns False when =self.repo= is None (no git remote).
+
+Smoke (manual): =make web=, point a phone at it.  Verify:
+- Thread row tap area is comfortable (~44 px tall).
+- Tapping the new-thread textarea does *not* zoom in.
+- Tapping "Your message" on the thread page does *not* zoom in.
+- Submitting a review and tapping back into the textarea does *not* zoom in.
+- The capture modal is readable on a 375 px viewport.
+- An unmerged thread shows the soft-amber "unmerged" badge; a merged-or-clean thread shows nothing.
+
+No =edd/eval/= test — pure web-UI plumbing.
+
+* Out of scope
+
+- Native swipe-to-delete on thread rows.
+- Pull-to-refresh on the index.
+- Persistent dark-mode preference.
+- Service-worker offline caching.
