@@ -54,3 +54,5 @@ def search_internet(
         return "[]"
     normalized = [{"title": r["title"], "url": r["href"], "content": r["body"]} for r in results]
     return str(normalized)
+
+

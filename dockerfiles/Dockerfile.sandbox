@@ -11,6 +11,8 @@ RUN pacman -Syu --noconfirm && \
         findutils \
         bash \
 	emacs \
+        # for pdftotext, supporting the pdf skill
+        poppler \
     && pacman -Scc --noconfirm
 
 # Create workspace directory
