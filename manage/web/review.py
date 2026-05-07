@@ -135,7 +135,7 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
           <title>Review — {html.escape(title)}</title>
           <style>body {{ font-family: sans-serif; margin: 0; }}
                  .container {{ max-width: 900px; margin: 0 auto; padding: 1rem; }}
-                 .nav a {{ text-decoration: none; padding: .4rem .6rem; border-radius: 6px; }}</style>
+                 .nav a {{ display: inline-flex; align-items: center; min-height: 44px; padding: .6rem .8rem; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}</style>
         </head><body>
           <div class="container">
             <div class="nav"><a href="/thread/{tid}">← Back to thread</a></div>
