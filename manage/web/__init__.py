@@ -43,6 +43,7 @@ from manage.web.state import (  # noqa: E402,F401
     _get_domain_manager,
     _get_sandbox_backend,
     _get_status,
+    _has_unmerged_changes,
     _set_status,
     _thread_domain_html,
     _thread_title,
