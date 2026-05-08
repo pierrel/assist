@@ -2,6 +2,8 @@ import hashlib
 import logging
 import os
 import re
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,13 @@ class SandboxManager:
 
     _docker_client = None
     _containers: dict[str, "docker.models.containers.Container"] = {}  # type: ignore[name-defined]
+    # Serialize bring-up of the shared egress proxy.  Without this,
+    # two threads simultaneously starting sandboxes after an allowlist
+    # change race in the get/remove/recreate flow and the loser fails
+    # with "container name already in use" — which the broad
+    # `except Exception` in get_sandbox_backend then swallows as
+    # "Docker unavailable", silently degrading one of the two threads.
+    _egress_lock = threading.Lock()
 
     @classmethod
     def _get_docker_client(cls):
@@ -92,58 +101,86 @@ class SandboxManager:
         allowlist_csv = ",".join(allowlist)
         allowlist_hash = hashlib.sha256(allowlist_csv.encode()).hexdigest()[:16]
 
-        try:
-            egress_net = client.networks.get(EGRESS_NETWORK)
-        except NotFound:
-            egress_net = client.networks.create(
-                EGRESS_NETWORK, driver="bridge", internal=True,
+        with cls._egress_lock:
+            try:
+                egress_net = client.networks.get(EGRESS_NETWORK)
+            except NotFound:
+                egress_net = client.networks.create(
+                    EGRESS_NETWORK, driver="bridge", internal=True,
+                )
+                logger.info("Created egress network %s (internal)", EGRESS_NETWORK)
+
+            existing = None
+            try:
+                existing = client.containers.get(EGRESS_PROXY_NAME)
+                existing.reload()
+            except NotFound:
+                pass
+
+            needs_recreate = (
+                existing is None
+                or existing.status != "running"
+                or existing.labels.get("assist.egress-allowlist-hash") != allowlist_hash
             )
-            logger.info("Created egress network %s (internal)", EGRESS_NETWORK)
+            if not needs_recreate:
+                return EGRESS_PROXY_NAME
 
-        existing = None
-        try:
-            existing = client.containers.get(EGRESS_PROXY_NAME)
-            existing.reload()
-        except NotFound:
-            pass
+            if existing is not None:
+                try:
+                    existing.remove(force=True)
+                    logger.info("Removed stale egress proxy %s", existing.id[:12])
+                except APIError as e:
+                    logger.warning("Could not remove existing egress proxy: %s", e)
 
-        needs_recreate = (
-            existing is None
-            or existing.status != "running"
-            or existing.labels.get("assist.egress-allowlist-hash") != allowlist_hash
-        )
-        if not needs_recreate:
+            proxy = client.containers.run(
+                EGRESS_PROXY_IMAGE,
+                name=EGRESS_PROXY_NAME,
+                detach=True,
+                restart_policy={"Name": "unless-stopped"},
+                extra_hosts={"host.docker.internal": "host-gateway"},
+                environment={"EGRESS_ALLOWLIST": allowlist_csv},
+                labels={
+                    "assist.egress-proxy": "true",
+                    "assist.egress-allowlist-hash": allowlist_hash,
+                },
+            )
+            try:
+                egress_net.connect(proxy)
+            except APIError as e:
+                if "already exists" not in str(e).lower():
+                    raise
+            cls._wait_for_egress_proxy_ready(proxy)
+            logger.info(
+                "Started egress proxy %s with %d allowlist entries (hash=%s)",
+                proxy.id[:12], len(allowlist), allowlist_hash,
+            )
             return EGRESS_PROXY_NAME
 
-        if existing is not None:
-            try:
-                existing.remove(force=True)
-                logger.info("Removed stale egress proxy %s", existing.id[:12])
-            except APIError as e:
-                logger.warning("Could not remove existing egress proxy: %s", e)
+    @classmethod
+    def _wait_for_egress_proxy_ready(cls, proxy, timeout: float = 10.0) -> None:
+        """Block until the proxy logs 'listening on'.
 
-        proxy = client.containers.run(
-            EGRESS_PROXY_IMAGE,
-            name=EGRESS_PROXY_NAME,
-            detach=True,
-            restart_policy={"Name": "unless-stopped"},
-            extra_hosts={"host.docker.internal": "host-gateway"},
-            environment={"EGRESS_ALLOWLIST": allowlist_csv},
-            labels={
-                "assist.egress-proxy": "true",
-                "assist.egress-allowlist-hash": allowlist_hash,
-            },
+        The proxy's TCP listener is bound only after Python startup +
+        allowlist parse + ``socket.bind`` — typically <100ms but not
+        instant.  Without this, the very first sandbox launched
+        immediately after a proxy recreate can hit connection-refused
+        on its first outbound call.  Polls container logs every 100ms.
+        Raises RuntimeError if the proxy never reports ready within
+        ``timeout`` (fail-closed).
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                logs = proxy.logs().decode("utf-8", errors="replace")
+            except Exception:
+                logs = ""
+            if "listening on" in logs:
+                return
+            time.sleep(0.1)
+        raise RuntimeError(
+            f"Egress proxy {proxy.id[:12]} did not report 'listening on' "
+            f"within {timeout}s.  Last logs: {logs[-500:]!r}"
         )
-        try:
-            egress_net.connect(proxy)
-        except APIError as e:
-            if "already exists" not in str(e).lower():
-                raise
-        logger.info(
-            "Started egress proxy %s with %d allowlist entries (hash=%s)",
-            proxy.id[:12], len(allowlist), allowlist_hash,
-        )
-        return EGRESS_PROXY_NAME
 
     @classmethod
     def get_sandbox_backend(cls, work_dir: str):

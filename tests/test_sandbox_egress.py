@@ -90,6 +90,10 @@ class TestEnsureEgressProxy(TestCase):
 
         new_proxy = MagicMock()
         new_proxy.id = "proxyabc1234"
+        # _wait_for_egress_proxy_ready polls proxy.logs() looking for
+        # "listening on".  Without this, the wait blocks for 10s and
+        # then raises — which would make every test slow and noisy.
+        new_proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.run.return_value = new_proxy
         return client
 
@@ -201,6 +205,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
                         hashlib.sha256(
                             ",".join(_load_egress_allowlist()).encode()
                         ).hexdigest()[:16]}
+        proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()
         sandbox_container.id = "sand123abcdef"
@@ -241,6 +246,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
                         hashlib.sha256(
                             ",".join(_load_egress_allowlist()).encode()
                         ).hexdigest()[:16]}
+        proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()
         sandbox_container.id = "sand123abcdef"

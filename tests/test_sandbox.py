@@ -332,6 +332,9 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.status = "running"
+        # Doubles as the egress-proxy container too — _wait_for_egress_proxy_ready
+        # polls .logs() looking for "listening on" before returning.
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         mock_client.containers.run.return_value = mock_container
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
@@ -362,6 +365,7 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.status = "running"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         mock_client.containers.run.return_value = mock_container
 
         host_st = os.stat(test_path)

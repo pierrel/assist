@@ -18,6 +18,17 @@ NETWORK="assist-egress-smoke-$$"
 PROXY="assist-egress-proxy-smoke-$$"
 HOST_DIR=$(mktemp -d)
 
+# Mount the real requirements.txt + pyproject.toml + assist source so
+# the positive case probes EXACTLY what dev-agent's eval install does
+# (`pip install -r requirements.txt -e .`).  Drift to a non-allowlisted
+# host (a future `git+https://github.com/...` line, a private index,
+# etc.) trips this smoke.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cp "$REPO_DIR/requirements.txt" "$HOST_DIR/"
+cp "$REPO_DIR/pyproject.toml" "$HOST_DIR/" 2>/dev/null || true
+cp -r "$REPO_DIR/assist" "$HOST_DIR/" 2>/dev/null || true
+
 cleanup() {
     docker rm -f "$PROXY" >/dev/null 2>&1
     docker network rm "$NETWORK" >/dev/null 2>&1
@@ -30,10 +41,11 @@ docker network create --internal --driver bridge "$NETWORK" >/dev/null || {
     echo "FAIL: could not create test network"; exit 1
 }
 
-echo "→ Starting proxy with restrictive allowlist (pypi only — host.docker.internal omitted)"
-# Deliberately narrow allowlist: pypi.org + files.pythonhosted.org only.
-# This makes the negative test specific — host.docker.internal is NOT
-# allowed in this run, so any request to it must 403.
+echo "→ Starting proxy with PyPI-only allowlist (host.docker.internal omitted)"
+# Deliberately narrow allowlist: pypi.org + files.pythonhosted.org +
+# pip.pypa.io ONLY.  host.docker.internal is NOT in this list so the
+# negative-case host-resolution probes have a non-allowlisted target
+# distinct from random external hosts.
 docker run -d \
     --name "$PROXY" \
     --network bridge \
@@ -100,19 +112,53 @@ if timeout 5 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" 2>/dev/null; then
 fi
 echo "ok  (3) raw TCP to 1.1.1.1:443  blocked"
 
-# (4) Positive: pip install of a small allowlisted package.  This is
-#     the "dev-agent must keep working" contract.  --no-cache-dir
-#     forces a fresh download (cache could mask a broken proxy).
+# (4) Mixed-case allowlist hostname — DNS hostnames are case-insensitive
+#     per RFC 4343.  The proxy lowercases before comparing.  Probes
+#     that the comparison is consistent between client and allowlist.
+status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
+    https://Pypi.Org/ 2>&1)
+if echo "$status" | grep -q "403"; then
+    echo "FAIL: mixed-case Pypi.Org returned 403 (case-insensitive match broken)"
+    exit 1
+fi
+echo "ok  (4) mixed-case https://Pypi.Org  allowed (status=$status)"
+
+# (5) HTTP-via-proxy code path — the absolute-URL request line that
+#     ASSIST_MODEL_URL traffic uses.  pypi over plain HTTP returns
+#     301-to-https; either way, NOT 000 (unreachable) and NOT 403.
+status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
+    --proxy "$HTTP_PROXY" http://pypi.org/ 2>&1)
+if [ "$status" = "000" ]; then
+    echo "FAIL: HTTP-via-proxy to pypi.org reachability failed (status=000)"
+    exit 1
+fi
+if [ "$status" = "403" ]; then
+    echo "FAIL: HTTP-via-proxy to pypi.org refused (allowlisted host got 403)"
+    exit 1
+fi
+echo "ok  (5) HTTP-via-proxy http://pypi.org/  reached (status=$status)"
+
+# (6) HTTP-via-proxy denied for off-allowlist host — same code path
+#     as (5) but the allowlist gate fires.  Gives both branches of
+#     the HTTP path coverage.
+status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
+    --proxy "$HTTP_PROXY" http://example.com/ 2>&1)
+if echo "$status" | grep -qE "^(200|301|302|3[0-9]+)$"; then
+    echo "FAIL: HTTP-via-proxy to example.com succeeded (status=$status, allowlist not enforced)"
+    exit 1
+fi
+echo "ok  (6) HTTP-via-proxy http://example.com/  blocked (status=$status)"
+
+# (7) Real install path — exactly what dev-agent does in
+#     test_dev_agent_runs_eval.py.  Catches any drift in
+#     requirements.txt that adds a non-allowlisted host.
 if ! pip install --user --break-system-packages --no-cache-dir --quiet \
-        "requests==2.32.3" 2>/tmp/pip.err; then
-    echo "FAIL: pip install via proxy failed:"
+        -r /workspace/requirements.txt 2>/tmp/pip.err; then
+    echo "FAIL: pip install -r requirements.txt via proxy failed:"
     cat /tmp/pip.err
     exit 1
 fi
-if ! python3 -c "import requests; print(requests.__version__)" >/dev/null 2>&1; then
-    echo "FAIL: requests imported but version probe failed"; exit 1
-fi
-echo "ok  (4) pip install requests==2.32.3  succeeded via proxy"
+echo "ok  (7) pip install -r requirements.txt  succeeded via proxy"
 
 echo "PASS"
 ' 2>&1)
