@@ -37,6 +37,11 @@ $USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist
 $USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist
 $USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist/*
+# Recursive chown for migrating legacy thread workspaces to the
+# non-root sandbox layer (docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org).
+# Idempotent — safe to re-run.
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER /var/lib/assist
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER /var/lib/assist/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/systemd/system/${SERVICE_NAME}.service
 EOF
 
