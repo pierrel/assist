@@ -41,11 +41,28 @@ This is the privilege-separation layer.  It rests on a Unix capability the previ
 
 | # | Decision | Choice |
 |---+----------+--------|
-| 1 | Approach | *A. Non-root sandbox + restricted =git-real= + setuid C shim* (vs. eBPF LSM, vs. limited-git reimplementation).  Conventional privilege-separation; bounded implementation surface. |
-| 2 | Sandbox user model | Container runs as a non-root uid (e.g. =sandbox= uid 1000, or =--user= matched to host uid).  Architect to determine the exact uid-mapping strategy from the existing =SandboxManager= code. |
-| 3 | Real-binary protection | =/usr/bin/git-real= becomes mode =0700= owned by root.  Only the shim (running setuid root) can exec it. |
-| 4 | Shim language | C, not bash.  Bash is neutered when run setuid.  A small C source (~30 lines) is auditable. |
-| 5 | Compile model | =gcc= installed in the build stage; shim compiled during build; =gcc= can stay (the agent has it anyway via base-devel) or be removed at the end if the agent doesn't need it. |
+| 1 | Approach | *A. Non-root sandbox + restricted =git-real= + privileged C shim* (vs. eBPF LSM, vs. limited-git reimplementation).  Conventional privilege-separation; bounded implementation surface. |
+| 2 | Sandbox user model | Container declares default user =sandbox= (uid 1000); =SandboxManager.get_sandbox_backend= passes =user="$HOST_UID:$HOST_GID"= at =containers.run= time so the running uid matches the host bind-mount owner. |
+| 3 | Real-binary protection | =/usr/bin/git-real= mode =0700= owned by root.  Only the shim (which has =cap_dac_override=ep= file capability) can exec it. |
+| 4 | Shim language | C, not bash.  ~50 lines, audit-friendly. |
+| 5 | Compile model | =gcc= via base-devel during build; image keeps base-devel (agent legitimately needs it for native dep compiles). |
+| 6 | Privilege mechanism | *File capability =cap_dac_override=ep=* on =/usr/bin/git=, NOT setuid root.  See "Phase 2 reality check" below for why setuid + fexecve doesn't work. |
+| 7 | =HOME= env in container | Default to =/home/sandbox= (from useradd).  Earlier draft proposed =HOME=/workspace=, rejected because =pip install --user= would write =/workspace/.local/= which would show up as untracked in =git status= and pollute the merge view. |
+| 8 | =$PATH= for user-installed CLIs | Dockerfile sets =ENV PATH=/home/sandbox/.local/bin:...= so =pip install --user= binaries (=pytest=, etc.) are reachable by name. |
+
+* Phase 2 reality check — fexecve is a dead end, capabilities are the answer
+
+The architect's plan called for a setuid C shim that opens =git-real= as root, drops privileges via =setuid(getuid())=, then =fexecve='s the open fd.  The theory: open succeeds because effective uid is 0 at open time; fexecve trusts the open fd.
+
+*Empirically wrong.*  Linux's =execveat(2)= (which =fexecve(3)= wraps) re-checks file permissions against the *current* effective uid at exec time, not against the open-time uid.  After =setuid(getuid())= drops to uid 1000, =fexecve= fails with =EACCES= because mode 0700 root:root has no exec bit for "other".
+
+The working answer is *file capabilities*: install =/usr/bin/git= with =setcap cap_dac_override=ep=.  When the shim is invoked, the new process has CAP_DAC_OVERRIDE in its effective set — without setuid.  The shim's effective uid is the caller's (1000); CAP_DAC_OVERRIDE bypasses DAC checks for read/exec on files that have at least one execute bit set.  Mode 0700 has owner-execute, so the cap-armed shim can =execv("/usr/bin/git-real", ...)=.
+
+Crucially, after the =execv= the new process loads =git-real='s file caps (none) and runs with empty cap sets, effective uid 1000.  Files it creates in =/workspace= are owned by uid 1000.  No privilege drop needed; the cap is consumed at the exec boundary.
+
+This pivot changed the locked decision 6 mid-implementation; cleared with the user's "go forward" before the rebuild.
+
+* Open design questions (Phase 1 — for the architect)
 
 * Open design questions (Phase 1 — for the architect)
 
