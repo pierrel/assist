@@ -15,6 +15,20 @@ RUN pacman -Syu --noconfirm && \
         poppler \
     && pacman -Scc --noconfirm
 
+# Wrap /usr/bin/git with a shim that refuses `git push` regardless of
+# how the call was constructed (catches dynamic command construction
+# in Python/Perl/Node, file-mediated `bash <script>`, and direct
+# calls to git-core symlinks like /usr/lib/git-core/git-push).  See
+# dockerfiles/sandbox-git-shim.sh's header for the full rationale.
+# Sandbox push protection rests on three layers:
+#   (a) static GitPushBlockerMiddleware on the agent's `execute` tool
+#   (b) credential-free sandbox environment (no SSH key, no .git-credentials)
+#   (c) this binary wrapper
+COPY dockerfiles/sandbox-git-shim.sh /usr/local/share/git-shim
+RUN mv /usr/bin/git /usr/bin/git-real && \
+    install -m 755 /usr/local/share/git-shim /usr/bin/git && \
+    rm /usr/local/share/git-shim
+
 # Create workspace directory
 RUN mkdir -p /workspace
 WORKDIR /workspace
