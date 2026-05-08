@@ -186,23 +186,6 @@ def git_diff_main(repo_dir: str) -> List[Change]:
     return changes
 
 
-def git_push(repo_dir: str) -> None:
-    """Push current branch to origin, setting upstream if needed.
-
-    Logs a warning instead of raising on push failure so that the
-    local commit is preserved even when the remote is unreachable.
-    """
-    # Determine current branch
-    cur = subprocess.run(['git', '-C', repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-    branch = cur.stdout.strip()
-    result = subprocess.run(['git', '-C', repo_dir, 'push', '--set-upstream', 'origin', branch],
-                            capture_output=True, text=True)
-    if result.returncode != 0:
-        logger.warning("git push failed for %s (branch %s): %s",
-                        repo_dir, branch, result.stderr.strip())
-
-
 def git_commit(repo_dir: str, message: str) -> None:
     """Stage all changes (including new files) and commit with message.
 
@@ -215,19 +198,6 @@ def git_commit(repo_dir: str, message: str) -> None:
         return
     subprocess.run(['git', '-C', repo_dir, 'commit', '-m', message], check=True)
 
-
-def merge_main_into_current_and_push(repo_path: str) -> None:
-    """Merge latest main into current branch and push the branch to origin."""
-    import subprocess
-    # Ensure we have latest remote refs
-    subprocess.run(['git', '-C', repo_path, 'fetch', 'origin'], check=True)
-    # Determine current branch
-    cur = subprocess.run(['git', '-C', repo_path, 'rev-parse', '--abbrev-ref', 'HEAD'], stdout=subprocess.PIPE, text=True, check=True)
-    branch = cur.stdout.strip()
-    # Merge origin/main into current branch
-    subprocess.run(['git', '-C', repo_path, 'merge', '--no-edit', 'origin/main'], check=True)
-    # Push current branch
-    subprocess.run(['git', '-C', repo_path, 'push', '--set-upstream', 'origin', branch], check=True)
 
 def is_git_repo(path: str) -> bool:
     """Check if path is a git repository (with or without remote)."""
@@ -440,8 +410,6 @@ class DomainManager:
         if not diffs:
             raise ValueError("No changes to merge")
 
-        summary = self._summarize_merge(diffs, current_branch, summary_model)
-
         # Fetch the latest origin/main so the rebase target is current.
         subprocess.run(['git', '-C', self.repo_path, 'fetch', 'origin'], check=True)
 
@@ -477,7 +445,25 @@ class DomainManager:
             )
             conflicted = [l.strip() for l in unmerged.stdout.splitlines() if l.strip()]
             subprocess.run(['git', '-C', self.repo_path, 'rebase', '--abort'], check=False)
-            raise MergeConflictError(current_branch, conflicted)
+            if conflicted:
+                raise MergeConflictError(current_branch, conflicted)
+            # Non-conflict rebase failure (e.g. dirty working tree at
+            # merge time, corrupt branch state).  Don't paper this
+            # over as a "conflict" — the agent would chase a
+            # nonexistent conflict.  Bubble up the underlying git
+            # failure so the route returns a 500 with the stderr.
+            raise subprocess.CalledProcessError(
+                rebase.returncode,
+                ['git', '-C', self.repo_path, 'rebase', 'origin/main'],
+                output=rebase.stdout,
+                stderr=rebase.stderr,
+            )
+
+        # Rebase succeeded — now commit to spending the LLM call on
+        # the summary.  Doing this *after* the rebase avoids burning
+        # wall-clock and queue capacity on merges that would have
+        # hit the unpushed-main check or a conflict.
+        summary = self._summarize_merge(diffs, current_branch, summary_model)
 
         # Switch to main and bring it level with origin/main before
         # squashing the rebased thread branch on top.
@@ -500,7 +486,12 @@ class DomainManager:
         deterministic fallback otherwise.  Extracted for testability.
         """
         if model is None:
-            return f"Merge {branch}: {diffs[0].path}"
+            # Honest fallback: summarise by file count rather than
+            # naming the first file as if it's representative — the
+            # original "Merge X: README.md" style was misleading on
+            # multi-file merges.  Truncated to the historical
+            # 72-char commit-message ceiling.
+            return f"Merge {branch}: {len(diffs)} file(s)"[:72]
 
         log_result = subprocess.run(
             ['git', '-C', self.repo_path, 'log', 'main', '--oneline', '-20'],

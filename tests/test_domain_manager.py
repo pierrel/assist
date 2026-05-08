@@ -7,7 +7,7 @@ import tempfile
 import shutil
 from unittest import TestCase
 from unittest.mock import patch, MagicMock
-from assist.domain_manager import DomainManager, Change, git_diff, git_commit, git_push
+from assist.domain_manager import DomainManager, Change, git_diff, git_commit
 
 
 class TestDomainManager(TestCase):

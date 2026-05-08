@@ -45,6 +45,13 @@ _OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
     "--exec-path", "--super-prefix",
 })
 
+# Shells that take a command string via a flag containing ``c`` —
+# ``bash -c "git push"``, ``sh -lc "git push"``.  We re-tokenise the
+# argument string and look for a push inside it.
+_SHELL_C_FORMS: frozenset[str] = frozenset({
+    "bash", "sh", "zsh", "ash", "ksh", "dash",
+})
+
 
 def _command_pushes(command: str) -> bool:
     """Return True iff ``command`` invokes ``git push`` in any form.
@@ -54,6 +61,11 @@ def _command_pushes(command: str) -> bool:
     flags like ``-C <path>``, ``--no-pager``, or ``--git-dir=...`` —
     by ``push``.  Shell operators (``;``, ``&&``, ``|``) become their
     own tokens, so chained commands surface the same way.
+
+    Recurses into nested shell-out forms so ``bash -c "git push"``,
+    ``sh -lc "git push origin"``, and ``eval "git push"`` are all
+    caught — the literal string after ``-c`` (or ``eval``) is
+    re-tokenised and re-classified.
 
     Tolerant of malformed commands: a quote-mismatched string falls
     back to a whitespace split, which is intentionally pessimistic —
@@ -67,24 +79,55 @@ def _command_pushes(command: str) -> bool:
 
     i = 0
     while i < len(tokens):
-        if tokens[i] != "git":
+        tok = tokens[i]
+
+        # ``bash -c "<cmd>"`` / ``sh -lc "<cmd>"`` etc. — recurse
+        # into the command-string argument.
+        if tok in _SHELL_C_FORMS:
+            j = i + 1
+            while j < len(tokens) and tokens[j].startswith("-"):
+                # Any flag whose short cluster contains 'c' (or the
+                # long-form ``--command``) takes the next token as
+                # the command string.
+                if "c" in tokens[j] and j + 1 < len(tokens):
+                    if _command_pushes(tokens[j + 1]):
+                        return True
+                j += 1
             i += 1
             continue
+
+        # ``eval "<cmd>"`` — the next non-flag token is a command
+        # string.
+        if tok == "eval":
+            j = i + 1
+            while j < len(tokens):
+                if not tokens[j].startswith("-"):
+                    if _command_pushes(tokens[j]):
+                        return True
+                    break
+                j += 1
+            i += 1
+            continue
+
+        if tok != "git":
+            i += 1
+            continue
+
         # Walk past git-level options after `git` to find the subcommand.
         j = i + 1
         while j < len(tokens):
-            tok = tokens[j]
+            t = tokens[j]
             # ``--name=value`` form: one token, skip it.
-            if tok.startswith("--") and "=" in tok:
+            if t.startswith("--") and "=" in t:
                 j += 1
                 continue
             # Options that take a separate value: skip option + value.
-            if tok in _OPTIONS_WITH_VALUE:
+            if t in _OPTIONS_WITH_VALUE:
                 j += 2
                 continue
             # Any other flag (short or long, e.g. ``--no-pager``,
             # ``-p``): one token.
-            if tok.startswith("-"):
+            if t.startswith("-"):
                 j += 1
                 continue
             # First non-flag token after `git` is the subcommand.

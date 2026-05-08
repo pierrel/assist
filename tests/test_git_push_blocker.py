@@ -83,6 +83,44 @@ class TestCommandPushClassifier(unittest.TestCase):
         # would rather false-positive than miss a real push attempt.
         self.assertPushes("git push 'unclosed")
 
+    # --- Recursion into shell-out forms -------------------------------------
+
+    def test_blocks_bash_dash_c_push(self):
+        self.assertPushes('bash -c "git push"')
+        self.assertPushes("bash -c 'git push origin main'")
+
+    def test_blocks_sh_dash_c_push(self):
+        self.assertPushes('sh -c "git push"')
+        self.assertPushes('zsh -c "git push --force"')
+
+    def test_blocks_shell_dash_lc_push(self):
+        # ``-lc`` is bash's "login + command" cluster; the c-flag still
+        # consumes the next arg as a command string.
+        self.assertPushes('bash -lc "git push"')
+        self.assertPushes('sh -ic "git push"')
+
+    def test_blocks_eval_push(self):
+        self.assertPushes('eval "git push"')
+        self.assertPushes("eval 'git push origin'")
+
+    def test_blocks_chain_inside_shell_out(self):
+        # The recursion re-tokenises the inner string, so chain
+        # operators inside the quoted command work the same way.
+        self.assertPushes('bash -c "echo hi && git push"')
+        self.assertPushes('sh -c "git fetch; git push"')
+
+    def test_allows_shell_out_without_push(self):
+        self.assertDoesNotPush('bash -c "git status"')
+        self.assertDoesNotPush('sh -c "ls /tmp"')
+        self.assertDoesNotPush('eval "git fetch"')
+
+    def test_allows_non_command_shell_invocation(self):
+        # ``bash myscript.sh`` doesn't have a -c flag; the script
+        # contents aren't inspected (out of scope for v1).  This
+        # is the documented limitation.
+        self.assertDoesNotPush("bash myscript.sh")
+        self.assertDoesNotPush("bash --version")
+
 
 class TestMiddlewareDispatch(unittest.TestCase):
     """``wrap_tool_call`` must reject ``execute`` calls whose command

@@ -208,6 +208,30 @@ class TestDomainMerge(unittest.TestCase):
         self.assertFalse(os.path.isdir(os.path.join(self.repo_path, '.git', 'rebase-merge')))
         self.assertFalse(os.path.isdir(os.path.join(self.repo_path, '.git', 'rebase-apply')))
 
+    def test_merge_dirty_worktree_does_not_raise_fake_conflict(self):
+        """A non-conflict rebase failure (dirty worktree, branch
+        rename, etc.) must NOT be papered over as ``MergeConflictError``
+        — that would send the agent chasing a nonexistent conflict.
+        """
+        # Dirty the worktree so `git rebase` refuses with a non-conflict
+        # error ("Cannot rebase: You have unstaged changes.").
+        with open(os.path.join(self.repo_path, "README.md"), 'a') as f:
+            f.write("\nuncommitted local edit\n")
+
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
+        with self.assertRaises(subprocess.CalledProcessError):
+            dm.merge_to_main(summary_model=None)
+
+        # Also assert it specifically didn't raise MergeConflictError
+        # — a separate run because the assertRaises above consumed
+        # the first.  Re-dirty if needed (still dirty from above).
+        try:
+            dm.merge_to_main(summary_model=None)
+        except MergeConflictError:
+            self.fail("dirty-worktree rebase failure was misclassified as MergeConflictError")
+        except subprocess.CalledProcessError:
+            pass  # expected
+
     def test_merge_refuses_when_local_main_has_unpushed_commits(self):
         """A second merge before pushing the first must refuse, so two
         threads' worth of unpushed commits don't pile onto local main.

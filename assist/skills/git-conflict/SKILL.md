@@ -1,6 +1,6 @@
 ---
 name: git-conflict
-description: Resolving a paused git rebase conflict left by a failed merge. EXAMPLES — "fix the merge conflict the rebase left"; "the merge failed on a conflict, please resolve it"; "git status shows unmerged files, work through them". MUST load before any tool call that touches git rebase state, conflict markers, or unmerged files.
+description: Resolving a paused git rebase conflict left by a failed merge. EXAMPLES — "I clicked Merge to Main and got a banner about conflicts in foo.py"; "git status has files under Unmerged paths, please work through them"; "the rebase aborted, can you sort out the file and try again". MUST load before any tool call that touches git rebase state, conflict markers, or unmerged files.
 ---
 
 # Git rebase conflict — fixed loop
