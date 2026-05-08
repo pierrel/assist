@@ -29,8 +29,8 @@ TS="$(date +%Y%m%d-%H%M)"
 # All eval-time tempfile activity (test workspaces, langgraph SqliteSaver
 # threads.db, sandbox bind mounts) goes to a dedicated scratch dir that
 # is wiped at the START of every run. Reproducible state, bounded disk
-# use, isolated from prod's /home/pierre/deploy/assist/threads/threads.db
-# (which has its own growth issue tracked separately in roadmap).
+# use, isolated from prod's $ASSIST_THREADS_DIR/threads.db (which has
+# its own growth issue tracked separately in roadmap).
 #
 # Default location: $HOME/deploy/assist/tmp/eval/
 # Override via EVAL_SCRATCH_DIR for testing the script itself.

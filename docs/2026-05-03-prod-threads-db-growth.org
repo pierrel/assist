@@ -1,6 +1,6 @@
 State: Not started
 * Problem
-=/home/pierre/deploy/assist/threads/threads.db= reached *187 GB* on
+=$ASSIST_THREADS_DIR/threads.db= reached *187 GB* on
 2026-05-03.  This is the langgraph =SqliteSaver= checkpointer for the
 production assist-web service, holding state for all threads ever
 created in the UI.
@@ -10,7 +10,7 @@ Observed sizes during today's session:
   filled /tmp's per-user quota (broke the eval suite for two
   nightlies).  That one was confined to a per-test temp dir; the prod
   one accumulates without any reset.
-- 2026-05-03 17:59: =/home/pierre/deploy/assist/threads/threads.db=
+- 2026-05-03 17:59: =$ASSIST_THREADS_DIR/threads.db=
   was 187,214,426,112 bytes (=187 GB=).
 - /home has 1.1 TB free, so this is not a hard outage yet — but it
   grows on the order of GB/day under normal use, and an eval-style
@@ -45,7 +45,7 @@ checkpoint deletion has been happening.
 
 Implementation: a daily systemd timer that runs ~3 AM:
 #+BEGIN_SRC bash
-sqlite3 /home/pierre/deploy/assist/threads/threads.db 'VACUUM;'
+sqlite3 $ASSIST_THREADS_DIR/threads.db 'VACUUM;'
 #+END_SRC
 
 Risks:

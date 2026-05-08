@@ -127,7 +127,7 @@ rather than re-downloading from HuggingFace:
 #+begin_src bash
 # Run this from the GPU server (or your local machine if it has the files)
 rsync -avz --progress \
-    /home/pierre/vllm/models/Ministral-3-14b-Instruct-2512/ \
+    ~/vllm/models/Ministral-3-14b-Instruct-2512/ \
     ubuntu@<instance-ip>:~/models/Ministral-3-14b-Instruct-2512/
 #+end_src
 
@@ -306,7 +306,7 @@ Or download directly to the GPU server:
 #+begin_src bash
 # From your GPU server:
 scp -r ubuntu@<instance-ip>:~/Ministral-3-14B-Instruct-2512-W4A16 \
-    /home/pierre/vllm/models/
+    ~/vllm/models/
 #+end_src
 
 ** Step 6: Terminate the instance
@@ -349,7 +349,7 @@ Note: the GPU will be fully occupied and cannot run vLLM at the same time.
 ** Step 1: Set up the environment on the GPU server
 
 #+begin_src bash
-ssh pierre@192.168.6.118
+ssh <user>@<gpu-host>
 cd ~/vllm
 .venv_llmcompressor/bin/pip install llmcompressor transformers accelerate datasets huggingface_hub
 .venv_llmcompressor/bin/huggingface-cli login   # paste your HF token
@@ -378,7 +378,7 @@ from llmcompressor.modifiers.quantization import GPTQModifier
 from llmcompressor import oneshot
 
 MODEL_ID = "mistralai/Ministral-3-14B-Instruct-2512"
-OUTPUT_DIR = "/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16"
+OUTPUT_DIR = "~/vllm/models/Ministral-3-14B-Instruct-2512-W4A16"
 NUM_CALIBRATION_SAMPLES = 512
 MAX_SEQUENCE_LENGTH = 2048
 
@@ -510,7 +510,7 @@ ls -lh ~/vllm/models/Ministral-3-14B-Instruct-2512-W4A16/
 
 .venv/bin/python -c "
 import json
-with open('/home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16/config.json') as f:
+with open('~/vllm/models/Ministral-3-14B-Instruct-2512-W4A16/config.json') as f:
     c = json.load(f)
 print('Architecture:', c.get('architectures'))
 print('Max position embeddings:', c.get('max_position_embeddings'))
@@ -521,7 +521,7 @@ print('Quantization format:', c.get('quantization_config', {}).get('format'))
 ** Step 5: Serve
 
 #+begin_src bash
-.venv/bin/vllm serve /home/pierre/vllm/models/Ministral-3-14B-Instruct-2512-W4A16 \
+.venv/bin/vllm serve ~/vllm/models/Ministral-3-14B-Instruct-2512-W4A16 \
   --host 0.0.0.0 \
   --port 8000 \
   --served-model-name mistralai/Ministral-3-14B-Instruct-2512 \
