@@ -115,7 +115,11 @@ There is no clean static answer.  Computation is universal — any language with
 | Network egress filter | *Optional* | Outbound to GitHub/SSH | Path-based remotes (no network) |
 | Process-level audit (=eBPF=, =auditd=) | *Out of scope* | All push attempts at kernel level | Heavy infra for marginal gain |
 
-** Wrapper implementation (shipped)
+** Wrapper implementation (shipped — [[https://github.com/pierrel/assist/pull/97][PR #97]], commit =19493e3=)
+
+To undo: revert =19493e3= (or just =dockerfiles/sandbox-git-shim.sh=
+and the =COPY=/=RUN= block added to =Dockerfile.sandbox=), then
+=make deploy-sandbox-build && make restart=.
 
 =dockerfiles/sandbox-git-shim.sh= sits at =/usr/bin/git= inside the
 sandbox image, replacing the upstream binary (moved aside to
