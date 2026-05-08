@@ -382,6 +382,34 @@ class TestSandboxManager(TestCase):
             SandboxManager.get_sandbox_backend(missing)
         self.assertIn("Cannot start sandbox", str(ctx.exception))
 
+    def test_get_sandbox_backend_refuses_root_owned_workspace(self):
+        """A root-owned workspace would silently restore the cp+exec-a
+        bypass that the non-root sandbox layer exists to close.
+        Refuse fail-closed and tell the operator how to migrate.
+        """
+        from unittest.mock import patch
+
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+
+        # Mock os.stat to return st_uid=0 (the legacy-thread case).
+        # Synthesise a stat_result with the right field positions.
+        real_st = os.stat(test_path)
+        fake_st = os.stat_result((
+            real_st.st_mode, real_st.st_ino, real_st.st_dev,
+            real_st.st_nlink, 0, 0,  # st_uid=0, st_gid=0
+            real_st.st_size, real_st.st_atime,
+            real_st.st_mtime, real_st.st_ctime,
+        ))
+
+        with patch('assist.sandbox_manager.os.stat', return_value=fake_st):
+            with self.assertRaises(RuntimeError) as ctx:
+                SandboxManager.get_sandbox_backend(test_path)
+
+        msg = str(ctx.exception)
+        self.assertIn("owned by root", msg)
+        self.assertIn("chown", msg)
+
     def test_get_sandbox_backend_reuses_container(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)

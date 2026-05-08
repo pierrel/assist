@@ -5,14 +5,19 @@
 #
 #   - Wrong file mode on /usr/bin/git-real (must be 0700 root:root)
 #   - Missing CAP_DAC_OVERRIDE on /usr/bin/git
-#   - Container running as root instead of uid 1000
+#   - Container running as root instead of a non-root uid
 #   - Any push variant succeeding (would advance origin/main)
 #   - Privilege-drop regression (git creating root-owned files)
 #
 # Usage: bash dockerfiles/test-sandbox-shim.sh
 # Exits 0 on full pass, 1 on any failure.
-
-set -e
+#
+# Why no `set -e`: this script captures the inner `docker run`
+# output via $(...) and inspects the exit code.  Under `set -e`,
+# bash 4.x would terminate the script before the diagnostic
+# message could be printed when docker run returns non-zero —
+# defeating the purpose of a smoke gate.  Each check inside the
+# heredoc handles its own failure with explicit `exit`.
 
 HOST_DIR=$(mktemp -d)
 trap 'rm -rf "$HOST_DIR"' EXIT
