@@ -191,7 +191,6 @@ def render_thread(
     captured: bool = False,
     merged: bool = False,
     reviewed: bool = False,
-    conflict: bool = False,
     pushed: bool = False,
 ) -> str:
     # Local import to avoid circular dependency with review.py at module load.
@@ -630,7 +629,6 @@ async def get_thread(
     captured: int = 0,
     merged: int = 0,
     reviewed: int = 0,
-    conflict: int = 0,
     pushed: int = 0,
 ) -> str:
     tdir = MANAGER.thread_dir(tid)
@@ -653,7 +651,6 @@ async def get_thread(
         captured=bool(captured),
         merged=bool(merged),
         reviewed=bool(reviewed),
-        conflict=bool(conflict),
         pushed=bool(pushed),
     )
 
@@ -717,11 +714,21 @@ async def merge_thread(tid: str):
     Persists a ``merge_conflict.json`` marker on rebase conflict so the
     UI can render a banner across subsequent renders; clears the marker
     on a clean merge.
+
+    Refuses with 409 when the thread is mid-turn — the agent inside
+    the sandbox is concurrently writing into the same working tree,
+    and the lock doesn't extend across the host/sandbox boundary.
     """
     try:
         thread = MANAGER.get(tid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
+
+    if _get_status(tid).get("stage") in BUSY_STAGES:
+        raise HTTPException(
+            status_code=409,
+            detail="Thread is busy. Wait for the current turn to finish before merging.",
+        )
 
     dm = _get_domain_manager(tid)
     if not dm or not dm.repo:
@@ -774,6 +781,12 @@ async def push_main(tid: str):
         MANAGER.get(tid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
+
+    if _get_status(tid).get("stage") in BUSY_STAGES:
+        raise HTTPException(
+            status_code=409,
+            detail="Thread is busy. Wait for the current turn to finish before pushing.",
+        )
 
     dm = _get_domain_manager(tid)
     if not dm or not dm.repo:
