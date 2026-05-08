@@ -62,14 +62,9 @@ Done 2026-05-06.  See [[file:docs/2026-05-06-mobile-friendly-ui-tweaks.org][docs
 ** DONE Make =write_file= recoverable on collision
 See [[file:docs/proposal-infinite-writes.org][docs/proposal-infinite-writes.org]] (Solution 1, "Make =write_file= recoverable").  Loop detection (Solution 2 of that doc) shipped already.  Without this fix, the small model still falls into the filename-mutation trap (=final_report.md= → =completed_final_report.md= → =report_final.md=…) when a write hits =Cannot write because it already exists=.  Hit the trap during the dev-skill migration evals (=test_mid_task_clarification=); loop detection caught it but the right fix is to make =write_file= overwrite-by-default or auto-rewrite to =edit_file= on collision.
 ** TODO Per-thread feature branch for web-UI threads
-Each new thread created through the web UI should branch off =main=, commit its changes after every turn to that branch, surface diffs as "this branch vs latest =origin/main=", and on merge fast-forward (or merge) to a fresh =main= and push to =origin/main=.
+Each new thread branches off =main= at creation, commits to that branch each turn, and merges back via auto-rebase + fast-forward.  Conflicts surface in the UI and are resolved by the agent.  Push to =origin/main= is user-initiated from the web UI only — the agent cannot push.
 
-Current behavior is unclear and needs to be investigated as the first step (=DomainManager= already exposes =has_changes_vs_main()=, suggesting *some* branch-per-thread machinery exists, but not necessarily this exact contract).  Open questions for the design phase:
-- Where does the branch get created — at thread-creation time, or lazily on first commit?
-- Branch naming (thread-id, slug from first user message, ...).
-- Behavior when =origin/main= advances mid-thread (rebase silently? surface a conflict in the UI?).
-- Merge contract — fast-forward only, or allow merge commits?  And what happens if the branch can't ff because =origin/main= moved?
-- Push permissions and credential model on the deploy box.
+See [[file:docs/2026-05-07-per-thread-web-git-isolation.org][docs/2026-05-07-per-thread-web-git-isolation.org]].
 ** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response
 ** TODO Self-healing flow on errors / suboptimal output
 See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].  Catch exceptions during agent execution and either spawn a remediation thread or surface for user-directed fix; reuse the "capture conversation" flow.
