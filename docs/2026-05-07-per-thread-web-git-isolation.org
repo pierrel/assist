@@ -111,34 +111,55 @@ There is no clean static answer.  Computation is universal — any language with
 |-------+--------+---------+--------|
 | Static classifier (=GitPushBlockerMiddleware=) | *In place* | Direct + shell-out forms | Dynamic construction in interpreters |
 | Sandbox credentials-free (no SSH key, no =.git-credentials=) | *In place* | Any push to a credential-requiring remote (=git@github.com=, HTTPS) | Path-based remotes inside =/workspace= |
-| =git= binary wrapper inside the sandbox image | *Recommended next* | All forms — refuses on =execve= regardless of how the call was constructed | Calling =/usr/lib/git-core/git push= directly (mitigate by wrapping that path too) |
+| =git= binary wrapper inside the sandbox image | *In place* | All push forms — direct, shell-out, Python subprocess, char-code, base64, file-mediated, Perl/Node, plumbing (=git-send-pack=, =git-push= via absolute path) | Implementing the git wire protocol from scratch in raw Python (caught by credential-free sandbox layer) |
 | Network egress filter | *Optional* | Outbound to GitHub/SSH | Path-based remotes (no network) |
 | Process-level audit (=eBPF=, =auditd=) | *Out of scope* | All push attempts at kernel level | Heavy infra for marginal gain |
 
-** Recommendation
+** Wrapper implementation (shipped)
 
-Add a thin wrapper script in front of =git= inside the sandbox image:
+=dockerfiles/sandbox-git-shim.sh= sits at =/usr/bin/git= inside the
+sandbox image, replacing the upstream binary (moved aside to
+=/usr/bin/git-real=).  Single shim closes every realised push path
+because git-core's subcommand symlinks (=/usr/lib/git-core/git-push=,
+=git-send-pack=, =git-receive-pack=) all point at =/usr/bin/git= —
+they all resolve through the shim.
 
-#+begin_src bash
-#!/bin/bash
-if [ "$1" = "push" ]; then
-  echo "Error: git push is disabled in this sandbox.  Pushes are user-initiated from the web UI." >&2
-  exit 1
-fi
-exec /usr/lib/git-core/git "$@"
-#+end_src
+Two checks:
 
-Place at =/usr/local/bin/git= (earlier in =PATH= than =/usr/bin/git=).  Closes:
-- =python -c "subprocess.run(['git','push'])"= — the wrapper sees =push= and refuses.
-- All char-code / base64 / dynamic constructions — they ultimately exec =git push=, which hits the wrapper.
-- =bash myscript.sh= where =myscript.sh= contains =git push= — same.
+1. =${0##*/}= matches =git-push=, =git-send-pack=, or =git-receive-pack=
+   — catches direct invocations like =/usr/lib/git-core/git-push origin main=.
+2. =$1= is =push= or =send-pack= — catches the standard =git push= form.
 
-Bypassable only by =/usr/lib/git-core/git push= (real binary path).  Wrap that path too, or move it.
+Anything else exec's the real binary with =exec -a git= (so git's
+own argv[0]-based subcommand dispatch keeps working).
 
-This is a follow-up — captured as a roadmap item.  Not blocking the current PR because:
-1. The credential-free sandbox already prevents pushes to *real* remotes (which is the actual production risk).
-2. The static classifier handles the common cases the small model would attempt without coaching.
-3. The eval (=edd/eval/test_git_push_blocker_agent.py=) shows the agent under ultimatum stops at the first middleware rejection (=LoopDetectionMiddleware= cuts the spiral) — bypass routes are not reached in observed agent behaviour.
+Verified against 15 bypass variants inside the rebuilt image:
+- =git push=, =git push -f=
+- =bash -c "git push"=, =sh -c=, =eval=
+- =python3 -c "subprocess.run(['git','push'])"=
+- =python3 -c "os.system('git push')"=
+- Char-code construction: =cmd=chr(103)+chr(105)+chr(116)=
+- Base64 payload via =exec(b64decode(...))=
+- =/usr/lib/git-core/git-push= absolute path
+- =/usr/lib/git-core/git-send-pack= (lower-level plumbing)
+- =/usr/bin/git push= (skipping PATH)
+- File-mediated: =write_file('x.sh', 'git push'); bash x.sh=
+- Shell variable assembly: =g=git; p=push; $g $p=
+- =perl -e "system(...)"=
+
+All 15 blocked.  Non-push git operations (=status=, =diff=, =log=,
+=branch=, =fetch=, =diff --cached=) all pass through unchanged.
+
+** What this still doesn't catch
+
+Implementing the git wire protocol directly in Python — opening a TCP
+socket and speaking pack-protocol — bypasses the binary wrapper
+entirely.  The =credential-free sandbox= layer catches this in
+production: no SSH key, no HTTPS token, so the agent can't authenticate
+to GitHub/GitLab regardless of how it speaks git.  Path-based remotes
+inside =/workspace= are the only target where a hand-rolled-protocol
+push would succeed; we accept that as out of scope (no real remote
+lives there in production).
 
 * Risks logged by the architect
 
