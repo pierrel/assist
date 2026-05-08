@@ -31,7 +31,7 @@ class TestDomainManager(TestCase):
         self.assertEqual(dm.domain(), test_path)
         self.assertEqual(dm.repo, "https://example.com/repo.git")
         # Should have called clone since directory doesn't exist
-        mock_clone.assert_called_once_with("https://example.com/repo.git", test_path)
+        mock_clone.assert_called_once_with("https://example.com/repo.git", test_path, branch_suffix=None)
 
     @patch('assist.domain_manager.git_repo')
     def test_domain_manager_uses_existing_directory(self, mock_git_repo):

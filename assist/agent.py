@@ -24,6 +24,7 @@ from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
+from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
@@ -118,14 +119,20 @@ def create_agent(model: BaseChatModel,
     # edit_file instead of inventing a new filename.  Must run before
     # loop_detection_mw so the rewritten error is what the loop detector sees.
     write_collision_mw = WriteCollisionMiddleware()
+    # Reject `git push` invocations from the agent's `execute` tool —
+    # the agent must not be able to publish to origin; pushes go
+    # through the web UI's "Push to origin" button only.  Sits ahead
+    # of `loop_detection_mw` so the rejection is what the loop
+    # detector sees if the model retries.
+    git_push_blocker_mw = GitPushBlockerMiddleware()
     loop_detection_mw = LoopDetectionMiddleware()
     # Innermost wrap_model_call middleware — recovers from empty terminal
     # AIMessages after every outer retry/sanitization layer has had its turn.
     empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
 
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
-          context_eviction_mw, write_collision_mw, loop_detection_mw,
-          ThreadQueueMiddleware(), empty_response_recovery_mw]
+          context_eviction_mw, write_collision_mw, git_push_blocker_mw,
+          loop_detection_mw, ThreadQueueMiddleware(), empty_response_recovery_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
     # Single-slashed path that's safe to interpolate without producing
