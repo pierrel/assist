@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -84,6 +85,16 @@ DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}
 DOMAIN_MANAGERS: Dict[str, DomainManager] = {}  # tid -> DomainManager
 
+# Serialises ``DomainManager.merge_to_main`` and ``push_main`` across
+# concurrent web requests.  The web app runs as a single uvicorn
+# worker, so an in-process lock is sufficient — without it, two
+# threads merging or pushing within the same second would race the
+# host's ``git fetch`` / ``git push`` sequence and one would leave
+# the local repo in a partial state.  If the deploy ever runs
+# multiple workers, swap this for an ``flock`` on a file in
+# ``ROOT``.
+MERGE_LOCK = threading.Lock()
+
 
 def _domain_label(url: str) -> str:
     """'user@host:/path/to/life.git' -> 'life'"""
@@ -126,12 +137,16 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
 
     For new threads pass *domain* (a git URL to clone).
     For existing threads pass None — DomainManager auto-detects the remote.
+
+    Passes the last 4 chars of ``tid`` as ``branch_suffix`` so per-thread
+    branches and post-merge re-branches are unambiguous when two threads
+    are created within the same UTC second.
     """
     if tid in DOMAIN_MANAGERS:
         return DOMAIN_MANAGERS[tid]
     twdir = MANAGER.thread_default_working_dir(tid)
     try:
-        dm = DomainManager(twdir, domain)
+        dm = DomainManager(twdir, domain, branch_suffix=tid[-4:])
         DOMAIN_MANAGERS[tid] = dm
         return dm
     except Exception:
@@ -164,6 +179,50 @@ def _has_unmerged_changes(tid: str) -> bool:
             "has_changes_vs_main failed for %s: %s", tid, e,
         )
         return False
+
+
+def _conflict_path(tid: str) -> str:
+    return os.path.join(MANAGER.thread_dir(tid), "merge_conflict.json")
+
+
+def _get_conflict(tid: str) -> dict | None:
+    """Return the persisted merge-conflict state for ``tid``, or None.
+
+    The dict shape is ``{"branch": str, "files": [str], "raised_at": iso}``.
+    Set by ``merge_thread`` when ``merge_to_main`` raises
+    :class:`MergeConflictError`; cleared when a subsequent merge
+    succeeds.  Stored separately from ``status.json`` so the agent
+    can keep transitioning through ``processing`` ↔ ``ready`` while
+    the user works through the conflict.
+    """
+    path = _conflict_path(tid)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _set_conflict(tid: str, branch: str, files: list[str]) -> None:
+    path = _conflict_path(tid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {
+        "branch": branch,
+        "files": files,
+        "raised_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def _clear_conflict(tid: str) -> None:
+    path = _conflict_path(tid)
+    if os.path.isfile(path):
+        os.remove(path)
 
 
 def _evict_caches(tid: str) -> None:

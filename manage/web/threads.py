@@ -17,7 +17,12 @@ import markdown
 from fastapi import BackgroundTasks, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-from assist.domain_manager import Change, DomainManager
+from assist.domain_manager import (
+    Change,
+    DomainManager,
+    MergeConflictError,
+    OriginAdvancedError,
+)
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
@@ -31,13 +36,17 @@ from manage.web.state import (
     DOMAINS,
     INIT_STAGES,
     MANAGER,
+    MERGE_LOCK,
     STAGE_LABELS,
+    _clear_conflict,
     _domain_selector_html,
     _evict_caches,
+    _get_conflict,
     _get_domain_manager,
     _get_sandbox_backend,
     _get_status,
     _has_unmerged_changes,
+    _set_conflict,
     _set_status,
     _thread_domain_html,
     _thread_title,
@@ -182,6 +191,8 @@ def render_thread(
     captured: bool = False,
     merged: bool = False,
     reviewed: bool = False,
+    conflict: bool = False,
+    pushed: bool = False,
 ) -> str:
     # Local import to avoid circular dependency with review.py at module load.
     from manage.web.review import _REVIEW_HEADER
@@ -213,6 +224,54 @@ def render_thread(
         except Exception:
             pass
 
+    # Surface a persistent merge-conflict banner above the diff stack
+    # whenever the most recent merge attempt aborted on a rebase
+    # conflict.  The banner clears the moment the next merge call
+    # succeeds (see ``merge_thread`` below), and stays put across
+    # ``processing`` ↔ ``ready`` transitions so the user can ask the
+    # agent to fix the conflict and the banner doesn't disappear when
+    # the agent's response lands.
+    conflict_state = _get_conflict(tid) if not is_init else None
+    conflict_banner_html = ""
+    if conflict_state:
+        files = conflict_state.get("files") or []
+        files_html = "".join(
+            f'<li><code>{html.escape(f)}</code></li>' for f in files
+        ) or "<li><em>(unmerged file list unavailable)</em></li>"
+        conflict_banner_html = f"""
+        <div class="conflict-banner">
+          <strong>Merge conflict on <code>{html.escape(conflict_state.get("branch", "?"))}</code>.</strong>
+          The rebase onto <code>origin/main</code> aborted because the
+          following file(s) need manual reconciliation:
+          <ul>{files_html}</ul>
+          The agent can attempt to resolve this — type a message asking
+          it to fix the conflict, then re-click <em>Merge to Main</em>.
+        </div>
+        """
+
+    # The push-to-origin button is visible only when a previous merge
+    # has put unpushed work on local ``main``.  ``has_unpushed_main``
+    # is a no-fetch ref-distance check; the push endpoint does the
+    # authoritative ``fetch + ancestor check`` server-side.
+    show_push_button = False
+    if not is_init:
+        try:
+            dm_for_push = _get_domain_manager(tid)
+            if dm_for_push:
+                show_push_button = dm_for_push.has_unpushed_main()
+        except Exception:
+            pass
+
+    push_btn_html = (
+        f"""<form action="/thread/{tid}/push-main" method="post" style="margin: 0;">
+              <button class="btn push-btn" type="submit"
+                      onclick="return confirm('Push local main to origin?');">
+                Push to origin
+              </button>
+            </form>"""
+        if show_push_button else ""
+    )
+
     diff_block_html = ""
     if diffs:
         diff_files_html = _render_inline_diffs(tid, diffs)
@@ -220,15 +279,26 @@ def render_thread(
         <div class="diff-container">
           <div class="diff-actions">
             <a class="btn btn-secondary review-btn" href="/thread/{tid}/review">Review</a>
+            {push_btn_html}
             <form action="/thread/{tid}/merge" method="post" style="margin: 0;">
               <button class="btn merge-btn" type="submit"
-                      onclick="return confirm('Merge this branch into main? This will squash all commits.');">
+                      onclick="return confirm('Merge this branch into main? This will rebase onto origin/main and squash into a single commit.');">
                 Merge to Main
               </button>
             </form>
           </div>
           <div class="diff-files">
             {diff_files_html}
+          </div>
+        </div>
+        """
+    elif show_push_button:
+        # Diff is empty (post-merge) but the user still needs the push
+        # button — render a slimmed-down action row.
+        diff_block_html = f"""
+        <div class="diff-container">
+          <div class="diff-actions">
+            {push_btn_html}
           </div>
         </div>
         """
@@ -323,8 +393,13 @@ def render_thread(
           .diff-actions {{ display: flex; justify-content: flex-end; gap: .5rem; margin-bottom: .6rem; flex-wrap: wrap; }}
           .merge-btn {{ background: #28a745; color: white; border: 1px solid #1e7e34; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; touch-action: manipulation; }}
           .merge-btn:hover {{ background: #218838; border-color: #1c7430; }}
+          .push-btn {{ background: #0366d6; color: white; border: 1px solid #024ea4; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; touch-action: manipulation; }}
+          .push-btn:hover {{ background: #024ea4; border-color: #023672; }}
           .review-btn {{ display: inline-flex; align-items: center; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; text-decoration: none; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; touch-action: manipulation; }}
           .review-btn:hover {{ background: #eaeef2; }}
+          .conflict-banner {{ background: #fff3f3; border: 1px solid #f5c6cb; padding: .8rem 1rem; margin: .8rem 0; border-radius: 6px; color: #721c24; font-size: .95rem; }}
+          .conflict-banner ul {{ margin: .4rem 0 .4rem 1.2rem; padding: 0; }}
+          .conflict-banner code {{ background: #fbe9eb; padding: 0 .25rem; border-radius: 3px; }}
           {_DIFF_CSS}
           .error-msg {{ background: #f8d7da; border: 1px solid #f5c6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #721c24; }}
           .status-banner {{ display: flex; align-items: center; gap: .6rem; background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: .6rem .8rem; margin: .5rem 0; border-radius: 6px; font-size: .9rem; }}
@@ -352,6 +427,8 @@ def render_thread(
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           {"<div class='success-msg'>Branch successfully merged to main!</div>" if merged else ""}
           {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}
+          {"<div class='success-msg'>Pushed local main to origin/main.</div>" if pushed else ""}
+          {conflict_banner_html}
           {f'<script>try {{ localStorage.removeItem("assist:review:" + {json.dumps(tid)}); }} catch (_) {{}}</script>' if reviewed else ""}
           <form action="/thread/{tid}/message" method="post">
             <label for="text">Your message</label><br/>
@@ -411,7 +488,11 @@ def _initialize_thread(tid: str, text: str, domain: str | None) -> None:
         if domain:
             _set_status(tid, "cloning", pending_message=text, domain=domain)
             try:
-                dm = DomainManager(MANAGER.thread_default_working_dir(tid), domain)
+                dm = DomainManager(
+                    MANAGER.thread_default_working_dir(tid),
+                    domain,
+                    branch_suffix=tid[-4:],
+                )
                 # Refresh cache: a previous render may have cached a no-remote DM.
                 DOMAIN_MANAGERS[tid] = dm
             except Exception as e:
@@ -519,7 +600,11 @@ async def create_thread(domain: str | None = Form(None)):
     tid = chat.thread_id
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected:
-        DomainManager(MANAGER.thread_default_working_dir(tid), selected)
+        DomainManager(
+            MANAGER.thread_default_working_dir(tid),
+            selected,
+            branch_suffix=tid[-4:],
+        )
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -540,7 +625,14 @@ async def create_thread_with_message(
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
-async def get_thread(tid: str, captured: int = 0, merged: int = 0, reviewed: int = 0) -> str:
+async def get_thread(
+    tid: str,
+    captured: int = 0,
+    merged: int = 0,
+    reviewed: int = 0,
+    conflict: int = 0,
+    pushed: int = 0,
+) -> str:
     tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
@@ -561,6 +653,8 @@ async def get_thread(tid: str, captured: int = 0, merged: int = 0, reviewed: int
         captured=bool(captured),
         merged=bool(merged),
         reviewed=bool(reviewed),
+        conflict=bool(conflict),
+        pushed=bool(pushed),
     )
 
 
@@ -616,7 +710,14 @@ async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: st
 
 @app.post("/thread/{tid}/merge")
 async def merge_thread(tid: str):
-    """Merge the current branch into main with AI-generated summary."""
+    """Rebase the thread branch onto origin/main and squash into local main.
+
+    Holds ``MERGE_LOCK`` for the duration so two web requests merging or
+    pushing at the same instant don't race the host's git operations.
+    Persists a ``merge_conflict.json`` marker on rebase conflict so the
+    UI can render a banner across subsequent renders; clears the marker
+    on a clean merge.
+    """
     try:
         thread = MANAGER.get(tid)
     except FileNotFoundError:
@@ -634,20 +735,63 @@ async def merge_thread(tid: str):
         # If model fails to load, pass None and use fallback summary
         summary_model = None
 
+    with MERGE_LOCK:
+        try:
+            dm.merge_to_main(summary_model)
+            _clear_conflict(tid)
+            return RedirectResponse(
+                url=f"/thread/{tid}?merged=1",
+                status_code=303,
+            )
+        except MergeConflictError as e:
+            _set_conflict(tid, e.branch, e.files)
+            return RedirectResponse(
+                url=f"/thread/{tid}?conflict=1",
+                status_code=303,
+            )
+        except ValueError as e:
+            # User-friendly error (already on main, no changes, unpushed local main).
+            raise HTTPException(status_code=400, detail=str(e))
+        except subprocess.CalledProcessError as e:
+            # Git command failed
+            raise HTTPException(status_code=500, detail=f"Git operation failed: {e}")
+        except Exception as e:
+            # Unexpected error
+            logging.error(f"Merge failed for thread {tid}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Merge failed: {str(e)}")
+
+
+@app.post("/thread/{tid}/push-main")
+async def push_main(tid: str):
+    """Fast-forward push local ``main`` to ``origin/main``.
+
+    User-initiated only — the agent has no way to reach this endpoint.
+    Holds ``MERGE_LOCK`` so a concurrent merge can't slip in between
+    the fetch and the push.  Returns 409 when ``origin/main`` has
+    advanced past local ``main`` so the user knows to re-merge.
+    """
     try:
-        summary = dm.merge_to_main(summary_model)
-        # Redirect with success message (could use query param)
-        return RedirectResponse(
-            url=f"/thread/{tid}?merged=1",
-            status_code=303
-        )
-    except ValueError as e:
-        # User-friendly error (merge conflicts, no changes, etc.)
-        raise HTTPException(status_code=400, detail=str(e))
-    except subprocess.CalledProcessError as e:
-        # Git command failed
-        raise HTTPException(status_code=500, detail=f"Git operation failed: {e}")
-    except Exception as e:
-        # Unexpected error
-        logging.error(f"Merge failed for thread {tid}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Merge failed: {str(e)}")
+        MANAGER.get(tid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    dm = _get_domain_manager(tid)
+    if not dm or not dm.repo:
+        raise HTTPException(status_code=400, detail="No git repository configured for this thread")
+
+    with MERGE_LOCK:
+        try:
+            dm.push_main()
+            return RedirectResponse(
+                url=f"/thread/{tid}?pushed=1",
+                status_code=303,
+            )
+        except OriginAdvancedError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except subprocess.CalledProcessError as e:
+            raise HTTPException(status_code=500, detail=f"Git operation failed: {e}")
+        except Exception as e:
+            logging.error(f"Push failed for thread {tid}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Push failed: {str(e)}")
