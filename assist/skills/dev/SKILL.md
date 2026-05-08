@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Software development work in a code project. TRIGGER WORDS — code, codebase, project, repo, function, class, method, module, test, TDD, refactor, bug, debug, fix, implement, feature, pyproject.toml, package.json, Cargo.toml, go.mod, Makefile, Dockerfile. MUST load before any tool call that explores, explains, writes, edits, or runs code in a software project.
+description: Software development work in a code project. EXAMPLES — "fix the bug in render_diff that drops the trailing newline"; "walk me through how the thread manager talks to the sandbox"; "add a retries kwarg to api_client.get with a test that exercises it". MUST load before any tool call that explores, explains, writes, edits, or runs code in a codebase.
 ---
 
 # Software Development Workflow
