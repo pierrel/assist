@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history vacuum-now
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -52,6 +52,14 @@ pull-eval-history:
 sandbox-build:
 	docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .
 
+# Build-time smoke for the git-push-refusal layers — fails the build
+# if any push variant succeeds, if /usr/bin/git-real isn't 0700, if
+# the cap_dac_override file cap isn't set, or if git creates root-
+# owned files (privilege drop regression).  See
+# dockerfiles/test-sandbox-shim.sh for the full check list.
+sandbox-smoke: sandbox-build
+	bash dockerfiles/test-sandbox-shim.sh
+
 sandbox-shell:
 	docker run --rm -it assist-sandbox bash
 
@@ -73,7 +81,21 @@ deploy-code:
 deploy-sandbox-build:
 	@echo "→ Building sandbox image on $(DEPLOY_HOST)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .'
-	@echo "✓ Sandbox image built"
+	@echo "→ Running sandbox-smoke on $(DEPLOY_HOST) (push-refusal regression gate)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
+	@echo "✓ Sandbox image built and smoked"
+
+# Migrate pre-non-root-sandbox thread workspaces to the deploy
+# user's ownership.  Idempotent.  Required after the first deploy
+# of the non-root sandbox layer (docs/2026-05-08-...) — without it,
+# legacy threads with root-owned files fail
+# SandboxManager.get_sandbox_backend's "uid != 0" check on first
+# turn.  Also wired into install-service.sh so it runs on every
+# install; this target is for ad-hoc re-application.
+deploy-migrate-workspaces:
+	@echo "→ Migrating thread workspaces on $(DEPLOY_HOST) to deploy-user ownership..."
+	@ssh $(DEPLOY_HOST) 'sudo chown -R $$USER:$$USER $(ASSIST_THREADS_DIR)'
+	@echo "✓ Workspace ownership migrated"
 
 deploy-service:
 	@echo "→ Installing systemd service..."
@@ -117,6 +139,7 @@ setup-sudo:
 	@ssh -t $(DEPLOY_HOST) \
 		SERVICE_NAME=$(SERVICE_NAME) \
 		DEPLOY_PATH=$(DEPLOY_PATH) \
+		ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
 		'bash -s' < scripts/setup-passwordless-sudo.sh
 	@echo ""
 	@echo "✓ Setup complete! You can now deploy from Emacs without password prompts."

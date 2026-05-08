@@ -46,12 +46,55 @@ class SandboxManager:
             except Exception:
                 cls._containers.pop(work_dir, None)
 
+        # Run the container as the host bind-mount's owner, not as
+        # root.  Two reasons:
+        #   1. Files the agent writes into /workspace land owned by
+        #      the deploying user on the host, so the host process
+        #      can clean them up via shutil.rmtree without the
+        #      alpine-rm fallback in thread.py.
+        #   2. As a non-root uid, the agent cannot read
+        #      /usr/bin/git-real (locked at mode 0700 root:root by
+        #      Dockerfile.sandbox).  This is the privilege-separation
+        #      layer that closes the cp+exec-a bypass left over from
+        #      PR #97.  See docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org.
+        # Read the bind-mount uid:gid here, not at module import,
+        # so a misconfigured workspace surfaces as a thread-level
+        # error rather than a manager-import crash.
+        try:
+            st = os.stat(work_dir)
+        except OSError as e:
+            raise RuntimeError(
+                f"Cannot start sandbox for {work_dir}: stat failed ({e}). "
+                "The workspace directory must exist and be readable by the web process."
+            ) from e
+
+        # Refuse to run the container as root.  A root-owned workspace
+        # would mean `containers.run(user="0:0")` — which silently
+        # restores the bypass this whole layer exists to close (the
+        # agent inside the sandbox could read mode-0700 git-real and
+        # copy it).  Pre-migration thread workspaces created before
+        # this layer shipped *are* root-owned, so this check is what
+        # catches them; the operator runs the documented chown and
+        # the thread comes back online.
+        if st.st_uid == 0:
+            raise RuntimeError(
+                f"Workspace {work_dir} is owned by root.  Refusing to "
+                "start the sandbox because that would defeat the "
+                "privilege-separation layer that prevents the agent "
+                "from bypassing the git push refusal.  Migrate with: "
+                f"sudo chown -R $USER:$USER {work_dir}  (or, for the "
+                "whole threads dir at once, $ASSIST_THREADS_DIR).  "
+                "See docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org."
+            )
+        user_arg = f"{st.st_uid}:{st.st_gid}"
+
         try:
             client = cls._get_docker_client()
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
                 remove=True,
+                user=user_arg,
                 volumes={work_dir: {"bind": "/workspace", "mode": "rw"}},
                 working_dir="/workspace",
                 stdin_open=True,
