@@ -1,0 +1,80 @@
+#+TITLE: Per-thread feature branch for web-UI threads
+#+DATE: 2026-05-07
+
+* Status
+Design.  Roadmap entry: =roadmap.org= "Per-thread feature branch for web-UI threads" under *Reliability*.
+
+* Problem
+
+Two threads created from the web UI both branch off =main= at roughly the same time and both try to land back to =main=.  Whichever thread merges second hits a non-fast-forward error because =main= advanced under it, even when the two threads' changes do not actually conflict.  The user sees a merge failure that has nothing to do with the substance of their work.
+
+The current contract — implicit in =DomainManager= and the web routes — is unclear.  =DomainManager.has_changes_vs_main()= suggests *some* branch-per-thread machinery exists, but not necessarily what the user intends.  The first step of this work is mapping current behavior; the design below assumes the target contract.
+
+* Target contract
+
+1. *Each web-UI thread runs on its own branch off =main=.*  The branch is created at thread-creation time (not lazily on first commit) so the diff baseline is unambiguous from turn 1.
+
+2. *The agent commits to the thread branch after each turn.*  Diffs the user sees in the UI are "this branch vs latest =origin/main=".
+
+3. *Merge to =main= is auto-rebase + fast-forward.*  When the user merges:
+   - Fetch =origin/main=.
+   - Rebase the thread branch onto =origin/main=.
+   - If rebase succeeds (no conflict), fast-forward =main= to the rebased branch.
+   - If rebase produces a conflict, abort the rebase, surface the conflict to the user in the web UI, and tell them to ask the agent to resolve it.  The agent has full git read/write access locally and can run =git rebase --continue= after editing conflicting files.
+
+4. *The agent cannot push.*  Push to =origin/main= is exclusively a user-initiated action from the web UI.  The push action runs on the app side, with credentials the agent does not have, and is implemented as a separate backend endpoint triggered by a UI button.
+
+5. *Conflict surface in the UI.*  When merge fails because of a rebase conflict, the UI shows: "Conflict during merge.  The agent can attempt to resolve — type a message to the thread asking it to fix the conflict."  Once resolved, the user re-clicks merge.
+
+* Decisions baked in (from user)
+
+| # | Decision | Choice |
+|---+----------+--------|
+| 1 | What "merge even if behind, no conflict" means | *Auto-rebase, then fast-forward.*  Thread branch isn't shared, so the rewrite is safe.  =main= stays linear. |
+| 2 | When the thread branch syncs against =origin/main= | *Only at merge time.*  Mid-thread rebases are confusing; conflicts surface late but unambiguously. |
+| 3 | Agent push permissions | *Agent can run any git command except push.*  Real enforcement boundary, not docs alone. |
+| 4 | Push UI affordance | *User-initiated button + dedicated backend endpoint.*  The endpoint owns the credentials. |
+
+* Open design questions (Phase 1 — for the architect)
+
+These need investigation in the codebase before implementation:
+
+1. *Where does the branch get created today, if anywhere?*  =DomainManager.has_changes_vs_main()= implies branching machinery exists.  Map: thread-creation flow, where =DomainManager= is constructed, what branch state is when a thread starts.
+
+2. *Branch naming.*  Thread-id (stable, opaque) is the safe default.  Slug-from-first-message is friendlier but requires knowing the message before the branch exists.  The architect should propose one.
+
+3. *Where does merge happen today?*  Find the existing merge code path.  Determine whether it currently does ff-only, merge commit, or something else, and where the non-ff failure surfaces.
+
+4. *How do we enforce "agent can't push"?*  Two options to evaluate:
+   - Wrap the agent's shell-execution tool to refuse =git push= invocations (any form: =push=, =push origin=, =push --force=, etc.).  Cheap, but the agent could still use porcelain that wraps push.
+   - Sandbox-level: mount the working tree without push credentials at all (no =~/.git-credentials=, no SSH key reachable from the sandbox).  Stronger but requires sandbox config changes.
+   The right choice probably combines both — the agent sandbox should not have credentials *and* the shell wrapper should refuse =git push=.
+
+5. *Push endpoint design.*  HTTP route in the web app.  Auth model — who is allowed to push?  What happens if the push fails (e.g. someone else pushed in the meantime)?  Probably: re-fetch, re-rebase, re-attempt, surface failure to user if still failing.
+
+6. *Concurrency.*  Two web threads merging at almost-the-same moment.  The rebase + push sequence is not atomic against =origin/main=.  Need a serialization story — likely a lock on the merge endpoint, or accept that one of the two will fail and have to retry.
+
+* Phase 1 — Architect responsibilities
+
+The architect (=Plan= subagent) should:
+1. Map current per-thread branching behavior end-to-end (thread create → turn → diff → merge), with file:line references.
+2. Identify the gap between current behavior and the target contract above.
+3. Answer the six open questions above with concrete choices grounded in the codebase.
+4. Produce a numbered implementation plan covering: data model changes (if any), web routes (new + modified), git wrapper / sandbox guard for push enforcement, UI changes, evals/smoke plan.
+5. Flag any risks or tradeoffs that the user decisions above didn't anticipate.
+
+* Phase 2 — Implementation responsibilities
+
+After the architect's plan is reviewed and redirected as needed:
+1. Implement the changes per the plan.
+2. Smoke the merge flow locally (clean ff path AND conflict path).
+3. Spawn the reviewer subagent on the diff.
+4. Address findings.
+5. Real-prod smoke after deploy (per saved =feedback_smoke_after_refactor=) — both clean merge and forced-conflict scenarios.
+
+* Out of scope
+
+- Pushes from anywhere except the web UI button.
+- Rewriting =DomainManager= beyond what's needed for the contract above.
+- Multi-user concurrent editing of the same thread (the existing single-thread-single-user model stays).
+- Fancy conflict-resolution UI — text-based "ask the agent to fix it" is the v1.
