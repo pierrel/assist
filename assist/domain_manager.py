@@ -459,12 +459,6 @@ class DomainManager:
                 stderr=rebase.stderr,
             )
 
-        # Rebase succeeded — now commit to spending the LLM call on
-        # the summary.  Doing this *after* the rebase avoids burning
-        # wall-clock and queue capacity on merges that would have
-        # hit the unpushed-main check or a conflict.
-        summary = self._summarize_merge(diffs, current_branch, summary_model)
-
         # Switch to main and bring it level with origin/main before
         # squashing the rebased thread branch on top.
         subprocess.run(['git', '-C', self.repo_path, 'checkout', 'main'], check=True)
@@ -473,6 +467,14 @@ class DomainManager:
             ['git', '-C', self.repo_path, 'merge', '--squash', current_branch],
             check=True,
         )
+
+        # Generate the AI summary as late as possible — directly
+        # before the commit it labels.  Every git step before this
+        # could fail (network on fetch, conflict on rebase, dirty
+        # state on checkout, etc.); spending an LLM round-trip only
+        # after they've all succeeded means a failed merge never
+        # burns a model call.
+        summary = self._summarize_merge(diffs, current_branch, summary_model)
         subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', summary], check=True)
 
         # Roll the thread forward onto a new branch off main so the
