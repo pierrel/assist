@@ -1,0 +1,98 @@
+#+TITLE: Privilege-separated git push refusal — restrict =git-real= via non-root sandbox
+#+DATE: 2026-05-08
+
+* Status
+Design.  Phase 1 — architect investigates current root-assumptions in the sandbox + proposes a numbered implementation plan.
+
+* Problem
+
+The =/usr/bin/git= shim shipped in [[https://github.com/pierrel/assist/pull/97][PR #97]] catches every push form that flows through ``git`` lookup — direct, shell-out, Python =subprocess.run=, char-code construction, base64, file-mediated =bash <script>=, plumbing (=git-send-pack=, =/usr/lib/git-core/git-push=).  But it does *not* close the case where the agent copies =/usr/bin/git-real= itself and invokes the copy with a spoofed argv[0].
+
+** Confirmed bypass (2026-05-08, verified in =assist-sandbox:latest=)
+
+#+begin_src bash
+cp /usr/bin/git-real /tmp/g
+chmod +x /tmp/g
+cat > /tmp/recv-wrap <<'WRAP'
+#!/bin/bash
+exec -a git-receive-pack /tmp/g "$@"
+WRAP
+chmod +x /tmp/recv-wrap
+/tmp/g push --receive-pack=/tmp/recv-wrap origin main
+# → To ../remote.git
+# →  * [new branch]      main -> main
+#+end_src
+
+Push reaches the remote.  This is the residual gap the "more foundational" fix must close.
+
+** Why the wrapper alone can't catch this
+
+The shim is a userspace binary at =/usr/bin/git=.  It only sees calls that resolve to it via PATH lookup or via the symlinks in =/usr/lib/git-core= that point at it.  A *new* binary at an arbitrary path (=/tmp/g=) doesn't go through =/usr/bin/git= — the kernel's =execve= dispatches it directly.  =exec -a= lets the caller set argv[0] without renaming the file, so checks based on the file path of argv[0] don't help either.
+
+Static analysis of the =execute= command string is also no help — see "Dynamic-construction attack surface" in =docs/2026-05-07-per-thread-web-git-isolation.org=.  Computation is universal; the agent can construct the bypass invocation in any interpreter at runtime.
+
+* Goal
+
+Make =/usr/bin/git-real= unreachable to the agent — it cannot read it, it cannot copy it, it cannot exec it directly.  The shim at =/usr/bin/git= is the *only* path that can invoke the real binary.
+
+This is the privilege-separation layer.  It rests on a Unix capability the previous layers did not use: making files unreadable to non-root processes.
+
+* Locked decisions (from user)
+
+| # | Decision | Choice |
+|---+----------+--------|
+| 1 | Approach | *A. Non-root sandbox + restricted =git-real= + setuid C shim* (vs. eBPF LSM, vs. limited-git reimplementation).  Conventional privilege-separation; bounded implementation surface. |
+| 2 | Sandbox user model | Container runs as a non-root uid (e.g. =sandbox= uid 1000, or =--user= matched to host uid).  Architect to determine the exact uid-mapping strategy from the existing =SandboxManager= code. |
+| 3 | Real-binary protection | =/usr/bin/git-real= becomes mode =0700= owned by root.  Only the shim (running setuid root) can exec it. |
+| 4 | Shim language | C, not bash.  Bash is neutered when run setuid.  A small C source (~30 lines) is auditable. |
+| 5 | Compile model | =gcc= installed in the build stage; shim compiled during build; =gcc= can stay (the agent has it anyway via base-devel) or be removed at the end if the agent doesn't need it. |
+
+* Open design questions (Phase 1 — for the architect)
+
+The architect should investigate the current sandbox layer and answer:
+
+1. *Where does the agent's =execute= tool actually run inside the sandbox?*  Map the path: =execute()= → =DockerSandboxBackend.execute()= → =container.exec_run()=.  Confirm it's invoked as root today.  Find any callers that pass =user== explicitly.
+
+2. *Bind-mount uid implications.*  When =SandboxManager.get_sandbox_backend(work_dir)= bind-mounts a host path, what uid does the inside-container process see for the files?  If we run as uid 1000 inside, can the container read/write =/workspace=?  What does that require on the host (chown, default uid, =--user=)?
+
+3. *Existing root-assumptions.*  Survey the codebase for places that assume root inside the sandbox.  Likely suspects:
+   - =pip install= calls (would they fail without =--user= or a venv?)
+   - Eval cleanup (=tearDown= runs =docker run alpine chmod -R 777 /cleanup=, suggesting today's flow leaves root-owned files behind — this might disappear if the agent is non-root).
+   - Any =Dockerfile.sandbox= step that creates root-owned content the agent later writes to.
+   - The retention sweep, the threads-db migration, etc.
+
+4. *Setuid C shim concrete design.*  Required behavior:
+   - Refuse if argv[0]'s basename is =git-push=, =git-send-pack=, or =git-receive-pack=.
+   - Refuse if argv[1] is =push= or =send-pack=.
+   - Otherwise, =execv("/usr/bin/git-real", ["git", argv[1], argv[2], ...])= so the real binary's argv[0]-based dispatch keeps working.
+   - Drop privileges before exec? Or run git-real as root (since the shim is setuid root)?  Trade-off: running git-real as root means git operations run privileged inside the container, which could let git misbehavior write outside the bind-mount.  Running git-real after =setuid(getuid())= drops back to the agent uid, but then git-real still needs to exec git-core helpers which require execute permission.  Architect to settle.
+
+5. *Compile path.*  =gcc= is in =base-devel= which is already installed.  Compile during =RUN= step.  After install, do we strip =gcc=?  base-devel is heavyweight; removing it shrinks the image and reduces the agent's offensive surface (no =gcc= to compile arbitrary tools).  Is base-devel needed for any agent task today (e.g. =pip install= of native deps)?
+
+6. *Verification harness.*  The new layer needs a test like the 15-variant bash test in PR #97, but specifically targeting the bypass forms.  At minimum:
+   - The original 15 variants still blocked.
+   - =cp /usr/bin/git-real /tmp/g; /tmp/g push= → blocked (now =git-real= unreadable).
+   - =cp + exec -a + --receive-pack= → blocked.
+   - =cat /usr/bin/git-real= → fails with permission denied.
+   - Non-push git ops still work.
+   - Non-root agent can still =pip install= a package, write to =/workspace=, etc.
+
+* Phase 1 — Architect responsibilities
+
+The architect (=Plan= subagent) should:
+
+1. Map the current root-execution surface end-to-end in the sandbox flow (=SandboxManager=, =DockerSandboxBackend=, =Dockerfile.sandbox=, eval setUp/tearDown patterns).  File:line references throughout.
+2. Answer the six open questions above with concrete choices grounded in the codebase.
+3. Produce a numbered implementation plan covering: Dockerfile changes, sandbox manager changes (uid passing), shim C source, build step, eval/test additions, deploy implications.
+4. Flag risks: potential breakage of existing evals, of =pip install=, of file-ownership in =/workspace= post-deploy.
+
+* Out of scope
+
+- eBPF LSM hooks (option B).  Heavier; revisit only if option A doesn't hold.
+- Stripped-down git reimplementation (option C).  Maintenance burden too high.
+- Network egress filter — orthogonal layer; addresses a different threat (real-remote pushes), already covered by credential-free sandbox.
+- Reverting any of PR #97's existing layers.  This is additive defense.
+
+* Out-of-scope-for-this-doc but flagged
+
+If the architect surfaces that switching to a non-root sandbox is impractical (e.g. uid-mapping with the existing checkpoint/threads-db flow turns out load-bearing), the fallback is to revisit option B (eBPF) or accept the residual gap and document it.  The user should be told before falling back.
