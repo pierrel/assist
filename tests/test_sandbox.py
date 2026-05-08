@@ -338,7 +338,14 @@ class TestSandboxManager(TestCase):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        mock_client.containers.run.assert_called_once()
+        # Two containers.run calls: the egress proxy (idempotent setup)
+        # and the sandbox itself.  Find the sandbox call specifically.
+        sandbox_calls = [
+            c for c in mock_client.containers.run.call_args_list
+            if c.args and c.args[0] == "assist-sandbox"
+        ]
+        self.assertEqual(len(sandbox_calls), 1,
+                         "Expected exactly one assist-sandbox containers.run call")
         # Verify container is registered
         self.assertIn(test_path, SandboxManager._containers)
 
@@ -363,9 +370,14 @@ class TestSandboxManager(TestCase):
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             SandboxManager.get_sandbox_backend(test_path)
 
-        _, kwargs = mock_client.containers.run.call_args
+        # The sandbox call (not the proxy call) must carry user=.  Pick
+        # it out by image name.
+        sandbox_call = next(
+            c for c in mock_client.containers.run.call_args_list
+            if c.args and c.args[0] == "assist-sandbox"
+        )
         self.assertEqual(
-            kwargs.get('user'), expected_user,
+            sandbox_call.kwargs.get('user'), expected_user,
             f"containers.run must be called with user={expected_user!r} "
             "so the agent inside the sandbox runs as the host bind-mount "
             "owner — not as root.",
