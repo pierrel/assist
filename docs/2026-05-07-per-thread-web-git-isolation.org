@@ -1,0 +1,218 @@
+#+TITLE: Per-thread feature branch for web-UI threads
+#+DATE: 2026-05-07
+
+* Status
+Design.  Roadmap entry: =roadmap.org= "Per-thread feature branch for web-UI threads" under *Reliability*.
+
+* Problem
+
+Two threads created from the web UI both branch off =main= at roughly the same time and both try to land back to =main=.  Whichever thread merges second hits a non-fast-forward error because =main= advanced under it, even when the two threads' changes do not actually conflict.  The user sees a merge failure that has nothing to do with the substance of their work.
+
+The current contract — implicit in =DomainManager= and the web routes — is unclear.  =DomainManager.has_changes_vs_main()= suggests *some* branch-per-thread machinery exists, but not necessarily what the user intends.  The first step of this work is mapping current behavior; the design below assumes the target contract.
+
+* Target contract
+
+1. *Each web-UI thread runs on its own branch off =main=.*  The branch is created at thread-creation time (not lazily on first commit) so the diff baseline is unambiguous from turn 1.
+
+2. *The agent commits to the thread branch after each turn.*  Diffs the user sees in the UI are "this branch vs latest =origin/main=".
+
+3. *Merge to =main= is auto-rebase + fast-forward.*  When the user merges:
+   - Fetch =origin/main=.
+   - Rebase the thread branch onto =origin/main=.
+   - If rebase succeeds (no conflict), fast-forward =main= to the rebased branch.
+   - If rebase produces a conflict, abort the rebase, surface the conflict to the user in the web UI, and tell them to ask the agent to resolve it.  The agent has full git read/write access locally and can run =git rebase --continue= after editing conflicting files.
+
+4. *The agent cannot push.*  Push to =origin/main= is exclusively a user-initiated action from the web UI.  The push action runs on the app side, with credentials the agent does not have, and is implemented as a separate backend endpoint triggered by a UI button.
+
+5. *Conflict surface in the UI.*  When merge fails because of a rebase conflict, the UI shows: "Conflict during merge.  The agent can attempt to resolve — type a message to the thread asking it to fix the conflict."  Once resolved, the user re-clicks merge.
+
+* Decisions baked in (from user)
+
+| # | Decision | Choice |
+|---+----------+--------|
+| 1 | What "merge even if behind, no conflict" means | *Auto-rebase, then fast-forward.*  Thread branch isn't shared, so the rewrite is safe.  =main= stays linear. |
+| 2 | When the thread branch syncs against =origin/main= | *Only at merge time.*  Mid-thread rebases are confusing; conflicts surface late but unambiguously. |
+| 3 | Agent push permissions | *Agent can run any git command except push.*  Real enforcement boundary, not docs alone. |
+| 4 | Push UI affordance | *User-initiated button + dedicated backend endpoint.*  The endpoint owns the credentials. |
+
+* Decisions made during the Phase 1 architect pass
+
+| # | Decision | Choice |
+|---+----------+--------|
+| 5 | What happens to the AI-generated commit summary on merge | *Preserved via post-rebase squash.*  Sequence: rebase thread branch onto =origin/main=; if clean, =git merge --squash= into local =main=; commit with the AI-generated summary.  Keeps =main= history at one curated commit per thread; rebase handles divergence. |
+| 6 | Per-turn host-side push of the thread branch (=DomainManager.sync= → =git_push=) | *Remove.*  No automated pushes anywhere — push to =origin= only happens on the user-initiated =push-main= action.  Trade-off: in-progress threads are local-only until merge, so a deploy-box loss mid-thread loses the thread.  Acceptable per saved =feedback_thread_failure_should_terminate= memory. |
+| 7 | Branch naming refinement | =assist/<UTC-timestamp>-<tid-suffix>= where =tid-suffix= is the last 4 hex chars of the thread id.  Prevents collisions if two threads created in the same second. |
+| 8 | Post-merge thread state | Thread rolls forward to a *new* =assist/<ts>-<suffix>= branch (preserves current "keep chatting after merge" UX). |
+| 9 | Concurrency model | Single in-process =threading.Lock= in =manage/web/state.py=, held by both =merge_thread= and the new =push-main= endpoint.  Web app is one uvicorn worker — sufficient. |
+| 10 | =origin/main= advanced between merge and push | Push endpoint returns 409 with explicit "click Merge to Main again, then click Push again" copy.  No silent retry (per saved =feedback_thread_failure_should_terminate= memory). |
+| 11 | Push enforcement layers | Both: =GitPushBlockerMiddleware= wraps the agent's =execute= tool (refuses adjacent =git ... push= tokens) AND sandbox stays credentials-free (no SSH key, no git credentials in the container). |
+| 12 | Conflict resolution | New =git-conflict= skill teaching Qwen3-Coder the canonical =git status= → resolve markers → =git add= → =git rebase --continue= loop.  Conflict state persists as =merge_conflict.json= in the thread dir; UI shows red banner. |
+
+* Implementation plan (architect output, Phase 2 contract)
+
+** Group A — branch creation refinement
+
+1. =assist/domain_manager.py:16-25= — extend =create_timestamped_branch= to take an optional =suffix: str | None= (yields =assist/<ts>-<suffix>=); update =clone_repo= (line 28-34) and the post-merge re-branch step to pass the thread =tid='s last 4 hex chars.
+
+** Group B — git operations rewrite
+
+2. =assist/domain_manager.py:348-451= — replace =merge_to_main= body.  New sequence: assert HEAD ≠ =main=; =git fetch origin=; =git rebase origin/main= on the thread branch; on conflict → =git rebase --abort= and raise typed =MergeConflictError(branch, files)= (new exception, files captured from =git diff --name-only --diff-filter=U= before the abort); on success → =git checkout main=; =git merge --squash <branch>=; AI summary via =select_chat_model= (kept); =git commit -m <summary>=; **do not** =git push origin main= here (the new =push-main= endpoint owns that); tail: =create_timestamped_branch(repo_path, tid_suffix)= so the thread rolls forward.
+3. =assist/domain_manager.py= — new =push_main(self) -> None=: assert HEAD = =main=; =git fetch origin=; if =origin/main= is not an ancestor of local =main= → raise =OriginAdvancedError=; else =git push origin main=.
+4. =assist/domain_manager.py= — new =has_unpushed_main(self) -> bool=: =git rev-list --count origin/main..main=.
+
+2b. =assist/domain_manager.py:342-346= — in =sync()=, remove the =git_push= call.  =git_commit= stays so the in-thread diff continues to work.  Per Decision 6.
+
+** Group C — agent push guard
+
+5. =assist/middleware/git_push_blocker.py= (new) — =GitPushBlockerMiddleware= modeled on =ReadOnlyEnforcerMiddleware= (=read_only_enforcer.py:35-54=).  Triggers on =tool_name == "execute"=; tokenises =command= via =shlex.split=; scans for adjacent =git= … =push= (tolerating intervening =-C <path>= or =--git-dir=...=); also catches chains (=cd /tmp && git push=, =;= / =&&= operators become their own tokens, so the =git push= adjacency still surfaces).  Rejects with =ToolMessage(status="error", content="Direct git push is not allowed.  The user controls pushes from the web UI.  To push your work, ask the user to click 'Push to origin' in their browser.")=.
+6. =assist/agent.py:126-128= — register =GitPushBlockerMiddleware()= in =create_agent= before =loop_detection_mw=.
+
+** Group D — web routes
+
+7. =manage/web/state.py= — add module-level =MERGE_LOCK = threading.Lock()=; helpers =_get_conflict(tid)= and =_clear_conflict(tid)= reading/writing =<twdir>/merge_conflict.json=.
+8. =manage/web/threads.py:617-653= (=merge_thread=) — acquire =MERGE_LOCK=; catch =MergeConflictError= → write =merge_conflict.json= → redirect with =?conflict=1=; on success → =_clear_conflict(tid)= + redirect with =?merged=1=.  Keep the existing =CalledProcessError= → 500 path.
+9. =manage/web/threads.py= (new) — =POST /thread/{tid}/push-main=: acquire =MERGE_LOCK=; call =dm.push_main()=; on =OriginAdvancedError= → 409 with body explaining "click Merge to Main again, then click Push again"; on success → redirect with =?pushed=1=.
+
+** Group E — UI
+
+10. =manage/web/threads.py:179-405= (=render_thread=) — wire =_get_conflict(tid)= into the page render: red "Merge conflict" banner above the diff stack listing the conflicted files with the copy "The agent can attempt to resolve this.  Type a message asking the agent to fix the conflict, then re-click Merge."  Add =?conflict=1= success-banner toggle alongside existing =?merged=1= / =?captured=1= flags.
+11. =manage/web/threads.py:217-234= (diff-actions block) — add a "Push to origin/main" button visible only when =dm.has_unpushed_main()= is true (i.e. post-merge, local =main= ahead of =origin/main=).  Wires to =POST /thread/{tid}/push-main=.
+12. =manage/web/threads.py= — =?pushed=1= success banner.
+
+** Group F — agent-side conflict skill
+
+13. =assist/skills/git-conflict/SKILL.md= (new).  Frontmatter description triggers on user messages like "merge conflict", "resolve the conflict", "fix the rebase".  Body: canonical loop — =git status=, read each unmerged file, resolve markers, =git add <file>=, =git rebase --continue=; explicitly forbids =git rebase --abort= and =git rebase --skip= (lose work); explicitly notes pushes are user-initiated and the agent cannot push.  Watch the YAML colon-space rule (=CLAUDE.md=): no =:<space>= in unquoted description values.
+
+** Group G — tests + smoke
+
+14. =tests/test_domain_merge.py= — replace squash-into-main expectations with new contract: =test_merge_ff_when_clean=, =test_merge_rebase_when_main_advanced_no_conflict=, =test_merge_conflict_aborts_and_raises_typed_error=, =test_merge_does_not_push=, =test_push_main_succeeds_when_local_ahead=, =test_push_main_rejects_when_origin_advanced=.
+15. =tests/test_git_push_blocker.py= (new) — unit tests for the middleware: blocks =git push=, =git push -f=, =git push origin HEAD:main=, =cd /tmp && git push=, =git -C /workspace push=; allows =git status=, =git fetch=, =git pull=, =git diff=.
+16. =tests/test_web_merge_concurrency.py= (new) — exercise the lock with two simultaneous =merge_thread= calls; assert one wins, no inconsistent local repo.
+17. =scripts/smoke_test.sh= — extend with merge + push sub-flow: create thread; ask agent to write a single file; trigger merge; trigger push.  Conflict path is a manual real-prod-smoke item (requires two threads + shared remote).
+
+* Dynamic-construction attack surface (post-impl analysis)
+
+The static classifier in =GitPushBlockerMiddleware= reads the literal =command= string from the =execute= tool call.  That works for direct invocations and shell-out forms (=git push=, =bash -c "git push"=, =eval "..."=) — captured by the unit tests in =tests/test_git_push_blocker.py=.  It cannot catch a command that constructs its push at runtime inside an interpreter the classifier doesn't follow into.
+
+** What a determined agent could do
+
+- *Char-code construction* — =python3 -c "import subprocess; cmd=chr(103)+chr(105)+chr(116); subprocess.run([cmd,'push'])"=.  No literal "git push" anywhere in the =execute= argument; static analysis sees an opaque interpreter call.
+- *Base64 / encoded payloads* — =python3 -c "exec(__import__('base64').b64decode('...').decode())"=.
+- *Shell variable assembly* — ="g=git; p=push; $g $p"=.  Tokeniser sees =$g $p= as variables, not git push.
+- *Other interpreters* — =perl=, =ruby=, =node=, =awk -e=, all the same shape: command-as-string passed to a runtime.
+- *File-mediated* — =write_file('x.sh', 'git push')= followed by =execute('bash x.sh')=.  =bash <file>= isn't inspected (only =bash -c <string>= is).
+- *Plumbing commands* — =git send-pack=, =git update-ref= (the latter doesn't push but can rewrite local state in confusing ways).
+
+There is no clean static answer.  Computation is universal — any language with string manipulation can build the literal =git push= at runtime, and the classifier sees only the construction code, not the result.  Pattern-matching for "looks like it might assemble git push" (heuristic substring search, AST analysis, fuzzy similarity) explodes the false-positive rate without closing the gap.
+
+** Defense in depth — what's in place vs what's recommended
+
+| Layer | Status | Catches | Misses |
+|-------+--------+---------+--------|
+| Static classifier (=GitPushBlockerMiddleware=) | *In place* | Direct + shell-out forms | Dynamic construction in interpreters |
+| Sandbox credentials-free (no SSH key, no =.git-credentials=) | *In place* | Any push to a credential-requiring remote (=git@github.com=, HTTPS) | Path-based remotes inside =/workspace= |
+| =git= binary wrapper inside the sandbox image | *In place* | All push forms — direct, shell-out, Python subprocess, char-code, base64, file-mediated, Perl/Node, plumbing (=git-send-pack=, =git-push= via absolute path) | Implementing the git wire protocol from scratch in raw Python (caught by credential-free sandbox layer) |
+| Network egress filter | *Optional* | Outbound to GitHub/SSH | Path-based remotes (no network) |
+| Process-level audit (=eBPF=, =auditd=) | *Out of scope* | All push attempts at kernel level | Heavy infra for marginal gain |
+
+** Wrapper implementation (shipped — [[https://github.com/pierrel/assist/pull/97][PR #97]], commit =19493e3=)
+
+To undo: revert =19493e3= (or just =dockerfiles/sandbox-git-shim.sh=
+and the =COPY=/=RUN= block added to =Dockerfile.sandbox=), then
+=make deploy-sandbox-build && make restart=.
+
+=dockerfiles/sandbox-git-shim.sh= sits at =/usr/bin/git= inside the
+sandbox image, replacing the upstream binary (moved aside to
+=/usr/bin/git-real=).  Single shim closes every realised push path
+because git-core's subcommand symlinks (=/usr/lib/git-core/git-push=,
+=git-send-pack=, =git-receive-pack=) all point at =/usr/bin/git= —
+they all resolve through the shim.
+
+Two checks:
+
+1. =${0##*/}= matches =git-push=, =git-send-pack=, or =git-receive-pack=
+   — catches direct invocations like =/usr/lib/git-core/git-push origin main=.
+2. =$1= is =push= or =send-pack= — catches the standard =git push= form.
+
+Anything else exec's the real binary with =exec -a git= (so git's
+own argv[0]-based subcommand dispatch keeps working).
+
+Verified against 15 bypass variants inside the rebuilt image:
+- =git push=, =git push -f=
+- =bash -c "git push"=, =sh -c=, =eval=
+- =python3 -c "subprocess.run(['git','push'])"=
+- =python3 -c "os.system('git push')"=
+- Char-code construction: =cmd=chr(103)+chr(105)+chr(116)=
+- Base64 payload via =exec(b64decode(...))=
+- =/usr/lib/git-core/git-push= absolute path
+- =/usr/lib/git-core/git-send-pack= (lower-level plumbing)
+- =/usr/bin/git push= (skipping PATH)
+- File-mediated: =write_file('x.sh', 'git push'); bash x.sh=
+- Shell variable assembly: =g=git; p=push; $g $p=
+- =perl -e "system(...)"=
+
+All 15 blocked.  Non-push git operations (=status=, =diff=, =log=,
+=branch=, =fetch=, =diff --cached=) all pass through unchanged.
+
+** What this still doesn't catch
+
+Implementing the git wire protocol directly in Python — opening a TCP
+socket and speaking pack-protocol — bypasses the binary wrapper
+entirely.  The =credential-free sandbox= layer catches this in
+production: no SSH key, no HTTPS token, so the agent can't authenticate
+to GitHub/GitLab regardless of how it speaks git.  Path-based remotes
+inside =/workspace= are the only target where a hand-rolled-protocol
+push would succeed; we accept that as out of scope (no real remote
+lives there in production).
+
+* Risks logged by the architect
+
+- *Conflict resolution depends on the small model executing a multi-step git workflow.*  Mitigated by the =git-conflict= skill (Group F).  Residual risk: agent runs =git rebase --abort= / =git push --force= to "fix" the rebase — the wrapper from Group C blocks pushes; the skill explicitly forbids =--abort=.
+- *Single-process lock breaks down with multiple workers.*  Acceptable for current single-uvicorn deploy; if that changes, swap for an =flock= on a file in the threads root.
+- *=origin/main= advanced between merge and push.*  Per Decision 10 the user gets a 409 and re-merges + re-pushes.  Expect at least one user-confused report; copy must be unmistakable.
+- *Backward compat.*  Existing threads with =assist/<ts>= (no suffix) keep their names — the suffix only applies to new threads.  No migration.
+- *Layout refactor footprint.*  No package moves planned.  The =python -m manage.web= entry point stays valid.  Real-prod smoke after deploy still mandatory (per saved =feedback_smoke_after_refactor=).
+
+* Open design questions (now answered above — kept for traceability)
+
+These need investigation in the codebase before implementation:
+
+1. *Where does the branch get created today, if anywhere?*  =DomainManager.has_changes_vs_main()= implies branching machinery exists.  Map: thread-creation flow, where =DomainManager= is constructed, what branch state is when a thread starts.
+
+2. *Branch naming.*  Thread-id (stable, opaque) is the safe default.  Slug-from-first-message is friendlier but requires knowing the message before the branch exists.  The architect should propose one.
+
+3. *Where does merge happen today?*  Find the existing merge code path.  Determine whether it currently does ff-only, merge commit, or something else, and where the non-ff failure surfaces.
+
+4. *How do we enforce "agent can't push"?*  Two options to evaluate:
+   - Wrap the agent's shell-execution tool to refuse =git push= invocations (any form: =push=, =push origin=, =push --force=, etc.).  Cheap, but the agent could still use porcelain that wraps push.
+   - Sandbox-level: mount the working tree without push credentials at all (no =~/.git-credentials=, no SSH key reachable from the sandbox).  Stronger but requires sandbox config changes.
+   The right choice probably combines both — the agent sandbox should not have credentials *and* the shell wrapper should refuse =git push=.
+
+5. *Push endpoint design.*  HTTP route in the web app.  Auth model — who is allowed to push?  What happens if the push fails (e.g. someone else pushed in the meantime)?  Probably: re-fetch, re-rebase, re-attempt, surface failure to user if still failing.
+
+6. *Concurrency.*  Two web threads merging at almost-the-same moment.  The rebase + push sequence is not atomic against =origin/main=.  Need a serialization story — likely a lock on the merge endpoint, or accept that one of the two will fail and have to retry.
+
+* Phase 1 — Architect responsibilities
+
+The architect (=Plan= subagent) should:
+1. Map current per-thread branching behavior end-to-end (thread create → turn → diff → merge), with file:line references.
+2. Identify the gap between current behavior and the target contract above.
+3. Answer the six open questions above with concrete choices grounded in the codebase.
+4. Produce a numbered implementation plan covering: data model changes (if any), web routes (new + modified), git wrapper / sandbox guard for push enforcement, UI changes, evals/smoke plan.
+5. Flag any risks or tradeoffs that the user decisions above didn't anticipate.
+
+* Phase 2 — Implementation responsibilities
+
+After the architect's plan is reviewed and redirected as needed:
+1. Implement the changes per the plan.
+2. Smoke the merge flow locally (clean ff path AND conflict path).
+3. Spawn the reviewer subagent on the diff.
+4. Address findings.
+5. Real-prod smoke after deploy (per saved =feedback_smoke_after_refactor=) — both clean merge and forced-conflict scenarios.
+
+* Out of scope
+
+- Pushes from anywhere except the web UI button.
+- Rewriting =DomainManager= beyond what's needed for the contract above.
+- Multi-user concurrent editing of the same thread (the existing single-thread-single-user model stays).
+- Fancy conflict-resolution UI — text-based "ask the agent to fix it" is the v1.
