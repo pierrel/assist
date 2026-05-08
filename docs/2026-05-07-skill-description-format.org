@@ -1,0 +1,102 @@
+#+TITLE: Skill description format — TRIGGER WORDS → short examples
+#+DATE: 2026-05-07
+
+* Status
+Design.  Migration plan, no code yet.  Pilot on =pdf=, then =calculate=, =dev=, =org-format=.  Single feature branch off =main=, one PR built up skill-by-skill.
+
+* Problem
+
+All four shipped skills (=calculate=, =dev=, =org-format=, =pdf=) use the same description shape inherited from the original migration:
+
+#+begin_src
+{topical summary}.  TRIGGER WORDS — w1, w2, w3, ...  MUST load before {condition}.
+#+end_src
+
+The keyword list is what the small model is supposed to scan against the user's message (per =SmallModelSkillsMiddleware='s pre-action check, see =assist/middleware/skills_middleware.py:52=).  Two known failure modes:
+
+1. *Vocabulary mismatch on implicit mentions.*  The user says "what does the manual say about Q3" — no listed trigger word fires unless we exhaustively listed every synonym.  We can't.
+2. *List length pressure.*  The =pdf= description already lists 13 trigger words to cover obvious synonyms.  =dev= has 17.  Each new skill adds the same kind of vocabulary inflation, and the listing is loaded on every turn.
+
+* Hypothesis
+
+A short concrete example — a user-message-shaped sentence — pattern-matches better than a flat keyword list, because the small model is an autoregressive next-token predictor that recognizes phrase shape, not just vocabulary tokens.  Two examples covering different request shapes (orient vs. read; lookup vs. write) generalize further than fifteen synonyms of the same noun.
+
+This is a hypothesis.  The deliverable is the eval data confirming or rejecting it per skill.
+
+* Proposed format
+
+#+begin_src
+{topical summary, one sentence}.  EXAMPLES — "{example user message}"; "{example user message}".  MUST load before {condition}.
+#+end_src
+
+Two to three examples target the most-common shapes for that skill.  Keep them short — one user-message-style fragment each, no agent-side framing.  Drop "TRIGGER WORDS"; keep the "MUST load before {condition}" tail because it's the trigger for the pre-action check, not vocabulary.
+
+*How many examples?*  Default is two.  Use three when the skill body teaches multiple distinct request shapes that no single example pair can span (e.g. =pdf= teaches orient / read-range / find — three distinct verbs the model has to recognize, settled during the pdf pilot's reviewer pass).  Don't pad to two when one shape covers the skill, and don't expand past three — the cost of a token-bloated description on every turn outweighs the gain from a fourth example.
+
+Pilot draft (=pdf=):
+
+#+begin_src
+Reading PDF files via shell tools (pdfinfo, pdftotext) inside the sandbox.  EXAMPLES — "what does the treatment guide say about dosage"; "summarize page 12 of report.pdf".  MUST load before answering any question about a .pdf file in the workspace.
+#+end_src
+
+Tradeoffs:
+- *Token cost per turn.*  Two short examples (~20 words) replace ~13 keywords (~13 words).  Modest growth.  Multiplied across four skills it's ~30 extra words in the per-turn preamble.  Acceptable; will measure exactly during pilot.
+- *Choosing examples.*  Bad examples bias the model toward narrow request shapes.  Pick examples that cover the spectrum of how users phrase intent for that skill (orient vs. read for =pdf=; explicit-number vs. compute-this-for-me for =calculate=).
+- *Loss of explicit keyword anchor.*  Some users will type the exact word ("PDF", "dosage", "compute") — examples lose direct lexical match.  Mitigation: pick examples that include the natural noun ("PDF", ".pdf") so common explicit mentions still hit lexically.
+
+* Eval cadence
+
+Per CLAUDE.md.  For each skill:
+
+1. *Baseline N=3* on the existing TRIGGER format.  Records the floor before the change.
+2. *Post-impl N=3* on the new EXAMPLES format.  If load-rate or pass-rate drops, redesign the examples — don't scale to N=5 on a regression.
+3. *Post-review N=5* after reviewer findings are addressed.
+4. *Stability N=10* — skip unless N=5 shows instability (per CLAUDE.md the skip is allowed when the wall-clock cost outweighs the gain).
+
+Eval-window rule: avoid 23:00–03:00 local (nightly cron, see saved =reference_nightly_eval_window=).
+
+* Rollout
+
+One skill at a time on a single branch (=skill-description-format-migration= or similar, off =main=).  Each skill goes through the full design → impl → reviewer → eval loop.  Build commits up on the branch as we go; PR opens after all four are migrated and stable.
+
+Order:
+1. =pdf= — fresh evals, smallest description, low blast radius.  Pilot.
+2. =calculate= — well-covered eval suite (=test_calculate_skill.py=); precise pass/fail.
+3. =org-format= — overlaps with roadmap L86 ("earn-its-keep test").  Decide during the migration whether to fold the harder-eval work in or split it into a follow-up.
+4. =dev= — largest description, loaded most often, highest blast radius.  Save for last so the format is fully settled by the time we touch it.
+
+* Out of scope
+
+- Rewriting skill *bodies*.  This migration is description-only; the body stays as-is.
+- Adding new skills.
+- Changing =SmallModelSkillsMiddleware= or its preamble.  If the new format suggests a preamble tweak (e.g. teaching "scan against examples, not just keywords"), that's a follow-up.
+
+* Lessons banked during the pdf pilot
+
+Captured here before applying to =calculate=, =org-format=, =dev=:
+
+1. *Don't tune examples to the eval.*  The architect's first pdf draft picked example phrasings that mirrored two of the five eval prompts almost verbatim ("how many pages is sample.pdf" → "how many pages is report.pdf"; "what does sample.pdf say about dosage" → "what does the manual say about dosage").  The reviewer caught it as a Goodhart risk.  The fix landed the same shape coverage but with one example moved to a phrasing unlike any current eval prompt.  Bake this into the architect's brief for subsequent skills: pick examples that cover *real-user* request shapes, then sanity-check that they don't accidentally mirror the eval.  If alignment ends up high anyway, treat it as a signal that the eval needs more cases — not that the examples need to be edited to be different.  This is now also captured durably in =CLAUDE.md= under "Project conventions".
+
+2. *Two-cap was too tight; allow three with mode-coverage justification.*  =pdf= teaches three modes (orient / read-range / find).  Two examples can't span them.  See §"Proposed format" above for the updated rule.  Same reasoning likely applies to =calculate= (explicit-arithmetic vs. word-problem vs. multi-step).
+
+3. *Token cost shrank, did not grow.*  Predicted ~30 extra words across 4 skills; pdf alone shrank by ~21 words because the old format carried both a topical synonym list AND a TRIGGER list.  The "preamble token bloat" concern was over-calibrated.  Revisit the prediction during =dev= (longest current description).
+
+4. *The eval cannot validate the format hypothesis.*  Pass-rate at ceiling (15/15 at baseline) means the eval can only detect *regressions*, not *improvements*.  The "phrase shape generalizes better than keyword vocabulary" claim is genuinely under-tested by the existing per-skill evals — most prompts contain a literal =.pdf= token or other strong lexical anchor.  Confirming or rejecting the hypothesis needs either new evals with implicit-only mentions, or production telemetry on real load-rate.  Track that as a follow-up after all four skills migrate.
+
+* Lessons banked during the calculate migration
+
+5. *YAML colon-space in EXAMPLES silently breaks skill loading.*  The first =calculate= post-impl run regressed =test_compound_growth_calculation= 0/3 (was 3/3 baseline).  Root cause: example C was =\"stdev of these nine measurements: ...\"= — the =: = inside the quoted string was parsed by YAML as a mapping start, =deepagents.middleware.skills= logged a warning, and the skill became unreachable to =load_skill=.  The eval failed because the agent literally couldn't load the skill it was supposed to load.  Fixed by dropping the colon (replaced with inline numbers: =\"stdev of 7, 13, 21, 35, 52, 78, 91, 104\"=).  Captured durably in =CLAUDE.md= under "Project conventions" with a one-liner =yaml.safe_load= sanity check command.  Watch for this on =dev= and =org-format= — any colon-space, leading =#=, leading =-=, or balanced =[]/{}= in an example will hit the same trap.
+
+6. *Pre-existing eval timeouts complicate the apples-to-apples compare.*  =test_does_not_load_on_planning_prompt= ("I'm thinking about retirement...") times out at 600s in baseline (also seen in 2026-05-03 history) — the agent gets stuck on the planning prompt regardless of which description is loaded.  Thread-method timeout aborts the pytest session, so test 4 (=test_throwaway_cleanup=) never runs.  Migration's success bar shifts: don't regress the two reliably-passing tests; the timeout is a pre-existing eval-suite issue, not a migration regression.  Worth filing as a separate roadmap follow-up to investigate the agent's planning-prompt loop.
+
+* Lessons banked during the org-format migration
+
+7. *Reviewer catches description↔body consistency that evals can't.*  The first =org-format= post-impl draft tightened the MUST clause from =\"reads, edits, writes, or mentions\"= to =\"reads, edits, or writes\"= — dropping =\"or mentions\"=.  Both eval suites passed 12/12 (=test_org_format_skill.py= + =test_skill_loading.py=).  The reviewer caught it: the body's M3 rule (line 8 of =SKILL.md=, "When your response involves any =.org= file, end the response with a brief note about the heading-insertion rule") fires on bare mentions, not just edits.  No eval covers the response-preamble rule.  Description-body inconsistency would have shipped if not for the reviewer pass.  Generalizable lesson: when a body rule's *trigger condition* (the response involves X) appears in the description's MUST clause (=load before X=), changing one without the other creates a silent contract drift.  Restored =\"or mentions\"= and re-ran post-review N=5 (20/20).
+
+8. *Two examples can be the right answer when the skill is one-domain.*  =pdf= and =calculate= warranted three examples each because they each teach three distinct user-facing verbs (orient/find/read for =pdf=; arithmetic/projection/stats for =calculate=).  =org-format= is fundamentally one-domain ("operating on =.org= content") with one dominant mode (heading insertion, ~75% of the body).  Two examples — one for the dominant mode, one for the tail (bullets/lists) — was the right cap.  Don't pad to three out of habit; the cap is *up to* three, not *exactly* three.
+
+* Lessons banked during the dev migration
+
+9. *Architect's chosen eval subset can have selection bias toward retained anchors.*  When a skill has many eval files (=dev= has 7+), the architect picks a subset for cadence efficiency.  The first =dev= subset happened to be the two =test_dev_agent= tests whose prompts most strongly anchor on retained triggers (=codebase=, =test=) AND have closely matching example shapes — invisible bias the architect didn't see.  The reviewer caught it: 5 unrun tests included three that lean on dropped =function=/=class=/=method= anchors.  Recommendation for future migrations: when picking an eval subset, *explicitly map dropped lexical anchors to eval prompts* and ensure the subset includes at least one prompt per high-load-bearing dropped anchor.  Expanded the =dev= subset with =test_updates_documentation= (documentation mode) and =test_uses_context_agent_before_changes= (=function=/=method= anchored); both passed 6/6 at N=3, 9/10 across N=5 with one transient =httpx APITimeoutError= unrelated to the description.
+
+10. *Format hypothesis confirmed under stress.*  =dev= dropped the highest-volume lexical anchor (=function=, in 4 of 7 eval prompts) plus 15 others — the most aggressive vocabulary cut in the migration.  Load-rate held: 21/21 across N=3 across the union, 34/35 at N=5 (1 transient).  Real evidence that the small model is pattern-matching against example *shape*, not just vocabulary.  This is the strongest validation of the format hypothesis from the existing eval suite — though banked lesson #4's caveat still applies (the eval cannot prove *improvement*, only no-regression on the existing prompt distribution).

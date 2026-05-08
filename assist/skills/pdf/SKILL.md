@@ -1,6 +1,6 @@
 ---
 name: pdf
-description: Reading PDF files — manuals, reports, papers, brochures, handbooks, whitepapers, RFPs, spec sheets, and anything else with a .pdf extension. TRIGGER WORDS — PDF, .pdf, page, document, extract, manual, report, paper, brochure, handbook, whitepaper, RFP, spec sheet. MUST load before answering any question about a PDF in the workspace, or when the user pastes a path that ends in .pdf.
+description: Reading PDF files via shell tools (pdfinfo, pdftotext) inside the sandbox. EXAMPLES — "how many pages is report.pdf"; "summarize page 12 of report.pdf"; "what does the manual say about dosage". MUST load before answering any question about a .pdf file in the workspace, or when the user pastes a path ending in .pdf.
 ---
 
 # PDF — orient, find, read via `execute`
