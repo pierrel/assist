@@ -27,8 +27,9 @@ Before making ANY changes, complete ALL of the following in order.
 
 **1b. Run at least one existing test — MANDATORY before writing a plan.**
 - Use the shell-execution tool (e.g. `execute`) to install dependencies and run the test suite. Example invocations:
-  - `execute("pip install -e . 2>&1 | tail -5")`
+  - `execute("pip install --user -e . 2>&1 | tail -5")`
   - `execute("pytest tests/ -x -q --tb=short 2>&1 | head -80")`
+- The sandbox runs as a non-root user; use `pip install --user` (writes to `~/.local`) — bare `pip install` will fail with EACCES on system site-packages.
 - Include the test output in your response. This confirms the environment works.
 
 **1c. Research (only if needed).**

@@ -69,11 +69,15 @@ class TestDevAgentRunsEval(TestCase):
                 "Docker sandbox unavailable — is Docker running and assist-sandbox built?"
             )
 
-        # Pre-install dependencies into system Python so that `pytest`,
-        # `python -m pytest`, etc. all work without venv activation.
-        # --break-system-packages bypasses Arch's externally-managed guard.
+        # Pre-install dependencies into the user-local site-packages
+        # so that `pytest`, `python -m pytest`, etc. all work without
+        # venv activation.  --user lands them under ~/.local (i.e.
+        # /home/sandbox/.local) so they survive the lifetime of the
+        # container and don't pollute /workspace's git status.
+        # --break-system-packages bypasses Arch's externally-managed
+        # guard (still required even with --user on Arch).
         result = cls.sandbox.execute(
-            "pip install --break-system-packages -r requirements.txt -e ."
+            "pip install --user --break-system-packages -r requirements.txt -e ."
         )
         if result.exit_code != 0:
             raise RuntimeError(

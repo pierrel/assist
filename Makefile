@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-shell pull-eval-history vacuum-now
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -52,6 +52,14 @@ pull-eval-history:
 sandbox-build:
 	docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .
 
+# Build-time smoke for the git-push-refusal layers — fails the build
+# if any push variant succeeds, if /usr/bin/git-real isn't 0700, if
+# the cap_dac_override file cap isn't set, or if git creates root-
+# owned files (privilege drop regression).  See
+# dockerfiles/test-sandbox-shim.sh for the full check list.
+sandbox-smoke: sandbox-build
+	bash dockerfiles/test-sandbox-shim.sh
+
 sandbox-shell:
 	docker run --rm -it assist-sandbox bash
 
@@ -73,7 +81,9 @@ deploy-code:
 deploy-sandbox-build:
 	@echo "→ Building sandbox image on $(DEPLOY_HOST)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .'
-	@echo "✓ Sandbox image built"
+	@echo "→ Running sandbox-smoke on $(DEPLOY_HOST) (push-refusal regression gate)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
+	@echo "✓ Sandbox image built and smoked"
 
 deploy-service:
 	@echo "→ Installing systemd service..."

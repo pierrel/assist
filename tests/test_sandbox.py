@@ -342,6 +342,46 @@ class TestSandboxManager(TestCase):
         # Verify container is registered
         self.assertIn(test_path, SandboxManager._containers)
 
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_get_sandbox_backend_passes_host_uid(self, mock_backend_cls):
+        """The container must run as the host bind-mount's owner —
+        privilege-separation layer that closes the cp+exec-a bypass.
+        See docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org.
+        """
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "test123456ab"
+        mock_container.status = "running"
+        mock_client.containers.run.return_value = mock_container
+
+        host_st = os.stat(test_path)
+        expected_user = f"{host_st.st_uid}:{host_st.st_gid}"
+
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            SandboxManager.get_sandbox_backend(test_path)
+
+        _, kwargs = mock_client.containers.run.call_args
+        self.assertEqual(
+            kwargs.get('user'), expected_user,
+            f"containers.run must be called with user={expected_user!r} "
+            "so the agent inside the sandbox runs as the host bind-mount "
+            "owner — not as root.",
+        )
+
+    def test_get_sandbox_backend_raises_when_workspace_missing(self):
+        """A missing workspace must surface as a typed error, not a
+        silent fallback.  Saved feedback memory:
+        'Threads should die on infrastructure failure rather than
+        heal-and-retry'.
+        """
+        missing = os.path.join(self.temp_dir, "does-not-exist")
+        with self.assertRaises(RuntimeError) as ctx:
+            SandboxManager.get_sandbox_backend(missing)
+        self.assertIn("Cannot start sandbox", str(ctx.exception))
+
     def test_get_sandbox_backend_reuses_container(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)

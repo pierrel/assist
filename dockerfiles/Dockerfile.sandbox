@@ -13,25 +13,59 @@ RUN pacman -Syu --noconfirm && \
 	emacs \
         # for pdftotext, supporting the pdf skill
         poppler \
+        # for setcap, used to grant CAP_DAC_OVERRIDE to the git shim
+        libcap \
     && pacman -Scc --noconfirm
 
-# Wrap /usr/bin/git with a shim that refuses `git push` regardless of
-# how the call was constructed (catches dynamic command construction
-# in Python/Perl/Node, file-mediated `bash <script>`, and direct
-# calls to git-core symlinks like /usr/lib/git-core/git-push).  See
-# dockerfiles/sandbox-git-shim.sh's header for the full rationale.
-# Sandbox push protection rests on three layers:
+# Privilege-separated git push refusal — three layers:
 #   (a) static GitPushBlockerMiddleware on the agent's `execute` tool
 #   (b) credential-free sandbox environment (no SSH key, no .git-credentials)
-#   (c) this binary wrapper
-COPY dockerfiles/sandbox-git-shim.sh /usr/local/share/git-shim
-RUN mv /usr/bin/git /usr/bin/git-real && \
-    install -m 755 /usr/local/share/git-shim /usr/bin/git && \
-    rm /usr/local/share/git-shim
+#   (c) /usr/bin/git wrapper that refuses `git push`
+# This block implements (c).  See dockerfiles/sandbox-git-shim.c
+# for the full rationale and threat model.
+#
+# Compile the C shim, install it as setuid root at /usr/bin/git,
+# move the upstream binary to /usr/bin/git-real with mode 0700 so
+# only the shim (running setuid root) can read or exec it.  The
+# container's default user is `sandbox` (uid 1000) — added below —
+# which means a non-shim path to git-real (e.g.
+# `cp /usr/bin/git-real /tmp/g` followed by an argv-spoofed exec)
+# fails at the read step with EACCES.
+COPY dockerfiles/sandbox-git-shim.c /usr/local/src/git-shim.c
+RUN gcc -O2 -Wall -Werror -o /usr/local/bin/git-shim /usr/local/src/git-shim.c && \
+    rm /usr/local/src/git-shim.c && \
+    mv /usr/bin/git /usr/bin/git-real && \
+    chown root:root /usr/bin/git-real && \
+    chmod 0700 /usr/bin/git-real && \
+    mv /usr/local/bin/git-shim /usr/bin/git && \
+    chown root:root /usr/bin/git && \
+    chmod 0755 /usr/bin/git && \
+    setcap cap_dac_override=ep /usr/bin/git
 
-# Create workspace directory
-RUN mkdir -p /workspace
+# Non-root user for the agent.  Fixed uid 1000 matches the typical
+# host deploying user; SandboxManager.get_sandbox_backend overrides
+# with `--user $(stat -c %u:%g /workspace)` at container-create
+# time so the running uid always matches the bind-mount owner —
+# necessary for the agent to write to /workspace from inside.
+RUN groupadd -g 1000 sandbox && \
+    useradd -u 1000 -g 1000 -m -s /bin/bash sandbox
+
+# Put ~/.local/bin on PATH so `pip install --user` (the only working
+# pip form for non-root agents) lands binaries the agent can run by
+# name.  Without this, `pytest`, `pip-installed-cli-tools`, etc.
+# require explicit `python -m <module>` invocation.
+ENV PATH=/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Create workspace directory.  Owned by sandbox so the default-uid
+# image can write /workspace before the runtime --user override
+# kicks in (e.g. during a manual `docker run --rm assist-sandbox`).
+RUN mkdir -p /workspace && \
+    chown sandbox:sandbox /workspace
 WORKDIR /workspace
+
+# Default user — runtime --user from SandboxManager overrides this
+# when the host bind-mount uid differs.
+USER sandbox
 
 # Container self-destructs after 1 hour; --rm in containers.run() handles removal
 CMD ["sleep", "3600"]
