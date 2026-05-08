@@ -34,19 +34,19 @@ ALLOWLIST_PATH = os.environ.get("ALLOWLIST_PATH", "/etc/egress-allowlist.conf")
 PIPE_TIMEOUT = 600  # seconds of idle on a tunnel before tearing down
 
 
-def load_allowlist() -> set[str]:
+def load_allowlist() -> frozenset[str]:
     raw = os.environ.get("EGRESS_ALLOWLIST", "")
     if raw.strip():
-        return {h.strip() for h in raw.split(",") if h.strip()}
+        return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
     try:
         with open(ALLOWLIST_PATH) as f:
-            return {
-                line.strip()
+            return frozenset(
+                line.strip().lower()
                 for line in f
                 if line.strip() and not line.lstrip().startswith("#")
-            }
+            )
     except FileNotFoundError:
-        return set()
+        return frozenset()
 
 
 ALLOWLIST = load_allowlist()
@@ -125,6 +125,7 @@ def handle(client: socket.socket, addr) -> None:
 
         if method == "CONNECT":
             host, _, port_str = target.partition(":")
+            host = host.lower()  # DNS hostnames are case-insensitive (RFC 4343)
             try:
                 port = int(port_str) if port_str else 443
             except ValueError:
@@ -150,7 +151,7 @@ def handle(client: socket.socket, addr) -> None:
             deny(client, target, "non-absolute URL on non-CONNECT method")
             return
         u = urlparse(target)
-        host = u.hostname or ""
+        host = (u.hostname or "").lower()
         port = u.port or (443 if u.scheme == "https" else 80)
         if host not in ALLOWLIST:
             deny(client, host, f"not in allowlist (HTTP {method})")
