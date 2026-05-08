@@ -90,6 +90,56 @@ The current contract — implicit in =DomainManager= and the web routes — is u
 16. =tests/test_web_merge_concurrency.py= (new) — exercise the lock with two simultaneous =merge_thread= calls; assert one wins, no inconsistent local repo.
 17. =scripts/smoke_test.sh= — extend with merge + push sub-flow: create thread; ask agent to write a single file; trigger merge; trigger push.  Conflict path is a manual real-prod-smoke item (requires two threads + shared remote).
 
+* Dynamic-construction attack surface (post-impl analysis)
+
+The static classifier in =GitPushBlockerMiddleware= reads the literal =command= string from the =execute= tool call.  That works for direct invocations and shell-out forms (=git push=, =bash -c "git push"=, =eval "..."=) — captured by the unit tests in =tests/test_git_push_blocker.py=.  It cannot catch a command that constructs its push at runtime inside an interpreter the classifier doesn't follow into.
+
+** What a determined agent could do
+
+- *Char-code construction* — =python3 -c "import subprocess; cmd=chr(103)+chr(105)+chr(116); subprocess.run([cmd,'push'])"=.  No literal "git push" anywhere in the =execute= argument; static analysis sees an opaque interpreter call.
+- *Base64 / encoded payloads* — =python3 -c "exec(__import__('base64').b64decode('...').decode())"=.
+- *Shell variable assembly* — ="g=git; p=push; $g $p"=.  Tokeniser sees =$g $p= as variables, not git push.
+- *Other interpreters* — =perl=, =ruby=, =node=, =awk -e=, all the same shape: command-as-string passed to a runtime.
+- *File-mediated* — =write_file('x.sh', 'git push')= followed by =execute('bash x.sh')=.  =bash <file>= isn't inspected (only =bash -c <string>= is).
+- *Plumbing commands* — =git send-pack=, =git update-ref= (the latter doesn't push but can rewrite local state in confusing ways).
+
+There is no clean static answer.  Computation is universal — any language with string manipulation can build the literal =git push= at runtime, and the classifier sees only the construction code, not the result.  Pattern-matching for "looks like it might assemble git push" (heuristic substring search, AST analysis, fuzzy similarity) explodes the false-positive rate without closing the gap.
+
+** Defense in depth — what's in place vs what's recommended
+
+| Layer | Status | Catches | Misses |
+|-------+--------+---------+--------|
+| Static classifier (=GitPushBlockerMiddleware=) | *In place* | Direct + shell-out forms | Dynamic construction in interpreters |
+| Sandbox credentials-free (no SSH key, no =.git-credentials=) | *In place* | Any push to a credential-requiring remote (=git@github.com=, HTTPS) | Path-based remotes inside =/workspace= |
+| =git= binary wrapper inside the sandbox image | *Recommended next* | All forms — refuses on =execve= regardless of how the call was constructed | Calling =/usr/lib/git-core/git push= directly (mitigate by wrapping that path too) |
+| Network egress filter | *Optional* | Outbound to GitHub/SSH | Path-based remotes (no network) |
+| Process-level audit (=eBPF=, =auditd=) | *Out of scope* | All push attempts at kernel level | Heavy infra for marginal gain |
+
+** Recommendation
+
+Add a thin wrapper script in front of =git= inside the sandbox image:
+
+#+begin_src bash
+#!/bin/bash
+if [ "$1" = "push" ]; then
+  echo "Error: git push is disabled in this sandbox.  Pushes are user-initiated from the web UI." >&2
+  exit 1
+fi
+exec /usr/lib/git-core/git "$@"
+#+end_src
+
+Place at =/usr/local/bin/git= (earlier in =PATH= than =/usr/bin/git=).  Closes:
+- =python -c "subprocess.run(['git','push'])"= — the wrapper sees =push= and refuses.
+- All char-code / base64 / dynamic constructions — they ultimately exec =git push=, which hits the wrapper.
+- =bash myscript.sh= where =myscript.sh= contains =git push= — same.
+
+Bypassable only by =/usr/lib/git-core/git push= (real binary path).  Wrap that path too, or move it.
+
+This is a follow-up — captured as a roadmap item.  Not blocking the current PR because:
+1. The credential-free sandbox already prevents pushes to *real* remotes (which is the actual production risk).
+2. The static classifier handles the common cases the small model would attempt without coaching.
+3. The eval (=edd/eval/test_git_push_blocker_agent.py=) shows the agent under ultimatum stops at the first middleware rejection (=LoopDetectionMiddleware= cuts the spiral) — bypass routes are not reached in observed agent behaviour.
+
 * Risks logged by the architect
 
 - *Conflict resolution depends on the small model executing a multi-step git workflow.*  Mitigated by the =git-conflict= skill (Group F).  Residual risk: agent runs =git rebase --abort= / =git push --force= to "fix" the rebase — the wrapper from Group C blocks pushes; the skill explicitly forbids =--abort=.
