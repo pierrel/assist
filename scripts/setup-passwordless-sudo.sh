@@ -6,6 +6,7 @@ set -e
 
 SERVICE_NAME="${SERVICE_NAME:-assist-web}"
 DEPLOY_PATH="${DEPLOY_PATH:-/opt/assist}"
+ASSIST_THREADS_DIR="${ASSIST_THREADS_DIR:-/var/lib/assist/threads}"
 
 echo "=== Setup Passwordless Sudo for Deployment ==="
 echo "This will allow deployment commands to run without password prompts"
@@ -32,16 +33,20 @@ $USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload ${SERVICE_NAME}
 # Journal logs
 $USER ALL=(ALL) NOPASSWD: /usr/bin/journalctl -u ${SERVICE_NAME} *
 
-# File operations for deployment
-$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist
-$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /var/lib/assist/*
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER /var/lib/assist/*
+# File operations for deployment.  Paths are parameterized via
+# ASSIST_THREADS_DIR so this matches whatever the deploy actually
+# uses (the running systemd unit reads ASSIST_THREADS_DIR from
+# .deploy.env, which may not be the /var/lib default).
+$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p ${ASSIST_THREADS_DIR}
+$USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p ${ASSIST_THREADS_DIR}/*
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER ${ASSIST_THREADS_DIR}
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER ${ASSIST_THREADS_DIR}/*
 # Recursive chown for migrating legacy thread workspaces to the
 # non-root sandbox layer (docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org).
-# Idempotent — safe to re-run.
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER /var/lib/assist
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER /var/lib/assist/*
+# Idempotent — safe to re-run.  No-op for deploys whose threads dir
+# is already user-owned.
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER ${ASSIST_THREADS_DIR}
+$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER ${ASSIST_THREADS_DIR}/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/systemd/system/${SERVICE_NAME}.service
 EOF
 
