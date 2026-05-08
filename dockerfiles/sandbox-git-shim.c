@@ -90,6 +90,16 @@ static void refuse(const char *what) {
 
 
 int main(int argc, char *argv[]) {
+    /* Hostile-invocation guard: Linux's exec syscalls accept argv ==
+     * NULL or argv[0] == NULL (e.g. Python's os.execve("/path", [],
+     * {})).  strrchr(NULL, ...) is undefined behaviour; refuse
+     * fail-closed before any argv access.
+     */
+    if (argc < 1 || argv[0] == NULL) {
+        refuse("(no argv)");
+        return 1;
+    }
+
     /* Find argv[0]'s basename — the part after the last '/'. */
     const char *base = strrchr(argv[0], '/');
     base = base ? base + 1 : argv[0];

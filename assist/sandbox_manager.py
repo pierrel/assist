@@ -67,6 +67,25 @@ class SandboxManager:
                 f"Cannot start sandbox for {work_dir}: stat failed ({e}). "
                 "The workspace directory must exist and be readable by the web process."
             ) from e
+
+        # Refuse to run the container as root.  A root-owned workspace
+        # would mean `containers.run(user="0:0")` — which silently
+        # restores the bypass this whole layer exists to close (the
+        # agent inside the sandbox could read mode-0700 git-real and
+        # copy it).  Pre-migration thread workspaces created before
+        # this layer shipped *are* root-owned, so this check is what
+        # catches them; the operator runs the documented chown and
+        # the thread comes back online.
+        if st.st_uid == 0:
+            raise RuntimeError(
+                f"Workspace {work_dir} is owned by root.  Refusing to "
+                "start the sandbox because that would defeat the "
+                "privilege-separation layer that prevents the agent "
+                "from bypassing the git push refusal.  Migrate with: "
+                f"sudo chown -R $USER:$USER {work_dir}  (or, for the "
+                "whole threads dir at once, $ASSIST_THREADS_DIR).  "
+                "See docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org."
+            )
         user_arg = f"{st.st_uid}:{st.st_gid}"
 
         try:

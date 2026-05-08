@@ -14,9 +14,20 @@ echo "Installing service: $SERVICE_NAME"
 echo "Deploy path: $DEPLOY_PATH"
 echo "Data directory: $ASSIST_THREADS_DIR"
 
-# Create data directory
+# Create data directory + migrate ownership.
+#
+# The non-root-sandbox layer
+# (docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org)
+# requires every thread workspace to be owned by the invoking user,
+# not root.  Pre-existing thread workspaces from before that layer
+# still hold root-owned files inside (sandbox used to run as root);
+# without a recursive chown they'd silently fail
+# SandboxManager.get_sandbox_backend's "uid != 0" check on first
+# turn after deploy.  The recursive chown is idempotent — re-running
+# on already-migrated workspaces is a no-op — so it's safe to run
+# on every install, not just first install.
 sudo mkdir -p "$ASSIST_THREADS_DIR"
-sudo chown $USER:$USER "$ASSIST_THREADS_DIR"
+sudo chown -R $USER:$USER "$ASSIST_THREADS_DIR"
 
 # Build environment variables section
 ENV_VARS=""

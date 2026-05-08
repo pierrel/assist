@@ -85,6 +85,18 @@ deploy-sandbox-build:
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
 	@echo "✓ Sandbox image built and smoked"
 
+# Migrate pre-non-root-sandbox thread workspaces to the deploy
+# user's ownership.  Idempotent.  Required after the first deploy
+# of the non-root sandbox layer (docs/2026-05-08-...) — without it,
+# legacy threads with root-owned files fail
+# SandboxManager.get_sandbox_backend's "uid != 0" check on first
+# turn.  Also wired into install-service.sh so it runs on every
+# install; this target is for ad-hoc re-application.
+deploy-migrate-workspaces:
+	@echo "→ Migrating thread workspaces on $(DEPLOY_HOST) to deploy-user ownership..."
+	@ssh $(DEPLOY_HOST) 'sudo chown -R $$USER:$$USER $(ASSIST_THREADS_DIR)'
+	@echo "✓ Workspace ownership migrated"
+
 deploy-service:
 	@echo "→ Installing systemd service..."
 	@ssh $(DEPLOY_HOST) \
