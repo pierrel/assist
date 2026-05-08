@@ -275,14 +275,16 @@ n    checkpointing via SqliteSaver.
         # 3. Wipe the on-disk directory.  Idempotent: a missing dir is
         # fine — re-running on a half-deleted thread must succeed.
         # On EACCES, fall back to a privileged-rm via a one-shot Docker
-        # container.  Sandbox runs write root-owned files into
-        # ``domain/references/`` and ``domain/**/__pycache__``; the
-        # invoking user can't ``rm`` those without ``chown -R`` (not in
-        # the passwordless sudoers).  Pierre is in the docker group, so
-        # a tiny ``alpine`` container can ``rm -rf`` as root via the
-        # bind mount.  Long-term fix is to run the sandbox as a non-
-        # root UID; this keeps the weekly sweep self-sufficient until
-        # then.
+        # container.  This path is *legacy-compat*: it covers thread
+        # workspaces created before the non-root-sandbox layer
+        # (docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org)
+        # shipped, which still hold root-owned files in
+        # ``domain/references/`` and ``domain/**/__pycache__``.
+        # Threads created after that deploy run the sandbox as the
+        # invoking user, so files are user-owned and ``shutil.rmtree``
+        # succeeds without the alpine fallback.  Once all such
+        # legacy threads age out via the retention sweep, this
+        # PermissionError branch becomes dead code and can be removed.
         try:
             shutil.rmtree(tdir, ignore_errors=False)
         except FileNotFoundError:

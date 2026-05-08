@@ -3,7 +3,7 @@ There was an error during research where the agent was stuck in a write-file loo
 * From claude conversation
 What went wrong
 
-  The agent got stuck in a degenerate write loop at the end of the run. Looking at the conversation history at          /home/pierre/deploy/assist/threads/20260424061644-1b5485b7/domain/conversation_history/e6b5559f-7637-4344-97e9-07ed2  56b7f91.md:                                                                                                                           
+  The agent got stuck in a degenerate write loop at the end of the run. Looking at the conversation history at          $ASSIST_THREADS_DIR/20260424061644-1b5485b7/domain/conversation_history/e6b5559f-7637-4344-97e9-07ed2  56b7f91.md:                                                                                                                           
   1. Lines 1–280 — research went normally: write question.txt (collided with leftover content from a prior thread, so   it used swimming_workout_question.txt), 5 web searches, write swimming_workout_report.md, run critique-agent, write
   a v2 fixing the yardage math, run fact-check-agent.                                                                   2. Lines 280–583 — the model declares "I have completed the research" but then immediately calls write_file again
   with a slightly different filename, repeatedly. The transcript ends mid-loop with Error: File already exists:         '/workspace/final_report.md' and no follow-up.
@@ -154,7 +154,7 @@ Wiring (in ~assist/agent.py~):
 ** Eval plan
 
 1. Replay the failing transcript at
-   ~/home/pierre/deploy/assist/threads/20260424061644-1b5485b7/...~
+   ~$ASSIST_THREADS_DIR/20260424061644-1b5485b7/...~
    against the patched agent in a unit-style eval; assert exactly one
    ~write_file~ to a stable path.
 2. Add a synthetic eval in ~edd/eval/~ that mocks ~write_file~ to

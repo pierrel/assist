@@ -154,8 +154,7 @@ ahead of time.  The serving endpoint already exposes both via
 }
 #+end_src
 
-(Verified live against http://192.168.6.118:8000/v1/models on
-2026-04-28.)
+(Verified live against the production vLLM endpoint on 2026-04-28.)
 
 Source: =docs/2026-04-25-dynamic-model.org=, roadmap.org item.
 
