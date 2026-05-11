@@ -28,6 +28,13 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cp "$REPO_DIR/requirements.txt" "$HOST_DIR/"
 cp "$REPO_DIR/pyproject.toml" "$HOST_DIR/" 2>/dev/null || true
 cp -r "$REPO_DIR/assist" "$HOST_DIR/" 2>/dev/null || true
+# mktemp -d is mode 0700.  The sandbox container runs as uid 1000
+# (the `sandbox` user baked into the image); on a host where the
+# runner's uid isn't 1000 (e.g. GitHub Actions runners = 1001), the
+# container can't read the host dir.  chmod world-readable (capital
+# X gives x to dirs only, not regular files).
+chmod 0755 "$HOST_DIR"
+chmod -R a+rX "$HOST_DIR"
 
 cleanup() {
     docker rm -f "$PROXY" >/dev/null 2>&1
