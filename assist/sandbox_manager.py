@@ -26,29 +26,19 @@ EGRESS_ALLOWLIST_FILE = os.path.join(
 
 
 def _load_egress_allowlist() -> list[str]:
-    """Read the sandbox egress allowlist.
+    """Read the sandbox egress allowlist from the committed conf file.
 
-    ASSIST_SANDBOX_EGRESS_ALLOWLIST env (comma-separated) takes
-    precedence; falls back to dockerfiles/egress-allowlist.conf.
+    Single source of truth: ``dockerfiles/egress-allowlist.conf``.
     Returns a sorted list (deterministic hash for change detection).
+    Raises FileNotFoundError if the file is missing — fail-closed,
+    no baked-in fallback that could silently disagree with the repo.
     """
-    env = os.environ.get("ASSIST_SANDBOX_EGRESS_ALLOWLIST", "").strip()
-    if env:
-        return sorted({h.strip() for h in env.split(",") if h.strip()})
-    try:
-        with open(EGRESS_ALLOWLIST_FILE) as f:
-            return sorted({
-                line.strip()
-                for line in f
-                if line.strip() and not line.lstrip().startswith("#")
-            })
-    except FileNotFoundError:
-        logger.warning(
-            "Egress allowlist file %s missing; falling back to baked-in defaults",
-            EGRESS_ALLOWLIST_FILE,
-        )
-        return sorted({"pypi.org", "files.pythonhosted.org", "pip.pypa.io",
-                       "host.docker.internal"})
+    with open(EGRESS_ALLOWLIST_FILE) as f:
+        return sorted({
+            line.strip()
+            for line in f
+            if line.strip() and not line.lstrip().startswith("#")
+        })
 
 
 class SandboxManager:
@@ -87,9 +77,9 @@ class SandboxManager:
           starts on the default bridge (so it has internet access) and
           is then connected to the egress network (so sandboxes can
           reach it as ``assist-egress-proxy:8888``).
-        - The current allowlist is hashed and stamped on the container
-          as a label.  When the allowlist changes (env or file), the
-          proxy is recreated on the next call.
+        - The current allowlist (from ``egress-allowlist.conf``) is
+          hashed and stamped on the container as a label.  When the
+          file changes, the proxy is recreated on the next call.
 
         Fails closed: if the proxy can't be brought up, callers see the
         exception and the sandbox start fails — which is the correct
