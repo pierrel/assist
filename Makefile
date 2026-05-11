@@ -59,14 +59,18 @@ sandbox-build: egress-proxy-build
 egress-proxy-build:
 	docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .
 
-# Build-time smoke.  Two harnesses, both fail the build on the first
-# regression they see:
+# Build-time smoke.  Three layers, fail-on-first-regression:
 #   - test-sandbox-shim.sh: 18 push-bypass variants + privilege-drop checks
 #   - test-sandbox-egress.sh: positive (pip install via proxy) +
 #     negative (off-allowlist host, direct-IP, raw TCP) probes
+#   - test_sandbox_egress_integration.py: e2e through SandboxManager.
+#     get_sandbox_backend → DockerSandboxBackend.execute("curl ..."),
+#     the same call path the agent's tool hits.  Auto-skips when
+#     Docker isn't available.
 sandbox-smoke: sandbox-build
 	bash dockerfiles/test-sandbox-shim.sh
 	bash dockerfiles/test-sandbox-egress.sh
+	.venv/bin/pytest tests/test_sandbox_egress_integration.py -v
 
 sandbox-shell:
 	docker run --rm -it assist-sandbox bash
