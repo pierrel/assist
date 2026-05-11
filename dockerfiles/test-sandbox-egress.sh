@@ -29,13 +29,24 @@ cp "$REPO_DIR/requirements.txt" "$HOST_DIR/"
 cp "$REPO_DIR/pyproject.toml" "$HOST_DIR/" 2>/dev/null || true
 cp -r "$REPO_DIR/assist" "$HOST_DIR/" 2>/dev/null || true
 
-# Run the container as the bind-mount owner — the same pattern
-# SandboxManager.get_sandbox_backend uses in production (it reads
-# stat(work_dir).st_uid and passes it via --user).  This means the
-# smoke runs under the same uid alignment as prod instead of the
-# hardcoded uid 1000 + world-readable workaround.
-HOST_UID=$(id -u)
-HOST_GID=$(id -g)
+# The container runs as --user 1000:1000 (the `sandbox` user baked
+# into the image).  In production this is the same uid as the deploy
+# user and the bind-mount owner — three-way alignment that makes
+# /home/sandbox writable and pip --user land in /home/sandbox/.local
+# the same way it does in prod.
+#
+# On a host where the runner's uid isn't 1000 (e.g. ubuntu-latest
+# GitHub runners = 1001), the bind-mount belongs to the runner uid
+# but the container reads it as uid 1000.  Without chmod, traversal
+# fails.  chmod 0755 on the dir + a+rX recursively closes that gap;
+# capital X gives x to dirs only, not regular files.
+#
+# Tried `--user $(id -u):$(id -g)` (commit d3931ed) — broke pip
+# --user because uid 1001 has no /etc/passwd entry in the image so
+# $HOME resolves to /, and /.local isn't writable.  Going with the
+# chmod approach keeps the smoke uid-aligned with production.
+chmod 0755 "$HOST_DIR"
+chmod -R a+rX "$HOST_DIR"
 
 cleanup() {
     docker rm -f "$PROXY" >/dev/null 2>&1
@@ -83,7 +94,7 @@ echo "→ Running negative + positive probes inside sandbox container"
 OUTPUT=$(docker run --rm \
     --network "$NETWORK" \
     -v "$HOST_DIR":/workspace \
-    --user "$HOST_UID:$HOST_GID" \
+    --user 1000:1000 \
     -e HTTPS_PROXY="$PROXY_URL" \
     -e HTTP_PROXY="$PROXY_URL" \
     -e https_proxy="$PROXY_URL" \
