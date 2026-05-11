@@ -1,14 +1,13 @@
 # Egress allowlist proxy for the assist sandbox.  See
-# dockerfiles/egress-proxy.py for the rationale and threat model.
+# dockerfiles/egress-proxy.py and
+# docs/2026-05-08-sandbox-network-allowlist.org for the rationale.
 #
 # Tiny image (python:3-alpine ~50MB).  No pip dependencies — stdlib
-# only.  Allowlist is shipped as a baked-in fallback at
-# /etc/egress-allowlist.conf; SandboxManager overrides at run time
-# via the EGRESS_ALLOWLIST env var.
+# only.  Allowlist is passed at container-create time via the
+# EGRESS_ALLOWLIST env var by SandboxManager.
 FROM python:3.13-alpine
 
 COPY dockerfiles/egress-proxy.py /usr/local/bin/egress-proxy.py
-COPY dockerfiles/egress-allowlist.conf /etc/egress-allowlist.conf
 
 EXPOSE 8888
 

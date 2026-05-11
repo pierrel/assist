@@ -19,8 +19,9 @@ Why custom Python instead of tinyproxy / squid:
     plaintext on the request line; we filter on the hostname there.
 
 Allowlist source:
-  EGRESS_ALLOWLIST env var (comma-separated) takes precedence.  Falls
-  back to /etc/egress-allowlist.conf (one hostname per line, # comments).
+  EGRESS_ALLOWLIST env var (comma-separated) — set by
+  SandboxManager._ensure_egress_proxy_running at container-create time.
+  No file fallback; the env var is the wire protocol from host to proxy.
 """
 import os
 import select
@@ -30,23 +31,12 @@ import threading
 from urllib.parse import urlparse
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8888"))
-ALLOWLIST_PATH = os.environ.get("ALLOWLIST_PATH", "/etc/egress-allowlist.conf")
 PIPE_TIMEOUT = 600  # seconds of idle on a tunnel before tearing down
 
 
 def load_allowlist() -> frozenset[str]:
     raw = os.environ.get("EGRESS_ALLOWLIST", "")
-    if raw.strip():
-        return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
-    try:
-        with open(ALLOWLIST_PATH) as f:
-            return frozenset(
-                line.strip().lower()
-                for line in f
-                if line.strip() and not line.lstrip().startswith("#")
-            )
-    except FileNotFoundError:
-        return frozenset()
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
 
 
 ALLOWLIST = load_allowlist()

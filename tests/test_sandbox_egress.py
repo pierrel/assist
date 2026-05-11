@@ -22,46 +22,36 @@ from assist.sandbox_manager import (
 
 
 class TestLoadEgressAllowlist(TestCase):
-    """Allowlist resolution: env var first, file second, baked default last."""
+    """Allowlist comes from a single source: dockerfiles/egress-allowlist.conf."""
 
-    def test_env_var_wins(self):
-        with patch.dict(os.environ,
-                        {"ASSIST_SANDBOX_EGRESS_ALLOWLIST": "a.example,b.example"},
-                        clear=False):
-            allowlist = _load_egress_allowlist()
-        self.assertEqual(allowlist, ["a.example", "b.example"])
-
-    def test_env_var_strips_whitespace_and_blanks(self):
-        with patch.dict(os.environ,
-                        {"ASSIST_SANDBOX_EGRESS_ALLOWLIST": " a.example , , b.example "},
-                        clear=False):
-            allowlist = _load_egress_allowlist()
-        self.assertEqual(allowlist, ["a.example", "b.example"])
-
-    def test_falls_back_to_file_when_env_unset(self):
-        # Pop env var if set, then read the actual repo file.
-        env = dict(os.environ)
-        env.pop("ASSIST_SANDBOX_EGRESS_ALLOWLIST", None)
-        with patch.dict(os.environ, env, clear=True):
-            allowlist = _load_egress_allowlist()
+    def test_reads_committed_repo_file(self):
+        allowlist = _load_egress_allowlist()
         # Defaults from dockerfiles/egress-allowlist.conf
         self.assertIn("pypi.org", allowlist)
         self.assertIn("files.pythonhosted.org", allowlist)
         self.assertIn("host.docker.internal", allowlist)
 
-    def test_file_strips_comments_and_blanks(self):
+    def test_strips_comments_and_blanks(self):
         with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
             f.write("# leading comment\n\n  pypi.org  \n# inline\nexample.com\n")
             tmp = f.name
         try:
-            env = dict(os.environ)
-            env.pop("ASSIST_SANDBOX_EGRESS_ALLOWLIST", None)
-            with patch.dict(os.environ, env, clear=True):
-                with patch("assist.sandbox_manager.EGRESS_ALLOWLIST_FILE", tmp):
-                    allowlist = _load_egress_allowlist()
+            with patch("assist.sandbox_manager.EGRESS_ALLOWLIST_FILE", tmp):
+                allowlist = _load_egress_allowlist()
             self.assertEqual(allowlist, ["example.com", "pypi.org"])
         finally:
             os.unlink(tmp)
+
+    def test_raises_fail_closed_when_file_missing(self):
+        """No baked-in fallback — operator misconfiguration must not
+        silently degrade to a permissive default.  Saved feedback memory:
+        'Threads should die on infrastructure failure rather than
+        heal-and-retry'.
+        """
+        with patch("assist.sandbox_manager.EGRESS_ALLOWLIST_FILE",
+                   "/nonexistent/egress-allowlist.conf"):
+            with self.assertRaises(FileNotFoundError):
+                _load_egress_allowlist()
 
 
 class TestEnsureEgressProxy(TestCase):
