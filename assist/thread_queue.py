@@ -55,7 +55,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 DEFAULT_HOLD_TIMEOUT_S = _env_float("ASSIST_THREAD_HOLD_TIMEOUT_S", 7200.0)
-DEFAULT_WAIT_TIMEOUT_S = _env_float("ASSIST_THREAD_QUEUE_WAIT_S", 900.0)
+DEFAULT_WAIT_TIMEOUT_S = _env_float("ASSIST_THREAD_QUEUE_WAIT_S", 14400.0)
 
 
 class QueueWaitTimeout(Exception):
