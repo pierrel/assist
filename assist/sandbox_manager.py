@@ -99,6 +99,22 @@ class SandboxManager:
                     EGRESS_NETWORK, driver="bridge", internal=True,
                 )
                 logger.info("Created egress network %s (internal)", EGRESS_NETWORK)
+            else:
+                # An attacker (or a hand-rolled docker network create that
+                # forgot --internal) could leave a same-named network that
+                # has a default gateway, re-opening unrestricted egress.
+                # Fail closed — refuse to attach a sandbox to a non-internal
+                # network of this name.  Operator fix: `docker network rm
+                # assist-egress-network`; SandboxManager recreates it
+                # correctly on the next sandbox start.
+                if not egress_net.attrs.get("Internal", False):
+                    raise RuntimeError(
+                        f"Egress network {EGRESS_NETWORK!r} exists but is "
+                        "not internal=True.  Refusing to attach the "
+                        "sandbox — that would bypass the allowlist layer.  "
+                        f"Fix: `docker network rm {EGRESS_NETWORK}` and "
+                        "the next sandbox start will recreate it."
+                    )
 
             existing = None
             try:

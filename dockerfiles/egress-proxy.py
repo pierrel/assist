@@ -190,8 +190,8 @@ def handle(client: socket.socket, addr) -> None:
 
 def main() -> int:
     if not ALLOWLIST:
-        log("ERROR: empty allowlist (EGRESS_ALLOWLIST env unset and " +
-            f"{ALLOWLIST_PATH} missing).  Refusing to start fail-open.")
+        log("ERROR: empty allowlist (EGRESS_ALLOWLIST env unset or empty).  "
+            "Refusing to start fail-open.")
         return 2
     log(f"allowlist ({len(ALLOWLIST)} entries): {sorted(ALLOWLIST)}")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

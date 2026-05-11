@@ -27,8 +27,12 @@ from assist.sandbox_manager import SandboxManager
 
 
 class TestSandboxEgressEndToEnd(unittest.TestCase):
-    """Real Docker.  Each test spins up a fresh sandbox via
-    SandboxManager and runs curl through ``backend.execute``.
+    """Real Docker.  A single sandbox backend is created in
+    ``setUpClass`` and shared across all tests in the class — each
+    test runs its own ``curl`` through ``backend.execute`` but
+    against the same container.  That's cheap and correct here
+    because curl has no persistent state that one test could leak
+    into another.
 
     Sets a 6s curl timeout — the proxy denies almost instantly (403)
     and a real allowed host responds in <2s; anything past that
