@@ -65,8 +65,12 @@ egress-proxy-build:
 #     negative (off-allowlist host, direct-IP, raw TCP) probes
 #   - test_sandbox_egress_integration.py: e2e through SandboxManager.
 #     get_sandbox_backend → DockerSandboxBackend.execute("curl ..."),
-#     the same call path the agent's tool hits.  Auto-skips when
-#     Docker isn't available.
+#     the same call path the agent's tool hits.  Requires Docker;
+#     fails loudly if missing (no skip — too important).
+#
+# `deploy-sandbox-build` only runs the two shell harnesses on the
+# remote (no venv there); use `make sandbox-smoke` locally / in CI
+# for the full three-layer coverage.
 sandbox-smoke: sandbox-build
 	bash dockerfiles/test-sandbox-shim.sh
 	bash dockerfiles/test-sandbox-egress.sh

@@ -102,13 +102,23 @@ OUTPUT=$(docker run --rm \
     assist-sandbox bash -c '
 set +e
 
+# Helper: did curl reach upstream with a non-error response?
+# Treats any 2xx/3xx as "got through" (3xx is a real upstream
+# redirect, which means we reached the host).  Drops stderr to
+# /dev/null so curl error text doesn'\''t pollute $status — we only
+# care about the 3-digit %{http_code} (or "000" / empty on fail).
+upstream_reached() {
+    local s="$1"
+    [[ "$s" =~ ^[23][0-9][0-9]$ ]]
+}
+
 # (1) Hostname not in allowlist — proxy should 403 (curl returns
 #     non-zero or HTTP 403).  Use --max-time so a hung proxy fails
 #     loudly instead of stalling the smoke gate.
-status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
-    https://example.com/ 2>&1)
-if [ "$status" = "200" ]; then
-    echo "FAIL: example.com returned 200 (allowlist not enforced)"; exit 1
+status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    https://example.com/ 2>/dev/null)
+if upstream_reached "$status"; then
+    echo "FAIL: example.com returned $status (allowlist not enforced)"; exit 1
 fi
 echo "ok  (1) https://example.com  blocked (status=$status)"
 
@@ -116,10 +126,10 @@ echo "ok  (1) https://example.com  blocked (status=$status)"
 #     hardcodes 1.1.1.1:443" exfiltration path.  Allowlist match is
 #     against the CONNECT line hostname; an IP literal is never on
 #     the list.
-status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
-    --resolve example.com:443:1.1.1.1 https://example.com/ 2>&1)
-if [ "$status" = "200" ]; then
-    echo "FAIL: direct-IP CONNECT to 1.1.1.1 succeeded (DNS bypass)"; exit 1
+status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --resolve example.com:443:1.1.1.1 https://example.com/ 2>/dev/null)
+if upstream_reached "$status"; then
+    echo "FAIL: direct-IP CONNECT to 1.1.1.1 returned $status (DNS bypass)"; exit 1
 fi
 echo "ok  (2) direct-IP CONNECT  blocked (status=$status)"
 

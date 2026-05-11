@@ -165,13 +165,14 @@ first sandbox trying to reach it.
 
 * Test contract
 
-Two layers of tests; both run on every ~make sandbox-smoke~ and
-~make deploy-sandbox-build~:
+Three layers.  ~make sandbox-smoke~ (local + CI) runs all three;
+~make deploy-sandbox-build~ runs only the two shell smokes on the
+remote (no venv there).
 
 ** Unit (~tests/test_sandbox_egress.py~) — Docker mocked
 
-- Allowlist loading: env precedence, file fallback, comment/blank
-  stripping, raises when both are missing (fail-closed).
+- Allowlist loading: file is read, comments and blanks stripped,
+  raises ~FileNotFoundError~ when the file is missing (fail-closed).
 - ~_ensure_egress_proxy_running~: creates network if missing,
   creates proxy if missing, idempotent when hash matches and
   container is running, recreates when hash changes, recreates
@@ -205,6 +206,16 @@ Seven probes, one container apiece:
    is the "dev-agent eval keeps working" contract; any drift in
    ~requirements.txt~ that adds a non-allowlisted host trips the
    smoke.
+
+** End-to-end integration (~tests/test_sandbox_egress_integration.py~)
+
+Three pytest cases that go through the production code path —
+~SandboxManager.get_sandbox_backend~ → real proxy + network →
+~DockerSandboxBackend.execute("curl ...")~ — the same call the
+agent's tool eventually makes.  Covers the gap between mocks
+(unit) and hand-rolled ~docker run~ (shell smoke).  Runs in
+~make sandbox-smoke~ and in CI; not chained into
+~make deploy-sandbox-build~ (no venv on the remote).
 
 * Migration / deploy impact
 
