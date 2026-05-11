@@ -15,9 +15,18 @@ jobs:
           python-version: '3.14'
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          grep -v '^-e git+https://github.com/pierrel/assist' requirements.txt > /tmp/req.txt
-          pip install -r /tmp/req.txt
-          pip install -e .
-      - name: Run tests
-        run: pytest tests/ -vv
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/pip install -e .
+      # Docker is pre-installed on ubuntu-latest runners; build the
+      # sandbox + egress-proxy images so the e2e integration tests
+      # (tests/test_sandbox_egress_integration.py) can spin up real
+      # containers.  No skip — the egress contract is too important
+      # to silently no-op in CI.
+      - name: Build sandbox images
+        run: make sandbox-build
+      - name: Sandbox smoke (push-refusal + egress + integration)
+        run: make sandbox-smoke
+      - name: Unit tests
+        run: .venv/bin/pytest tests/ -vv

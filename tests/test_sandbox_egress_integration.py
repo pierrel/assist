@@ -13,11 +13,12 @@ SandboxManager), this exercises the *production* code path:
 If anything in that chain regresses — proxy bring-up, network attach,
 env-var injection, hash-based recreate — these tests catch it.
 
-Auto-skips when Docker isn't available or the required images aren't
-built, so ``make test`` on a developer machine without Docker still
-passes.
+No skip: the egress contract is too important to silently no-op.
+Docker is pre-installed on ``ubuntu-latest`` GitHub runners (the
+CI environment) and is always available on the deploy host.  If
+Docker is genuinely missing, setUpClass fails loudly with a real
+error — that's better than a silent skip that masks the regression.
 """
-import os
 import shutil
 import tempfile
 import unittest
@@ -25,33 +26,6 @@ import unittest
 from assist.sandbox_manager import SandboxManager
 
 
-def _docker_available() -> bool:
-    """True iff the local Docker daemon is reachable and both required
-    images are built.  Either condition missing → skip the test class.
-    """
-    try:
-        import docker
-    except ImportError:
-        return False
-    try:
-        client = docker.from_env()
-        client.ping()
-    except Exception:
-        return False
-    needed = {"assist-sandbox", "assist-egress-proxy"}
-    have = set()
-    for img in client.images.list():
-        for tag in (img.tags or []):
-            for name in needed:
-                if tag.startswith(name + ":"):
-                    have.add(name)
-    return needed <= have
-
-
-@unittest.skipUnless(
-    _docker_available(),
-    "Docker + assist-sandbox + assist-egress-proxy images required",
-)
 class TestSandboxEgressEndToEnd(unittest.TestCase):
     """Real Docker.  Each test spins up a fresh sandbox via
     SandboxManager and runs curl through ``backend.execute``.
