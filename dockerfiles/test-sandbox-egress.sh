@@ -28,13 +28,14 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cp "$REPO_DIR/requirements.txt" "$HOST_DIR/"
 cp "$REPO_DIR/pyproject.toml" "$HOST_DIR/" 2>/dev/null || true
 cp -r "$REPO_DIR/assist" "$HOST_DIR/" 2>/dev/null || true
-# mktemp -d is mode 0700.  The sandbox container runs as uid 1000
-# (the `sandbox` user baked into the image); on a host where the
-# runner's uid isn't 1000 (e.g. GitHub Actions runners = 1001), the
-# container can't read the host dir.  chmod world-readable (capital
-# X gives x to dirs only, not regular files).
-chmod 0755 "$HOST_DIR"
-chmod -R a+rX "$HOST_DIR"
+
+# Run the container as the bind-mount owner — the same pattern
+# SandboxManager.get_sandbox_backend uses in production (it reads
+# stat(work_dir).st_uid and passes it via --user).  This means the
+# smoke runs under the same uid alignment as prod instead of the
+# hardcoded uid 1000 + world-readable workaround.
+HOST_UID=$(id -u)
+HOST_GID=$(id -g)
 
 cleanup() {
     docker rm -f "$PROXY" >/dev/null 2>&1
@@ -82,7 +83,7 @@ echo "→ Running negative + positive probes inside sandbox container"
 OUTPUT=$(docker run --rm \
     --network "$NETWORK" \
     -v "$HOST_DIR":/workspace \
-    --user 1000:1000 \
+    --user "$HOST_UID:$HOST_GID" \
     -e HTTPS_PROXY="$PROXY_URL" \
     -e HTTP_PROXY="$PROXY_URL" \
     -e https_proxy="$PROXY_URL" \
