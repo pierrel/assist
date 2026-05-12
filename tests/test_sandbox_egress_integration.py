@@ -70,22 +70,30 @@ class TestSandboxEgressEndToEnd(unittest.TestCase):
         resp = self.backend.execute(cmd)
         return resp.exit_code, resp.output
 
+    @staticmethod
+    def _reached_upstream(exit_code: int, output: str) -> bool:
+        """True iff curl reached a real upstream — any 2xx or 3xx is
+        evidence the request was allowed through.  A 3xx redirect is
+        a real response from an upstream we shouldn't have reached,
+        so it counts as a leak for negative cases.
+        """
+        if exit_code != 0:
+            return False
+        status = output.strip()
+        return len(status) == 3 and status[0] in ("2", "3")
+
     def test_off_allowlist_host_is_denied(self):
         """Negative case: curl to a host not in the allowlist must NOT
-        return a 2xx.  The proxy filters on the CONNECT hostname and
+        reach upstream.  The proxy filters on the CONNECT hostname and
         emits ``HTTP/1.1 403 Forbidden``; curl reports the failure
         either as a non-zero exit (connection refused / proxy error)
         or as "000" (no response from upstream — proxy closed the
-        tunnel).  Either way: not 200.
+        tunnel).
         """
         exit_code, output = self._curl_status("https://example.com/")
-        # example.com is not on the allowlist.  Acceptable evidence
-        # of denial: non-zero exit OR an explicit 403/000 status in
-        # the body.  Reject only a successful (2xx) response.
-        is_success = (exit_code == 0 and output.strip().startswith("2"))
         self.assertFalse(
-            is_success,
-            f"Off-allowlist curl unexpectedly succeeded: "
+            self._reached_upstream(exit_code, output),
+            f"Off-allowlist curl unexpectedly reached upstream: "
             f"exit={exit_code}, output={output!r}",
         )
 
@@ -125,9 +133,8 @@ class TestSandboxEgressEndToEnd(unittest.TestCase):
             f"https://example.com/"
         )
         resp = self.backend.execute(cmd)
-        is_success = (resp.exit_code == 0 and resp.output.strip().startswith("2"))
         self.assertFalse(
-            is_success,
-            f"Direct-IP curl unexpectedly succeeded: "
+            self._reached_upstream(resp.exit_code, resp.output),
+            f"Direct-IP curl unexpectedly reached upstream: "
             f"exit={resp.exit_code}, output={resp.output!r}",
         )
