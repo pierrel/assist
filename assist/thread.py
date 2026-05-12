@@ -10,13 +10,13 @@ from typing import Literal, Dict, Any, Callable, List, Iterator
 
 import sqlite3
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
 from assist.checkpoint_rollback import invoke_with_rollback
+from assist.eviction_saver import EvictionSaver
 from assist.sandbox_manager import SandboxManager
 from assist.thread_queue import THREAD_QUEUE
 
@@ -190,7 +190,12 @@ n    checkpointing via SqliteSaver.
             open(self.db_path, "a").close()
         # SqliteSaver expects a sqlite3.Connection
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.checkpointer = SqliteSaver(self.conn)
+        # EvictionSaver writes blobs under
+        # <root_dir>/<thread_id>/large_tool_results/, so Layer 0's
+        # hard_delete (rmtree on the thread dir) cleans them up for free.
+        self.checkpointer = EvictionSaver(
+            self.conn, eviction_root=self.root_dir
+        )
         # Lazily resolve the chat model so the web server can boot before
         # the LLM endpoint is reachable.  First request triggers the probe;
         # the lock prevents two concurrent first-requests from probing twice.
