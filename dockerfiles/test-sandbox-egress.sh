@@ -3,11 +3,15 @@
 # `make sandbox-smoke` and `make deploy-sandbox-build`.  Fails the
 # build if:
 #
-#   - A non-allowlisted hostname returns anything but 403/connect-fail
-#   - A direct-IP connection (DNS bypass attempt) succeeds
+#   - A non-allowlisted hostname returns any 2xx/3xx (allowlist leak)
+#   - A direct-IP CONNECT succeeds (DNS bypass)
 #   - A raw TCP connect to an off-allowlist endpoint succeeds
 #     (would mean the sandbox network isn't internal)
-#   - `pip install` of a small allowlisted package fails through the proxy
+#   - A mixed-case allowlisted hostname fails (case-insensitive match broken)
+#   - HTTP-via-proxy is unreachable for an allowed host, or reachable
+#     for a denied one (covers the absolute-URL request-line path)
+#   - `pip install -r requirements.txt` (the same install command
+#     test_dev_agent_runs_eval uses) fails through the proxy
 #
 # Both images must already be built: `assist-sandbox` and
 # `assist-egress-proxy`.  This harness creates a temporary internal

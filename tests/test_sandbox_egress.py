@@ -69,7 +69,12 @@ class TestEnsureEgressProxy(TestCase):
         client = MagicMock()
         from docker.errors import NotFound
         if network_exists:
-            client.networks.get.return_value = MagicMock()
+            # Real Docker returns attrs with Internal=True for our network;
+            # match that so the manager's "is this internal?" validation
+            # passes by intent, not by MagicMock truthiness coincidence.
+            net = MagicMock()
+            net.attrs = {"Internal": True}
+            client.networks.get.return_value = net
         else:
             client.networks.get.side_effect = NotFound("no network")
 
@@ -158,10 +163,31 @@ class TestEnsureEgressProxy(TestCase):
 
         SandboxManager._ensure_egress_proxy_running(client)
 
-        # client.networks.get(EGRESS_NETWORK).connect(proxy) must be called.
-        # We didn't set up a precise mock chain, so verify the network was
-        # fetched and .connect() invoked on the result.
+        # Network is fetched + validated (internal=True) by the manager.
         client.networks.get.assert_any_call(EGRESS_NETWORK)
+        # And the new proxy container is then attached to it via
+        # egress_net.connect(proxy).  This is the load-bearing step —
+        # without it the proxy lives only on the default bridge and
+        # sandboxes can't reach it.
+        egress_net = client.networks.get.return_value
+        new_proxy = client.containers.run.return_value
+        egress_net.connect.assert_called_once_with(new_proxy)
+
+    def test_rejects_non_internal_egress_network(self):
+        """If a same-named network exists but isn't internal=True
+        (e.g., hand-rolled `docker network create` without --internal),
+        attaching the sandbox would re-open unrestricted egress.
+        Fail-closed: raise RuntimeError instead of silently bypassing.
+        """
+        client = self._make_client()
+        # Override: network exists but is NOT internal.
+        non_internal = MagicMock()
+        non_internal.attrs = {"Internal": False}
+        client.networks.get.return_value = non_internal
+
+        with self.assertRaises(RuntimeError) as ctx:
+            SandboxManager._ensure_egress_proxy_running(client)
+        self.assertIn("not internal", str(ctx.exception).lower())
 
 
 class TestSandboxBackendUsesEgressProxy(TestCase):

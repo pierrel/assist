@@ -136,13 +136,19 @@ def handle(client: socket.socket, addr) -> None:
             pipe(client, upstream)
             return
 
-        # HTTP via proxy: request line is "METHOD http://host[:port]/path HTTP/1.1"
-        if not target.startswith(("http://", "https://")):
-            deny(client, target, "non-absolute URL on non-CONNECT method")
+        # HTTP via proxy: request line is "METHOD http://host[:port]/path HTTP/1.1".
+        # We do NOT accept https:// here — an HTTPS absolute-URI on a
+        # non-CONNECT method would mean the client expects us to do
+        # the TLS handshake to upstream, which we don't (CONNECT is the
+        # right verb for that).  Refuse instead of silently sending
+        # plaintext HTTP to port 443 and confusing everyone.
+        if not target.startswith("http://"):
+            deny(client, target,
+                 f"non-absolute or non-http:// URL on {method} (use CONNECT for HTTPS)")
             return
         u = urlparse(target)
         host = (u.hostname or "").lower()
-        port = u.port or (443 if u.scheme == "https" else 80)
+        port = u.port or 80
         if host not in ALLOWLIST:
             deny(client, host, f"not in allowlist (HTTP {method})")
             return
