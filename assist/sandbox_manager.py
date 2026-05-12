@@ -246,9 +246,24 @@ class SandboxManager:
             )
         user_arg = f"{st.st_uid}:{st.st_gid}"
 
+        # Egress proxy bring-up runs OUTSIDE the broad-except below.
+        # If the allowlist file is missing, or the egress network
+        # exists but isn't internal=True, or the proxy image is
+        # broken, we want a loud RuntimeError — silently returning
+        # None here would mean threads keep working WITHOUT the
+        # egress gate, defeating the layer entirely.  DockerException
+        # (daemon down, transient API error) still degrades to None
+        # via the explicit catch below.
+        from docker.errors import DockerException
         try:
             client = cls._get_docker_client()
             cls._ensure_egress_proxy_running(client)
+        except DockerException as e:
+            logger.warning("Docker unavailable for egress setup: %s", e)
+            return None
+        # Anything else (RuntimeError from policy checks, etc) raises.
+
+        try:
             proxy_url = f"http://{EGRESS_PROXY_NAME}:{EGRESS_PROXY_PORT}"
             # The sandbox is on an internal Docker network — no host-gateway
             # route, no NAT.  The only reachable name on this network is
@@ -289,7 +304,7 @@ class SandboxManager:
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(container)
-        except Exception as e:
+        except DockerException as e:
             logger.warning("Docker sandbox unavailable: %s", e)
             return None
 
