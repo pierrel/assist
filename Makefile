@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build egress-proxy-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -49,16 +49,32 @@ pull-eval-history:
 	@rsync -avz $(DEPLOY_HOST):$(DEPLOY_PATH)/edd/history/ edd/history/
 	@echo "✓ Eval history synced"
 
-sandbox-build:
+sandbox-build: egress-proxy-build
 	docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .
 
-# Build-time smoke for the git-push-refusal layers — fails the build
-# if any push variant succeeds, if /usr/bin/git-real isn't 0700, if
-# the cap_dac_override file cap isn't set, or if git creates root-
-# owned files (privilege drop regression).  See
-# dockerfiles/test-sandbox-shim.sh for the full check list.
+# Egress allowlist proxy.  Tiny image (python:3-alpine + ~150 LOC of
+# stdlib).  Used by SandboxManager._ensure_egress_proxy_running to
+# gate every byte leaving the sandbox.  See
+# dockerfiles/egress-proxy.py and docs/2026-05-08-sandbox-network-allowlist.org.
+egress-proxy-build:
+	docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .
+
+# Build-time smoke.  Three layers, fail-on-first-regression:
+#   - test-sandbox-shim.sh: 18 push-bypass variants + privilege-drop checks
+#   - test-sandbox-egress.sh: positive (pip install via proxy) +
+#     negative (off-allowlist host, direct-IP, raw TCP) probes
+#   - test_sandbox_egress_integration.py: e2e through SandboxManager.
+#     get_sandbox_backend → DockerSandboxBackend.execute("curl ..."),
+#     the same call path the agent's tool hits.  Requires Docker;
+#     fails loudly if missing (no skip — too important).
+#
+# `deploy-sandbox-build` only runs the two shell harnesses on the
+# remote (no venv there); use `make sandbox-smoke` locally / in CI
+# for the full three-layer coverage.
 sandbox-smoke: sandbox-build
 	bash dockerfiles/test-sandbox-shim.sh
+	bash dockerfiles/test-sandbox-egress.sh
+	.venv/bin/pytest tests/test_sandbox_egress_integration.py -v
 
 sandbox-shell:
 	docker run --rm -it assist-sandbox bash
@@ -79,11 +95,15 @@ deploy-code:
 	@echo "✓ Code deployed"
 
 deploy-sandbox-build:
+	@echo "→ Building egress-proxy image on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .'
 	@echo "→ Building sandbox image on $(DEPLOY_HOST)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-sandbox -f dockerfiles/Dockerfile.sandbox .'
 	@echo "→ Running sandbox-smoke on $(DEPLOY_HOST) (push-refusal regression gate)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-shim.sh'
-	@echo "✓ Sandbox image built and smoked"
+	@echo "→ Running egress-smoke on $(DEPLOY_HOST) (allowlist regression gate)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-egress.sh'
+	@echo "✓ Sandbox + egress-proxy images built and smoked"
 
 # Migrate pre-non-root-sandbox thread workspaces to the deploy
 # user's ownership.  Idempotent.  Required after the first deploy

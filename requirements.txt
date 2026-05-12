@@ -7,7 +7,6 @@ annotated-types==0.7.0
 anthropic==0.92.0
 anyio==4.12.1
 APScheduler==3.11.2
--e git+https://github.com/pierrel/assist.git@32c1e12d55fa3601be5265c2d1b5b03c527cc930#egg=assist
 astroid==4.0.3
 asttokens==3.0.1
 attrs==25.4.0
