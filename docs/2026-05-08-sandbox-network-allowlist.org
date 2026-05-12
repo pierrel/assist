@@ -1,0 +1,253 @@
+#+TITLE: Sandbox egress allowlist: internal network + CONNECT-only proxy
+#+DATE: 2026-05-08
+
+* Problem
+
+The sandbox container that runs agent code had unrestricted outbound
+network access.  A prompt-injected or otherwise compromised agent
+inside the sandbox could ~POST~ workspace contents — source code,
+conversation history, secrets — to any host on the internet.
+
+This is the network-side counterpart to the git-push refusal layer
+(see ~docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org~):
+both close foothold paths that an attacker would use to get data
+*out* of the sandbox.
+
+* Threat model
+
+The sandbox is treated as untrusted.  Specifically:
+
+- The agent's input (system prompt + user turns + tool results) may
+  contain prompt injection.  The model may invoke ~execute~ with an
+  attacker-supplied command.
+- The sandbox is the only place where attacker-controlled code runs
+  with workspace read access.  Host process and other threads are
+  isolated.
+- Goal: deny the sandbox the ability to send workspace contents to
+  any host that is not on a small allowlist.  Anything that
+  legitimately needs egress (~pip install~, the local model URL)
+  must keep working.
+
+What this layer does *not* defend against:
+
+- An agent that exfiltrates via an allowlisted host's side channels
+  (e.g. encodes data in package names and ~pip install~s them, or
+  uses crafted URL paths to ~pypi.org~).  CONNECT-only proxying
+  cannot inspect inside TLS; rate-limit and content-inspection are
+  out of scope.
+- Domain-fronting via an allowlisted CDN.  If the host fronts other
+  origins via SNI/Host-header tricks, that's the CDN's trust
+  boundary.  We can't see inside TLS to enforce.
+- DoH/DoT from an allowlisted host.  Same: we don't peek inside.
+- The sandbox image ships ~gcc~ (needed for the git-shim build).
+  A custom egress binary still has no IP route out (see below), so
+  a compiler is not a foothold by itself.
+
+* Design
+
+** Architectural choice — internal Docker network + explicit CONNECT proxy
+
+The sandbox attaches to a Docker user-defined network created with
+~internal=True~.  An internal network has no default gateway and no
+NAT — the only reachable host on the network for the sandbox is
+whatever else is attached to it.  We attach exactly one other thing:
+a small proxy container.
+
+The proxy listens on TCP 8888 and accepts:
+
+- ~CONNECT host:port HTTP/1.1~ — used for HTTPS.  Filters on the
+  hostname in the request line (exact-string match, case-insensitive
+  per RFC 4343).  On allow, opens a TCP tunnel to the upstream and
+  pipes bytes both ways.  No TLS termination — the client validates
+  the upstream certificate as usual.
+- ~METHOD http://host:port/path HTTP/1.1~ (absolute-URL request line,
+  the HTTP-via-proxy form) — used for HTTP traffic, primarily the
+  local model URL ~http://host.docker.internal:8000/v1~.  Filters on
+  the URL's hostname (NOT the ~Host:~ header), opens a TCP socket to
+  upstream, forwards the request rewritten to relative form, pipes
+  the response back.
+
+The sandbox is launched with ~HTTPS_PROXY~ / ~HTTP_PROXY~ env vars
+pointing at the proxy by name (~assist-egress-proxy:8888~).  pip,
+httpx, openai-sdk, and the standard ~urllib~ all consult these
+variables, so no in-sandbox code changes are needed.
+
+** Why an explicit proxy and not iptables / DNS allowlist
+
+- *DNS allowlist alone* — defeated by direct-IP connections
+  (~curl https://1.2.3.4/~ skips DNS entirely).  Rejected.
+- *iptables inside the sandbox container* — requires
+  ~CAP_NET_ADMIN~ in the container, which itself is an escalation
+  surface, and puts the firewall *inside* the thing we don't trust.
+  Rejected.
+- *iptables on the host* — works but the rules need IP literals
+  for hostnames that change (PyPI/Fastly), and adding/removing
+  hostnames means rewriting kernel rules at runtime.  Operationally
+  brittle.  Rejected.
+- *MITM proxy with --allow-hosts regex (mitmproxy)* — works but
+  requires a CA cert in the sandbox's trust store, which is itself
+  a foothold (the agent can extract the CA key from the image).
+  And the regex needs explicit anchoring (~^pypi\.org$~); the
+  failure mode of forgetting that is silent allow on
+  ~evil-pypi.org~ matching ~pypi.org~.  Rejected.
+- *Custom Python CONNECT proxy* — chosen.  ~150 LOC of stdlib,
+  exact-string match by construction (no regex), no MITM, no CA.
+  Audit-friendly per the codebase's pattern (cf. the C git-shim
+  chosen over a bash equivalent).
+
+** Why dual-home the proxy
+
+The sandbox network is ~internal=True~ — no route to the host
+gateway from the sandbox.  But the agent's traffic to the local
+model URL is ~http://host.docker.internal:8000/v1~, which needs to
+reach the host.  Two options to reconcile:
+
+1. Set ~NO_PROXY=host.docker.internal~ on the sandbox.  Doesn't
+   work — bypassing the proxy means trying to connect directly, and
+   the internal network has no route to host-gateway.
+2. *Allow the proxy to relay to host.docker.internal*.  The proxy
+   container is attached to BOTH the internal egress network (for
+   sandbox connections) AND the default bridge (for internet +
+   ~host-gateway~).  ~host.docker.internal~ is in the default
+   allowlist; the proxy receives the HTTP-via-proxy request, looks
+   up the host on its own bridge network, forwards.
+
+We do (2).  This is why ~_ensure_egress_proxy_running~ first runs
+the proxy on bridge (~containers.run~ without ~network=~) then
+connects it to the internal network (~egress_net.connect(proxy)~).
+
+** Allowlist source — single file, no override
+
+~dockerfiles/egress-allowlist.conf~ is the single source of truth.
+One hostname per line, ~#~ comments allowed.  Source-controlled,
+auditable via ~git log~ / ~git blame~.
+
+~SandboxManager._load_egress_allowlist~ reads the file and passes
+the contents as the ~EGRESS_ALLOWLIST~ env var to the proxy
+container at create time.  No env override on the host side; no
+file fallback inside the proxy image.  If the file is missing,
+~_load_egress_allowlist~ raises ~FileNotFoundError~ — fail-closed.
+
+An env-var override may be added back later if a real need shows
+up (e.g. one deploy needs a hostname that doesn't belong in the
+shared repo).  For now the value of "one source, auditable" beats
+the speculative flexibility of two channels.
+
+To change the allowlist on a running deploy:
+
+#+begin_src text
+$EDITOR dockerfiles/egress-allowlist.conf
+make deploy-code      # rsync the new file
+make restart          # next sandbox start recreates the proxy
+                      # because the allowlist hash changed
+#+end_src
+
+** Hash-based proxy recreate
+
+~_ensure_egress_proxy_running~ stamps the SHA-256 of the
+comma-separated allowlist (first 16 hex chars) onto the proxy
+container as a label.  On every sandbox start it:
+
+1. Looks up the proxy by name.
+2. Compares the stamped hash to the current allowlist hash.
+3. If equal AND the container is running, returns the proxy name
+   silently (the common-case fast path).
+4. Otherwise removes the stale proxy and starts a fresh one.
+
+The whole operation runs under a class-level ~threading.Lock~ so
+two threads simultaneously starting sandboxes after an allowlist
+change don't collide on "container name already in use."
+
+After ~containers.run~ + ~connect~, ~_wait_for_egress_proxy_ready~
+polls the proxy's container logs for "listening on" with a 10s
+deadline.  This closes the race between proxy startup and the very
+first sandbox trying to reach it.
+
+* Test contract
+
+Three layers.  ~make sandbox-smoke~ (local + CI) runs all three;
+~make deploy-sandbox-build~ runs only the two shell smokes on the
+remote (no venv there).
+
+** Unit (~tests/test_sandbox_egress.py~) — Docker mocked
+
+- Allowlist loading: file is read, comments and blanks stripped,
+  raises ~FileNotFoundError~ when the file is missing (fail-closed).
+- ~_ensure_egress_proxy_running~: creates network if missing,
+  creates proxy if missing, idempotent when hash matches and
+  container is running, recreates when hash changes, recreates
+  when proxy is stopped.
+- ~get_sandbox_backend~ wiring: sandbox attaches to
+  ~assist-egress-network~, environment has ~HTTPS_PROXY~ /
+  ~HTTP_PROXY~ pointing at the proxy.
+
+** Build-time smoke (~dockerfiles/test-sandbox-egress.sh~) — real Docker
+
+Seven probes, one container apiece:
+
+1. ~curl https://example.com~ — off-allowlist HTTPS host.  Expect
+   ~403~ or connect-fail.
+2. ~curl --resolve example.com:443:1.1.1.1 https://example.com~ —
+   direct-IP CONNECT (DNS-bypass attempt).  Expect ~403~ or
+   connect-fail.  The allowlist match is on the hostname in the
+   CONNECT line, which for a literal IP is never in the list.
+3. Raw TCP to ~1.1.1.1:443~ via bash ~/dev/tcp~ — no proxy
+   involvement.  Tests that the *network* is internal, distinct
+   from the proxy filter.  Expect ~Network is unreachable~.
+4. ~curl https://Pypi.Org/~ — mixed-case allowlist host.  Tests
+   case-insensitive match.  Expect ~200~.
+5. ~curl --proxy ... http://pypi.org/~ — HTTP-via-proxy allow path.
+   Exercises the absolute-URL request-line parser.  Expect any
+   non-403, non-000 response.
+6. ~curl --proxy ... http://example.com/~ — HTTP-via-proxy deny
+   path.  Expect ~403~.
+7. ~pip install --user -r requirements.txt~ — real install command
+   that ~test_dev_agent_runs_eval~ runs inside the sandbox.  This
+   is the "dev-agent eval keeps working" contract; any drift in
+   ~requirements.txt~ that adds a non-allowlisted host trips the
+   smoke.
+
+** End-to-end integration (~tests/test_sandbox_egress_integration.py~)
+
+Three pytest cases that go through the production code path —
+~SandboxManager.get_sandbox_backend~ → real proxy + network →
+~DockerSandboxBackend.execute("curl ...")~ — the same call the
+agent's tool eventually makes.  Covers the gap between mocks
+(unit) and hand-rolled ~docker run~ (shell smoke).  Runs in
+~make sandbox-smoke~ and in CI; not chained into
+~make deploy-sandbox-build~ (no venv on the remote).
+
+* Migration / deploy impact
+
+- New image: ~assist-egress-proxy~ (tiny, python:3-alpine + ~150 LOC
+  stdlib).  Built locally via ~make egress-proxy-build~, on the
+  deploy host via ~make deploy-sandbox-build~.
+- No new sudoers entry; no systemd unit changes.
+- ~_ensure_egress_proxy_running~ is lazy — the proxy is brought up
+  on the first sandbox start after a service restart.  No separate
+  service to manage.
+- Existing sandbox containers from before the deploy keep working
+  with their old (default-bridge) network until they self-destruct
+  after 1 hour.  Full migration completes within an hour.
+
+* Operator playbook
+
+Adding or removing a hostname:
+
+#+begin_src text
+# 1. Edit the file
+$EDITOR dockerfiles/egress-allowlist.conf
+
+# 2. Deploy (rsync picks up the new file)
+make deploy-code
+
+# 3. Restart (next sandbox start recreates the proxy with the new hash)
+make restart
+#+end_src
+
+Inspecting blocks in prod:
+
+#+begin_src bash
+# Proxy logs every ALLOW/DENY decision
+docker logs assist-egress-proxy 2>&1 | tail -50
+#+end_src

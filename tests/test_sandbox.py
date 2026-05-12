@@ -332,13 +332,23 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.status = "running"
+        # Doubles as the egress-proxy container too — _wait_for_egress_proxy_ready
+        # polls .logs() looking for "listening on" before returning.
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         mock_client.containers.run.return_value = mock_container
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        mock_client.containers.run.assert_called_once()
+        # Two containers.run calls: the egress proxy (idempotent setup)
+        # and the sandbox itself.  Find the sandbox call specifically.
+        sandbox_calls = [
+            c for c in mock_client.containers.run.call_args_list
+            if c.args and c.args[0] == "assist-sandbox"
+        ]
+        self.assertEqual(len(sandbox_calls), 1,
+                         "Expected exactly one assist-sandbox containers.run call")
         # Verify container is registered
         self.assertIn(test_path, SandboxManager._containers)
 
@@ -355,6 +365,7 @@ class TestSandboxManager(TestCase):
         mock_container = MagicMock()
         mock_container.id = "test123456ab"
         mock_container.status = "running"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         mock_client.containers.run.return_value = mock_container
 
         host_st = os.stat(test_path)
@@ -363,9 +374,14 @@ class TestSandboxManager(TestCase):
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             SandboxManager.get_sandbox_backend(test_path)
 
-        _, kwargs = mock_client.containers.run.call_args
+        # The sandbox call (not the proxy call) must carry user=.  Pick
+        # it out by image name.
+        sandbox_call = next(
+            c for c in mock_client.containers.run.call_args_list
+            if c.args and c.args[0] == "assist-sandbox"
+        )
         self.assertEqual(
-            kwargs.get('user'), expected_user,
+            sandbox_call.kwargs.get('user'), expected_user,
             f"containers.run must be called with user={expected_user!r} "
             "so the agent inside the sandbox runs as the host bind-mount "
             "owner — not as root.",
@@ -426,11 +442,20 @@ class TestSandboxManager(TestCase):
         mock_container.reload.assert_called_once()
 
     def test_get_sandbox_backend_returns_none_on_docker_error(self):
+        """Docker daemon unavailable / transient API error should
+        degrade to a None backend (no sandbox).  Policy / fail-closed
+        errors (RuntimeError from non-internal egress network, etc)
+        raise instead — see test_get_sandbox_backend_raises_when_*.
+        """
+        from docker.errors import DockerException
+
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
         mock_client = MagicMock()
-        mock_client.containers.run.side_effect = Exception("Docker not running")
+        # Has to be a DockerException subclass now that the catch is
+        # narrowed; a bare Exception would propagate (correctly).
+        mock_client.containers.run.side_effect = DockerException("Docker not running")
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)
