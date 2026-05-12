@@ -3,32 +3,13 @@
 Make it expandable from the main web ui. Not always expanded.
 * Basics
 ** TODO Fix cli
-** DONE Prevent long diffs from crashing the browser
-Done 2026-05-06.  Subsumed by =Web diff review= below.  Per-file =<details>= collapsing + per-file size cap (=600= lines / =64= KB) + total-bytes cap (=256= KB) on the inline view at =/thread/{tid}=.  Files exceeding the per-file cap render a "too large to preview" placeholder linking to the new review page.
-** TODO PDF reading
 * Vision
 ** TODO Test a single vision experiment
-* Qwen upgrade
-See [[file:docs/2026-04-27-qwen-quantization-guide.md][quantization guide]].
-** TODO Run the awq quantizer
-** TODO Test (run all evals)
-** TODO Push to huggingface
 * Dev updates
 The dev agent needs significant improvements
-** TODO Remove the hard-injection and move to a skill
-project_indicators modifies the system prompt. Need to experiment with moving to a skill.
-
-Some loose steps:
-1. Create some evals similar to the org ones in the skills test file
-2. Ensure that the same level of explicity is followed (and use the filesystem as the most implicit)
-3. Validate that the skill is loaded
-4. Do something to terminate early so that the development isn't actually done - this should only validate that the skill is loaded and then terminate. Maybe mock the "load_skill" tool to raise an exception (ending early) and ensure that that exception was thrown. Dev agent tests should handle the actual implementation.
-
-Also remove mention of the dev skill from the general instructions - again skill guidance and general instructions should be generic.
 ** TODO Many more evals
 Consider checking out a version of this app to make changes to
 ** TODO Language/project-specific guidance
-** TODO Ensure it reads the README every time
 * Research improvements
 Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
 ** TODO Create some evals on how you want it to act
@@ -40,90 +21,20 @@ Consider:
 ** Bound production =threads.db= growth
 Overall plan + history: [[file:docs/2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]].  Prod DB hit 187 GB on 2026-05-03 because nothing capped thread count, checkpoints per thread, or content per checkpoint.  Four layers, each with its own design doc and TODO below.
 
-*** TODO Layer 0 — Thread retention with hard delete
-See [[file:docs/2026-05-04-threads-db-layer-0-thread-retention.org][docs/2026-05-04-threads-db-layer-0-thread-retention.org]].  Replace =MANAGER.soft_delete= with a =hard_delete= that wipes DB rows + thread dir + sandbox container; add a daily sweeper that keeps only =MIN_THREADS=100= most-recent threads.  The biggest sustained-growth-bound win and the one that makes Layer 1 (VACUUM) actually reclaim disk.
-
-*** DONE Layer 1 — Weekly =VACUUM= via user cron
-Done 2026-05-04.  =scripts/vacuum-prod-db.sh= + =scripts/crontab.example= + =Makefile vacuum-now= target.  Sunday 06:00 fires =VACUUM= against =threads.db= with a =flock= guard against the 23:00 eval cron.  Branch =weekly-vacuum-cron=; design background in [[file:2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]] §"Layer 1".  Switching to =VACUUM INTO= is a follow-up to avoid the WAL-doubling penalty observed on the first manual run.
-
 *** TODO Layer 2 — Per-thread checkpoint retention
 See [[file:docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org][docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org]].  Wrapper over =SqliteSaver= that prunes older checkpoints in =put()= so each thread keeps only =RETAIN_LAST=10=.  Bounds per-thread DB footprint even for hour-long research loops.
 
 *** TODO Layer 3 — Tool-result eviction at write time
 See [[file:docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org][docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org]].  Extend =ContextAwareToolEvictionMiddleware= to evict large =ToolMessage= contents to =/workspace/large_tool_results/<id>= before the checkpoint write, leaving a stub in the message list.  Caps single-checkpoint size and prevents =read_url= blobs from accumulating across snapshots.  Eval-side equivalent already shipped (commit f9df751).
-** DONE Per-thread LLM affinity queue
-Done 2026-05-06.  PR #90, commit =57ffa93=, merged to main.  See [[file:docs/2026-05-06-thread-affinity-queue.org][docs/2026-05-06-thread-affinity-queue.org]].  Concurrent =Thread.message()= calls thrashed llama.cpp's =--parallel 1= KV cache, growing prefill from O(T) to O(T²) per agent.  =ThreadAffinityQueue= serializes per-=Thread.message()= burst with FIFO waiters and a new =queued= UI stage.  =hold_timeout_s=600= + =wait_timeout_s=900= both env-overridable; cooperative cancel via =ThreadQueueMiddleware= between LLM calls.
-** DONE Web diff review
-Done 2026-05-06.  PR #92, merged to main.  See [[file:docs/2026-05-06-web-diff-review.org][docs/2026-05-06-web-diff-review.org]].  Replaces the single Pygments diff blob with a per-file collapsible stack on =/thread/{tid}= (light red/green per-line backgrounds, +N/−N stats, per-file size cap to keep the browser fast).  Adds =Review= button next to =Merge to Main= that opens =/thread/{tid}/review=: full diff, click any line to leave an inline comment, overall comment box, =Submit review= posts a markdown-formatted message back into the thread (routed through =ThreadAffinityQueue= as a regular turn).  Drafts persist in =localStorage= keyed per thread until the server confirms the submit.  Subsumes =Prevent long diffs from crashing the browser= above.
-** DONE Bound LLM-call wall-clock with per-phase httpx timeouts
-Done 2026-05-06.  PR #91, commit =2dfd86d=, deployed (merge pending).  See [[file:docs/2026-05-06-bound-llm-call-latency.org][docs/2026-05-06-bound-llm-call-latency.org]].  Prior single-scalar =timeout=600= meant a stuck TCP handshake burned the full 600s before raising — caught by the queue's =QueueWaitTimeout= during the 2026-05-06 incident.  Split into =httpx.Timeout(connect=10, read=600, write=60, pool=10)=, env-overridable; connect-down failures now surface in ~10s.  Both fail-fast layers (queue + per-call) live in prod.
-** DONE Mobile-friendly UI tweaks + unmerged status badge
-Done 2026-05-06.  See [[file:docs/2026-05-06-mobile-friendly-ui-tweaks.org][docs/2026-05-06-mobile-friendly-ui-tweaks.org]].  Pass over the web UI for phone use (iPhone 13 mini target): every editable form input gets =font-size: 16px= so iOS Safari stops auto-zooming on focus; thread rows on the index get 44 px tap targets (Apple's minimum) instead of bare =<a>= links; capture/review modals widen to =min(95%, 500px)=; =touch-action: manipulation= eliminates the 300 ms tap delay.  Adds an "unmerged" badge on idle threads with work not yet in =main=, secondary to the existing =queued/processing/error= badges.  =DomainManager.has_changes_vs_main()= covers committed, uncommitted, and untracked work.
-** DONE Make =write_file= recoverable on collision
-See [[file:docs/proposal-infinite-writes.org][docs/proposal-infinite-writes.org]] (Solution 1, "Make =write_file= recoverable").  Loop detection (Solution 2 of that doc) shipped already.  Without this fix, the small model still falls into the filename-mutation trap (=final_report.md= → =completed_final_report.md= → =report_final.md=…) when a write hits =Cannot write because it already exists=.  Hit the trap during the dev-skill migration evals (=test_mid_task_clarification=); loop detection caught it but the right fix is to make =write_file= overwrite-by-default or auto-rewrite to =edit_file= on collision.
-** TODO Per-thread feature branch for web-UI threads
-Each new thread branches off =main= at creation, commits to that branch each turn, and merges back via auto-rebase + fast-forward.  Conflicts surface in the UI and are resolved by the agent.  Push to =origin/main= is user-initiated from the web UI only — the agent cannot push.
-
-See [[file:docs/2026-05-07-per-thread-web-git-isolation.org][docs/2026-05-07-per-thread-web-git-isolation.org]].
-** DONE Wrap =git= binary in the sandbox image to refuse =push= at the runtime layer
-Done 2026-05-07 in [[https://github.com/pierrel/assist/pull/97][PR #97]] (=dockerfiles/sandbox-git-shim.sh= + =Dockerfile.sandbox=).  Single shim at =/usr/bin/git= (real binary moved to =/usr/bin/git-real=) refuses on argv[0] match (=git-push=, =git-send-pack=, =git-receive-pack=) or argv[1] match (=push=, =send-pack=).  Verified against 15 bypass variants — direct, shell-out, Python =subprocess.run=, =os.system=, char-code, base64, =/usr/lib/git-core/git-push= absolute path, =git-send-pack= plumbing, file-mediated =bash <script>=, shell var assembly, =perl system()=.  Non-push git ops unaffected.  See "Dynamic-construction attack surface" in [[file:docs/2026-05-07-per-thread-web-git-isolation.org][docs/2026-05-07-per-thread-web-git-isolation.org]].  *To undo:* revert commit =19493e3= (or just the two files: =dockerfiles/sandbox-git-shim.sh= and the =COPY=/=RUN= block in =Dockerfile.sandbox=) and rebuild the sandbox.
-
-*Residual gap (2026-05-08):* the wrapper is bypassable by =cp /usr/bin/git-real /tmp/g + exec -a git-receive-pack /tmp/g + --receive-pack=...= — the agent runs as root in the sandbox and can copy the real binary to a path the shim doesn't intercept.  See follow-up below.
-** TODO Privilege-separated git refusal — restrict =git-real= via non-root sandbox
-The wrapper above is bypassable: an agent with shell access as root can =cp /usr/bin/git-real /tmp/g= and invoke the copy with a spoofed argv[0] via =exec -a=.  Closes by running the sandbox container as a non-root user with =/usr/bin/git-real= mode =0700 root:root= and the shim recompiled as a setuid C binary that does the argv check before exec'ing.  See [[file:docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org][docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org]].
 ** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response
 ** TODO Self-healing flow on errors / suboptimal output
 See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].  Catch exceptions during agent execution and either spawn a remediation thread or surface for user-directed fix; reuse the "capture conversation" flow.
-** DONE Proactive message-trim middleware (token-max-mismatch follow-up)
-See [[file:docs/2026-04-26-token-max-mismatch-investigation.md][docs/2026-04-26-token-max-mismatch-investigation.md]] recommendation #2 (deferred).  =BadRequestRetryMiddleware= currently catches context overflow reactively (sanitize + truncate on retry).  A =wrap_model_call= middleware that drops the oldest tool-result messages until the message list is under some fraction of =max_input_tokens= would prevent the wasted first-attempt model call.  Re-evaluate if =edd/eval/test_research_multi_turn_token_regression.py= still trips on overflow after the 2026-04-26 fixes.
 * Configuration
-** DONE Auto-detect served model + context length
-Done 2026-04-28.  =assist/model_manager.py= now probes
-=${ASSIST_MODEL_URL}/models= on first request, caches model id and
-=max_model_len=, and busts the cache on =model_not_found= upstream
-errors via a =BaseCallbackHandler= attached to every =ChatOpenAI=
-instance.  =ThreadManager.model= is lazy so the web server still boots
-without vLLM running.  Removed env vars: =ASSIST_MODEL_NAME=,
-=ASSIST_API_KEY= (now optional, defaults to =EMPTY=),
-=ASSIST_CONTEXT_LEN=, =ASSIST_TEST_URL_PATH=.  See
-[[file:docs/2026-04-28-dynamic-model-plan.org][docs/2026-04-28-dynamic-model-plan.org]].
 * Skills migration follow-ups
 The dev-agent → skill migration shipped in four phases (see [[file:docs/2026-04-25-skills-rearchitecture.org][docs/2026-04-25-skills-rearchitecture.org]]) but a few cleanups were left for later:
-** DONE Hard retire of dev-agent
-Done 2026-04-26.  =edd/eval/test_dev_agent.py=, =test_dev_agent_planning_flow.py=, and =test_dev_agent_runs_eval.py= now exercise the general agent + =dev= skill via =create_agent=.  =create_dev_agent= and =assist/templates/deepagents/dev_agent_instructions.md.j2= deleted.  See [[file:docs/2026-04-26-dev-agent-hard-retire.org][docs/2026-04-26-dev-agent-hard-retire.org]].
 ** TODO Sandbox parity in evals
 Production already passes =sandbox_backend= through every agent factory (see =assist/thread.py=).  Most evals (=test_agent.py=, =test_context_agent.py=, =test_org_format_skill.py=) still use the standard filesystem backend for speed.  Add a config knob (env var or pytest marker) so the suite can be run in sandbox-mode without slowing the fast path.
-** TODO Earn-its-keep test for the org-format skill
-Today's =test_org_format_skill.py= passes mainly because the small model can infer org structure from reading the file.  Design a test where the body-rule is *not* visually obvious (e.g. multi-level subheadings, no body content yet) — the kind of case that needs the skill's procedure.  Confirms the skill earns its slot in the manifest.
 ** TODO Memory-middleware / tool-API trap
 Documented as an open question in the skills doc and partly overlaps with the =write_file= recoverability item above.  The deepagents memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content; combined with =write_file='s refuse-overwrite policy this produces a no-clean-exit loop.  Either fix needs both ends to align.
 ** TODO Make more evals around skill use
 The evals should test varying levels of skill mentions (implicit vs explicit) and check whether the appropriate skill(s) were loaded.
-** TODO Migrate skill descriptions from TRIGGER WORDS to short examples
-All four skills (=calculate=, =dev=, =org-format=, =pdf=) currently use the =TRIGGER WORDS — w1, w2, ...= description format inherited from the original migration.  Hypothesis: short concrete examples in the description load better on implicit mentions than a flat keyword list, because the small model pattern-matches against shape rather than vocabulary.  Migration plan: one skill at a time on a single branch/PR, design + reviewer per skill, eval cadence 3/3/5 (skip N=10 unless instability shows up).  Pilot: =pdf=.  Per-skill load-rate evals double as the deliverable for the [[Make more evals around skill use]] item above.
-** TODO Implement small-llm compatible memory similar to what was done with skills
-Create more extensive evals for the memory implementation.
-** TODO README cleanup and guidance
-Update the README to reflect how the skills system here works and how it is based largely on deepagents but with these modifications? For example, how to format the description, how to keep things generic for more buildout of skills. And in general how guidance should be provided to the agent (system prompt: available agents and general guidance, skills prompt: how and when to use skills and skills list, skills: description: when to load and what its for, body: guidance for the agent on that specific)
-* Memory
-** TODO Come up with at least 3 memory plans
-Some considerations:
-- Direct the agent to store anything in the AGENTS.md file (probably start here)
-- Create a specific (saved on the server) memory file(s) for each (or all) domains
-- Some vector store of timestamped facts to be recalled
-
-Here is an old memory plan:
-#+begin_quote
-This could be done through the user expert agent. It should:
-1. Intercept any new user request (through a middleware) and be asked to pick out:
-   1. Any facts the user has shared. These should be stored in a timestamped file in a declarative format
-   2. The main topics of the request (emacs, veganism, etc) and save them to another that is also timestamped
-2.Insert into the prompt (again, through middleware) anything relevant to the user request before it reaches the model.
-
-All of these kinds of things should be stored in a special "/memories" directory that is global to the agent. There's just 1 memories directory that is not within the main filesystem. No other agent has access to this.
-
-There should be at least two new tools available to:
-1. Calculate topic "density" - The rate of occurrence of topics with some time decay component. This should help the user expert agent understand, if there is any ambiguity, what the user could be asking about. For example, if the user often asks about emacs, then the user expert agent could be used to shape the prompt for the main agent/llm so that this is made clear for example if the user simply asks "how do I split a window horizontally" it could be updated to "how do I split a window horizontally.\n# User context\nThe user is probably asking about this in the context of emacs".
-2. Pick out facts (from the facts file) relevant to the user prompt, for example if the user is asking for restaurant recommendations, and there's a fact that the user is vegan, then it should be made clear that the user is probably asking for restaurants that provide vegan options.
-#+end_quote
-** TODO Memory plan 1
