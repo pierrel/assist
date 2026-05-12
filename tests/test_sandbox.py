@@ -442,11 +442,20 @@ class TestSandboxManager(TestCase):
         mock_container.reload.assert_called_once()
 
     def test_get_sandbox_backend_returns_none_on_docker_error(self):
+        """Docker daemon unavailable / transient API error should
+        degrade to a None backend (no sandbox).  Policy / fail-closed
+        errors (RuntimeError from non-internal egress network, etc)
+        raise instead — see test_get_sandbox_backend_raises_when_*.
+        """
+        from docker.errors import DockerException
+
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
         mock_client = MagicMock()
-        mock_client.containers.run.side_effect = Exception("Docker not running")
+        # Has to be a DockerException subclass now that the catch is
+        # narrowed; a bare Exception would propagate (correctly).
+        mock_client.containers.run.side_effect = DockerException("Docker not running")
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
             sandbox = SandboxManager.get_sandbox_backend(test_path)

@@ -28,5 +28,7 @@ jobs:
         run: make sandbox-build
       - name: Sandbox smoke (push-refusal + egress + integration)
         run: make sandbox-smoke
+      # `make sandbox-smoke` above already ran the e2e integration
+      # tests; exclude them here so we don't pay for them twice.
       - name: Unit tests
-        run: .venv/bin/pytest tests/ -vv
+        run: .venv/bin/pytest tests/ -vv --ignore=tests/test_sandbox_egress_integration.py

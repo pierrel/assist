@@ -144,25 +144,22 @@ echo "ok  (3) raw TCP to 1.1.1.1:443  blocked"
 # (4) Mixed-case allowlist hostname — DNS hostnames are case-insensitive
 #     per RFC 4343.  The proxy lowercases before comparing.  Probes
 #     that the comparison is consistent between client and allowlist.
-status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
-    https://Pypi.Org/ 2>&1)
-if echo "$status" | grep -q "403"; then
-    echo "FAIL: mixed-case Pypi.Org returned 403 (case-insensitive match broken)"
+status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    https://Pypi.Org/ 2>/dev/null)
+if ! upstream_reached "$status"; then
+    echo "FAIL: mixed-case Pypi.Org did not reach upstream (status=$status, "
+    echo "case-insensitive allowlist match likely broken)"
     exit 1
 fi
 echo "ok  (4) mixed-case https://Pypi.Org  allowed (status=$status)"
 
 # (5) HTTP-via-proxy code path — the absolute-URL request line that
 #     ASSIST_MODEL_URL traffic uses.  pypi over plain HTTP returns
-#     301-to-https; either way, NOT 000 (unreachable) and NOT 403.
-status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
-    --proxy "$HTTP_PROXY" http://pypi.org/ 2>&1)
-if [ "$status" = "000" ]; then
-    echo "FAIL: HTTP-via-proxy to pypi.org reachability failed (status=000)"
-    exit 1
-fi
-if [ "$status" = "403" ]; then
-    echo "FAIL: HTTP-via-proxy to pypi.org refused (allowlisted host got 403)"
+#     301-to-https; we just need to see that we reached upstream.
+status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --proxy "$HTTP_PROXY" http://pypi.org/ 2>/dev/null)
+if ! upstream_reached "$status"; then
+    echo "FAIL: HTTP-via-proxy to pypi.org did not reach upstream (status=$status)"
     exit 1
 fi
 echo "ok  (5) HTTP-via-proxy http://pypi.org/  reached (status=$status)"
@@ -170,10 +167,10 @@ echo "ok  (5) HTTP-via-proxy http://pypi.org/  reached (status=$status)"
 # (6) HTTP-via-proxy denied for off-allowlist host — same code path
 #     as (5) but the allowlist gate fires.  Gives both branches of
 #     the HTTP path coverage.
-status=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 8 \
-    --proxy "$HTTP_PROXY" http://example.com/ 2>&1)
-if echo "$status" | grep -qE "^(200|301|302|3[0-9]+)$"; then
-    echo "FAIL: HTTP-via-proxy to example.com succeeded (status=$status, allowlist not enforced)"
+status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --proxy "$HTTP_PROXY" http://example.com/ 2>/dev/null)
+if upstream_reached "$status"; then
+    echo "FAIL: HTTP-via-proxy to example.com reached upstream (status=$status, allowlist not enforced)"
     exit 1
 fi
 echo "ok  (6) HTTP-via-proxy http://example.com/  blocked (status=$status)"
