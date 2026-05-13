@@ -1,6 +1,193 @@
 #+TITLE: Layer 2 — Per-thread checkpoint retention
 #+DATE: 2026-05-04
-State: Not started
+State: PR #88 open since 2026-05-05, awaiting review (no review activity yet)
+
+* Session handoff (latest at top, last updated 2026-05-06)
+This section is for whoever picks the work back up.  The design
+sections below are unchanged history; this block tracks current
+state.
+
+** Update 2026-05-06 — Layer 3 has shipped without Layer 2
+Significant context shift: *Layer 3 (per-checkpoint tool-result
+eviction) was deployed to prod 2026-05-05 13:20 PDT* on its own
+feature branch (PR #89, branch =layer-3-tool-result-eviction=).
+Layer 2 is still unmerged.
+
+What this means for Layer 2:
+- *Composition order has flipped.*  Layer 3's =EvictionSaver=
+  currently subclasses upstream =SqliteSaver= directly, not
+  =CheckpointRetentionSaver=.  When Layer 2 merges, the integration
+  is one-line: change =class EvictionSaver(SqliteSaver):= →
+  =class EvictionSaver(CheckpointRetentionSaver):= and
+  thread =retain_last= through the constructor.  See the Layer 3
+  doc's "Pending" section item 2 for the merge-order options.
+- *No file conflict on merge.*  Layer 3 lives in
+  =assist/eviction_saver.py= (separate file from Layer 2's
+  =assist/checkpointer.py=) precisely so the two PRs don't
+  collide.  Both modify =assist/thread.py= at
+  =ThreadManager.__init__=, but each substitutes a different
+  saver class — the merge will require choosing the composition
+  (likely =EvictionSaver(...)= wrapping the retention base).
+- *Layer 2 still useful.*  Layer 3 caps =per-checkpoint= bytes;
+  Layer 2 caps =per-thread checkpoint count=.  Without Layer 2, a
+  long-running thread can still accumulate hundreds of (now-small)
+  checkpoint rows in the DB.  The two are multiplicative — the
+  bound becomes =100 threads × 10 checkpoints × 250 KB stub
+  size= rather than =100 × 10 × 100 MB=.  See the relative-gains
+  chat in the session log; both layers have a meaningful slot.
+
+** Prod state at 2026-05-06
+- =threads.db= = 175 GB (unchanged from yesterday's deploy).  No
+  Sunday VACUUM has run since Layer 3 deployed; expect significant
+  reclamation when the next one fires.  Layer 2 will accelerate
+  this once it merges by deleting old checkpoint rows so VACUUM
+  has more freelist to reclaim.
+- 85 thread directories under =/home/pierre/deploy/assist/threads/=
+  (under MIN_THREADS=100, so the next sweep won't prune any).
+- Two threads have produced Layer 3 disk artifacts, totalling
+  192 KB.  No Layer 2 activity (it's not deployed yet).
+
+** Cross-cutting observations from the Layer 3 session
+Worth scanning before re-engaging with Layer 2:
+- *Editable-install side-finding.*  The dev =.venv= had
+  =.venv/src/assist/= as a stale snapshot from a prior
+  =pip install --src= flow.  Scripts run as
+  =.venv/bin/python <script.py>= imported the stale code
+  because =sys.path[0]= is the script's directory and the
+  editable finder's MAPPING pointed at the snapshot.  Fix:
+  =.venv/bin/pip install -e . --no-deps=.  If Layer 2 work
+  involves running scripts (not pytest, which adds project
+  root to sys.path itself), check this first.
+- *Eval-reliability finding.*  =eval_large_tool_results.py=
+  was patching =ddgs.DDGS.text= but =ddgs.DDGS= is a thin
+  proxy class; instances use =ddgs.ddgs.DDGS=.  Fix
+  committed on Layer 3 branch (=68a6e38=) to patch
+  =ddgs.ddgs.DDGS.text= and accept =self= in the mock.  If
+  Layer 2 reviewers want to run that eval against this branch
+  too, cherry-pick that one-file change first or just be
+  aware of the issue.
+- *Memory notes.*  Two new feedback memories from the session:
+  =feedback_deploy_from_feature_branch.md= (user OK'd
+  feature-branch deploys; CLAUDE.md's blanket prohibition is
+  not absolute) and =feedback_thread_failure_should_terminate.md=
+  (don't build heal-and-retry for sandbox/long-request
+  failures; let the thread die and the user start a new one).
+  Neither directly affects Layer 2 design but both are worth
+  scanning.
+
+** What's landed
+- Branch: =layer-2-checkpoint-retention= (forked from =main= at
+  =e8f7705=).
+- Commit: =816dc28= "threads-db Layer 2: per-thread checkpoint
+  retention" — wrapper + tests + doc.
+- Pushed to =origin/layer-2-checkpoint-retention=.
+- PR: https://github.com/pierrel/assist/pull/88 (base =main=).
+
+** What's in the diff
+- =assist/checkpointer.py= (new) — =CheckpointRetentionSaver=
+  subclass.  Override =put()= only; option (A) inline prune in one
+  =self.cursor()= block (single TX, single lock acq, single
+  commit).  Env switch =ASSIST_RETAIN_LAST= (default 10, =0= /
+  ="disabled"= / ="off"= / ="false"= = no-op pass-through).
+  Schema-drift assertion against =EXPECTED_TABLES = {checkpoints,
+  writes}= cached after first =put=.  Prune wrapped in
+  try/except — fail-open (INSERT survives a prune failure;
+  self-heals on next put).
+- =assist/thread.py= — swapped =SqliteSaver= import +
+  instantiation site at =ThreadManager.__init__= for the new
+  wrapper.  Did *not* override =delete_thread=; Layer 0's
+  =hard_delete= path uses upstream's per-table wipe unchanged.
+- =tests/test_checkpointer_retention.py= (new) — 17 tests
+  covering: basic prune, namespace isolation, thread isolation,
+  =writes=-table lockstep, =delete_thread= compat, rollback depth
+  (N=10 vs =max_rollback_depth=3=), retention disabled (N=0),
+  prune-fails-open, concurrent puts (two Python threads),
+  =aput= still raises, EXPLAIN QUERY PLAN uses PK index, schema
+  drift disables pruning, env-var parsing × 5.
+- This doc — corrections from the design review (2 tables not 3,
+  compound PK, sync-only saver, rollback depth resolved at 3).
+
+** Test status
+Local: =297/297= passing in the full suite, =17/17= in the new
+file.  Run from =~/src/assist=:
+#+begin_src
+.venv/bin/python -m pytest tests/test_checkpointer_retention.py
+.venv/bin/python -m pytest tests/  # full suite
+#+end_src
+
+** Pending — what the next session should do
+1. *Address PR review comments* on
+   https://github.com/pierrel/assist/pull/88 .  No review activity
+   yet.  Expect feedback if any on the option-A code-duplication of
+   upstream's =put= body (we mirror lines 380-436 of
+   =langgraph-checkpoint-sqlite==3.0.3= verbatim; the trade-off was
+   justified by the single-TX guarantee).
+2. *Resolve merge-order with Layer 3.*  Layer 3 is already in prod
+   on a feature branch.  When Layer 2 merges to main, Layer 3's
+   branch needs a follow-up edit to swap =class EvictionSaver(SqliteSaver):=
+   to =class EvictionSaver(CheckpointRetentionSaver):= and pass
+   =retain_last= through the constructor.  Either order works; the
+   final state is identical.  Coordinate with the Layer 3 doc's
+   merge-order section.
+3. *Merge to main* once approved.  Standard squash-or-merge per
+   project convention (Layer 0 used a regular merge — match it).
+4. *Deploy to prod*.  =make deploy= from =~/src/assist= ships the
+   change.  =ASSIST_RETAIN_LAST= is *not* in =.deploy.env=, which
+   means it falls back to the default (10).  No env edit needed for
+   the default rollout.  *Note:* the user has authorized
+   feature-branch deploys (see
+   =feedback_deploy_from_feature_branch.md= memory) — don't block
+   on merge if a quick prod test is wanted first.
+5. *Smoke + observe*.  After deploy + restart:
+   - =make smoke= or =./scripts/smoke_test.sh= for the basic
+     end-to-end (tiny inference + assist-web reachability).
+   - Watch =journalctl -u assist-web -f= for
+     "CheckpointRetentionSaver: retaining last 10 checkpoints
+     per (thread_id, checkpoint_ns)" at startup.
+   - Run an eval suite (=make eval=).  Confirm no regression in
+     pass rates.  Be aware of the eval mock-path bug noted above
+     if running =eval_large_tool_results.py= on this branch.
+   - Optional: pick one chatty research-agent thread, then
+     =sqlite3 threads.db "SELECT thread_id, checkpoint_ns,
+     COUNT(*) FROM checkpoints GROUP BY thread_id, checkpoint_ns
+     ORDER BY 3 DESC LIMIT 10;"= — every (tid, ns) row should show
+     ≤10.
+6. *Decide whether to lower N*.  After Layer 2 has been live for a
+   week, if observation shows rollback never reaches near 10, drop
+   the default to 5 in =assist/checkpointer.py=
+   (=DEFAULT_RETAIN_LAST=).  Code already supports it; one-line
+   follow-up PR.
+7. *Watch the threads.db reduction curve.*  Layer 2 will free
+   freelist pages on every put (deleting old checkpoint rows).  The
+   next Sunday VACUUM after Layer 2 deploys should produce a
+   meaningful drop in the .db file size — meaningful in the same
+   ballpark as Layer 0's one-time cleanup, since it removes the
+   per-thread historical accumulation.  Track =du -sh
+   /home/pierre/deploy/assist/threads/threads.db= weekly and note
+   the ratio before/after.
+
+** Kill switch (if Layer 2 misbehaves in prod)
+Add to =/home/pierre/deploy/assist/code/.deploy.env= on the prod
+host:
+#+begin_src
+ASSIST_RETAIN_LAST=0
+#+end_src
+Then =sudo systemctl restart assist-web=.  The wrapper becomes a
+no-op pass-through; behavior reverts to upstream =SqliteSaver=
+without a code rollback.
+
+** Known dev-environment gotcha
+The dev venv at =~/src/assist/.venv= was rebuilt at Python 3.14
+during this session (the system upgrade earlier on 2026-05-05
+removed =python3.13=; the existing venv's site-packages were at
+=lib/python3.13/site-packages/= and ImportError'd until rebuilt
+with =python3.14 -m venv .venv && .venv/bin/pip install -e . -r
+requirements.txt=).  See the
+=project_pacman_python_bump_breaks_venv.md= memory for the same
+failure mode on the deploy copy.  If a fresh clone or a future
+=pacman -Syu= breaks imports, rebuild the venv the same way.
+
+* Original design (history below)
 
 Layer 2 of the prod =threads.db= growth plan (overview:
 [[file:2026-05-03-prod-threads-db-growth.org][2026-05-03-prod-threads-db-growth.org]]; Layer 0 sibling:
@@ -26,40 +213,82 @@ N=10 is generously larger than rollback's 1–2 turn reach in
 practice, so this loses no real recovery surface.
 
 * Approach
-Subclass =SqliteSaver= (or wrap it via the public =BaseCheckpointSaver=
-protocol) so that on every =put()= the wrapper:
+Subclass =SqliteSaver= and override =put()= so it:
 
-1. Calls the underlying =put()= as usual.
-2. =SELECT checkpoint_id FROM checkpoints WHERE thread_id=?
-   ORDER BY checkpoint_id DESC LIMIT -1 OFFSET 10= — the IDs to
-   delete.
-3. =DELETE FROM checkpoints WHERE thread_id=? AND checkpoint_id IN (...)=
-   plus the same against =writes= and =checkpoint_blobs= (the
-   SqliteSaver schema's three tables, joined on (=thread_id=,
-   =checkpoint_id=)).
+1. Runs the upstream INSERT (mirrored verbatim from
+   =langgraph-checkpoint-sqlite==3.0.3=, =__init__.py:380-436=).
+2. =SELECT checkpoint_id FROM checkpoints WHERE thread_id=? AND
+   checkpoint_ns=? ORDER BY checkpoint_id DESC LIMIT -1 OFFSET N=
+   — the IDs to delete.
+3. =DELETE FROM writes= then =DELETE FROM checkpoints=, both
+   scoped by =(thread_id, checkpoint_ns, checkpoint_id IN (...))=.
 
-All deletes batched in a single transaction with the put.  No
-external timer, no startup pass.
+All four statements share one =with self.cursor() as cur:= block,
+so they run under one =self.lock= acquisition and one =commit()=
+on context exit.  No external timer, no startup pass.
+
+Schema details (verified against =3.0.3=):
+- *Two tables, not three*: =checkpoints= and =writes=.  No
+  =checkpoint_blobs= and no separate =checkpoint_writes=.
+- *Compound PK includes =checkpoint_ns==: scope every WHERE by
+  the full =(thread_id, checkpoint_ns, checkpoint_id)= triple.
+  Two namespaces under the same =thread_id= retain N each.
+- *Async path is N/A*: upstream sync =SqliteSaver.aput= raises
+  =NotImplementedError= (=AIO_ERROR_MSG=, =__init__.py:535=); we
+  use only the sync class.  Don't override =aput=.
+
+Prune failures are caught and logged — the INSERT is the
+load-bearing operation; a failed prune self-heals on the next
+=put()=.
 
 * Key decisions
-- *RETAIN_LAST=10* default, env-overridable.  Conservative; could
-  go to 5 once we measure rollback depth in practice.
+- *RETAIN_LAST=10* default, env-overridable via
+  =ASSIST_RETAIN_LAST=.  =0= / ="disabled"= / ="off"= / ="false"=
+  makes the wrapper a no-op pass-through (operational kill
+  switch).  Negative or non-integer values fall back to 10 with
+  a loud warning so a typo never silently disables retention.
+- *=RollbackRunnable.max_rollback_depth=3=* (=assist/checkpoint_rollback.py:51=).
+  N=10 has a 3× margin.
 - *Sync prune on put*, not async sweep.  Avoids a "drift then
-  catch up" pattern; per-put cost is small (a few row deletes
-  with an index on =(thread_id, checkpoint_id)=).
-- *Implementation as a wrapper, not a fork.*  Subclassing keeps us
-  on the upstream code path; we only override =put= / =aput=.
+  catch up" pattern; per-put cost is one indexed lookup against
+  the PK =(thread_id, checkpoint_ns, checkpoint_id)= plus a
+  ≤(N+M) row delete.
+- *Subclass, don't fork.*  Override =put= only; everything else
+  (=get_tuple=, =list=, =put_writes=, =delete_thread=) flows
+  through upstream unchanged.  In particular *do not* override
+  =delete_thread= — Layer 0's =hard_delete= path needs the
+  upstream per-table wipe.
+- *Schema-drift assertion.* On first =put= the wrapper compares
+  =sqlite_master= against =EXPECTED_TABLES= (a frozenset pinned
+  to the langgraph version).  A mismatch logs once and disables
+  pruning for the saver's lifetime.  Bumping
+  =langgraph-checkpoint-sqlite= requires updating
+  =EXPECTED_TABLES=.
 
-* Open questions
-- Does =RollbackRunnable= ever reach back further than 10 in the
-  agent flows we run?  Need to instrument or grep the rollback
-  code path before locking N=10 in.  Default could ship as
-  =RETAIN_LAST=20= and lower it after observation.
-- Async path: =aput= delegates to =put= via a thread executor in
-  upstream =SqliteSaver=; verify the wrapper covers both.
-- Multiple writers: prod has one writer process (assist-web), but
-  evals can run a second.  =DELETE= during a concurrent =put= is
-  fine within SQLite's WAL mode, but worth a stress test.
+* Open questions (resolved)
+- *Rollback depth* — =max_rollback_depth=3= in
+  =assist/checkpoint_rollback.py:51=.  N=10 is sufficient with
+  3× margin.  Closed.
+- *Async path* — irrelevant: sync =SqliteSaver.aput= raises
+  =NotImplementedError= and we never use =AsyncSqliteSaver=.
+  The wrapper overrides only =put=; a regression test asserts
+  =aput= still raises so we don't accidentally enable the async
+  path.  Closed.
+- *Multiple writers* — Layer 0 retention runs offline (the
+  weekly cron in =scripts/threads-db-retention.cron= stops
+  assist-web first; =retention.py= refuses to run if any other
+  process holds =threads.db=).  Layer 0 and Layer 2 are
+  temporally disjoint by construction.  The sync wrapper's
+  per-thread concurrency is covered by the upstream
+  =self.lock=; a regression test exercises two Python threads
+  writing concurrently.  Closed.
+
+* Orthogonal: VACUUM
+Layer 2 frees pages; SQLite WAL marks them free for reuse but
+does not shrink the file.  Disk reclamation is Layer 1's job
+(=scripts/threads-db-vacuum.sh=).  Without Layer 1, Layer 2
+prevents *unbounded* growth but doesn't shrink an already-bloated
+file.
 
 * Files this touches
 - =assist/checkpointer.py= (new) — the wrapper class.
@@ -81,8 +310,18 @@ external timer, no startup pass.
   introspection finds extra tables we don't know about.
 
 * Order of operations
-1. Wrapper + tests (no behavior change yet — wire it in but with
-   N=10000 effectively-disabled).
-2. Lower N=10 in dev; observe behavior across an eval suite run.
-3. Ship to prod.
-4. Lower N if observation supports it.
+The original plan staged a "ship inert with N=10000" step before
+turning retention on.  Skipped: Layer 2 ships behind
+=ASSIST_RETAIN_LAST= (default 10, =0= = no-op).  The env
+variable provides the same operational guarantee — flip to =0=
+in =.deploy.env= if anything misbehaves and restart assist-web —
+without a double deploy.  Layer 0's review caught real bugs
+that justified the inert-first approach there; Layer 2's blast
+radius is "checkpoints stop being deleted" or "checkpoints get
+over-deleted", both reversible.
+
+1. Wrapper + tests on =layer-2-checkpoint-retention= (done
+   2026-05-05).
+2. Push, deploy, smoke; observe behavior across an eval suite
+   run.
+3. Lower N if observation supports it.
