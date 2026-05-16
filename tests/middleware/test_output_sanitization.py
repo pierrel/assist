@@ -1,16 +1,22 @@
 """Tests for OutputSanitizationMiddleware.
 
 The middleware strips ANSI CSI sequences and stray control chars from
-ToolMessage content via the wrap_tool_call after-path, so the sanitized
+ToolMessage content in the wrap_tool_call after-path so the sanitized
 version is what lands in state["messages"].
-"""
-from unittest.mock import Mock
 
-from langchain_core.messages import AIMessage, ToolMessage
+Critical: the langchain `wrap_tool_call` handler returns either a bare
+`ToolMessage` or a `langgraph.types.Command(update={"messages": [...]})`.
+NOT an object with `.messages`.  A prior version of this test used Mock
+objects with a fabricated `.messages` attribute and the middleware
+silently no-op'd in production — the type contract matters.
+"""
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
 
 from assist.middleware.output_sanitization import (
     OutputSanitizationMiddleware,
     _sanitize,
+    _sanitize_tool_message,
     _CSI_RE,
     _CONTROL_RE,
 )
@@ -78,115 +84,143 @@ def test_sanitize_no_change_returns_same_text():
 
 
 # ---------------------------------------------------------------------------
-# Middleware behavior tests
+# _sanitize_tool_message helper tests
 # ---------------------------------------------------------------------------
 
-def _make_result_with_messages(messages):
-    """Construct a minimal mock that mimics the wrap_tool_call handler return.
-
-    The middleware uses `result.messages` and `result.model_copy(update=...)`.
-    """
-    result = Mock()
-    result.messages = messages
-    # model_copy returns a new mock with the messages updated
-    def model_copy(update=None):
-        new = Mock()
-        new.messages = update.get("messages", messages) if update else messages
-        return new
-    result.model_copy = model_copy
-    return result
+def test_sanitize_tool_message_strips_ansi():
+    msg = ToolMessage(content="\x1b[31merror\x1b[0m output", tool_call_id="c1")
+    out = _sanitize_tool_message(msg)
+    assert out is not msg
+    assert out.content == "error output"
+    assert out.tool_call_id == "c1"
 
 
-def test_middleware_strips_ansi_from_tool_message():
+def test_sanitize_tool_message_no_change_returns_same_instance():
+    msg = ToolMessage(content="clean output", tool_call_id="c1")
+    out = _sanitize_tool_message(msg)
+    assert out is msg
+
+
+def test_sanitize_tool_message_skips_list_content():
+    """ToolMessage with list-of-blocks content is passed through untouched."""
+    msg = ToolMessage(
+        content=[{"type": "text", "text": "hi"}],
+        tool_call_id="c1",
+    )
+    out = _sanitize_tool_message(msg)
+    assert out is msg
+
+
+# ---------------------------------------------------------------------------
+# Middleware behavior tests — using REAL types per wrap_tool_call contract
+# ---------------------------------------------------------------------------
+
+def _identity_handler(return_value):
+    """A handler stub: ignores the request, returns the given value."""
+    return lambda request: return_value
+
+
+def test_middleware_sanitizes_bare_tool_message_return():
+    """Most common: handler returns a bare ToolMessage."""
     mw = OutputSanitizationMiddleware()
-    msg = ToolMessage(content="\x1b[31mred error\x1b[0m output", tool_call_id="c1")
-    result = _make_result_with_messages([msg])
-    handler = Mock(return_value=result)
-    request = Mock()
-
-    out = mw.wrap_tool_call(request, handler)
-
-    assert out.messages[0].content == "red error output"
-    handler.assert_called_once_with(request)
+    dirty = ToolMessage(content="\x1b[31mred\x1b[0m", tool_call_id="c1")
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(dirty))
+    assert isinstance(out, ToolMessage)
+    assert out.content == "red"
+    assert out.tool_call_id == "c1"
 
 
-def test_middleware_leaves_clean_tool_message_unmodified():
-    """No sanitization needed → don't allocate a new message."""
+def test_middleware_passes_through_clean_tool_message():
     mw = OutputSanitizationMiddleware()
-    msg = ToolMessage(content="clean output\nwith newlines\tand tabs", tool_call_id="c1")
-    result = _make_result_with_messages([msg])
-    handler = Mock(return_value=result)
-
-    out = mw.wrap_tool_call(Mock(), handler)
-
-    # Returned the same result object (no model_copy fired because nothing changed)
-    assert out is result
+    clean = ToolMessage(content="hello", tool_call_id="c1")
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(clean))
+    assert out is clean  # no copy made
 
 
-def test_middleware_only_touches_tool_messages():
-    """AIMessage content with ANSI is left alone — that's BadRequestRetry's job
-    (defense in depth)."""
+def test_middleware_sanitizes_command_with_tool_messages():
+    """Less common but real: handler returns Command(update={'messages': [...]})."""
     mw = OutputSanitizationMiddleware()
-    ai = AIMessage(content="\x1b[31m[thinking]\x1b[0m")  # would be unusual but possible
-    tool = ToolMessage(content="\x1b[31merror\x1b[0m", tool_call_id="c1")
-    result = _make_result_with_messages([ai, tool])
-    handler = Mock(return_value=result)
-
-    out = mw.wrap_tool_call(Mock(), handler)
-
-    # AI message unchanged (ANSI still in content)
-    assert out.messages[0].content == "\x1b[31m[thinking]\x1b[0m"
-    # Tool message sanitized
-    assert out.messages[1].content == "error"
+    dirty = ToolMessage(content="\x1b[31merror\x1b[0m", tool_call_id="c1")
+    cmd = Command(update={"messages": [dirty], "files": {"a.txt": "x"}})
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(cmd))
+    assert isinstance(out, Command)
+    assert out.update["messages"][0].content == "error"
+    assert out.update["messages"][0].tool_call_id == "c1"
+    # Other update keys preserved
+    assert out.update["files"] == {"a.txt": "x"}
 
 
-def test_middleware_handles_no_messages_attribute():
-    """Some handler returns may not have a messages list — don't crash."""
+def test_middleware_command_with_clean_messages_passes_through():
     mw = OutputSanitizationMiddleware()
-    result = Mock(spec=[])  # no .messages attribute
-    handler = Mock(return_value=result)
-
-    out = mw.wrap_tool_call(Mock(), handler)
-
-    assert out is result
+    clean = ToolMessage(content="hello", tool_call_id="c1")
+    cmd = Command(update={"messages": [clean]})
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(cmd))
+    assert out is cmd  # no copy when nothing changed
 
 
-def test_middleware_handles_non_string_content():
-    """Some ToolMessages have list-of-blocks content; skip those (don't crash)."""
+def test_middleware_command_leaves_ai_messages_alone():
+    """AIMessage with ANSI is left alone — that's BadRequestRetry's job
+    (defense-in-depth path; this middleware only touches ToolMessage)."""
     mw = OutputSanitizationMiddleware()
-    msg = ToolMessage(content=[{"type": "text", "text": "hi"}], tool_call_id="c1")
-    result = _make_result_with_messages([msg])
-    handler = Mock(return_value=result)
+    ai = AIMessage(content="\x1b[31m[thinking]\x1b[0m")
+    tool = ToolMessage(content="\x1b[31mTOOL ERR\x1b[0m", tool_call_id="c1")
+    cmd = Command(update={"messages": [ai, tool]})
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(cmd))
+    # AI unchanged (still has ANSI)
+    assert out.update["messages"][0].content == "\x1b[31m[thinking]\x1b[0m"
+    # Tool sanitized
+    assert out.update["messages"][1].content == "TOOL ERR"
 
-    out = mw.wrap_tool_call(Mock(), handler)
 
-    # Returned as-is (we only mutate string content)
-    assert out is result
+def test_middleware_handles_unknown_return_type_gracefully():
+    """If handler returns something that isn't ToolMessage or Command,
+    pass it through untouched (don't crash)."""
+    mw = OutputSanitizationMiddleware()
+    weird = "not a message"
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(weird))
+    assert out == weird
 
 
 def test_middleware_swallows_sanitizer_exceptions():
     """A bug in _sanitize must NEVER block the tool-result path."""
     mw = OutputSanitizationMiddleware()
-
-    class WeirdContent:
-        """Pretends to be a string but raises on regex sub."""
-        def __str__(self):
-            raise RuntimeError("nope")
-
-    msg = ToolMessage(content="hello", tool_call_id="c1")
-    msg_broken = Mock(spec=ToolMessage)
-    msg_broken.content = "hi"
-    # Patch isinstance check — bypass with a real ToolMessage that has
-    # a content attribute the regex chokes on.  Easier: just sanity-
-    # check the exception swallow path by patching _sanitize.
+    # Patch the module-level _sanitize_tool_message to raise, simulating
+    # a bug in the sanitization path.
     import assist.middleware.output_sanitization as mod
-    original_sanitize = mod._sanitize
-    mod._sanitize = lambda _: (_ for _ in ()).throw(RuntimeError("boom"))
+    original = mod._sanitize_tool_message
+
+    def broken(_):
+        raise RuntimeError("boom")
+    mod._sanitize_tool_message = broken
     try:
-        result = _make_result_with_messages([msg])
-        handler = Mock(return_value=result)
-        out = mw.wrap_tool_call(Mock(), handler)
-        # Returned the original result (untouched) because sanitizer raised
-        assert out is result
+        dirty = ToolMessage(content="\x1b[31mred\x1b[0m", tool_call_id="c1")
+        out = mw.wrap_tool_call(request=None, handler=_identity_handler(dirty))
+        # Returned the original (untouched) because sanitizer raised
+        assert out is dirty
     finally:
-        mod._sanitize = original_sanitize
+        mod._sanitize_tool_message = original
+
+
+# ---------------------------------------------------------------------------
+# Wiring tests — verify the middleware is actually in each agent's chain
+# ---------------------------------------------------------------------------
+
+def test_middleware_is_wired_into_create_agent_path():
+    """Construct the agent module's middleware list and confirm
+    OutputSanitizationMiddleware appears in it.  Guards against a
+    future refactor that drops the wiring."""
+    import inspect
+    from assist import agent as agent_module
+    # Read the source to confirm OutputSanitizationMiddleware is
+    # referenced in each agent factory.  Cheap structural test; avoids
+    # spinning up a real ChatModel.
+    src = inspect.getsource(agent_module)
+    # Three factory functions
+    factories = ["create_agent", "create_context_agent", "create_research_agent"]
+    for factory in factories:
+        fn = getattr(agent_module, factory)
+        fsrc = inspect.getsource(fn)
+        assert "OutputSanitizationMiddleware" in fsrc, (
+            f"OutputSanitizationMiddleware missing from {factory} — "
+            f"future refactor regression?"
+        )
