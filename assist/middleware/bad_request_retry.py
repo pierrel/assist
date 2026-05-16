@@ -71,7 +71,12 @@ class BadRequestRetryMiddleware(AgentMiddleware):
         part of the context-management overhaul.  See
         docs/2026-05-16-context-management-overhaul.org.)
         """
-        text = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', text)
+        # CSI = ESC `[` parameters intermediate-bytes final-byte.  Final
+        # byte is anywhere in 0x40-0x7E.  Catches colorization (m),
+        # cursor moves (A-D, G), erase (J, K), and any other escape we
+        # haven't seen yet — the deleted middleware's narrow
+        # `[mGKHF]` set missed `\x1b[2J` (clear screen) and others.
+        text = re.sub(r'\x1b\[[0-9;?]*[@-~]', '', text)
         return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
     @staticmethod
