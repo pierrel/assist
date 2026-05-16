@@ -65,16 +65,25 @@ def _build_graph(use_delta: bool, snapshot_frequency: int = 10):
     if use_delta:
         try:
             from langgraph.channels import DeltaChannel  # type: ignore
+            # Use deepagents' batch-aware reducer — the same one
+            # `_DeepAgentState` uses in production (deepagents 0.6.1
+            # graph.py:66).  Plain `add_messages` is NOT batch-aware and
+            # raises on DeltaChannel's `reducer(state, [w1, w2, ...])`
+            # call shape.
+            from deepagents._messages_reducer import _messages_delta_reducer  # type: ignore
         except ImportError as e:
             raise RuntimeError(
-                "DeltaChannel not importable — need langgraph >= 1.2. "
-                f"Underlying: {e}"
+                "DeltaChannel not importable — need langgraph >= 1.2 "
+                f"and deepagents >= 0.6.1.  Underlying: {e}"
             ) from e
 
         class State(TypedDict):
             messages: Annotated[
                 list[AnyMessage],
-                DeltaChannel(add_messages, snapshot_frequency=snapshot_frequency),
+                DeltaChannel(
+                    _messages_delta_reducer,
+                    snapshot_frequency=snapshot_frequency,
+                ),
             ]
     else:
         class State(TypedDict):

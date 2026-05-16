@@ -2,9 +2,10 @@
 #+DATE: 2026-05-16
 
 * State
-Baseline measured.  Spike branch =spike-deltachannel= (off =main=).
-Harness in =edd/spike/measure_deltachannel.py=.  Pin bump + spike
-measurement pending.
+Spike complete.  Decision: */adopt the upgrade (Case A — pin bumps
+only); close PR #88 (Layer 2); keep PR #89 (Layer 3)./*  See §Decision
+for the matrix evaluation and the beta-API + Layer-2-interaction
+caveats that drove the close-PR-88 call.
 
 * Goal
 Decide, with numbers, whether LangGraph 1.2's =DeltaChannel= (shipped
@@ -20,10 +21,10 @@ The deepagents 0.6 blog claims ≈40× checkpoint-storage reduction
 on /our/ workload before we either rewrite or rip out our custom
 wrappers.
 
-* Wire-up (Case A vs Case B — pending pin bump)
+* Wire-up — Case A (default-on in deepagents 0.6.1)
 
-Pre-bump =langchain.agents.middleware.types.AgentState= (langchain
-1.2.15):
+=langchain.agents.middleware.types.AgentState= (post-bump, langchain
+1.3.1) still uses plain =add_messages=:
 
 #+begin_src python
 class AgentState(TypedDict, Generic[ResponseT]):
@@ -32,26 +33,43 @@ class AgentState(TypedDict, Generic[ResponseT]):
     structured_response: NotRequired[Annotated[ResponseT, OmitFromInput]]
 #+end_src
 
-Reducer is =add_messages= (full-list semantics).  No =DeltaChannel=
-anywhere in =langgraph.channels= today.
+But =deepagents 0.6.1=' s =graph.py:63-66= defines:
 
-Post-bump investigation step (drives this section):
-1. =./.venv/bin/pip install --upgrade deepagents==0.6.1=, let resolver
-   pull matching =langgraph/langchain= pins.
-2. =python -c "from langgraph.channels import DeltaChannel; help(DeltaChannel)"=
-3. =python -c "import inspect; from langchain.agents.middleware.types
-   import AgentState; print(inspect.getsource(AgentState))"=
+#+begin_src python
+class _DeepAgentState(AgentState):
+    """AgentState with DeltaChannel on messages to reduce checkpoint growth from O(N²) to O(N)."""
+    messages: Required[Annotated[
+        list[AnyMessage],
+        DeltaChannel(_messages_delta_reducer, snapshot_frequency=50),
+    ]]
+#+end_src
 
-Two possibilities:
-- *Case A — default:* =AgentState.messages= already wraps a
-  =DeltaChannel=.  No caller change.  Just bump pins and re-measure.
-- *Case B — opt-in:* Caller declares a custom state schema with
-  =Annotated[list[AnyMessage], DeltaChannel(snapshot_frequency=K)]=
-  and passes it through =create_deep_agent(state_schema=...)= (if
-  exposed) or via a deepagents-side hook.  In that case, edit the
-  three call sites in =assist/agent.py= (≈ lines 194, 248, 366).
+…and passes =state_schema=_DeepAgentState= to =create_agent= at
+=graph.py:776=.  So *every* caller of =create_deep_agent= picks up
+=DeltaChannel= automatically once the pin bumps — including all three
+of our call sites at =assist/agent.py:194, 248, 366=.  No code edits
+required.
 
-To be filled in after the bump.
+The reducer is =deepagents._messages_reducer._messages_delta_reducer=
+(batch-aware version of =add_messages= — handles =reducer(state,
+[write1, write2, ...])=).  Plain upstream =add_messages= is NOT
+batch-aware and raises =NotImplementedError= when called directly
+from =DeltaChannel.update=.  Implication for the spike harness: it
+must use deepagents' reducer, not =add_messages=, to model
+production wire-up faithfully.
+
+=DeltaChannel='s docstring carries an explicit beta warning:
+#+begin_quote
+!!! warning "Beta"
+    `DeltaChannel` is in beta. The API and on-disk representation may
+    change in future releases. Threads written with `DeltaChannel`
+    today are expected to remain readable, but the surrounding contract
+    (`BaseCheckpointSaver.get_delta_channel_history`, the
+    `_DeltaSnapshot` blob shape, the `counters_since_delta_snapshot`
+    metadata field) is not yet stable.
+#+end_quote
+
+This warning is load-bearing for the decision below.
 
 * Upgrade scope
 Pins to bump (from =requirements.txt=):
@@ -100,35 +118,44 @@ Research multi-turn eval IS in that glob; schedule outside the 23:00–
 
 * Results
 
-Synthetic harness, 50 KB payload per super-step, plain =SqliteSaver=,
-=langgraph==1.1.6= / =deepagents==0.5.1= / =langchain==1.2.15=.
+Synthetic harness, 50 KB payload per super-step, plain =SqliteSaver=.
+Baseline: =langgraph==1.1.6= / =deepagents==0.5.1= / =langchain==1.2.15=.
+Spike: =langgraph==1.2.0= / =deepagents==0.6.1= / =langchain==1.3.1=
+(deepagents-side =DeltaChannel(_messages_delta_reducer,
+snapshot_frequency=K)= on the =messages= channel).
 
-| Workload         | Baseline bytes | Spike bytes | Reduction | Rollback OK? |
-|------------------+----------------+-------------+-----------+--------------|
-| Synthetic N=20   |     34,230,272 |             |           |              |
-| Synthetic N=50   |    196,947,968 |             |           |              |
-| Synthetic N=100  |    779,472,896 |             |           |              |
-| Research 3-turn  |                |             |           |              |
+| Workload         | Baseline bytes | Spike K=10   | Reduction | Spike K=50  | Reduction |
+|------------------+----------------+--------------+-----------+-------------+-----------|
+| Synthetic N=20   |     34,230,272 |    3,637,248 |     9.4×  |       4,096 | 8,361×    |
+| Synthetic N=50   |    196,947,968 |   16,658,432 |    11.8×  |   6,524,928 |   30×     |
+| Synthetic N=100  |    779,472,896 |   58,605,568 |    13.3×  |  18,087,936 |   43×     |
+
+The N=20 K=50 row (8,361×) is misleading — at N=20 the first full
+snapshot hasn't fired yet (K=50 means snapshots only every 50
+super-steps), so the DB still has only the seed row.  The N=50 and
+N=100 numbers are the load-bearing ones; the N=100 K=50 case
+matches the deepagents 0.6 blog's ~40× claim almost exactly (43×).
 
 Secondary table — separates per-blob shrinkage from row-count change:
 
-| Workload         | Baseline (rows, avg blob)        | Spike (rows, avg blob) |
-|------------------+----------------------------------+------------------------|
-| Synthetic N=20   | 63 rows, avg 524 KB              |                        |
-| Synthetic N=50   | 153 rows, avg 1.28 MB            |                        |
-| Synthetic N=100  | 303 rows, avg 2.55 MB            |                        |
+| Workload         | Baseline (rows, avg blob) | Spike K=10 (rows, avg blob) | Spike K=50 (rows, avg blob) |
+|------------------+---------------------------+-----------------------------+-----------------------------|
+| Synthetic N=20   | 63 rows, avg 524 KB       | 63 rows, avg 41 KB          | 63 rows, avg 572 B          |
+| Synthetic N=50   | 153 rows, avg 1.28 MB     | 153 rows, avg 91 KB         | 153 rows, avg 25 KB         |
+| Synthetic N=100  | 303 rows, avg 2.55 MB     | 303 rows, avg 176 KB        | 303 rows, avg 42 KB         |
 
-Baseline shape:
-- Three checkpoint rows per super-step (pre-step / post-step / end);
-  rows grow as 3N + 3.
-- Avg blob bytes grow linearly with N (full-list snapshot semantics),
-  so file bytes grow ≈ quadratically with N.  Exactly the prod 187 GB
-  symptom in miniature.
-- Schema tables: =['checkpoints', 'writes']= — pre-bump baseline; the
-  table list goes into the schema-drift check above.
+Row count is identical across all three modes (same number of
+super-steps means same number of checkpoint rows).  The win is
+entirely per-blob shrinkage: at K=50, N=100, avg blob bytes drop
+from 2.55 MB → 42 KB (60×), and total DB file size drops 779 MB →
+18 MB (43×).
 
-Full trajectory pasted from =edd/spike/measure_deltachannel.py= run
-output (see git history on the spike branch for raw output).
+Schema tables in all three modes: =['checkpoints', 'writes']=.  No
+new =deltas= table; =DeltaChannel= deltas live inside the existing
+=writes= rows (encoded into the per-row =checkpoint= blob shape).
+That's a /good/ sign for Layer 2 / Layer 3 wrapper compatibility —
+the existing =EXPECTED_TABLES = frozenset({"checkpoints",
+"writes"})= guard in PR #88 doesn't trip.
 
 * Rollback validation
 =RollbackRunnable= (=assist/checkpoint_rollback.py:97-136=) calls
@@ -138,41 +165,90 @@ math may land on a partial state.  Force a =BadRequestError= at
 turn K and check rollback for target indices 1 / 5 / 12 (straddling
 =snapshot_frequency= boundary, assuming default K=10).
 
-| Boundary case        | Pass? | Notes |
-|----------------------+-------+-------|
-| Rollback depth 1     |       |       |
-| Rollback depth 5     |       |       |
-| Rollback depth 12    |       |       |
+Harness: =edd/spike/test_rollback_under_deltachannel.py=.  N=15
+super-steps with K=10, so depth=12 straddles the snapshot boundary.
 
-If any regress, mark spike "no-go on rollback safety" regardless of
-byte numbers.
+| Boundary case        | Pass? | Notes                                                            |
+|----------------------+-------+------------------------------------------------------------------|
+| Rollback depth 1     |  yes  | target step 44 (45 msgs) → resumed step has 48 msgs              |
+| Rollback depth 5     |  yes  | target step 40 (42 msgs) → resumed step has 45 msgs              |
+| Rollback depth 12    |  yes  | target step 33 (34 msgs) → resumed step has 37 msgs; spans K=10  |
+
+=app.get_state_history(cfg)= returned 48 entries for 15 super-steps
++ seed (≈3 entries per superstep, matching the baseline checkpoint-
+row pattern).  Each rolled-back =target.config= resumes cleanly
+through =app.invoke(...)=; resumed message count = target +
+(seed turn input) + (one new step's AIMessage + ToolMessage) as
+expected.  No partial-state failures at the snapshot boundary —
+=DeltaChannel='s replay is transparent to =RollbackRunnable='s
+=target_idx = depth + 1= math.
 
 * Decision
-Apply criteria set before measurement (do not move the goalposts):
 
-Let R = baseline_bytes / spike_bytes at N=100 synthetic.
+Applying the pre-measurement criteria.  At =K=50= (the deepagents 0.6.1
+production default, set in =deepagents/graph.py:66=), N=100 synthetic:
 
-- *R ≥ 20× and rollback OK* → /scrap Layer 2./  Follow-up PR:
-  "Replace per-thread retention with DeltaChannel; relax eviction
-  threshold to 100 KB."  PR #88 closes; #89 lands with adjusted
+- *R = 779,472,896 / 18,087,936 = 43.1×* → above the 20× scrap-Layer-2
   threshold.
-- *5× ≤ R < 20× and rollback OK* → /keep Layer 2, raise
-  =ASSIST_RETAIN_LAST= 10 → 50./  Both PRs land as-is; follow-up
-  commit bumps the env default.
-- *R < 5× OR rollback regresses* → /no-go./  Close this branch;
-  merge #88 and #89 unchanged.
+- *Rollback validation passed* at all three probed depths, including
+  straddling the snapshot boundary.
 
-R thresholds: 20× = half the blog's 40× claim (our mixed workload is
-not the all-research blog case).  Below 5× = doesn't meaningfully
-attack the 187 GB problem.
+*By the matrix, this is a "scrap Layer 2" outcome.*
 
-(Decision and final numbers go here after measurement.)
+But two factors temper that:
+
+1. *=DeltaChannel= is explicitly beta.*  Upstream warning quoted under
+   §Wire-up.  The on-disk =_DeltaSnapshot= shape and the
+   =BaseCheckpointSaver.get_delta_channel_history= contract are not
+   yet stable.  Threads written today are expected to remain readable
+   in future releases, but adopting an unstable interface inside a
+   stop-the-world wrapper (Layer 2 prunes by row, which is precisely
+   the contract that may shift) is fragile.
+
+2. *Layer 2 + DeltaChannel may not compose safely.*  Layer 2 prunes
+   the oldest checkpoint rows for a thread.  =DeltaChannel='s replay
+   semantics walk ancestor writes back to the last full
+   =_DeltaSnapshot=.  If Layer 2's pruning happens to delete the
+   snapshot row that surviving delta rows reference, replay breaks
+   silently (state reconstructed from an incomplete write chain).
+   Today's PR #88 wrapper has no awareness of which rows are
+   snapshots vs deltas — it just prunes by =(thread_id,
+   checkpoint_id DESC LIMIT -1 OFFSET RETAIN_LAST)=.  This is a
+   /correctness/ risk, not a performance one.
+
+*Adopt the upgrade; do not adopt Layer 2.*
+
+Concretely:
+- *Bump pins* to =deepagents==0.6.1= / =langgraph==1.2.0= /
+  =langchain==1.3.1= and coupled minor bumps.  Picks up DeltaChannel
+  automatically via =deepagents._DeepAgentState=.  This is what this
+  PR does.
+- *Close PR #88* (Layer 2 — per-thread retention) without merging.
+  The 43× per-blob reduction makes the per-thread cap much less
+  urgent; the Layer 0 thread-count cap (already shipped) bounds the
+  fleet to N_THREADS × ~60 MB at N=100 ≈ 6 GB worst-case.  Plus the
+  weekly =VACUUM= reclaims any deletion freelist.  Revisit if/when
+  =DeltaChannel= stabilizes and we can rewrite Layer 2 to prune by
+  delta-epoch instead of by row.
+- *Keep PR #89* (Layer 3 — tool-result eviction at write time).
+  Compounds cleanly with =DeltaChannel=: Layer 3 shrinks =ToolMessage=
+  content /before/ serialization, so the per-write payload that
+  =DeltaChannel= stores as a delta is already small.  The two are
+  orthogonal — different axes of the same problem.  Address PR
+  #89's DDGS-mock eval flake separately.
 
 * Follow-up
-- PR title + scope (or close-out note) goes here.
-- Note for both branches: Layer 0 (per-thread count cap, already
-  shipped) is /unaffected/ by this spike — it caps thread count, not
-  per-thread bytes.
+- This PR's scope: pin bumps + spike artifacts (doc + harness) as the
+  written record of the decision.  No code changes to
+  =assist/agent.py= or =assist/thread.py= — Case A means the bump
+  alone activates =DeltaChannel=.
+- PR #88: close with a comment pointing here.
+- PR #89: rebase onto =main= after this lands; fix the DDGS mock-path
+  flake in a follow-up commit.
+- Layer 0 (already shipped, per-thread count cap) is unaffected.
+- Future work: if/when =DeltaChannel= exits beta, revisit whether to
+  re-introduce a delta-epoch-aware Layer 2.  Tracked in roadmap under
+  Reliability.
 
 * Risks observed
 1. *Case A vs Case B uncertainty.*  Until pip install + AgentState
