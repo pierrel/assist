@@ -60,7 +60,18 @@ class BadRequestRetryMiddleware(AgentMiddleware):
         """Remove control characters that break JSON serialization.
 
         Keeps \\n (0x0A), \\r (0x0D), \\t (0x09) — valid JSON whitespace.
+
+        Also strips ANSI escape sequences (ESC [ ... [mGKHF] patterns)
+        that show up in `execute` tool output from colorized terminal
+        commands.  Some llama.cpp / OpenAI-compat endpoints reject
+        these as malformed UTF-8 in the JSON body — sanitize before
+        retry so the retry has a chance of succeeding.  (Previously
+        this was done proactively in ContextAwareToolEvictionMiddleware's
+        after_tool hook; that middleware was deleted on 2026-05-16 as
+        part of the context-management overhaul.  See
+        docs/2026-05-16-context-management-overhaul.org.)
         """
+        text = re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', text)
         return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
     @staticmethod
