@@ -21,6 +21,7 @@ Run:
 
 import os
 import sqlite3
+import sys
 import tempfile
 from typing import Annotated, TypedDict
 
@@ -137,25 +138,34 @@ def probe_invoke_with_rollback():
                     cfg,
                 )
                 msg_count = len(result.get("messages", []))
-                # If rollback worked, we'll have a non-empty messages list
-                # and call_count > 6 (the retry fired).
-                pass_ok = msg_count > 0 and call_count["n"] >= 7
+                # Load-bearing assertion: the retry fired, i.e. the
+                # flaky node was called again after the failure.  If
+                # rollback silently swallowed the BadRequestError and
+                # returned without retrying, call_count would still
+                # equal 6 — and this check would correctly fail.
+                pass_ok = call_count["n"] >= 7
                 status = "PASS" if pass_ok else "FAIL"
                 print(f"## invoke_with_rollback: {status}")
                 print(f"  - flaky node invocations: {call_count['n']} (expected >= 7)")
                 print(f"  - final messages count: {msg_count}")
                 print(f"  - rollback fired and recovered: {pass_ok}")
+                return pass_ok
             except Exception as e:
                 print(f"## invoke_with_rollback: ERROR")
                 print(f"  - flaky node invocations: {call_count['n']}")
                 print(f"  - raised: {type(e).__name__}: {str(e)[:200]}")
+                return False
         finally:
             conn.close()
 
 
-def probe_history_indexing():
-    """Probe 1 — get_state_history shape + invoke-from-target-config under DeltaChannel."""
+def probe_history_indexing() -> bool:
+    """Probe 1 — get_state_history shape + invoke-from-target-config under DeltaChannel.
+
+    Returns True iff all three depth probes (1/5/12) pass.
+    """
     g = _build_graph()
+    all_ok = True
     n_supersteps = 15  # straddles the K=10 snapshot boundary
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "threads.db")
@@ -187,6 +197,7 @@ def probe_history_indexing():
                 target_idx = depth + 1
                 if target_idx >= len(history):
                     print(f"## depth={depth}: SKIP (history too short, len={len(history)})")
+                    all_ok = False
                     continue
                 target = history[target_idx]
                 target_step = target.metadata.get("step", "?")
@@ -206,6 +217,8 @@ def probe_history_indexing():
                     # step's output (1 AIMessage + 1 ToolMessage = 2).
                     expected_min = target_msg_count + 1  # at least the resume HumanMessage
                     pass_ok = resumed_msg_count >= expected_min
+                    if not pass_ok:
+                        all_ok = False
                     status = "PASS" if pass_ok else "FAIL"
                     print(
                         f"## depth={depth}: {status}\n"
@@ -214,6 +227,7 @@ def probe_history_indexing():
                         f"(>= target+1 = {expected_min}: {pass_ok})"
                     )
                 except Exception as e:
+                    all_ok = False
                     print(
                         f"## depth={depth}: ERROR\n"
                         f"  - target step: {target_step}, msg_count: {target_msg_count}, cp: {cp_id}…\n"
@@ -222,8 +236,12 @@ def probe_history_indexing():
                 print()
         finally:
             conn.close()
+    return all_ok
 
 
 if __name__ == "__main__":
-    probe_history_indexing()
-    probe_invoke_with_rollback()
+    ok1 = probe_history_indexing()
+    ok2 = probe_invoke_with_rollback()
+    if not (ok1 and ok2):
+        print(f"\nNON-ZERO EXIT: probe_history_indexing={ok1}, probe_invoke_with_rollback={ok2}")
+        sys.exit(1)

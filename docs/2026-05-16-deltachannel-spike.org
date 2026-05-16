@@ -193,10 +193,13 @@ step run produces history entries with steps up to ~46.
 Note this test exercises =app.get_state_history(cfg)= shape +
 =app.invoke(input, target_config)= resume, the two LangGraph
 primitives =RollbackRunnable= depends on (see
-=assist/checkpoint_rollback.py:97,131,144=).  A separate test in the
-same file (=test_rollback_runnable_under_deltachannel=) installs a
-fake model that raises =BadRequestError= and drives the full
-=invoke_with_rollback= path end-to-end against DeltaChannel.
+=assist/checkpoint_rollback.py:97,131,144=).  A separate probe in the
+same file (=probe_invoke_with_rollback=) installs a graph node that
+raises =BadRequestError= on its 6th invocation and drives the full
+=invoke_with_rollback= path end-to-end against DeltaChannel.  Confirmed:
+the rollback fires at depth=0 (one checkpoint back, step 14), the
+retry is the 7th node invocation, and the recovered state contains
+the full pre-failure history plus the recovery turn.
 
 * Decision
 
