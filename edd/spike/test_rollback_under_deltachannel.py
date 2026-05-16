@@ -205,16 +205,27 @@ def probe_history_indexing() -> bool:
                 target_cfg = target.config
                 cp_id = target_cfg["configurable"].get("checkpoint_id", "")[:16]
 
-                # Now try to resume the graph from that target config.
+                # NOTE: This probe resumes with a *new* HumanMessage,
+                # NOT with None.  Production rollback (assist/
+                # checkpoint_rollback.py:144-145) passes None as input,
+                # which only makes progress when the target checkpoint
+                # has pending work (e.g. mid-step BadRequestError).
+                # Our synthetic graph completes each super-step in one
+                # node call — its checkpoints have no pending work,
+                # so invoke(None, target_cfg) is a no-op here.  The
+                # production None-input path *is* exercised end-to-end
+                # by probe_invoke_with_rollback below, which raises
+                # BadRequestError mid-step and lets invoke_with_rollback
+                # drive the full rollback → invoke(None, ...) → retry
+                # cycle.  This probe just smoke-tests that history is
+                # well-formed and target_config resumes cleanly with
+                # an explicit new input.
                 try:
                     resumed = app.invoke(
                         {"messages": [HumanMessage(content=f"resumed at depth {depth}")]},
                         target_cfg,
                     )
                     resumed_msg_count = len(resumed.get("messages", []))
-                    # The resumed state should contain the rolled-back
-                    # messages PLUS the resume input PLUS the one new
-                    # step's output (1 AIMessage + 1 ToolMessage = 2).
                     expected_min = target_msg_count + 1  # at least the resume HumanMessage
                     pass_ok = resumed_msg_count >= expected_min
                     if not pass_ok:

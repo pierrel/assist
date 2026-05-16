@@ -84,7 +84,30 @@ Possibly coupled (let resolver decide):
   (=langchain-anthropic=, =langchain-openai=, =langchain-google-genai=),
   =langgraph-sdk==0.3.3=.
 
-=pip freeze= diff goes here verbatim after the bump.
+Actual =pip install --upgrade deepagents==0.6.1= resolver moves:
+
+#+begin_example
+anthropic            0.92.0   → 0.102.0
+deepagents           0.5.1    → 0.6.1
+google-auth          2.47.0   → 2.53.0
+google-genai         1.58.0   → 1.75.0
+langchain            1.2.15   → 1.3.1
+langchain-anthropic  1.4.0    → 1.4.3
+langchain-core       1.2.28   → 1.4.0
+langchain-google-genai 4.2.1  → 4.2.2
+langgraph            1.1.6    → 1.2.0
+langgraph-checkpoint 4.0.0    → 4.1.0
+langgraph-prebuilt   1.0.9    → 1.1.0
+langsmith            0.6.3    → 0.8.5
+
+# new (transitive):
+cffi==2.0.0
+cryptography==48.0.0
+pycparser==3.0
+#+end_example
+
+Unchanged: =langchain-openai==1.1.9=, =langchain-text-splitters==1.1.0=,
+=langgraph-checkpoint-sqlite==3.0.3=, =langgraph-sdk==0.3.3=.
 
 * Harness
 Two complementary measurements on the same branch:

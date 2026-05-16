@@ -16,16 +16,27 @@ What it does:
     size every 5 steps.
   - Prints a markdown row that can be pasted into the spike doc.
 
-Run twice for the comparison:
-  - Once on the spike branch BEFORE bumping pins (baseline =
-    plain add_messages reducer, full-list semantics).
-  - Once AFTER bumping deepagents 0.6.1 + langgraph 1.2 (the
-    AgentState-default DeltaChannel kicks in if Case A; Case B
-    requires re-running with --delta to explicitly wrap the channel).
+This harness builds its own minimal StateGraph (`_build_graph`) and
+does NOT use `create_deep_agent` — so deepagents' `_DeepAgentState`
+default-on DeltaChannel is NOT in play here.  To measure DeltaChannel
+via this harness you MUST pass `--delta` regardless of which
+deepagents version is installed.
+
+Use it for the apples-to-apples comparison:
+  - Without `--delta`: baseline (plain `add_messages` reducer,
+    full-list snapshot per super-step).
+  - With `--delta`: explicit `DeltaChannel(_messages_delta_reducer,
+    snapshot_frequency=K)` wrap on the `messages` channel — the same
+    reducer + channel shape that `deepagents._DeepAgentState` uses
+    in production.
+
+Both modes need deepagents 0.6.1 installed for the
+`_messages_delta_reducer` import.
 
 Usage:
     .venv/bin/python -m edd.spike.measure_deltachannel --n 20 50 100
     .venv/bin/python -m edd.spike.measure_deltachannel --n 100 --delta
+    .venv/bin/python -m edd.spike.measure_deltachannel --n 100 --delta --snapshot-frequency 50
 """
 
 import argparse
