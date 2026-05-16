@@ -313,7 +313,8 @@ Concretely:
   automatically via =deepagents._DeepAgentState=.  This is what this
   PR does.
 - *Close PR #88* (Layer 2 — per-thread retention) without merging.
-  The 43× per-blob reduction makes the per-thread cap much less
+  The 42.2× file-size reduction (driven by 59× per-blob shrinkage
+  on the checkpoints table) makes the per-thread cap much less
   urgent; the Layer 0 thread-count cap (already shipped) bounds the
   fleet to N_THREADS × ~60 MB at N=100 ≈ 6 GB worst-case.  Plus the
   weekly =VACUUM= reclaims any deletion freelist.  Revisit if/when
