@@ -1,0 +1,285 @@
+#+TITLE: Context-management overhaul — adopt deepagents 0.6.1 builtins
+#+DATE: 2026-05-16
+
+* State
+Phase 2 implementation in progress.  Branch =context-management-overhaul=
+(off =spike-deltachannel= since this depends on the deepagents 0.6.1
+bump that PR #100 lands).
+
+* Goal
+User: */"work on the context limit, then see if the new deepagents
+version has any affordances for context management.  i want to have
+more 'actual' compaction, not hard percentages.  we should assess all
+context middleare (even deepagents builtin) and make sure that were
+not artificially lowering the ceiling.  only doing it when actually
+necessary while not hitting oom."/*
+
+Mapped to design decisions:
+- *"actual compaction, not hard percentages"* → adopt deepagents'
+  =SummarizationMiddleware= (LLM-summarization + offload to
+  =/conversation_history/{thread_id}.md=); remove our blunt
+  =ContextAwareToolEvictionMiddleware=.
+- *"not artificially lowering the ceiling"* → restore =CTX_SIZE=
+  131072 (from the temporary 98304 drop on 2026-05-16 morning, which
+  was driven by the Parler-TTS GPU squat — Parler is now gated off);
+  remove our 0.55–0.60 trigger fractions that double-discounted the
+  real ceiling.
+- *"only doing it when actually necessary while not hitting OOM"*
+  → upstream =SummarizationMiddleware= fires at 0.85 fraction
+  /OR/ on =ContextOverflowError= fallback (whichever happens first);
+  =BadRequestRetryMiddleware= remains as the terminal safety net.
+
+* Pre-state — the ceiling stack we'd built
+
+For a research-agent thread before this PR:
+
+| Layer | Mechanism | Value | Effective cap (tokens) |
+|---|---|---|---|
+| Hardware | RTX 3090, 24 GiB; weights 17 GiB | — | — |
+| llama-server =CTX_SIZE= | ~/llama-cpp/scripts/serve.sh (was 131k, dropped to 98304 on 2026-05-16) | 98304 | 98304 |
+| Model profile =max_input_tokens= | assist/model_manager.py:353 (set from /props) | 98304 | 98304 |
+| Our research eviction trigger | assist/agent.py:289 trigger_fraction=0.55 | 0.55 × 98304 | *would be 54,067* |
+| Latent plumbing bug | =_get_context_size= falls back to hardcoded 128000 because =max_input_tokens= isn't reachable via =configurable= or =state._model_profile= | — | actually triggers at 0.55 × 128000 = 70,400 — /above/ the server cap |
+| =_estimate_tokens= heuristic | =len(content)//4= — under-counts Qwen3 tokenization | — | unknown drift |
+
+The whole edifice was a /double safety net/ on top of upstream code
+we didn't realize was already running:
+
+- Deepagents 0.6.1 ships =create_summarization_middleware= on by
+  default in every =create_deep_agent= call (=graph.py:626, 698=).
+  Trigger =("fraction", 0.85)=, keep =("fraction", 0.10)=, with
+  offload to =/conversation_history/{thread_id}.md=.  This /is/ the
+  "actual compaction" the user asked for.
+- Deepagents' =FilesystemMiddleware= already evicts tool results
+  >20k tokens to =/large_tool_results/<id>= (=filesystem.py:724-786=).
+  Our =ContextAwareToolEvictionMiddleware= ran on top of this.
+- =BadRequestRetryMiddleware= already truncates messages >20k chars
+  on retry attempts ≥1.  Combined with =SummarizationMiddleware='s
+  =ContextOverflowError= fallback, the post-overflow story is strong.
+
+* Memory math — why 131k is safe now
+
+Per =~/llama-cpp/README.md='s "Memory math" table (validated
+2026-05-03):
+
+| n_ctx | Q4_0 KV total | idle headroom | peak prefill headroom | Verdict |
+|---|---|---|---|---|
+| 98304 (today) | 1.5 GB | ~5.3 GB free | ~4.8 GB | over-conservative now that Parler is gated |
+| 131072 | 2.1 GB | ~4.7 GB | ~4.2 GB | comfortable |
+| 200000 | 3.2 GB | ~3.5 GB | ~2.7 GB | comfortable but leaves less slack for XTTS-v2 cuda load (1.5-2 GB) |
+| 262144 | 4.0 GB | ~2.7 GB | ~1.4 GB | mechanical only; no slack |
+
+Picked 131072: matches pre-Parler default, ~2 GB slack for XTTS-v2
+if it cuda-loads on a /clone, plus margin for any concurrent burst.
+200k revisited if XTTS adoption later proves unnecessary.
+
+* Design — Option 3 (hybrid, subtractive)
+
+The change is mostly deletion — we stop fighting upstream defaults.
+One small new middleware (=OutputSanitizationMiddleware=, ~200 LOC
+including docstrings and helpers)
+handles proactive ANSI/control-char strip on =ToolMessage= content,
+because neither deepagents' =FilesystemMiddleware= nor
+=SummarizationMiddleware= strips ANSI and reactive-only cleanup in
+=BadRequestRetry= doesn't persist sanitized state.  See §File-by-file
+edits for both halves.
+
+| Middleware (ordered as deepagents builds the chain) | Before | After |
+|---|---|---|
+| =TodoListMiddleware= (deepagents builtin) | active | unchanged |
+| =FilesystemMiddleware= (deepagents builtin, evicts >20k token tool results) | active | unchanged — this is what was actually doing the per-result eviction work |
+| =SubAgentMiddleware= (deepagents builtin) | active | unchanged |
+| *=SummarizationMiddleware=* (deepagents builtin, fraction=0.85, LLM-summarization, offloads to =/conversation_history/=) | *active but invisible* | *active and recognized* — the primary compaction path |
+| =PatchToolCallsMiddleware= (deepagents builtin) | active | unchanged |
+| *Our =ContextAwareToolEvictionMiddleware=* (custom, fraction=0.55–0.60) | *active* | *deleted* — redundant with the above two |
+| =BadRequestRetryMiddleware= (with text sanitization + 20k-char truncation) | active | extended to strip ANSI codes (lifted from the deleted middleware) |
+| =LoopDetectionMiddleware=, =ThreadQueueMiddleware=, etc. | active | unchanged |
+| =AnthropicPromptCachingMiddleware= (deepagents builtin) | active | unchanged |
+
+The new compaction flow:
+1. Tool result arrives.  =FilesystemMiddleware= evicts if >20k
+   tokens.  Single-result blowups can't push past this cap.
+2. Before model call: =SummarizationMiddleware= checks if total
+   context > 0.85 × max_input_tokens.  Effective trigger:
+   - *pre llamacpp-restart* (today, =CTX_SIZE=98304=): ≈ 83,558 tokens
+   - *post llamacpp-restart* (after =sudo systemctl restart llamacpp=
+     picks up the =CTX_SIZE=131072= edit): ≈ 111,411 tokens
+   If yes, runs an LLM-summarization pass and offloads the cut
+   history to =/conversation_history/{thread_id}.md= (routed to
+   =StateBackend= via the addition to =STATEFUL_PATHS=, so the
+   offload is thread-local + ephemeral rather than polluting the
+   user's git-tracked workspace).
+3. If the LLM call /still/ returns =ContextOverflowError= (e.g. the
+   estimator was off), =SummarizationMiddleware= falls back to the
+   summarization path on the spot and retries.
+4. If that fails too, =BadRequestRetryMiddleware= truncates every
+   message to ≤20k chars (≈5k tokens) and retries (max 3 attempts).
+   This is the terminal fail-fast layer — if all three retries fail
+   the thread surfaces the error per user's "fail-fast over self-
+   healing" preference.
+
+The "actually compacted" answer to the user's question is step 2.
+The "only when necessary" answer is step 2's high trigger (0.85 of
+the /real/ max_input_tokens, not a 0.55–0.60 discount on a hardcoded
+128k that didn't match reality).  The "not OOM" answer is the three-
+layer cascade (file eviction → summarization → reactive truncation).
+
+* File-by-file edits
+
+** =~/llama-cpp/scripts/serve.sh:23= — restore CTX_SIZE 131072
+Comment block rewritten to record both the 2026-05-16 morning drop
+(98304, driven by Parler) and the same-day restore (131072, after
+Parler removal).  Restart via =sudo systemctl restart llamacpp=
+(needs user — no NOPASSWD entry).
+
+** =assist/agent.py= — three sites
+Line numbers are pre-change (anchors against =main@bbb8ecb=); the
+post-change file is shorter, so a =sed -n '113,117p'= today shows
+unrelated code.
+
+- Line 21 import deleted.
+- Lines 113-117 (general agent): instantiation deleted.
+- Line 134 (general agent mw list): =context_eviction_mw= removed.
+- Lines 231-235 (context agent): instantiation deleted.
+- Lines 285-291 (research agent): instantiation deleted.
+- Subagent =_subagent_safety_mw= unchanged (it never had eviction).
+
+** =assist/middleware/output_sanitization.py= (new) — proactive ANSI strip
+Tiny middleware that strips ANSI/control chars from =ToolMessage=
+content in =wrap_tool_call= after-path.  Wired into all three agent
+factories.  Why proactive (not reactive in =BadRequestRetry=): the
+retry path rewrites the in-flight model request body, not
+=state["messages"]=.  Without proactive strip, ANSI lingers in state
+forever, costs tokens on every subsequent prompt assembly, and may
+re-trigger BadRequest on each turn.  Uses the full ECMA-48 CSI
+matcher =\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]= (final byte
+0x40-0x7e covers every CSI sequence; parameter range 0x30-0x3f
+catches 24-bit-color forms using `:`).
+
+** =assist/middleware/bad_request_retry.py= — broaden ANSI strip
+Defense-in-depth: the same broad CSI matcher is applied in
+=_strip_control_chars= so anything that bypasses
+=OutputSanitizationMiddleware= (e.g., ANSI embedded in =AIMessage=
+content, not =ToolMessage=) gets cleaned on the retry path too.
+
+** =assist/middleware/context_aware_tool_eviction.py= — delete
+File removed entirely.  Per project rule "delete unused code, no
+half-finished cleanups."  Tests that imported it
+(=tests/middleware/= if any) also deleted.
+
+** =assist/backends.py= — route =/conversation_history/= to StateBackend
+Added =/conversation_history/=, =conversation_history/=,
+=conversation_history= to =STATEFUL_PATHS=.  Reason:
+=SummarizationMiddleware= writes per-thread compaction artifacts to
+=/conversation_history/{thread_id}.md= via the agent's backend.
+Without this routing the file lands at the default backend root —
+in sandbox mode that's =/workspace/conversation_history/...= (host
+bind-mount → user's git-tracked workspace), and in local mode it's
+the workspace root.  Mirror =large_tool_results/= so the offload is
+thread-local + ephemeral.
+
+** No other changes
+- =requirements.txt= unchanged (deepagents/langchain/langgraph already
+  bumped by the spike PR).
+- =assist/model_manager.py= unchanged.  Verified =:353= writes
+  =llm.profile["max_input_tokens"] = config.context_len= which is
+  what =SummarizationMiddleware._get_profile_limits= reads from
+  (=langchain/agents/middleware/summarization.py:496-509=).
+
+* Eval strategy (3/5/10 cadence per project convention)
+
+Cadence (per CLAUDE.md):
+- Baseline N=3: before any code change.
+- Post-implementation N=3: after the deletion.
+- Post-review N=5: after self-review + Copilot fixes.
+- Stability N=10: final pre-merge.
+
+Tests:
+- =edd/eval/test_research_multi_turn_token_regression.py= — the
+  pinned regression for the 2026-04-26 SF Giants thread.  *Critical
+  must-pass.*  Validates summarization-at-0.85 + BadRequestRetry-
+  truncation keeps a multi-turn research thread from overflowing.
+- =edd/eval/eval_large_tool_results.py= — synthetic 80k-token tool
+  result.  *Critical must-pass.*  Validates that
+  =FilesystemMiddleware='s 20k-per-result cap (alone, no
+  =ContextAwareToolEvictionMiddleware=) keeps the agent moving.
+- =edd/eval/test_research_agent.py=, =test_dev_agent_planning_flow.py=,
+  =test_thread_e2e.py= — sanity on agent quality post-deletion.
+
+Eval window: avoid 23:00–03:00 (nightly LLM-queue cron contention
+per user's saved preference).
+
+* Risks observed
+
+1. *ANSI proactive vs reactive.*  /Resolved./  An initial pass deleted
+   the proactive sanitization and relied on =BadRequestRetry='s
+   reactive path.  Copilot review #1 caught that =BadRequestRetry=
+   only rewrites the in-flight model request body — it does NOT
+   persist the sanitized =ToolMessage= back to =state["messages"]=,
+   so ANSI would linger across turns and re-trigger BadRequest on
+   each subsequent prompt.  Fixed in commit 86cb49e by re-introducing
+   a tiny =OutputSanitizationMiddleware= that strips ANSI from
+   =ToolMessage= content in =wrap_tool_call= after-path.
+   Wired into all three agent factories plus the subagent safety
+   stack.  Defense-in-depth: =BadRequestRetry= keeps a broader CSI
+   regex for ANSI embedded in =AIMessage= content (which the
+   ToolMessage-only middleware does not touch).
+
+2. *Summarization-pass cost on Qwen3.6.*  Each compaction is an LLM
+   call sending up to 4000 tokens (langchain default).  At ~40 tok/s
+   decode, ~10–30s per compaction.  On a long research thread: 2–4
+   compactions, +1–2 min wall-clock per thread.  Worth measuring in
+   the eval suite; acceptable in exchange for "actual compaction."
+
+3. *Summary quality on a small local model.*  =DEFAULT_SUMMARY_PROMPT=
+   is well-structured but written for SOTA models.  Qwen3.6-27B-Q4_K_M
+   may produce lossier summaries than we'd like.  Mitigation: the
+   offload-to-=/conversation_history/{thread_id}.md= path means the
+   agent can =read_file= the full history if a summary is too thin.
+   Eval should look for cases where the agent gets stuck after
+   compaction.
+
+4. *DeltaChannel + summarization interaction.*  =SummarizationMiddleware=
+   writes to =_summarization_event= (private state field) via
+   =wrap_model_call=, NOT via =before_model= with =RemoveMessage=.
+   Should not interact with =DeltaChannel='s replay path — verified
+   by reading both code paths.  Probe in the realistic eval.
+
+5. *Removing our middleware loses proactive ANSI sanitization on
+   non-error paths.*  /Resolved./  See risk #1 — proactive
+   sanitization is preserved by =OutputSanitizationMiddleware=.
+
+6. *Removing our middleware loses the failsafe IF =FilesystemMiddleware=
+   or =SummarizationMiddleware= disabled in some future config.*
+   Both are auto-installed by =create_deep_agent= and not removable
+   without a caller override.  All four call sites in this repo
+   (=assist/agent.py:200, 254, 374= for general / context / research
+   agents + =edd/agent.py:40= for the eval-side builder) use the
+   default behavior.  Low risk.
+
+* Decision
+Apply the edits in §File-by-file edits.  Net diff is heavily subtractive
+(~324 LOC deleted from =context_aware_tool_eviction.py= + 3 instantiation
+sites + 1 import line; we removed redundancy with deepagents 0.6.1
+defaults).  Plus *one small new file* — =assist/middleware/output_sanitization.py=
+(~200 LOC incl. docstrings + helpers) — because neither
+=FilesystemMiddleware= nor
+=SummarizationMiddleware= strips ANSI/control chars, and reactive-only
+cleanup in =BadRequestRetry= doesn't persist sanitized state across
+turns.  =BadRequestRetry= broadens its own regex to a full ECMA-48
+CSI matcher as defense-in-depth for ANSI in non-=ToolMessage= content.
+llama-server CTX_SIZE restore (98304 → 131072) is the only knob that
+increases capability rather than reducing complexity.
+
+* Follow-up
+- =SummarizationToolMiddleware= (deepagents builtin) — gives the
+  model a =compact_conversation= tool to proactively compact when
+  it knows a sub-task wrapped up.  Defer until evals show benefit.
+- (Done in 86cb49e: proactive ANSI sanitization via
+  =OutputSanitizationMiddleware=.  Originally planned as a
+  follow-up; Copilot review surfaced that reactive-only was
+  insufficient, so it landed in this PR.)
+- Consider raising CTX_SIZE to 200k after observing 131k behavior
+  for ~1 week.
+- =SummarizationMiddleware= telemetry: count compactions per thread,
+  surface in status.json so the UI can show "compacted N times."

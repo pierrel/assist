@@ -12,16 +12,26 @@ caused the research subagent to accumulate web-search results and draft
 reports.  By turn 3 the message history exceeded the model server's
 53,616-token cap by exactly one token.
 
-Root causes (full analysis: docs/2026-04-26-token-max-mismatch-investigation.md):
+Historical root causes (resolved by the 2026-05-16 context-management
+overhaul — see docs/2026-05-16-context-management-overhaul.org and the
+original 2026-04-26 incident analysis at
+docs/2026-04-26-token-max-mismatch-investigation.md):
 
-1. `ContextAwareToolEvictionMiddleware` only acts on incoming tool
-   results, not on the full message list before send.
-2. The middleware estimates tokens with `len(content) // 4`, which
+1. `ContextAwareToolEvictionMiddleware` (now deleted) only acted on
+   incoming tool results, not on the full message list before send.
+2. That middleware estimated tokens with `len(content) // 4`, which
    underestimates Qwen3-Coder tokenization.
 3. `ModelRetryMiddleware` does not retry on `BadRequestError` (only
    transient 5xx / network errors).
 4. `BadRequestRetryMiddleware` exists but was not wired into the general
    or research agents.
+
+Today this test guards against the SAME failure mode under a different
+architecture: deepagents 0.6.1's auto-installed `SummarizationMiddleware`
+(trigger=fraction 0.85, real LLM-summarization, offload to
+`/conversation_history/`) handles compaction; `BadRequestRetryMiddleware`
+handles terminal sanitize-and-truncate.  If summarization regresses or
+its plumbing breaks, this test should fail again.
 
 What this test pins down: a three-turn run of the exact prompts that
 failed must complete without `BadRequestError` reaching the caller.

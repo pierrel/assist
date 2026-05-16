@@ -239,3 +239,49 @@ class TestSanitizationHelpers:
         result = mw._truncate_large_content(big, max_chars=20_000)
         assert len(result) < 30_000
         assert "[Content truncated" in result
+
+    # ------------------------------------------------------------------
+    # CSI/ANSI strip (broadened on 2026-05-16 to full ECMA-48 final-byte
+    # range — see assist/middleware/output_sanitization.py docstring).
+    # OutputSanitizationMiddleware is the proactive layer for
+    # ToolMessage content; this is defense-in-depth for AIMessage etc.
+    # ------------------------------------------------------------------
+
+    def test_strip_control_chars_strips_sgr_color(self):
+        """Old narrow regex would have caught this too, but pin it."""
+        mw = BadRequestRetryMiddleware()
+        assert mw._strip_control_chars("\x1b[31mred\x1b[0m") == "red"
+
+    def test_strip_control_chars_strips_clear_screen(self):
+        """`\\x1b[2J` — clear screen.  Old narrow `[mGKHF]` regex missed this."""
+        mw = BadRequestRetryMiddleware()
+        assert mw._strip_control_chars("\x1b[2Jhello") == "hello"
+
+    def test_strip_control_chars_strips_24bit_color_with_colon(self):
+        """24-bit color forms use `:` as a parameter byte.  Old `[0-9;]*` regex missed these."""
+        mw = BadRequestRetryMiddleware()
+        s = "\x1b[38:2:255:128:0morange\x1b[0m"
+        assert mw._strip_control_chars(s) == "orange"
+
+    def test_strip_control_chars_strips_private_mode(self):
+        """DEC private mode (h/l with ? prefix)."""
+        mw = BadRequestRetryMiddleware()
+        s = "\x1b[?25l hidden \x1b[?25h"
+        assert mw._strip_control_chars(s) == " hidden "
+
+    def test_strip_control_chars_strips_osc_bel_terminated(self):
+        """OSC (Operating System Command) sequence terminated by BEL —
+        shell terminal-title sets emit these (`\\x1b]0;title\\x07`).
+        Defense in depth: OutputSanitizationMiddleware strips OSC
+        proactively on ToolMessage content; this is the retry-path
+        fallback for ANSI in non-ToolMessage content (e.g. AIMessage)."""
+        mw = BadRequestRetryMiddleware()
+        s = "\x1b]0;my-title\x07after"
+        assert mw._strip_control_chars(s) == "after"
+
+    def test_strip_control_chars_strips_osc_st_terminated(self):
+        """OSC sequences terminated by ST (`ESC \\\\`).  Used by modern
+        terminals for hyperlinks (OSC 8 ;; URL ST text OSC 8 ;; ST)."""
+        mw = BadRequestRetryMiddleware()
+        s = "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\after"
+        assert mw._strip_control_chars(s) == "linkafter"

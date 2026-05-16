@@ -60,7 +60,34 @@ class BadRequestRetryMiddleware(AgentMiddleware):
         """Remove control characters that break JSON serialization.
 
         Keeps \\n (0x0A), \\r (0x0D), \\t (0x09) — valid JSON whitespace.
+
+        Also strips ANSI escape sequences (full ECMA-48 CSI matcher:
+        `\\x1b\\[` + parameter bytes (0x30-0x3f) + intermediate bytes
+        (0x20-0x2f) + final byte 0x40-0x7e — see the regex below for
+        the verbatim pattern) that show up in `execute` tool output
+        from colorized terminal commands.  Some llama.cpp / OpenAI-compat endpoints reject
+        these as malformed UTF-8 in the JSON body — sanitize before
+        retry so the retry has a chance of succeeding.  (Previously
+        this was done proactively in ContextAwareToolEvictionMiddleware's
+        after_tool hook; that middleware was deleted on 2026-05-16 as
+        part of the context-management overhaul.  See
+        docs/2026-05-16-context-management-overhaul.org.)
         """
+        # OSC (Operating System Command): ESC `]` payload, terminated by
+        # BEL or ST (ESC \).  Catches hyperlink escapes, iTerm2 inline
+        # images, terminal-title sets, etc.  Must run BEFORE the CSI
+        # strip so the OSC payload doesn't get partially eaten.
+        text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
+        # Full CSI matcher per ECMA-48: ESC `[`, then parameter-bytes
+        # (0x30-0x3f, includes 0-9 and `:;<=>?`), intermediate-bytes
+        # (0x20-0x2f), final-byte (0x40-0x7e).  Covers SGR (m), cursor
+        # moves (A-D/G/H/F), erase (J/K), private-mode (h/l), 24-bit
+        # color forms using `:`, and everything else a terminal emits.
+        # Defense in depth: OutputSanitizationMiddleware already strips
+        # ANSI from ToolMessages proactively (before they enter state);
+        # this layer catches anything that slipped through (e.g., ANSI
+        # embedded in AIMessage content) on the retry path.
+        text = re.sub(r'\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]', '', text)
         return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
     @staticmethod
