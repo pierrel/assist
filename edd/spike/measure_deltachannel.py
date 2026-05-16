@@ -24,14 +24,17 @@ deepagents version is installed.
 
 Use it for the apples-to-apples comparison:
   - Without `--delta`: baseline (plain `add_messages` reducer,
-    full-list snapshot per super-step).
+    full-list snapshot per super-step).  Runs on any langgraph
+    version; does NOT require deepagents 0.6.1.
   - With `--delta`: explicit `DeltaChannel(_messages_delta_reducer,
     snapshot_frequency=K)` wrap on the `messages` channel — the same
     reducer + channel shape that `deepagents._DeepAgentState` uses
-    in production.
+    in production.  Requires deepagents 0.6.1 + langgraph 1.2 for the
+    `_messages_delta_reducer` and `DeltaChannel` imports.
 
-Both modes need deepagents 0.6.1 installed for the
-`_messages_delta_reducer` import.
+The `_messages_delta_reducer` import lives inside the `use_delta`
+branch of `_build_graph`, so the baseline run does not need it
+installed — useful for measuring the pre-upgrade environment.
 
 Usage:
     .venv/bin/python -m edd.spike.measure_deltachannel --n 20 50 100
@@ -134,18 +137,36 @@ def _build_graph(use_delta: bool, snapshot_frequency: int = 10):
     return g
 
 
-def _db_stats(db_path: str) -> tuple[int, int, int]:
-    """Return (file_bytes, checkpoint_row_count, sum_checkpoint_blob_bytes)."""
+def _db_stats(db_path: str) -> dict:
+    """Return per-table sizing.
+
+    Under DeltaChannel, the per-step delta payload is added to the
+    ``writes`` table (column ``value``), while the ``checkpoints``
+    table (column ``checkpoint``) holds a much smaller snapshot blob
+    that says "look at writes for the actual content."  Under the
+    baseline ``add_messages`` reducer, virtually all data sits in
+    the ``checkpoints`` table.  Reporting only one table can mislead
+    readers about where the win comes from — measure both.
+    """
     file_bytes = os.path.getsize(db_path)
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        rows = cur.execute(
+        ckpt_rows, ckpt_bytes = cur.execute(
             "SELECT COUNT(*), COALESCE(SUM(LENGTH(checkpoint)), 0) FROM checkpoints"
+        ).fetchone()
+        writes_rows, writes_bytes = cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(value)), 0) FROM writes"
         ).fetchone()
     finally:
         conn.close()
-    return file_bytes, rows[0], rows[1]
+    return {
+        "file_bytes": file_bytes,
+        "ckpt_rows": ckpt_rows,
+        "ckpt_blob_bytes": ckpt_bytes,
+        "writes_rows": writes_rows,
+        "writes_value_bytes": writes_bytes,
+    }
 
 
 def _checkpoint_meta(db_path: str) -> dict:
@@ -177,19 +198,27 @@ def measure(n: int, use_delta: bool, snapshot_frequency: int = 10) -> dict:
             thread_id = "spike"
             cfg = {"configurable": {"thread_id": thread_id}}
 
-            # Seed with a HumanMessage so the first step has a baseline.
-            app.invoke({"messages": [HumanMessage(content="go")]}, cfg)
-
             trajectory = []
+            # n total super-steps — no extra seed invoke, so the
+            # advertised N matches the workload exactly.  Each invoke
+            # produces one super-step with the synthetic 50 KB
+            # ToolMessage payload.
             for i in range(1, n + 1):
-                app.invoke({"messages": [HumanMessage(content=f"continue {i}")]}, cfg)
+                app.invoke({"messages": [HumanMessage(content=f"turn {i}")]}, cfg)
                 if i % 5 == 0 or i == n:
-                    file_b, rows, blob_sum = _db_stats(db_path)
-                    avg_blob = blob_sum // rows if rows else 0
-                    trajectory.append(
-                        {"step": i, "file_bytes": file_b, "rows": rows,
-                         "avg_blob_bytes": avg_blob, "sum_blob_bytes": blob_sum}
-                    )
+                    s = _db_stats(db_path)
+                    avg_ckpt = s["ckpt_blob_bytes"] // s["ckpt_rows"] if s["ckpt_rows"] else 0
+                    avg_writes = s["writes_value_bytes"] // s["writes_rows"] if s["writes_rows"] else 0
+                    trajectory.append({
+                        "step": i,
+                        "file_bytes": s["file_bytes"],
+                        "ckpt_rows": s["ckpt_rows"],
+                        "ckpt_blob_bytes": s["ckpt_blob_bytes"],
+                        "avg_ckpt_blob_bytes": avg_ckpt,
+                        "writes_rows": s["writes_rows"],
+                        "writes_value_bytes": s["writes_value_bytes"],
+                        "avg_writes_value_bytes": avg_writes,
+                    })
 
             meta = _checkpoint_meta(db_path)
         finally:
@@ -243,16 +272,25 @@ def main():
         result = measure(n=n, use_delta=args.delta,
                          snapshot_frequency=args.snapshot_frequency)
         final = result["trajectory"][-1]
+        total_blob = final["ckpt_blob_bytes"] + final["writes_value_bytes"]
         print(f"### N={n}")
         print(f"- final file bytes: {final['file_bytes']:,}")
-        print(f"- final checkpoint rows: {final['rows']}")
-        print(f"- final avg blob bytes: {final['avg_blob_bytes']:,}")
+        print(f"- checkpoints table: {final['ckpt_rows']} rows, "
+              f"{final['ckpt_blob_bytes']:,} blob bytes "
+              f"(avg {final['avg_ckpt_blob_bytes']:,})")
+        print(f"- writes table:      {final['writes_rows']} rows, "
+              f"{final['writes_value_bytes']:,} value bytes "
+              f"(avg {final['avg_writes_value_bytes']:,})")
+        print(f"- sum across tables: {total_blob:,} bytes "
+              f"(vs file_bytes {final['file_bytes']:,} — delta is SQLite page overhead)")
         print(f"- schema tables: {result['schema']['tables']}")
         print()
-        print("| step | file_bytes | rows | avg_blob_bytes |")
-        print("|------|------------|------|----------------|")
+        print("| step | file_bytes | ckpt rows | ckpt avg blob | writes rows | writes avg value |")
+        print("|------|------------|-----------|---------------|-------------|------------------|")
         for s in result["trajectory"]:
-            print(f"| {s['step']} | {s['file_bytes']:,} | {s['rows']} | {s['avg_blob_bytes']:,} |")
+            print(f"| {s['step']} | {s['file_bytes']:,} | "
+                  f"{s['ckpt_rows']} | {s['avg_ckpt_blob_bytes']:,} | "
+                  f"{s['writes_rows']} | {s['avg_writes_value_bytes']:,} |")
         print()
 
 

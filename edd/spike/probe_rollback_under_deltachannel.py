@@ -1,22 +1,36 @@
 """DeltaChannel spike — rollback validation.
 
-Throwaway test for the `spike-deltachannel` branch.  Two probes:
+Throwaway harness for the `spike-deltachannel` branch.  File is named
+`probe_*.py` (not `test_*.py`) so pytest does NOT collect it during
+the normal unit suite — it depends on beta DeltaChannel APIs and is
+meant for one-shot, manual runs.
 
-1. ``probe_history_indexing`` — verifies that ``agent.get_state_history(cfg)``
-   returns one usable entry per super-step ordered most-recent first, and
-   that ``app.invoke(None, target_config)`` resumes cleanly from a target
-   chosen by ``target_idx = depth + 1`` math.  This is what
-   ``assist/checkpoint_rollback.py:97-145`` depends on.
+Two probes:
 
-2. ``probe_invoke_with_rollback`` — drives the FULL ``invoke_with_rollback``
-   path: a node that raises ``BadRequestError`` on its 6th invocation, then
-   succeeds.  Verifies the rollback fires, picks a valid target, and the
-   resumed invocation returns the agent result without partial-state
-   corruption.  Catches anything ``probe_history_indexing`` would miss
-   because it tests the live error-recovery path end-to-end.
+1. ``probe_history_indexing`` — drives N=15 super-steps then walks
+   ``agent.get_state_history(cfg)``.  For depths 1, 5, and 12
+   (straddling the K=10 snapshot boundary) it picks a target config
+   from history and resumes via ``app.invoke({...new HumanMessage...},
+   target_config)``.  This is a SMOKE for the history-shape +
+   resume-with-input path; it does NOT exercise production rollback's
+   ``current_input=None`` path because the synthetic graph's
+   checkpoints have no pending work (the node completes each super-
+   step in one call), so ``invoke(None, target_cfg)`` would be a no-op
+   here.  That production path is what Probe 2 covers.
+
+2. ``probe_invoke_with_rollback`` — drives the FULL
+   ``invoke_with_rollback`` path end-to-end.  A node raises
+   ``BadRequestError`` on its 6th invocation, then succeeds.
+   ``invoke_with_rollback`` catches the error, rolls back to an
+   earlier checkpoint, and re-invokes with ``current_input=None``
+   (matching ``assist/checkpoint_rollback.py:144-145``).  Asserts both
+   that the retry fired (call counter advances past the failure point)
+   AND that the recovered state has at least the pre-failure messages
+   — guards against a silent-swallow regression in which rollback
+   returned an empty result.
 
 Run:
-    .venv/bin/python -m edd.spike.test_rollback_under_deltachannel
+    .venv/bin/python -m edd.spike.probe_rollback_under_deltachannel
 """
 
 import os
@@ -138,17 +152,26 @@ def probe_invoke_with_rollback():
                     cfg,
                 )
                 msg_count = len(result.get("messages", []))
-                # Load-bearing assertion: the retry fired, i.e. the
-                # flaky node was called again after the failure.  If
-                # rollback silently swallowed the BadRequestError and
-                # returned without retrying, call_count would still
-                # equal 6 — and this check would correctly fail.
-                pass_ok = call_count["n"] >= 7
+                # Two load-bearing assertions:
+                #  (a) the retry fired — call counter advanced past the
+                #      failure point (would be 6 if rollback silently
+                #      swallowed the BadRequestError).
+                #  (b) the recovered state has at least the pre-failure
+                #      messages — guards against a regression in which
+                #      rollback returned an empty / truncated result.
+                #      Pre-failure: 5 successful super-steps, each
+                #      appends 2 messages → ≥10 messages plus the
+                #      recovery turn's 1 HumanMessage + 2 step msgs.
+                retry_fired = call_count["n"] >= 7
+                state_recovered = msg_count >= 10
+                pass_ok = retry_fired and state_recovered
                 status = "PASS" if pass_ok else "FAIL"
                 print(f"## invoke_with_rollback: {status}")
-                print(f"  - flaky node invocations: {call_count['n']} (expected >= 7)")
-                print(f"  - final messages count: {msg_count}")
-                print(f"  - rollback fired and recovered: {pass_ok}")
+                print(f"  - flaky node invocations: {call_count['n']} "
+                      f"(>= 7: {retry_fired})")
+                print(f"  - final messages count: {msg_count} "
+                      f"(>= 10: {state_recovered})")
+                print(f"  - rollback fired and state recovered: {pass_ok}")
                 return pass_ok
             except Exception as e:
                 print(f"## invoke_with_rollback: ERROR")
