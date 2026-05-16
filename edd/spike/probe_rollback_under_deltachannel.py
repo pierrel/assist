@@ -159,18 +159,25 @@ def probe_invoke_with_rollback():
                 #  (b) the recovered state has at least the pre-failure
                 #      messages — guards against a regression in which
                 #      rollback returned an empty / truncated result.
-                #      Pre-failure: 5 successful super-steps, each
-                #      appends 2 messages → ≥10 messages plus the
-                #      recovery turn's 1 HumanMessage + 2 step msgs.
+                #
+                # Per-turn growth: each invoke adds 1 HumanMessage (the
+                # input) + 2 from flaky_step (1 AIMessage + 1 ToolMessage)
+                # = 3 messages.  Pre-failure: 5 successful turns × 3 = 15
+                # messages.  The failed 6th turn's HumanMessage may or may
+                # not be in state depending on rollback target.  The
+                # retry's successful step adds 2 more = ~17-18 final.
+                # Floor at 15 so we catch silent-empty-recovery regressions
+                # without being brittle to ±1 from the exact rollback
+                # depth langgraph picks.
                 retry_fired = call_count["n"] >= 7
-                state_recovered = msg_count >= 10
+                state_recovered = msg_count >= 15
                 pass_ok = retry_fired and state_recovered
                 status = "PASS" if pass_ok else "FAIL"
                 print(f"## invoke_with_rollback: {status}")
                 print(f"  - flaky node invocations: {call_count['n']} "
                       f"(>= 7: {retry_fired})")
                 print(f"  - final messages count: {msg_count} "
-                      f"(>= 10: {state_recovered})")
+                      f"(>= 15: {state_recovered})")
                 print(f"  - rollback fired and state recovered: {pass_ok}")
                 return pass_ok
             except Exception as e:
