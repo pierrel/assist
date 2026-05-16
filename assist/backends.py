@@ -63,6 +63,15 @@ STATEFUL_PATHS = [
     "/large_tool_results/",
     "large_tool_results/",
     "large_tool_results",
+    # deepagents 0.6.1's SummarizationMiddleware offloads the pre-
+    # summarization conversation history here as a per-thread file so
+    # the agent can read_file it back if a summary is too thin.  Without
+    # this routing the offload lands in the user's git-tracked workspace
+    # (the default backend root) — wrong layer.  Mirror large_tool_results/
+    # routing so it's thread-local + ephemeral.
+    "/conversation_history/",
+    "conversation_history/",
+    "conversation_history",
 ]
 
 SKILLS_ROUTE = "/skills/"

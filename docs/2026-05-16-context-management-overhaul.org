@@ -94,9 +94,15 @@ The new compaction flow:
 1. Tool result arrives.  =FilesystemMiddleware= evicts if >20k
    tokens.  Single-result blowups can't push past this cap.
 2. Before model call: =SummarizationMiddleware= checks if total
-   context > 0.85 × max_input_tokens (= 0.85 × 131072 = ~111k for
-   us post-this-PR).  If yes, runs an LLM-summarization pass and
-   offloads the cut history.
+   context > 0.85 × max_input_tokens.  Effective trigger:
+   - *pre llamacpp-restart* (today, =CTX_SIZE=98304=): ≈ 83,558 tokens
+   - *post llamacpp-restart* (after =sudo systemctl restart llamacpp=
+     picks up the =CTX_SIZE=131072= edit): ≈ 111,411 tokens
+   If yes, runs an LLM-summarization pass and offloads the cut
+   history to =/conversation_history/{thread_id}.md= (routed to
+   =StateBackend= via the addition to =STATEFUL_PATHS=, so the
+   offload is thread-local + ephemeral rather than polluting the
+   user's git-tracked workspace).
 3. If the LLM call /still/ returns =ContextOverflowError= (e.g. the
    estimator was off), =SummarizationMiddleware= falls back to the
    summarization path on the spot and retries.
@@ -121,6 +127,10 @@ Parler removal).  Restart via =sudo systemctl restart llamacpp=
 (needs user — no NOPASSWD entry).
 
 ** =assist/agent.py= — three sites
+Line numbers are pre-change (anchors against =main@bbb8ecb=); the
+post-change file is shorter, so a =sed -n '113,117p'= today shows
+unrelated code.
+
 - Line 21 import deleted.
 - Lines 113-117 (general agent): instantiation deleted.
 - Line 134 (general agent mw list): =context_eviction_mw= removed.
@@ -141,6 +151,17 @@ fine because we never re-emit the raw stream).
 File removed entirely.  Per project rule "delete unused code, no
 half-finished cleanups."  Tests that imported it
 (=tests/middleware/= if any) also deleted.
+
+** =assist/backends.py= — route =/conversation_history/= to StateBackend
+Added =/conversation_history/=, =conversation_history/=,
+=conversation_history= to =STATEFUL_PATHS=.  Reason:
+=SummarizationMiddleware= writes per-thread compaction artifacts to
+=/conversation_history/{thread_id}.md= via the agent's backend.
+Without this routing the file lands at the default backend root —
+in sandbox mode that's =/workspace/conversation_history/...= (host
+bind-mount → user's git-tracked workspace), and in local mode it's
+the workspace root.  Mirror =large_tool_results/= so the offload is
+thread-local + ephemeral.
 
 ** No other changes
 - =requirements.txt= unchanged (deepagents/langchain/langgraph already
