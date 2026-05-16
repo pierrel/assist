@@ -268,3 +268,20 @@ class TestSanitizationHelpers:
         mw = BadRequestRetryMiddleware()
         s = "\x1b[?25l hidden \x1b[?25h"
         assert mw._strip_control_chars(s) == " hidden "
+
+    def test_strip_control_chars_strips_osc_bel_terminated(self):
+        """OSC (Operating System Command) sequence terminated by BEL —
+        shell terminal-title sets emit these (`\\x1b]0;title\\x07`).
+        Defense in depth: OutputSanitizationMiddleware strips OSC
+        proactively on ToolMessage content; this is the retry-path
+        fallback for ANSI in non-ToolMessage content (e.g. AIMessage)."""
+        mw = BadRequestRetryMiddleware()
+        s = "\x1b]0;my-title\x07after"
+        assert mw._strip_control_chars(s) == "after"
+
+    def test_strip_control_chars_strips_osc_st_terminated(self):
+        """OSC sequences terminated by ST (`ESC \\\\`).  Used by modern
+        terminals for hyperlinks (OSC 8 ;; URL ST text OSC 8 ;; ST)."""
+        mw = BadRequestRetryMiddleware()
+        s = "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\after"
+        assert mw._strip_control_chars(s) == "linkafter"
