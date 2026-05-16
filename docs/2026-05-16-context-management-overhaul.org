@@ -255,10 +255,17 @@ per user's saved preference).
    sites use the default behavior.  Low risk.
 
 * Decision
-Apply the edits in §File-by-file edits.  This is a *subtractive* PR
-— no new code, just removing redundancy and a small extension to
-BadRequestRetry.  llama-server CTX_SIZE restore is the only knob
-that increases capability rather than reducing complexity.
+Apply the edits in §File-by-file edits.  Net diff is heavily subtractive
+(~324 LOC deleted from =context_aware_tool_eviction.py= + 3 instantiation
+sites + 1 import line; we removed redundancy with deepagents 0.6.1
+defaults).  Plus *one small new file* — =assist/middleware/output_sanitization.py=
+(~115 LOC) — because neither =FilesystemMiddleware= nor
+=SummarizationMiddleware= strips ANSI/control chars, and reactive-only
+cleanup in =BadRequestRetry= doesn't persist sanitized state across
+turns.  =BadRequestRetry= broadens its own regex to a full ECMA-48
+CSI matcher as defense-in-depth for ANSI in non-=ToolMessage= content.
+llama-server CTX_SIZE restore (98304 → 131072) is the only knob that
+increases capability rather than reducing complexity.
 
 * Follow-up
 - =SummarizationToolMiddleware= (deepagents builtin) — gives the
