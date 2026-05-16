@@ -75,8 +75,13 @@ if it cuda-loads on a /clone, plus margin for any concurrent burst.
 
 * Design — Option 3 (hybrid, subtractive)
 
-The change is almost entirely deletion.  No new middleware; we just
-stop fighting upstream defaults.
+The change is mostly deletion — we stop fighting upstream defaults.
+One small new middleware (=OutputSanitizationMiddleware=, ~80 LOC)
+handles proactive ANSI/control-char strip on =ToolMessage= content,
+because neither deepagents' =FilesystemMiddleware= nor
+=SummarizationMiddleware= strips ANSI and reactive-only cleanup in
+=BadRequestRetry= doesn't persist sanitized state.  See §File-by-file
+edits for both halves.
 
 | Middleware (ordered as deepagents builds the chain) | Before | After |
 |---|---|---|
