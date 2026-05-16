@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Awaitable, Callable
+from typing import Awaitable, Callable
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
@@ -53,6 +53,15 @@ logger = logging.getLogger(__name__)
 # full cursor-movement set.
 _CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
 
+# OSC (Operating System Command) matcher: ESC `]` payload, terminated by
+# either BEL (0x07) or ST (`ESC \\` = 0x1b 0x5c).  Real-world emitters:
+# `set terminal title` from shells, hyperlink escapes from modern terminal
+# tools (file://, vscode-jupyter-tab-tag etc.), iTerm2 inline images.
+# Without this match, OSC payload survives as plain text after CSI-only
+# stripping, e.g. `]0;title\x07` would lose the `\x1b` to the control-char
+# pass but leave `]0;title` as visible noise.
+_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
 # Plus a sweep for non-whitespace control chars that can still break
 # JSON serialization on some endpoints (kept narrower than
 # BadRequestRetry's set because we do NOT want to drop \r, \n, \t which
@@ -61,6 +70,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _sanitize(text: str) -> str:
+    text = _OSC_RE.sub("", text)
     text = _CSI_RE.sub("", text)
     return _CONTROL_RE.sub("", text)
 

@@ -73,6 +73,11 @@ class BadRequestRetryMiddleware(AgentMiddleware):
         part of the context-management overhaul.  See
         docs/2026-05-16-context-management-overhaul.org.)
         """
+        # OSC (Operating System Command): ESC `]` payload, terminated by
+        # BEL or ST (ESC \).  Catches hyperlink escapes, iTerm2 inline
+        # images, terminal-title sets, etc.  Must run BEFORE the CSI
+        # strip so the OSC payload doesn't get partially eaten.
+        text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)
         # Full CSI matcher per ECMA-48: ESC `[`, then parameter-bytes
         # (0x30-0x3f, includes 0-9 and `:;<=>?`), intermediate-bytes
         # (0x20-0x2f), final-byte (0x40-0x7e).  Covers SGR (m), cursor
