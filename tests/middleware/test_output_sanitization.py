@@ -10,7 +10,7 @@ NOT an object with `.messages`.  A prior version of this test used Mock
 objects with a fabricated `.messages` attribute and the middleware
 silently no-op'd in production — the type contract matters.
 """
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 from assist.middleware.output_sanitization import (
@@ -19,6 +19,7 @@ from assist.middleware.output_sanitization import (
     _sanitize_tool_message,
     _CSI_RE,
     _CONTROL_RE,
+    _OSC_RE,
 )
 
 
@@ -72,9 +73,30 @@ def test_control_regex_keeps_whitespace():
 
 
 def test_sanitize_combines_both():
-    """_sanitize applies CSI strip then control strip in order."""
+    """_sanitize applies OSC + CSI + control strip in order."""
     s = "\x1b[31mERROR\x1b[0m\x00 details"
     assert _sanitize(s) == "ERROR details"
+
+
+def test_osc_regex_strips_bel_terminated():
+    """OSC sequences terminated by BEL (\\x07).  Used by shells to
+    set the terminal title (`\\x1b]0;title\\x07`)."""
+    s = "\x1b]0;my-title\x07prompt$"
+    assert _OSC_RE.sub("", s) == "prompt$"
+
+
+def test_osc_regex_strips_st_terminated():
+    """OSC sequences terminated by ST (\\x1b\\\\ = ESC backslash).
+    Used by modern terminals for hyperlinks: OSC 8 ; ; URL ST text OSC 8 ; ; ST"""
+    s = "\x1b]8;;https://example.com\x1b\\linktext\x1b]8;;\x1b\\after"
+    assert _OSC_RE.sub("", s) == "linktextafter"
+
+
+def test_osc_in_sanitize_pipeline():
+    """OSC stripped before CSI so the CSI strip doesn't eat the
+    payload partially."""
+    s = "\x1b]0;title\x07\x1b[31mred\x1b[0m"
+    assert _sanitize(s) == "red"
 
 
 def test_sanitize_no_change_returns_same_text():
@@ -364,3 +386,55 @@ def test_middleware_is_wired_into_create_agent_path():
             f"OutputSanitizationMiddleware() not instantiated in {factory} — "
             f"future refactor regression?"
         )
+
+
+def test_middleware_wired_into_subagent_safety_stack():
+    """Dict-spec subagents (research-agent, critique-agent, fact-check-agent)
+    inherit middleware from `_subagent_safety_mw()`.  A future refactor
+    that drops the middleware there would silently leak unsanitized
+    ANSI from subagent tool calls into the parent's state via the task
+    tool result.  Pin the wiring explicitly."""
+    from assist.agent import create_research_agent
+    import inspect
+    # _subagent_safety_mw is defined inside create_research_agent.
+    # Grep its source for the middleware reference.
+    src = inspect.getsource(create_research_agent)
+    # Locate the _subagent_safety_mw helper specifically (not the parent
+    # base_mw which already has its own wiring test above).
+    helper_start = src.index("def _subagent_safety_mw")
+    helper_end = src.index("\n\n", helper_start + 1)
+    helper_src = src[helper_start:helper_end]
+    code_lines = [
+        line for line in helper_src.split("\n")
+        if not line.lstrip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    assert "OutputSanitizationMiddleware(" in code, (
+        "OutputSanitizationMiddleware not instantiated in _subagent_safety_mw "
+        "— research/critique/fact-check subagents would leak ANSI from "
+        "read_url/etc. back to parent state via task tool result"
+    )
+
+
+def test_middleware_wired_into_inline_critique_subagent():
+    """The `critique_sub_agent` dict inside `create_agent` carries its own
+    explicit middleware list (separate from `_subagent_safety_mw` which
+    lives in create_research_agent).  Pin its wiring too."""
+    from assist.agent import create_agent
+    import inspect
+    src = inspect.getsource(create_agent)
+    # Find the critique_sub_agent dict literal
+    crit_start = src.index("critique_sub_agent = {")
+    # Find the matching closing brace at indent 4 (start of dict)
+    crit_end = src.index("\n    }", crit_start)
+    crit_src = src[crit_start:crit_end]
+    code_lines = [
+        line for line in crit_src.split("\n")
+        if not line.lstrip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    assert "OutputSanitizationMiddleware(" in code, (
+        "OutputSanitizationMiddleware missing from critique_sub_agent "
+        "middleware list in create_agent — same leak as in subagent "
+        "safety stack"
+    )
