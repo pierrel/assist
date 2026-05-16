@@ -1,0 +1,203 @@
+#+TITLE: DeltaChannel spike — can upstream supersede Layers 2 & 3?
+#+DATE: 2026-05-16
+
+* State
+Baseline measured.  Spike branch =spike-deltachannel= (off =main=).
+Harness in =edd/spike/measure_deltachannel.py=.  Pin bump + spike
+measurement pending.
+
+* Goal
+Decide, with numbers, whether LangGraph 1.2's =DeltaChannel= (shipped
+2026-05-12 alongside =deepagents 0.6.1=) delivers enough per-thread
+=threads.db= reduction to:
+
+- *scrap* Layer 2 (per-thread checkpoint retention wrapper, PR #88), or
+- *keep but loosen* it (e.g. raise =RETAIN_LAST= 10 → 50), or
+- *no-go* — close this branch and merge #88/#89 as planned.
+
+The deepagents 0.6 blog claims ≈40× checkpoint-storage reduction
+(5.27 GB → 129 MB on a 200-turn session).  This spike validates that
+on /our/ workload before we either rewrite or rip out our custom
+wrappers.
+
+* Wire-up (Case A vs Case B — pending pin bump)
+
+Pre-bump =langchain.agents.middleware.types.AgentState= (langchain
+1.2.15):
+
+#+begin_src python
+class AgentState(TypedDict, Generic[ResponseT]):
+    messages: Required[Annotated[list[AnyMessage], add_messages]]
+    jump_to: NotRequired[Annotated[JumpTo | None, EphemeralValue, PrivateStateAttr]]
+    structured_response: NotRequired[Annotated[ResponseT, OmitFromInput]]
+#+end_src
+
+Reducer is =add_messages= (full-list semantics).  No =DeltaChannel=
+anywhere in =langgraph.channels= today.
+
+Post-bump investigation step (drives this section):
+1. =./.venv/bin/pip install --upgrade deepagents==0.6.1=, let resolver
+   pull matching =langgraph/langchain= pins.
+2. =python -c "from langgraph.channels import DeltaChannel; help(DeltaChannel)"=
+3. =python -c "import inspect; from langchain.agents.middleware.types
+   import AgentState; print(inspect.getsource(AgentState))"=
+
+Two possibilities:
+- *Case A — default:* =AgentState.messages= already wraps a
+  =DeltaChannel=.  No caller change.  Just bump pins and re-measure.
+- *Case B — opt-in:* Caller declares a custom state schema with
+  =Annotated[list[AnyMessage], DeltaChannel(snapshot_frequency=K)]=
+  and passes it through =create_deep_agent(state_schema=...)= (if
+  exposed) or via a deepagents-side hook.  In that case, edit the
+  three call sites in =assist/agent.py= (≈ lines 194, 248, 366).
+
+To be filled in after the bump.
+
+* Upgrade scope
+Pins to bump (from =requirements.txt=):
+- L23  =deepagents==0.5.1=
+- L70  =langgraph==1.1.6=
+- L71  =langgraph-checkpoint==4.0.0=
+- L72  =langgraph-checkpoint-sqlite==3.0.3=
+- L73  =langgraph-prebuilt==1.0.9=
+
+Possibly coupled (let resolver decide):
+- =langchain==1.2.15=, =langchain-core==1.2.28=, the provider adapters
+  (=langchain-anthropic=, =langchain-openai=, =langchain-google-genai=),
+  =langgraph-sdk==0.3.3=.
+
+=pip freeze= diff goes here verbatim after the bump.
+
+* Harness
+Two complementary measurements on the same branch:
+
+** Primary — synthetic StateGraph (deterministic, fast)
+=edd/spike/measure_deltachannel.py= — builds a minimal =StateGraph=
+with one node that appends a synthetic 50 KB =ToolMessage= per
+super-step.  Runs N ∈ {20, 50, 100} super-steps against a real
+=SqliteSaver= and records bytes-on-disk + row count + average blob
+size every 5 steps.
+
+Why minimal-StateGraph, not =create_deep_agent=:
+- Isolates =DeltaChannel='s effect on serialization from any
+  middleware variability.
+- Runs in seconds without a model or network dependency.
+- Reproducible byte counts (= same run = same bytes ± dict ordering).
+
+** Secondary — realistic research eval
+=edd/eval/test_research_multi_turn_token_regression.py= (already in
+tree, 3 sequential research turns through the real research subagent).
+Reuse as-is.  Records final DB size on baseline vs spike.  Realism
+check — if synthetic shows 30× and this shows 3×, synthetic isn't
+representative.
+
+** Eval-window discipline
+Synthetic harness lives in =edd/spike/= (NOT picked up by
+=scripts/run-evals.sh='s =edd/eval/test_*.py= glob), safe any time.
+Research multi-turn eval IS in that glob; schedule outside the 23:00–
+03:00 LLM-queue window per
+=memory/reference_nightly_eval_window.md=.
+
+* Results
+
+Synthetic harness, 50 KB payload per super-step, plain =SqliteSaver=,
+=langgraph==1.1.6= / =deepagents==0.5.1= / =langchain==1.2.15=.
+
+| Workload         | Baseline bytes | Spike bytes | Reduction | Rollback OK? |
+|------------------+----------------+-------------+-----------+--------------|
+| Synthetic N=20   |     34,230,272 |             |           |              |
+| Synthetic N=50   |    196,947,968 |             |           |              |
+| Synthetic N=100  |    779,472,896 |             |           |              |
+| Research 3-turn  |                |             |           |              |
+
+Secondary table — separates per-blob shrinkage from row-count change:
+
+| Workload         | Baseline (rows, avg blob)        | Spike (rows, avg blob) |
+|------------------+----------------------------------+------------------------|
+| Synthetic N=20   | 63 rows, avg 524 KB              |                        |
+| Synthetic N=50   | 153 rows, avg 1.28 MB            |                        |
+| Synthetic N=100  | 303 rows, avg 2.55 MB            |                        |
+
+Baseline shape:
+- Three checkpoint rows per super-step (pre-step / post-step / end);
+  rows grow as 3N + 3.
+- Avg blob bytes grow linearly with N (full-list snapshot semantics),
+  so file bytes grow ≈ quadratically with N.  Exactly the prod 187 GB
+  symptom in miniature.
+- Schema tables: =['checkpoints', 'writes']= — pre-bump baseline; the
+  table list goes into the schema-drift check above.
+
+Full trajectory pasted from =edd/spike/measure_deltachannel.py= run
+output (see git history on the spike branch for raw output).
+
+* Rollback validation
+=RollbackRunnable= (=assist/checkpoint_rollback.py:97-136=) calls
+=agent.get_state_history(config)= and indexes =target_idx = depth + 1=.
+If =DeltaChannel= exposes delta rows as their own checkpoints, the
+math may land on a partial state.  Force a =BadRequestError= at
+turn K and check rollback for target indices 1 / 5 / 12 (straddling
+=snapshot_frequency= boundary, assuming default K=10).
+
+| Boundary case        | Pass? | Notes |
+|----------------------+-------+-------|
+| Rollback depth 1     |       |       |
+| Rollback depth 5     |       |       |
+| Rollback depth 12    |       |       |
+
+If any regress, mark spike "no-go on rollback safety" regardless of
+byte numbers.
+
+* Decision
+Apply criteria set before measurement (do not move the goalposts):
+
+Let R = baseline_bytes / spike_bytes at N=100 synthetic.
+
+- *R ≥ 20× and rollback OK* → /scrap Layer 2./  Follow-up PR:
+  "Replace per-thread retention with DeltaChannel; relax eviction
+  threshold to 100 KB."  PR #88 closes; #89 lands with adjusted
+  threshold.
+- *5× ≤ R < 20× and rollback OK* → /keep Layer 2, raise
+  =ASSIST_RETAIN_LAST= 10 → 50./  Both PRs land as-is; follow-up
+  commit bumps the env default.
+- *R < 5× OR rollback regresses* → /no-go./  Close this branch;
+  merge #88 and #89 unchanged.
+
+R thresholds: 20× = half the blog's 40× claim (our mixed workload is
+not the all-research blog case).  Below 5× = doesn't meaningfully
+attack the 187 GB problem.
+
+(Decision and final numbers go here after measurement.)
+
+* Follow-up
+- PR title + scope (or close-out note) goes here.
+- Note for both branches: Layer 0 (per-thread count cap, already
+  shipped) is /unaffected/ by this spike — it caps thread count, not
+  per-thread bytes.
+
+* Risks observed
+1. *Case A vs Case B uncertainty.*  Until pip install + AgentState
+   inspection completes, we don't know whether the upgrade is "bump
+   pins and done" or "rewrite agent.py call sites".  If neither path
+   exposes a clean override, fall back to no-go (a deepagents
+   monkey-patch is acceptable on this throwaway branch for
+   measurement, but NOT for prod).
+2. *=DeltaChannel= beta posture.*  Treat it as beta even in 1.2.  If
+   the v0.6.1 changelog says "experimental" or "preview", that itself
+   is a no-go signal for scrapping mature Layer 2/3 code.
+3. *Schema drift breaks PR #88/#89 silently.*  =CheckpointRetentionSaver=
+   has =EXPECTED_TABLES = frozenset({"checkpoints", "writes"})= and
+   disables pruning on drift.  =EvictionSaver= walks
+   =checkpoint["channel_values"]["messages"]= directly.  If
+   =DeltaChannel= adds a =deltas= table or nests channel values, both
+   wrappers degrade silently.  Spike doesn't trigger this (measures
+   plain SqliteSaver), but the go-decision must call it out for the
+   follow-up PR.
+4. *=RollbackRunnable= history depth.*  =max_rollback_depth=3=
+   (=checkpoint_rollback.py:53=).  If =DeltaChannel= exposes one
+   history entry per delta, depth-3 reaches less than one real turn.
+   Probe explicitly in the rollback table above.
+5. *Inherited DDGS flake.*  Realistic eval uses real DuckDuckGo and
+   has timed out repeatedly (see PR #89 session notes).  Re-run on
+   network failure; don't gate the go-decision on it.
+6. *One-thread bias.*  =DeltaChannel= helps per-thread bytes only.
+   Layer 0 (thread-count cap) still ships regardless.
