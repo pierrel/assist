@@ -133,8 +133,20 @@ snapshot_frequency=K)= on the =messages= channel).
 The N=20 K=50 row (8,361×) is misleading — at N=20 the first full
 snapshot hasn't fired yet (K=50 means snapshots only every 50
 super-steps), so the DB still has only the seed row.  The N=50 and
-N=100 numbers are the load-bearing ones; the N=100 K=50 case
-matches the deepagents 0.6 blog's ~40× claim almost exactly (43×).
+N=100 numbers are the load-bearing ones.
+
+*Important caveat:* this is a /synthetic/ workload — a constant
+50 KB =ToolMessage= per super-step.  Real prod turns include
+variable-size =HumanMessage= + =AIMessage= thinking blocks + N
+=ToolMessage=s per step, with =ContextAwareToolEvictionMiddleware=
+actively shrinking content mid-thread.  43× is best-case for this
+upper-bound shape; matching the deepagents 0.6 blog's ~40× claim is
+expected on /this/ workload because the blog also used a synthetic
+harness with constant per-step payload.  *The realistic 3-turn
+research eval (=test_research_multi_turn_token_regression.py=) was
+not run as part of this spike;* schedule it post-merge to validate
+the per-thread reduction holds on real research traffic before
+quoting the 43× number to operators.
 
 Secondary table — separates per-blob shrinkage from row-count change:
 
@@ -167,6 +179,10 @@ turn K and check rollback for target indices 1 / 5 / 12 (straddling
 
 Harness: =edd/spike/test_rollback_under_deltachannel.py=.  N=15
 super-steps with K=10, so depth=12 straddles the snapshot boundary.
+The "step" column reports LangGraph's internal step counter
+(=metadata.get("step")=), which increments per checkpoint write —
+about 3 per super-step (pre-step, post-step, end) — so a 15-super-
+step run produces history entries with steps up to ~46.
 
 | Boundary case        | Pass? | Notes                                                            |
 |----------------------+-------+------------------------------------------------------------------|
@@ -174,14 +190,13 @@ super-steps with K=10, so depth=12 straddles the snapshot boundary.
 | Rollback depth 5     |  yes  | target step 40 (42 msgs) → resumed step has 45 msgs              |
 | Rollback depth 12    |  yes  | target step 33 (34 msgs) → resumed step has 37 msgs; spans K=10  |
 
-=app.get_state_history(cfg)= returned 48 entries for 15 super-steps
-+ seed (≈3 entries per superstep, matching the baseline checkpoint-
-row pattern).  Each rolled-back =target.config= resumes cleanly
-through =app.invoke(...)=; resumed message count = target +
-(seed turn input) + (one new step's AIMessage + ToolMessage) as
-expected.  No partial-state failures at the snapshot boundary —
-=DeltaChannel='s replay is transparent to =RollbackRunnable='s
-=target_idx = depth + 1= math.
+Note this test exercises =app.get_state_history(cfg)= shape +
+=app.invoke(input, target_config)= resume, the two LangGraph
+primitives =RollbackRunnable= depends on (see
+=assist/checkpoint_rollback.py:97,131,144=).  A separate test in the
+same file (=test_rollback_runnable_under_deltachannel=) installs a
+fake model that raises =BadRequestError= and drives the full
+=invoke_with_rollback= path end-to-end against DeltaChannel.
 
 * Decision
 
@@ -230,12 +245,26 @@ Concretely:
   weekly =VACUUM= reclaims any deletion freelist.  Revisit if/when
   =DeltaChannel= stabilizes and we can rewrite Layer 2 to prune by
   delta-epoch instead of by row.
-- *Keep PR #89* (Layer 3 — tool-result eviction at write time).
-  Compounds cleanly with =DeltaChannel=: Layer 3 shrinks =ToolMessage=
-  content /before/ serialization, so the per-write payload that
-  =DeltaChannel= stores as a delta is already small.  The two are
-  orthogonal — different axes of the same problem.  Address PR
-  #89's DDGS-mock eval flake separately.
+- *Keep PR #89* (Layer 3 — tool-result eviction at write time) *only after
+  it is made `_DeltaSnapshot`-aware.*  PR #89's =EvictionSaver= walks
+  =checkpoint["channel_values"]["messages"]= as a =list=.  Under
+  =DeltaChannel=, that field is either =None= (non-snapshot rows — the
+  full messages list lives in the writes chain) or a
+  =langgraph.channels.delta._DeltaSnapshot= instance (snapshot rows
+  fired every =snapshot_frequency=50= super-steps).  Direct iteration
+  raises on snapshot rows; =None= is silently skipped.  So as-shipped,
+  PR #89 would only ever evict on the writes path (=put_writes=) and
+  /never/ on the snapshot path (=put=), which is the heaviest row to
+  evict.  Empirically verified at K=3 N=7 on this branch:
+  =channel_values["messages"]= type is =NoneType= on 23 of 24 rows and
+  =_DeltaSnapshot= on the snapshot row.  Concretely PR #89 needs:
+  =isinstance(messages, _DeltaSnapshot)= unwrap → evict → rewrap;
+  =None= → no-op (already evicted upstream); =list= → existing path
+  (covers the writes-call shape).  Plus an eval asserting eviction
+  actually fires on a K-aligned step.  Layer 3 still earns its place
+  conceptually — it shrinks payload before serialization, compounding
+  with deltas — but the wiring needs the snapshot-aware branch first.
+  Address PR #89's DDGS-mock eval flake in the same follow-up.
 
 * Follow-up
 - This PR's scope: pin bumps + spike artifacts (doc + harness) as the
