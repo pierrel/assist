@@ -46,9 +46,10 @@ class _DeepAgentState(AgentState):
 
 …and passes =state_schema=_DeepAgentState= to =create_agent= at
 =graph.py:776=.  So *every* caller of =create_deep_agent= picks up
-=DeltaChannel= automatically once the pin bumps — including all three
-of our call sites at =assist/agent.py:194, 248, 366=.  No code edits
-required.
+=DeltaChannel= automatically once the pin bumps — including all four
+call sites in this repo: =assist/agent.py:194, 248, 366= (main /
+context / research agents) plus =edd/agent.py:40= (eval-side agent
+builder).  No code edits required.
 
 The reducer is =deepagents._messages_reducer._messages_delta_reducer=
 (batch-aware version of =add_messages= — handles =reducer(state,
@@ -72,22 +73,31 @@ production wire-up faithfully.
 This warning is load-bearing for the decision below.
 
 * Upgrade scope
-Pins targeted for the upgrade (from =requirements.txt=):
-- L23  =deepagents==0.5.1= → bump
-- L70  =langgraph==1.1.6= → bump
-- L71  =langgraph-checkpoint==4.0.0= → bump
+Pins targeted for the upgrade (post-bump line numbers in
+=requirements.txt=):
+- L25 =deepagents= 0.5.1 → 0.6.1 — bumped
+- L72 =langgraph= 1.1.6 → 1.2.0 — bumped
+- L73 =langgraph-checkpoint= 4.0.0 → 4.1.0 — bumped
 
-Pins that turned out *not* to need a bump (resolver left them):
-- =langgraph-checkpoint-sqlite==3.0.3= — unchanged
-- =langgraph-sdk==0.3.3= — unchanged
-- =langgraph-prebuilt==1.0.9= — resolver moved to 1.1.0 (transitive
-  from new langgraph)
-- =langchain-openai==1.1.9= — unchanged
+Pins the resolver left unchanged:
+- L74 =langgraph-checkpoint-sqlite= 3.0.3 — unchanged
+- L76 =langgraph-sdk= 0.3.3 — unchanged
+- L70 =langchain-openai= 1.1.9 — unchanged
+- L71 =langchain-text-splitters= 1.1.0 — unchanged
 
-Pins the resolver moved as transitive deps of the bumps:
-- =langchain==1.2.15=, =langchain-core==1.2.28=, =langchain-anthropic=,
-  =langchain-google-genai=, =anthropic=, =google-auth=, =google-genai=,
-  =langsmith=, =langgraph-prebuilt=.
+Pins the resolver moved as transitive deps of the bumps (recorded
+here for audit completeness):
+- =langchain= 1.2.15 → 1.3.1
+- =langchain-core= 1.2.28 → 1.4.0
+- =langchain-anthropic= 1.4.0 → 1.4.3
+- =langchain-google-genai= 4.2.1 → 4.2.2
+- =langgraph-prebuilt= 1.0.9 → 1.1.0 (transitive from new langgraph
+  1.2 — we did not target this pin, the resolver moved it)
+- =anthropic= 0.92.0 → 0.102.0
+- =google-auth= 2.47.0 → 2.53.0
+- =google-genai= 1.58.0 → 1.75.0
+- =langsmith= 0.6.3 → 0.8.5
+- new transitives: =cffi= 2.0.0, =cryptography= 48.0.0, =pycparser= 3.0
 
 Actual =pip install --upgrade deepagents==0.6.1= resolver moves:
 
@@ -146,8 +156,9 @@ representative.
 Synthetic harness lives in =edd/spike/= (NOT picked up by
 =scripts/run-evals.sh='s =edd/eval/test_*.py= glob), safe any time.
 Research multi-turn eval IS in that glob; schedule outside the 23:00–
-03:00 LLM-queue window per
-=memory/reference_nightly_eval_window.md=.
+03:00 LLM-queue window — see =scripts/run-evals.sh= for the cron
+schedule and =scripts/crontab.example= for the entry.  (This window
+is the user's saved operational preference; not a file in this repo.)
 
 * Results
 
@@ -343,29 +354,41 @@ Concretely:
   Reliability.
 
 * Risks observed
-1. *Case A vs Case B uncertainty.*  Until pip install + AgentState
-   inspection completes, we don't know whether the upgrade is "bump
-   pins and done" or "rewrite agent.py call sites".  If neither path
-   exposes a clean override, fall back to no-go (a deepagents
-   monkey-patch is acceptable on this throwaway branch for
-   measurement, but NOT for prod).
-2. *=DeltaChannel= beta posture.*  Treat it as beta even in 1.2.  If
-   the v0.6.1 changelog says "experimental" or "preview", that itself
-   is a no-go signal for scrapping mature Layer 2/3 code.
-3. *Schema drift breaks PR #88/#89 silently.*  =CheckpointRetentionSaver=
-   has =EXPECTED_TABLES = frozenset({"checkpoints", "writes"})= and
-   disables pruning on drift.  =EvictionSaver= walks
-   =checkpoint["channel_values"]["messages"]= directly.  If
-   =DeltaChannel= adds a =deltas= table or nests channel values, both
-   wrappers degrade silently.  Spike doesn't trigger this (measures
-   plain SqliteSaver), but the go-decision must call it out for the
-   follow-up PR.
-4. *=RollbackRunnable= history depth.*  =max_rollback_depth=3=
-   (=checkpoint_rollback.py:53=).  If =DeltaChannel= exposes one
-   history entry per delta, depth-3 reaches less than one real turn.
-   Probe explicitly in the rollback table above.
-5. *Inherited DDGS flake.*  Realistic eval uses real DuckDuckGo and
-   has timed out repeatedly (see PR #89 session notes).  Re-run on
-   network failure; don't gate the go-decision on it.
-6. *One-thread bias.*  =DeltaChannel= helps per-thread bytes only.
-   Layer 0 (thread-count cap) still ships regardless.
+(Risks from the original planning section that have been *resolved*
+during the spike are kept here for traceability with their status.)
+
+1. *Case A vs Case B uncertainty.*  /Resolved — Case A./  Confirmed
+   empirically: =deepagents 0.6.1= ships =_DeepAgentState= with
+   =DeltaChannel(_messages_delta_reducer, snapshot_frequency=50)= on
+   the messages channel (=graph.py:63-66=) and passes
+   =state_schema=_DeepAgentState= to =create_agent= (=graph.py:776=).
+   Every =create_deep_agent= caller in this repo (4 sites)
+   automatically picks it up — no =assist/agent.py= edits required.
+
+2. *=DeltaChannel= beta posture.*  /Confirmed beta;/ docstring
+   warning quoted under §Wire-up.  Drove the close-#88 decision (we
+   don't want a row-pruning wrapper depending on an unstable
+   write-chain contract).
+
+3. *Schema drift breaks PR #88/#89 silently.*  /Half-resolved./
+   Spike confirmed tables remain =['checkpoints', 'writes']= — no
+   new =deltas= table, so PR #88's =EXPECTED_TABLES= guard does
+   NOT trip.  BUT empirically =channel_values["messages"]= becomes
+   =None= on most rows and =_DeltaSnapshot(value=[...])= on snapshot
+   rows; PR #89's =EvictionSaver= iterates that as a list and breaks
+   on both shapes.  Hence the hold-#89 decision.
+
+4. *=RollbackRunnable= history depth.*  /Resolved — works./
+   =probe_invoke_with_rollback= exercises the full path with K=10
+   and rollback at depth straddling the snapshot boundary.  All
+   probes pass; recovered state has expected messages count.
+
+5. *Inherited DDGS flake.*  /Avoided./  We did not run the realistic
+   eval as part of this spike (synthetic numbers + 407 unit tests
+   were considered sufficient given the close-#88 / hold-#89
+   decision).  Scheduling the realistic eval is now a post-merge
+   task.
+
+6. *One-thread bias.*  /Acknowledged./  =DeltaChannel= helps per-
+   thread bytes only.  Layer 0 (thread-count cap, already shipped)
+   covers the fleet axis regardless of this PR.
