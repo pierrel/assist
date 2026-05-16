@@ -19,6 +19,7 @@ from assist.sandbox import DockerSandboxBackend
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
+from assist.middleware.output_sanitization import OutputSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
@@ -130,8 +131,11 @@ def create_agent(model: BaseChatModel,
     # eviction is delegated to deepagents' FilesystemMiddleware
     # (default 20k-token cap).  Our previous ContextAwareToolEvictionMiddleware
     # was redundant with both and was deleted on 2026-05-16 — see
-    # docs/2026-05-16-context-management-overhaul.org.
+    # docs/2026-05-16-context-management-overhaul.org.  We kept its
+    # ANSI/control-char sanitization in OutputSanitizationMiddleware
+    # (proactive, before content lands in state).
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+          OutputSanitizationMiddleware(),
           write_collision_mw, git_push_blocker_mw,
           loop_detection_mw, ThreadQueueMiddleware(), empty_response_recovery_mw]
 
@@ -232,6 +236,8 @@ def create_context_agent(model: BaseChatModel,
     # Context compaction delegated to deepagents' SummarizationMiddleware
     # (auto-installed by create_deep_agent at fraction=0.85).  Per-result
     # eviction delegated to deepagents' FilesystemMiddleware (20k cap).
+    # Proactive ANSI/control-char strip from tool output:
+    base_mw.append(OutputSanitizationMiddleware())
     base_mw.append(LoopDetectionMiddleware())
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
@@ -285,6 +291,8 @@ def create_research_agent(model: BaseChatModel,
     # (auto-installed by create_deep_agent at fraction=0.85, with LLM-
     # summarization + offload to /conversation_history/{thread_id}.md).
     # Per-result tool-output eviction delegated to FilesystemMiddleware.
+    # Proactive ANSI/control-char strip from tool output:
+    base_mw.append(OutputSanitizationMiddleware())
     # Rewrite write_file collision errors before loop detection sees them —
     # research-agent is the most likely path to hit the filename-mutation
     # trap (multi-pass critique → "I have completed the research" → another
