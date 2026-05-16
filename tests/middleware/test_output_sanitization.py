@@ -158,6 +158,82 @@ def test_middleware_command_with_clean_messages_passes_through():
     assert out is cmd  # no copy when nothing changed
 
 
+def test_command_preserves_goto_on_rebuild():
+    """When sanitization triggers a Command rebuild, goto must survive.
+    Otherwise we silently break tools that combine state updates with
+    parent-graph handoffs."""
+    from langgraph.types import Send
+    mw = OutputSanitizationMiddleware()
+    dirty = ToolMessage(content="\x1b[31merror\x1b[0m", tool_call_id="c1")
+    cmd = Command(
+        update={"messages": [dirty], "other": 42},
+        goto=[Send("next_node", {"x": 1})],
+    )
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(cmd))
+    assert isinstance(out, Command)
+    # Sanitization happened
+    assert out.update["messages"][0].content == "error"
+    # Control-flow + other update fields preserved
+    assert out.goto == cmd.goto
+    assert out.update["other"] == 42
+
+
+def test_command_preserves_graph_and_resume_on_rebuild():
+    mw = OutputSanitizationMiddleware()
+    dirty = ToolMessage(content="\x1b[31merror\x1b[0m", tool_call_id="c1")
+    cmd = Command(
+        update={"messages": [dirty]},
+        graph="PARENT",
+        resume={"foo": "bar"},
+    )
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(cmd))
+    assert out.graph == "PARENT"
+    assert out.resume == {"foo": "bar"}
+    assert out.update["messages"][0].content == "error"
+
+
+def test_list_content_sanitizes_text_blocks():
+    """ToolMessage.content can be list[str | dict].  ANSI in a text
+    block must be stripped — Copilot review #3 caught that the old
+    early-return on non-str content was a hole."""
+    mw = OutputSanitizationMiddleware()
+    msg = ToolMessage(
+        content=[
+            {"type": "text", "text": "\x1b[31mERROR\x1b[0m line 1"},
+            {"type": "text", "text": "clean line 2"},
+            {"type": "image", "url": "..."},  # non-text block passes through
+        ],
+        tool_call_id="c1",
+    )
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(msg))
+    assert out is not msg
+    assert out.content[0] == {"type": "text", "text": "ERROR line 1"}
+    assert out.content[1] == {"type": "text", "text": "clean line 2"}
+    assert out.content[2] == {"type": "image", "url": "..."}
+
+
+def test_list_content_clean_passes_through():
+    """No-op when nothing in the list needs sanitizing."""
+    mw = OutputSanitizationMiddleware()
+    msg = ToolMessage(
+        content=[{"type": "text", "text": "all clean"}, {"type": "image", "url": "x"}],
+        tool_call_id="c1",
+    )
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(msg))
+    assert out is msg
+
+
+def test_list_content_bare_strings_in_list():
+    """ToolMessage.content can also be list[str] (without dict wrappers)."""
+    mw = OutputSanitizationMiddleware()
+    msg = ToolMessage(
+        content=["\x1b[31mred\x1b[0m", "clean"],
+        tool_call_id="c1",
+    )
+    out = mw.wrap_tool_call(request=None, handler=_identity_handler(msg))
+    assert out.content == ["red", "clean"]
+
+
 def test_middleware_command_leaves_ai_messages_alone():
     """AIMessage with ANSI is left alone — that's BadRequestRetry's job
     (defense-in-depth path; this middleware only touches ToolMessage)."""

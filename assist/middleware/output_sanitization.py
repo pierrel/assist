@@ -65,22 +65,55 @@ def _sanitize(text: str) -> str:
     return _CONTROL_RE.sub("", text)
 
 
+def _sanitize_content(content):
+    """Sanitize ToolMessage content of either str or list[str|dict] shape.
+
+    Returns ``(new_content, changed)``.  When ``changed`` is False, the
+    returned ``new_content`` is the same object identity as the input.
+    """
+    if isinstance(content, str):
+        sanitized = _sanitize(content)
+        return (sanitized, sanitized != content)
+    if isinstance(content, list):
+        new_parts = []
+        changed = False
+        for part in content:
+            if isinstance(part, str):
+                cleaned = _sanitize(part)
+                if cleaned != part:
+                    changed = True
+                new_parts.append(cleaned)
+            elif isinstance(part, dict) and "text" in part and isinstance(part["text"], str):
+                cleaned = _sanitize(part["text"])
+                if cleaned != part["text"]:
+                    new_parts.append({**part, "text": cleaned})
+                    changed = True
+                else:
+                    new_parts.append(part)
+            else:
+                # Non-text blocks (image, audio, etc.) pass through.
+                new_parts.append(part)
+        return (new_parts if changed else content, changed)
+    # Unknown content shape (None / bytes / etc.) — pass through.
+    return (content, False)
+
+
 def _sanitize_tool_message(msg: ToolMessage) -> ToolMessage:
     """Return msg unchanged if no sanitization needed; else a new copy
-    with sanitized content."""
-    if not isinstance(msg.content, str):
-        # list-of-blocks content — skip; only string ToolMessage content
-        # carries the ANSI we care about.
+    with sanitized content.  Handles both str and list-of-blocks content."""
+    new_content, changed = _sanitize_content(msg.content)
+    if not changed:
         return msg
-    sanitized = _sanitize(msg.content)
-    if sanitized == msg.content:
-        return msg
+    if isinstance(msg.content, str):
+        stripped_bytes = len(msg.content) - len(new_content)
+    else:
+        stripped_bytes = -1  # list-of-blocks; not worth precise accounting
     logger.debug(
-        "OutputSanitization: stripped %d bytes from %s tool output",
-        len(msg.content) - len(sanitized),
+        "OutputSanitization: stripped %s bytes from %s tool output",
+        stripped_bytes if stripped_bytes >= 0 else "?",
         msg.name or "tool",
     )
-    return msg.model_copy(update={"content": sanitized})
+    return msg.model_copy(update={"content": new_content})
 
 
 def _sanitize_result(result):
@@ -111,7 +144,16 @@ def _sanitize_result(result):
         if not mutated:
             return result
         new_update = {**update, "messages": new_messages}
-        return Command(update=new_update)
+        # Preserve control-flow fields (goto / graph / resume) — Command
+        # is a dataclass with (graph, update, resume, goto); rebuilding
+        # with only `update` silently drops the others, which would
+        # break any tool that combines navigation with state updates.
+        return Command(
+            graph=result.graph,
+            update=new_update,
+            resume=result.resume,
+            goto=result.goto,
+        )
     # Unknown return type — pass through.
     return result
 
