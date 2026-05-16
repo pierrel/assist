@@ -105,12 +105,12 @@ def _sanitize_tool_message(msg: ToolMessage) -> ToolMessage:
     if not changed:
         return msg
     if isinstance(msg.content, str):
-        stripped_bytes = len(msg.content) - len(new_content)
+        stripped_chars = len(msg.content) - len(new_content)
     else:
-        stripped_bytes = -1  # list-of-blocks; not worth precise accounting
+        stripped_chars = -1  # list-of-blocks; not worth precise accounting
     logger.debug(
-        "OutputSanitization: stripped %s bytes from %s tool output",
-        stripped_bytes if stripped_bytes >= 0 else "?",
+        "OutputSanitization: stripped %s chars from %s tool output",
+        stripped_chars if stripped_chars >= 0 else "?",
         msg.name or "tool",
     )
     return msg.model_copy(update={"content": new_content})

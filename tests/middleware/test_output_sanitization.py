@@ -101,12 +101,20 @@ def test_sanitize_tool_message_no_change_returns_same_instance():
     assert out is msg
 
 
-def test_sanitize_tool_message_skips_list_content():
-    """ToolMessage with list-of-blocks content is passed through untouched."""
+def test_sanitize_tool_message_passes_clean_list_content_through():
+    """ToolMessage with list-of-blocks content that has nothing to sanitize
+    returns the same instance (no allocation when no change needed)."""
     msg = ToolMessage(
         content=[{"type": "text", "text": "hi"}],
         tool_call_id="c1",
     )
+    out = _sanitize_tool_message(msg)
+    assert out is msg
+
+
+def test_sanitize_tool_message_handles_unknown_content_shape():
+    """Bytes / None / other unknown content types pass through untouched."""
+    msg = ToolMessage(content=b"raw bytes", tool_call_id="c1")
     out = _sanitize_tool_message(msg)
     assert out is msg
 
@@ -333,21 +341,26 @@ def test_awrap_passes_through_clean():
 
 
 def test_middleware_is_wired_into_create_agent_path():
-    """Construct the agent module's middleware list and confirm
-    OutputSanitizationMiddleware appears in it.  Guards against a
-    future refactor that drops the wiring."""
+    """Confirm OutputSanitizationMiddleware is *instantiated* in each
+    agent factory.  Guards against a future refactor that drops the
+    wiring.  Checks for `OutputSanitizationMiddleware(` (with paren) so
+    a comment-only mention (e.g., the `mw = [..., OutputSanitization...]`
+    docstring) doesn't falsely satisfy the test."""
     import inspect
     from assist import agent as agent_module
-    # Read the source to confirm OutputSanitizationMiddleware is
-    # referenced in each agent factory.  Cheap structural test; avoids
-    # spinning up a real ChatModel.
-    src = inspect.getsource(agent_module)
-    # Three factory functions
     factories = ["create_agent", "create_context_agent", "create_research_agent"]
     for factory in factories:
         fn = getattr(agent_module, factory)
         fsrc = inspect.getsource(fn)
-        assert "OutputSanitizationMiddleware" in fsrc, (
-            f"OutputSanitizationMiddleware missing from {factory} — "
+        # Strip comment lines so a comment mentioning the class name
+        # doesn't satisfy the check — only real `OutputSanitizationMiddleware(`
+        # call sites count.
+        code_lines = [
+            line for line in fsrc.split("\n")
+            if not line.lstrip().startswith("#")
+        ]
+        code = "\n".join(code_lines)
+        assert "OutputSanitizationMiddleware(" in code, (
+            f"OutputSanitizationMiddleware() not instantiated in {factory} — "
             f"future refactor regression?"
         )

@@ -76,7 +76,8 @@ if it cuda-loads on a /clone, plus margin for any concurrent burst.
 * Design — Option 3 (hybrid, subtractive)
 
 The change is mostly deletion — we stop fighting upstream defaults.
-One small new middleware (=OutputSanitizationMiddleware=, ~80 LOC)
+One small new middleware (=OutputSanitizationMiddleware=, ~200 LOC
+including docstrings and helpers)
 handles proactive ANSI/control-char strip on =ToolMessage= content,
 because neither deepagents' =FilesystemMiddleware= nor
 =SummarizationMiddleware= strips ANSI and reactive-only cleanup in
@@ -251,15 +252,18 @@ per user's saved preference).
 6. *Removing our middleware loses the failsafe IF =FilesystemMiddleware=
    or =SummarizationMiddleware= disabled in some future config.*
    Both are auto-installed by =create_deep_agent= and not removable
-   without a caller override.  All four of our =create_deep_agent=
-   sites use the default behavior.  Low risk.
+   without a caller override.  All four call sites in this repo
+   (=assist/agent.py:200, 254, 374= for general / context / research
+   agents + =edd/agent.py:40= for the eval-side builder) use the
+   default behavior.  Low risk.
 
 * Decision
 Apply the edits in §File-by-file edits.  Net diff is heavily subtractive
 (~324 LOC deleted from =context_aware_tool_eviction.py= + 3 instantiation
 sites + 1 import line; we removed redundancy with deepagents 0.6.1
 defaults).  Plus *one small new file* — =assist/middleware/output_sanitization.py=
-(~115 LOC) — because neither =FilesystemMiddleware= nor
+(~200 LOC incl. docstrings + helpers) — because neither
+=FilesystemMiddleware= nor
 =SummarizationMiddleware= strips ANSI/control chars, and reactive-only
 cleanup in =BadRequestRetry= doesn't persist sanitized state across
 turns.  =BadRequestRetry= broadens its own regex to a full ECMA-48
