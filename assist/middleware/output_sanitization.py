@@ -37,18 +37,19 @@ from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
 
-# Full CSI matcher: ESC `[` parameter-bytes (0x30-0x3f, includes `:<=>?` for
-# 24-bit color and private-mode sequences) intermediate-bytes (0x20-0x2f)
-# final-byte (0x40-0x7e).  Covers SGR (colors), cursor moves, erase, scroll,
-# private-mode set/reset, and DEC special sequences — i.e. everything a
-# terminal emits.  The narrower `\x1b\[[0-9;]*[mGKHF]` regex previously
-# embedded in the deleted ContextAwareToolEvictionMiddleware missed
-# `\x1b[2J` (clear screen), 24-bit color forms using `:`, and the full
-# cursor-movement set.
+# Full CSI matcher per ECMA-48: ESC `[` parameter-bytes (0x30-0x3f, includes
+# `:;<=>?` for 24-bit color and private-mode sequences) intermediate-bytes
+# (0x20-0x2f) final-byte (0x40-0x7e).  Covers SGR (colors), cursor moves,
+# erase, scroll, private-mode set/reset, and DEC special sequences — i.e.
+# everything a terminal emits.  The narrower `\x1b\[[0-9;]*[mGKHF]` regex
+# previously embedded in the deleted ContextAwareToolEvictionMiddleware
+# missed `\x1b[2J` (clear screen), 24-bit color forms using `:`, and the
+# full cursor-movement set.
 _CSI_RE = re.compile(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]")
 
 # Plus a sweep for non-whitespace control chars that can still break
@@ -63,13 +64,31 @@ def _sanitize(text: str) -> str:
     return _CONTROL_RE.sub("", text)
 
 
+def _sanitize_tool_message(msg: ToolMessage) -> ToolMessage:
+    """Return msg unchanged if no sanitization needed; else a new copy
+    with sanitized content."""
+    if not isinstance(msg.content, str):
+        # list-of-blocks content — skip; only string ToolMessage content
+        # carries the ANSI we care about.
+        return msg
+    sanitized = _sanitize(msg.content)
+    if sanitized == msg.content:
+        return msg
+    logger.debug(
+        "OutputSanitization: stripped %d bytes from %s tool output",
+        len(msg.content) - len(sanitized),
+        msg.name or "tool",
+    )
+    return msg.model_copy(update={"content": sanitized})
+
+
 class OutputSanitizationMiddleware(AgentMiddleware):
     """Strip ANSI / control chars from ``ToolMessage`` content in-state.
 
-    Runs after each tool call.  Compares before/after; if anything
-    changed, replaces the message content so the sanitized version is
-    what lands in ``state["messages"]`` (and therefore in any future
-    checkpoint, summarization read, or next-turn prompt).
+    Runs after each tool call.  The handler returns either a bare
+    ``ToolMessage`` (most common) or a ``Command(update={...})`` that
+    carries one or more messages plus other state updates.  We handle
+    both shapes — anything else passes through untouched.
     """
 
     name = "OutputSanitizationMiddleware"
@@ -77,29 +96,34 @@ class OutputSanitizationMiddleware(AgentMiddleware):
     def wrap_tool_call(self, request, handler):
         result = handler(request)
         try:
-            messages = getattr(result, "messages", None)
-            if not messages:
-                return result
-            mutated = False
-            new_messages = []
-            for msg in messages:
-                if isinstance(msg, ToolMessage) and isinstance(msg.content, str):
-                    sanitized = _sanitize(msg.content)
-                    if sanitized != msg.content:
-                        new_msg = msg.model_copy(update={"content": sanitized})
+            if isinstance(result, ToolMessage):
+                return _sanitize_tool_message(result)
+            if isinstance(result, Command):
+                update = getattr(result, "update", None)
+                if not isinstance(update, dict):
+                    return result
+                messages = update.get("messages")
+                if not messages:
+                    return result
+                mutated = False
+                new_messages = []
+                for msg in messages:
+                    if isinstance(msg, ToolMessage):
+                        new_msg = _sanitize_tool_message(msg)
+                        if new_msg is not msg:
+                            mutated = True
                         new_messages.append(new_msg)
-                        mutated = True
-                        logger.debug(
-                            "OutputSanitization: stripped %d bytes from %s",
-                            len(msg.content) - len(sanitized),
-                            msg.name or "tool",
-                        )
-                        continue
-                new_messages.append(msg)
-            if mutated:
-                return result.model_copy(update={"messages": new_messages})
+                    else:
+                        new_messages.append(msg)
+                if not mutated:
+                    return result
+                new_update = {**update, "messages": new_messages}
+                return Command(update=new_update)
+            # Unknown return type — pass through.
             return result
         except Exception as e:  # never block the tool path on sanitizer bugs
-            logger.warning("OutputSanitization: skipped due to %s: %s",
-                           type(e).__name__, e)
+            logger.warning(
+                "OutputSanitization: skipped due to %s: %s",
+                type(e).__name__, e,
+            )
             return result

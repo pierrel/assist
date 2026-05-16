@@ -205,13 +205,19 @@ per user's saved preference).
 
 * Risks observed
 
-1. *ANSI proactive vs reactive.*  Previously every tool result was
-   sanitized in =after_tool=; now sanitization is reactive (after
-   first BadRequestError per thread).  Cost: one extra LLM
-   round-trip on the first ANSI-bearing tool result.  Mitigation:
-   if eval shows this is a noticeable wall-clock penalty, add a
-   tiny =OutputSanitizationMiddleware= in a follow-up that only
-   does the ANSI regex in =after_tool=.
+1. *ANSI proactive vs reactive.*  /Resolved./  An initial pass deleted
+   the proactive sanitization and relied on =BadRequestRetry='s
+   reactive path.  Copilot review #1 caught that =BadRequestRetry=
+   only rewrites the in-flight model request body — it does NOT
+   persist the sanitized =ToolMessage= back to =state["messages"]=,
+   so ANSI would linger across turns and re-trigger BadRequest on
+   each subsequent prompt.  Fixed in commit 86cb49e by re-introducing
+   a tiny =OutputSanitizationMiddleware= that strips ANSI from
+   =ToolMessage= content in =wrap_tool_call= after-path.
+   Wired into all three agent factories plus the subagent safety
+   stack.  Defense-in-depth: =BadRequestRetry= keeps a broader CSI
+   regex for ANSI embedded in =AIMessage= content (which the
+   ToolMessage-only middleware does not touch).
 
 2. *Summarization-pass cost on Qwen3.6.*  Each compaction is an LLM
    call sending up to 4000 tokens (langchain default).  At ~40 tok/s
@@ -234,7 +240,8 @@ per user's saved preference).
    by reading both code paths.  Probe in the realistic eval.
 
 5. *Removing our middleware loses proactive ANSI sanitization on
-   non-error paths.*  See risk #1; same mitigation.
+   non-error paths.*  /Resolved./  See risk #1 — proactive
+   sanitization is preserved by =OutputSanitizationMiddleware=.
 
 6. *Removing our middleware loses the failsafe IF =FilesystemMiddleware=
    or =SummarizationMiddleware= disabled in some future config.*
@@ -252,8 +259,10 @@ that increases capability rather than reducing complexity.
 - =SummarizationToolMiddleware= (deepagents builtin) — gives the
   model a =compact_conversation= tool to proactively compact when
   it knows a sub-task wrapped up.  Defer until evals show benefit.
-- Optional proactive ANSI sanitization middleware if reactive cost
-  proves real.
+- (Done in 86cb49e: proactive ANSI sanitization via
+  =OutputSanitizationMiddleware=.  Originally planned as a
+  follow-up; Copilot review surfaced that reactive-only was
+  insufficient, so it landed in this PR.)
 - Consider raising CTX_SIZE to 200k after observing 131k behavior
   for ~1 week.
 - =SummarizationMiddleware= telemetry: count compactions per thread,

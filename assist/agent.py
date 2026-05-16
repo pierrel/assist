@@ -192,6 +192,7 @@ def create_agent(model: BaseChatModel,
         # call to an unretried APITimeoutError).
         "middleware": [_make_retry_middleware(),
                        BadRequestRetryMiddleware(max_retries=3),
+                       OutputSanitizationMiddleware(),
                        LoopDetectionMiddleware(),
                        EmptyResponseRecoveryMiddleware()],
     }
@@ -340,6 +341,9 @@ def create_research_agent(model: BaseChatModel,
     def _subagent_safety_mw():
         return [_make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
+                # Strip ANSI from sub-tool output (read_url HTML can carry
+                # raw escape sequences) before it lands in subagent state.
+                OutputSanitizationMiddleware(),
                 LoopDetectionMiddleware(),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
