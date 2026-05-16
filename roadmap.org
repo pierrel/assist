@@ -29,59 +29,140 @@ See [[file:docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org][docs/202
 ** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response
 ** TODO Self-healing flow on errors / suboptimal output
 See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].  Catch exceptions during agent execution and either spawn a remediation thread or surface for user-directed fix; reuse the "capture conversation" flow.
-** TODO Replace or sandbox =DDGS= (search_internet) — repeated hangs
-=assist/tools.py:43= calls =DDGS().text(query, max_results, backend="duckduckgo")=
-with no explicit timeout (DDGS default = 5s per engine query).  Two PRs
-across the 2026-05-16 work tripped over this:
+** TODO Tool-call mocking system for evals (record-and-replay cassettes)
+*Motivation.*  Eval runs default to real tool calls, which couples
+their pass/fail to live network reliability + provider-side response
+drift.  Concrete pain points:
+- 2026-05-16 PR #89 (Layer 3 eviction) —
+  =test_research_multi_turn_token_regression.py= timed out at 702s
+  with a stack trace showing =DDGS_*= worker threads stuck on
+  =work_queue.get(block=True)= waiting on real DuckDuckGo searches
+  that never returned.  0 HTTP requests visible in capture.
+- 2026-05-16 PR #101 (context overhaul) — same eval timed out at 900s;
+  deeper langgraph chain stuck on =subagent.invoke → runner.tick →
+  concurrent.futures.wait=, multiple idle DDGS workers in the executor.
+- DDG result drift: a "President of France" query returns different
+  ordering / different bodies week-to-week, making any eval that pins
+  response shape brittle.
 
-- *PR #89* (Layer 3 eviction) — =test_research_multi_turn_token_regression.py=
-  timed out at 702s with stack trace showing =DDGS_*= worker threads
-  stuck on =work_queue.get(block=True)= waiting on real DuckDuckGo
-  searches that never returned.  0 HTTP requests visible in capture.
-- *PR #101* (this context overhaul) — same eval timed out at 900s with
-  a deeper langgraph chain stuck; stack showed a similar pattern
-  (subagent.invoke → runner.tick → concurrent.futures.wait), with
-  multiple idle DDGS workers in the executor pool.
+A point fix for DDGS (timeout wrapper / subprocess kill / Tavily swap)
+only addresses one tool.  Every other network tool (=read_url=, any
+future API integration) has the same exposure.  Mocking at the
+tool-call layer is the architecturally right move.
 
-*Root cause hypothesis* (needs validation):
-1. =DDGS().text(...)= uses =wait(futures, timeout=self._timeout)= but
-   does NOT cancel futures left in =not_done=.  Hung workers keep
-   running in the executor.
-2. =DDGS()= instance is GC'd when =search_internet= returns, BUT the
-   shared =get_executor()= behavior across instances may keep the
-   thread pool alive across calls.
-3. The underlying HTTP lib (=primp=, Rust-based) does an uninterruptible
-   socket recv that =primp='s own timeout knob may not enforce.
-4. langgraph's parent =concurrent.futures.wait()= has no timeout, so
-   any hung future hangs the whole graph.
+*Design — cassette-style record-and-replay.*  Pattern after
+=pytest-recording= / =vcrpy= but at the *tool* layer (not HTTP layer),
+because our tools sit above the network and the tool return value is
+what assist actually consumes:
 
-*Three possible fixes, ordered by escalating intrusion:*
+1. *Cassette format.*  One JSON file per test, e.g.
+   =edd/eval/cassettes/test_research_multi_turn_token_regression.json=.
+   Top-level dict keyed by =(tool_name, args_hash)=.  Value is the
+   serialized tool return (string, dict, or list — whatever the tool
+   normally returns).  Args hash = stable sha256 of
+   =json.dumps(args, sort_keys=True)= so the same call with the same
+   args replays deterministically.
+2. *Replay path (default).*  A pytest fixture (autouse for
+   =edd/eval/=) wraps every tool registered with the agent.  On call:
+   look up =(tool_name, args_hash)= in the cassette.  Found →
+   return the recorded value.  Missing → fall through to the real
+   tool call, save the response into the cassette before returning.
+3. *Record-from-scratch mode.*  Env var (=ASSIST_EVAL_RECORD=1=) or
+   pytest marker (=@pytest.mark.eval_record=).  Deletes the existing
+   cassette and re-records from live calls.  Run manually when an
+   eval's expected behavior legitimately changes (e.g. a tool's
+   schema evolved).
+4. *Append mode (default for missing entries).*  Default behavior when
+   ASSIST_EVAL_RECORD is unset: replay matches, record misses.  This
+   means a brand-new test's first run records cassettes for it; second
+   run replays.  Net behavior: cassettes grow over time but never
+   block the test.
+5. *Strict mode.*  Env var (=ASSIST_EVAL_STRICT=1=) flips missing
+   entries from "fall through and record" to "fail loudly."  Use this
+   in CI so an unintended live tool call (e.g. a new tool call
+   introduced by an agent-prompt change) fails the test instead of
+   silently hitting the network.
+6. *Scope.*  Per-test cassette (not per-test-class or per-test-file)
+   — keeps blast radius small when a single test's prompt changes.
+   Cassette path derives from pytest's =request.node.nodeid=.
+7. *Time-sensitive determinism.*  Mock the agent's
+   =get_current_date()= analog (currently
+   =assist.promptable.base_prompt_for= injects =datetime.now()=) to
+   a frozen value during eval runs.  Cassettes assume a known wall
+   clock to be reproducible.
 
-1. *Cheapest:* wrap the whole =DDGS().text()= call in a thread-level
-   timeout via =concurrent.futures= with =as_completed(timeout=)=, and
-   return =[]= on TimeoutError.  Doesn't fix the leaked thread but
-   stops it from hanging the caller.
-2. *Medium:* run DDGS in a subprocess (subprocess.run with timeout=)
-   so a hung primp socket can be SIGKILL'd cleanly.  More process
-   overhead per search but bulletproof.
-3. *Right answer for prod:* switch to a paid search backend (Tavily,
-   Brave Search API, Google CSE) for prod and keep DDGS as a free-
-   tier fallback for dev.  Tavily integration exists upstream
-   (=langchain_community.tools.tavily_search=); already in
-   requirements.txt as =tavily==1.1.0=.
+*Implementation sketch:*
+- =edd/eval/conftest.py= — autouse fixture
+  =mock_tool_calls(request, tmp_path)= that installs the
+  wrap-and-replay shim on every tool the agent registers.  Uses
+  =unittest.mock.patch.object= per tool, or registers via a
+  middleware that intercepts =wrap_tool_call= (likely cleaner —
+  matches the existing middleware pattern in
+  =assist/middleware/=).
+- =edd/eval/_cassette.py= — load / save / hash logic.  Pure
+  functions, no pytest knowledge.
+- =edd/eval/cassettes/= — git-tracked JSON cassettes.  PR-time
+  review of cassette diffs is the human signal that an eval's
+  expected upstream-response shape changed.
+- pytest CLI: =--eval-record= (record all), =--eval-strict= (fail
+  on miss), default = replay-with-record-on-miss.
+
+*Why middleware (not monkeypatch) for the shim:*
+The agent registers tools via =deepagents.create_deep_agent=.  Tools
+are invoked through the =wrap_tool_call= chain we've already added
+several middlewares to (=OutputSanitizationMiddleware=,
+=GitPushBlockerMiddleware=, etc.).  A
+=CassetteReplayMiddleware= slots in at that layer with no special
+import-time knowledge, and works for both sync (=wrap_tool_call=)
+and async (=awrap_tool_call=) paths.  It also naturally handles
+subagent tool calls — they go through the same chain.
 
 *Verification path:*
-- =scripts/run-evals.sh edd/eval/test_research_multi_turn_token_regression.py=
-  is the regression that fails today.  Per-test pytest-timeout currently
-  600s; bump to a sane bound after the fix lands so the test fails
-  cleanly rather than hangs.
-- Look for the eval-window discipline note in
-  [[file:reference_nightly_eval_window.md]] — schedule any DDGS-heavy
-  validation outside 11p–3a per the cron lockout convention.
+- Pick one eval, e.g. =eval_large_tool_results.py= (already mocks
+  DDGS via =unittest.mock.patch('ddgs.DDGS.text', mock_ddg_search)=
+  — gradually migrate this hand-rolled mock to the cassette
+  system).
+- =scripts/run-evals.sh edd/eval/= — should run faster and
+  deterministically after migration.
+- Add a wiring test (=tests/test_cassette_replay.py=) that
+  constructs a 2-call sequence: first records, second replays,
+  cassette content matches expected hash.
 
-*Files to touch:* =assist/tools.py:43-56= for the wrap or backend swap,
-=requirements.txt= if dropping/adding deps, design doc per the
-doc-per-feature rule.
+*Files to touch:*
+- =edd/eval/conftest.py= (new)
+- =edd/eval/_cassette.py= (new)
+- =edd/eval/cassettes/= (new directory)
+- =assist/middleware/cassette_replay.py= (new) — likely lives in
+  the assist tree even though only eval-active, because it
+  participates in the middleware chain
+- Existing evals: gradually replace =@patch('ddgs.DDGS.text')=
+  blocks with cassette reliance
+- =scripts/run-evals.sh= — surface =--eval-record= / =--eval-strict=
+  flags
+- design doc per the doc-per-feature rule:
+  =docs/2026-MM-DD-eval-cassettes.org=
+
+*Replaces / makes obsolete:*
+- The earlier hypothesis-set for DDGS-specific fixes (timeout
+  wrapper, subprocess sandbox, Tavily swap).  Those become
+  follow-ups only if a SPECIFIC prod path needs them — eval
+  reliability is the real motivator and this addresses it
+  systemically.
+
+*Open questions for the implementing session:*
+1. Cassette diff readability for large tool results — JSON-pretty
+   helps but a 50 KB =read_url= response is hard to diff.  Maybe
+   gzip + base64 + a sidecar hash file?  Or accept the diff noise
+   and rely on PR review judgment.
+2. Tool-result drift detection — when running in append mode,
+   compare the live response to the cassette and warn if they
+   differ structurally (different keys / different list lengths).
+   Out of scope for v1; potential v2 feature.
+3. How to handle non-deterministic tool args (e.g., a tool that
+   uses a random ID).  Cassette miss → real call → mismatched
+   args every time → cassette never reused.  May need
+   "args canonicalizer" hooks per tool, or accept that some tools
+   bypass the cassette.
 
 ** TODO Clamp =glob= (and sibling fs tools) to the workspace
 On 2026-05-16, thread =20260516102611-410cae36= emitted =glob.glob("**/references/**/*", recursive=True)= from =/= inside the sandbox container after =LoopDetection= bounced the research-agent.  Walked =/proc=, =/sys=, and every mounted host path for 18+ minutes at 99% CPU before the container was killed, blocking the whole thread on the Docker exec stream.  Filesystem tools that accept a =path= argument should refuse paths outside the workspace (no =/=, no =..= traversal), and =glob= should reject unbounded-depth patterns that don't anchor inside the workspace.
