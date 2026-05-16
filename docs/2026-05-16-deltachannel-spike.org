@@ -7,6 +7,15 @@ only); close PR #88 (Layer 2); keep PR #89 (Layer 3)./*  See §Decision
 for the matrix evaluation and the beta-API + Layer-2-interaction
 caveats that drove the close-PR-88 call.
 
+*Note on referenced harness files:* the spike scripts
+=edd/spike/measure_deltachannel.py= and
+=edd/spike/probe_rollback_under_deltachannel.py= referenced below were
+removed before merge — the doc captures the methodology + numbers; the
+scripts served their purpose during validation and aren't needed in
+the long-lived tree.  See git history on the =spike-deltachannel=
+branch (commits =c83ff2f= through final) if a future session needs
+to re-run them.
+
 * Goal
 Decide, with numbers, whether LangGraph 1.2's =DeltaChannel= (shipped
 2026-05-12 alongside =deepagents 0.6.1=) delivers enough per-thread
