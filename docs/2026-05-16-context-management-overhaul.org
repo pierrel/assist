@@ -138,14 +138,23 @@ unrelated code.
 - Lines 285-291 (research agent): instantiation deleted.
 - Subagent =_subagent_safety_mw= unchanged (it never had eviction).
 
-** =assist/middleware/bad_request_retry.py= — extend ANSI strip
-=_strip_control_chars= currently catches only =[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]=.
-Add a pre-pass that strips ANSI escape sequences
-(=\x1b\[[0-9;]*[mGKHF]=) — the regex lifted from the deleted
-middleware.  Same =BadRequestRetryMiddleware._sanitize_text= entry
-point; cost: one extra retry round-trip on the /first/ ANSI-bearing
-tool result per thread (subsequent results in the same thread are
-fine because we never re-emit the raw stream).
+** =assist/middleware/output_sanitization.py= (new) — proactive ANSI strip
+Tiny middleware that strips ANSI/control chars from =ToolMessage=
+content in =wrap_tool_call= after-path.  Wired into all three agent
+factories.  Why proactive (not reactive in =BadRequestRetry=): the
+retry path rewrites the in-flight model request body, not
+=state["messages"]=.  Without proactive strip, ANSI lingers in state
+forever, costs tokens on every subsequent prompt assembly, and may
+re-trigger BadRequest on each turn.  Uses the full ECMA-48 CSI
+matcher =\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]= (final byte
+0x40-0x7e covers every CSI sequence; parameter range 0x30-0x3f
+catches 24-bit-color forms using `:`).
+
+** =assist/middleware/bad_request_retry.py= — broaden ANSI strip
+Defense-in-depth: the same broad CSI matcher is applied in
+=_strip_control_chars= so anything that bypasses
+=OutputSanitizationMiddleware= (e.g., ANSI embedded in =AIMessage=
+content, not =ToolMessage=) gets cleaned on the retry path too.
 
 ** =assist/middleware/context_aware_tool_eviction.py= — delete
 File removed entirely.  Per project rule "delete unused code, no

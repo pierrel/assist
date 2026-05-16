@@ -71,12 +71,16 @@ class BadRequestRetryMiddleware(AgentMiddleware):
         part of the context-management overhaul.  See
         docs/2026-05-16-context-management-overhaul.org.)
         """
-        # CSI = ESC `[` parameters intermediate-bytes final-byte.  Final
-        # byte is anywhere in 0x40-0x7E.  Catches colorization (m),
-        # cursor moves (A-D, G), erase (J, K), and any other escape we
-        # haven't seen yet — the deleted middleware's narrow
-        # `[mGKHF]` set missed `\x1b[2J` (clear screen) and others.
-        text = re.sub(r'\x1b\[[0-9;?]*[@-~]', '', text)
+        # Full CSI matcher per ECMA-48: ESC `[`, then parameter-bytes
+        # (0x30-0x3f, includes 0-9 and `:;<=>?`), intermediate-bytes
+        # (0x20-0x2f), final-byte (0x40-0x7e).  Covers SGR (m), cursor
+        # moves (A-D/G/H/F), erase (J/K), private-mode (h/l), 24-bit
+        # color forms using `:`, and everything else a terminal emits.
+        # Defense in depth: OutputSanitizationMiddleware already strips
+        # ANSI from ToolMessages proactively (before they enter state);
+        # this layer catches anything that slipped through (e.g., ANSI
+        # embedded in AIMessage content) on the retry path.
+        text = re.sub(r'\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]', '', text)
         return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
 
     @staticmethod
