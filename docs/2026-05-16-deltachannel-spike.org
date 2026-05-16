@@ -378,10 +378,23 @@ during the spike are kept here for traceability with their status.)
    rows; PR #89's =EvictionSaver= iterates that as a list and breaks
    on both shapes.  Hence the hold-#89 decision.
 
-4. *=RollbackRunnable= history depth.*  /Resolved — works./
-   =probe_invoke_with_rollback= exercises the full path with K=10
-   and rollback at depth straddling the snapshot boundary.  All
-   probes pass; recovered state has expected messages count.
+4. *=RollbackRunnable= history depth.*  /Resolved at non-boundary
+   depths; boundary-straddling exercised only by Probe 1./
+   =probe_invoke_with_rollback= forces a =BadRequestError= on the
+   6th node invocation after 5 successful super-steps, and
+   =invoke_with_rollback='s default =max_rollback_depth=3= /
+   =max_retries_per_step=2= means it rolls back to depth ≤ 2 — well
+   inside the K=10 snapshot window, NOT straddling it.  Boundary-
+   straddling resume *is* covered by =probe_history_indexing='s
+   depth=12 case (which lands one step past the K=10 boundary and
+   succeeds), but that probe resumes with a fresh =HumanMessage=
+   rather than the =current_input=None= the production rollback path
+   uses.  Both paths pass within their respective scopes; a future
+   harness that combines mid-step failure + deeper rollback would
+   give end-to-end coverage of "production rollback path AND
+   straddles snapshot boundary."  For this PR's scope, the two
+   probes together are sufficient evidence that no DeltaChannel-
+   specific regression breaks rollback semantics.
 
 5. *Inherited DDGS flake.*  /Avoided./  We did not run the realistic
    eval as part of this spike (synthetic numbers + 407 unit tests
