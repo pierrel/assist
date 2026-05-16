@@ -147,11 +147,21 @@ def _db_stats(db_path: str) -> dict:
     baseline ``add_messages`` reducer, virtually all data sits in
     the ``checkpoints`` table.  Reporting only one table can mislead
     readers about where the win comes from — measure both.
+
+    SQLite is in WAL mode by default; uncheckpointed rows live in
+    the ``-wal`` sidecar file and are absent from the main DB's
+    ``os.path.getsize`` reading.  We force a TRUNCATE checkpoint
+    before measuring so ``file_bytes`` reflects the actual on-disk
+    footprint of every committed row.
     """
-    file_bytes = os.path.getsize(db_path)
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
+        # Drain the WAL into the main DB file so file_bytes is
+        # accurate.  Without this, low-N runs show suspiciously tiny
+        # file_bytes (4096 = single empty page) even though the
+        # per-table queries report many rows.
+        cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         ckpt_rows, ckpt_bytes = cur.execute(
             "SELECT COUNT(*), COALESCE(SUM(LENGTH(checkpoint)), 0) FROM checkpoints"
         ).fetchone()
@@ -160,6 +170,7 @@ def _db_stats(db_path: str) -> dict:
         ).fetchone()
     finally:
         conn.close()
+    file_bytes = os.path.getsize(db_path)
     return {
         "file_bytes": file_bytes,
         "ckpt_rows": ckpt_rows,

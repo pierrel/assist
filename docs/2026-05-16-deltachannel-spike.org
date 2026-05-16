@@ -164,14 +164,17 @@ snapshot_frequency=K)= on the =messages= channel).
 
 | Workload         | Baseline file_bytes | Spike K=10 file_bytes | Reduction | Spike K=50 file_bytes | Reduction |
 |------------------+---------------------+-----------------------+-----------+-----------------------+-----------|
-| Synthetic N=20   |          30,060,544 |             3,637,248 |      8.3× |                 4,096 | n/a       |
+| Synthetic N=20   |          31,076,352 |             3,637,248 |      8.5× |             1,101,824 |    28.2×  |
 | Synthetic N=50   |         191,803,392 |            16,658,432 |     11.5× |             6,524,928 |    29.4×  |
 | Synthetic N=100  |         764,092,416 |            58,605,568 |     13.0× |            18,087,936 |  *42.2×*  |
 
-The N=20 K=50 cell is "n/a" because the first DeltaChannel snapshot
-hasn't fired yet at N<50; the file still has only the SQLite
-overhead (4 KB) without a single full-snapshot blob.  The N=50 and
-N=100 numbers are the load-bearing ones.
+All numbers above are post-=PRAGMA wal_checkpoint(TRUNCATE)= — the
+harness forces a WAL drain into the main DB file before reading
+=os.path.getsize=, so the bytes reflect the true on-disk footprint
+of committed rows (not just the main page minus uncheckpointed WAL).
+An earlier version of these tables reported 4 KB for the N=20 K=50
+cell, which was a WAL-mode artifact — that row's data was in the
+=.db-wal= sidecar, not the main =.db= file.
 
 *Important caveat:* this is a /synthetic/ workload.  Real prod turns
 include variable-size =HumanMessage= + =AIMessage= thinking blocks +
@@ -194,8 +197,8 @@ slightly less than =file_bytes= because of SQLite page overhead.)
 | Workload         | Baseline ckpt rows / avg blob | Baseline writes rows / avg value | Spike K=50 ckpt rows / avg blob | Spike K=50 writes rows / avg value |
 |------------------+-------------------------------+----------------------------------+---------------------------------+------------------------------------|
 | Synthetic N=20   |             60 / 499 KB       |             60 / 16.9 KB         |             60 / 570 B          |             60 / 16.9 KB           |
-| Synthetic N=50   |            150 / 1.26 MB      |            150 / 16.9 KB         |            150 / 25 KB          |            150 / 16.9 KB           |
-| Synthetic N=100  |            300 / 2.53 MB      |            300 / 16.9 KB         |            300 / 43 KB          |            300 / 16.9 KB           |
+| Synthetic N=50   |            150 / 1.26 MB      |            150 / 16.9 KB         |            150 / 25.9 KB        |            150 / 16.9 KB           |
+| Synthetic N=100  |            300 / 2.53 MB      |            300 / 16.9 KB         |            300 / 42.7 KB        |            300 / 16.9 KB           |
 
 Observations:
 - Row counts are identical between baseline and spike (same number of
@@ -263,7 +266,7 @@ the full pre-failure history plus the recovery turn.
 Applying the pre-measurement criteria.  At =K=50= (the deepagents 0.6.1
 production default, set in =deepagents/graph.py:66=), N=100 synthetic:
 
-- *R = 779,472,896 / 18,087,936 = 43.1×* → above the 20× scrap-Layer-2
+- *R = 764,092,416 / 18,087,936 = 42.2×* → above the 20× scrap-Layer-2
   threshold.
 - *Rollback validation passed* at all three probed depths, including
   straddling the snapshot boundary.
