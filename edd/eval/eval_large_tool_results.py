@@ -73,24 +73,63 @@ def create_large_payload(target_tokens: int = 80000) -> str:
 
 
 class EvalMetrics:
-    """Track metrics for the evaluation."""
+    """Track metrics for the evaluation.
+
+    Pre-2026-05-16 architecture: `ContextAwareToolEvictionMiddleware`
+    at the general-agent (parent) level evicted big tool results to
+    `state["files"]` under `/large_tool_results/`.  This eval pinned
+    that behavior.
+
+    Post-2026-05-16 architecture (docs/2026-05-16-context-management-
+    overhaul.org): the parent's eviction middleware was deleted.
+    Eviction is now done by deepagents' built-in `FilesystemMiddleware`
+    inside the *research subagent* whose `search_internet` call
+    actually receives the big mocked payload.  The parent agent sees
+    only the subagent's summary via the `task` tool return — it never
+    sees `/large_tool_results/` files in its own state.
+
+    The eval therefore needs to accept BOTH signals as evidence that
+    context was managed correctly:
+      1. Files under `/large_tool_results/` in PARENT state
+         (old architecture's signal; still applies if the parent's
+         own tools ever return 20k+ tokens — e.g. a future tool that
+         the parent calls directly).
+      2. `_summarization_event` field in parent state (deepagents'
+         SummarizationMiddleware fired — only happens if total context
+         exceeded 0.85 × max_input_tokens, which with the 131k restore
+         needs >111k tokens — unlikely on this synthetic single-turn
+         eval but possible).
+      3. The agent COMPLETED the task (didn't crash, returned a
+         meaningful response).  If the big tool result was handled
+         somewhere (subagent eviction, internal summarization,
+         whatever) and the parent got a sensible response back, then
+         the architecture worked end-to-end — even if no observable
+         artifact landed in parent state.
+    """
 
     def __init__(self):
         self.completed = False
         self.context_overflow_error = False
-        self.large_tool_results_created = False
+        # True iff we observed concrete evidence of compaction in
+        # PARENT state (signals 1 or 2 from the class docstring).
+        # Signal 3 (successful completion) is captured by `completed`.
+        self.parent_state_compaction = False
         self.agent_response = ""
         self.error_message = ""
         self.large_result_files = []
+        self.summarization_fired = False
 
     def print_summary(self):
         """Print evaluation summary."""
         print("\n" + "=" * 80)
         print("LARGE TOOL RESULTS EVAL SUMMARY")
         print("=" * 80)
-        print(f"Task Completed: {'✅ YES' if self.completed else '❌ NO'}")
+        print(f"Task Completed:         {'✅ YES' if self.completed else '❌ NO'}")
         print(f"Context Overflow Error: {'❌ YES' if self.context_overflow_error else '✅ NO'}")
-        print(f"Large Results Evicted: {'✅ YES' if self.large_tool_results_created else '❌ NO'}")
+        print(f"Parent /large_tool_results/ eviction: "
+              f"{'✅ YES' if self.large_result_files else 'n/a (handled in subagent)'}")
+        print(f"Parent SummarizationMiddleware fired: "
+              f"{'✅ YES' if self.summarization_fired else 'n/a (single turn well under trigger)'}")
 
         if self.large_result_files:
             print(f"\nLarge Result Files Created: {len(self.large_result_files)}")
@@ -108,13 +147,24 @@ class EvalMetrics:
 
         print("=" * 80)
 
-        # Determine pass/fail
-        if self.completed and not self.context_overflow_error and self.large_tool_results_created:
-            print("✅ EVAL PASSED: Context management working correctly")
+        # Pass criteria: agent completed end-to-end without a context-
+        # overflow error.  Parent-state compaction observation is
+        # informative but not load-bearing — under the post-2026-05-16
+        # architecture, eviction happens in the research subagent's
+        # state, which we don't probe from here (cross-graph state
+        # introspection isn't a stable contract in deepagents 0.6.1).
+        if self.completed and not self.context_overflow_error:
+            extra = ""
+            if self.large_result_files:
+                extra = " (with parent-state eviction)"
+            elif self.summarization_fired:
+                extra = " (with parent-state summarization)"
+            else:
+                extra = " (compaction handled in subagent — opaque to parent)"
+            print(f"✅ EVAL PASSED: Context management working correctly{extra}")
             return 0
-        else:
-            print("❌ EVAL FAILED: Context management not working as expected")
-            return 1
+        print("❌ EVAL FAILED: Context management not working as expected")
+        return 1
 
 
 def run_eval(verbose: bool = True) -> EvalMetrics:
@@ -194,22 +244,28 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
                             print(f"   {error_str}")
                         raise
 
-                # Check if large_tool_results files were created in agent state
-                # FilesystemMiddleware writes to state["files"], not physical filesystem
+                # Inspect parent state for evidence of context management.
+                # Under the post-2026-05-16 architecture this is best-
+                # effort — the research subagent does the actual eviction
+                # in its own state, which we don't probe from here.
                 try:
-                    # Get the final state from the thread
                     final_state = thread.agent.get_state({"configurable": {"thread_id": thread.thread_id}})
-                    files_in_state = final_state.values.get("files", {})
+                    state_values = final_state.values
+                    files_in_state = state_values.get("files", {})
 
-                    # Look for files in /large_tool_results/
-                    large_result_files = [path for path in files_in_state.keys() if path.startswith("/large_tool_results/")]
-
+                    # Signal 1: files evicted to /large_tool_results/ in PARENT state.
+                    # Only fires under the old architecture or if the parent agent
+                    # itself called a tool that returned 20k+ tokens directly.
+                    large_result_files = [
+                        path for path in files_in_state.keys()
+                        if path.startswith("/large_tool_results/")
+                    ]
                     if large_result_files:
-                        metrics.large_tool_results_created = True
                         metrics.large_result_files = large_result_files
+                        metrics.parent_state_compaction = True
                         if verbose:
-                            print(f"\n✅ {len(large_result_files)} file(s) evicted to /large_tool_results/ in agent state")
-                            for filepath in large_result_files[:3]:  # Show first 3
+                            print(f"\n✅ {len(large_result_files)} file(s) evicted to /large_tool_results/ in PARENT state")
+                            for filepath in large_result_files[:3]:
                                 file_data = files_in_state[filepath]
                                 if isinstance(file_data, dict):
                                     content = file_data.get("content", [])
@@ -217,15 +273,38 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
                                 else:
                                     content_len = len(str(file_data))
                                 print(f"   - {filepath}: {content_len:,} chars")
-                    else:
+
+                    # Signal 2: SummarizationMiddleware fired (writes
+                    # _summarization_event to state via wrap_model_call).
+                    if state_values.get("_summarization_event") is not None:
+                        metrics.summarization_fired = True
+                        metrics.parent_state_compaction = True
                         if verbose:
-                            print(f"\n⚠️  No files in /large_tool_results/ in agent state")
-                            if files_in_state:
-                                print(f"   Files in state: {list(files_in_state.keys())[:5]}")
-                            print("   (Large tool results may not have been evicted)")
+                            print("\n✅ SummarizationMiddleware fired in parent state")
+
+                    # Signal 3: /conversation_history/ artifact landed in
+                    # parent state — the SummarizationMiddleware offload
+                    # path (routed via STATEFUL_PATHS → StateBackend).
+                    convo_history_files = [
+                        path for path in files_in_state.keys()
+                        if path.startswith("/conversation_history/")
+                    ]
+                    if convo_history_files:
+                        metrics.parent_state_compaction = True
+                        if verbose:
+                            print(f"\n✅ {len(convo_history_files)} /conversation_history/ artifact(s) in parent state")
+
+                    if not metrics.parent_state_compaction and verbose:
+                        print(
+                            "\nℹ️  No compaction artifacts in PARENT state — under the "
+                            "post-2026-05-16 architecture this is expected when the "
+                            "research subagent (not the parent) handled the big tool "
+                            "result.  Parent state files keys: "
+                            f"{list(files_in_state.keys())[:5]}"
+                        )
                 except Exception as e:
                     if verbose:
-                        print(f"\n⚠️  Could not check agent state for large_tool_results: {e}")
+                        print(f"\n⚠️  Could not inspect parent state: {e}")
 
             except Exception as e:
                 logger.error(f"Eval failed with unexpected error: {e}", exc_info=True)
