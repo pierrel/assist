@@ -18,8 +18,8 @@ from assist.research_cleanup import ReferencesCleanupRunnable
 from assist.sandbox import DockerSandboxBackend
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
-from assist.middleware.context_aware_tool_eviction import ContextAwareToolEvictionMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
+from assist.middleware.output_sanitization import OutputSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
@@ -110,11 +110,6 @@ def create_agent(model: BaseChatModel,
     tool_name_mw = ToolNameSanitizationMiddleware()
     logging_mw = ModelLoggingMiddleware("general-agent")
 
-    # Context-aware tool eviction: evict results to filesystem if they would cause overflow.
-    # 0.60 trigger leaves margin for tokenizer disagreement vs the chars//4 estimate.
-    context_eviction_mw = ContextAwareToolEvictionMiddleware(
-        trigger_fraction=0.60,
-    )
     # Rewrite write_file collision errors so the small model is redirected to
     # edit_file instead of inventing a new filename.  Must run before
     # loop_detection_mw so the rewritten error is what the loop detector sees.
@@ -130,8 +125,18 @@ def create_agent(model: BaseChatModel,
     # AIMessages after every outer retry/sanitization layer has had its turn.
     empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
 
+    # Note: context-aware compaction is delegated to deepagents 0.6.1's
+    # built-in SummarizationMiddleware (trigger fraction=0.85, offloads
+    # to /conversation_history/{thread_id}.md).  Per-result tool-output
+    # eviction is delegated to deepagents' FilesystemMiddleware
+    # (default 20k-token cap).  Our previous ContextAwareToolEvictionMiddleware
+    # was redundant with both and was deleted on 2026-05-16 — see
+    # docs/2026-05-16-context-management-overhaul.org.  We kept its
+    # ANSI/control-char sanitization in OutputSanitizationMiddleware
+    # (proactive, before content lands in state).
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
-          context_eviction_mw, write_collision_mw, git_push_blocker_mw,
+          OutputSanitizationMiddleware(),
+          write_collision_mw, git_push_blocker_mw,
           loop_detection_mw, ThreadQueueMiddleware(), empty_response_recovery_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
@@ -187,6 +192,7 @@ def create_agent(model: BaseChatModel,
         # call to an unretried APITimeoutError).
         "middleware": [_make_retry_middleware(),
                        BadRequestRetryMiddleware(max_retries=3),
+                       OutputSanitizationMiddleware(),
                        LoopDetectionMiddleware(),
                        EmptyResponseRecoveryMiddleware()],
     }
@@ -228,11 +234,11 @@ def create_context_agent(model: BaseChatModel,
 
     # Catch BadRequestError, sanitize & truncate messages, retry.
     base_mw.append(BadRequestRetryMiddleware(max_retries=3))
-    # Context-aware tool eviction (0.60 leaves margin for tokenizer disagreement).
-    context_eviction_mw = ContextAwareToolEvictionMiddleware(
-        trigger_fraction=0.60,
-    )
-    base_mw.append(context_eviction_mw)
+    # Context compaction delegated to deepagents' SummarizationMiddleware
+    # (auto-installed by create_deep_agent at fraction=0.85).  Per-result
+    # eviction delegated to deepagents' FilesystemMiddleware (20k cap).
+    # Proactive ANSI/control-char strip from tool output:
+    base_mw.append(OutputSanitizationMiddleware())
     base_mw.append(LoopDetectionMiddleware())
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
@@ -282,13 +288,12 @@ def create_research_agent(model: BaseChatModel,
 
     # Catch BadRequestError, sanitize & truncate messages, retry.
     base_mw.append(BadRequestRetryMiddleware(max_retries=3))
-    # Context-aware tool eviction for research agents (most aggressive — research
-    # accumulates web-search results and intermediate report drafts that bloat
-    # context fast).  0.55 keeps wide margin against the chars//4 estimate.
-    context_eviction_mw = ContextAwareToolEvictionMiddleware(
-        trigger_fraction=0.55,
-    )
-    base_mw.append(context_eviction_mw)
+    # Context compaction delegated to deepagents' SummarizationMiddleware
+    # (auto-installed by create_deep_agent at fraction=0.85, with LLM-
+    # summarization + offload to /conversation_history/{thread_id}.md).
+    # Per-result tool-output eviction delegated to FilesystemMiddleware.
+    # Proactive ANSI/control-char strip from tool output:
+    base_mw.append(OutputSanitizationMiddleware())
     # Rewrite write_file collision errors before loop detection sees them —
     # research-agent is the most likely path to hit the filename-mutation
     # trap (multi-pass critique → "I have completed the research" → another
@@ -336,6 +341,9 @@ def create_research_agent(model: BaseChatModel,
     def _subagent_safety_mw():
         return [_make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
+                # Strip ANSI from sub-tool output (read_url HTML can carry
+                # raw escape sequences) before it lands in subagent state.
+                OutputSanitizationMiddleware(),
                 LoopDetectionMiddleware(),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
