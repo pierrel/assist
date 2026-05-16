@@ -205,6 +205,57 @@ def test_middleware_swallows_sanitizer_exceptions():
 # Wiring tests — verify the middleware is actually in each agent's chain
 # ---------------------------------------------------------------------------
 
+async def _async_identity_handler(return_value):
+    """An async handler stub for awrap_tool_call tests."""
+    async def handler(request):
+        return return_value
+    return handler
+
+
+def test_awrap_sanitizes_bare_tool_message():
+    """Async path must also sanitize.  Research/context subagents call
+    via the async path (ReferencesCleanupRunnable.ainvoke)."""
+    import asyncio
+    mw = OutputSanitizationMiddleware()
+    dirty = ToolMessage(content="\x1b[31mred\x1b[0m", tool_call_id="c1")
+
+    async def run():
+        handler = await _async_identity_handler(dirty)
+        return await mw.awrap_tool_call(request=None, handler=handler)
+
+    out = asyncio.run(run())
+    assert isinstance(out, ToolMessage)
+    assert out.content == "red"
+
+
+def test_awrap_sanitizes_command():
+    import asyncio
+    mw = OutputSanitizationMiddleware()
+    dirty = ToolMessage(content="\x1b[2Jerror", tool_call_id="c1")
+    cmd = Command(update={"messages": [dirty]})
+
+    async def run():
+        handler = await _async_identity_handler(cmd)
+        return await mw.awrap_tool_call(request=None, handler=handler)
+
+    out = asyncio.run(run())
+    assert isinstance(out, Command)
+    assert out.update["messages"][0].content == "error"
+
+
+def test_awrap_passes_through_clean():
+    import asyncio
+    mw = OutputSanitizationMiddleware()
+    clean = ToolMessage(content="clean", tool_call_id="c1")
+
+    async def run():
+        handler = await _async_identity_handler(clean)
+        return await mw.awrap_tool_call(request=None, handler=handler)
+
+    out = asyncio.run(run())
+    assert out is clean
+
+
 def test_middleware_is_wired_into_create_agent_path():
     """Construct the agent module's middleware list and confirm
     OutputSanitizationMiddleware appears in it.  Guards against a

@@ -61,9 +61,11 @@ class BadRequestRetryMiddleware(AgentMiddleware):
 
         Keeps \\n (0x0A), \\r (0x0D), \\t (0x09) — valid JSON whitespace.
 
-        Also strips ANSI escape sequences (ESC [ ... [mGKHF] patterns)
-        that show up in `execute` tool output from colorized terminal
-        commands.  Some llama.cpp / OpenAI-compat endpoints reject
+        Also strips ANSI escape sequences (full ECMA-48 CSI matcher:
+        `\\x1b\\[` + parameter bytes (0x30-0x3f) + intermediate bytes
+        (0x20-0x2f) + final byte 0x40-0x7e — see the regex below for
+        the verbatim pattern) that show up in `execute` tool output
+        from colorized terminal commands.  Some llama.cpp / OpenAI-compat endpoints reject
         these as malformed UTF-8 in the JSON body — sanitize before
         retry so the retry has a chance of succeeding.  (Previously
         this was done proactively in ContextAwareToolEvictionMiddleware's
