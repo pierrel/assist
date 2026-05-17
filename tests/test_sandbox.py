@@ -224,6 +224,41 @@ class TestDockerSandboxBackendPathPrefixing(TestCase):
         self.assertIn("/workspace", decoded)
         self.assertNotIn("/", decoded)
 
+    def test_grep_catches_value_error_from_exec_failure_parsing(self):
+        """When the container exec fails (chdir error, missing binary,
+        container died mid-exec), Docker returns the OCI runtime error
+        message as stdout.  deepagents 0.6.1's SandboxBackend.grep
+        (deepagents/backends/sandbox.py:776-783) splits each line on `:`
+        and does `int(parts[1])` — for an exec-failure message like
+        `OCI runtime exec failed: exec failed: unable to start...`,
+        parts[1] is ` exec failed` and int() raises ValueError.
+
+        Without the wrap in assist/sandbox.py, that ValueError
+        propagated to the agent loop and crashed the thread (regression:
+        thread 20260516200432-50b5360f, 2026-05-16).
+
+        With the wrap, grep returns a clean GrepResult(error=...,
+        matches=None) — the model sees `grep failed` and can adapt
+        instead of crashing the whole tool node.
+        """
+        # Make container.exec_run return exec-failure text.  deepagents'
+        # SandboxBackend.grep will then try to parse it as `path:line:text`
+        # and crash with ValueError.
+        self.container.exec_run.return_value = (
+            0,  # docker exec returns 0 for the wrapping shell even on inner failure
+            b'OCI runtime exec failed: exec failed: unable to start '
+            b'container process: chdir to cwd ("/workspace/references"): '
+            b'no such file or directory: unknown\n',
+        )
+        result = self.sandbox.grep("TODO", path="/")
+        # Must NOT raise.
+        self.assertIsNotNone(result)
+        # Surfaces as a clean error on the GrepResult (deepagents' own
+        # error-channel) rather than a crash.
+        self.assertIsNotNone(result.error)
+        self.assertIn("grep failed", result.error)
+        self.assertIsNone(result.matches)
+
     def test_ls_resolves_root_to_workspace(self):
         """ls('/') must list /workspace, not the container's /."""
         self.sandbox.ls("/")
