@@ -12,11 +12,8 @@ routes that hold skill files outside the assist repo.  The contract:
      contributes skills.
 """
 
-import os
 import tempfile
 from unittest.mock import patch, MagicMock
-
-import pytest
 
 from assist.backends import (
     SKILLS_ROUTE,
@@ -159,3 +156,26 @@ class TestCreateAgentExtraSkillSources:
         for path in extras:
             assert path in backend.routes
         assert SKILLS_ROUTE in backend.routes
+
+    def test_extra_skill_sources_overriding_skills_route_does_not_duplicate(self):
+        """If an embedder explicitly passes `SKILLS_ROUTE` as a key in
+        `extra_skill_sources` (the documented backend-override
+        mechanism), the middleware's `sources` list must NOT contain
+        `SKILLS_ROUTE` twice — duplicates would make the middleware
+        scan the same prefix twice.  The backend route still gets
+        overridden (the route map update wins)."""
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        replacement = _route_backend()
+        kwargs = self._build(extra_skill_sources={SKILLS_ROUTE: replacement})
+
+        # Backend route is the replacement (override).
+        backend = kwargs["backend"]
+        assert backend.routes[SKILLS_ROUTE] is replacement
+
+        # Middleware sources list has SKILLS_ROUTE exactly once.
+        mw = next(m for m in kwargs["middleware"]
+                  if isinstance(m, SmallModelSkillsMiddleware))
+        assert mw.sources.count(SKILLS_ROUTE) == 1, (
+            f"SKILLS_ROUTE duplicated in middleware sources: {mw.sources}"
+        )

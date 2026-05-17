@@ -84,13 +84,15 @@ def routes(stateful_paths: list[str]) -> dict:
     return routes
 
 
-def create_composite_backend(fs_root: str = None,
-                             stateful_paths: list[str] = [],
+def create_composite_backend(fs_root: str | None = None,
+                             stateful_paths: list[str] | None = None,
                              extra_routes: dict[str, BackendProtocol] | None = None,
                              ) -> CompositeBackend:
 
     if not fs_root:
         fs_root = tempfile.mkdtemp()
+    if stateful_paths is None:
+        stateful_paths = []
     merged_routes = routes(stateful_paths)
     if extra_routes:
         merged_routes.update(extra_routes)
