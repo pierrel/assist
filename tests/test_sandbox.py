@@ -424,6 +424,40 @@ class TestSandboxManager(TestCase):
         self.assertIn("permission denied", str(cm.exception))
 
     @patch('assist.sandbox.DockerSandboxBackend')
+    def test_get_sandbox_backend_cleans_up_on_mkdir_failure(self, mock_backend_cls):
+        """When mkdir fails, the broken container must be stopped AND
+        the _containers registry must not retain it.  Otherwise the next
+        get_sandbox_backend call hits the early-return at line 197-203
+        and hands out a backend wrapping the broken container — exactly
+        the chdir bug this PR fixes.  Regression for self-review pass 1
+        BLOCKER (commit message reference 48ffb5a → 87cd95c-equivalent).
+        """
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "test123456ab"
+        mock_container.status = "running"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.exec_run.return_value = (1, b"mkdir: read-only filesystem")
+        mock_client.containers.run.return_value = mock_container
+
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            with self.assertRaises(RuntimeError):
+                SandboxManager.get_sandbox_backend(test_path)
+
+        # Registry must NOT contain the broken container.
+        self.assertNotIn(
+            test_path, SandboxManager._containers,
+            "Broken container left in _containers registry — next "
+            "get_sandbox_backend call would short-circuit and hand it out."
+        )
+        # Container must have been stopped (triggers auto-remove via
+        # remove=True).
+        mock_container.stop.assert_called_once()
+
+    @patch('assist.sandbox.DockerSandboxBackend')
     def test_get_sandbox_backend_passes_host_uid(self, mock_backend_cls):
         """The container must run as the host bind-mount's owner —
         privilege-separation layer that closes the cp+exec-a bypass.
