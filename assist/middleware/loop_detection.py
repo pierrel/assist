@@ -193,11 +193,28 @@ def _detect_loop(
     if not completed_events:
         return None
 
-    # Pattern A: trailing run of same tool + same normalised error.
+    # Patterns A and B walk the trailing run of "mutating" tool events;
+    # read-only events (ls, read_file, grep, glob, read_url,
+    # search_internet) are TRANSPARENT to the walk — neither extending
+    # the run nor breaking it.  Rationale: a read-only call between two
+    # failing mutating calls is "let me check what's there" — the agent
+    # is observing state but not changing approach.  Treating that as
+    # progress-resetting would let "[ls, write_file_err] x N" loops
+    # escape detection (which is exactly the 2026-05-16 winged-horse-
+    # flag thread).  Read-only sequences alone are still pure
+    # exploration and do not trigger detection (Pattern A needs at
+    # least one error event; Pattern B needs the same MUTATING tool
+    # repeating).
+    def _mutating_only(events):
+        return [e for e in events if e["tool_name"] not in _READ_ONLY_TOOLS]
+
+    mutating_events = _mutating_only(completed_events)
+
+    # Pattern A: trailing run of same mutating tool + same normalised error.
     run_tool = None
     run_err = None
     run_len = 0
-    for e in reversed(completed_events):
+    for e in reversed(mutating_events):
         if not e["is_error"]:
             break
         err_sig = _normalise_error(e["result_content"])
@@ -217,11 +234,11 @@ def _detect_loop(
             "run_length": run_len,
         }
 
-    # Pattern B: trailing run of same tool + same args.
+    # Pattern B: trailing run of same mutating tool + same args.
     run_tool = None
     run_args = None
     run_len = 0
-    for e in reversed(completed_events):
+    for e in reversed(mutating_events):
         if run_tool is None:
             run_tool = e["tool_name"]
             run_args = e["args_sig"]

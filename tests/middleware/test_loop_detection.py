@@ -278,6 +278,110 @@ class TestDetectLoop:
         assert result is not None
         assert result["tools"] == {"custom_mutator"}
 
+    # ------------------------------------------------------------------
+    # Read-only-interleaved trailing-run detection
+    # Regression: 2026-05-16 thread 20260516165139-36e38c0a ("winged-
+    # horse flag") oscillated 70+ times in
+    # `[ls, write_file_err, ls, write_file_err, ...]` for ~1 hour
+    # before the sandbox container was lost.  Pattern A trailing-run
+    # walk used to break on the interleaved `ls` (non-error), so the
+    # loop escaped detection.  Read-only events are now transparent
+    # to the Pattern A and B walks.
+    # ------------------------------------------------------------------
+
+    def test_pattern_a_catches_loop_through_interleaved_ls(self):
+        """Two write_file errors with `ls` in between — the flag-thread
+        shape — must trigger Pattern A.  `ls` is read-only so it
+        neither extends nor breaks the trailing mutating-tool error
+        run."""
+        events = [
+            self._evt(tool="ls", args={"path": "/workspace"}, content="[]"),
+            self._evt(
+                tool="write_file",
+                args={"file_path": "report.org", "content": "..."},
+                content=("OCI runtime exec failed: exec failed: unable to "
+                         "start container process: chdir to cwd "
+                         "(\"/workspace/references\")"),
+                is_error=True,
+            ),
+            self._evt(tool="ls", args={"path": "/workspace"}, content="[]"),
+            self._evt(
+                tool="write_file",
+                args={"file_path": "report.org", "content": "..."},
+                content=("OCI runtime exec failed: exec failed: unable to "
+                         "start container process: chdir to cwd "
+                         "(\"/workspace/references\")"),
+                is_error=True,
+            ),
+        ]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None, "Pattern A should fire on ls-interleaved write_file errors"
+        assert result["pattern"] == "same-tool-same-error"
+        assert result["tools"] == {"write_file"}
+        assert result["run_length"] == 2
+
+    def test_pattern_a_catches_long_alternating_pathology(self):
+        """Full 8-event alternation (4 ls + 4 wf_err) — the exact
+        N=4 mutating-error run we'd want to catch as early as
+        possible.  Asserts run_length counts only the mutating
+        events (4), not the interleaved ls."""
+        events = []
+        for _ in range(4):
+            events.append(self._evt(tool="ls", args={"path": "/"}, content="[]"))
+            events.append(self._evt(
+                tool="write_file",
+                args={"file_path": "x.org"},
+                content="OCI runtime exec failed: chdir to cwd",
+                is_error=True,
+            ))
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-error"
+        assert result["run_length"] == 4
+
+    def test_pattern_b_catches_same_args_through_interleaved_glob(self):
+        """Same-args trailing-run also tolerates read-only interleaving.
+        Three identical write_file calls with `glob` in between count
+        as Pattern B at threshold 3."""
+        wf = self._evt(
+            tool="write_file",
+            args={"file_path": "/x.org", "content": "data"},
+            content="ok",
+        )
+        gl = self._evt(tool="glob", args={"pattern": "*.org"}, content="[]")
+        events = [wf, gl, wf.copy(), gl.copy(), wf.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-args"
+        assert result["tools"] == {"write_file"}
+        assert result["run_length"] == 3
+
+    def test_no_false_positive_legitimate_write_read_write(self):
+        """Sanity counter-check: a real workflow of `write_file(/a) →
+        ls → write_file(/b)` (different files, no errors) must NOT
+        trigger any pattern.  The ls is transparent to A/B walks but
+        without errors there's no Pattern A; and the two writes have
+        different args so Pattern B's trailing-same-args-run is 1."""
+        events = [
+            self._evt(tool="write_file", args={"file_path": "/a.org"}, content="Wrote /a.org"),
+            self._evt(tool="ls", args={"path": "/"}, content="['a.org']"),
+            self._evt(tool="write_file", args={"file_path": "/b.org"}, content="Wrote /b.org"),
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10) is None
+
+    def test_no_false_positive_pure_exploration(self):
+        """A run of read-only tools alone (no mutating) must NOT
+        trigger any pattern.  After filtering out read-only events
+        the mutating-events list is empty, so all three patterns
+        short-circuit."""
+        events = [
+            self._evt(tool="ls", args={"path": "/"}, content="[]"),
+            self._evt(tool="read_file", args={"file_path": "/x"}, content="hi"),
+            self._evt(tool="grep", args={"pattern": "foo"}, content="[]"),
+            self._evt(tool="search_internet", args={"query": "x"}, content="[]"),
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10) is None
+
 
 class TestLastSuccessfulArtifact:
     def test_returns_path_of_last_success(self):
