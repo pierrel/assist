@@ -36,13 +36,16 @@ from assist.env import env_int
 logger = logging.getLogger(__name__)
 
 
-def _create_standard_backend(working_dir: str):
+def _create_standard_backend(working_dir: str, extra_routes=None):
     """Create the standard composite backend with state exclusions.
 
     This backend excludes ephemeral files like question.txt and large_tool_results/
-    from the stateful filesystem, using StateBackend instead.
+    from the stateful filesystem, using StateBackend instead.  ``extra_routes``
+    is threaded through to ``create_composite_backend`` for embedders that
+    need to register additional virtual-path routes (e.g. external skill dirs).
     """
-    return create_composite_backend(working_dir, STATEFUL_PATHS)
+    return create_composite_backend(working_dir, STATEFUL_PATHS,
+                                    extra_routes=extra_routes)
 
 
 # Single source of truth for the retry-on tuple.  When adding a new
@@ -99,7 +102,19 @@ _MEMORY_FILE = "AGENTS.md"
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
-                 sandbox_backend=None) -> CompiledStateGraph:
+                 sandbox_backend=None,
+                 extra_skill_sources=None) -> CompiledStateGraph:
+    """Build the general-purpose agent.
+
+    ``extra_skill_sources`` is a ``dict[str, BackendProtocol]`` mapping
+    additional virtual-path routes to backends that hold ``SKILL.md``
+    files.  Embedders (e.g. emacsos-server) use this to register skills
+    that live outside the assist repo.  Each route is registered with
+    the composite backend AND added to ``SmallModelSkillsMiddleware``'s
+    sources list, so the routed files are reachable AND the middleware
+    knows to list them as available skills.  Default ``None`` preserves
+    the current behavior of loading skills only from ``SKILLS_ROUTE``.
+    """
     # Core middleware: retry, tool call limiting, JSON validation, and logging.
     # See `_make_retry_middleware` for the retry-on tuple rationale.
     retry_middle = _make_retry_middleware()
@@ -148,11 +163,16 @@ def create_agent(model: BaseChatModel,
     memories_path = os.path.join(workspace_dir, _MEMORY_FILE)
 
     if sandbox_backend:
-        backend = create_sandbox_composite_backend(sandbox_backend)
+        backend = create_sandbox_composite_backend(sandbox_backend,
+                                                   extra_routes=extra_skill_sources)
     else:
-        backend = _create_standard_backend(working_dir)
+        backend = _create_standard_backend(working_dir,
+                                           extra_routes=extra_skill_sources)
 
-    skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=[SKILLS_ROUTE])
+    skill_sources = [SKILLS_ROUTE]
+    if extra_skill_sources:
+        skill_sources.extend(extra_skill_sources.keys())
+    skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
     context_sub = CompiledSubAgent(
