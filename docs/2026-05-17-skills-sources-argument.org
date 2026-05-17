@@ -2,7 +2,7 @@
 #+date: 2026-05-17
 
 Tiny enabling change for the emacsos experiment described in
-[[file:~/src/emacsos/docs/2026-05-17-assist-import.org][~/src/emacsos/docs/2026-05-17-assist-import.org]]:
+[[https://github.com/pierrel/emacsos/blob/main/docs/2026-05-17-assist-import.org][emacsos/docs/2026-05-17-assist-import.org]]:
 give external embedders a way to register skill directories that live
 outside the assist repo.
 
@@ -10,7 +10,8 @@ outside the assist repo.
 
 =emacsos-server= imports =assist= in-process and wants to register one
 skill that lives in the emacsos repo at =emacsos/skills/report-time/=.
-Today =assist.create_agent= hardcodes
+Today =assist.agent.create_agent= (no re-export through =assist=
+itself; =assist/__init__.py= is empty) hardcodes
 
 #+begin_src python
 SmallModelSkillsMiddleware(backend=backend, sources=[SKILLS_ROUTE])
@@ -22,12 +23,17 @@ is possible without patching this line.
 
 * What changes
 
-A single new keyword arg, =extra_skill_sources=, on =create_agent=:
+A single new keyword arg, =extra_skill_sources=, on
+=assist.agent.create_agent=:
 
 #+begin_src python
+from assist.agent import create_agent
+from deepagents.backends.protocol import BackendProtocol
+
 def create_agent(model, working_dir, checkpointer=None,
                  sandbox_backend=None,
-                 extra_skill_sources=None) -> CompiledStateGraph:
+                 extra_skill_sources: dict[str, BackendProtocol] | None = None,
+                 ) -> CompiledStateGraph:
     ...
 #+end_src
 
@@ -64,9 +70,12 @@ its source.  Upstream =SkillsMiddleware= loads sources in order and
 later sources override earlier ones by skill name.  This is the
 parallel of the backend-route override mechanism (where passing
 ={SKILLS_ROUTE: replacement}= replaces the built-in skills *backend*).
-Both are intentional and document explicitly so embedders can
+Both are intentional and documented explicitly so embedders can
 intentionally swap a built-in if they need to; neither is something a
-default-arg caller can trip into accidentally.
+default-arg caller can trip into accidentally.  Re-passing
+=SKILLS_ROUTE= as a key in =extra_skill_sources= overrides the
+*backend* (route-map update wins) but the middleware sources list
+de-duplicates so the prefix isn't scanned twice.
 
 * Surface area
 

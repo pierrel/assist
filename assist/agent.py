@@ -3,6 +3,7 @@ import uuid
 import logging
 
 from deepagents import create_deep_agent, CompiledSubAgent
+from deepagents.backends.protocol import BackendProtocol
 from langchain.messages import AIMessage, AnyMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -36,7 +37,9 @@ from assist.env import env_int
 logger = logging.getLogger(__name__)
 
 
-def _create_standard_backend(working_dir: str, extra_routes=None):
+def _create_standard_backend(working_dir: str,
+                             extra_routes: dict[str, BackendProtocol] | None = None,
+                             ):
     """Create the standard composite backend with state exclusions.
 
     This backend excludes ephemeral files like question.txt and large_tool_results/
@@ -103,17 +106,21 @@ def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
                  sandbox_backend=None,
-                 extra_skill_sources=None) -> CompiledStateGraph:
+                 extra_skill_sources: dict[str, BackendProtocol] | None = None,
+                 ) -> CompiledStateGraph:
     """Build the general-purpose agent.
 
-    ``extra_skill_sources`` is a ``dict[str, BackendProtocol]`` mapping
-    additional virtual-path routes to backends that hold ``SKILL.md``
-    files.  Embedders (e.g. emacsos-server) use this to register skills
-    that live outside the assist repo.  Each route is registered with
-    the composite backend AND added to ``SmallModelSkillsMiddleware``'s
-    sources list, so the routed files are reachable AND the middleware
-    knows to list them as available skills.  Default ``None`` preserves
-    the current behavior of loading skills only from ``SKILLS_ROUTE``.
+    ``extra_skill_sources`` is a mapping of additional virtual-path
+    routes to backends that hold ``SKILL.md`` files.  Embedders (e.g.
+    emacsos-server) use this to register skills that live outside the
+    assist repo.  Each route is registered with the composite backend
+    AND added to ``SmallModelSkillsMiddleware``'s sources list, so the
+    routed files are reachable AND the middleware knows to list them
+    as available skills.  Default ``None`` preserves the current
+    behavior of loading skills only from ``SKILLS_ROUTE``.  An
+    embedder that explicitly re-passes ``SKILLS_ROUTE`` as a key gets
+    its backend swapped in (intentional override mechanism); the
+    sources list de-duplicates so the middleware doesn't scan twice.
     """
     # Core middleware: retry, tool call limiting, JSON validation, and logging.
     # See `_make_retry_middleware` for the retry-on tuple rationale.
@@ -171,7 +178,13 @@ def create_agent(model: BaseChatModel,
 
     skill_sources = [SKILLS_ROUTE]
     if extra_skill_sources:
-        skill_sources.extend(extra_skill_sources.keys())
+        # De-dupe: an embedder that re-passes SKILLS_ROUTE as a key
+        # has overridden the built-in *backend* (the route map
+        # update wins), but shouldn't make the middleware scan the
+        # same prefix twice.
+        skill_sources.extend(
+            k for k in extra_skill_sources if k != SKILLS_ROUTE
+        )
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
