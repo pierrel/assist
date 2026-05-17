@@ -164,6 +164,49 @@ subagent tool calls — they go through the same chain.
    "args canonicalizer" hooks per tool, or accept that some tools
    bypass the cassette.
 
+** TODO Refresh sandbox container TTL on activity (assist-side)
+The sandbox container's PID 1 is currently =sleep 3600=
+(=dockerfiles/Dockerfile.sandbox:71=), so any thread that runs longer
+than an hour loses its container mid-flight.  Symptom:
+=SandboxContainerLostError= raised from =DockerSandboxBackend.execute=
+(=assist/sandbox.py:69-89=); thread is marked errored.  Not theoretical:
+the winged-horse-flag thread (2026-05-16, =20260516165139-36e38c0a=)
+was killed at sandbox-start + 1h on a research flow that legitimately
+needed >60 min.  Docker events confirmed: =container die execDuration=3600
+exitCode=0= followed immediately by =container destroy=.
+
+*Direction:* assist-side refresh-on-activity (NOT docker-internal
+=sleep $((3600 - elapsed))= games — those bake the TTL into the image
+and can't see "is the agent still working" signals).  The TTL clock
+should reset whenever the agent makes a tool call.
+
+Open mechanisms (architect/team to pick):
+1. Watchdog thread inside =SandboxManager= that bumps a per-container
+   =last_seen= on every =get_sandbox_backend= reuse / every
+   =DockerSandboxBackend.execute= call; periodically =container.stop=s
+   any container idle >N minutes.  Replace PID 1's =sleep 3600= with
+   =sleep infinity= + an external kill signal from the watchdog.
+2. Swap PID 1 for an assist-ping-driven process: tiny script that waits
+   for a Unix socket signal from the assist host, resetting an internal
+   timer each ping; expires if no ping in N minutes.
+3. Use =container.restart()= / =container.start()= keepalive — feasible
+   only if PID 1 is restart-safe (re-mounts, no state).
+
+Constraints:
+- Must NOT bake in extra Docker daemon calls *per tool invocation* (cost
+  adds up at 100s of calls/thread; option 1 with batched watchdog ticks
+  every N seconds is fine, option 1 with a Docker call per
+  =execute()= is not).
+- Must still self-destruct on truly-orphan threads — the 1h cap exists
+  for a reason (abandoned web threads shouldn't pin sandbox containers
+  forever).  Idle-timeout should still fire when there's genuinely no
+  activity, just based on assist-observed activity, not wall clock.
+- Must coexist with the privilege-separation layer (non-root user,
+  internal egress network).
+
+See =assist/sandbox.py:74-77= for the existing TTL discussion and
+=SandboxContainerLostError= for the current bubble-up behavior.
+
 ** TODO Clamp =glob= (and sibling fs tools) to the workspace
 On 2026-05-16, thread =20260516102611-410cae36= emitted =glob.glob("**/references/**/*", recursive=True)= from =/= inside the sandbox container after =LoopDetection= bounced the research-agent.  Walked =/proc=, =/sys=, and every mounted host path for 18+ minutes at 99% CPU before the container was killed, blocking the whole thread on the Docker exec stream.  Filesystem tools that accept a =path= argument should refuse paths outside the workspace (no =/=, no =..= traversal), and =glob= should reject unbounded-depth patterns that don't anchor inside the workspace.
 ** DONE Raise total context + smarter context management

@@ -302,6 +302,33 @@ class SandboxManager:
             )
             cls._containers[work_dir] = container
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
+            # Pre-create /workspace/references inside the container so
+            # the research-subagent's DockerSandboxBackend (which uses
+            # work_dir="/workspace/references" — see assist/agent.py:315-322)
+            # can chdir into it on its first exec call.  Without this,
+            # every research-subagent tool call fails with `OCI runtime
+            # exec failed: chdir to cwd ("/workspace/references")`.
+            # ReferencesCleanupRunnable._ensure_dir() exists as a lazy
+            # fallback but didn't fire in the 2026-05-16 winged-horse-flag
+            # thread for reasons not yet understood (suspected
+            # deepagents 0.6.1 wrapper bypass); this layer is the
+            # load-bearing guarantee.  Fail-closed if mkdir fails — a
+            # sandbox that can't pre-create this dir is broken for the
+            # whole research-flow path and we'd rather surface that here
+            # than at minute 13 of a research thread.  The mkdir runs
+            # as the container's uid (set by --user above to match the
+            # host bind-mount owner), so the dir lands on the host
+            # workspace owned consistently with the rest of /workspace.
+            exit_code, output = container.exec_run(
+                ["mkdir", "-p", "/workspace/references"]
+            )
+            if exit_code != 0:
+                output_str = output.decode("utf-8", errors="replace") if output else ""
+                raise RuntimeError(
+                    f"Failed to pre-create /workspace/references in sandbox "
+                    f"container {container.id[:12]}: exit_code={exit_code} "
+                    f"output={output_str!r}"
+                )
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(container)
         except DockerException as e:

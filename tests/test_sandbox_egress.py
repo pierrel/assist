@@ -226,6 +226,7 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         sandbox_container = MagicMock()
         sandbox_container.id = "sand123abcdef"
         sandbox_container.status = "running"
+        sandbox_container.exec_run.return_value = (0, b"")
         client.containers.run.return_value = sandbox_container
 
         with patch.object(SandboxManager, "_get_docker_client", return_value=client):
@@ -267,6 +268,9 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         sandbox_container = MagicMock()
         sandbox_container.id = "sand123abcdef"
         sandbox_container.status = "running"
+        # _start_container now runs `mkdir -p /workspace/references` via
+        # exec after containers.run — see assist/sandbox_manager.py.
+        sandbox_container.exec_run.return_value = (0, b"")
         client.containers.run.return_value = sandbox_container
 
         with patch.object(SandboxManager, "_get_docker_client", return_value=client):
