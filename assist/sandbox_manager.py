@@ -300,8 +300,8 @@ class SandboxManager:
                 network=EGRESS_NETWORK,
                 environment=sandbox_env,
             )
-            cls._containers[work_dir] = container
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
+            cls._containers[work_dir] = container
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(container)
         except DockerException as e:

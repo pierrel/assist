@@ -15,7 +15,8 @@ from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
-from assist.sandbox import DockerSandboxBackend
+from assist.sandbox import DockerSandboxBackend, SandboxContainerLostError
+from docker.errors import NotFound as DockerNotFound
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
@@ -312,12 +313,47 @@ def create_research_agent(model: BaseChatModel,
     # Cleanup of intermediate files happens in `ReferencesCleanupRunnable`
     # outside the agent's loop.
     if sandbox_backend:
+        # Pre-create the references dir eagerly — the sibling
+        # ``DockerSandboxBackend`` below uses it as its ``work_dir``, which
+        # Docker exec sets as ``chdir`` on every command.  If the dir
+        # doesn't exist, every tool call from this agent (and its
+        # sub-sub-agents that inherit this backend) crashes with
+        # ``OCI runtime exec failed: chdir to cwd``.  Bit the 2026-05-16
+        # winged-horse-flag thread.  Failure here raises ``RuntimeError``
+        # back to the caller — the parent sandbox container is NOT torn
+        # down (it belongs to the top-level agent, and a research-init
+        # issue shouldn't kill the user's whole thread).  Idempotent
+        # belt-and-suspenders alongside ``ReferencesCleanupRunnable._ensure_dir``
+        # in local mode and as a lazy fallback in sandbox mode.
+        references_path = sandbox_backend.work_dir + "/references"
+        try:
+            exit_code, output = sandbox_backend.container.exec_run(
+                ["mkdir", "-p", references_path]
+            )
+        except DockerNotFound as e:
+            # Container vanished between sandbox acquisition and research-
+            # agent construction (TTL expiry, manual rm, daemon restart).
+            # Translate to the typed error the web layer special-cases —
+            # otherwise the raw docker exception escapes and the web layer
+            # misses its dedicated cleanup + user-message path.  Matches
+            # ``DockerSandboxBackend.execute``'s handling.
+            raise SandboxContainerLostError(
+                f"Sandbox container {sandbox_backend.container.id[:12]} "
+                "disappeared before research-agent init — please retry."
+            ) from e
+        if exit_code != 0:
+            output_str = output.decode("utf-8", errors="replace") if output else ""
+            raise RuntimeError(
+                f"Failed to create references dir {references_path!r} in "
+                f"sandbox container {sandbox_backend.container.id[:12]}: "
+                f"exit_code={exit_code} output={output_str!r}"
+            )
         # Sibling sandbox rooted at /workspace/references.  ``strip_prefixes``
         # flattens any agent-supplied ``references/`` (or ``/references/``)
         # so writes don't nest under the already-references-rooted workdir.
         references_sandbox = DockerSandboxBackend(
             sandbox_backend.container,
-            work_dir=sandbox_backend.work_dir + "/references",
+            work_dir=references_path,
             strip_prefixes=("references",),
         )
         backend = create_sandbox_composite_backend(references_sandbox)
@@ -390,9 +426,10 @@ def create_research_agent(model: BaseChatModel,
     # Wrap with the references-cleanup runnable so intermediate drafts
     # and sub-sub-agent scratch files get pruned after the research call
     # returns — only the final report stays in references/.  The wrapper
-    # uses the *parent* sandbox (work_dir=/workspace), not the references
-    # sibling, so its `mkdir -p /workspace/references` runs with a
-    # workdir that exists on the first call.
+    # uses the *parent* sandbox (work_dir=/workspace) for its lazy
+    # _ensure_dir fallback.  In sandbox mode the eager mkdir above is the
+    # load-bearing creator; _ensure_dir is the load-bearing creator in
+    # local mode (no container to exec_run against).
     if sandbox_backend:
         references_path = sandbox_backend.work_dir + "/references"
         cleanup_sandbox = sandbox_backend
