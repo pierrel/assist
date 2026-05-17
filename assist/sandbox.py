@@ -250,11 +250,9 @@ class DockerSandboxBackend(BaseSandbox):
             #
             # Recover by surfacing as a clean ``GrepResult.error`` — the
             # model sees "grep failed" instead of crashing the thread, and
-            # the operator gets the full stack in the logs.  An upstream
-            # bug-report draft (not filed publicly) lives at
-            # ``docs/2026-05-16-deepagents-grep-bug-draft.org`` for future
-            # routing.  This wrap drops out when upstream lands an
-            # equivalent fix.
+            # the operator gets the full stack in the logs.  Filed upstream
+            # as langchain-ai/deepagents#3440; this wrap drops out when
+            # upstream lands an equivalent fix.
             logger.warning(
                 "SandboxBackend.grep raised ValueError (likely deepagents "
                 "0.6.1 parsing exec-failure output as grep results): %s",
