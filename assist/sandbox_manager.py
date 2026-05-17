@@ -300,7 +300,6 @@ class SandboxManager:
                 network=EGRESS_NETWORK,
                 environment=sandbox_env,
             )
-            cls._containers[work_dir] = container
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             # Pre-create /workspace/references inside the container so
             # the research-subagent's DockerSandboxBackend (which uses
@@ -315,20 +314,53 @@ class SandboxManager:
             # load-bearing guarantee.  Fail-closed if mkdir fails — a
             # sandbox that can't pre-create this dir is broken for the
             # whole research-flow path and we'd rather surface that here
-            # than at minute 13 of a research thread.  The mkdir runs
-            # as the container's uid (set by --user above to match the
-            # host bind-mount owner), so the dir lands on the host
-            # workspace owned consistently with the rest of /workspace.
-            exit_code, output = container.exec_run(
-                ["mkdir", "-p", "/workspace/references"]
-            )
+            # than at minute 13 of a research thread.
+            #
+            # exec_run inherits the container's --user (host uid:gid) when
+            # `user=` is unset — docker SDK posts User='' which the engine
+            # interprets as "use Config.User from containers.run".  So the
+            # dir lands on the host bind mount owned consistently with the
+            # rest of /workspace.  (The SDK docstring "Default: root" is
+            # misleading; it only applies when --user was not set on
+            # containers.run, which is never the case for us — see line
+            # 290-302.)  Bind mount is guaranteed ready: container start
+            # blocks on mount-namespace setup before PID 1 is exec'd.
+            try:
+                exit_code, output = container.exec_run(
+                    ["mkdir", "-p", "/workspace/references"]
+                )
+            except Exception:
+                # exec_run itself failed before returning a tuple — stop
+                # the container and re-raise so the caller sees a clean
+                # error instead of a half-initialised backend.
+                try:
+                    container.stop(timeout=5)
+                except Exception:
+                    pass  # best-effort; remove=True will GC if/when it exits
+                raise
             if exit_code != 0:
                 output_str = output.decode("utf-8", errors="replace") if output else ""
+                # Stop the container before raising — otherwise it lingers
+                # as an orphan (`remove=True` only fires on process exit).
+                # Stopping triggers the auto-remove.  Also prevents the
+                # _containers registry from a poisoned entry — we haven't
+                # written to it yet (intentionally — see the post-mkdir
+                # registry write below), but defense in depth.
+                try:
+                    container.stop(timeout=5)
+                except Exception:
+                    pass  # best-effort
                 raise RuntimeError(
                     f"Failed to pre-create /workspace/references in sandbox "
                     f"container {container.id[:12]}: exit_code={exit_code} "
                     f"output={output_str!r}"
                 )
+            # Only register the container AFTER mkdir succeeded.  Writing
+            # to _containers before mkdir would leave a poisoned entry on
+            # mkdir failure — the next get_sandbox_backend call would
+            # short-circuit on the "running" early-return (line 197-203)
+            # and hand out a backend wrapping the broken container.
+            cls._containers[work_dir] = container
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(container)
         except DockerException as e:
