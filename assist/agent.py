@@ -15,7 +15,8 @@ from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
-from assist.sandbox import DockerSandboxBackend
+from assist.sandbox import DockerSandboxBackend, SandboxContainerLostError
+from docker.errors import NotFound as DockerNotFound
 from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
@@ -325,9 +326,21 @@ def create_research_agent(model: BaseChatModel,
         # belt-and-suspenders alongside ``ReferencesCleanupRunnable._ensure_dir``
         # in local mode and as a lazy fallback in sandbox mode.
         references_path = sandbox_backend.work_dir + "/references"
-        exit_code, output = sandbox_backend.container.exec_run(
-            ["mkdir", "-p", references_path]
-        )
+        try:
+            exit_code, output = sandbox_backend.container.exec_run(
+                ["mkdir", "-p", references_path]
+            )
+        except DockerNotFound as e:
+            # Container vanished between sandbox acquisition and research-
+            # agent construction (TTL expiry, manual rm, daemon restart).
+            # Translate to the typed error the web layer special-cases —
+            # otherwise the raw docker exception escapes and the web layer
+            # misses its dedicated cleanup + user-message path.  Matches
+            # ``DockerSandboxBackend.execute``'s handling.
+            raise SandboxContainerLostError(
+                f"Sandbox container {sandbox_backend.container.id[:12]} "
+                "disappeared before research-agent init — please retry."
+            ) from e
         if exit_code != 0:
             output_str = output.decode("utf-8", errors="replace") if output else ""
             raise RuntimeError(
