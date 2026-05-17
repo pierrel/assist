@@ -258,6 +258,7 @@ class DockerSandboxBackend(BaseSandbox):
                 "SandboxBackend.grep raised ValueError (likely deepagents "
                 "0.6.1 parsing exec-failure output as grep results): %s",
                 e,
+                exc_info=True,
             )
             return GrepResult(
                 error=f"grep failed inside sandbox: {e}",

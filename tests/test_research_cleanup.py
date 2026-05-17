@@ -409,6 +409,37 @@ class TestResearchAgentWiring:
             f"{sandbox.container.exec_run.call_args_list!r}"
         )
 
+    def test_sandbox_mode_translates_container_not_found_to_typed_error(self):
+        """If the parent container vanishes between sandbox acquisition
+        and ``create_research_agent``, the raw ``docker.errors.NotFound``
+        must be translated to ``SandboxContainerLostError`` — the typed
+        error the web layer special-cases for its cleanup + user-message
+        path.  Mirrors the same translation in
+        ``DockerSandboxBackend.execute``.
+        """
+        from docker.errors import NotFound as DockerNotFound
+
+        from assist.agent import create_research_agent
+        from assist.sandbox import DockerSandboxBackend, SandboxContainerLostError
+
+        sandbox = MagicMock(spec=DockerSandboxBackend)
+        sandbox.work_dir = "/workspace"
+        sandbox.container = MagicMock()
+        sandbox.container.id = "vanished12345"
+        sandbox.container.exec_run.side_effect = DockerNotFound("No such container")
+
+        with patch("assist.agent.create_deep_agent") as fake:
+            fake.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                with pytest.raises(SandboxContainerLostError) as exc_info:
+                    create_research_agent(
+                        MagicMock(), wd, sandbox_backend=sandbox,
+                    )
+
+        msg = str(exc_info.value)
+        assert "vanished12345"[:12] in msg
+        assert "disappeared" in msg or "retry" in msg.lower()
+
     def test_sandbox_mode_raises_when_mkdir_fails(self):
         """If the eager mkdir returns a non-zero exit, construction must
         raise ``RuntimeError`` with the failure detail.  Fail-loud — but
