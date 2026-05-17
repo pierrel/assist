@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
 from langchain.messages import AIMessage
 
 from assist.research_cleanup import ReferencesCleanupRunnable
@@ -350,6 +351,7 @@ class TestResearchAgentWiring:
         sandbox = MagicMock(spec=DockerSandboxBackend)
         sandbox.work_dir = "/workspace"
         sandbox.container = MagicMock()
+        sandbox.container.exec_run.return_value = (0, b"")
 
         with patch("assist.agent.create_deep_agent") as fake:
             fake.return_value = MagicMock()
@@ -358,9 +360,6 @@ class TestResearchAgentWiring:
                     MagicMock(), wd, sandbox_backend=sandbox,
                 )
 
-                # Cleanup wrapper got the parent sandbox (not a sibling) —
-                # so its `mkdir -p /workspace/references` runs with a
-                # workdir that exists.
                 assert runnable._sandbox is sandbox
                 assert runnable._references_path == "/workspace/references"
 
@@ -372,3 +371,100 @@ class TestResearchAgentWiring:
                 # sibling DockerSandboxBackend.
                 assert backend.default is not sandbox
                 assert backend.default.work_dir == "/workspace/references"
+
+    def test_sandbox_mode_eager_mkdir_creates_references_dir(self):
+        """``create_research_agent`` must eagerly ``mkdir -p`` the
+        references dir inside the sandbox container during construction.
+
+        Without this, the sibling ``DockerSandboxBackend`` built right
+        after points at a non-existent ``work_dir``, and the first tool
+        call from the agent (or any sub-sub-agent inheriting this
+        backend) crashes with ``OCI runtime exec failed: chdir to cwd``.
+        Bit the 2026-05-16 winged-horse-flag thread.
+        """
+        from assist.agent import create_research_agent
+        from assist.sandbox import DockerSandboxBackend
+
+        sandbox = MagicMock(spec=DockerSandboxBackend)
+        sandbox.work_dir = "/workspace"
+        sandbox.container = MagicMock()
+        sandbox.container.exec_run.return_value = (0, b"")
+
+        with patch("assist.agent.create_deep_agent") as fake:
+            fake.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                create_research_agent(
+                    MagicMock(), wd, sandbox_backend=sandbox,
+                )
+
+        mkdir_calls = [
+            c for c in sandbox.container.exec_run.call_args_list
+            if c.args
+            and isinstance(c.args[0], list)
+            and c.args[0] == ["mkdir", "-p", "/workspace/references"]
+        ]
+        assert len(mkdir_calls) == 1, (
+            "Expected exactly one `mkdir -p /workspace/references` exec_run "
+            f"call during create_research_agent construction; got "
+            f"{sandbox.container.exec_run.call_args_list!r}"
+        )
+
+    def test_sandbox_mode_translates_container_not_found_to_typed_error(self):
+        """If the parent container vanishes between sandbox acquisition
+        and ``create_research_agent``, the raw ``docker.errors.NotFound``
+        must be translated to ``SandboxContainerLostError`` — the typed
+        error the web layer special-cases for its cleanup + user-message
+        path.  Mirrors the same translation in
+        ``DockerSandboxBackend.execute``.
+        """
+        from docker.errors import NotFound as DockerNotFound
+
+        from assist.agent import create_research_agent
+        from assist.sandbox import DockerSandboxBackend, SandboxContainerLostError
+
+        sandbox = MagicMock(spec=DockerSandboxBackend)
+        sandbox.work_dir = "/workspace"
+        sandbox.container = MagicMock()
+        sandbox.container.id = "vanished12345"
+        sandbox.container.exec_run.side_effect = DockerNotFound("No such container")
+
+        with patch("assist.agent.create_deep_agent") as fake:
+            fake.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                with pytest.raises(SandboxContainerLostError) as exc_info:
+                    create_research_agent(
+                        MagicMock(), wd, sandbox_backend=sandbox,
+                    )
+
+        msg = str(exc_info.value)
+        assert "vanished12345"[:12] in msg
+        assert "disappeared" in msg or "retry" in msg.lower()
+
+    def test_sandbox_mode_raises_when_mkdir_fails(self):
+        """If the eager mkdir returns a non-zero exit, construction must
+        raise ``RuntimeError`` with the failure detail.  Fail-loud — but
+        do NOT stop the container (it belongs to the parent agent and
+        may still serve other tools)."""
+        from assist.agent import create_research_agent
+        from assist.sandbox import DockerSandboxBackend
+
+        sandbox = MagicMock(spec=DockerSandboxBackend)
+        sandbox.work_dir = "/workspace"
+        sandbox.container = MagicMock()
+        sandbox.container.id = "abc123def4567"
+        sandbox.container.exec_run.return_value = (1, b"mkdir: permission denied")
+
+        with patch("assist.agent.create_deep_agent") as fake:
+            fake.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                with pytest.raises(RuntimeError) as exc_info:
+                    create_research_agent(
+                        MagicMock(), wd, sandbox_backend=sandbox,
+                    )
+
+        msg = str(exc_info.value)
+        assert "/workspace/references" in msg
+        assert "exit_code=1" in msg
+        assert "permission denied" in msg
+        # Container is NOT torn down — that's the parent agent's resource.
+        sandbox.container.stop.assert_not_called()
