@@ -224,6 +224,41 @@ class TestDockerSandboxBackendPathPrefixing(TestCase):
         self.assertIn("/workspace", decoded)
         self.assertNotIn("/", decoded)
 
+    def test_grep_catches_value_error_from_exec_failure_parsing(self):
+        """When the container exec fails (chdir error, missing binary,
+        container died mid-exec), Docker returns the OCI runtime error
+        message as stdout.  deepagents 0.6.1's SandboxBackend.grep
+        (deepagents/backends/sandbox.py:776-783) splits each line on `:`
+        and does `int(parts[1])` — for an exec-failure message like
+        `OCI runtime exec failed: exec failed: unable to start...`,
+        parts[1] is ` exec failed` and int() raises ValueError.
+
+        Without the wrap in assist/sandbox.py, that ValueError
+        propagated to the agent loop and crashed the thread (regression:
+        thread 20260516200432-50b5360f, 2026-05-16).
+
+        With the wrap, grep returns a clean GrepResult(error=...,
+        matches=None) — the model sees `grep failed` and can adapt
+        instead of crashing the whole tool node.
+        """
+        # Make container.exec_run return exec-failure text.  deepagents'
+        # SandboxBackend.grep will then try to parse it as `path:line:text`
+        # and crash with ValueError.
+        self.container.exec_run.return_value = (
+            0,  # docker exec returns 0 for the wrapping shell even on inner failure
+            b'OCI runtime exec failed: exec failed: unable to start '
+            b'container process: chdir to cwd ("/workspace/references"): '
+            b'no such file or directory: unknown\n',
+        )
+        result = self.sandbox.grep("TODO", path="/")
+        # Must NOT raise.
+        self.assertIsNotNone(result)
+        # Surfaces as a clean error on the GrepResult (deepagents' own
+        # error-channel) rather than a crash.
+        self.assertIsNotNone(result.error)
+        self.assertIn("grep failed", result.error)
+        self.assertIsNone(result.matches)
+
     def test_ls_resolves_root_to_workspace(self):
         """ls('/') must list /workspace, not the container's /."""
         self.sandbox.ls("/")
@@ -335,6 +370,11 @@ class TestSandboxManager(TestCase):
         # Doubles as the egress-proxy container too — _wait_for_egress_proxy_ready
         # polls .logs() looking for "listening on" before returning.
         mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        # `_start_container` runs `mkdir -p /workspace/references` via exec
+        # after `containers.run` — see the pre-create comment in
+        # assist/sandbox_manager.py.  Default mock returns a MagicMock that
+        # cannot be unpacked into (exit_code, output), so pin it to success.
+        mock_container.exec_run.return_value = (0, b"")
         mock_client.containers.run.return_value = mock_container
 
         with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
@@ -353,6 +393,106 @@ class TestSandboxManager(TestCase):
         self.assertIn(test_path, SandboxManager._containers)
 
     @patch('assist.sandbox.DockerSandboxBackend')
+    def test_get_sandbox_backend_pre_creates_references_dir(self, mock_backend_cls):
+        """`_start_container` must `mkdir -p /workspace/references` inside
+        the container BEFORE returning.  Without this, the
+        research-subagent's `DockerSandboxBackend(work_dir="/workspace/references")`
+        fails its first exec call with `chdir to cwd`.  Regression for
+        2026-05-16 winged-horse-flag thread.
+        """
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "test123456ab"
+        mock_container.status = "running"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.exec_run.return_value = (0, b"")
+        mock_client.containers.run.return_value = mock_container
+
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            SandboxManager.get_sandbox_backend(test_path)
+
+        # Find the mkdir exec call.  exec_run may be called for the egress
+        # proxy too (no — proxy uses container.logs(), not exec_run); be
+        # defensive and look for the mkdir argv.
+        mkdir_calls = [
+            c for c in mock_container.exec_run.call_args_list
+            if c.args
+            and isinstance(c.args[0], list)
+            and c.args[0][:2] == ["mkdir", "-p"]
+            and c.args[0][2] == "/workspace/references"
+        ]
+        self.assertEqual(
+            len(mkdir_calls), 1,
+            "Expected exactly one `mkdir -p /workspace/references` exec_run "
+            "call after the sandbox container starts.  Without this, the "
+            "research-subagent fails every tool call with `chdir to cwd`."
+        )
+
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_get_sandbox_backend_raises_when_mkdir_fails(self, mock_backend_cls):
+        """If `mkdir -p /workspace/references` returns a non-zero exit,
+        `_start_container` must raise rather than return a half-broken
+        backend.  Fail-closed posture matching the egress-proxy setup
+        (see line 249-264 of sandbox_manager.py).
+        """
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "test123456ab"
+        mock_container.status = "running"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.exec_run.return_value = (1, b"mkdir: permission denied")
+        mock_client.containers.run.return_value = mock_container
+
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            with self.assertRaises(RuntimeError) as cm:
+                SandboxManager.get_sandbox_backend(test_path)
+        # Error message must surface the failure mode (exit code + output)
+        # so an operator can diagnose without re-running.
+        self.assertIn("/workspace/references", str(cm.exception))
+        self.assertIn("exit_code=1", str(cm.exception))
+        self.assertIn("permission denied", str(cm.exception))
+
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_get_sandbox_backend_cleans_up_on_mkdir_failure(self, mock_backend_cls):
+        """When mkdir fails, the broken container must be stopped AND
+        the _containers registry must not retain it.  Otherwise the next
+        get_sandbox_backend call hits the early-return at line 197-203
+        and hands out a backend wrapping the broken container — exactly
+        the chdir bug this PR fixes.  Regression for self-review pass 1
+        BLOCKER (commit message reference 48ffb5a → 87cd95c-equivalent).
+        """
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "test123456ab"
+        mock_container.status = "running"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.exec_run.return_value = (1, b"mkdir: read-only filesystem")
+        mock_client.containers.run.return_value = mock_container
+
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            with self.assertRaises(RuntimeError):
+                SandboxManager.get_sandbox_backend(test_path)
+
+        # Registry must NOT contain the broken container.
+        self.assertNotIn(
+            test_path, SandboxManager._containers,
+            "Broken container left in _containers registry — next "
+            "get_sandbox_backend call would short-circuit and hand it out."
+        )
+        # Container must have been stopped (triggers auto-remove via
+        # remove=True).
+        mock_container.stop.assert_called_once()
+
+    @patch('assist.sandbox.DockerSandboxBackend')
     def test_get_sandbox_backend_passes_host_uid(self, mock_backend_cls):
         """The container must run as the host bind-mount's owner —
         privilege-separation layer that closes the cp+exec-a bypass.
@@ -366,6 +506,7 @@ class TestSandboxManager(TestCase):
         mock_container.id = "test123456ab"
         mock_container.status = "running"
         mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_container.exec_run.return_value = (0, b"")
         mock_client.containers.run.return_value = mock_container
 
         host_st = os.stat(test_path)

@@ -231,7 +231,37 @@ class DockerSandboxBackend(BaseSandbox):
 
     def grep(self, pattern: str, path: str | None = None,
              glob: str | None = None) -> GrepResult:
-        return super().grep(pattern, self._resolve(path or "/"), glob)
+        try:
+            return super().grep(pattern, self._resolve(path or "/"), glob)
+        except ValueError as e:
+            # Defensive: deepagents 0.6.1 (deepagents/backends/sandbox.py:776-783)
+            # splits each line of grep stdout on ":" and does
+            # ``int(parts[1])`` to extract the line number.  When the
+            # underlying ``container.exec_run`` fails to start the process
+            # (chdir error, missing binary, container died mid-exec), Docker
+            # returns the OCI runtime error message as stdout — e.g.
+            # ``OCI runtime exec failed: exec failed: unable to start
+            # container process: chdir to cwd ("/workspace/references"): ...``
+            # That message has colons too; ``int(" exec failed")`` then
+            # raises ``ValueError: invalid literal for int() with base 10``
+            # and the entire thread fails with a confusing error message
+            # the user can't act on.  Regression: thread
+            # 20260516200432-50b5360f on 2026-05-16.
+            #
+            # Recover by surfacing as a clean ``GrepResult.error`` — the
+            # model sees "grep failed" instead of crashing the thread, and
+            # the operator gets the full stack in the logs.  Filed upstream
+            # as langchain-ai/deepagents#3440; this wrap drops out when
+            # upstream lands an equivalent fix.
+            logger.warning(
+                "SandboxBackend.grep raised ValueError (likely deepagents "
+                "0.6.1 parsing exec-failure output as grep results): %s",
+                e,
+            )
+            return GrepResult(
+                error=f"grep failed inside sandbox: {e}",
+                matches=None,
+            )
 
     def glob(self, pattern: str, path: str = "/") -> GlobResult:
         return super().glob(pattern, self._resolve(path))
