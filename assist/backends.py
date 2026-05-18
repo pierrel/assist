@@ -84,31 +84,46 @@ def routes(stateful_paths: list[str]) -> dict:
     return routes
 
 
-def create_composite_backend(fs_root: str = None,
-                             stateful_paths: list[str] = []) -> CompositeBackend:
+def create_composite_backend(fs_root: str | None = None,
+                             stateful_paths: list[str] | None = None,
+                             extra_routes: dict[str, BackendProtocol] | None = None,
+                             ) -> CompositeBackend:
 
     if not fs_root:
         fs_root = tempfile.mkdtemp()
+    if stateful_paths is None:
+        stateful_paths = []
+    merged_routes = routes(stateful_paths)
+    if extra_routes:
+        merged_routes.update(extra_routes)
     return CompositeBackend(
         default=FilesystemBackend(root_dir=fs_root,
                                   virtual_mode=True),
-        routes=routes(stateful_paths)
+        routes=merged_routes
     )
 
 
 def create_sandbox_composite_backend(sandbox_backend: BackendProtocol,
-                                     stateful_paths: list[str] | None = None) -> CompositeBackend:
+                                     stateful_paths: list[str] | None = None,
+                                     extra_routes: dict[str, BackendProtocol] | None = None,
+                                     ) -> CompositeBackend:
     """Create a composite backend that routes to a sandbox for default operations.
 
     Ephemeral paths (question.txt, large_tool_results/) go to StateBackend,
-    everything else goes to the sandbox backend.
+    everything else goes to the sandbox backend.  ``extra_routes`` lets
+    an embedder (e.g. emacsos-server) inject additional virtual-path
+    routes, typically to register a skills directory at a path not
+    rooted under the assist repo.
     """
     if stateful_paths is None:
         stateful_paths = STATEFUL_PATHS
 
+    merged_routes = routes(stateful_paths)
+    if extra_routes:
+        merged_routes.update(extra_routes)
     return CompositeBackend(
         default=sandbox_backend,
-        routes=routes(stateful_paths)
+        routes=merged_routes
     )
 
 

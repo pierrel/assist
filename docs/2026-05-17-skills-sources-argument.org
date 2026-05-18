@@ -1,0 +1,134 @@
+#+title: extra_skill_sources parameter on create_agent
+#+date: 2026-05-17
+
+Tiny enabling change for the emacsos experiment described in
+[[https://github.com/pierrel/emacsos/blob/main/docs/2026-05-17-assist-import.org][emacsos/docs/2026-05-17-assist-import.org]]:
+give external embedders a way to register skill directories that live
+outside the assist repo.
+
+* Motivation
+
+=emacsos-server= imports =assist= in-process and wants to register one
+skill that lives in the emacsos repo at =emacsos/skills/report-time/=.
+Today =assist.agent.create_agent= (no re-export through =assist=
+itself; =assist/__init__.py= is empty) hardcodes
+
+#+begin_src python
+SmallModelSkillsMiddleware(backend=backend, sources=[SKILLS_ROUTE])
+#+end_src
+
+so any skill outside =assist/skills/= is invisible to the middleware
+even if the backend can resolve its path.  No external skill discovery
+is possible without patching this line.
+
+* What changes
+
+A single new keyword arg, =extra_skill_sources=, on
+=assist.agent.create_agent=:
+
+#+begin_src python
+from assist.agent import create_agent
+from deepagents.backends.protocol import BackendProtocol
+
+def create_agent(model, working_dir, checkpointer=None,
+                 sandbox_backend=None,
+                 extra_skill_sources: dict[str, BackendProtocol] | None = None,
+                 ) -> CompiledStateGraph:
+    ...
+#+end_src
+
+Type: =dict[str, BackendProtocol] | None=.  Default =None= preserves
+the pre-patch behavior verbatim — internal callers ([[file:../manage/web/threads.py][=manage/web/threads.py=]],
+tests) keep working unchanged.
+
+When provided, each =(route, backend)= pair is:
+
+1. Threaded through to the composite backend factory so the route
+   resolves (=create_composite_backend(..., extra_routes=...)= or
+   =create_sandbox_composite_backend(..., extra_routes=...)= depending
+   on whether sandbox mode is on).
+2. Added to the =sources= list passed to =SmallModelSkillsMiddleware= so
+   the middleware actually lists skills from those paths.
+
+Both steps are needed: without #1 the middleware tries to read from an
+unrouted path and gets nothing; without #2 the middleware never asks.
+
+* What does NOT change
+
+- Internal callers (=manage/web/threads.py= and friends) don't pass
+  =extra_skill_sources=.  They keep getting exactly the agent they
+  already get.
+- =create_research_agent= and =create_context_agent= don't grow this
+  param — they don't construct =SmallModelSkillsMiddleware= at all.  If
+  a future need lands, follow the same shape.
+- =SKILLS_ROUTE= (=/skills/=) is still always first in the sources
+  list.  External sources extend it; they don't replace it.
+
+A note on override semantics: an embedder *can* shadow a built-in
+skill by registering a skill file with the same =name= frontmatter in
+its source.  Upstream =SkillsMiddleware= loads sources in order and
+later sources override earlier ones by skill name.  This is the
+parallel of the backend-route override mechanism (where passing
+={SKILLS_ROUTE: replacement}= replaces the built-in skills *backend*).
+Both are intentional and documented explicitly so embedders can
+intentionally swap a built-in if they need to; neither is something a
+default-arg caller can trip into accidentally.  Re-passing
+=SKILLS_ROUTE= as a key in =extra_skill_sources= overrides the
+*backend* (route-map update wins) but the middleware sources list
+de-duplicates so the prefix isn't scanned twice.
+
+* Surface area
+
+Three files, one parameter through three call sites:
+
+- =assist/backends.py= — =create_composite_backend= and
+  =create_sandbox_composite_backend= grow =extra_routes: dict[str,
+  BackendProtocol] | None = None=.  Merged into the route table after
+  the defaults.  An explicit collision (e.g. caller passes
+  ={SKILLS_ROUTE: ...}=) overrides; that's intentional, lets an
+  embedder swap the built-in skills source if it ever has to.
+- =assist/agent.py= — =_create_standard_backend= threads =extra_routes=
+  through to =create_composite_backend=; =create_agent= grows
+  =extra_skill_sources= and threads it through to both backend
+  factories + the middleware sources list.
+
+* Tests
+
+=tests/test_create_agent_extra_skill_sources.py= covers:
+
+- Default behavior: =create_composite_backend()= still has =SKILLS_ROUTE=
+  and the STATEFUL_PATHS routes (when passed) and nothing else.
+- =extra_routes= merges into both factories' route tables.
+- =extra_routes= can override a built-in route by passing the same key
+  (intentional, documented as the override mechanism).
+- =create_agent= with =extra_skill_sources=None= produces a backend
+  with only the default routes and a middleware with only =SKILLS_ROUTE=
+  in its sources list.
+- =create_agent= with =extra_skill_sources={"/emacsos-skills/": fb}=
+  routes that path AND adds it to the middleware's sources list.
+- Multiple extras (two virtual paths) all register.
+
+* Why this design rather than the alternatives
+
+- *Vendor =assist= into emacsos.*  Considered and rejected in the
+  emacsos design doc — turns every assist change into a two-repo dance.
+- *Have emacsos build its own =CompositeBackend= and pass it in via a
+  new =backend= parameter on =create_agent=.*  That would require
+  exposing the internal backend shape (routes, defaults, STATEFUL_PATHS
+  wiring) as a public contract — a much larger surface than one
+  dict-of-extras keyword arg.
+- *Skip the patch, side-step =create_agent= entirely from
+  emacsos-server.*  Duplicates ~60 lines of agent-construction logic
+  across two repos and silently rots when this side evolves.
+
+The single-parameter, default-preserving shape is the smallest viable
+change that meets the emacsos integration need.  Once skill *discovery*
+(experiment #2 in the emacsos roadmap) lands, the same parameter
+handles it — emacsos-server scans its skills dir, builds the dict of
+=(virtual-path, FilesystemBackend)=, and passes it through.  No new
+assist surface needed for that follow-up.
+
+* Companion docs
+
+- [[file:~/src/emacsos/docs/2026-05-17-assist-import.org][~/src/emacsos/docs/2026-05-17-assist-import.org]] — the emacsos
+  experiment this change unblocks.
