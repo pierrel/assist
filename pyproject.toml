@@ -5,12 +5,32 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "assist"
 version = "0.1.0"
+# Runtime deps: packages actually imported under assist/, manage/, edd/.
+# Versions are NOT pinned here; requirements.txt is the lockfile that
+# pins the full transitive closure for reproducible installs.
+# Downstream consumers (eg. emacsos-server) can install with:
+#   pip install -e /path/to/assist -c /path/to/assist/requirements.txt
+# to pick up these deps while honouring assist's pinned versions.
 dependencies = [
-    "vgrep==0.1.4",
-    "Jinja2==3.1.6",
-    "typer",
-    "pyyaml",
-    "jsonschema"
+    "ddgs",
+    "deepagents",
+    "docker",
+    "fastapi",
+    "httpx",
+    "Jinja2",
+    "langchain",
+    "langchain-core",
+    "langchain-openai",
+    "langgraph",
+    "langgraph-checkpoint-sqlite",
+    "loguru",
+    "Markdown",
+    "openai",
+    "pydantic",
+    "python-dotenv",
+    "python-multipart",
+    "requests",
+    "uvicorn",
 ]
 
 [project.scripts]
