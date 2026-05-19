@@ -57,7 +57,22 @@ class Thread:
                  model: BaseChatModel | None = None,
                  max_concurrency: int = 5,
                  sandbox_backend=None,
-                 on_queue_state: Callable[[str], None] | None = None):
+                 on_queue_state: Callable[[str], None] | None = None,
+                 extra_tools=None,
+                 extra_config: dict | None = None):
+        """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
+        — embedder-supplied tools the main agent can call.  See
+        ``assist.agent.create_agent`` docstring for the subagent
+        scope.
+
+        `extra_config` is merged into ``self.runconfig`` so per-Thread
+        embedder context (eg. langgraph ``configurable`` values that
+        tools read via the ``config: RunnableConfig`` parameter) reaches
+        every invocation without the embedder having to call
+        ``.with_config(...)`` at every entry point.  Default ``None``
+        preserves prior behavior.  Embedder-provided keys take
+        precedence over the built-ins on collision.
+        """
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
@@ -72,11 +87,22 @@ class Thread:
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency
         }
+        if extra_config:
+            # Shallow-merge with a deeper merge for the nested
+            # `configurable` dict so embedder additions don't wipe the
+            # built-in thread_id.  Top-level keys other than
+            # `configurable` are overridden wholesale.
+            extra_configurable = extra_config.get("configurable") or {}
+            self.runconfig["configurable"].update(extra_configurable)
+            for k, v in extra_config.items():
+                if k != "configurable":
+                    self.runconfig[k] = v
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
                                   checkpointer=checkpointer,
-                                  sandbox_backend=sandbox_backend)
+                                  sandbox_backend=sandbox_backend,
+                                  extra_tools=extra_tools)
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response.
