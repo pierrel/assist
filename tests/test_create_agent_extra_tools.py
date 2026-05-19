@@ -9,9 +9,12 @@ contract:
   1. `extra_tools` reaches `create_deep_agent(tools=...)` so the bound
      tools end up on the model.
   2. `Thread.__init__(extra_tools=...)` forwards to `create_agent`.
-  3. `Thread.__init__(extra_config=...)` deep-merges into
-     `self.runconfig` so the embedder's `configurable` keys land
-     alongside the built-in `thread_id` without overwriting it.
+  3. `Thread.__init__(extra_config=...)` two-level-merges into
+     `self.runconfig` — the inner `configurable` dict gets a shallow
+     `.update()` from the embedder's `configurable` (adds alongside
+     built-in `thread_id`), top-level keys are overridden wholesale.
+     Not a recursive deep merge — a key whose value is itself a dict
+     replaces any existing dict at that key.
   4. Defaults preserve the pre-2026-05-19 behavior (no tools added, no
      extra configurable keys).
 """
