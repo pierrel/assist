@@ -59,7 +59,7 @@ class Thread:
                  sandbox_backend=None,
                  on_queue_state: Callable[[str], None] | None = None,
                  extra_tools=None,
-                 extra_config: dict | None = None):
+                 extra_config: dict[str, Any] | None = None):
         """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
         — embedder-supplied tools the main agent can call.  See
         ``assist.agent.create_agent`` docstring for the subagent
@@ -71,6 +71,14 @@ class Thread:
         every invocation without the embedder having to call
         ``.with_config(...)`` at every entry point.  Default ``None``
         preserves prior behavior.
+
+        *Merge semantics:* two-level, not recursive.  The nested
+        ``configurable`` dict gets a shallow `.update()` from the
+        embedder's ``configurable`` (so adding a key alongside
+        ``thread_id`` works as expected; passing a key whose value
+        is itself a dict overwrites any existing dict at that key
+        wholesale — no deep merge).  Top-level keys other than
+        ``configurable`` are overridden wholesale.
 
         Constructor-owned keys (``configurable.thread_id``,
         ``max_concurrency``) are NOT overridable via ``extra_config``
