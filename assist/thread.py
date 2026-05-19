@@ -105,12 +105,14 @@ class Thread:
             "max_concurrency": self.max_concurrency
         }
         if extra_config:
-            # Deep merge for `configurable`, shallow override for
-            # everything else.  Protected keys (`thread_id` inside
-            # `configurable`, and top-level `max_concurrency`) are
-            # silently dropped from the embedder's input to keep
-            # `self.thread_id` / `self.max_concurrency` in sync with
-            # the runconfig — see docstring.
+            # Two-level merge (NOT recursive): the inner `configurable`
+            # dict gets a shallow `.update()` from the embedder's
+            # `configurable`; top-level keys are overridden wholesale.
+            # Protected keys (`thread_id` inside `configurable`, and
+            # top-level `max_concurrency`) are silently dropped from
+            # the embedder's input to keep `self.thread_id` /
+            # `self.max_concurrency` in sync with the runconfig —
+            # see docstring.
             extra_configurable = {
                 k: v for k, v in (extra_config.get("configurable") or {}).items()
                 if k != "thread_id"
