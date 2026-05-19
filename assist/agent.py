@@ -1,8 +1,10 @@
 import os
 import uuid
 import logging
+from typing import Any, Callable, Sequence
 
 from deepagents import create_deep_agent, CompiledSubAgent
+from langchain_core.tools import BaseTool
 from deepagents.backends.protocol import BackendProtocol
 from langchain.messages import AIMessage, AnyMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -107,7 +109,7 @@ def create_agent(model: BaseChatModel,
                  checkpointer=None,
                  sandbox_backend=None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
-                 extra_tools=None,
+                 extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  ) -> CompiledStateGraph:
     """Build the general-purpose agent.
 
