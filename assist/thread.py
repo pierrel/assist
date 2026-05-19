@@ -106,6 +106,18 @@ class Thread:
             "max_concurrency": self.max_concurrency
         }
         if extra_config:
+            # Validate up front so an embedder gets a clear error
+            # instead of a downstream AttributeError on `.items()`.
+            if not isinstance(extra_config, dict):
+                raise TypeError(
+                    f"extra_config must be a dict, got {type(extra_config).__name__}"
+                )
+            inner = extra_config.get("configurable")
+            if inner is not None and not isinstance(inner, dict):
+                raise TypeError(
+                    f"extra_config['configurable'] must be a dict, "
+                    f"got {type(inner).__name__}"
+                )
             # Two-level merge (NOT recursive): the inner `configurable`
             # dict gets a shallow `.update()` from the embedder's
             # `configurable`; top-level keys are overridden wholesale.
@@ -122,7 +134,7 @@ class Thread:
             # deep-copied (consistent with the documented "two-level,
             # not recursive" merge semantics).
             extra_configurable = {
-                k: v for k, v in (extra_config.get("configurable") or {}).items()
+                k: v for k, v in (inner or {}).items()
                 if k != "thread_id"
             }
             self.runconfig["configurable"].update(extra_configurable)
