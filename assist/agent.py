@@ -107,6 +107,7 @@ def create_agent(model: BaseChatModel,
                  checkpointer=None,
                  sandbox_backend=None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
+                 extra_tools=None,
                  ) -> CompiledStateGraph:
     """Build the general-purpose agent.
 
@@ -121,6 +122,14 @@ def create_agent(model: BaseChatModel,
     embedder that explicitly re-passes ``SKILLS_ROUTE`` as a key gets
     its backend swapped in (intentional override mechanism); the
     sources list de-duplicates so the middleware doesn't scan twice.
+
+    ``extra_tools`` is a sequence of ``BaseTool | Callable | dict[str,
+    Any]`` passed through to ``create_deep_agent(tools=...)`` — the
+    additive surface for embedder-supplied tools the main agent can
+    call.  Reaches the main agent and the auto-injected
+    general-purpose subagent; the bespoke ``context`` / ``research`` /
+    ``critique`` subagents are built separately and do not see these
+    tools (correctly, given their roles).  Default ``None`` is empty.
     """
     # Core middleware: retry, tool call limiting, JSON validation, and logging.
     # See `_make_retry_middleware` for the retry-on tuple rationale.
@@ -242,6 +251,7 @@ def create_agent(model: BaseChatModel,
         middleware=mw + [skills_mw, memory_mw, logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
+        tools=list(extra_tools) if extra_tools else [],
     )
 
     return agent
