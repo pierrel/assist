@@ -181,6 +181,24 @@ class TestThreadExtraConfig:
         with _pytest.raises(TypeError, match="extra_config must be a dict, got str"):
             self._build(extra_config="not a dict")
 
+    def test_extra_config_falsy_non_dict_still_validates(self):
+        """`if extra_config is not None` (not `if extra_config:`) so
+        falsy-but-wrong-type values (eg. `[]`) still hit the
+        isinstance check instead of silently skipping validation."""
+        import pytest as _pytest
+        with _pytest.raises(TypeError, match="extra_config must be a dict, got list"):
+            self._build(extra_config=[])
+        with _pytest.raises(TypeError, match="extra_config must be a dict, got str"):
+            self._build(extra_config="")
+
+    def test_extra_config_empty_dict_is_noop(self):
+        """Explicit `{}` is a harmless no-op (matches the prior
+        `if extra_config:` behavior for the empty-dict case)."""
+        t = self._build(extra_config={})
+        # Built-in keys still present, nothing extra.
+        assert "thread_id" in t.runconfig["configurable"]
+        assert t.runconfig["max_concurrency"] == 5
+
     def test_extra_config_configurable_non_dict_raises_clear_typeerror(self):
         """Same shape for the nested `configurable` key."""
         import pytest as _pytest

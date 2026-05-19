@@ -105,9 +105,14 @@ class Thread:
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency
         }
-        if extra_config:
-            # Validate up front so an embedder gets a clear error
-            # instead of a downstream AttributeError on `.items()`.
+        if extra_config is not None:
+            # `is not None` (vs `if extra_config:`) so a falsy-but-
+            # wrong-type value like `[]` or `""` still trips the
+            # isinstance check below instead of silently skipping the
+            # whole merge.  An explicit `{}` no-ops harmlessly either
+            # way.  Validate up front so an embedder gets a clear
+            # error instead of a downstream AttributeError on
+            # `.items()`.
             if not isinstance(extra_config, dict):
                 raise TypeError(
                     f"extra_config must be a dict, got {type(extra_config).__name__}"
