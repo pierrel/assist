@@ -124,21 +124,39 @@ class TestThreadExtraConfig:
             "auth_contents": "x", "phone_host": "h"
         }
 
-    def test_extra_configurable_collision_embedder_wins(self):
-        """If the embedder explicitly sets `thread_id`, the embedder
-        intends to override.  Document this behavior so the next
-        reader knows."""
-        t = self._build(extra_config={
-            "configurable": {"thread_id": "embedder-set"}
+    def test_extra_configurable_cannot_override_thread_id(self):
+        """Constructor-owned key: `thread_id` lives both as
+        `self.thread_id` (read by THREAD_QUEUE for affinity, by
+        `message()` for log lines) and as
+        `runconfig.configurable.thread_id`.  Letting `extra_config`
+        override the runconfig copy would diverge the two; protected
+        instead — pass via the `thread_id=` constructor param if you
+        need a non-default id."""
+        t = self._build(thread_id="ctor-set", extra_config={
+            "configurable": {"thread_id": "embedder-attempt"}
         })
-        assert t.runconfig["configurable"]["thread_id"] == "embedder-set"
+        # Attribute holds the ctor value.
+        assert t.thread_id == "ctor-set"
+        # Runconfig agrees — embedder's attempt was silently dropped.
+        assert t.runconfig["configurable"]["thread_id"] == "ctor-set"
 
-    def test_extra_top_level_keys_override_built_in(self):
-        """Top-level (non-configurable) keys are overridden wholesale."""
-        t = self._build(extra_config={"max_concurrency": 99})
-        assert t.runconfig["max_concurrency"] == 99
-        # Built-in `configurable` survives untouched.
-        assert "thread_id" in t.runconfig["configurable"]
+    def test_extra_top_level_max_concurrency_protected(self):
+        """Same rationale as thread_id: `self.max_concurrency` is the
+        public attribute; if an embedder overrode just the runconfig
+        copy, callers reading `self.max_concurrency` would see a
+        different value than langgraph does."""
+        t = self._build(max_concurrency=7, extra_config={
+            "max_concurrency": 99,
+        })
+        assert t.max_concurrency == 7
+        assert t.runconfig["max_concurrency"] == 7
+
+    def test_extra_top_level_non_protected_keys_pass_through(self):
+        """Top-level keys other than `configurable` / `max_concurrency`
+        flow through unchanged — embedder freely adds new langgraph
+        config knobs."""
+        t = self._build(extra_config={"recursion_limit": 42})
+        assert t.runconfig["recursion_limit"] == 42
 
     def test_extra_config_does_not_leak_across_threads(self):
         """Two Threads built with different extra_config must not share
