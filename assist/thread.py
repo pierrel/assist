@@ -70,8 +70,17 @@ class Thread:
         tools read via the ``config: RunnableConfig`` parameter) reaches
         every invocation without the embedder having to call
         ``.with_config(...)`` at every entry point.  Default ``None``
-        preserves prior behavior.  Embedder-provided keys take
-        precedence over the built-ins on collision.
+        preserves prior behavior.
+
+        Constructor-owned keys (``configurable.thread_id``,
+        ``max_concurrency``) are NOT overridable via ``extra_config``
+        — `self.thread_id` / `self.max_concurrency` would diverge
+        from what the runconfig says, and downstream code
+        (THREAD_QUEUE affinity, ``message()``'s log lines) reads the
+        attribute not the config.  Pass those via the dedicated
+        ``thread_id=`` / ``max_concurrency=`` constructor params
+        instead; the merge silently drops the protected keys to keep
+        the attribute and runconfig in sync.
         """
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -88,15 +97,21 @@ class Thread:
             "max_concurrency": self.max_concurrency
         }
         if extra_config:
-            # Shallow-merge with a deeper merge for the nested
-            # `configurable` dict so embedder additions don't wipe the
-            # built-in thread_id.  Top-level keys other than
-            # `configurable` are overridden wholesale.
-            extra_configurable = extra_config.get("configurable") or {}
+            # Deep merge for `configurable`, shallow override for
+            # everything else.  Protected keys (`thread_id` inside
+            # `configurable`, and top-level `max_concurrency`) are
+            # silently dropped from the embedder's input to keep
+            # `self.thread_id` / `self.max_concurrency` in sync with
+            # the runconfig — see docstring.
+            extra_configurable = {
+                k: v for k, v in (extra_config.get("configurable") or {}).items()
+                if k != "thread_id"
+            }
             self.runconfig["configurable"].update(extra_configurable)
             for k, v in extra_config.items():
-                if k != "configurable":
-                    self.runconfig[k] = v
+                if k in ("configurable", "max_concurrency"):
+                    continue
+                self.runconfig[k] = v
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
