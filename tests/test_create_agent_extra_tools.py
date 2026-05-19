@@ -173,6 +173,21 @@ class TestThreadExtraConfig:
         assert t1.runconfig["configurable"]["phone_context"] == "one"
         assert t2.runconfig["configurable"]["phone_context"] == "two"
 
+    def test_extra_config_non_dict_raises_clear_typeerror(self):
+        """Public-API validation: embedder passing a non-dict gets a
+        clear TypeError naming the actual type instead of a downstream
+        AttributeError on `.items()`."""
+        import pytest as _pytest
+        with _pytest.raises(TypeError, match="extra_config must be a dict, got str"):
+            self._build(extra_config="not a dict")
+
+    def test_extra_config_configurable_non_dict_raises_clear_typeerror(self):
+        """Same shape for the nested `configurable` key."""
+        import pytest as _pytest
+        with _pytest.raises(TypeError,
+                            match=r"extra_config\['configurable'\] must be a dict, got list"):
+            self._build(extra_config={"configurable": ["not", "a", "dict"]})
+
     def test_embedder_mutating_extra_config_after_construction_is_isolated(self):
         """Defensive shallow-copy: if the embedder mutates its own
         `extra_config["configurable"]` dict AFTER constructing the
