@@ -6,10 +6,11 @@ import threading
 import time
 import tempfile
 from datetime import datetime
-from typing import Literal, Dict, Any, Callable, List, Iterator
+from typing import Literal, Dict, Any, Callable, List, Iterator, Sequence
 
 import sqlite3
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -58,7 +59,7 @@ class Thread:
                  max_concurrency: int = 5,
                  sandbox_backend=None,
                  on_queue_state: Callable[[str], None] | None = None,
-                 extra_tools=None,
+                 extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  extra_config: dict[str, Any] | None = None):
         """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
         — embedder-supplied tools the main agent can call.  See
@@ -113,6 +114,13 @@ class Thread:
             # the embedder's input to keep `self.thread_id` /
             # `self.max_concurrency` in sync with the runconfig —
             # see docstring.
+            #
+            # The dict-comprehension below also serves as a defensive
+            # shallow copy of `extra_config["configurable"]` — if the
+            # embedder mutates its own dict later, our `runconfig`
+            # isn't affected.  Nested values themselves are not
+            # deep-copied (consistent with the documented "two-level,
+            # not recursive" merge semantics).
             extra_configurable = {
                 k: v for k, v in (extra_config.get("configurable") or {}).items()
                 if k != "thread_id"

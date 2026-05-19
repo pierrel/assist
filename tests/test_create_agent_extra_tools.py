@@ -172,3 +172,21 @@ class TestThreadExtraConfig:
         })
         assert t1.runconfig["configurable"]["phone_context"] == "one"
         assert t2.runconfig["configurable"]["phone_context"] == "two"
+
+    def test_embedder_mutating_extra_config_after_construction_is_isolated(self):
+        """Defensive shallow-copy: if the embedder mutates its own
+        `extra_config["configurable"]` dict AFTER constructing the
+        Thread, the Thread's runconfig must not see the mutation.
+        Protects against the embedder reusing one config dict across
+        many Threads and mutating in place."""
+        shared = {"configurable": {"phone_context": "original"}}
+        t = self._build(extra_config=shared)
+        assert t.runconfig["configurable"]["phone_context"] == "original"
+
+        # Mutate the embedder's input AFTER construction.
+        shared["configurable"]["phone_context"] = "MUTATED"
+        shared["configurable"]["new_key"] = "added"
+
+        # Thread's runconfig is unaffected.
+        assert t.runconfig["configurable"]["phone_context"] == "original"
+        assert "new_key" not in t.runconfig["configurable"]
