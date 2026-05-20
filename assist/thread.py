@@ -6,10 +6,11 @@ import threading
 import time
 import tempfile
 from datetime import datetime
-from typing import Literal, Dict, Any, Callable, List, Iterator
+from typing import Literal, Dict, Any, Callable, List, Iterator, Sequence
 
 import sqlite3
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -57,7 +58,39 @@ class Thread:
                  model: BaseChatModel | None = None,
                  max_concurrency: int = 5,
                  sandbox_backend=None,
-                 on_queue_state: Callable[[str], None] | None = None):
+                 on_queue_state: Callable[[str], None] | None = None,
+                 extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
+                 extra_config: dict[str, Any] | None = None):
+        """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
+        — embedder-supplied tools the main agent can call.  See
+        ``assist.agent.create_agent`` docstring for the subagent
+        scope.
+
+        `extra_config` is merged into ``self.runconfig`` so per-Thread
+        embedder context (eg. langgraph ``configurable`` values that
+        tools read via the ``config: RunnableConfig`` parameter) reaches
+        every invocation without the embedder having to call
+        ``.with_config(...)`` at every entry point.  Default ``None``
+        preserves prior behavior.
+
+        *Merge semantics:* two-level, not recursive.  The nested
+        ``configurable`` dict gets a shallow `.update()` from the
+        embedder's ``configurable`` (so adding a key alongside
+        ``thread_id`` works as expected; passing a key whose value
+        is itself a dict overwrites any existing dict at that key
+        wholesale — no deep merge).  Top-level keys other than
+        ``configurable`` are overridden wholesale.
+
+        Constructor-owned keys (``configurable.thread_id``,
+        ``max_concurrency``) are NOT overridable via ``extra_config``
+        — `self.thread_id` / `self.max_concurrency` would diverge
+        from what the runconfig says, and downstream code
+        (THREAD_QUEUE affinity, ``message()``'s log lines) reads the
+        attribute not the config.  Pass those via the dedicated
+        ``thread_id=`` / ``max_concurrency=`` constructor params
+        instead; the merge silently drops the protected keys to keep
+        the attribute and runconfig in sync.
+        """
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
@@ -72,11 +105,54 @@ class Thread:
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency
         }
+        if extra_config is not None:
+            # `is not None` (vs `if extra_config:`) so a falsy-but-
+            # wrong-type value like `[]` or `""` still trips the
+            # isinstance check below instead of silently skipping the
+            # whole merge.  An explicit `{}` no-ops harmlessly either
+            # way.  Validate up front so an embedder gets a clear
+            # error instead of a downstream AttributeError on
+            # `.items()`.
+            if not isinstance(extra_config, dict):
+                raise TypeError(
+                    f"extra_config must be a dict, got {type(extra_config).__name__}"
+                )
+            inner = extra_config.get("configurable")
+            if inner is not None and not isinstance(inner, dict):
+                raise TypeError(
+                    f"extra_config['configurable'] must be a dict, "
+                    f"got {type(inner).__name__}"
+                )
+            # Two-level merge (NOT recursive): the inner `configurable`
+            # dict gets a shallow `.update()` from the embedder's
+            # `configurable`; top-level keys are overridden wholesale.
+            # Protected keys (`thread_id` inside `configurable`, and
+            # top-level `max_concurrency`) are silently dropped from
+            # the embedder's input to keep `self.thread_id` /
+            # `self.max_concurrency` in sync with the runconfig —
+            # see docstring.
+            #
+            # The dict-comprehension below also serves as a defensive
+            # shallow copy of `extra_config["configurable"]` — if the
+            # embedder mutates its own dict later, our `runconfig`
+            # isn't affected.  Nested values themselves are not
+            # deep-copied (consistent with the documented "two-level,
+            # not recursive" merge semantics).
+            extra_configurable = {
+                k: v for k, v in (inner or {}).items()
+                if k != "thread_id"
+            }
+            self.runconfig["configurable"].update(extra_configurable)
+            for k, v in extra_config.items():
+                if k in ("configurable", "max_concurrency"):
+                    continue
+                self.runconfig[k] = v
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
                                   checkpointer=checkpointer,
-                                  sandbox_backend=sandbox_backend)
+                                  sandbox_backend=sandbox_backend,
+                                  extra_tools=extra_tools)
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response.
