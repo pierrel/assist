@@ -262,6 +262,96 @@ class TestDetectLoop:
         ]
         assert _detect_loop(events, 2, 3, 3, 10) is None
 
+    # ------------------------------------------------------------------
+    # Exploration tools (eg. emacsos's eval_elisp): relaxed Pattern-C
+    # breadth threshold, but NOT exempt and still subject to A/B.
+    # ------------------------------------------------------------------
+
+    def test_pattern_c_exploration_tool_gets_higher_threshold(self):
+        # The live emacsos shape: a few distinct eval_elisp probes, one
+        # erroring (the small model fumbles the API).  With eval_elisp
+        # marked as an exploration tool, the higher threshold (default 6)
+        # means this legitimate exploration is NOT terminated.
+        events = [
+            self._evt(tool="eval_elisp", args={"code": "(cursor-type)"}, content="box"),
+            self._evt(tool="eval_elisp",
+                      args={"code": "(frame-parameter nil 'cursor-color)"},
+                      content="nil"),
+            self._evt(tool="eval_elisp", args={"code": "(load-path)"},
+                      content="error: void-function load-path", is_error=True),
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10,
+                            exploration_tools=frozenset({"eval_elisp"})) is None
+
+    def test_pattern_c_fires_for_eval_elisp_when_not_an_exploration_tool(self):
+        # Opt-in: with NO exploration_tools (the dev/code agent's config),
+        # the same 3 distinct erroring probes trip Pattern C at threshold 3.
+        events = [
+            self._evt(tool="eval_elisp", args={"code": "(cursor-type)"}, content="box"),
+            self._evt(tool="eval_elisp",
+                      args={"code": "(frame-parameter nil 'cursor-color)"},
+                      content="nil"),
+            self._evt(tool="eval_elisp", args={"code": "(load-path)"},
+                      content="error: void-function load-path", is_error=True),
+        ]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "distinct-args-thrash"
+
+    def test_pattern_c_exploration_tool_boundary_just_below_threshold(self):
+        # 5 distinct erroring forms (one below the exploration threshold of
+        # 6, with DISTINCT errors so A/B don't fire) → not yet a flail.
+        errs = ["void-function a", "void-variable b", "wrong-type c",
+                "args-range d", "scan-error e"]
+        events = [
+            self._evt(tool="eval_elisp", args={"code": f"(p{i})"},
+                      content=f"error: {errs[i]}", is_error=True)
+            for i in range(5)
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10,
+                            exploration_tools=frozenset({"eval_elisp"})) is None
+
+    def test_pattern_c_still_catches_sustained_exploration_flail(self):
+        # A sustained flail (>= the higher threshold of distinct erroring
+        # forms, with DISTINCT errors so A/B don't fire) IS still caught,
+        # faster than the recursion limit.
+        errs = ["void-function foo", "void-variable bar", "wrong-type baz",
+                "args-out-of-range qux", "scan-error quux", "no-catch corge"]
+        events = [
+            self._evt(tool="eval_elisp", args={"code": f"(probe-{i})"},
+                      content=f"error: {errs[i]}", is_error=True)
+            for i in range(6)
+        ]
+        result = _detect_loop(events, 2, 3, 3, 10,
+                              exploration_tools=frozenset({"eval_elisp"}))
+        assert result is not None
+        assert result["pattern"] == "distinct-args-thrash"
+        assert result["run_length"] == 6
+
+    def test_exploration_tool_still_subject_to_pattern_a(self):
+        # The SAME error repeated is a real loop — Pattern A still fires for
+        # an exploration tool (it stays "mutating" for A/B).
+        events = [
+            self._evt(tool="eval_elisp", args={"code": "(a)"},
+                      content="error: void-function frobnicate", is_error=True),
+            self._evt(tool="eval_elisp", args={"code": "(b)"},
+                      content="error: void-function frobnicate", is_error=True),
+        ]
+        result = _detect_loop(events, 2, 3, 3, 10,
+                              exploration_tools=frozenset({"eval_elisp"}))
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-error"
+
+    def test_exploration_tool_still_subject_to_pattern_b(self):
+        # The IDENTICAL form repeated 3x is a real loop — Pattern B still
+        # fires for an exploration tool.
+        evt = self._evt(tool="eval_elisp", args={"code": "(stuck)"}, content="nil")
+        events = [evt, evt.copy(), evt.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10,
+                              exploration_tools=frozenset({"eval_elisp"}))
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-args"
+
     def test_different_tools_do_not_interleave(self):
         # Pattern C identifies the offending tool name when 3 distinct
         # mutating calls share the same name. Custom tool name avoids the

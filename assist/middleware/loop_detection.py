@@ -28,7 +28,11 @@ C. Same tool + >= ``distinct_args_threshold`` distinct arg sets within
    error → ``foo2.py`` → error → ``foo_new.py``) even when individual
    error strings differ. Read-only tools (``read_file``, ``ls``,
    ``grep``, etc.) are exempt because distinct-args usage is the
-   normal shape of legitimate exploration.
+   normal shape of legitimate exploration. Embedder-declared
+   ``exploration_tools`` (e.g. emacsos's ``eval_elisp``) are not exempt
+   but get a HIGHER breadth threshold
+   (``_EXPLORATION_DISTINCT_ARGS_THRESHOLD``); they remain fully subject
+   to A and B.
 """
 
 import hashlib
@@ -68,6 +72,20 @@ _READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "read_url",
     "search_internet",
 })
+
+# Pattern C distinct-args threshold for tools an embedder marks as
+# "exploration" (e.g. emacsos's `eval_elisp`, which probes a live emacs and
+# is the agent's primary inspection tool).  Such tools legitimately fire
+# many distinct forms, and the small local model fumbles the API as it goes
+# — so a few distinct erroring probes are normal trial-and-error, not yet a
+# loop.  Exploration tools get this HIGHER breadth threshold than ordinary
+# mutating tools (default 3), so legitimate exploration isn't terminated;
+# but they are NOT exempt — a sustained flail of this many distinct erroring
+# forms is still caught (faster + with a clearer message than the recursion
+# limit).  They ALSO stay fully subject to Patterns A/B (repetition), which
+# is why `_mutating_only` below intentionally keeps using `_READ_ONLY_TOOLS`
+# only.  Tune against the live exploration shape in the evals.
+_EXPLORATION_DISTINCT_ARGS_THRESHOLD = 6
 
 
 def _looks_like_error(content: str) -> bool:
@@ -179,6 +197,8 @@ def _detect_loop(
     args_repeat_threshold: int,
     distinct_args_threshold: int,
     distinct_args_window: int,
+    exploration_tools: frozenset[str] = frozenset(),
+    exploration_args_threshold: int = _EXPLORATION_DISTINCT_ARGS_THRESHOLD,
 ) -> dict | None:
     """Return loop-detection info or ``None`` if no loop.
 
@@ -205,6 +225,14 @@ def _detect_loop(
     # exploration and do not trigger detection (Pattern A needs at
     # least one error event; Pattern B needs the same MUTATING tool
     # repeating).
+    #
+    # NOTE: this intentionally filters on `_READ_ONLY_TOOLS` ONLY — NOT the
+    # caller's `exploration_tools`.  Exploration tools (eg. eval_elisp) get a
+    # relaxed *Pattern C* breadth threshold below, but they must stay
+    # "mutating" here so Patterns A/B still catch a genuine repetition loop
+    # in them (same error / same form repeated).  Folding `exploration_tools`
+    # into this filter would disable A/B for them and remove their only
+    # remaining loop protection.
     def _mutating_only(events):
         return [e for e in events if e["tool_name"] not in _READ_ONLY_TOOLS]
 
@@ -269,7 +297,13 @@ def _detect_loop(
         if e["is_error"]:
             tool_errored[e["tool_name"]] = True
     for tool_name, sigs in by_tool.items():
-        if len(sigs) >= distinct_args_threshold and tool_errored.get(tool_name):
+        # Exploration tools (eg. eval_elisp) probe many distinct forms
+        # legitimately, so they get a higher breadth threshold — but still a
+        # finite one, so a sustained flail is caught.
+        threshold = (exploration_args_threshold
+                     if tool_name in exploration_tools
+                     else distinct_args_threshold)
+        if len(sigs) >= threshold and tool_errored.get(tool_name):
             return {
                 "pattern": "distinct-args-thrash",
                 "reason": (f"distinct-args-thrash: {tool_name} "
@@ -418,6 +452,15 @@ class LoopDetectionMiddleware(AgentMiddleware):
             exempt. Default 3.
         distinct_args_window: Sliding window for the distinct-args
             check. Default 10.
+        exploration_tools: Tool names whose distinct-args *breadth* gets a
+            higher Pattern-C threshold
+            (``_EXPLORATION_DISTINCT_ARGS_THRESHOLD``) because probing many
+            distinct forms is their normal
+            shape (e.g. emacsos's ``eval_elisp``).  They are NOT exempt from
+            Pattern C (a sustained flail is still caught) and remain fully
+            subject to Patterns A/B (repetition).  Default ``None`` → empty,
+            so the dev/code agent is unaffected; an embedder opts in per
+            agent.
     """
 
     def __init__(
@@ -427,6 +470,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
         args_repeat_threshold: int = 3,
         distinct_args_threshold: int = 3,
         distinct_args_window: int = 10,
+        exploration_tools: frozenset[str] | None = None,
     ):
         super().__init__()
         self.window = window
@@ -434,6 +478,9 @@ class LoopDetectionMiddleware(AgentMiddleware):
         self.args_repeat_threshold = args_repeat_threshold
         self.distinct_args_threshold = distinct_args_threshold
         self.distinct_args_window = distinct_args_window
+        # Normalise to frozenset so a caller passing a mutable set still
+        # yields an immutable attribute (matches the type annotation).
+        self.exploration_tools = frozenset(exploration_tools or ())
         self.tools = []
         self._intervention_count = 0
 
@@ -457,6 +504,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
             args_repeat_threshold=self.args_repeat_threshold,
             distinct_args_threshold=self.distinct_args_threshold,
             distinct_args_window=self.distinct_args_window,
+            exploration_tools=self.exploration_tools,
         )
         if detection is None:
             return None
