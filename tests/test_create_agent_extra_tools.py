@@ -72,6 +72,37 @@ class TestCreateAgentExtraTools:
         assert kwargs["tools"] == [t1, t2]
 
 
+class TestCreateAgentLoopExplorationTools:
+    """`loop_exploration_tools` reaches the MAIN agent's
+    `LoopDetectionMiddleware(exploration_tools=...)`; default leaves the
+    dev/code agent unchanged (empty set)."""
+
+    def _main_loop_mw(self, **kwargs):
+        from assist.agent import create_agent
+        from assist.middleware.loop_detection import LoopDetectionMiddleware
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        with patch("assist.agent.create_deep_agent") as fake, \
+             patch("assist.agent.create_context_agent") as fake_ctx, \
+             patch("assist.agent.create_research_agent") as fake_res:
+            fake.return_value = MagicMock()
+            fake_ctx.return_value = MagicMock()
+            fake_res.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                create_agent(MagicMock(), wd, checkpointer=InMemorySaver(),
+                             sandbox_backend=None, **kwargs)
+            mws = fake.call_args.kwargs["middleware"]
+            return next(m for m in mws if isinstance(m, LoopDetectionMiddleware))
+
+    def test_default_exploration_tools_is_empty(self):
+        # The dev/code agent (no exploration tools) is unchanged.
+        assert self._main_loop_mw().exploration_tools == frozenset()
+
+    def test_loop_exploration_tools_forwarded_to_middleware(self):
+        mw = self._main_loop_mw(loop_exploration_tools=frozenset({"eval_elisp"}))
+        assert mw.exploration_tools == frozenset({"eval_elisp"})
+
+
 class TestThreadExtraTools:
     """`Thread.__init__` is heavy too; patch `create_agent` and verify
     the wiring through to `create_agent` + `self.runconfig`."""
@@ -94,6 +125,14 @@ class TestThreadExtraTools:
         def my_tool(x: str) -> str: return x
         _, ca_kwargs = self._build(extra_tools=[my_tool])
         assert ca_kwargs["extra_tools"] == [my_tool]
+
+    def test_default_loop_exploration_tools_none_passed_through(self):
+        _, ca_kwargs = self._build()
+        assert ca_kwargs["loop_exploration_tools"] is None
+
+    def test_loop_exploration_tools_forwarded_to_create_agent(self):
+        _, ca_kwargs = self._build(loop_exploration_tools=frozenset({"eval_elisp"}))
+        assert ca_kwargs["loop_exploration_tools"] == frozenset({"eval_elisp"})
 
 
 class TestThreadExtraConfig:

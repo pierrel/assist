@@ -60,11 +60,18 @@ class Thread:
                  sandbox_backend=None,
                  on_queue_state: Callable[[str], None] | None = None,
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
+                 loop_exploration_tools: frozenset[str] | None = None,
                  extra_config: dict[str, Any] | None = None):
         """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
         — embedder-supplied tools the main agent can call.  See
         ``assist.agent.create_agent`` docstring for the subagent
         scope.
+
+        `loop_exploration_tools` is forwarded to
+        ``create_agent(loop_exploration_tools=...)`` — tool names whose
+        distinct-args breadth gets a relaxed (but still finite) loop-
+        detection threshold because probing many forms is their normal
+        shape (eg. an embedder's ``eval_elisp``).  Default ``None``.
 
         `extra_config` is merged into ``self.runconfig`` so per-Thread
         embedder context (eg. langgraph ``configurable`` values that
@@ -152,7 +159,8 @@ class Thread:
                                   working_dir=working_dir,
                                   checkpointer=checkpointer,
                                   sandbox_backend=sandbox_backend,
-                                  extra_tools=extra_tools)
+                                  extra_tools=extra_tools,
+                                  loop_exploration_tools=loop_exploration_tools)
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response.
