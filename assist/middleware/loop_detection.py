@@ -28,7 +28,10 @@ C. Same tool + >= ``distinct_args_threshold`` distinct arg sets within
    error → ``foo2.py`` → error → ``foo_new.py``) even when individual
    error strings differ. Read-only tools (``read_file``, ``ls``,
    ``grep``, etc.) are exempt because distinct-args usage is the
-   normal shape of legitimate exploration.
+   normal shape of legitimate exploration. Embedder-declared
+   ``exploration_tools`` (e.g. emacsos's ``eval_elisp``) are not exempt
+   but get a HIGHER breadth threshold (``_EXPLORATION_DISTINCT_ARGS_
+   THRESHOLD``); they remain fully subject to A and B.
 """
 
 import hashlib
