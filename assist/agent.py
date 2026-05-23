@@ -110,6 +110,7 @@ def create_agent(model: BaseChatModel,
                  sandbox_backend=None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
+                 loop_exploration_tools: frozenset[str] | None = None,
                  ) -> CompiledStateGraph:
     """Build the general-purpose agent.
 
@@ -132,6 +133,15 @@ def create_agent(model: BaseChatModel,
     general-purpose subagent; the bespoke ``context`` / ``research`` /
     ``critique`` subagents are built separately and do not see these
     tools (correctly, given their roles).  Default ``None`` is empty.
+
+    ``loop_exploration_tools`` is forwarded to the MAIN agent's
+    ``LoopDetectionMiddleware(exploration_tools=...)``: tool names whose
+    distinct-args breadth gets a higher Pattern-C threshold (they probe
+    many forms legitimately — e.g. emacsos's ``eval_elisp``).  They are
+    NOT exempt from loop detection (still subject to Patterns A/B and a
+    finite Pattern-C cap).  Only the main agent gets it — the bespoke
+    subagents don't receive ``extra_tools`` so the exploration tool can't
+    reach them.  Default ``None`` leaves the dev/code agent unchanged.
     """
     # Core middleware: retry, tool call limiting, JSON validation, and logging.
     # See `_make_retry_middleware` for the retry-on tuple rationale.
@@ -154,7 +164,7 @@ def create_agent(model: BaseChatModel,
     # of `loop_detection_mw` so the rejection is what the loop
     # detector sees if the model retries.
     git_push_blocker_mw = GitPushBlockerMiddleware()
-    loop_detection_mw = LoopDetectionMiddleware()
+    loop_detection_mw = LoopDetectionMiddleware(exploration_tools=loop_exploration_tools)
     # Innermost wrap_model_call middleware — recovers from empty terminal
     # AIMessages after every outer retry/sanitization layer has had its turn.
     empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
