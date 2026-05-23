@@ -14,6 +14,8 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from deepagents.backends.protocol import BackendProtocol
+
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_chat_model
 from assist.agent import create_research_agent, create_agent
@@ -61,6 +63,7 @@ class Thread:
                  on_queue_state: Callable[[str], None] | None = None,
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  loop_exploration_tools: frozenset[str] | None = None,
+                 extra_skill_sources: dict[str, BackendProtocol] | None = None,
                  extra_config: dict[str, Any] | None = None):
         """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
         — embedder-supplied tools the main agent can call.  See
@@ -72,6 +75,12 @@ class Thread:
         distinct-args breadth gets a relaxed (but still finite) loop-
         detection threshold because probing many forms is their normal
         shape (eg. an embedder's ``eval_elisp``).  Default ``None``.
+
+        `extra_skill_sources` is forwarded to
+        ``create_agent(extra_skill_sources=...)`` — a mapping of additional
+        virtual-path routes to backends that hold ``SKILL.md`` files, so an
+        embedder can ship skills that live outside the assist repo (see
+        ``assist.agent.create_agent``).  Default ``None``.
 
         `extra_config` is merged into ``self.runconfig`` so per-Thread
         embedder context (eg. langgraph ``configurable`` values that
@@ -160,7 +169,8 @@ class Thread:
                                   checkpointer=checkpointer,
                                   sandbox_backend=sandbox_backend,
                                   extra_tools=extra_tools,
-                                  loop_exploration_tools=loop_exploration_tools)
+                                  loop_exploration_tools=loop_exploration_tools,
+                                  extra_skill_sources=extra_skill_sources)
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response.

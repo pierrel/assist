@@ -134,6 +134,15 @@ class TestThreadExtraTools:
         _, ca_kwargs = self._build(loop_exploration_tools=frozenset({"eval_elisp"}))
         assert ca_kwargs["loop_exploration_tools"] == frozenset({"eval_elisp"})
 
+    def test_default_extra_skill_sources_none_passed_through(self):
+        _, ca_kwargs = self._build()
+        assert ca_kwargs["extra_skill_sources"] is None
+
+    def test_extra_skill_sources_forwarded_to_create_agent(self):
+        sentinel = {"/emacsos-skills/": object()}
+        _, ca_kwargs = self._build(extra_skill_sources=sentinel)
+        assert ca_kwargs["extra_skill_sources"] is sentinel
+
 
 class TestThreadExtraConfig:
     """`Thread.__init__(extra_config=...)` merges into `self.runconfig`.
