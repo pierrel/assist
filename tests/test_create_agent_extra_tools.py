@@ -139,7 +139,8 @@ class TestThreadExtraTools:
         assert ca_kwargs["extra_skill_sources"] is None
 
     def test_extra_skill_sources_forwarded_to_create_agent(self):
-        sentinel = {"/emacsos-skills/": object()}
+        from deepagents.backends.protocol import BackendProtocol
+        sentinel = {"/emacsos-skills/": MagicMock(spec=BackendProtocol)}
         _, ca_kwargs = self._build(extra_skill_sources=sentinel)
         assert ca_kwargs["extra_skill_sources"] is sentinel
 
