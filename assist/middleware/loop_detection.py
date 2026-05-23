@@ -30,8 +30,9 @@ C. Same tool + >= ``distinct_args_threshold`` distinct arg sets within
    ``grep``, etc.) are exempt because distinct-args usage is the
    normal shape of legitimate exploration. Embedder-declared
    ``exploration_tools`` (e.g. emacsos's ``eval_elisp``) are not exempt
-   but get a HIGHER breadth threshold (``_EXPLORATION_DISTINCT_ARGS_
-   THRESHOLD``); they remain fully subject to A and B.
+   but get a HIGHER breadth threshold
+   (``_EXPLORATION_DISTINCT_ARGS_THRESHOLD``); they remain fully subject
+   to A and B.
 """
 
 import hashlib
@@ -452,8 +453,9 @@ class LoopDetectionMiddleware(AgentMiddleware):
         distinct_args_window: Sliding window for the distinct-args
             check. Default 10.
         exploration_tools: Tool names whose distinct-args *breadth* gets a
-            higher Pattern-C threshold (``_EXPLORATION_DISTINCT_ARGS_
-            THRESHOLD``) because probing many distinct forms is their normal
+            higher Pattern-C threshold
+            (``_EXPLORATION_DISTINCT_ARGS_THRESHOLD``) because probing many
+            distinct forms is their normal
             shape (e.g. emacsos's ``eval_elisp``).  They are NOT exempt from
             Pattern C (a sustained flail is still caught) and remain fully
             subject to Patterns A/B (repetition).  Default ``None`` → empty,
@@ -476,7 +478,9 @@ class LoopDetectionMiddleware(AgentMiddleware):
         self.args_repeat_threshold = args_repeat_threshold
         self.distinct_args_threshold = distinct_args_threshold
         self.distinct_args_window = distinct_args_window
-        self.exploration_tools = exploration_tools or frozenset()
+        # Normalise to frozenset so a caller passing a mutable set still
+        # yields an immutable attribute (matches the type annotation).
+        self.exploration_tools = frozenset(exploration_tools or ())
         self.tools = []
         self._intervention_count = 0
 
