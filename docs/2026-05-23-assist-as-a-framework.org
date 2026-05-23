@@ -1,0 +1,163 @@
+#+title: assist as a framework — the deepagents / assist / client boundary
+#+date: 2026-05-23
+
+A *thinking* doc, not yet an implementation plan.  It frames a problem
+we've been accumulating and sketches directions; a future design phase
+(the three-phase workflow) picks one and an incremental migration.
+
+* The problem: we've been "opening up" assist by accretion
+
+assist began as a single application — a personal dev/research agent
+fronted by =manage.web=.  Over the last few weeks emacsos (a phone-shaped
+emacs client that imports =assist= in-process) has needed assist to bend
+to its shape, and we've satisfied each need with a *minimal, reactive
+change*: thread one more keyword through =Thread.__init__= →
+=create_agent= → the middleware / subagent stack.
+
+The embedder surface, accreted roughly in order:
+
+| Opening                                      | Why it was added                                   |
+|----------------------------------------------+----------------------------------------------------|
+| =model=, =checkpointer=, =thread_id=, =sandbox_backend= | original reuse seams (the web app)        |
+| =extra_tools=                                | emacsos needs =eval_elisp= / =apply_config= callable |
+| =extra_config=                               | per-request phone identity into the langgraph configurable |
+| =extra_skill_sources=                        | emacsos ships its own =SKILL.md= outside the assist repo |
+| =loop_exploration_tools=                     | relax =LoopDetection='s Pattern-C for =eval_elisp= |
+
+Each was the right small change *in isolation* (see the per-change docs,
+e.g. [[file:2026-05-17-skills-sources-argument.org][2026-05-17-skills-sources-argument.org]]).  The *pattern* is the problem:
+every new client need becomes a new keyword forwarded through 2–3 layers,
+and the public API is "a constructor that grows a parameter whenever
+someone wants to influence the agent."
+
+** Symptoms
+
+- *Repetitive forwarding.*  =Thread= mirrors =create_agent= mirrors the
+  middleware.  Each opening is the same three-line dance in three files
+  plus a forwarding test.
+- *Inconsistent control surfaces.*  Some client control is a constructor
+  kwarg (=extra_tools=); some is a langgraph =configurable= value via
+  =extra_config= (phone context); some is *impossible* — the middleware
+  *stack itself* (which middleware, in what order, with what thresholds)
+  is hardcoded in =create_agent=, and we only expose the few knobs we've
+  poked holes for (e.g. =loop_exploration_tools=).
+- *Implicit, drifting boundary.*  There is no stated "this is the embedder
+  contract."  What a client may decide vs. what assist decides is wherever
+  the last opening happened to land.
+- *App concerns baked into the reuse path.*  =create_agent= hardcodes the
+  dev / research / critique subagents and dev-oriented prompts.  emacsos
+  inherits all of them even though a phone agent wants neither a
+  research-agent nor a code-critique subagent — it just has no clean way
+  to say no.
+
+* The three layers, and where they blur
+
+- *deepagents* — the underlying agent framework: =create_deep_agent=, the
+  middleware protocol, backends, the langgraph graph.  General-purpose,
+  upstream, not ours.
+- *assist* — today a *mix* of two things:
+  1. a genuinely reusable *small-model-hardening layer*: the opinionated
+     middleware stack (retry, JSON validation, tool-name sanitization,
+     loop detection, output sanitization, summarization wiring, the
+     small-model skills + memory middleware, empty-response recovery,
+     write-collision, git-push blocking) plus construction conventions.
+     This is assist's real value-add *over raw deepagents* for small local
+     models.
+  2. *app-specific* pieces: the research / context / critique subagents,
+     the dev system prompts, =ThreadManager= + =threads.db= retention (a
+     web-app concern), the domain-clone / git-real / non-root-sandbox
+     machinery.
+- *clients* — =manage.web= (the dev/research app) and emacsos (phone:
+  =eval_elisp= / =apply_config=, a config-apply skill, chat-first
+  persistence keyed by a fixed phone id).  Plausible future clients: a
+  CLI, another device, another domain.
+
+The blur: assist's reusable core (1) is entangled with its app layer (2),
+and =create_agent= ships them as one unit.  A client wants the core and
+pokes holes to suppress or adjust the app layer.
+
+* What "framework" should mean here
+
+A deliberate *embedder contract* instead of an ever-widening constructor.
+A client declares its agent — tools, skills, system prompt, subagents (if
+any), persistence / keying policy, middleware tuning — through one
+cohesive, composable surface; assist supplies the hardened core and sane
+defaults; the dev app and emacsos *both become clients of* that core,
+rather than one being the framework and the other poking holes in it.
+
+A framework-shaped assist would let a client answer, in one place:
+- which *tools* does my agent have?
+- which *skills*, and where do they live?
+- what *system prompt* / persona?
+- which *subagents*, if any?  (emacsos: none; dev app: research/critique)
+- how is *conversation state* persisted and *keyed*?  (emacsos rolled its
+  own fixed-id + =SqliteSaver=; =ThreadManager= is web-app-shaped)
+- what *middleware tuning*?  (loop-detection thresholds, exploration
+  tools, summarization trigger, eviction) — without a new kwarg per knob.
+
+* Directions to explore (options, not decisions)
+
+1. *Agent spec/profile object.*  A client passes one =AgentSpec= (tools,
+   skills, prompt, subagents, persistence policy, middleware tuning)
+   instead of N kwargs.  Pro: one cohesive, extensible surface.  Con: a
+   new abstraction to design well; risk of a god-object.
+2. *Composable middleware export.*  Expose the hardening stack as a
+   documented, orderable list a client assembles (add / remove / reorder /
+   retune) and feeds to =create_deep_agent= itself.  assist becomes "a
+   library of small-model middleware + helpers," not "a function that
+   builds THE agent."  Pro: maximal flexibility, honest about the layer.
+   Con: clients must understand middleware ordering, which is load-bearing
+   (see [[file:2026-05-16-context-management-overhaul.org][2026-05-16-context-management-overhaul.org]]); more rope to hang
+   yourself with.
+3. *Builder.*  =AgentBuilder().with_tools(...).with_skills(...)
+   .with_subagents(...).tune_loop_detection(...).build()= — a middle
+   ground between (1) and (2).
+4. *Package / module split.*  =assist.core= (framework: hardening
+   middleware + construction) vs =assist.app= (the dev/research agent +
+   web thread management).  emacsos depends on =assist.core=; =manage.web=
+   on =assist.app=.  Orthogonal to 1–3 (could combine) but forces the
+   reusable-vs-app boundary to actually be named.
+
+* The deepagents boundary (a real question, not rhetorical)
+
+assist's value over deepagents is the *small-model hardening* plus
+opinionated defaults.  Two of those (Summarization, Filesystem eviction)
+we already delegate upstream.  Open question for the refactor: which of
+assist's hardening middleware (loop detection, JSON / tool-name
+sanitization, empty-response recovery, the small-model skills/memory
+variants) is *generally useful enough to contribute upstream to
+deepagents*, vs. stays assist-specific?  The answer moves the framework
+line: if much goes upstream, "assist as a framework" is thinner (mostly
+defaults + glue) and clients lean more directly on deepagents.
+
+* Key questions for the design phase
+
+1. What is the *minimal embedder contract*?  (tools, skills, prompt,
+   subagents, persistence-keying, middleware tuning — is that the complete
+   set, or are there others: the streaming/event shape, the LLM queue
+   model, the runaway/abort policy?)
+2. Which =create_agent= internals are *reusable-core* vs *app-specific*?
+   Especially the three subagents, the dev prompts, =ThreadManager= /
+   =threads.db= retention, the domain-clone / sandbox machinery.
+3. *Persistence* abstraction: emacsos wants fixed-id + =SqliteSaver= +
+   explicit clear; the web app wants =ThreadManager='s many-threads +
+   retention sweep.  What's the reusable seam — a =PersistencePolicy=?
+4. *Middleware tuning* without kwarg-per-knob: a single middleware-config
+   object?  Per-middleware config the spec carries?
+5. *Upstream vs local*: which hardening middleware to push to deepagents.
+6. *Migration*: the dev web app runs on today's API.  A refactor must keep
+   it working — introduce the new surface, port =manage.web= and emacsos
+   onto it, then remove the accreted kwargs.  Incremental, not big-bang.
+
+* Non-goals / scope discipline
+
+- This is *framing*, not a committed design.  A design phase picks a
+  direction and an incremental migration path.
+- Design for the clients we actually have or clearly foresee (the dev app
+  + emacsos, maybe a CLI) — *not* an infinitely-general plugin framework.
+  The simplest shape that ends the per-need-kwarg accretion and names the
+  reusable / app / deepagents boundaries is the win.
+- Don't block emacsos work on this.  Keep shipping needed openings the
+  current way until the refactor is prioritized; this doc is the marker
+  that we should *stop accreting and design* before the embedder surface
+  grows much further.

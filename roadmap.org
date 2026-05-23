@@ -5,6 +5,25 @@ Make it expandable from the main web ui. Not always expanded.
 ** TODO Fix cli
 * Vision
 ** TODO Test a single vision experiment
+* Architecture
+** TODO Refactor assist into a framework (deepagents / assist / client boundary)
+We've been "opening up" assist to emacsos's needs by *accretion* — a new
+keyword threaded through =Thread= → =create_agent= each time a client
+needs to influence the agent (=extra_tools=, =extra_config=,
+=extra_skill_sources=, =loop_exploration_tools=, …).  Each was a fine
+small change in isolation, but the pattern is the problem.  Instead:
+design a deliberate *embedder contract*, separate assist's reusable
+small-model-hardening core from its app-specific pieces (the
+dev/research/critique subagents, dev prompts, =ThreadManager= /
+=threads.db=) so the dev app AND emacsos are both *clients* of a
+framework, and decide which hardening middleware belongs upstream in
+deepagents.  Thinking + options (spec object / composable middleware /
+builder / package split) in
+[[file:docs/2026-05-23-assist-as-a-framework.org][docs/2026-05-23-assist-as-a-framework.org]].  Action: stop accreting
+per-need kwargs; run a design phase before the embedder surface grows
+further.  Must keep =manage.web= working — incremental migration, not a
+big-bang rewrite.
+
 * Dev updates
 The dev agent needs significant improvements
 ** TODO Many more evals
