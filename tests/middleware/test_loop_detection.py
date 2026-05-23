@@ -298,6 +298,19 @@ class TestDetectLoop:
         assert result is not None
         assert result["pattern"] == "distinct-args-thrash"
 
+    def test_pattern_c_exploration_tool_boundary_just_below_threshold(self):
+        # 5 distinct erroring forms (one below the exploration threshold of
+        # 6, with DISTINCT errors so A/B don't fire) → not yet a flail.
+        errs = ["void-function a", "void-variable b", "wrong-type c",
+                "args-range d", "scan-error e"]
+        events = [
+            self._evt(tool="eval_elisp", args={"code": f"(p{i})"},
+                      content=f"error: {errs[i]}", is_error=True)
+            for i in range(5)
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10,
+                            exploration_tools=frozenset({"eval_elisp"})) is None
+
     def test_pattern_c_still_catches_sustained_exploration_flail(self):
         # A sustained flail (>= the higher threshold of distinct erroring
         # forms, with DISTINCT errors so A/B don't fire) IS still caught,
