@@ -101,6 +101,15 @@ class ThreadAffinityQueue:
         wait_timeout_s: float | None = None,
         hold_timeout_s: float | None = None,
     ) -> Iterator[_Handle]:
+        """Acquire this thread's single-flight slot for the ``with`` block.
+
+        Thread-affine: holds a ``threading.Condition`` and sets a
+        ``ContextVar`` token, so it must be entered, resumed across ``yield``,
+        and exited on the same OS thread.  Advancing the wrapped generator
+        across threads (e.g. ``run_in_executor`` on the default pool) releases
+        the lock from a non-owning thread and raises ``RuntimeError: cannot
+        release un-acquired lock``; drive it from a single thread.
+        """
         cb = on_state_change or (lambda _: None)
         wait_timeout = (
             self._default_wait_timeout if wait_timeout_s is None else wait_timeout_s
