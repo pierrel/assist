@@ -47,12 +47,26 @@ Consider:
 2. URLs that do not corroborate the information in the final report
 3. Better ways to search
 * Reliability
-** TODO Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
+** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path does NOT hit it.
 
 *Root cause (py-spy dump, 2026-05-25 — saved analysis).*  THREAD-POOL EXHAUSTION in langgraph's chained checkpoint put, =_checkpointer_put_after_previous= (=langgraph/pregel/_loop.py:1508/1511=).  The dump showed five =ThreadPoolExecutor-4_*= threads all parked in =result()= waiting on the *previous* put's future, with no free worker left to complete any — a self-deadlocked future chain.  Above it: =ThreadPoolExecutor-1_0= = the top-level =agent.stream()= tick (=assist/thread.py:204=) waiting; =ThreadPoolExecutor-3_0= = the =subagent.invoke()= (=deepagents/middleware/subagents.py:493=) tick waiting; =ThreadPoolExecutor-1_1= = a second turn blocked on =thread_queue.acquire= (the wedge propagating).  The streamed path adds an extra executor layer (=run_in_executor= for =next()=) on top of the nested =general.stream → research.invoke → nested trio + concurrent tools/DDGS=, and the deep nesting + concurrency exhausts the pool feeding the put chain.  Backend-independent: deadlocks the same on =InMemorySaver= or =SqliteSaver=.  Obscure research prompts make it worse (122 floundering searches → deeper nesting); test with easy topics ("when was Paris founded").
 
-*Fix direction (under investigation).*  Levers, most-promising first: (1) langgraph checkpoint *durability* / put model — write checkpoints synchronously instead of chaining through an exhaustible executor; (2) langgraph version — may be fixed upstream; (3) drop the =run_in_executor=→=next()= streaming layer for async-native streaming.
+*Fix (DONE, lever 1).*  Pass =durability="sync"= to =agent.stream()= in
+=Thread.stream_message= (=assist/thread.py=): checkpoints persist synchronously
+before the next step instead of chaining through the exhaustible
+=BackgroundExecutor=, so the put-chain can't self-deadlock.  Kept per-step
+checkpoints (so sub-agent rollback still works); did NOT need lever 2/3.
+
+Fixing the deadlock unmasked two streamed-path consumer bugs (langgraph 1.2)
+that turns never reached while they wedged: (A) an =updates= chunk's =messages=
+can be a =langgraph.types.Overwrite= wrapper, crashing the naive list-iteration
+— fixed by the shared =assist.stream_chunks.unwrap_messages= (used by the CLI
+and emacsos-server); (B) the emacsos consumer advanced this thread-affine
+generator across the default thread pool → cross-thread =THREAD_QUEUE= lock
+release → worker crash — fixed in emacsos by pinning the generator to a
+=max_workers=1= pump (branch =fix-streamed-chat-langgraph-1.2=).  Verified e2e
+2026-05-25.  assist side ships on =fix-streamed-subagent-deadlock=.
 
 *Related (hygiene, NOT the fix).*  Branch =isolate-subagent-checkpointer= (assist, pushed/unmerged, commit f93d451): gives each ephemeral sub-agent its own =InMemorySaver= instead of the parent's persistent one.  Correct on its own — merge when convenient — but it does not resolve the wedge (confirmed by the dump).
 
