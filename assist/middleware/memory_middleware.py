@@ -1,7 +1,7 @@
 """Small-model-friendly memory middleware.
 
 Subclasses deepagents' ``MemoryMiddleware`` so the small models we run
-(e.g. Qwen3-Coder-30B) reliably read AND write the user's persistent
+(e.g. Qwen3.6-27B) reliably read AND write the user's persistent
 memory file (``AGENTS.md``).
 
 One change from the upstream behavior: the system-prompt block injected

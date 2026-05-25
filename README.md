@@ -380,7 +380,7 @@ See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 The skills system is built on the `SkillsMiddleware` from
 [deepagents](https://github.com/langchain-ai/deepagents) but with a few
 modifications tuned for the small models we run locally (e.g.
-Qwen3-Coder-30B). Upstream's mechanism is **read the SKILL.md path with
+Qwen3.6-27B). Upstream's mechanism is **read the SKILL.md path with
 `read_file`** — the small model is unreliable at constructing that path
 from a description. Our variant in `assist/middleware/skills_middleware.py`
 keeps progressive disclosure but changes how the model interacts with it:
@@ -505,7 +505,7 @@ The memory system is built on `MemoryMiddleware` from
 [deepagents](https://github.com/langchain-ai/deepagents).  Upstream's
 mechanism — **read happens automatically; write happens through the
 model's existing `edit_file` / `write_file` tools** — works on the
-small models we run (e.g. Qwen3-Coder-30B) once the system prompt is
+small models we run (e.g. Qwen3.6-27B) once the system prompt is
 shaped for them; we do not register a dedicated `save_memory` tool.
 
 `assist/middleware/memory_middleware.py` rewrites the system-prompt
