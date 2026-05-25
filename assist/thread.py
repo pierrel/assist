@@ -204,7 +204,22 @@ class Thread:
                 yield from self.agent.stream(
                     {"messages": [{"role": "user", "content": text}]},
                     self.runconfig,
-                    stream_mode=["messages", "updates"]
+                    stream_mode=["messages", "updates"],
+                    # durability="sync": persist each checkpoint synchronously
+                    # before the next step instead of langgraph's default
+                    # "async" background writes.  The async path submits every
+                    # checkpoint put to a BackgroundExecutor and chains them via
+                    # futures (`_checkpointer_put_after_previous`); under the
+                    # streamed agent's deep nesting (general.stream → sub-agent
+                    # .invoke → nested trio + concurrent tools) that pool gets
+                    # exhausted — every worker blocks on the previous put's
+                    # future with none left to complete them, deadlocking the
+                    # turn (confirmed by py-spy, 2026-05-25).  "sync" keeps one
+                    # put in flight at a time, so the pool can't pile up, while
+                    # still writing per-step checkpoints (RollbackRunnable needs
+                    # them).  langgraph propagates this to the task-tool
+                    # sub-agents via the config, so the whole tree is covered.
+                    durability="sync",
                 )
         return _gen()
 
