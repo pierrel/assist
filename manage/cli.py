@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 
 from assist.env import load_dev_env
 from assist.thread import ThreadManager, Thread, render_tool_calls
+from assist.stream_chunks import unwrap_messages
 
 # Setup logging to file
 project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -27,7 +28,10 @@ logger = logging.getLogger("assist.model")
 def print_update(chunk) -> None:
     model_call = chunk.get('model', None)
     if model_call:
-        last_message = model_call.get("messages", [])[-1]
+        # langgraph 1.2 may wrap the `messages` value in an `Overwrite`;
+        # unwrap_messages normalizes that (and any list/empty shape).
+        messages = unwrap_messages(model_call.get("messages"))
+        last_message = messages[-1] if messages else None
         if last_message and isinstance(last_message, AIMessage):
             print(render_tool_calls(last_message))
 
@@ -42,7 +46,11 @@ def stream_message(thread: Thread, message: str):
         if ch_type == 'updates':
             print_update(chunk)
         elif ch_type == 'messages':
-            [print_message(c) for c in chunk]
+            # A `messages`-mode item is an `(AIMessageChunk, metadata)`
+            # tuple — print the message, not the metadata. (Mirrors
+            # stream.py's `_tool_messages` / `extract_content_text`.)
+            message_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
+            print_message(message_chunk)
 
 
 def main():
