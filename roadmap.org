@@ -30,8 +30,8 @@ The dev agent needs significant improvements
 Consider checking out a version of this app to make changes to
 ** TODO Language/project-specific guidance
 ** TODO Explore upgrading the local small model to Qwen3.7
-The dev/agent stack currently targets Qwen3-Coder-30B-A3B-Instruct-AWQ
-on local vLLM (see CLAUDE.md "Small-model targeting").  A newer
+The dev/agent stack now targets Qwen3.6-27B (Q4_K_M gguf) on local
+llama.cpp (see CLAUDE.md "Small-model targeting").  A newer
 Qwen3.7-class release may close the gap to GPT-4-class behavior on the
 failure modes we prompt-engineer around (tool-call composition,
 multi-turn instruction following, elisp/config restatement for the

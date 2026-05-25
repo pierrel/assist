@@ -1,7 +1,7 @@
 """Small-model-friendly skills middleware.
 
 Subclasses deepagents' SkillsMiddleware so the small models we run (e.g.
-Qwen3-Coder-30B) reliably load skills before acting in their domain.
+Qwen3.6-27B) reliably load skills before acting in their domain.
 
 Two changes from the upstream behavior:
 

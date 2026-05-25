@@ -11,8 +11,8 @@ This middleware intercepts `write_file` results via `wrap_tool_call` /
 `awrap_tool_call` and rewrites the collision error to a positive,
 recipe-style redirect that points the model at `edit_file` with an explicit
 sample call.  The path is repeated four times in the rewritten message
-because a single mention of the path was empirically not enough on
-Qwen3-Coder-30B-A3B-Instruct-AWQ.
+because a single mention of the path was empirically not enough on the
+small model we run (Qwen3.6-27B; the 4× was first tuned on Qwen3-Coder).
 
 `status="error"` is preserved so `LoopDetectionMiddleware` still sees the
 result as an error event — the rewrite changes the message text the model
