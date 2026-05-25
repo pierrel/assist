@@ -32,6 +32,8 @@ def unwrap_messages(value: Any) -> list:
         return []
     # A lone message-like object: the messages channel is normally a list,
     # but tolerate a single message so a stray shape isn't silently dropped.
-    if hasattr(value, "content") or hasattr(value, "type"):
+    # Key on `.content` (every langchain message has it) — not `.type`, which
+    # is a common attribute name that would wrap unrelated objects.
+    if hasattr(value, "content"):
         return [value]
     return []
