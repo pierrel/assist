@@ -209,12 +209,28 @@ def create_agent(model: BaseChatModel,
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
+    # Sub-agents get their OWN isolated in-memory checkpointer rather than the
+    # parent's (which may be a persistent SqliteSaver shared process-wide).  A
+    # sub-agent is ephemeral — one `task` invocation, never resumed across
+    # turns — so it has no reason to write into the conversation's persistent
+    # checkpoint store; an isolated InMemorySaver is the correct scope.
+    # RollbackRunnable still rolls each sub-agent back against its own
+    # checkpointer, and the parent resumes from the `task` tool's RETURNED
+    # result (not the sub-agent's checkpoints), so nothing depends on the
+    # sub-agent sharing the persistent store.  A fresh saver per sub-agent
+    # also isolates them from each other.
+    #
+    # NOTE: this is hygiene, NOT the fix for the streamed sub-agent wedge.
+    # That hang is thread-pool exhaustion in langgraph's chained checkpoint
+    # put (`_checkpointer_put_after_previous`), which deadlocks identically on
+    # InMemorySaver or SqliteSaver — so this isolation does not resolve it.
+    # See the roadmap item for the real root cause.
     context_sub = CompiledSubAgent(
         name="context-agent",
         description="Discovers and surfaces relevant context from the user's local filesystem. Use this agent to find files, read content, and understand the user's file structure before taking action. It is read-only — it will not modify files.",
         runnable=create_context_agent(model,
                                       working_dir,
-                                      checkpointer,
+                                      InMemorySaver(),
                                       [retry_middle, json_validation_mw, tool_name_mw],
                                       sandbox_backend=sandbox_backend)
     )
@@ -229,7 +245,7 @@ def create_agent(model: BaseChatModel,
         ),
         runnable=create_research_agent(model,
                                        working_dir,
-                                       checkpointer,
+                                       InMemorySaver(),
                                        [retry_middle, json_validation_mw, tool_name_mw],
                                        sandbox_backend=sandbox_backend)
     )
