@@ -12,7 +12,7 @@ from typing import Any
 from langgraph.types import Overwrite
 
 
-def unwrap_messages(value: Any) -> list:
+def unwrap_messages(value: Any) -> list[Any]:
     """Return the messages carried by a node's ``messages`` channel update,
     regardless of how langgraph wrapped them.
 
@@ -22,7 +22,8 @@ def unwrap_messages(value: Any) -> list:
     than appending).  ``Overwrite`` is truthy and not iterable, so the naive
     ``for m in value or []`` raises ``TypeError: 'Overwrite' object is not
     iterable``.  This unwraps the known shapes and returns ``[]`` for anything
-    unexpected — it never raises.
+    unexpected; it does not raise on the channel-value shapes langgraph
+    produces (lists, ``Overwrite``, ``None``, or a message object).
     """
     if isinstance(value, Overwrite):
         value = value.value

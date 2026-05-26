@@ -47,8 +47,7 @@ def stream_message(thread: Thread, message: str):
             print_update(chunk)
         elif ch_type == 'messages':
             # A `messages`-mode item is an `(AIMessageChunk, metadata)`
-            # tuple — print the message, not the metadata. (Mirrors
-            # stream.py's `_tool_messages` / `extract_content_text`.)
+            # tuple — print the message, not the metadata.
             message_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
             print_message(message_chunk)
 
