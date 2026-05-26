@@ -103,14 +103,15 @@ class ThreadAffinityQueue:
     ) -> Iterator[_Handle]:
         """Acquire this thread's single-flight slot for the ``with`` block.
 
-        Thread-affine: the context manager sets a ``ContextVar`` token on entry
-        and resets it on exit, and re-acquires a ``threading.Condition`` in its
-        finally — so it must be entered, resumed across ``yield``, and exited on
-        the same OS thread.  If the wrapped generator is advanced/closed across
-        threads (e.g. ``run_in_executor`` on the default pool), the exit runs in
-        a different context and the token reset raises ``ValueError: <token>
-        was created in a different Context`` (and the Condition is likewise
-        unsafe to touch from a non-owning thread).  Drive it from one thread.
+        Context-affine: the context manager sets a ``ContextVar`` token on entry
+        and resets it on exit, so it must be entered, resumed across ``yield``,
+        and exited in the SAME execution context.  If the wrapped generator is
+        advanced/closed in a different context — e.g. driven across threads via
+        ``run_in_executor`` on the default pool, since each thread has its own
+        context — the token reset raises ``ValueError: <token> was created in a
+        different Context``.  Drive it from a single thread/context.  (The
+        ``threading.Condition`` is always used under its own lock, so it is safe
+        across threads; the contextvar token is the hard constraint.)
         """
         cb = on_state_change or (lambda _: None)
         wait_timeout = (
