@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 def _create_standard_backend(working_dir: str,
                              extra_routes: dict[str, BackendProtocol] | None = None,
+                             default_backend: BackendProtocol | None = None,
                              ):
     """Create the standard composite backend with state exclusions.
 
@@ -48,9 +49,13 @@ def _create_standard_backend(working_dir: str,
     from the stateful filesystem, using StateBackend instead.  ``extra_routes``
     is threaded through to ``create_composite_backend`` for embedders that
     need to register additional virtual-path routes (e.g. external skill dirs).
+    ``default_backend``, if given, replaces the FilesystemBackend default (see
+    ``create_composite_backend``) so an embedder can supply a custom default
+    while keeping the standard STATEFUL_PATHS routing.
     """
     return create_composite_backend(working_dir, STATEFUL_PATHS,
-                                    extra_routes=extra_routes)
+                                    extra_routes=extra_routes,
+                                    default_backend=default_backend)
 
 
 # Single source of truth for the retry-on tuple.  When adding a new
@@ -108,6 +113,7 @@ def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
                  sandbox_backend=None,
+                 default_backend: BackendProtocol | None = None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  loop_exploration_tools: frozenset[str] | None = None,
@@ -142,7 +148,22 @@ def create_agent(model: BaseChatModel,
     finite Pattern-C cap).  Only the main agent gets it — the bespoke
     subagents don't receive ``extra_tools`` so the exploration tool can't
     reach them.  Default ``None`` leaves the dev/code agent unchanged.
+
+    ``default_backend`` lets an embedder supply the composite backend's
+    *default* — the target for every non-routed path — instead of the
+    ``FilesystemBackend`` rooted at ``working_dir``.  assist still wraps it
+    with the standard STATEFUL_PATHS -> ``StateBackend`` routing (so
+    summarization/scratch stay ephemeral) and any ``extra_skill_sources``.
+    Mutually exclusive with ``sandbox_backend``.  If the supplied backend
+    implements ``SandboxBackendProtocol``, deepagents' ``supports_execution``
+    enables the ``execute`` tool for it automatically.  This affects only
+    the MAIN agent; the context/research subagents build their own backends
+    from ``working_dir`` (+ ``sandbox_backend``) as before.  Default ``None``
+    preserves the FilesystemBackend default.
     """
+    if sandbox_backend is not None and default_backend is not None:
+        raise ValueError(
+            "create_agent: pass sandbox_backend OR default_backend, not both")
     # Core middleware: retry, tool call limiting, JSON validation, and logging.
     # See `_make_retry_middleware` for the retry-on tuple rationale.
     retry_middle = _make_retry_middleware()
@@ -195,7 +216,8 @@ def create_agent(model: BaseChatModel,
                                                    extra_routes=extra_skill_sources)
     else:
         backend = _create_standard_backend(working_dir,
-                                           extra_routes=extra_skill_sources)
+                                           extra_routes=extra_skill_sources,
+                                           default_backend=default_backend)
 
     skill_sources = [SKILLS_ROUTE]
     if extra_skill_sources:
