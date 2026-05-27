@@ -103,8 +103,8 @@ def create_composite_backend(fs_root: str | None = None,
     if extra_routes:
         merged_routes.update(extra_routes)
     return CompositeBackend(
-        default=default_backend or FilesystemBackend(root_dir=fs_root,
-                                                     virtual_mode=True),
+        default=(default_backend if default_backend is not None
+                 else FilesystemBackend(root_dir=fs_root, virtual_mode=True)),
         routes=merged_routes
     )
 
