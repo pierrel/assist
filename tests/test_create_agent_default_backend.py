@@ -101,3 +101,40 @@ class TestCreateAgentDefaultBackend:
     def test_default_and_sandbox_are_mutually_exclusive(self):
         with pytest.raises(ValueError):
             self._build(default_backend=_fs(), sandbox_backend=MagicMock())
+
+
+class TestThreadDefaultBackend:
+    """`Thread.__init__` forwards `default_backend` to `create_agent` —
+    mirrors the extra_tools / loop_exploration_tools / extra_skill_sources
+    forwarding tests in test_create_agent_extra_tools.py."""
+
+    def _build(self, **kwargs):
+        from assist.thread import Thread
+
+        with patch("assist.thread.create_agent") as fake_ca, \
+             patch("assist.thread.select_chat_model") as fake_model:
+            fake_ca.return_value = MagicMock()
+            fake_model.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                Thread(working_dir=wd, **kwargs)
+                return fake_ca.call_args.kwargs
+
+    def test_default_backend_none_passed_through(self):
+        assert self._build()["default_backend"] is None
+
+    def test_default_backend_forwarded_to_create_agent(self):
+        inj = _fs()
+        assert self._build(default_backend=inj)["default_backend"] is inj
+
+    def test_thread_both_backends_raise(self):
+        # create_agent is intentionally NOT patched so its mutual-exclusion
+        # guard runs (it raises on the first statement, before any heavy work).
+        from assist.thread import Thread
+
+        with patch("assist.thread.select_chat_model") as fake_model:
+            fake_model.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                with pytest.raises(ValueError):
+                    Thread(working_dir=wd,
+                           sandbox_backend=MagicMock(),
+                           default_backend=_fs())
