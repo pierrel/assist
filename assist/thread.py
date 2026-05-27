@@ -60,12 +60,12 @@ class Thread:
                  model: BaseChatModel | None = None,
                  max_concurrency: int = 5,
                  sandbox_backend=None,
-                 default_backend: BackendProtocol | None = None,
                  on_queue_state: Callable[[str], None] | None = None,
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  loop_exploration_tools: frozenset[str] | None = None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
-                 extra_config: dict[str, Any] | None = None):
+                 extra_config: dict[str, Any] | None = None,
+                 default_backend: BackendProtocol | None = None):
         """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
         — embedder-supplied tools the main agent can call.  See
         ``assist.agent.create_agent`` docstring for the subagent

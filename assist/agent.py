@@ -113,10 +113,10 @@ def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
                  sandbox_backend=None,
-                 default_backend: BackendProtocol | None = None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  loop_exploration_tools: frozenset[str] | None = None,
+                 default_backend: BackendProtocol | None = None,
                  ) -> CompiledStateGraph:
     """Build the general-purpose agent.
 
