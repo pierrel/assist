@@ -103,6 +103,57 @@ class TestCreateAgentDefaultBackend:
             self._build(default_backend=_fs(), sandbox_backend=MagicMock())
 
 
+class TestSubagentDefaultBackendInheritance:
+    """`default_backend` must reach `create_context_agent` so the subagent's
+    filesystem tools resolve against the embedder's backend.  Without this,
+    the context-agent (which the parent delegates to for "find files" work)
+    falls back to a standard FilesystemBackend rooted at `working_dir`, and
+    file-chat queries list the server's `/skills/` instead of the phone's
+    workdir.  Bit emacsos's file-chat live-test on 2026-05-28: agent reply
+    was \"The only files present are 5 SKILL.md files under /skills/\" —
+    StateBackend territory, not the user's playground.
+
+    Mirror of `TestCreateAgentDefaultBackend`'s patching pattern."""
+
+    def _build(self, **kwargs):
+        from assist.agent import create_agent
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        with patch("assist.agent.create_deep_agent") as fake, \
+             patch("assist.agent.create_context_agent") as fake_ctx, \
+             patch("assist.agent.create_research_agent") as fake_res:
+            fake.return_value = MagicMock()
+            fake_ctx.return_value = MagicMock()
+            fake_res.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                create_agent(MagicMock(), wd, checkpointer=InMemorySaver(),
+                             **kwargs)
+                return fake_ctx.call_args.kwargs
+
+    def test_default_backend_reaches_context_agent(self):
+        inj = _fs()
+        kwargs = self._build(default_backend=inj)
+        assert kwargs.get("default_backend") is inj
+
+    def test_no_default_backend_passes_none_to_context_agent(self):
+        kwargs = self._build()
+        # Either absent or explicitly None — both mean "no override."
+        assert kwargs.get("default_backend") is None
+
+    def test_context_agent_uses_default_backend_in_standard_path(self):
+        """End-to-end through `create_context_agent`: when a default backend
+        is supplied (no sandbox_backend), the resulting composite's default
+        is the injected backend, not a fresh FilesystemBackend."""
+        from assist.agent import create_context_agent
+
+        inj = _fs()
+        with patch("assist.agent.create_deep_agent") as fake:
+            fake.return_value = MagicMock()
+            create_context_agent(MagicMock(), "/tmp", default_backend=inj)
+            backend = fake.call_args.kwargs["backend"]
+            assert backend.default is inj
+
+
 class TestThreadDefaultBackend:
     """`Thread.__init__` forwards `default_backend` to `create_agent` —
     mirrors the extra_tools / loop_exploration_tools / extra_skill_sources
