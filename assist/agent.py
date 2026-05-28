@@ -238,9 +238,18 @@ def create_agent(model: BaseChatModel,
                                       working_dir,
                                       checkpointer,
                                       [retry_middle, json_validation_mw, tool_name_mw],
-                                      sandbox_backend=sandbox_backend)
+                                      sandbox_backend=sandbox_backend,
+                                      default_backend=default_backend)
     )
 
+    # NOTE: research-agent is confined to <working_dir>/references/ via
+    # `create_references_backend` and does NOT inherit `default_backend`.
+    # For embedders using `default_backend` (e.g. emacsos file-chat), the
+    # research-agent's report writes land on the SERVER's working_dir, not
+    # the embedder's filesystem.  Acceptable v1 — research is rare and
+    # reports are server-side documents.  When file-chat starts needing
+    # research reports on the embedder's FS, add `default_backend` to
+    # `create_research_agent` and to `create_references_backend`'s routing.
     research_sub = CompiledSubAgent(
         name="research-agent",
         description=(
@@ -294,13 +303,24 @@ def create_context_agent(model: BaseChatModel,
                          working_dir: str,
                          checkpointer=None,
                          middleware=[],
-                         sandbox_backend=None) -> RollbackRunnable:
+                         sandbox_backend=None,
+                         default_backend: BackendProtocol | None = None,
+                         ) -> RollbackRunnable:
     """Create a read-only context agent for codebase exploration.
 
     Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
     rolls back to a previous checkpoint rather than crashing.  This is safe
     because the context-agent is read-only (no filesystem side effects).
-    """
+
+    ``default_backend`` mirrors the parent ``create_agent`` parameter: when
+    an embedder supplies a custom default (e.g. emacsos's EmacsBackend for
+    file-backed chat), the subagent inherits it.  Without this plumbing the
+    parent agent's filesystem changes wouldn't be visible to the subagent
+    that does most of the "find files" work — see the bug surfaced on
+    2026-05-28 where file-chat's context-agent listed StateBackend paths
+    (/skills/) instead of the phone's workdir.  Mutually exclusive with
+    ``sandbox_backend`` at the parent level; ignored when sandbox_backend
+    is set."""
     # Only add JSON validation if not already provided
     has_json_validation = any(isinstance(m, JsonValidationMiddleware) for m in middleware)
 
@@ -326,7 +346,8 @@ def create_context_agent(model: BaseChatModel,
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend)
     else:
-        backend = _create_standard_backend(working_dir)
+        backend = _create_standard_backend(working_dir,
+                                           default_backend=default_backend)
     logging_mw = ModelLoggingMiddleware("context-agent")
 
     agent = create_deep_agent(
