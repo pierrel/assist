@@ -1,6 +1,6 @@
 #+TITLE: ThreadAffinityQueue holder-slot leak fix
 #+DATE: 2026-05-29
-State: Shipped (PR #111)
+State: In review (PR #111)
 
 Follow-up to =2026-05-06-thread-affinity-queue.org=.  That PR shipped the
 queue; this one fixes a leak that bit prod on 2026-05-28.
