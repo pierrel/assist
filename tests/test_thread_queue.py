@@ -1,6 +1,5 @@
 """Tests for ThreadAffinityQueue (assist/thread_queue.py)."""
 import contextvars
-import os
 import threading
 import time
 

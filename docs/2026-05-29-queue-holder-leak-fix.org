@@ -1,6 +1,6 @@
 #+TITLE: ThreadAffinityQueue holder-slot leak fix
 #+DATE: 2026-05-29
-State: Phase 1 design (about to enter Phase 2 — implementation)
+State: Shipped (PR #111)
 
 Follow-up to =2026-05-06-thread-affinity-queue.org=.  That PR shipped the
 queue; this one fixes a leak that bit prod on 2026-05-28.
@@ -19,21 +19,21 @@ The queue's =_holder= slot leaked.  Symptoms in prod logs:
   threads as =error= (preserving their =pending_message= for the user
   to resend).
 
-** Root cause hypothesis
-=acquire()='s =finally= block at =assist/thread_queue.py:178= starts
-with =_active_handle.reset(token)=.  The docstring at lines 106-114
-already warns: if the =with= block exits in a different
-=contextvars.Context= than it was entered, =reset()= raises =ValueError=.
-The bare =reset()= call meant that =ValueError= aborted the rest of
-=finally= — watchdog cancel, =_holder= clear, and =notify_all()= all
-skipped.  The watchdog still fired and flipped =handle.expired=, but
-nothing cleared =_holder=, so waiters blocked the full =wait_timeout_s=.
+** Root cause
+=ThreadAffinityQueue.acquire='s =finally= block starts with
+=_active_handle.reset(token)=.  As the method's docstring already
+warns: if the =with= block exits in a different =contextvars.Context=
+than it was entered, =reset()= raises =ValueError=.  The bare
+=reset()= call meant that =ValueError= aborted the rest of =finally=
+— watchdog cancel, =_holder= clear, and =notify_all()= all skipped.
+The watchdog still fired and flipped =handle.expired=, but nothing
+cleared =_holder=, so waiters blocked the full =wait_timeout_s=.
 
-The =stream_message= generator path in =assist/thread.py:212= is the
-likely source of the cross-context exit (FastAPI iterates the body
-generator on a thread different from where it was constructed when
-the client disconnects mid-stream).  Not confirmed for the specific
-2026-05-28 incident, but the shape fits.
+The =Thread.stream_message= generator path is the likely source of
+the cross-context exit (FastAPI iterates the body generator on a
+thread different from where it was constructed when the client
+disconnects mid-stream).  Not confirmed for the specific 2026-05-28
+incident, but the shape fits.
 
 * Solution
 Two changes in =assist/thread_queue.py=, both narrow.
