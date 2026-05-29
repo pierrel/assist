@@ -156,12 +156,23 @@ def test_wait_timeout_raises():
     assert q.waiter_count() == 0
 
 
-def test_hold_timeout_marks_expired():
+def test_hold_timeout_marks_expired_and_force_releases():
+    # After the hold_timeout_s watchdog fires, both the cooperative-cancel
+    # flag (`expired`) AND the queue-slot release happen.  The force release
+    # is what bounds the leak window when the holder's `finally` is skipped
+    # (the 2026-05-28 prod incident — see thread_queue.py docstring).
     q = ThreadAffinityQueue()
     with q.acquire("A", hold_timeout_s=0.1) as handle:
         assert handle.expired is False
+        assert q.current_handle() is handle
         time.sleep(0.25)
         assert handle.expired is True
+        # The slot is vacated mid-`with`: a waiter could acquire RIGHT NOW.
+        assert q.current_handle() is None
+    # Holder's `finally` ran after the watchdog already released; the
+    # `is handle` guard in `_release_if_holder` made it a no-op (no
+    # exception, no double-notify).
+    assert q.current_handle() is None
 
 
 def test_reentrant_same_thread_id_is_noop():
@@ -269,3 +280,165 @@ def test_defaults_match_module_constants():
     q = ThreadAffinityQueue()
     assert q._default_hold_timeout == DEFAULT_HOLD_TIMEOUT_S
     assert q._default_wait_timeout == DEFAULT_WAIT_TIMEOUT_S
+
+
+# --- Leak-fix regression tests ----------------------------------------
+# These tests pin the contract that the queue's `_holder` slot is
+# released even when `acquire`'s `finally` is interrupted partway, AND
+# that the watchdog timer forcibly releases the slot when `finally` is
+# bypassed entirely.  Background: docs/2026-05-29-queue-holder-leak-fix.org.
+
+
+def test_finally_runs_when_contextvar_reset_raises():
+    # Reproduces the 2026-05-28 prod failure mode: the with-block is
+    # entered in one `contextvars.Context` and exited in another, so
+    # `_active_handle.reset(token)` raises `ValueError` at the top of
+    # `finally`.  Pre-fix, that aborted the rest of `finally` and left
+    # `_holder` set; waiters then blocked the full wait_timeout_s (4h
+    # in prod).  Post-fix, the ValueError is swallowed and the slot is
+    # released cleanly.
+    import contextvars
+
+    q = ThreadAffinityQueue()
+    cm = q.acquire("A")
+    ctx = contextvars.copy_context()
+    # `__enter__` binds the contextvar token to `ctx`; the subsequent
+    # `__exit__` runs in the test's outer context, so `reset(token)`
+    # sees the context mismatch and raises ValueError (the real CPython
+    # behaviour — no mocking needed).
+    ctx.run(cm.__enter__)
+    assert q.current_handle() is not None
+    cm.__exit__(None, None, None)
+
+    # The swallow guard in `finally` caught the ValueError; the rest of
+    # cleanup (watchdog cancel + `_release_if_holder`) still ran.
+    assert q.current_handle() is None
+
+    # A fresh acquire goes straight to "running" with no "queued" state.
+    states: list[str] = []
+    with q.acquire("B", on_state_change=states.append):
+        pass
+    assert states == ["running"]
+
+
+def test_watchdog_force_releases_when_holder_is_wedged():
+    # The real leak-bound: even if the holder's `with` never exits
+    # (wedged in an infinite loop, never reaches `finally`), the
+    # watchdog timer must release the slot at `hold_timeout_s` so
+    # waiters can proceed.
+    q = ThreadAffinityQueue()
+    holder_can_release = threading.Event()
+    holder_done = threading.Event()
+    waiter_states: list[str] = []
+    waiter_done = threading.Event()
+
+    def wedged_holder():
+        with q.acquire("A", hold_timeout_s=0.1):
+            holder_can_release.wait(timeout=5.0)
+        holder_done.set()
+
+    def waiter():
+        # Wait_timeout generous; the watchdog should free the slot
+        # at ~0.1s, well before wait_timeout would matter.
+        with q.acquire("B", wait_timeout_s=2.0,
+                       on_state_change=waiter_states.append):
+            pass
+        waiter_done.set()
+
+    th = threading.Thread(target=wedged_holder)
+    th.start()
+    # Give A time to enter `with` and become holder.
+    time.sleep(0.05)
+    assert q.current_handle() is not None
+    tw = threading.Thread(target=waiter)
+    tw.start()
+
+    # B is queued behind A.  Wait long enough for the watchdog to fire.
+    waiter_done.wait(timeout=2.0)
+    assert waiter_done.is_set(), "waiter never acquired — watchdog didn't release"
+    # B observed both states: queued then running.
+    assert waiter_states == ["queued", "running"]
+
+    # Let the wedged holder unblock so the test thread can finish.
+    holder_can_release.set()
+    holder_done.wait(timeout=2.0)
+    th.join(timeout=2.0)
+    tw.join(timeout=2.0)
+
+    assert q.current_handle() is None
+    assert q.waiter_count() == 0
+
+
+def test_watchdog_does_not_clobber_newly_promoted_holder():
+    # Watchdog fires on A, releasing the slot.  B is promoted and
+    # becomes the new holder.  Then A's `with` finally exits — its
+    # cleanup must NOT clobber B's slot.  The `is handle` guard in
+    # `_release_if_holder` is what protects this; this test pins it.
+    q = ThreadAffinityQueue()
+    a_can_release = threading.Event()
+    b_acquired = threading.Event()
+    b_can_release = threading.Event()
+
+    def hold_a():
+        with q.acquire("A", hold_timeout_s=0.1):
+            a_can_release.wait(timeout=5.0)
+
+    def hold_b():
+        with q.acquire("B", wait_timeout_s=2.0) as h:
+            # Mark that B is now the holder (post-watchdog promotion).
+            b_acquired.set()
+            b_can_release.wait(timeout=5.0)
+            # Save B's handle identity via closure into the outer scope.
+            hold_b.handle = h  # type: ignore[attr-defined]
+
+    ta = threading.Thread(target=hold_a)
+    ta.start()
+    time.sleep(0.05)
+    tb = threading.Thread(target=hold_b)
+    tb.start()
+
+    # Wait for B to be promoted (watchdog fires at ~0.1s).
+    assert b_acquired.wait(timeout=2.0), "B never promoted — watchdog didn't release A"
+    b_handle = q.current_handle()
+    assert b_handle is not None
+    assert b_handle.thread_id == "B"
+
+    # Now let A exit its `with` (its cleanup must be a no-op for `_holder`).
+    a_can_release.set()
+    ta.join(timeout=2.0)
+
+    # B is still the holder — A's `finally` didn't clobber it.
+    assert q.current_handle() is b_handle
+
+    b_can_release.set()
+    tb.join(timeout=2.0)
+    assert q.current_handle() is None
+
+
+def test_late_watchdog_fire_after_normal_release_is_noop():
+    # The happy path: holder releases normally before hold_timeout_s,
+    # so `watchdog.cancel()` should prevent the Timer firing.  But if
+    # the Timer fires anyway (race window between cancel and the
+    # Timer thread's tick), `_on_hold_timeout` must be a no-op:
+    # `_holder` is None, so `_release_if_holder` returns False, no
+    # exception, no spurious notify.
+    q = ThreadAffinityQueue()
+    # Acquire cleanly; record the handle for the manual fire below.
+    with q.acquire("A", hold_timeout_s=10.0) as handle:
+        pass
+    assert q.current_handle() is None
+
+    # Simulate a late Timer fire after the holder cleanly released.
+    q._on_hold_timeout(handle)
+
+    # Slot is still None; the late callback didn't crash and didn't
+    # confuse a future acquire.
+    assert q.current_handle() is None
+    # `expired` does get flipped (cheap, harmless) — but no one is reading
+    # it now since the holder's `with` already exited.
+    assert handle.expired is True
+
+    # A fresh acquire still works.
+    with q.acquire("B"):
+        pass
+    assert q.current_handle() is None
