@@ -9,7 +9,7 @@ slot's cached prefix matched, so prefill stays a per-turn delta.
 
 Affinity, not fairness:
 
-- Holder runs to completion before any waiter runs.
+- Holder runs to completion *or* its watchdog fires, before any waiter runs.
 - Waiters are FIFO among themselves.
 - Same ``thread_id`` re-acquiring is a no-op (re-entrant by id).
 
@@ -17,13 +17,16 @@ Failure-fast bounds:
 
 - ``hold_timeout_s`` — a runaway holder is flagged ``expired`` so the
   cooperative cancel point in :class:`ThreadQueueMiddleware` raises
-  :class:`ThreadHoldExpired` between LLM calls.  Honors the project
-  rule that threads die on infrastructure failure rather than
-  heal-and-retry.  The cap bounds the *detection latency*, not the
-  exact wall-clock release time — a ``wrap_model_call`` retry inside
+  :class:`ThreadHoldExpired` between LLM calls, AND the slot is vacated
+  immediately so the next waiter can claim it without waiting on the
+  runaway's ``finally``.  Honors the project rule that threads die on
+  infrastructure failure rather than heal-and-retry.  The cap bounds the
+  *detection latency* of the cooperative cancel, not the exact wall-clock
+  release time — a ``wrap_model_call`` retry inside
   :class:`EmptyResponseRecoveryMiddleware` or
   :class:`BadRequestRetryMiddleware` can run one or two more LLM calls
-  past expiration before ``after_model`` next fires.
+  past expiration before ``after_model`` next fires.  Forcible slot
+  release happens at the timeout regardless, logged at WARNING.
 - ``wait_timeout_s`` — a waiter that can't acquire raises
   :class:`QueueWaitTimeout` and the thread errors.
 
@@ -36,12 +39,15 @@ tasks within one ``manage.web`` process.  Eval CLIs that import
 """
 
 import contextvars
+import logging
 import os
 import threading
 import time
 from collections import deque
 from contextlib import contextmanager
 from typing import Callable, Iterator
+
+logger = logging.getLogger(__name__)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -67,13 +73,12 @@ class ThreadHoldExpired(Exception):
 
 
 class _Handle:
-    __slots__ = ("thread_id", "expired", "acquired_at", "_watchdog")
+    __slots__ = ("thread_id", "expired", "acquired_at")
 
     def __init__(self, thread_id: str) -> None:
         self.thread_id = thread_id
         self.expired = False
         self.acquired_at = time.time()
-        self._watchdog: threading.Timer | None = None
 
 
 _active_handle: contextvars.ContextVar = contextvars.ContextVar(
@@ -164,9 +169,10 @@ class ThreadAffinityQueue:
             self._holder = handle
             cb("running")
 
-            watchdog = threading.Timer(hold_timeout, _mark_expired, args=(handle,))
+            watchdog = threading.Timer(
+                hold_timeout, self._on_hold_timeout, args=(handle,)
+            )
             watchdog.daemon = True
-            handle._watchdog = watchdog
 
         # Start the watchdog outside the lock so a near-zero timeout
         # (used in tests) doesn't fire while we're still in __enter__.
@@ -175,15 +181,74 @@ class ThreadAffinityQueue:
         try:
             yield handle
         finally:
-            _active_handle.reset(token)
+            # The contextvar reset can raise ValueError when this with-block
+            # exits in a different contextvars.Context than it was entered
+            # (the case warned about in this method's docstring; observed
+            # in prod on 2026-05-28).  That MUST NOT abort the rest of
+            # cleanup — leaving `_holder` set wedges every subsequent
+            # waiter until `wait_timeout_s` expires (4h in prod).  The
+            # contextvar in *this* context already reads default (None),
+            # which is the state we want.
+            try:
+                _active_handle.reset(token)
+            except ValueError:
+                pass
             try:
                 watchdog.cancel()
             except Exception:
                 pass
-            with self._cond:
-                if self._holder is handle:
-                    self._holder = None
-                    self._cond.notify_all()
+            self._release_if_holder(handle)
+
+    def _release_if_holder(self, handle: "_Handle") -> bool:
+        """Vacate the slot iff ``handle`` is still the current holder.
+
+        Idempotent across the two release paths (``acquire``'s ``finally``
+        and the watchdog's :meth:`_on_hold_timeout`); whichever wins the
+        lock first releases, the other sees ``_holder is not handle`` and
+        returns False without clobbering a newly-promoted holder.
+        """
+        with self._cond:
+            if self._holder is handle:
+                self._holder = None
+                self._cond.notify_all()
+                return True
+            return False
+
+    def _on_hold_timeout(self, handle: "_Handle") -> None:
+        """Watchdog callback: flag the holder ``expired`` AND forcibly
+        release the slot if it's still held by this handle.
+
+        Two consequences, two consumers:
+
+        - ``expired = True`` drives the cooperative cancel in
+          :class:`ThreadQueueMiddleware`: the holder's next ``after_model``
+          reads :func:`active_handle` (which is per-call-stack via the
+          contextvar) and raises :class:`ThreadHoldExpired`.
+        - Forcibly clearing ``_holder`` unblocks waiters NOW, instead of
+          requiring the holder's ``finally`` to run.  Bounds leak duration
+          to ``hold_timeout_s`` even when ``finally`` was skipped — the
+          2026-05-28 incident, where ``_active_handle.reset(token)`` raised
+          mid-``finally`` and the queue stayed wedged for 17h until the
+          ``wait_timeout_s`` ceiling fired.
+
+        Briefly, the contextvar still points at ``handle`` for the holder's
+        stack while ``_holder`` may point at a newly-promoted waiter —
+        intentional: the contextvar is per-call-stack identity, ``_holder``
+        is queue-wide ownership.  The cooperative cancel reads the former,
+        waiter promotion reads the latter; they converge cleanly.
+
+        Logs WARNING when force-release actually fired (i.e. the cooperative
+        path failed to clean up in time).  Should be cold in steady state;
+        a hit is a real signal worth investigating.
+        """
+        handle.expired = True
+        if self._release_if_holder(handle):
+            logger.warning(
+                "thread_queue: forcibly released holder %s after %.1fs hold; "
+                "cooperative cancel did not fire",
+                handle.thread_id,
+                time.time() - handle.acquired_at,
+            )
 
     def current_handle(self) -> _Handle | None:
         with self._cond:
@@ -192,10 +257,6 @@ class ThreadAffinityQueue:
     def waiter_count(self) -> int:
         with self._cond:
             return len(self._waiters)
-
-
-def _mark_expired(handle: _Handle) -> None:
-    handle.expired = True
 
 
 def active_handle() -> _Handle | None:
