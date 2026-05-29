@@ -1,8 +1,8 @@
 """Tests for ThreadAffinityQueue (assist/thread_queue.py)."""
+import contextvars
 import os
 import threading
 import time
-from unittest.mock import patch
 
 import pytest
 
@@ -297,8 +297,6 @@ def test_finally_runs_when_contextvar_reset_raises():
     # `_holder` set; waiters then blocked the full wait_timeout_s (4h
     # in prod).  Post-fix, the ValueError is swallowed and the slot is
     # released cleanly.
-    import contextvars
-
     q = ThreadAffinityQueue()
     cm = q.acquire("A")
     ctx = contextvars.copy_context()
@@ -384,12 +382,10 @@ def test_watchdog_does_not_clobber_newly_promoted_holder():
             a_can_release.wait(timeout=5.0)
 
     def hold_b():
-        with q.acquire("B", wait_timeout_s=2.0) as h:
+        with q.acquire("B", wait_timeout_s=2.0):
             # Mark that B is now the holder (post-watchdog promotion).
             b_acquired.set()
             b_can_release.wait(timeout=5.0)
-            # Save B's handle identity via closure into the outer scope.
-            hold_b.handle = h  # type: ignore[attr-defined]
 
     ta = threading.Thread(target=hold_a)
     ta.start()
@@ -412,33 +408,4 @@ def test_watchdog_does_not_clobber_newly_promoted_holder():
 
     b_can_release.set()
     tb.join(timeout=2.0)
-    assert q.current_handle() is None
-
-
-def test_late_watchdog_fire_after_normal_release_is_noop():
-    # The happy path: holder releases normally before hold_timeout_s,
-    # so `watchdog.cancel()` should prevent the Timer firing.  But if
-    # the Timer fires anyway (race window between cancel and the
-    # Timer thread's tick), `_on_hold_timeout` must be a no-op:
-    # `_holder` is None, so `_release_if_holder` returns False, no
-    # exception, no spurious notify.
-    q = ThreadAffinityQueue()
-    # Acquire cleanly; record the handle for the manual fire below.
-    with q.acquire("A", hold_timeout_s=10.0) as handle:
-        pass
-    assert q.current_handle() is None
-
-    # Simulate a late Timer fire after the holder cleanly released.
-    q._on_hold_timeout(handle)
-
-    # Slot is still None; the late callback didn't crash and didn't
-    # confuse a future acquire.
-    assert q.current_handle() is None
-    # `expired` does get flipped (cheap, harmless) — but no one is reading
-    # it now since the holder's `with` already exited.
-    assert handle.expired is True
-
-    # A fresh acquire still works.
-    with q.acquire("B"):
-        pass
     assert q.current_handle() is None

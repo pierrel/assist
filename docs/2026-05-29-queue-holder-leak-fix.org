@@ -128,5 +128,34 @@ on the prod incident is exactly the operability gap this closes.
 
 * Eval cadence
 Unit tests only — this is queue plumbing, not agent behavior.
-=tests/test_thread_queue.py= already at 14 tests; adding 4 new + 1
-modified.  No edd/eval/ suite changes.
+=tests/test_thread_queue.py= already at 14 tests; adding 3 new + 1
+modified (post code-review trim from 4 → 3).  No edd/eval/ suite changes.
+
+* Follow-ups (surfaced by code review; not in this PR)
+1. *=Thread.stream_message= close-on-disconnect.*  The generator wraps
+   =acquire()=; a consumer that drops iteration without =close()= leaves
+   the with-block suspended.  Change B in THIS PR bounds the leak to
+   =hold_timeout_s=, but the structural fix lives in =assist/thread.py=:
+   either a context-manager API for the caller, or drain the generator
+   on a worker thread bound to =copy_context()= so =__enter__= and
+   =__exit__= run in the same context.
+2. *Bind the streaming generator to a captured context.*  Wrap =_gen()=
+   so it runs inside =contextvars.copy_context().run(...)=.  Makes the
+   cross-context exit case structurally impossible; the =try/except
+   ValueError= in this PR becomes defense-in-depth.
+3. *=ThreadQueueMiddleware= docstring* should reflect the two-paths-
+   converging contract (=active_handle= = per-call-stack identity,
+   =_holder= = queue-wide ownership; the watchdog can clear =_holder=
+   while the contextvar still points at the dying handle).
+4. *Reentrant fast path could skip =_cond=.*  Reading =_active_handle=
+   is lock-free; sub-agent calls currently pay a lock acquisition just
+   to check a contextvar.
+5. *Observability counter.*  =_release_if_holder= returns =bool=, ready
+   for instrumentation: =force_releases= and =cooperative_releases= as
+   separate counters, with the ratio as the SLO signal.  WARNING log
+   in this PR catches absolute count; trend lives in metrics.
+6. *=register_at_fork= hook.*  The module docstring claims separate
+   processes get their own queue — true for =spawn=, NOT for =fork=.
+   A forked child inherits a stale =_holder=.  Either add
+   =os.register_at_fork(after_in_child=...)= to reinitialize, or
+   document the fork hazard.

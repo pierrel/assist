@@ -199,7 +199,7 @@ class ThreadAffinityQueue:
                 pass
             self._release_if_holder(handle)
 
-    def _release_if_holder(self, handle: "_Handle") -> bool:
+    def _release_if_holder(self, handle: _Handle) -> bool:
         """Vacate the slot iff ``handle`` is still the current holder.
 
         Idempotent across the two release paths (``acquire``'s ``finally``
@@ -214,37 +214,21 @@ class ThreadAffinityQueue:
                 return True
             return False
 
-    def _on_hold_timeout(self, handle: "_Handle") -> None:
-        """Watchdog callback: flag the holder ``expired`` AND forcibly
-        release the slot if it's still held by this handle.
+    def _on_hold_timeout(self, handle: _Handle) -> None:
+        """Watchdog callback: flag holder ``expired`` and force-release the slot.
 
-        Two consequences, two consumers:
-
-        - ``expired = True`` drives the cooperative cancel in
-          :class:`ThreadQueueMiddleware`: the holder's next ``after_model``
-          reads :func:`active_handle` (which is per-call-stack via the
-          contextvar) and raises :class:`ThreadHoldExpired`.
-        - Forcibly clearing ``_holder`` unblocks waiters NOW, instead of
-          requiring the holder's ``finally`` to run.  Bounds leak duration
-          to ``hold_timeout_s`` even when ``finally`` was skipped — the
-          2026-05-28 incident, where ``_active_handle.reset(token)`` raised
-          mid-``finally`` and the queue stayed wedged for 17h until the
-          ``wait_timeout_s`` ceiling fired.
-
-        Briefly, the contextvar still points at ``handle`` for the holder's
-        stack while ``_holder`` may point at a newly-promoted waiter —
-        intentional: the contextvar is per-call-stack identity, ``_holder``
-        is queue-wide ownership.  The cooperative cancel reads the former,
-        waiter promotion reads the latter; they converge cleanly.
-
-        Logs WARNING when force-release actually fired (i.e. the cooperative
-        path failed to clean up in time).  Should be cold in steady state;
-        a hit is a real signal worth investigating.
+        ``expired = True`` is read by :class:`ThreadQueueMiddleware`'s
+        cooperative cancel (via :func:`active_handle` — per-call-stack);
+        the force-release through :meth:`_release_if_holder` bounds the
+        leak window when ``acquire``'s ``finally`` is skipped (the
+        2026-05-28 incident).  Logs WARNING when the release actually
+        fired — should be cold in steady state, a hit means the
+        cooperative path didn't clean up in time.
         """
         handle.expired = True
         if self._release_if_holder(handle):
             logger.warning(
-                "thread_queue: forcibly released holder %s after %.1fs hold; "
+                "force-released wedged holder %s after %.1fs; "
                 "cooperative cancel did not fire",
                 handle.thread_id,
                 time.time() - handle.acquired_at,
