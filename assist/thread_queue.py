@@ -227,9 +227,14 @@ class ThreadAffinityQueue:
         """
         handle.expired = True
         if self._release_if_holder(handle):
+            # We can't tell from here why the slot was still held: the
+            # cooperative cancel may never have fired, may have fired but
+            # the holder is mid-unwind, or `finally` ran partially and left
+            # `_holder` set (the 2026-05-28 incident shape).  Log the fact
+            # we can observe — the slot needed force-release — and leave
+            # the why to the investigator.
             logger.warning(
-                "force-released wedged holder %s after %.1fs; "
-                "cooperative cancel did not fire",
+                "force-released wedged holder %s after %.1fs hold",
                 handle.thread_id,
                 time.time() - handle.acquired_at,
             )

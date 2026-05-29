@@ -160,11 +160,16 @@ def test_hold_timeout_marks_expired_and_force_releases():
     # flag (`expired`) AND the queue-slot release happen.  The force release
     # is what bounds the leak window when the holder's `finally` is skipped
     # (the 2026-05-28 prod incident — see thread_queue.py docstring).
+    # Poll for the watchdog's effects rather than fixed-sleep: avoids
+    # flakiness on slow/loaded CI where the Timer thread may take longer
+    # than a tight `time.sleep` margin to execute its callback.
     q = ThreadAffinityQueue()
     with q.acquire("A", hold_timeout_s=0.1) as handle:
         assert handle.expired is False
         assert q.current_handle() is handle
-        time.sleep(0.25)
+        deadline = time.time() + 2.0
+        while q.current_handle() is not None and time.time() < deadline:
+            time.sleep(0.01)
         assert handle.expired is True
         # The slot is vacated mid-`with`: a waiter could acquire RIGHT NOW.
         assert q.current_handle() is None
