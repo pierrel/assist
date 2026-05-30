@@ -50,21 +50,28 @@ surfaced as a clean =ECONNRESET= at the openai SDK after ~50s instead of
 hanging until the 2h queue watchdog fired.
 
 ** Implementation shape
-One small change in =assist/model_manager.py=:
+Changes in =assist/model_manager.py=:
 
 - New constant =_TCP_KEEPALIVE_SOCKET_OPTIONS= holds the four
   =(level, optname, value)= tuples.
-- New factory =_build_http_client()= returns
-  =httpx.Client(timeout=_build_request_timeout(),
-                  transport=httpx.HTTPTransport(socket_options=...))=.
-- =_build_openai_chat_model()= passes =http_client=_build_http_client()=
-  to ChatOpenAI alongside the existing =timeout=.
+- New factories =_build_http_client()= and =_build_http_async_client()=
+  return =httpx.Client= / =httpx.AsyncClient= subclasses (=_HttpClient=,
+  =_AsyncHttpClient=) wired with =transport=HTTPTransport(socket_options=...)=
+  + the per-phase Timeout from =_build_request_timeout=.
+- The =_HttpClient= subclass adds a =__del__= finalizer that closes
+  the client on GC — matches langchain_openai's own
+  =_SyncHttpxClientWrapper= pattern.  Without it, each ChatOpenAI
+  going out of scope leaks the underlying connection pool (a real
+  cost across eval sweeps that construct N test-class clients).
+- =_build_openai_chat_model()= passes BOTH =http_client= and
+  =http_async_client= to ChatOpenAI.  The async path is what
+  deepagents' subagent dispatch (=await subagent.ainvoke(...)=) uses;
+  without async coverage, subagent LLM calls (=context= / =research=
+  / =critique=) would still hit the 2026-05-29 wedge class.
 
 The =timeout= kwarg on ChatOpenAI stays — it propagates to per-call
 =client.with_options(timeout=...)= in the openai SDK, which overrides
-the client default at call time.  Both call sites (per-call and
-client-default) carry the same per-phase Timeout, so behavior is
-consistent.
+the client default at call time.
 
 ** What this does NOT change
 - =_build_request_timeout= itself — the 600s read default stays.  The
@@ -109,19 +116,20 @@ consistent.
   the target Python.  =SO_KEEPALIVE= is portable.
 
 * Tests
-=tests/test_model_manager.py= (new file):
-- =test_tcp_keepalive_socket_options_are_set= — assert the constant
-  contains the four expected tuples with the right values.
-- =test_build_http_client_returns_client_with_keepalive= — construct
-  a client and verify its transport's =socket_options= match the
-  constant.
-- =test_build_http_client_applies_per_phase_timeout= — assert
-  =client.timeout.connect/read/write/pool= match
-  =_build_request_timeout()=.
-- =test_keepalive_actually_set_on_server_socket= (integration) —
-  spin up a local TCP server, accept a connection from the httpx
-  client, =getsockopt(SO_KEEPALIVE)= on the server side should be
-  =1=.  Confirms the option reaches the kernel.
+=tests/model_manager/test_http_client.py= (new) — see the file for
+the assertions.  Four tests: constant correctness, sync-client
+keepalive + timeout, async-client keepalive + timeout, and a
+kernel-level proof.
+
+The kernel-level proof was originally planned as
+=getsockopt(SO_KEEPALIVE)= server-side, but that wouldn't actually
+verify the client's socket — =SO_KEEPALIVE= is set per-socket on the
+endpoint that enables it, so the server's accepted socket has no
+visibility into what the client set on its outbound socket.  The
+implementation instead monkey-patches =socket.socket.setsockopt= and
+records all calls during one HTTP GET, then asserts each keepalive
+tuple appeared.  This catches an httpx upgrade silently dropping
+=socket_options= — pure introspection wouldn't.
 
 * Eval cadence
 Unit tests only — no agent-behavior change, no LLM behavior change.
