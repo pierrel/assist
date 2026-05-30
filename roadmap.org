@@ -308,3 +308,18 @@ Production already passes =sandbox_backend= through every agent factory (see =as
 Documented as an open question in the skills doc and partly overlaps with the =write_file= recoverability item above.  The deepagents memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content; combined with =write_file='s refuse-overwrite policy this produces a no-clean-exit loop.  Either fix needs both ends to align.
 ** TODO Make more evals around skill use
 The evals should test varying levels of skill mentions (implicit vs explicit) and check whether the appropriate skill(s) were loaded.
+** TODO Explore deepagents code interpreter for the =calculate= skill
+LangChain shipped a code-interpreter middleware for deepagents (=CodeInterpreterMiddleware= from =langchain_quickjs=) and an "interpreter skill" pattern that layers reusable typed modules on top.  See [[https://www.langchain.com/blog/give-your-agents-an-interpreter][blog: Give Your Agents an Interpreter]] and [[https://www.langchain.com/blog/interpreter-skills][blog: Interpreter Skills]].
+
+*Current.*  =assist/skills/calculate/SKILL.md= tells the model to call =execute("python3 -c '...'")= in the sandbox container for every numeric answer.  Works, but every call spins up a fresh =python3=, the shell-escaping dance for multi-line is awkward (heredoc), and there's no state across calls within a turn (multi-step calculations re-import + re-define).
+
+*Interpreter approach.*  =CodeInterpreterMiddleware(ptc=[...])= runs JS/TS in an embedded QuickJS runtime IN-PROCESS.  Persistent state across =eval= calls within a turn.  Programmatic tool calling (PTC) lets the model call our existing tools from interpreter code instead of via separate tool calls — LangChain reports up to ~35% token reduction on some tasks.  No shell escaping; typed function boundaries; structured returns.
+
+*Open questions before committing.*
+- Language fit: =calculate= is Python-flavored (=math=, =statistics=).  QuickJS is JS.  How much of =math.sqrt= / =statistics.stdev= / =statistics.fmean= do we re-implement in TS, vs ship a small TS stats library, vs keep the Python =execute= path for stdlib-heavy answers and use the interpreter for compose-y multi-step work?
+- Token saving math: their 35% number is on their model + workload.  Verify on Qwen3.6-27B with our actual calculate eval set (=edd/eval/test_calculate_skill.py=) before deciding.
+- Sandbox parity: the interpreter is in-process — no docker boundary.  For calculate this is FINE (no fs/network), but it sets a precedent that complicates the "every tool execution runs in the sandbox" mental model.
+- Interpreter-skill packaging: an =index.ts= module alongside =SKILL.md= is a different layout than the markdown-only skills today.  Need to decide whether the skill loader treats it as a separate kind or unifies.
+- Dependency footprint: adds =langchain_quickjs= + a JS runtime to the wheel.  Size?  Cold-start?
+
+*Concrete next step.*  Spike: build an interpreter version of calculate covering the 3-5 most common eval-prompt shapes, run =test_calculate_skill.py= at N=3 on both versions side-by-side, compare token usage + pass rate.  Decide based on data.  Out of scope: rewriting *other* skills (research, context, dev) — calculate is the cleanest test case because its semantics are simple and its sandbox dependency is shallow.
