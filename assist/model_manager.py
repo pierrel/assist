@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import threading
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -43,6 +44,30 @@ logger = logging.getLogger(__name__)
 
 
 _PROBE_TIMEOUT_S = 10.0
+
+
+# TCP keepalive socket options for the ChatOpenAI httpx client.  Without
+# these, a half-closed peer (the 2026-05-29 wedge: llama.cpp half-closed
+# a socket; the client never noticed and was blocked on `recv()` for
+# 5h26m until the queue watchdog force-released the slot — but the
+# holder THREAD itself stayed stuck because no read ever completed) is
+# only detected when Linux's default `tcp_keepalive_time` (7200s = 2h)
+# fires.  With these options, the kernel surfaces a dead peer as a
+# clean ECONNRESET after roughly:
+#
+#     TCP_KEEPIDLE + (TCP_KEEPCNT - 1) * TCP_KEEPINTVL
+#   = 30          + (3            - 1) * 10
+#   = 50 seconds.
+#
+# Constants are Linux-specific (TCP_KEEPIDLE etc. are TCP_* level);
+# `SO_KEEPALIVE` itself is portable but the per-option tuning is not.
+# Production target is Linux, so this is the right scope.
+_TCP_KEEPALIVE_SOCKET_OPTIONS: list[tuple[int, int, int]] = [
+    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
+]
 
 
 # Per-phase httpx Timeout for ChatOpenAI's underlying client.  Without
@@ -74,6 +99,24 @@ def _build_request_timeout() -> httpx.Timeout:
         read=env_float("ASSIST_LLM_READ_TIMEOUT_S", 600.0),
         write=env_float("ASSIST_LLM_WRITE_TIMEOUT_S", 60.0),
         pool=env_float("ASSIST_LLM_POOL_TIMEOUT_S", 10.0),
+    )
+
+
+def _build_http_client() -> httpx.Client:
+    """Construct the httpx.Client used by every ChatOpenAI instance.
+
+    Wires in TCP keepalive (see ``_TCP_KEEPALIVE_SOCKET_OPTIONS``) so a
+    half-closed peer surfaces in ~50s rather than waiting on the kernel
+    default ``tcp_keepalive_time`` (2h on Linux).  The per-phase
+    :class:`httpx.Timeout` from :func:`_build_request_timeout` is set
+    as the client default; per-call ``timeout`` on ChatOpenAI overrides
+    it when the openai SDK calls ``client.with_options(timeout=...)``.
+    """
+    return httpx.Client(
+        timeout=_build_request_timeout(),
+        transport=httpx.HTTPTransport(
+            socket_options=_TCP_KEEPALIVE_SOCKET_OPTIONS,
+        ),
     )
 
 
@@ -307,6 +350,13 @@ def _build_openai_chat_model(
         # on per-call wall-clock.
         "max_retries": 0,
         "timeout": _build_request_timeout(),
+        # http_client with TCP keepalive — see _build_http_client.
+        # Catches the half-closed-peer wedge that bit prod on
+        # 2026-05-29; without keepalive an LLM endpoint that crashes
+        # or half-closes mid-response leaves the client blocked on
+        # recv() until the queue's hold_timeout_s force-releases the
+        # slot (and even then the holder thread itself stays stuck).
+        "http_client": _build_http_client(),
         "callbacks": [_ModelNotFoundCacheBuster()],
         "base_url": base_url,
         "api_key": api_key,

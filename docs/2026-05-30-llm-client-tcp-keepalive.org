@@ -1,0 +1,134 @@
+#+TITLE: TCP keepalive on the LLM httpx client
+#+DATE: 2026-05-30
+State: In review (PR pending)
+
+First of three surgical follow-ups to the 2026-05-29 wedge incident.
+See [[file:2026-05-29-queue-holder-leak-fix.org]] and the audit findings
+that motivated the sequence.
+
+* Problem
+On 2026-05-29 thread =20260528073914-cbd6a4cb= sat in =processing= for
+5h26m.  Investigation: an open TCP connection from the assist-web
+Python process to llama.cpp at =127.0.0.1:8000= in =CLOSE_WAIT= state
+with 1 byte buffered.  Llama.cpp had finished its response and
+half-closed the socket; the openai/httpx client never noticed and was
+blocked on =recv()= indefinitely.
+
+The previous fix (PR #111) bounded the *queue slot* leak to
+=hold_timeout_s= via the watchdog — but the *holder thread* itself
+stays wedged because =ThreadQueueMiddleware='s cooperative cancel
+only fires between LLM calls (in =after_model=), and the next call
+was exactly what was blocked.
+
+** Why httpx didn't time out
+- =httpx.Timeout(connect=10, read=600, write=60, pool=10)= is set
+  on the ChatOpenAI client via =assist/model_manager._build_request_timeout=.
+- =read=600= is httpx's *idle-byte* timer.  It resets on every byte
+  received and only fires when no byte arrives for =read= seconds.
+  With 1 byte sitting in the kernel's recv queue, the timer may
+  never arm cleanly.
+- No TCP keepalive is configured on the underlying socket.
+- Linux's default =tcp_keepalive_time= is 7200s (2h) — so the kernel
+  safety net would only kick in well after the queue watchdog
+  already fired anyway.
+
+* Solution
+Configure TCP keepalive on the httpx client used by every ChatOpenAI
+instance.
+
+** Socket options
+| Option              | Value | Why                                  |
+|---------------------+-------+--------------------------------------|
+| =SO_KEEPALIVE=      |     1 | Enable keepalive at all              |
+| =TCP_KEEPIDLE=      |    30 | Probe after 30s idle                 |
+| =TCP_KEEPINTVL=     |    10 | 10s between probes                   |
+| =TCP_KEEPCNT=       |     3 | Fail after 3 missed probes           |
+
+Total detection time = =TCP_KEEPIDLE + (TCP_KEEPCNT - 1) * TCP_KEEPINTVL=
+= =30 + 2 * 10= = **50 seconds**.  Today's CLOSE_WAIT wedge would have
+surfaced as a clean =ECONNRESET= at the openai SDK after ~50s instead of
+hanging until the 2h queue watchdog fired.
+
+** Implementation shape
+One small change in =assist/model_manager.py=:
+
+- New constant =_TCP_KEEPALIVE_SOCKET_OPTIONS= holds the four
+  =(level, optname, value)= tuples.
+- New factory =_build_http_client()= returns
+  =httpx.Client(timeout=_build_request_timeout(),
+                  transport=httpx.HTTPTransport(socket_options=...))=.
+- =_build_openai_chat_model()= passes =http_client=_build_http_client()=
+  to ChatOpenAI alongside the existing =timeout=.
+
+The =timeout= kwarg on ChatOpenAI stays — it propagates to per-call
+=client.with_options(timeout=...)= in the openai SDK, which overrides
+the client default at call time.  Both call sites (per-call and
+client-default) carry the same per-phase Timeout, so behavior is
+consistent.
+
+** What this does NOT change
+- =_build_request_timeout= itself — the 600s read default stays.  The
+  audit recommended lowering to 120s, but that's operator-impactful
+  (genuinely long generations could now hit it) and a separate
+  judgment call from the keepalive hardening.  Defer to a follow-up
+  if force-release WARN keeps firing on long-running threads.
+- =ThreadQueueMiddleware= — the cooperative cancel point is unchanged.
+  Earlier cancel checks (=before_model=, =wrap_tool_call=) are the
+  next surgical PR.
+- The probe httpx calls (=_probe_endpoint=, =_probe_props_n_ctx=) —
+  these are short single-shot requests with their own 10s timeout;
+  not worth keepalive-hardening.
+
+** Rejected alternatives
+1. *Lower =read= timeout to 120s.*  Real cost (long synthesis hits
+   it) for marginal benefit when keepalive already catches the
+   half-closed peer.  Operators can still bump the env var.
+2. *Wrap the LLM call in a thread-supervisor with =signal.alarm=
+   or =threading.Timer= + =httpx.Client.close()=.*  Cross-thread
+   client close is not safe in httpx; would risk corrupting in-flight
+   requests on other threads sharing the client.  Adding a
+   per-request supervisor is more code than the kernel-level
+   keepalive that's already there.
+3. *Move LLM calls into a subprocess we can =terminate()=.*  This is
+   the "real" structural fix — covered as the long-term contingency
+   in [[file:2026-05-29-queue-holder-leak-fix.org]] follow-up #1 /
+   the audit's holistic-option-B.  Cost is high; defer until the
+   surgical fixes prove insufficient.
+
+* Risks
+- *R1 — Keepalive probes consume tiny bandwidth.*  4 packets every
+  ~50s per idle connection.  Negligible on localhost or a LAN.
+- *R2 — A flapping network path between the client and llama.cpp
+  could trigger spurious resets.*  Localhost: not applicable.  LAN:
+  if probes get dropped under congestion, the connection drops and
+  the openai SDK reconnects (which is correct — the alternative is
+  silent wedge).  =ModelRetryMiddleware= handles the transient
+  retry case.
+- *R3 — TCP keepalive constants are Linux-specific.*  Verified
+  =socket.TCP_KEEPIDLE/TCP_KEEPINTVL/TCP_KEEPCNT= are present on
+  the target Python.  =SO_KEEPALIVE= is portable.
+
+* Tests
+=tests/test_model_manager.py= (new file):
+- =test_tcp_keepalive_socket_options_are_set= — assert the constant
+  contains the four expected tuples with the right values.
+- =test_build_http_client_returns_client_with_keepalive= — construct
+  a client and verify its transport's =socket_options= match the
+  constant.
+- =test_build_http_client_applies_per_phase_timeout= — assert
+  =client.timeout.connect/read/write/pool= match
+  =_build_request_timeout()=.
+- =test_keepalive_actually_set_on_server_socket= (integration) —
+  spin up a local TCP server, accept a connection from the httpx
+  client, =getsockopt(SO_KEEPALIVE)= on the server side should be
+  =1=.  Confirms the option reaches the kernel.
+
+* Eval cadence
+Unit tests only — no agent-behavior change, no LLM behavior change.
+No edd/eval/ suite changes.
+
+* Follow-ups (sequence)
+This is fix 1 of 3 in the post-incident sweep.  Next:
+1. Refresh sandbox container TTL on activity (roadmap item).
+2. Add =before_model= + =wrap_tool_call= cancel points to
+   =ThreadQueueMiddleware=.
