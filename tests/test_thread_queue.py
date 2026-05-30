@@ -293,28 +293,40 @@ def test_defaults_match_module_constants():
 # bypassed entirely.  Background: docs/2026-05-29-queue-holder-leak-fix.org.
 
 
-def test_finally_runs_when_contextvar_reset_raises():
-    # Reproduces the 2026-05-28 prod failure mode: the with-block is
-    # entered in one `contextvars.Context` and exited in another, so
-    # `_active_handle.reset(token)` raises `ValueError` at the top of
-    # `finally`.  Pre-fix, that aborted the rest of `finally` and left
-    # `_holder` set; waiters then blocked the full wait_timeout_s (4h
-    # in prod).  Post-fix, the ValueError is swallowed and the slot is
-    # released cleanly.
+def test_cross_context_exit_leaks_holder_until_watchdog_recovers():
+    # Pins the failure-mode-and-recovery for the 2026-05-28 prod incident:
+    # the with-block is entered in one `contextvars.Context` and exited in
+    # another, so `_active_handle.reset(token)` raises `ValueError` at the
+    # top of `finally`, aborting the rest of cleanup.  This PR's policy is
+    # NOT to swallow the ValueError (that hides the bug in the caller);
+    # instead, the watchdog bounds the resulting `_holder` leak to
+    # `hold_timeout_s`.  The cause itself (a generator iterated across
+    # thread boundaries — see `Thread.stream_message`) gets fixed in a
+    # follow-up.
     q = ThreadAffinityQueue()
-    cm = q.acquire("A")
+    cm = q.acquire("A", hold_timeout_s=0.1)
     ctx = contextvars.copy_context()
     # `__enter__` binds the contextvar token to `ctx`; the subsequent
     # `__exit__` runs in the test's outer context, so `reset(token)`
-    # sees the context mismatch and raises ValueError (the real CPython
+    # sees the context mismatch and raises ValueError (real CPython
     # behaviour — no mocking needed).
     ctx.run(cm.__enter__)
     assert q.current_handle() is not None
-    cm.__exit__(None, None, None)
 
-    # The swallow guard in `finally` caught the ValueError; the rest of
-    # cleanup (watchdog cancel + `_release_if_holder`) still ran.
-    assert q.current_handle() is None
+    # The ValueError propagates out of `finally` — the holder leaks
+    # momentarily.  This is the documented failure mode.
+    with pytest.raises(ValueError):
+        cm.__exit__(None, None, None)
+    assert q.current_handle() is not None, "holder leaked, as expected"
+
+    # The watchdog catches the leak: `_holder` is force-released after
+    # `hold_timeout_s` so the queue stays serving other threads.
+    deadline = time.time() + 2.0
+    while q.current_handle() is not None and time.time() < deadline:
+        time.sleep(0.01)
+    assert q.current_handle() is None, (
+        "watchdog should have force-released the leaked slot"
+    )
 
     # A fresh acquire goes straight to "running" with no "queued" state.
     states: list[str] = []
