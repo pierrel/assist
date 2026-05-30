@@ -181,18 +181,17 @@ class ThreadAffinityQueue:
         try:
             yield handle
         finally:
-            # The contextvar reset can raise ValueError when this with-block
-            # exits in a different contextvars.Context than it was entered
-            # (the case warned about in this method's docstring; observed
-            # in prod on 2026-05-28).  That MUST NOT abort the rest of
-            # cleanup — leaving `_holder` set wedges every subsequent
-            # waiter until `wait_timeout_s` expires (4h in prod).  The
-            # contextvar in *this* context already reads default (None),
-            # which is the state we want.
-            try:
-                _active_handle.reset(token)
-            except ValueError:
-                pass
+            # NOTE: `_active_handle.reset(token)` raises ValueError when
+            # this with-block exits in a different contextvars.Context
+            # than it was entered (the case the docstring above warns
+            # about).  Today we let it propagate — the cause lives in
+            # the caller (a generator iterated across thread boundaries)
+            # and the fix belongs there, NOT in a try/except around the
+            # reset that would hide the bug.  The watchdog below bounds
+            # the resulting `_holder` leak to ``hold_timeout_s`` so the
+            # queue stays serving other threads while the underlying
+            # contract violation gets fixed in a follow-up.
+            _active_handle.reset(token)
             try:
                 watchdog.cancel()
             except Exception:

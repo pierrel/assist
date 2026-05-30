@@ -36,51 +36,49 @@ disconnects mid-stream).  Not confirmed for the specific 2026-05-28
 incident, but the shape fits.
 
 * Solution
-Two changes in =assist/thread_queue.py=, both narrow.
+*One change* in =assist/thread_queue.py=: the watchdog forcibly
+releases the slot.
 
-** Change A — make =finally= leak-proof
-Wrap =_active_handle.reset(token)= in =try/except ValueError=.  The
-contextvar in the current context already reads as default (=None=);
-swallowing the mismatch is correct.  The original exception that
-drove us into =finally= still propagates upward — the holder thread
-still terminates normally.
-
-** Change B — watchdog forcibly releases the slot
-Today the watchdog =_mark_expired= just flips =handle.expired = True=
-and trusts the cooperative cancel point in =ThreadQueueMiddleware= to
-unwind the holder.  That works IF the holder's call stack is still
-running.  If the holder has already unwound past =finally= without
-clearing =_holder= (Change A's failure mode, pre-fix), nothing else
-ever clears the slot.
+Today the watchdog only flips =handle.expired = True= and trusts the
+cooperative cancel point in =ThreadQueueMiddleware= to unwind the
+holder.  That works IF the holder's call stack is still running.  If
+the holder has already unwound past =finally= without clearing
+=_holder= (the contextvar-reset case below), nothing else clears the
+slot.
 
 Rename to =_on_hold_timeout=, promote to a method on
 =ThreadAffinityQueue=, and have it ALSO clear =_holder= via a shared
 =_release_if_holder= helper.  Bounds the leak duration to
-=hold_timeout_s= (default 2h) regardless of which finally-path failure
-mode triggered the leak.
+=hold_timeout_s= (default 2h) regardless of *which* failure mode left
+=_holder= set.
 
 A =logger.warning= fires when force-release actually happens — it's a
 should-never-happen path in steady state, and the 17h detection delay
 on the prod incident is exactly the operability gap this closes.
 
-** What the design-review team pushed back on
-- *Add the log line* (rejected by architect as scope creep; all three
-  reviewers — Simplicity, Clean Interfaces, Fail-fast Contract — said
-  ship it).  Accepted: one =logger.warning= when the force-release
-  branch actually fires.
-- *Narrow exception catch to =ValueError= only* (architect proposed
-  =(ValueError, LookupError)= defensively; Simplicity reviewer said
-  speculative).  Accepted: =ValueError= only.
-- *Extract =_release_if_holder= helper* (Clean Interfaces #1 — the
-  4-line release pattern is repeated in =finally= and =_mark_expired=).
-  Accepted.
-- *Rename =_mark_expired= → =_on_hold_timeout=* (Clean Interfaces #2
-  — the function does more than mark after Change B).  Accepted.
-- *Promote to method, drop unused =_Handle._watchdog= slot* (Clean
-  Interfaces #3, #6).  Accepted.
-- *Document the two-paths-converging contract* (Clean Interfaces #7,
-  Fail-fast #1).  Accepted: module docstring + comment on
-  =_on_hold_timeout=.
+** What this PR does NOT do
+We do NOT wrap =_active_handle.reset(token)= in a
+=try/except ValueError= to "make =finally= leak-proof."  An earlier
+draft did exactly that; the user pushed back on 2026-05-30 with:
+
+#+BEGIN_QUOTE
+Why would this happen?  Seems like fixing the cause of this is more
+important than placing these assurances *around* it.
+#+END_QUOTE
+
+The cause is that =Thread.stream_message=' generator gets iterated
+across thread boundaries (FastAPI streaming the body via
+=run_in_executor=; the emacsos consumer's =run_in_executor= → =next()=
+pump; client-disconnect GC closing the generator from the collector
+thread).  The fix lives in =assist/thread.py= — bind the generator
+to a captured =contextvars.copy_context()= — NOT in a defensive
+swallow inside the queue.
+
+Tracked as the next PR, separate from this one.  Until that PR lands,
+the contextvar-reset ValueError propagates out of =finally= and leaks
+=_holder= momentarily; the watchdog catches it within
+=hold_timeout_s=.  See the pinned-contract test
+=test_cross_context_exit_leaks_holder_until_watchdog_recovers=.
 
 ** Rejected alternatives
 1. *Heartbeat-based holder.*  Requires a background poller; the Timer
@@ -98,10 +96,10 @@ on the prod incident is exactly the operability gap this closes.
    watchdog not actually freeing the slot.
 
 ** Out of scope
-- =Thread.stream_message= generator close-on-disconnect (real but bounded
-  to =hold_timeout_s= by Change B; proper fix belongs in =assist/thread.py=).
+- =Thread.stream_message= generator close-on-disconnect — the *cause*
+  of the contextvar-reset case.  This is the NEXT PR, separately
+  scoped; the watchdog bounds the leak in the meantime.
 - Metrics dashboard for force-release counts.
-- Force-release endpoint or =current_handle_age_s()= helper.
 - =_Handle= → =@dataclass= refactor (=__slots__= is load-bearing).
 
 * Risks
@@ -128,34 +126,11 @@ on the prod incident is exactly the operability gap this closes.
 
 * Eval cadence
 Unit tests only — this is queue plumbing, not agent behavior.
-=tests/test_thread_queue.py= already at 14 tests; adding 3 new + 1
-modified (post code-review trim from 4 → 3).  No edd/eval/ suite changes.
+=tests/test_thread_queue.py=: 3 new tests + 1 modified.
 
-* Follow-ups (surfaced by code review; not in this PR)
-1. *=Thread.stream_message= close-on-disconnect.*  The generator wraps
-   =acquire()=; a consumer that drops iteration without =close()= leaves
-   the with-block suspended.  Change B in THIS PR bounds the leak to
-   =hold_timeout_s=, but the structural fix lives in =assist/thread.py=:
-   either a context-manager API for the caller, or drain the generator
-   on a worker thread bound to =copy_context()= so =__enter__= and
-   =__exit__= run in the same context.
-2. *Bind the streaming generator to a captured context.*  Wrap =_gen()=
-   so it runs inside =contextvars.copy_context().run(...)=.  Makes the
-   cross-context exit case structurally impossible; the =try/except
-   ValueError= in this PR becomes defense-in-depth.
-3. *=ThreadQueueMiddleware= docstring* should reflect the two-paths-
-   converging contract (=active_handle= = per-call-stack identity,
-   =_holder= = queue-wide ownership; the watchdog can clear =_holder=
-   while the contextvar still points at the dying handle).
-4. *Reentrant fast path could skip =_cond=.*  Reading =_active_handle=
-   is lock-free; sub-agent calls currently pay a lock acquisition just
-   to check a contextvar.
-5. *Observability counter.*  =_release_if_holder= returns =bool=, ready
-   for instrumentation: =force_releases= and =cooperative_releases= as
-   separate counters, with the ratio as the SLO signal.  WARNING log
-   in this PR catches absolute count; trend lives in metrics.
-6. *=register_at_fork= hook.*  The module docstring claims separate
-   processes get their own queue — true for =spawn=, NOT for =fork=.
-   A forked child inherits a stale =_holder=.  Either add
-   =os.register_at_fork(after_in_child=...)= to reinitialize, or
-   document the fork hazard.
+* Next PR (the cause fix)
+Bind =Thread.stream_message='s generator to a captured
+=contextvars.copy_context()= so =__enter__= and =__exit__= always run
+in the same context.  Makes the contextvar-reset ValueError
+structurally impossible.  Lives in =assist/thread.py=; separate scope
+from this queue-plumbing fix.
