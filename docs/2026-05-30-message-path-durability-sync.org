@@ -1,6 +1,6 @@
 #+TITLE: Mirror durability="sync" into Thread.message (langgraph BackgroundExecutor wedge)
 #+DATE: 2026-05-30
-State: In review (PR pending)
+State: Shipped (PR #113, commit =cc106b3=, merged to main 2026-05-30)
 
 * Problem
 On 2026-05-29 thread =20260528073914-cbd6a4cb= sat in =processing= for

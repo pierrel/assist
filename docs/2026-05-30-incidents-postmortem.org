@@ -1,0 +1,237 @@
+#+TITLE: Postmortem — 2026-05-28 and 2026-05-29 queue wedges
+#+DATE: 2026-05-30
+State: Closed
+
+Two production incidents in 26 hours, both surfacing as "thread stuck
+in =processing= forever."  Initially I conflated them; investigation
+showed they're different bugs in different layers.  This doc captures
+the timeline, the root causes, the fixes shipped, the mistakes I made
+along the way, and the lessons saved to memory.
+
+* TL;DR
+
+| Incident | Root cause | Fix (PR) | Status |
+|----------+-----------+----------+--------|
+| 2026-05-28 (17h leak) | =_active_handle.reset()= raises =ValueError= on cross-context exit; finally aborts; =_holder= leaks. | PR #114 (cause) + PR #111 (symptom bound) | Both deployed |
+| 2026-05-29 (5h26m wedge) | langgraph =BackgroundExecutor= chained-futures pool exhaustion under nested + concurrent tools.  Same bug class as 2026-05-25 streaming wedge; fix didn't reach the blocking entry point. | PR #113 (=durability="sync"= mirror) | Deployed |
+
+* Incident 1 — 2026-05-28 queue =_holder= leak (17h)
+
+** Timeline
+
+| Time      | Event                                                             |
+|-----------+-------------------------------------------------------------------|
+| ~14:48    | A holder thread's =finally= ran =_active_handle.reset(token)=, which raised =ValueError= (cross-context exit; the docstring already warned this could happen).  The raise aborted the rest of =finally= — watchdog cancel + =_holder= clear + =notify_all()= all skipped.  =_holder= stayed pointing at a dead handle. |
+| 18:48:44  | Thread =20260527085157-77ceb1f1= errored out with =QueueWaitTimeout: waited 14400.0s for queue= — the full =ASSIST_THREAD_QUEUE_WAIT_S= ceiling.  17h after the leak began. |
+| 2026-05-29 08:17 / 08:19 | Two new threads (=20260528073914-cbd6a4cb=, =df64e49f-...=) hit the still-held queue and went to =queued=.  They would have errored out around 12:17 / 12:19 the same way. |
+| 2026-05-29 ~08:30 | =make restart= recovered.  Lifespan handler marked the queued threads =error= with =pending_message= preserved. |
+
+** Root cause
+
+The queue's reentrancy mechanism uses a =contextvars.ContextVar=.  On
+=acquire= entry, =_active_handle.set(handle)= returns a =Token= bound
+to the current =contextvars.Context=.  On exit, =reset(token)= must
+run in the SAME Context — else =ValueError=.
+
+In =Thread.stream_message=, the returned generator is iterated by the
+consumer in whichever thread/Context the consumer drives =next()= /
+=close()= from.  Known consumers that drive iteration from a different
+OS thread:
+
+- the emacsos-server's =run_in_executor= → =next()= pump (each
+  executor worker has its own default Context)
+- FastAPI streaming response handlers
+- GC-driven generator close from a collector thread
+
+When the consumer's thread isn't the construction thread, =__enter__=
+ran in Context A and =__exit__= runs in Context B.  =reset(token)=
+raises.  Pre-fix, the raise was the FIRST line of =finally= — the
+rest of cleanup skipped — and =_holder= leaked.
+
+** Fixes
+
+*** Cause — PR #114 (=bind-stream-message-context=)
+=Thread.stream_message= now captures =ctx = contextvars.copy_context()=
+and wraps the inner generator in a tiny =_ContextBoundIterator= that
+routes every =__next__= / =close= through =ctx.run=.  =__enter__= and
+=__exit__= always see the same Context.  The =ValueError= becomes
+structurally impossible.  Design doc:
+[[file:2026-05-30-stream-message-context-binding.org]].
+
+*** Symptom bound — PR #111 (=fix-queue-holder-leak=)
+The watchdog's =_on_hold_timeout= callback now forcibly releases
+=_holder= (in addition to setting =handle.expired = True=) and logs a
+=WARNING= when force-release fires.  Bounds the leak to
+=hold_timeout_s= (2h) regardless of how cleanup failed.  Catches not
+just contextvar mismatches but any future cleanup path that leaves
+=_holder= set.  Design doc:
+[[file:2026-05-29-queue-holder-leak-fix.org]].
+
+PR #111 went through 4 Copilot rounds.  An earlier draft included a
+"Change A" — wrap =reset(token)= in =try/except ValueError= inside
+=finally= — that the user pushed back on:
+
+#+BEGIN_QUOTE
+Why would this happen?  Seems like fixing the cause of this is more
+important than placing these assurances *around* it.
+#+END_QUOTE
+
+That feedback was right.  Change A was dropped on 2026-05-30; the
+cause fix moved to its own PR (#114).  See
+[[feedback_no_theoretical_only_code]] in memory.
+
+* Incident 2 — 2026-05-29 langgraph deadlock (5h26m)
+
+** Timeline
+
+| Time      | Event                                                             |
+|-----------+-------------------------------------------------------------------|
+| 10:52:45  | Thread =20260528073914-cbd6a4cb= acquired the LLM queue; sandbox started. |
+| 10:53:36  | =[research-agent] Model Call #2 completed with 4 concurrent tool call(s).= |
+| 10:53:36 → 12:52:45 | Two hours of silence in the journal.  All 38 Python threads in the process were in =futex_wait= (lock waits), not socket I/O. |
+| 12:52:45  | PR #111's watchdog (which had been deployed earlier that morning) fired: =force-released wedged holder ... after 7200.0s hold=.  Queue slot freed for other threads.  But the holder thread itself stayed wedged. |
+| ~16:18    | User reported "stuck again."  I observed the thread still in =processing=. |
+| ~17:00    | =make restart= recovered. |
+
+** Root cause
+
+Same chained-futures pool exhaustion as the 2026-05-25 streaming
+wedge.  When langgraph's Pregel loop runs with =durability="async"=
+(the default), every superstep submits a checkpoint =put= to a per-loop
+=BackgroundExecutor= and chains them via futures
+(=_checkpointer_put_after_previous=).  Under deep nesting (general
+→ research subagent → 4 concurrent tool calls) the pool's workers all
+park on =prev.result()= waiting for the previous put's future, with
+no free worker left to complete any.  Self-deadlocked.
+
+The 2026-05-25 fix passed =durability="sync"= to =agent.stream()= in
+=Thread.stream_message=.  =Thread.message= → =invoke_with_rollback=
+→ =agent.invoke= was NOT covered.  =roadmap.org= line 51 explicitly
+claimed the blocking path "does NOT hit it."  That claim was wrong —
+the deadlock is =durability=-mode-dependent, not entry-point-dependent.
+
+** Fix — PR #113 (=fix-message-checkpoint-deadlock=)
+One-line change in =assist/checkpoint_rollback.py=:
+=agent.invoke(input, config, durability="sync")=.  Two more
+production-adjacent sites a scope audit found
+(=edd/capture.py:228=, =edd/eval/test_dev_agent_runs_eval.py:116=).
+=roadmap.org= line 51's wrong claim retracted.  Design doc:
+[[file:2026-05-30-message-path-durability-sync.org]].
+
+* What I got wrong
+
+** Misdiagnosed Incident 2 as a CLOSE_WAIT socket hang
+
+My initial investigation of the 2026-05-29 wedge found a single
+=CLOSE_WAIT= socket from the assist-web process to llama.cpp at
+=127.0.0.1:8000= with 1 byte buffered.  I attributed the wedge to
+"openai/httpx blocked on =recv()=" and proposed PR #112 — TCP
+keepalive on the httpx client.
+
+Copilot reviewer caught the framing problem.  Re-reading my own
+diagnostic confirmed Copilot was right:
+
+- llama.cpp logs at incident time: =done request: POST
+  /v1/chat/completions 127.0.0.1 200= — the call had COMPLETED cleanly.
+- No ESTABLISHED connections to llama.cpp existed on the wedged PID.
+- All 38 Python threads were in =futex_wait= — not socket I/O.
+- The =CLOSE_WAIT= socket was a stale pool connection from a
+  COMPLETED request, not the wedge cause.
+
+Plus a structural error in my proposed fix: TCP keepalive only probes
+ESTABLISHED connections — it does nothing for a CLOSE_WAIT socket
+where the FIN has already arrived.
+
+PR #112 was closed.  Lesson saved to memory:
+[[feedback_diagnose_wedge_thread_states_first]] — check =wchan= per
+thread (and ideally =py-spy=) BEFORE attributing a wedge to any open
+socket.  =ss -tnp= output for a stuck process is mostly noise.
+
+** Added defensive code "around" a symptom instead of fixing the cause
+
+PR #111 initially had two changes: the watchdog (Change B) AND a
+=try/except ValueError= wrapper around =_active_handle.reset(token)=
+(Change A).  Reviewer-justified at the time.  User pushed back: that
+hides the bug in =stream_message=.  Dropped Change A; moved the cause
+fix to PR #114.
+
+Lesson saved to memory:
+[[feedback_no_theoretical_only_code]] — fix root causes, don't paper
+over with try/except, helpers, or defensive branches.  Every line
+adds maintenance cost; theoretical robustness isn't free.
+
+** Used =git add -A= in assist
+
+Once, on the durability-fix PR (#113).  Picked up =.claude/=,
+=improvements/=, =edd/eval-history/=, =roadmap.org_archive= — all
+intentionally-untracked operator data.  Caught it before push; reset
+and re-staged specifically.
+
+Lesson saved to memory:
+[[feedback_no_git_add_dash_a_in_assist]] — always =git add
+<specific-files>=; the assist repo has multiple uncommitted
+top-level dirs that must stay out.
+
+** Created prod-state confusion with branch-deploys
+
+Deployed PR #113's branch at ~11:30 — =rsync --delete= overwrote
+PR #111's watchdog deployment from earlier that morning.  Didn't
+flag.  User asked the wrap-up "deploy PR #114 paired with the
+already-deployed PR #113" — I had to correct: prod had PR #113 but
+NOT PR #111 (my fault).  Built a =prod-restore-2026-05-30= branch
+combining all three and redeployed.
+
+No saved lesson on this one because the underlying mechanism is well
+known (=rsync --delete= replaces operator state).  Next time I deploy
+from a feature branch, I should explicitly check whether other
+unmerged-but-deployed branches are about to be lost.
+
+* What I got right
+
+- The investigation of Incident 2 (after the misdiagnosis correction)
+  found the langgraph deadlock fast — journal showed "Model Call #2
+  completed with 4 concurrent tool call(s)" right before 2h of
+  silence, which matched the 2026-05-25 wedge shape exactly.
+- PR #111's watchdog WAS valuable independent of the cause fix.  Its
+  =WARNING= log at 12:52:45 was the diagnostic anchor that let me
+  identify the wedge as different-class-from-leak (queue released
+  cleanly per the log; the wedge had to be in the holder thread's own
+  code).
+- The 4-lens code review on PR #111 caught real issues pre-Copilot
+  (BLOCKER on async coverage, IMPORTANTs on finalizer, naming, etc.).
+- Pushed back on Copilot re-flags on PR #111 round 4 (the
+  "State: In review" marker had been flagged in rounds 1, 3, 4 with
+  different framings each time).  CLAUDE.md predicted this pattern;
+  the cap saved cycles.
+
+* Memory artifacts saved this session
+
+- =feedback_diagnose_wedge_thread_states_first.md= — =wchan= per
+  thread first, not =ss=.
+- =feedback_no_theoretical_only_code.md= — fix causes, don't paper
+  over with defensive code.
+- =feedback_no_git_add_dash_a_in_assist.md= — stage specific files.
+
+* Open follow-ups (NOT done this session)
+
+- *Task #6 — refresh sandbox container TTL on activity.*  Real
+  roadmap item; would have prevented the 2026-05-27
+  =SandboxContainerLostError= that fed into Incident 1's
+  precondition.  Unblocked, not started.
+- *Investigate the langgraph BackgroundExecutor pattern itself.*  Two
+  bugs of the same class (2026-05-25 streaming + 2026-05-29 blocking)
+  in two months.  Worth a deeper conversation about whether the
+  =durability="sync"= workaround is the right long-term shape, or
+  whether the executor needs replacing.  Out of scope for the incident
+  response; on the roadmap as design work.
+
+* PRs
+
+| PR  | Branch                            | Status                                     |
+|-----+-----------------------------------+--------------------------------------------|
+| #111 | =fix-queue-holder-leak=          | Merged 2026-05-30 (commit =c233062=)       |
+| #112 | =llm-client-tcp-keepalive=       | Closed (misdiagnosed)                      |
+| #113 | =fix-message-checkpoint-deadlock= | Merged 2026-05-30 (commit =cc106b3=)      |
+| #114 | =bind-stream-message-context=    | Merged 2026-05-30 (commit =030572e=)       |
+| #?  | =post-merge-cleanup=              | This PR — integrated-review findings (BLOCKER: =_ContextBoundIterator.__del__=; dead-code drop; doc state markers; postmortem to main) |
+| n/a | =prod-restore-2026-05-30=         | Temp combined branch; deleted after individual PRs merged |

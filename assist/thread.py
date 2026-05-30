@@ -55,6 +55,14 @@ class _ContextBoundIterator:
     they bind) on the same Context, even when ``__next__`` / ``close`` are
     called from a different OS thread.  See the comment in
     ``stream_message`` for the failure mode this closes.
+
+    ``__del__`` routes the GC-driven generator finalization through
+    ``ctx.run`` too: CPython's generator finalizer (``_PyGen_Finalize``)
+    runs on whichever thread the collector happens to be on, which
+    typically isn't the construction thread.  Without this, a consumer
+    that drops the iterator without calling ``close()`` (e.g. emacsos-
+    server client disconnect) re-introduces the contextvar-mismatch
+    leak that PR #114 closed for the explicit-iteration path.
     """
     __slots__ = ("_ctx", "_gen")
 
@@ -70,6 +78,15 @@ class _ContextBoundIterator:
 
     def close(self) -> None:
         self._ctx.run(self._gen.close)
+
+    def __del__(self) -> None:
+        # GC-driven finalization.  Errors are swallowed because Python
+        # routes them to sys.unraisablehook anyway; raising here just
+        # pollutes the unraisable channel without any caller to handle it.
+        try:
+            self._ctx.run(self._gen.close)
+        except Exception:
+            pass
 
 
 class Thread:

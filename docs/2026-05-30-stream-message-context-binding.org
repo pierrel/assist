@@ -1,6 +1,6 @@
 #+TITLE: Bind Thread.stream_message generator to its construction Context
 #+DATE: 2026-05-30
-State: In review (PR pending)
+State: Shipped (PR #114, commit =030572e=, merged to main 2026-05-30).  Follow-up: PR (this branch) adds =__del__= to close the GC-on-different-thread path.
 
 The cause-side fix for the 2026-05-28 queue holder leak (the symptom
 of which is bounded by the watchdog in
