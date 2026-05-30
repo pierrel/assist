@@ -46,18 +46,24 @@ logger = logging.getLogger(__name__)
 _PROBE_TIMEOUT_S = 10.0
 
 
-# TCP keepalive socket options for the ChatOpenAI httpx client.  Without
-# these, a half-closed peer (the 2026-05-29 wedge: llama.cpp half-closed
-# a socket; the client never noticed and was blocked on `recv()` for
-# 5h26m until the queue watchdog force-released the slot — but the
-# holder THREAD itself stayed stuck because no read ever completed) is
-# only detected when Linux's default `tcp_keepalive_time` (7200s = 2h)
-# fires.  With these options, the kernel surfaces a dead peer as a
-# clean ECONNRESET after roughly:
+# TCP keepalive socket options for the ChatOpenAI httpx client.
+# Defense-in-depth against dead-peer scenarios where a process is
+# actively blocked on `recv()` against a connection that the peer's
+# kernel has stopped acknowledging (e.g. peer-host kernel panic with
+# no FIN/RST sent, NAT/firewall state expiry).  Without these, the
+# kernel's safety net is the default `tcp_keepalive_time` (7200s = 2h
+# on Linux).  With these, the kernel surfaces a dead peer as a clean
+# ECONNRESET after:
 #
-#     TCP_KEEPIDLE + (TCP_KEEPCNT - 1) * TCP_KEEPINTVL
-#   = 30          + (3            - 1) * 10
-#   = 50 seconds.
+#     TCP_KEEPIDLE + TCP_KEEPCNT * TCP_KEEPINTVL
+#   = 30          + 3            * 10
+#   = 60 seconds.
+#
+# What this does NOT bound: a connection that has already received FIN
+# from the peer (socket in CLOSE_WAIT) but where the application hasn't
+# called recv() since.  Keepalive only probes ESTABLISHED connections.
+# That class is bounded by the openai SDK's per-call timeout + the
+# upstream retry layer.
 #
 # Constants are Linux-specific (TCP_KEEPIDLE etc. are TCP_* level);
 # `SO_KEEPALIVE` itself is portable but the per-option tuning is not.

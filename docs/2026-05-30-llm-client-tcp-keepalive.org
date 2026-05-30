@@ -8,29 +8,38 @@ that motivated the sequence.
 
 * Problem
 On 2026-05-29 thread =20260528073914-cbd6a4cb= sat in =processing= for
-5h26m.  Investigation: an open TCP connection from the assist-web
-Python process to llama.cpp at =127.0.0.1:8000= in =CLOSE_WAIT= state
-with 1 byte buffered.  Llama.cpp had finished its response and
-half-closed the socket; the openai/httpx client never noticed and was
-blocked on =recv()= indefinitely.
+5h26m.  Initial diagnostic spotted a TCP connection from the assist-web
+process to llama.cpp at =127.0.0.1:8000= in =CLOSE_WAIT= state with
+1 byte (the FIN) buffered, and that shaped the original framing of
+this PR as "openai/httpx blocked on recv()".
 
-The previous fix (PR #111) bounded the *queue slot* leak to
-=hold_timeout_s= via the watchdog — but the *holder thread* itself
-stays wedged because =ThreadQueueMiddleware='s cooperative cancel
-only fires between LLM calls (in =after_model=), and the next call
-was exactly what was blocked.
+Re-examination — and the Copilot reviewer flagging the original
+framing — clarified that the CLOSE_WAIT socket was almost certainly
+*not* the wedge cause:
+- llama.cpp logs showed the request had completed cleanly
+  (=done request: POST /v1/chat/completions 127.0.0.1 200=).
+- No ESTABLISHED connections to llama.cpp existed on PID 1675100 at
+  the time of inspection.
+- All 38 Python threads in PID 1675100 were in =futex_wait= /
+  =io_sq_wait= (lock waits), not on socket =recv()=.
+- The CLOSE_WAIT was a stale pool connection from a *completed*
+  request — the actual wedge was elsewhere (langgraph executor /
+  sqlite checkpoint write / sandbox interaction; needs separate
+  investigation, tracked as a follow-up).
 
-** Why httpx didn't time out
-- =httpx.Timeout(connect=10, read=600, write=60, pool=10)= is set
-  on the ChatOpenAI client via =assist/model_manager._build_request_timeout=.
-- =read=600= is httpx's *idle-byte* timer.  It resets on every byte
-  received and only fires when no byte arrives for =read= seconds.
-  With 1 byte sitting in the kernel's recv queue, the timer may
-  never arm cleanly.
-- No TCP keepalive is configured on the underlying socket.
-- Linux's default =tcp_keepalive_time= is 7200s (2h) — so the kernel
-  safety net would only kick in well after the queue watchdog
-  already fired anyway.
+So this PR no longer claims to bound the observed wedge.  What it
+*does* do is harden the LLM client against a *related* failure-mode
+bucket — dead-peer scenarios where a process IS actively blocked on
+a network read against a peer whose kernel has stopped acknowledging
+(peer host kernel panic with no FIN/RST, NAT/firewall state expiry,
+some bridge/iptables drop).  Defense-in-depth, not the definitive
+fix for the 2026-05-29 incident.
+
+PR #111's queue watchdog still bounded the *queue slot* leak to
+=hold_timeout_s= regardless of which layer wedged.  The holder
+thread itself stays stuck — bounding that requires a different
+mechanism (subprocess termination is the structural answer; see
+follow-up #1 in [[file:2026-05-29-queue-holder-leak-fix.org]]).
 
 * Solution
 Configure TCP keepalive on the httpx client used by every ChatOpenAI
@@ -44,10 +53,10 @@ instance.
 | =TCP_KEEPINTVL=     |    10 | 10s between probes                   |
 | =TCP_KEEPCNT=       |     3 | Fail after 3 missed probes           |
 
-Total detection time = =TCP_KEEPIDLE + (TCP_KEEPCNT - 1) * TCP_KEEPINTVL=
-= =30 + 2 * 10= = **50 seconds**.  Today's CLOSE_WAIT wedge would have
-surfaced as a clean =ECONNRESET= at the openai SDK after ~50s instead of
-hanging until the 2h queue watchdog fired.
+Total detection time = =TCP_KEEPIDLE + TCP_KEEPCNT * TCP_KEEPINTVL=
+= =30 + 3 * 10= = **60 seconds**.  A peer that goes dead without a
+clean FIN/RST surfaces as =ECONNRESET= at the openai SDK after ~60s
+instead of waiting on Linux's default =tcp_keepalive_time= (2h).
 
 ** Implementation shape
 Changes in =assist/model_manager.py=:
@@ -73,12 +82,17 @@ The =timeout= kwarg on ChatOpenAI stays — it propagates to per-call
 =client.with_options(timeout=...)= in the openai SDK, which overrides
 the client default at call time.
 
-** What this does NOT change
-- =_build_request_timeout= itself — the 600s read default stays.  The
-  audit recommended lowering to 120s, but that's operator-impactful
-  (genuinely long generations could now hit it) and a separate
-  judgment call from the keepalive hardening.  Defer to a follow-up
-  if force-release WARN keeps firing on long-running threads.
+** What this does NOT bound
+- *The CLOSE_WAIT scenario specifically.*  Once a socket has received
+  FIN, keepalive doesn't probe it.  If the application has buffered
+  read data and never calls =recv()= again, the socket sits in
+  CLOSE_WAIT until the process exits.  Bounding that requires either
+  per-call deadlines higher up the stack, or fixing the application
+  pattern that left the socket unread.
+- *The actual 2026-05-29 wedge.*  As above, that thread wasn't
+  blocked on a socket at all — it was wedged elsewhere.  Separate
+  investigation pending.
+- =_build_request_timeout= itself — the 600s read default stays.
 - =ThreadQueueMiddleware= — the cooperative cancel point is unchanged.
   Earlier cancel checks (=before_model=, =wrap_tool_call=) are the
   next surgical PR.

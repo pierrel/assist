@@ -26,7 +26,7 @@ def test_tcp_keepalive_socket_options_constant():
     # Pin the exact (level, optname, value) tuples.  The detection-time
     # math in the module docstring depends on these specific values:
     #
-    #     30 (idle) + 2 * 10 (probes) = 50s before kernel surfaces a
+    #     30 (idle) + 3 * 10 (probes) = 60s before kernel surfaces a
     #     dead peer as ECONNRESET.
     #
     # Changing any of these without re-doing the math is a regression.
