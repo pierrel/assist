@@ -1,0 +1,136 @@
+#+TITLE: ThreadAffinityQueue holder-slot leak fix
+#+DATE: 2026-05-29
+State: In review (PR #111)
+
+Follow-up to =2026-05-06-thread-affinity-queue.org=.  That PR shipped the
+queue; this one fixes a leak that bit prod on 2026-05-28.
+
+* Problem
+The queue's =_holder= slot leaked.  Symptoms in prod logs:
+- 2026-05-28 18:48:44 — thread =20260527085157-77ceb1f1= errored with
+  =QueueWaitTimeout: waited 14400.0s for queue= (the full
+  =ASSIST_THREAD_QUEUE_WAIT_S= ceiling).
+- 2026-05-29 08:17 / 08:19 — user submitted two new requests, both
+  immediately went =queued= and would have hit the same 4h ceiling.
+- assist-web process (PID 742034) stayed alive the whole time —
+  no crash, no OOM, healthy event loop.  Only the in-memory
+  =_holder= slot was wedged, pointing at a dead handle.
+- Recovery: =make restart=.  Lifespan handler marked both =queued=
+  threads as =error= (preserving their =pending_message= for the user
+  to resend).
+
+** Root cause
+=ThreadAffinityQueue.acquire='s =finally= block starts with
+=_active_handle.reset(token)=.  As the method's docstring already
+warns: if the =with= block exits in a different =contextvars.Context=
+than it was entered, =reset()= raises =ValueError=.  The bare
+=reset()= call meant that =ValueError= aborted the rest of =finally=
+— watchdog cancel, =_holder= clear, and =notify_all()= all skipped.
+The watchdog still fired and flipped =handle.expired=, but nothing
+cleared =_holder=, so waiters blocked the full =wait_timeout_s=.
+
+The =Thread.stream_message= generator path is the likely source of
+the cross-context exit (FastAPI iterates the body generator on a
+thread different from where it was constructed when the client
+disconnects mid-stream).  Not confirmed for the specific 2026-05-28
+incident, but the shape fits.
+
+* Solution
+*One change* in =assist/thread_queue.py=: the watchdog forcibly
+releases the slot.
+
+Today the watchdog only flips =handle.expired = True= and trusts the
+cooperative cancel point in =ThreadQueueMiddleware= to unwind the
+holder.  That works IF the holder's call stack is still running.  If
+the holder has already unwound past =finally= without clearing
+=_holder= (the contextvar-reset case below), nothing else clears the
+slot.
+
+Rename to =_on_hold_timeout=, promote to a method on
+=ThreadAffinityQueue=, and have it ALSO clear =_holder= via a shared
+=_release_if_holder= helper.  Bounds the leak duration to
+=hold_timeout_s= (default 2h) regardless of *which* failure mode left
+=_holder= set.
+
+A =logger.warning= fires when force-release actually happens — it's a
+should-never-happen path in steady state, and the 17h detection delay
+on the prod incident is exactly the operability gap this closes.
+
+** What this PR does NOT do
+We do NOT wrap =_active_handle.reset(token)= in a
+=try/except ValueError= to "make =finally= leak-proof."  An earlier
+draft did exactly that; the user pushed back on 2026-05-30 with:
+
+#+BEGIN_QUOTE
+Why would this happen?  Seems like fixing the cause of this is more
+important than placing these assurances *around* it.
+#+END_QUOTE
+
+The cause is that =Thread.stream_message=' generator gets iterated
+across thread boundaries (FastAPI streaming the body via
+=run_in_executor=; the emacsos consumer's =run_in_executor= → =next()=
+pump; client-disconnect GC closing the generator from the collector
+thread).  The fix lives in =assist/thread.py= — bind the generator
+to a captured =contextvars.copy_context()= — NOT in a defensive
+swallow inside the queue.
+
+Tracked as the next PR, separate from this one.  Until that PR lands,
+the contextvar-reset ValueError propagates out of =finally= and leaks
+=_holder= momentarily; the watchdog catches it within
+=hold_timeout_s=.  See the pinned-contract test
+=test_cross_context_exit_leaks_holder_until_watchdog_recovers=.
+
+** Rejected alternatives
+1. *Heartbeat-based holder.*  Requires a background poller; the Timer
+   we already have does the same job without polling.
+2. *Admin endpoint to forcibly clear =_holder=.*  Hands operators a
+   footgun (force-clearing a live holder corrupts mid-prefill).
+3. *Periodic cleanup pass on each =acquire()=.*  Only runs when new
+   traffic arrives; silent if the system is idle.
+4. *Switch contextvar to =threading.local= or explicit handle param.*
+   The contextvar is the right primitive for "same call stack" detection
+   (sub-agent calls free-ride; cross-thread same-tid does not).  A
+   redesign is a separate, larger PR.
+5. *Tune =DEFAULT_HOLD_TIMEOUT_S= lower.*  The 2h default is calibrated
+   for legitimately long agent runs.  The bug isn't the cap; it's the
+   watchdog not actually freeing the slot.
+
+** Out of scope
+- =Thread.stream_message= generator close-on-disconnect — the *cause*
+  of the contextvar-reset case.  This is the NEXT PR, separately
+  scoped; the watchdog bounds the leak in the meantime.
+- Metrics dashboard for force-release counts.
+- =_Handle= → =@dataclass= refactor (=__slots__= is load-bearing).
+
+* Risks
+- *R1 — Slow-but-progressing holder gets force-released.*  Already the
+  documented contract of =hold_timeout_s=; Change B just makes the kill
+  also free the slot.  At most one overlap LLM call between the dying
+  holder and the newly-promoted waiter — same window the
+  =EmptyResponseRecoveryMiddleware= retry comment already calls out.
+- *R2 — Double-release race.*  The =is handle= guard in
+  =_release_if_holder= short-circuits whichever path runs second.  No
+  clobbering of a newly-promoted holder.
+- *R3 — Cooperative cancel still works.*  =ThreadQueueMiddleware= reads
+  =active_handle()= (contextvar), not =queue._holder=.  So even after
+  the watchdog clears =_holder=, the dying holder's middleware still
+  sees =handle.expired = True= and raises =ThreadHoldExpired= at the
+  next LLM call boundary.
+- *R4 — Timer thread re-entering =_cond=.*  No deadlock: =_cond= is
+  acquired by the holder thread only inside short critical sections;
+  the Timer thread queues for the lock normally.
+- *R5 — Effective wait timeout shrinks to =min(wait, hold)=.*  A
+  waiter behind an expired holder unblocks at =hold_timeout_s= instead
+  of waiting =wait_timeout_s=.  Strictly better; matches operator
+  intuition.
+
+* Eval cadence
+Unit tests only — this is queue plumbing, not agent behavior.
+=tests/test_thread_queue.py=: 3 new tests + 1 modified.
+
+* Next PR (the cause fix)
+Bind =Thread.stream_message='s generator to a captured
+=contextvars.copy_context()= so =__enter__= and =__exit__= always run
+in the same context.  Makes the contextvar-reset ValueError
+structurally impossible.  Lives in =assist/thread.py=; separate scope
+from this queue-plumbing fix.

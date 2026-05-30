@@ -9,7 +9,13 @@ slot's cached prefix matched, so prefill stays a per-turn delta.
 
 Affinity, not fairness:
 
-- Holder runs to completion before any waiter runs.
+- Waiters wait until the slot is vacated — either by the holder's
+  clean release at ``__exit__`` or by the watchdog force-releasing it
+  at ``hold_timeout_s``.  After a force-release the original holder
+  thread may still be unwinding its ``with`` block while a waiter is
+  already running; the identity guard in :meth:`_release_if_holder`
+  prevents the unwinding holder's late cleanup from clobbering the
+  new holder.
 - Waiters are FIFO among themselves.
 - Same ``thread_id`` re-acquiring is a no-op (re-entrant by id).
 
@@ -17,13 +23,16 @@ Failure-fast bounds:
 
 - ``hold_timeout_s`` — a runaway holder is flagged ``expired`` so the
   cooperative cancel point in :class:`ThreadQueueMiddleware` raises
-  :class:`ThreadHoldExpired` between LLM calls.  Honors the project
-  rule that threads die on infrastructure failure rather than
-  heal-and-retry.  The cap bounds the *detection latency*, not the
-  exact wall-clock release time — a ``wrap_model_call`` retry inside
+  :class:`ThreadHoldExpired` between LLM calls, AND the slot is vacated
+  immediately so the next waiter can claim it without waiting on the
+  runaway's ``finally``.  Honors the project rule that threads die on
+  infrastructure failure rather than heal-and-retry.  The cap bounds the
+  *detection latency* of the cooperative cancel, not the exact wall-clock
+  release time — a ``wrap_model_call`` retry inside
   :class:`EmptyResponseRecoveryMiddleware` or
   :class:`BadRequestRetryMiddleware` can run one or two more LLM calls
-  past expiration before ``after_model`` next fires.
+  past expiration before ``after_model`` next fires.  Forcible slot
+  release happens at the timeout regardless, logged at WARNING.
 - ``wait_timeout_s`` — a waiter that can't acquire raises
   :class:`QueueWaitTimeout` and the thread errors.
 
@@ -36,12 +45,15 @@ tasks within one ``manage.web`` process.  Eval CLIs that import
 """
 
 import contextvars
+import logging
 import os
 import threading
 import time
 from collections import deque
 from contextlib import contextmanager
 from typing import Callable, Iterator
+
+logger = logging.getLogger(__name__)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -67,13 +79,12 @@ class ThreadHoldExpired(Exception):
 
 
 class _Handle:
-    __slots__ = ("thread_id", "expired", "acquired_at", "_watchdog")
+    __slots__ = ("thread_id", "expired", "acquired_at")
 
     def __init__(self, thread_id: str) -> None:
         self.thread_id = thread_id
         self.expired = False
         self.acquired_at = time.time()
-        self._watchdog: threading.Timer | None = None
 
 
 _active_handle: contextvars.ContextVar = contextvars.ContextVar(
@@ -164,9 +175,10 @@ class ThreadAffinityQueue:
             self._holder = handle
             cb("running")
 
-            watchdog = threading.Timer(hold_timeout, _mark_expired, args=(handle,))
+            watchdog = threading.Timer(
+                hold_timeout, self._on_hold_timeout, args=(handle,)
+            )
             watchdog.daemon = True
-            handle._watchdog = watchdog
 
         # Start the watchdog outside the lock so a near-zero timeout
         # (used in tests) doesn't fire while we're still in __enter__.
@@ -175,15 +187,62 @@ class ThreadAffinityQueue:
         try:
             yield handle
         finally:
+            # NOTE: `_active_handle.reset(token)` raises ValueError when
+            # this with-block exits in a different contextvars.Context
+            # than it was entered (the case the docstring above warns
+            # about).  Today we let it propagate — the cause lives in
+            # the caller (a generator iterated across thread boundaries)
+            # and the fix belongs there, NOT in a try/except around the
+            # reset that would hide the bug.  The watchdog below bounds
+            # the resulting `_holder` leak to ``hold_timeout_s`` so the
+            # queue stays serving other threads while the underlying
+            # contract violation gets fixed in a follow-up.
             _active_handle.reset(token)
             try:
                 watchdog.cancel()
             except Exception:
                 pass
-            with self._cond:
-                if self._holder is handle:
-                    self._holder = None
-                    self._cond.notify_all()
+            self._release_if_holder(handle)
+
+    def _release_if_holder(self, handle: _Handle) -> bool:
+        """Vacate the slot iff ``handle`` is still the current holder.
+
+        Idempotent across the two release paths (``acquire``'s ``finally``
+        and the watchdog's :meth:`_on_hold_timeout`); whichever wins the
+        lock first releases, the other sees ``_holder is not handle`` and
+        returns False without clobbering a newly-promoted holder.
+        """
+        with self._cond:
+            if self._holder is handle:
+                self._holder = None
+                self._cond.notify_all()
+                return True
+            return False
+
+    def _on_hold_timeout(self, handle: _Handle) -> None:
+        """Watchdog callback: flag holder ``expired`` and force-release the slot.
+
+        ``expired = True`` is read by :class:`ThreadQueueMiddleware`'s
+        cooperative cancel (via :func:`active_handle` — per-call-stack);
+        the force-release through :meth:`_release_if_holder` bounds the
+        leak window when ``acquire``'s ``finally`` is skipped (the
+        2026-05-28 incident).  Logs WARNING when the release actually
+        fired — should be cold in steady state, a hit means the
+        cooperative path didn't clean up in time.
+        """
+        handle.expired = True
+        if self._release_if_holder(handle):
+            # We can't tell from here why the slot was still held: the
+            # cooperative cancel may never have fired, may have fired but
+            # the holder is mid-unwind, or `finally` ran partially and left
+            # `_holder` set (the 2026-05-28 incident shape).  Log the fact
+            # we can observe — the slot needed force-release — and leave
+            # the why to the investigator.
+            logger.warning(
+                "force-released wedged holder %s after %.1fs hold",
+                handle.thread_id,
+                time.time() - handle.acquired_at,
+            )
 
     def current_handle(self) -> _Handle | None:
         with self._cond:
@@ -192,10 +251,6 @@ class ThreadAffinityQueue:
     def waiter_count(self) -> int:
         with self._cond:
             return len(self._waiters)
-
-
-def _mark_expired(handle: _Handle) -> None:
-    handle.expired = True
 
 
 def active_handle() -> _Handle | None:
