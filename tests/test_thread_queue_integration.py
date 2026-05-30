@@ -162,3 +162,80 @@ class TestThreadStreamMessageHoldsAndReleasesQueue(_ThreadQueueIntegrationBase):
         self.assertEqual(chunks, ["a", "b", "c"])
         # Queue released cleanly — no ValueError on with-exit means no leak.
         self.assertIsNone(THREAD_QUEUE.current_handle())
+
+    def test_iterator_gc_on_different_thread_does_not_leak(self):
+        # Consumer abandons the iterator without calling `close()` — Python
+        # GC eventually finalizes it on the collector thread.  Without
+        # `_ContextBoundIterator.__del__`, the underlying generator's
+        # finalization runs `gen.close()` on the GC thread, the with-block's
+        # `_active_handle.reset(token)` raises ValueError, and `_holder`
+        # leaks until the watchdog catches it.  This test pins the __del__
+        # behavior: even GC-driven cleanup runs in the captured context.
+        import gc
+        chat = self.tm.new()
+        with patch.object(chat.agent, "stream", self._patch_stream(["a", "b", "c"])):
+            stream_iter = chat.stream_message("hello")
+            # Advance once so the queue is acquired; then drop the reference.
+            next(stream_iter)
+            self.assertIsNotNone(THREAD_QUEUE.current_handle())
+            del stream_iter
+            gc.collect()
+        # GC ran the iterator's __del__ → routed close through ctx.run →
+        # with-exit ran in the captured Context → reset succeeded → slot
+        # released.  If __del__ is missing or routes through the wrong
+        # context, this assertion fails.
+        self.assertIsNone(THREAD_QUEUE.current_handle())
+
+    def test_iterator_holds_queue_when_watchdog_fires_mid_stream(self):
+        # A stream_message iterator is mid-flight when the watchdog fires.
+        # PR #114 binds iteration to a captured context; PR #111's watchdog
+        # force-releases _holder when hold_timeout_s elapses.  The two
+        # interact: watchdog clears _holder mid-`with`; iteration eventually
+        # completes; holder's __exit__ runs in the captured ctx and calls
+        # `_release_if_holder(handle)` which finds `_holder is None` and
+        # no-ops via the identity guard.  Assert clean release.
+        import time
+        chat = self.tm.new()
+
+        # Override the model's hold_timeout via a generator that yields
+        # the first chunk fast, then stalls past hold_timeout_s, then
+        # yields the rest.
+        slow_event = threading.Event()
+
+        def slow_stream(*args, **kwargs):
+            yield "a"
+            slow_event.wait(timeout=2.0)
+            yield "b"
+            yield "c"
+
+        # Tight hold_timeout so the watchdog fires during the stall.
+        with patch.object(chat.agent, "stream", slow_stream):
+            with patch.object(
+                THREAD_QUEUE,
+                "_default_hold_timeout",
+                0.1,
+            ):
+                stream_iter = chat.stream_message("hello")
+                # First chunk acquires the queue.
+                first = next(stream_iter)
+                self.assertEqual(first, "a")
+                self.assertIsNotNone(THREAD_QUEUE.current_handle())
+
+                # Wait past hold_timeout_s — watchdog fires, _holder cleared.
+                time.sleep(0.25)
+                self.assertIsNone(
+                    THREAD_QUEUE.current_handle(),
+                    "watchdog did not force-release the stalled holder",
+                )
+
+                # Unstick the stream; iteration completes; holder's
+                # finally runs `_release_if_holder` which is a no-op
+                # because `_holder` is already None (identity guard).
+                slow_event.set()
+                rest = list(stream_iter)
+                self.assertEqual(rest, ["b", "c"])
+
+        # After full exhaustion, slot is still None — the holder's
+        # late finally did not clobber, and no waiter was promoted
+        # so nothing's there.
+        self.assertIsNone(THREAD_QUEUE.current_handle())
