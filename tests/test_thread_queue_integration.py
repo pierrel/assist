@@ -152,6 +152,12 @@ class TestThreadStreamMessageHoldsAndReleasesQueue(_ThreadQueueIntegrationBase):
             t.start()
             t.join(timeout=2.0)
 
+        # Worker must have finished — without this guard a hang inside
+        # `ctx.run` would let `join` return on timeout with empty errors,
+        # a partial `chunks`, and a released `current_handle()` (because
+        # the holder hasn't been touched yet), masking the very bug this
+        # test is supposed to catch.
+        self.assertFalse(t.is_alive(), "consumer thread did not finish")
         self.assertFalse(errors, f"cross-thread iteration raised: {errors}")
         self.assertEqual(chunks, ["a", "b", "c"])
         # Queue released cleanly — no ValueError on with-exit means no leak.
