@@ -118,7 +118,7 @@ the client default at call time.
 
 * Risks
 - *R1 — Keepalive probes consume tiny bandwidth.*  4 packets every
-  ~50s per idle connection.  Negligible on localhost or a LAN.
+  ~60s per idle connection.  Negligible on localhost or a LAN.
 - *R2 — A flapping network path between the client and llama.cpp
   could trigger spurious resets.*  Localhost: not applicable.  LAN:
   if probes get dropped under congestion, the connection drops and

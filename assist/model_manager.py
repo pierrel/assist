@@ -152,7 +152,7 @@ def _build_http_client() -> httpx.Client:
     """Construct the sync httpx.Client used by every ChatOpenAI instance.
 
     Wires in TCP keepalive (see ``_TCP_KEEPALIVE_SOCKET_OPTIONS``) so a
-    half-closed peer surfaces in ~50s rather than waiting on the kernel
+    dead peer surfaces in ~60s rather than waiting on the kernel
     default ``tcp_keepalive_time`` (2h on Linux).  The per-phase
     :class:`httpx.Timeout` from :func:`_build_request_timeout` is set
     as the client default and is *also* set via ChatOpenAI's ``timeout``
