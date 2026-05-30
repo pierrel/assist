@@ -115,10 +115,11 @@ weighed in 2026-05-25.
 1. *Raise =max_concurrency=.*  Postpones the deadlock, doesn't fix
    it.  Eventually any sufficiently-deep nesting exhausts the pool
    again.
-2. *Move LLM calls into a subprocess.*  Structural fix listed as the
-   long-term contingency in
-   [[file:2026-05-29-queue-holder-leak-fix.org]] follow-up #1; out
-   of scope.
+2. *Move LLM calls into a subprocess.*  The structural fix for
+   forcible mid-call termination — Python doesn't support killing
+   a thread from outside, so the watchdog can only declare bankruptcy
+   on the queue slot, not on the worker.  Out of scope here; tracked
+   as long-term contingency from the 2026-05-29 incident audit.
 3. *Unit test the deadlock directly.*  Deadlock repros are flaky
    (depend on which future completes first under contention) — the
    2026-05-25 fix was "verified live" rather than via unit test.
@@ -141,11 +142,12 @@ weighed in 2026-05-25.
   production paths.
 
 * Tests
-=tests/test_checkpoint_rollback.py= (already exists; check or add):
-- =test_invoke_with_rollback_passes_durability_sync= — wiring test
-  via =unittest.mock= or a stub agent: assert =agent.invoke=
-  receives =durability="sync"= in kwargs on the happy path and on
-  every rollback retry.
+Two new tests in =tests/test_checkpoint_rollback.py= (existing file):
+- =test_passes_durability_sync_on_happy_path= — first invocation
+  carries the kwarg.
+- =test_passes_durability_sync_on_every_rollback_retry= — kwarg
+  survives every rollback retry (guards against a refactor that
+  builds a fresh kwargs dict and forgets to carry it forward).
 
 * Eval cadence
 Unit tests only — single-line wiring change.  No agent-behavior

@@ -93,8 +93,7 @@ class TestInvokeWithRollback:
         )
 
         # All three invocations (initial + 2 rollback retries) must have
-        # durability="sync".  call_args_list is a list of (args, kwargs)
-        # in newer Mock versions; .kwargs accessor works on each entry.
+        # durability="sync".
         assert agent.invoke.call_count == 3
         for i, call in enumerate(agent.invoke.call_args_list):
             assert call.kwargs.get("durability") == "sync", (
