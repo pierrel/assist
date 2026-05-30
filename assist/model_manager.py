@@ -102,19 +102,80 @@ def _build_request_timeout() -> httpx.Timeout:
     )
 
 
+class _HttpClient(httpx.Client):
+    """``httpx.Client`` subclass that closes itself on GC.
+
+    Mirrors langchain_openai's own ``_SyncHttpxClientWrapper`` (which
+    subclasses ``openai.DefaultHttpxClient`` for the same reason): a
+    plain ``httpx.Client`` has no ``__del__`` finalizer, so a ChatOpenAI
+    instance going out of scope leaks its connection pool until process
+    exit.  Production hits this once per process (cached via
+    ``ThreadManager.model``), but eval sweeps construct N clients across
+    test classes — the cumulative leak adds up.
+    """
+
+    def __del__(self) -> None:
+        if self.is_closed:
+            return
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class _AsyncHttpClient(httpx.AsyncClient):
+    """``httpx.AsyncClient`` subclass with a sync ``__del__``.
+
+    Same reason as :class:`_HttpClient`.  ``AsyncClient.close`` is
+    async; calling it from ``__del__`` (a sync context) would raise.
+    ``AsyncClient.aclose`` is also async.  The sync escape hatch is
+    ``_close_rs``-style transport close, but that's private — instead
+    we just let the OS reap the underlying sockets on process exit.
+    The pool's idle connections are bounded by httpx's defaults (5),
+    so the leak is small and the test-sweep concern doesn't apply
+    here in the same magnitude.
+    """
+
+    def __del__(self) -> None:
+        # No safe sync close path; rely on OS-level reaping.  See class
+        # docstring for the trade-off.
+        return
+
+
 def _build_http_client() -> httpx.Client:
-    """Construct the httpx.Client used by every ChatOpenAI instance.
+    """Construct the sync httpx.Client used by every ChatOpenAI instance.
 
     Wires in TCP keepalive (see ``_TCP_KEEPALIVE_SOCKET_OPTIONS``) so a
     half-closed peer surfaces in ~50s rather than waiting on the kernel
     default ``tcp_keepalive_time`` (2h on Linux).  The per-phase
     :class:`httpx.Timeout` from :func:`_build_request_timeout` is set
-    as the client default; per-call ``timeout`` on ChatOpenAI overrides
-    it when the openai SDK calls ``client.with_options(timeout=...)``.
+    as the client default and is *also* set via ChatOpenAI's ``timeout``
+    kwarg — in normal openai-SDK usage the per-call ``client.with_options(
+    timeout=...)`` always overrides the client default, so the client
+    default is the fallback for any direct httpx use.
     """
-    return httpx.Client(
+    return _HttpClient(
         timeout=_build_request_timeout(),
         transport=httpx.HTTPTransport(
+            socket_options=_TCP_KEEPALIVE_SOCKET_OPTIONS,
+        ),
+    )
+
+
+def _build_http_async_client() -> httpx.AsyncClient:
+    """Construct the async httpx.AsyncClient used by every ChatOpenAI.
+
+    The async client is what deepagents' subagent dispatch
+    (``await subagent.ainvoke(...)``) uses.  Without setting
+    ``http_async_client`` on ChatOpenAI, the openai SDK falls back to
+    its default async client which has no socket options, leaving
+    subagent LLM calls completely unprotected from the half-closed-peer
+    wedge that motivated this PR.  Setting both keeps sync and async
+    paths in lockstep.
+    """
+    return _AsyncHttpClient(
+        timeout=_build_request_timeout(),
+        transport=httpx.AsyncHTTPTransport(
             socket_options=_TCP_KEEPALIVE_SOCKET_OPTIONS,
         ),
     )
@@ -350,13 +411,11 @@ def _build_openai_chat_model(
         # on per-call wall-clock.
         "max_retries": 0,
         "timeout": _build_request_timeout(),
-        # http_client with TCP keepalive — see _build_http_client.
-        # Catches the half-closed-peer wedge that bit prod on
-        # 2026-05-29; without keepalive an LLM endpoint that crashes
-        # or half-closes mid-response leaves the client blocked on
-        # recv() until the queue's hold_timeout_s force-releases the
-        # slot (and even then the holder thread itself stays stuck).
+        # Both sync AND async clients carry TCP keepalive — see
+        # _build_http_client / _build_http_async_client.  Async covers
+        # the deepagents subagent dispatch path (await subagent.ainvoke).
         "http_client": _build_http_client(),
+        "http_async_client": _build_http_async_client(),
         "callbacks": [_ModelNotFoundCacheBuster()],
         "base_url": base_url,
         "api_key": api_key,
