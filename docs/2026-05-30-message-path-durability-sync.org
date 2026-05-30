@@ -1,0 +1,160 @@
+#+TITLE: Mirror durability="sync" into Thread.message (langgraph BackgroundExecutor wedge)
+#+DATE: 2026-05-30
+State: In review (PR pending)
+
+* Problem
+On 2026-05-29 thread =20260528073914-cbd6a4cb= sat in =processing= for
+~5h26m.  Initial diagnosis blamed an httpx CLOSE_WAIT socket — that
+was a misdiagnosis (the socket was a stale pool connection from a
+COMPLETED request; the wedge was elsewhere).
+
+Re-investigating with =wchan= per thread + journal-side timeline:
+
+| Time     | Event                                                         |
+|----------+---------------------------------------------------------------|
+| 10:52:45 | =Started sandbox container 2a65ef3babd5= (queue acquired)     |
+| 10:52:45 | =[general-agent] Model Call #1 starting=                      |
+| 10:53:04 | =[general-agent] Model Call #1 completed= (3 tool calls)      |
+| 10:53:04 | =[research-agent] Model Call #1 starting=                     |
+| 10:53:16 | =[research-agent] Model Call #1 completed= (1 tool call)      |
+| 10:53:36 | =[research-agent] Model Call #2 completed with 4 concurrent tool call(s)= |
+| 10:53:36 → 12:52:45 | *NOTHING.*  2h of silence in the journal.          |
+| 12:52:45 | =force-released wedged holder ... after 7200.0s hold= (watchdog) |
+
+The wedge happened RIGHT AFTER the model dispatched 4 concurrent
+tool calls — same shape as the 2026-05-25 streaming wedge documented
+in =roadmap.org= lines 50-69.  At observation time, all 38 Python
+threads in the process were in =futex_wait= (lock waits), not socket
+I/O — consistent with a chained-futures deadlock in the langgraph
+=BackgroundExecutor=, not network or sqlite contention.
+
+* Root cause
+The 2026-05-25 fix passed =durability="sync"= to =agent.stream()=
+in =Thread.stream_message= (=assist/thread.py:222=) with a 16-line
+comment naming the chained checkpoint-put pool exhaustion in
+=langgraph/pregel/_loop.py= (=_checkpointer_put_after_previous=).
+=roadmap.org= line 51 explicitly claims the blocking
+=Thread.message=  →  =invoke_with_rollback=  →  =.invoke()= path
+"does NOT hit it."  That claim is wrong.
+
+- =invoke_with_rollback= at =assist/checkpoint_rollback.py:90=
+  calls =agent.invoke(current_input, current_config)= with no
+  =durability= kwarg.
+- =langgraph/pregel/main.py:2574= defaults to =durability="async"=.
+- Under =async=, every superstep submits to a per-loop
+  =BackgroundExecutor= (=langgraph/pregel/_loop.py:1147-1187=) and
+  the puts chain via futures.  Under enough nesting + concurrent
+  tool calls, the pool runs out of workers (workers parked on
+  =result()= of the previous put's future, with no free worker to
+  complete any).
+- The deadlock is =durability=-mode-dependent and entry-point-
+  independent.  Backend-independent too (per the prior incident's
+  notes: "deadlocks the same on InMemorySaver or SqliteSaver").
+
+The roadmap's "does NOT hit it" claim was based on the 2026-05-25
+repro — which used the streamed path — not on a proof that the
+blocking path was immune.  When the May-29 thread hit deep enough
+nesting (=general-agent= → =research-agent= → 4 concurrent tools),
+it exposed the same chained-futures deadlock from the
+=.invoke()= side.
+
+* Solution
+One-line change in =assist/checkpoint_rollback.py= at the
+=invoke_with_rollback= retry loop:
+
+#+BEGIN_SRC python
+-            return agent.invoke(current_input, current_config)
++            return agent.invoke(current_input, current_config, durability="sync")
+#+END_SRC
+
+That single change propagates through =langgraph/pregel/main.py:2835=
+to all subgraphs (research-agent, context-agent, critique, fact-check),
+mirroring the streaming-path fix.  =RollbackRunnable.invoke=
+(=assist/checkpoint_rollback.py:200-207=) calls
+=invoke_with_rollback=, so it gets the fix automatically — covering
+the =Thread.message= web path AND the =AgentHarness.message= eval
+path that goes through the same retry loop.
+
+** Two more call sites NOT covered by the above
+A scope audit surfaced two production-adjacent call sites that
+invoke a checkpointed agent directly (bypassing
+=invoke_with_rollback=):
+
+1. =edd/capture.py:228= — the "Capture this thread" background task,
+   triggered from the web UI button via
+   =manage/web/threads.py:699=.  Has a checkpointer
+   (=InMemorySaver= + auto-injected =general-purpose= subagent).
+   Add =durability="sync"= to the config dict at the call site.
+
+2. =edd/eval/test_dev_agent_runs_eval.py:116= — nightly eval, runs
+   the full deep-nested dev-agent path inside a sandbox.  Not
+   user-facing but can deadlock during nightly cron with false
+   failure signal.  Add =durability="sync"= to the inline config.
+
+Both are the same one-line shape, so folding them into this PR
+keeps the bug class closed across the whole codebase.
+
+* What this does NOT change
+- Streaming path (=Thread.stream_message=) — already has the fix.
+- =durability= semantics — =sync= persists each checkpoint
+  synchronously before the next step.  =RollbackRunnable= still works
+  (still gets per-step checkpoints).
+- Sub-agent state separation, queue affinity, cooperative cancel —
+  all unchanged.
+
+* Why not lower =max_concurrency=?
+=runconfig["max_concurrency"]=5= at =assist/thread.py:122= bounds the
+per-loop executor.  Raising it would give more headroom for the
+chain to complete, but the deadlock recurs at higher loads — it's a
+race between "futures can complete" and "futures need workers."
+The =durability="sync"= fix removes the chaining entirely, so the
+pool can't pile up.  This is the same trade-off the streaming fix
+weighed in 2026-05-25.
+
+* Rejected alternatives
+1. *Raise =max_concurrency=.*  Postpones the deadlock, doesn't fix
+   it.  Eventually any sufficiently-deep nesting exhausts the pool
+   again.
+2. *Move LLM calls into a subprocess.*  Structural fix listed as the
+   long-term contingency in
+   [[file:2026-05-29-queue-holder-leak-fix.org]] follow-up #1; out
+   of scope.
+3. *Unit test the deadlock directly.*  Deadlock repros are flaky
+   (depend on which future completes first under contention) — the
+   2026-05-25 fix was "verified live" rather than via unit test.
+   Same approach here: ship the fix, verify under the same prompt
+   shape ("Do research on X with multiple concurrent tool calls").
+   Add a CHEAP wiring test instead: confirm
+   =invoke_with_rollback= passes =durability="sync"= to the
+   wrapped agent.
+
+* Risks
+- *R1 — Per-step checkpoint writes are slower than async batched.*
+  The streaming path has run on =sync= since 2026-05-25 with no
+  observed perf regression; the same is expected here.  Per-step
+  writes are bounded by sqlite IOPS, which is the bottleneck anyway.
+- *R2 — Other entry points might still default to async.*
+  =AgentHarness.message= (=assist/agent.py:84-93=) goes through
+  =invoke_with_rollback=, so it's covered.  Direct
+  =agent.invoke(...)= calls in eval CLIs would still default to
+  async — flag in the doc and let those drift; they're not
+  production paths.
+
+* Tests
+=tests/test_checkpoint_rollback.py= (already exists; check or add):
+- =test_invoke_with_rollback_passes_durability_sync= — wiring test
+  via =unittest.mock= or a stub agent: assert =agent.invoke=
+  receives =durability="sync"= in kwargs on the happy path and on
+  every rollback retry.
+
+* Eval cadence
+Unit tests only — single-line wiring change.  No agent-behavior
+delta expected.  Defer N=10 eval until after prod deploy.
+
+* Roadmap update
+=roadmap.org= line 51 retracted in the same commit:
+- Before: "The web UI's blocking ... path does NOT hit it."
+- After: "Initially thought to be streaming-path-only; mirrored
+  into the blocking path on 2026-05-30 after the May-29 incident
+  proved deeper nesting + concurrent tools exposes it from
+  =.invoke()= too."

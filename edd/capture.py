@@ -225,9 +225,12 @@ Begin!
     logger.debug(f"Domain directory copied to: {capture_domain_dir}")
 
     try:
+        # durability="sync" — see assist/checkpoint_rollback.py:90 comment
+        # for the chained-futures pool exhaustion this avoids.
         response = agent.invoke(
             {"messages": [{"role": "user", "content": task}]},
-            {"configurable": {"thread_id": f"capture-{thread.thread_id}"}}
+            {"configurable": {"thread_id": f"capture-{thread.thread_id}"}},
+            durability="sync",
         )
         logger.debug(f"Agent completed successfully")
     except Exception as e:
