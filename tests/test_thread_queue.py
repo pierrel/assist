@@ -297,12 +297,14 @@ def test_cross_context_exit_leaks_holder_until_watchdog_recovers():
     # Pins the failure-mode-and-recovery for the 2026-05-28 prod incident:
     # the with-block is entered in one `contextvars.Context` and exited in
     # another, so `_active_handle.reset(token)` raises `ValueError` at the
-    # top of `finally`, aborting the rest of cleanup.  This PR's policy is
-    # NOT to swallow the ValueError (that hides the bug in the caller);
+    # top of `finally`, aborting the rest of cleanup.  The queue's policy
+    # is NOT to swallow the ValueError (that hides the bug in the caller);
     # instead, the watchdog bounds the resulting `_holder` leak to
-    # `hold_timeout_s`.  The cause itself (a generator iterated across
-    # thread boundaries — see `Thread.stream_message`) gets fixed in a
-    # follow-up.
+    # `hold_timeout_s`.  The known caller (`Thread.stream_message`) binds
+    # its generator to a captured Context via `_ContextBoundIterator`, so
+    # this path is no longer reachable from in-tree code; the test still
+    # pins the queue-level recovery contract for any future caller that
+    # might violate the same-Context-exit contract.
     q = ThreadAffinityQueue()
     cm = q.acquire("A", hold_timeout_s=0.1)
     ctx = contextvars.copy_context()

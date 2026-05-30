@@ -187,21 +187,15 @@ class ThreadAffinityQueue:
         try:
             yield handle
         finally:
-            # NOTE: `_active_handle.reset(token)` raises ValueError when
-            # this with-block exits in a different contextvars.Context
-            # than it was entered (the case the docstring above warns
-            # about).  Today we let it propagate — the cause lives in
-            # the caller (a generator iterated across thread boundaries)
-            # and the fix belongs there, NOT in a try/except around the
-            # reset that would hide the bug.  The watchdog below bounds
-            # the resulting `_holder` leak to ``hold_timeout_s`` so the
-            # queue stays serving other threads while the underlying
-            # contract violation gets fixed in a follow-up.
+            # `_active_handle.reset(token)` requires same-Context exit
+            # (the docstring above defines the contract).  Callers that
+            # iterate across thread boundaries must bind via
+            # ``contextvars.Context.run`` — see `Thread.stream_message`'s
+            # `_ContextBoundIterator` for the in-tree pattern.  If the
+            # contract is violated, the watchdog bounds the resulting
+            # `_holder` leak to ``hold_timeout_s``.
             _active_handle.reset(token)
-            try:
-                watchdog.cancel()
-            except Exception:
-                pass
+            watchdog.cancel()
             self._release_if_holder(handle)
 
     def _release_if_holder(self, handle: _Handle) -> bool:
@@ -223,21 +217,15 @@ class ThreadAffinityQueue:
         """Watchdog callback: flag holder ``expired`` and force-release the slot.
 
         ``expired = True`` is read by :class:`ThreadQueueMiddleware`'s
-        cooperative cancel (via :func:`active_handle` — per-call-stack);
-        the force-release through :meth:`_release_if_holder` bounds the
-        leak window when ``acquire``'s ``finally`` is skipped (the
-        2026-05-28 incident).  Logs WARNING when the release actually
-        fired — should be cold in steady state, a hit means the
-        cooperative path didn't clean up in time.
+        cooperative cancel (via :func:`active_handle` — per-call-stack).
+        The force-release through :meth:`_release_if_holder` is
+        defense-in-depth: it bounds the leak window for any cleanup
+        failure that leaves ``_holder`` set, regardless of cause.
+        Logs WARNING when the release actually fired — should be cold
+        in steady state.
         """
         handle.expired = True
         if self._release_if_holder(handle):
-            # We can't tell from here why the slot was still held: the
-            # cooperative cancel may never have fired, may have fired but
-            # the holder is mid-unwind, or `finally` ran partially and left
-            # `_holder` set (the 2026-05-28 incident shape).  Log the fact
-            # we can observe — the slot needed force-release — and leave
-            # the why to the investigator.
             logger.warning(
                 "force-released wedged holder %s after %.1fs hold",
                 handle.thread_id,

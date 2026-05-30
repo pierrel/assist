@@ -1,6 +1,6 @@
 #+TITLE: ThreadAffinityQueue holder-slot leak fix
 #+DATE: 2026-05-29
-State: In review (PR #111)
+State: Shipped (PR #111, commit =c233062=, merged to main 2026-05-30)
 
 Follow-up to =2026-05-06-thread-affinity-queue.org=.  That PR shipped the
 queue; this one fixes a leak that bit prod on 2026-05-28.
@@ -74,11 +74,12 @@ thread).  The fix lives in =assist/thread.py= — bind the generator
 to a captured =contextvars.copy_context()= — NOT in a defensive
 swallow inside the queue.
 
-Tracked as the next PR, separate from this one.  Until that PR lands,
-the contextvar-reset ValueError propagates out of =finally= and leaks
-=_holder= momentarily; the watchdog catches it within
-=hold_timeout_s=.  See the pinned-contract test
-=test_cross_context_exit_leaks_holder_until_watchdog_recovers=.
+Shipped as PR #114 (=bind-stream-message-context=, commit =030572e=,
+merged 2026-05-30).  See
+[[file:2026-05-30-stream-message-context-binding.org]].  The pinned-
+contract test =test_cross_context_exit_leaks_holder_until_watchdog_recovers=
+still covers the queue-level recovery semantics for any future caller
+that might violate the same-Context-exit contract.
 
 ** Rejected alternatives
 1. *Heartbeat-based holder.*  Requires a background poller; the Timer
@@ -95,10 +96,9 @@ the contextvar-reset ValueError propagates out of =finally= and leaks
    for legitimately long agent runs.  The bug isn't the cap; it's the
    watchdog not actually freeing the slot.
 
-** Out of scope
+** Out of scope (deferred to later PRs)
 - =Thread.stream_message= generator close-on-disconnect — the *cause*
-  of the contextvar-reset case.  This is the NEXT PR, separately
-  scoped; the watchdog bounds the leak in the meantime.
+  of the contextvar-reset case.  Shipped as PR #114; see [[file:2026-05-30-stream-message-context-binding.org]].
 - Metrics dashboard for force-release counts.
 - =_Handle= → =@dataclass= refactor (=__slots__= is load-bearing).
 
@@ -128,9 +128,10 @@ the contextvar-reset ValueError propagates out of =finally= and leaks
 Unit tests only — this is queue plumbing, not agent behavior.
 =tests/test_thread_queue.py=: 3 new tests + 1 modified.
 
-* Next PR (the cause fix)
-Bind =Thread.stream_message='s generator to a captured
+* Cause fix (shipped separately)
+PR #114 (=bind-stream-message-context=, commit =030572e=, merged
+2026-05-30) binds =Thread.stream_message='s generator to a captured
 =contextvars.copy_context()= so =__enter__= and =__exit__= always run
 in the same context.  Makes the contextvar-reset ValueError
-structurally impossible.  Lives in =assist/thread.py=; separate scope
-from this queue-plumbing fix.
+structurally impossible from the only known caller.  See
+[[file:2026-05-30-stream-message-context-binding.org]].
