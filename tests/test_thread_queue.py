@@ -343,11 +343,15 @@ def test_watchdog_force_releases_when_holder_is_wedged():
     q = ThreadAffinityQueue()
     holder_can_release = threading.Event()
     holder_done = threading.Event()
+    holder_acquired = threading.Event()
     waiter_states: list[str] = []
     waiter_done = threading.Event()
 
     def wedged_holder():
-        with q.acquire("A", hold_timeout_s=0.1):
+        with q.acquire(
+            "A", hold_timeout_s=0.1,
+            on_state_change=lambda s: holder_acquired.set() if s == "running" else None,
+        ):
             holder_can_release.wait(timeout=5.0)
         holder_done.set()
 
@@ -361,8 +365,10 @@ def test_watchdog_force_releases_when_holder_is_wedged():
 
     th = threading.Thread(target=wedged_holder)
     th.start()
-    # Give A time to enter `with` and become holder.
-    time.sleep(0.05)
+    # Deterministic wait for A to become holder (avoids time.sleep flakiness
+    # on slow/loaded CI — the on_state_change callback above flips the Event
+    # the moment A's acquire transitions to "running").
+    assert holder_acquired.wait(timeout=2.0), "holder A never acquired"
     assert q.current_handle() is not None
     tw = threading.Thread(target=waiter)
     tw.start()
@@ -379,6 +385,10 @@ def test_watchdog_force_releases_when_holder_is_wedged():
     th.join(timeout=2.0)
     tw.join(timeout=2.0)
 
+    # Assert threads actually terminated — a flaky join-on-timeout would
+    # leave them alive and silently corrupt state for the next test.
+    assert not th.is_alive(), "wedged_holder thread did not finish"
+    assert not tw.is_alive(), "waiter thread did not finish"
     assert q.current_handle() is None
     assert q.waiter_count() == 0
 
@@ -390,11 +400,15 @@ def test_watchdog_does_not_clobber_newly_promoted_holder():
     # `_release_if_holder` is what protects this; this test pins it.
     q = ThreadAffinityQueue()
     a_can_release = threading.Event()
+    a_acquired = threading.Event()
     b_acquired = threading.Event()
     b_can_release = threading.Event()
 
     def hold_a():
-        with q.acquire("A", hold_timeout_s=0.1):
+        with q.acquire(
+            "A", hold_timeout_s=0.1,
+            on_state_change=lambda s: a_acquired.set() if s == "running" else None,
+        ):
             a_can_release.wait(timeout=5.0)
 
     def hold_b():
@@ -405,7 +419,8 @@ def test_watchdog_does_not_clobber_newly_promoted_holder():
 
     ta = threading.Thread(target=hold_a)
     ta.start()
-    time.sleep(0.05)
+    # Deterministic wait for A to enter `with` and become holder.
+    assert a_acquired.wait(timeout=2.0), "holder A never acquired"
     tb = threading.Thread(target=hold_b)
     tb.start()
 
@@ -418,10 +433,12 @@ def test_watchdog_does_not_clobber_newly_promoted_holder():
     # Now let A exit its `with` (its cleanup must be a no-op for `_holder`).
     a_can_release.set()
     ta.join(timeout=2.0)
+    assert not ta.is_alive(), "hold_a thread did not finish"
 
     # B is still the holder — A's `finally` didn't clobber it.
     assert q.current_handle() is b_handle
 
     b_can_release.set()
     tb.join(timeout=2.0)
+    assert not tb.is_alive(), "hold_b thread did not finish"
     assert q.current_handle() is None

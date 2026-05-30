@@ -9,7 +9,13 @@ slot's cached prefix matched, so prefill stays a per-turn delta.
 
 Affinity, not fairness:
 
-- Holder runs to completion *or* its watchdog fires, before any waiter runs.
+- Waiters wait until the slot is vacated — either by the holder's
+  clean release at ``__exit__`` or by the watchdog force-releasing it
+  at ``hold_timeout_s``.  After a force-release the original holder
+  thread may still be unwinding its ``with`` block while a waiter is
+  already running; the identity guard in :meth:`_release_if_holder`
+  prevents the unwinding holder's late cleanup from clobbering the
+  new holder.
 - Waiters are FIFO among themselves.
 - Same ``thread_id`` re-acquiring is a no-op (re-entrant by id).
 
