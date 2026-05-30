@@ -64,7 +64,8 @@ class Thread:
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  loop_exploration_tools: frozenset[str] | None = None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
-                 extra_config: dict[str, Any] | None = None):
+                 extra_config: dict[str, Any] | None = None,
+                 default_backend: BackendProtocol | None = None):
         """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
         — embedder-supplied tools the main agent can call.  See
         ``assist.agent.create_agent`` docstring for the subagent
@@ -81,6 +82,13 @@ class Thread:
         virtual-path routes to backends that hold ``SKILL.md`` files, so an
         embedder can ship skills that live outside the assist repo (see
         ``assist.agent.create_agent``).  Default ``None``.
+
+        `default_backend` is forwarded to ``create_agent(default_backend=...)``
+        — the composite backend's default (the target for non-routed paths),
+        instead of a FilesystemBackend rooted at ``working_dir``.  Mutually
+        exclusive with ``sandbox_backend``; if it implements
+        ``SandboxBackendProtocol`` the ``execute`` tool is enabled for the
+        main agent.  Default ``None``.
 
         `extra_config` is merged into ``self.runconfig`` so per-Thread
         embedder context (eg. langgraph ``configurable`` values that
@@ -168,6 +176,7 @@ class Thread:
                                   working_dir=working_dir,
                                   checkpointer=checkpointer,
                                   sandbox_backend=sandbox_backend,
+                                  default_backend=default_backend,
                                   extra_tools=extra_tools,
                                   loop_exploration_tools=loop_exploration_tools,
                                   extra_skill_sources=extra_skill_sources)
