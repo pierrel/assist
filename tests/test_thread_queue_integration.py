@@ -125,3 +125,34 @@ class TestThreadStreamMessageHoldsAndReleasesQueue(_ThreadQueueIntegrationBase):
             gen.close()
         # Generator close runs the finally → exits the `with` → releases queue.
         self.assertIsNone(THREAD_QUEUE.current_handle())
+
+    def test_iterator_can_be_driven_from_different_os_thread(self):
+        # The streaming iterator binds to a captured contextvars.Context at
+        # construction time, so iterating from a different OS thread does NOT
+        # trigger a ValueError on THREAD_QUEUE's `_active_handle.reset(token)`.
+        # Without that binding, a consumer using `run_in_executor → next()`
+        # (or any cross-thread iteration) exits the with-block in a different
+        # Context than entered — and the queue holder leaks until the
+        # watchdog catches it.  The 2026-05-28 incident was this exact bug.
+        chat = self.tm.new()
+        chunks: list = []
+        errors: list = []
+
+        with patch.object(chat.agent, "stream", self._patch_stream(["a", "b", "c"])):
+            stream_iter = chat.stream_message("hello")
+
+            def consumer():
+                try:
+                    for chunk in stream_iter:
+                        chunks.append(chunk)
+                except Exception as e:
+                    errors.append(e)
+
+            t = threading.Thread(target=consumer)
+            t.start()
+            t.join(timeout=2.0)
+
+        self.assertFalse(errors, f"cross-thread iteration raised: {errors}")
+        self.assertEqual(chunks, ["a", "b", "c"])
+        # Queue released cleanly — no ValueError on with-exit means no leak.
+        self.assertIsNone(THREAD_QUEUE.current_handle())

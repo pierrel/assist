@@ -1,0 +1,96 @@
+#+TITLE: Bind Thread.stream_message generator to its construction Context
+#+DATE: 2026-05-30
+State: In review (PR pending)
+
+The cause-side fix for the 2026-05-28 queue holder leak (the symptom
+of which is bounded by the watchdog in
+[[file:2026-05-29-queue-holder-leak-fix.org]]).
+
+* Problem
+=Thread.stream_message= returns a generator that holds =THREAD_QUEUE=
+via a ~with~ block.  The block captures a =_active_handle.set(handle)=
+token bound to whichever =contextvars.Context= was current at
+=__enter__=.  Python's contextvar contract: =reset(token)= must run
+in the SAME Context, else =ValueError=.
+
+In production a streaming consumer drives iteration from a different
+OS thread (the emacsos-server's =run_in_executor= → =next()= pump;
+FastAPI streaming response handlers; any caller using a worker pool
+for backpressure).  Each =next()= / =close()= lands in that thread's
+default Context — which differs from the Context active when the
+generator was constructed.  On exit, =_active_handle.reset(token)=
+sees the mismatch and raises =ValueError=.
+
+Pre-PR #111: the =ValueError= aborted the rest of =finally=, leaving
+=_holder= set.  17h leak on 2026-05-28.
+Post-PR #111: the watchdog catches the leak within =hold_timeout_s=
+(default 2h) — better but still wrong.  PR #111's design doc
+acknowledged this as the cause to fix here.
+
+* Solution
+Wrap the generator in a tiny iterator class that routes every step
+through a captured Context:
+
+#+BEGIN_SRC python
+class _ContextBoundIterator:
+    __slots__ = ("_ctx", "_gen")
+    def __init__(self, ctx, gen):
+        self._ctx = ctx
+        self._gen = gen
+    def __iter__(self):
+        return self
+    def __next__(self):
+        return self._ctx.run(self._gen.__next__)
+    def close(self):
+        self._ctx.run(self._gen.close)
+#+END_SRC
+
+=stream_message= captures =ctx = contextvars.copy_context()= before
+returning the wrapper.  Every =next()= and =close()= the consumer
+calls runs the underlying generator's step inside =ctx= — so
+=__enter__=, every yield, and =__exit__= all see the same Context.
+The token's Context matches.  Reset works.  No leak.
+
+** What this class deliberately does NOT have
+- *No =__del__=.*  Observed failure modes are explicit iteration
+  (=for chunk in iter=) and explicit =close()=; both covered.  A
+  GC-induced =close= on a different thread is theoretically possible
+  but has not been observed, and adding =__del__= would add a code
+  path that the next reader has to reason about.  If it bites, we
+  add it then.
+- *No =throw= / =send=.*  Neither is called by current consumers.
+- *No fallback for an empty =copy_context()= edge case.*  An empty
+  Context is fine for our purposes; the contextvar set on entry
+  works the same way.
+
+* Tests
+=tests/test_thread_queue_integration.py= — one new test:
+
+- =test_iterator_can_be_driven_from_different_os_thread= — constructs
+  the iterator in the main thread, iterates it from a worker thread,
+  asserts no exception + queue released cleanly.  Pre-fix this would
+  trigger the =ValueError= and leak the holder; post-fix it works.
+
+The existing four =TestThreadStreamMessageHoldsAndReleasesQueue=
+tests still pass (the wrapper is transparent on the same-thread
+happy path).
+
+* Risks
+- *R1 — =ctx.run= cost.*  One Python-level function call per
+  =next()= for the Context switch.  Negligible compared to LLM
+  inference latency.
+- *R2 — The wrapper hides nothing.*  =__next__= surfaces the same
+  exceptions =gen.__next__= would (=StopIteration=, agent errors,
+  etc.) because =ctx.run= re-raises.  Caller-visible behavior is
+  identical.
+
+* Eval cadence
+Unit tests only.  Single integration test pins the cross-thread
+contract.
+
+* Relationship to other PRs
+- PR #111 (=fix-queue-holder-leak=) — bounds the *symptom* of this
+  bug to =hold_timeout_s= via the watchdog.  This PR fixes the
+  *cause*.  Land order doesn't matter; the two are complementary.
+- PR #113 (=fix-message-checkpoint-deadlock=) — already merged-and-
+  deployed; unrelated bug class (langgraph deadlock).
