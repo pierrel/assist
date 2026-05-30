@@ -30,7 +30,7 @@ I/O — consistent with a chained-futures deadlock in the langgraph
 
 * Root cause
 The 2026-05-25 fix passed =durability="sync"= to =agent.stream()=
-in =Thread.stream_message= (=assist/thread.py:222=) with a 16-line
+in =Thread.stream_message= (=assist/thread.py=) with a 16-line
 comment naming the chained checkpoint-put pool exhaustion in
 =langgraph/pregel/_loop.py= (=_checkpointer_put_after_previous=).
 =roadmap.org= line 51 explicitly claims the blocking
@@ -84,12 +84,18 @@ invoke a checkpointed agent directly (bypassing
    triggered from the web UI button via
    =manage/web/threads.py:699=.  Has a checkpointer
    (=InMemorySaver= + auto-injected =general-purpose= subagent).
-   Add =durability="sync"= to the config dict at the call site.
+   Pass =durability="sync"= as a kwarg to =agent.invoke()=.
 
 2. =edd/eval/test_dev_agent_runs_eval.py:116= — nightly eval, runs
    the full deep-nested dev-agent path inside a sandbox.  Not
    user-facing but can deadlock during nightly cron with false
-   failure signal.  Add =durability="sync"= to the inline config.
+   failure signal.  Pass =durability="sync"= as a kwarg to
+   =agent.agent.invoke()=.
+
+(=durability= is a top-level kwarg on =CompiledStateGraph.invoke= /
+=.stream()=, not a key inside the runtime config dict — langgraph
+writes it into =config[CONF][CONFIG_KEY_DURABILITY]= internally and
+propagates from there to subgraphs.)
 
 Both are the same one-line shape, so folding them into this PR
 keeps the bug class closed across the whole codebase.
@@ -103,7 +109,7 @@ keeps the bug class closed across the whole codebase.
   all unchanged.
 
 * Why not lower =max_concurrency=?
-=runconfig["max_concurrency"]=5= at =assist/thread.py:122= bounds the
+=runconfig["max_concurrency"]=5= in =Thread.__init__= bounds the
 per-loop executor.  Raising it would give more headroom for the
 chain to complete, but the deadlock recurs at higher loads — it's a
 race between "futures can complete" and "futures need workers."
