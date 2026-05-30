@@ -87,9 +87,15 @@ def routes(stateful_paths: list[str]) -> dict:
 def create_composite_backend(fs_root: str | None = None,
                              stateful_paths: list[str] | None = None,
                              extra_routes: dict[str, BackendProtocol] | None = None,
+                             default_backend: BackendProtocol | None = None,
                              ) -> CompositeBackend:
-
-    if not fs_root:
+    """Compose a backend.  ``default_backend``, if given, becomes the
+    composite's default (the target for every non-routed path) instead of a
+    ``FilesystemBackend`` rooted at ``fs_root`` — letting an embedder supply
+    a custom default backend while still getting the standard
+    ``stateful_paths`` -> ``StateBackend`` routing and any ``extra_routes``.
+    When ``default_backend`` is given, ``fs_root`` is ignored."""
+    if default_backend is None and not fs_root:
         fs_root = tempfile.mkdtemp()
     if stateful_paths is None:
         stateful_paths = []
@@ -97,8 +103,8 @@ def create_composite_backend(fs_root: str | None = None,
     if extra_routes:
         merged_routes.update(extra_routes)
     return CompositeBackend(
-        default=FilesystemBackend(root_dir=fs_root,
-                                  virtual_mode=True),
+        default=(default_backend if default_backend is not None
+                 else FilesystemBackend(root_dir=fs_root, virtual_mode=True)),
         routes=merged_routes
     )
 
