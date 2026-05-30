@@ -113,10 +113,14 @@ class TestDevAgentRunsEval(TestCase):
 
     def _invoke(self, agent, text: str) -> str:
         try:
+            # durability="sync" — see assist/checkpoint_rollback.py:90 comment.
+            # This eval bypasses AgentHarness.message (and thus invoke_with_rollback),
+            # so the durability kwarg has to be set explicitly here.
             resp = agent.agent.invoke(
                 {"messages": [{"role": "user", "content": text}]},
                 {"configurable": {"thread_id": agent.thread_id},
                  "recursion_limit": RECURSION_LIMIT},
+                durability="sync",
             )
             return resp["messages"][-1].content
         except GraphRecursionError:
