@@ -1,3 +1,4 @@
+import contextvars
 import logging
 import os
 import shutil
@@ -44,6 +45,32 @@ def render_tool_call(call: dict) -> str:
         return f"Calling subagent {subagent} with {args}"
     else:
         return f"Calling {name} with {args}"
+
+
+class _ContextBoundIterator:
+    """Iterator that routes every step through a captured ``contextvars.Context``.
+
+    Used by :meth:`Thread.stream_message` to keep its generator's
+    ``__enter__`` / ``__exit__`` (and the THREAD_QUEUE contextvar token
+    they bind) on the same Context, even when ``__next__`` / ``close`` are
+    called from a different OS thread.  See the comment in
+    ``stream_message`` for the failure mode this closes.
+    """
+    __slots__ = ("_ctx", "_gen")
+
+    def __init__(self, ctx: contextvars.Context, gen: Iterator) -> None:
+        self._ctx = ctx
+        self._gen = gen
+
+    def __iter__(self) -> "_ContextBoundIterator":
+        return self
+
+    def __next__(self):
+        return self._ctx.run(self._gen.__next__)
+
+    def close(self) -> None:
+        self._ctx.run(self._gen.close)
+
 
 class Thread:
     """Reusable chat-like interface that mimics the CLI back-and-forth.
@@ -208,6 +235,18 @@ class Thread:
         # Continue the thread by sending only the latest human message; prior state is in the checkpointer.
         # Wrap the iterator in a generator so the queue is held for the
         # full streaming lifetime, not just the call to .stream().
+        #
+        # The iterator is bound to a captured contextvars.Context (see
+        # _ContextBoundIterator below).  Without that, a consumer that
+        # drives `next()` / `close()` from a different OS thread (e.g.
+        # the emacsos-server's `run_in_executor` → `next()` pump, or
+        # any FastAPI streaming response handler) exits THREAD_QUEUE's
+        # `with` block in a different Context than it entered — and
+        # `_active_handle.reset(token)` raises ValueError, leaking
+        # `_holder` until the watchdog (see assist/thread_queue.py)
+        # force-releases it.  The binding makes that bug structurally
+        # impossible: every step runs in the construction context.
+        ctx = contextvars.copy_context()
         def _gen():
             with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
                 yield from self.agent.stream(
@@ -230,7 +269,7 @@ class Thread:
                     # sub-agents via the config, so the whole tree is covered.
                     durability="sync",
                 )
-        return _gen()
+        return _ContextBoundIterator(ctx, _gen())
 
     def get_messages(self) -> list[dict]:
         """Return user/assistant messages from checkpointer state as role/content dicts."""
