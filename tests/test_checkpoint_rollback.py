@@ -49,6 +49,58 @@ class TestInvokeWithRollback:
         assert agent.invoke.call_count == 1
         agent.get_state_history.assert_not_called()
 
+    def test_passes_durability_sync_on_happy_path(self):
+        """Every agent.invoke() call must carry durability="sync".
+
+        Mirrors assist/thread.py:222 (streaming-path) — the langgraph
+        BackgroundExecutor chained-futures pool deadlock is bypassed by
+        forcing per-step sync checkpoint writes.  Without this kwarg,
+        the May-29 5h26m wedge recurs on any sufficiently-nested agent
+        run.  See docs/2026-05-30-message-path-durability-sync.org.
+        """
+        agent = Mock()
+        agent.invoke.return_value = {"messages": ["ok"]}
+
+        invoke_with_rollback(
+            agent,
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"configurable": {"thread_id": "t1"}},
+        )
+
+        assert agent.invoke.call_args.kwargs.get("durability") == "sync"
+
+    def test_passes_durability_sync_on_every_rollback_retry(self):
+        """The kwarg must survive every rollback retry, not just the
+        first attempt.  A future refactor that builds a fresh kwargs
+        dict on retry and forgets to carry durability forward would
+        re-introduce the deadlock on threads that need rollback.
+        """
+        agent = Mock()
+        agent.invoke.side_effect = [
+            _make_bad_request_error(),
+            _make_bad_request_error(),
+            {"messages": ["recovered"]},
+        ]
+        agent.get_state_history.return_value = [
+            _make_checkpoint("cp-bad", step=1),
+            _make_checkpoint("cp-good", step=0),
+        ]
+
+        invoke_with_rollback(
+            agent,
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"configurable": {"thread_id": "t1"}},
+        )
+
+        # All three invocations (initial + 2 rollback retries) must have
+        # durability="sync".
+        assert agent.invoke.call_count == 3
+        for i, call in enumerate(agent.invoke.call_args_list):
+            assert call.kwargs.get("durability") == "sync", (
+                f"call #{i} missing durability='sync': "
+                f"args={call.args}, kwargs={call.kwargs}"
+            )
+
     def test_recovers_from_single_failure(self):
         """One BadRequestError, then rollback succeeds on retry."""
         agent = Mock()

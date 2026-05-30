@@ -87,7 +87,25 @@ def invoke_with_rollback(
     max_attempts = 1 + max_rollback_depth * max_retries_per_step
     for _attempt in range(max_attempts):
         try:
-            return agent.invoke(current_input, current_config)
+            # durability="sync" mirrors the streaming-path fix in
+            # Thread.stream_message (assist/thread.py) — see the long
+            # comment there.  Under langgraph's
+            # default "async" mode, every superstep submits a checkpoint
+            # put to a per-loop BackgroundExecutor and chains them via
+            # futures (`_checkpointer_put_after_previous`); deep nesting
+            # (general-agent → research-agent → 4 concurrent tools)
+            # exhausts that pool — workers park on prev.result() with no
+            # free worker left to complete the chain.  "sync" keeps one
+            # put in flight at a time, so the pool can't pile up, while
+            # still writing per-step checkpoints (rollback needs them).
+            # langgraph propagates this to subgraphs via the config, so
+            # the whole tree is covered.  See
+            # docs/2026-05-30-message-path-durability-sync.org for the
+            # 2026-05-29 incident analysis; do not remove without reading
+            # both that doc and the Thread.stream_message comment.
+            return agent.invoke(
+                current_input, current_config, durability="sync"
+            )
 
         except BaseException as exc:
             if not isinstance(exc, rollback_on):
