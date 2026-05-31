@@ -511,10 +511,12 @@ def _process_message(tid: str, text: str) -> None:
     pending_kwargs = {"pending_message": text}
 
     def on_queue_wait(stage: str) -> None:
-        # Only emits "queued" while we're waiting for another thread's
-        # hold to clear.  The post-acquire flow below sets
-        # "starting_sandbox" → "processing" itself, so we don't need
-        # the "running" rewrite here.
+        # `ThreadAffinityQueue.acquire` fires the callback with "queued"
+        # (when this thread has to wait) and then "running" (when it
+        # acquires).  We only HANDLE "queued" here — the post-acquire
+        # flow below sets the more specific "starting_sandbox" →
+        # "processing" statuses itself, so the "running" callback is
+        # intentionally ignored.
         if stage == "queued":
             _set_status(tid, "queued", **pending_kwargs)
 
