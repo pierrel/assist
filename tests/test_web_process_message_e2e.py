@@ -9,26 +9,31 @@ function end-to-end.
 
 This file plugs that gap.  It POSTs to the real
 ``/thread/{tid}/message`` route via FastAPI's `TestClient`, lets the
-background task run, and asserts the thread reaches a terminal status
-(``ready`` or ``error``) without crashing inside ``_process_message``.
+background task run, and asserts the thread reaches ``status="ready"``
+without crashing inside ``_process_message``.
 
-The LLM and sandbox are stubbed (we're testing the wiring, not the
-agent loop) — but the THREAD_QUEUE acquire, the
-sandbox-backend retrieval, and the Thread construction all run for
-real.  If a future change re-introduces a missing-import or other
-``_process_message``-side regression, this test catches it.
+What this test runs FOR REAL (catches regressions in):
+  - The FastAPI route handler and `BackgroundTasks` scheduling
+  - `_process_message`'s top-level flow (imports, status writes,
+    exception handling)
+  - The `THREAD_QUEUE.acquire(...)` block (catches missing-import
+    and contextvar-handling regressions)
+  - The post-acquire status sequence
+
+What is STUBBED (NOT exercised here — would need an integration test
+with real Docker + a real LLM):
+  - `_get_sandbox_backend` — stubbed to None (the same shape it
+    returns when Docker is unavailable)
+  - `MANAGER.get` — returns a `_FakeChat` (Thread / agent / LLM stack
+    is not exercised)
+  - The domain-manager sync and description-generation paths
 """
-import json
-import os
 import time
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain.messages import AIMessage
 
 from manage import web
-from manage.web import threads as web_threads
 
 
 @pytest.fixture
@@ -66,12 +71,15 @@ def test_post_message_runs_process_message_without_crashing(
     client, monkeypatch
 ):
     """The full POST → BackgroundTask → _process_message → THREAD_QUEUE
-    acquire → sandbox → chat.message → status="ready" path runs without
-    raising.  Regression: PR #117's initial commit broke this with a
-    `THREAD_QUEUE` NameError that no existing test caught."""
+    acquire → sandbox-backend lookup → chat.message → status="ready"
+    path runs without raising.  Regression: PR #117's initial commit
+    broke this with a `THREAD_QUEUE` NameError that no existing test
+    caught."""
     # Stub the sandbox backend lookup so the test doesn't require Docker.
     # Returning None is the same shape `_get_sandbox_backend` returns when
-    # Docker is unavailable on the host.
+    # Docker is unavailable on the host.  Patch both the source binding
+    # AND the threads-module's already-imported reference; _process_message
+    # calls the latter.
     monkeypatch.setattr(
         "manage.web.state._get_sandbox_backend", lambda tid: None,
     )
@@ -105,8 +113,13 @@ def test_post_message_runs_process_message_without_crashing(
     )
 
     # Stub description generation so it doesn't try to network.
+    # IMPORTANT: `_process_message` does `from manage.web.state import
+    # ... get_cached_description`, so the live binding is the one in
+    # `manage.web.threads`'s module namespace — patching only the source
+    # module (`manage.web.state.get_cached_description`) would leave the
+    # imported reference unchanged.
     monkeypatch.setattr(
-        "manage.web.state.get_cached_description", lambda tid: "stub",
+        "manage.web.threads.get_cached_description", lambda tid: "stub",
     )
 
     r = client.post(
