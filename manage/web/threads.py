@@ -26,6 +26,7 @@ from assist.domain_manager import (
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
+from assist.thread_queue import THREAD_QUEUE
 
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
