@@ -28,6 +28,7 @@ with real Docker + a real LLM):
     is not exercised)
   - The domain-manager sync and description-generation paths
 """
+import os
 import time
 
 import pytest
@@ -56,13 +57,24 @@ def client(tmp_path, monkeypatch):
 
 
 def _wait_for_terminal_status(tid: str, deadline_s: float = 5.0) -> dict:
-    """Poll status.json until stage in {ready, error}, or fail."""
-    from manage.web.state import _get_status
+    """Poll status.json until stage in {ready, error}, or fail.
+
+    *Important:* `_get_status` returns ``{"stage": "ready"}`` as its
+    DEFAULT when the file doesn't exist yet (see
+    ``manage/web/state.py``).  Treating that default as "terminal" would
+    let this test pass without `_process_message` ever having run — a
+    false positive that defeats the regression purpose.  So gate on
+    ``os.path.isfile(_status_path(tid))`` first; only when the
+    BackgroundTask has actually written status.json do we consider
+    ``stage`` terminal."""
+    from manage.web.state import _get_status, _status_path
+    path = _status_path(tid)
     end = time.time() + deadline_s
     while time.time() < end:
-        st = _get_status(tid)
-        if st.get("stage") in ("ready", "error"):
-            return st
+        if os.path.isfile(path):
+            st = _get_status(tid)
+            if st.get("stage") in ("ready", "error"):
+                return st
         time.sleep(0.05)
     return _get_status(tid)
 
