@@ -459,6 +459,58 @@ class TestDetectLoop:
         ]
         assert _detect_loop(events, 2, 3, 3, 10) is None
 
+    def test_pattern_b_catches_repeated_read_url(self):
+        """The 2026-05-30 runaway: a sub-research-agent issued the same
+        read_url(URL) ~1000 times in a row.  Pre-fix, Pattern B's walk
+        was over `mutating_events` which filtered out all read_url
+        calls — the runaway was invisible.  Post-fix, Pattern B walks
+        ALL completed events; same-args repetition triggers regardless
+        of read-only category."""
+        ru = self._evt(
+            tool="read_url",
+            args={"url": "https://www.casio.com/products/watches/f-91w-1"},
+            content="[long page content]",
+        )
+        events = [ru, ru.copy(), ru.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-args"
+        assert result["tools"] == {"read_url"}
+        assert result["run_length"] == 3
+
+    def test_pattern_b_catches_repeated_search_internet(self):
+        """Same-args runaway also catches search_internet — the runaway
+        log showed the same query (`Casio F-91W watch specs water
+        resistance`) issued back-to-back several times in the trailing
+        window before the model rephrased."""
+        si = self._evt(
+            tool="search_internet",
+            args={"query": "Casio F-91W watch specs water resistance"},
+            content="[results]",
+        )
+        events = [si, si.copy(), si.copy(), si.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-args"
+        assert result["tools"] == {"search_internet"}
+        assert result["run_length"] == 4
+
+    def test_pattern_b_read_url_transparent_to_unrelated_read_only_between(self):
+        """Three same-URL read_urls with an `ls` between count via the
+        same transparent-read-only rule that already protects
+        interleaved-mutating loops (the 2026-05-16 case)."""
+        ru = self._evt(
+            tool="read_url",
+            args={"url": "https://example.com/article"},
+            content="[content]",
+        )
+        ls = self._evt(tool="ls", args={"path": "/"}, content="['x.md']")
+        events = [ru, ls, ru.copy(), ls.copy(), ru.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-args"
+        assert result["run_length"] == 3
+
     def test_no_false_positive_pure_exploration(self):
         """A run of read-only tools alone (no mutating) must NOT
         trigger any pattern.  After filtering out read-only events

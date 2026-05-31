@@ -213,7 +213,7 @@ def _detect_loop(
     if not completed_events:
         return None
 
-    # Patterns A and B walk the trailing run of "mutating" tool events;
+    # Pattern A walks the trailing run of "mutating" tool events;
     # read-only events (ls, read_file, grep, glob, read_url,
     # search_internet) are TRANSPARENT to the walk — neither extending
     # the run nor breaking it.  Rationale: a read-only call between two
@@ -221,18 +221,23 @@ def _detect_loop(
     # is observing state but not changing approach.  Treating that as
     # progress-resetting would let "[ls, write_file_err] x N" loops
     # escape detection (which is exactly the 2026-05-16 winged-horse-
-    # flag thread).  Read-only sequences alone are still pure
-    # exploration and do not trigger detection (Pattern A needs at
-    # least one error event; Pattern B needs the same MUTATING tool
-    # repeating).
+    # flag thread).
+    #
+    # Pattern B walks ALL completed events including read-only ones.
+    # Same-tool-same-args repetition is a loop regardless of read-only
+    # status — there's no "exploration" justification for hitting the
+    # same URL or running the same search query 3 times in a row.
+    # The 2026-05-30 runaway issued the same `read_url(F-91W product
+    # page)` ~1000 times under a sub-research-agent because the prior
+    # mutating-only filter made Pattern B blind to it.
     #
     # NOTE: this intentionally filters on `_READ_ONLY_TOOLS` ONLY — NOT the
     # caller's `exploration_tools`.  Exploration tools (eg. eval_elisp) get a
     # relaxed *Pattern C* breadth threshold below, but they must stay
-    # "mutating" here so Patterns A/B still catch a genuine repetition loop
-    # in them (same error / same form repeated).  Folding `exploration_tools`
-    # into this filter would disable A/B for them and remove their only
-    # remaining loop protection.
+    # "mutating" here so Pattern A still catches a genuine repetition loop
+    # in them (same error repeated).  Folding `exploration_tools` into this
+    # filter would disable A for them and remove their only remaining loop
+    # protection.
     def _mutating_only(events):
         return [e for e in events if e["tool_name"] not in _READ_ONLY_TOOLS]
 
@@ -262,17 +267,29 @@ def _detect_loop(
             "run_length": run_len,
         }
 
-    # Pattern B: trailing run of same mutating tool + same args.
+    # Pattern B: trailing run of same tool + same args.  Walks ALL
+    # completed events.  A non-matching read-only event is transparent
+    # (skipped, doesn't break the run) — so an agent doing
+    # `[write_file_X, ls, write_file_X, ls, write_file_X]` still
+    # registers as 3 write_file repetitions (the 2026-05-16
+    # winged-horse-flag case).  A non-matching MUTATING event breaks
+    # the run.  This catches both the historical interleaved-mutating
+    # pattern AND the 2026-05-30 sub-research-agent runaway that
+    # issued the same `read_url(F-91W)` ~1000 times in a row.
     run_tool = None
     run_args = None
     run_len = 0
-    for e in reversed(mutating_events):
+    for e in reversed(completed_events):
         if run_tool is None:
             run_tool = e["tool_name"]
             run_args = e["args_sig"]
             run_len = 1
         elif e["tool_name"] == run_tool and e["args_sig"] == run_args:
             run_len += 1
+        elif e["tool_name"] in _READ_ONLY_TOOLS:
+            # Non-matching read-only event: transparent — skip without
+            # extending or breaking the run.
+            continue
         else:
             break
     if run_tool and run_len >= args_repeat_threshold:
