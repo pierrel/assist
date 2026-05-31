@@ -111,6 +111,41 @@ def _normalise_args(args: Any) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
+# HTTP-failure markers commonly present in tool RESULT bodies when a
+# fetch tool gets a 4xx page (bot-detection, rate-limit, captcha, etc.).
+# Sites often return their failure UI as a 200-or-403 HTML body — the
+# tool happily returns that body as a "successful" result, so neither
+# `_looks_like_error` (Python-style errors) nor Patterns A/B/C (which
+# need args/error repetition) catch the loop.  Pattern D (below) uses
+# `_looks_like_http_failure` to count consecutive 4xx-shaped responses
+# regardless of args, which is what catches the 2026-05-30 casio runaway
+# (fetch -> 403, fetch -> 403, … across distinct watch-product URLs).
+_HTTP_ERROR_MARKERS: tuple[str, ...] = (
+    " 401 ", " 403 ", " 404 ", " 429 ", " 500 ", " 502 ", " 503 ",
+    "forbidden", "not found", "unauthorized",
+    "rate limit", "rate-limit", "rate limited",
+    "access denied", "request blocked", "captcha",
+    "too many requests", "blocked by",
+)
+
+
+def _looks_like_http_failure(content: str) -> bool:
+    """True if the tool result content suggests an HTTP 4xx/5xx response.
+
+    Many sites return their bot-detection or rate-limit UI as the
+    response body even on 4xx — `_looks_like_error` won't catch these
+    because the body is HTML, not a Python-style error string.  This
+    scans the first ~1KB for HTTP-failure markers; deliberately
+    case-insensitive and substring-based to tolerate varied page
+    layouts.  False negatives are fine (Patterns A/B/C still apply);
+    false positives are the thing to avoid, which is why the markers
+    are biased toward strings that don't show up in a normal article
+    body (status-code numerals padded with spaces, common 4xx/5xx
+    error phrases)."""
+    head = content.lower()[:1000]
+    return any(m in head for m in _HTTP_ERROR_MARKERS)
+
+
 def _current_turn_slice(messages: list) -> list:
     """Return messages from the most recent ``HumanMessage`` onward.
 
@@ -177,6 +212,9 @@ def _extract_events(messages: list, window: int) -> list[dict]:
                     "args_sig": _normalise_args(args),
                     "result_content": content,
                     "is_error": is_error,
+                    # Pattern D signal: HTTP-failure-shaped body even when
+                    # the tool didn't surface it as a Python-style error.
+                    "http_failure": _looks_like_http_failure(content),
                     "completed": True,
                 })
             else:
@@ -185,6 +223,7 @@ def _extract_events(messages: list, window: int) -> list[dict]:
                     "args_sig": _normalise_args(args),
                     "result_content": "",
                     "is_error": False,
+                    "http_failure": False,
                     "completed": False,
                 })
 
@@ -199,6 +238,7 @@ def _detect_loop(
     distinct_args_window: int,
     exploration_tools: frozenset[str] = frozenset(),
     exploration_args_threshold: int = _EXPLORATION_DISTINCT_ARGS_THRESHOLD,
+    http_failure_threshold: int = 4,
 ) -> dict | None:
     """Return loop-detection info or ``None`` if no loop.
 
@@ -277,23 +317,45 @@ def _detect_loop(
     # same-args extends regardless of read-only category — catches the
     # 2026-05-30 sub-research-agent runaway that issued the same
     # `read_url(F-91W)` ~1000 times in a row.
-    run_tool = None
-    run_args = None
-    run_len = 0
-    for e in reversed(completed_events):
-        if run_tool is None:
-            run_tool = e["tool_name"]
-            run_args = e["args_sig"]
-            run_len = 1
-        elif e["tool_name"] == run_tool and e["args_sig"] == run_args:
-            run_len += 1
-        elif e["tool_name"] != run_tool and e["tool_name"] in _READ_ONLY_TOOLS:
-            # Different-tool read-only event: transparent — skip without
-            # extending or breaking the run.  Same-tool different-args
-            # falls through to the break below.
-            continue
-        else:
-            break
+    # Pattern B is computed TWO ways and we take whichever finds the longer
+    # trailing run.  The naive single-pass (anchor on the very last event)
+    # misses the case where the trailing event is a read-only call of a
+    # DIFFERENT tool than the mutating loop just before it — e.g.
+    # ``[write_X, ls, write_X, ls, write_X, ls]``.  Anchored on ``ls`` the
+    # ``write_X`` break would terminate the run at length 1.  The second
+    # pass advances past trailing read-only events of a different tool to
+    # anchor on the latest mutating event, recovering the loop.  Both
+    # passes still respect "same-tool same-args extends regardless of
+    # read-only category," so the F-91W ``read_url(URL) x1000`` case is
+    # also still caught.
+    def _trailing_run(skip_trailing_read_only: bool) -> tuple:
+        run_tool = None
+        run_args = None
+        run_len = 0
+        for e in reversed(completed_events):
+            if run_tool is None:
+                if skip_trailing_read_only and e["tool_name"] in _READ_ONLY_TOOLS:
+                    continue
+                run_tool = e["tool_name"]
+                run_args = e["args_sig"]
+                run_len = 1
+            elif e["tool_name"] == run_tool and e["args_sig"] == run_args:
+                run_len += 1
+            elif e["tool_name"] != run_tool and e["tool_name"] in _READ_ONLY_TOOLS:
+                # Different-tool read-only event: transparent — skip without
+                # extending or breaking the run.  Same-tool different-args
+                # falls through to the break below.
+                continue
+            else:
+                break
+        return run_tool, run_args, run_len
+
+    a_tool, a_args, a_len = _trailing_run(skip_trailing_read_only=False)
+    b_tool, b_args, b_len = _trailing_run(skip_trailing_read_only=True)
+    if b_len > a_len:
+        run_tool, run_args, run_len = b_tool, b_args, b_len
+    else:
+        run_tool, run_args, run_len = a_tool, a_args, a_len
     if run_tool and run_len >= args_repeat_threshold:
         return {
             "pattern": "same-tool-same-args",
@@ -330,6 +392,37 @@ def _detect_loop(
                 "tools": {tool_name},
                 "run_length": len(sigs),
             }
+
+    # Pattern D: trailing run of consecutive tool calls whose RESULT
+    # bodies look like an HTTP failure (4xx/5xx page), regardless of args.
+    # Catches the 2026-05-30 casio runaway: the agent emitted ~9,000
+    # fetch_url calls across distinct watch-product URLs on casio.com,
+    # all returning 403 bot-detection pages.  Patterns A/B/C all
+    # short-circuit because the result body is HTML (not a Python error),
+    # the args differ across calls (different URLs), and the model never
+    # repeats the same arg twice.  `_looks_like_http_failure` picks up
+    # the 4xx body markers; consecutive failures across ANY args trigger.
+    http_fail_len = 0
+    http_fail_tool: str | None = None
+    for e in reversed(completed_events):
+        if e.get("http_failure"):
+            http_fail_len += 1
+            # Use the LATEST failing tool as the loop's name (most recent
+            # is what the model is currently trying); if the streak spans
+            # multiple tool names (e.g. fetch_url + search_internet both
+            # 4xx'd), report the latest.
+            if http_fail_tool is None:
+                http_fail_tool = e["tool_name"]
+        else:
+            break
+    if http_fail_tool and http_fail_len >= http_failure_threshold:
+        return {
+            "pattern": "http-failure-streak",
+            "reason": (f"http-failure-streak: {http_fail_tool} "
+                       f"x{http_fail_len} (4xx/5xx-shaped responses)"),
+            "tools": {http_fail_tool},
+            "run_length": http_fail_len,
+        }
 
     return None
 
@@ -480,6 +573,13 @@ class LoopDetectionMiddleware(AgentMiddleware):
             subject to Patterns A/B (repetition).  Default ``None`` → empty,
             so the dev/code agent is unaffected; an embedder opts in per
             agent.
+        http_failure_threshold: Number of consecutive trailing tool calls
+            with an HTTP-failure-shaped body (4xx/5xx markers, see
+            ``_looks_like_http_failure``) that constitute a loop, regardless
+            of args.  Catches the case where the model iterates through
+            distinct URLs that all return 403 / captcha / rate-limit pages
+            — Patterns A/B/C all miss this because the result body is HTML,
+            not a Python error, and the args differ across calls.  Default 4.
     """
 
     def __init__(
@@ -490,6 +590,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
         distinct_args_threshold: int = 3,
         distinct_args_window: int = 10,
         exploration_tools: frozenset[str] | None = None,
+        http_failure_threshold: int = 4,
     ):
         super().__init__()
         self.window = window
@@ -500,6 +601,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
         # Normalise to frozenset so a caller passing a mutable set still
         # yields an immutable attribute (matches the type annotation).
         self.exploration_tools = frozenset(exploration_tools or ())
+        self.http_failure_threshold = http_failure_threshold
         self.tools = []
         self._intervention_count = 0
 
@@ -524,6 +626,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
             distinct_args_threshold=self.distinct_args_threshold,
             distinct_args_window=self.distinct_args_window,
             exploration_tools=self.exploration_tools,
+            http_failure_threshold=self.http_failure_threshold,
         )
         if detection is None:
             return None
