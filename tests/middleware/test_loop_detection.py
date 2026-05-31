@@ -148,12 +148,14 @@ class TestExtractEvents:
 # ---------------------------------------------------------------------------
 
 class TestDetectLoop:
-    def _evt(self, tool="write_file", args=None, content="ok", is_error=False):
+    def _evt(self, tool="write_file", args=None, content="ok",
+             is_error=False, http_failure=False):
         return {
             "tool_name": tool,
             "args_sig": _normalise_args(args or {}),
             "result_content": content,
             "is_error": is_error,
+            "http_failure": http_failure,
             "completed": True,
         }
 
@@ -542,6 +544,142 @@ class TestDetectLoop:
             self._evt(tool="search_internet", args={"query": "x"}, content="[]"),
         ]
         assert _detect_loop(events, 2, 3, 3, 10) is None
+
+    # ------------------------------------------------------------------
+    # Pattern B — trailing-read-only-of-different-tool case
+    # ------------------------------------------------------------------
+    def test_pattern_b_catches_mutating_loop_ending_on_read_only(self):
+        """``[write_file_X, ls, write_file_X, ls, write_file_X, ls]`` —
+        the trailing ``ls`` would otherwise be the run anchor and any
+        prior ``write_file_X`` would break it (Copilot round 4 finding
+        on PR #116).  The two-pass anchor fix (anchor on the latest
+        non-read-only event when the trailing one is read-only)
+        recovers the loop.  Mirrors the established 2026-05-16
+        winged-horse-flag case, just with one more trailing ``ls``."""
+        wf = self._evt(
+            tool="write_file",
+            args={"file_path": "/x.org", "content": "v1"},
+            content="Wrote /x.org",
+        )
+        ls = self._evt(tool="ls", args={"path": "/"}, content="['x.org']")
+        events = [wf, ls, wf.copy(), ls.copy(), wf.copy(), ls.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None, "loop missed when trailing event is read-only"
+        assert result["pattern"] == "same-tool-same-args"
+        assert result["tools"] == {"write_file"}
+        assert result["run_length"] == 3
+
+    def test_pattern_b_two_pass_still_catches_trailing_mutating_same_args(self):
+        """Sanity: the two-pass fix must not regress the canonical case
+        where the trailing event IS the mutating loop tail."""
+        wf = self._evt(
+            tool="write_file",
+            args={"file_path": "/x.org", "content": "v1"},
+            content="Wrote /x.org",
+        )
+        events = [wf, wf.copy(), wf.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-args"
+        assert result["run_length"] == 3
+
+    def test_pattern_b_two_pass_still_catches_read_only_same_args(self):
+        """Sanity: the F-91W case (``read_url(URL) x N``) must still fire
+        — the second pass would skip the trailing read-only and find
+        nothing, but the first pass anchors on it and the same-args
+        extension keeps working regardless of read-only category."""
+        ru = self._evt(
+            tool="read_url",
+            args={"url": "https://example.com/a"},
+            content="[content]",
+        )
+        events = [ru, ru.copy(), ru.copy()]
+        result = _detect_loop(events, 2, 3, 3, 10)
+        assert result is not None
+        assert result["pattern"] == "same-tool-same-args"
+        assert result["run_length"] == 3
+
+    # ------------------------------------------------------------------
+    # Pattern D — HTTP-failure streak (the casio runaway shape)
+    # ------------------------------------------------------------------
+    def test_pattern_d_catches_distinct_url_4xx_streak(self):
+        """The 2026-05-30 casio.com runaway: ``fetch_url`` returned a
+        403 bot-detection HTML page on each of many distinct watch-product
+        URLs.  Patterns A/B/C all short-circuit (HTML body isn't a
+        Python error, args differ each call, no error flag set), so
+        Pattern D specifically counts consecutive trailing tool calls
+        whose body looks HTTP-failure-shaped, regardless of args."""
+        events = [
+            self._evt(
+                tool="fetch_url",
+                args={"url": f"https://www.casio.com/products/watches/p-{i}/"},
+                content="<html><title>403 Forbidden</title>...",
+                http_failure=True,
+            )
+            for i in range(5)
+        ]
+        result = _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4)
+        assert result is not None
+        assert result["pattern"] == "http-failure-streak"
+        assert result["tools"] == {"fetch_url"}
+        assert result["run_length"] == 5
+
+    def test_pattern_d_does_not_fire_below_threshold(self):
+        """3 consecutive failures (< default threshold 4) should not
+        fire — many normal research sessions hit one or two 4xx hops
+        before finding a working source."""
+        events = [
+            self._evt(tool="fetch_url",
+                      args={"url": f"https://x.example.com/p-{i}/"},
+                      content="403 Forbidden", http_failure=True)
+            for i in range(3)
+        ]
+        assert _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4) is None
+
+    def test_pattern_d_does_not_fire_when_streak_is_broken(self):
+        """A successful response in the trailing window breaks the
+        streak — the model is still making progress."""
+        events = [
+            self._evt(tool="fetch_url",
+                      args={"url": "https://x.example.com/p-1/"},
+                      content="403 Forbidden", http_failure=True),
+            self._evt(tool="fetch_url",
+                      args={"url": "https://x.example.com/p-2/"},
+                      content="403 Forbidden", http_failure=True),
+            # A real successful page — breaks the streak.
+            self._evt(tool="fetch_url",
+                      args={"url": "https://x.example.com/about/"},
+                      content="<html><body>Welcome to our store...</body></html>"),
+            self._evt(tool="fetch_url",
+                      args={"url": "https://x.example.com/p-3/"},
+                      content="403 Forbidden", http_failure=True),
+        ]
+        # The trailing failure-streak is 1; below threshold.
+        assert _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4) is None
+
+    def test_pattern_d_streak_spanning_tool_names(self):
+        """Mixed-tool failure streaks (search_internet 4xx, fetch_url 4xx,
+        fetch_url 4xx, …) trigger on the LATEST failing tool — the
+        signature is the failure shape, not the tool identity."""
+        events = [
+            self._evt(tool="search_internet",
+                      args={"query": "f-91w"},
+                      content="Rate limit exceeded", http_failure=True),
+            self._evt(tool="fetch_url",
+                      args={"url": "https://casio.com/a/"},
+                      content="403 Forbidden", http_failure=True),
+            self._evt(tool="fetch_url",
+                      args={"url": "https://casio.com/b/"},
+                      content="403 Forbidden", http_failure=True),
+            self._evt(tool="fetch_url",
+                      args={"url": "https://casio.com/c/"},
+                      content="403 Forbidden", http_failure=True),
+        ]
+        result = _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4)
+        assert result is not None
+        assert result["pattern"] == "http-failure-streak"
+        assert result["tools"] == {"fetch_url"}, \
+            "latest failing tool wins (most recent is what the model is currently doing)"
 
 
 class TestLastSuccessfulArtifact:
