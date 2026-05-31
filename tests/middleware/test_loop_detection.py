@@ -511,6 +511,25 @@ class TestDetectLoop:
         assert result["pattern"] == "same-tool-same-args"
         assert result["run_length"] == 3
 
+    def test_pattern_b_does_not_fire_on_alternating_read_urls(self):
+        """Alternating between two distinct URLs is exploration, not a
+        loop.  Same-tool different-args must BREAK the trailing run
+        even though both args are read-only.  Without this check, the
+        transparent-read-only rule would skip the `B` events and
+        falsely identify a 3-run of `A`."""
+        ru_a = self._evt(
+            tool="read_url",
+            args={"url": "https://example.com/a"},
+            content="[a]",
+        )
+        ru_b = self._evt(
+            tool="read_url",
+            args={"url": "https://example.com/b"},
+            content="[b]",
+        )
+        events = [ru_a, ru_b, ru_a.copy(), ru_b.copy(), ru_a.copy()]
+        assert _detect_loop(events, 2, 3, 3, 10) is None
+
     def test_no_false_positive_pure_exploration(self):
         """A run of read-only tools alone (no mutating) must NOT
         trigger any pattern.  After filtering out read-only events
