@@ -268,14 +268,15 @@ def _detect_loop(
         }
 
     # Pattern B: trailing run of same tool + same args.  Walks ALL
-    # completed events.  A non-matching read-only event is transparent
-    # (skipped, doesn't break the run) — so an agent doing
-    # `[write_file_X, ls, write_file_X, ls, write_file_X]` still
-    # registers as 3 write_file repetitions (the 2026-05-16
-    # winged-horse-flag case).  A non-matching MUTATING event breaks
-    # the run.  This catches both the historical interleaved-mutating
-    # pattern AND the 2026-05-30 sub-research-agent runaway that
-    # issued the same `read_url(F-91W)` ~1000 times in a row.
+    # completed events.  A non-matching event of a DIFFERENT read-only
+    # tool is transparent (skipped) — so `[write_file_X, ls,
+    # write_file_X, ls, write_file_X]` still registers as 3 write_file
+    # repetitions (the 2026-05-16 winged-horse-flag case).  Same-tool
+    # different-args BREAKS the run — `[read_url(A), read_url(B),
+    # read_url(A)]` is exploration across URLs, not a loop.  Same-tool
+    # same-args extends regardless of read-only category — catches the
+    # 2026-05-30 sub-research-agent runaway that issued the same
+    # `read_url(F-91W)` ~1000 times in a row.
     run_tool = None
     run_args = None
     run_len = 0
@@ -286,9 +287,10 @@ def _detect_loop(
             run_len = 1
         elif e["tool_name"] == run_tool and e["args_sig"] == run_args:
             run_len += 1
-        elif e["tool_name"] in _READ_ONLY_TOOLS:
-            # Non-matching read-only event: transparent — skip without
-            # extending or breaking the run.
+        elif e["tool_name"] != run_tool and e["tool_name"] in _READ_ONLY_TOOLS:
+            # Different-tool read-only event: transparent — skip without
+            # extending or breaking the run.  Same-tool different-args
+            # falls through to the break below.
             continue
         else:
             break
