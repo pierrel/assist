@@ -509,25 +509,42 @@ def _process_message(tid: str, text: str) -> None:
     # it as a placeholder bubble while processing (cleared once status==ready).
     pending_kwargs = {"pending_message": text}
 
-    def on_queue_state(stage: str) -> None:
-        # Called by ThreadAffinityQueue when this thread has to wait
-        # for another's hold ("queued") and again when the queue is
-        # acquired ("running" -> rewritten to "processing" for the UI).
-        ui_stage = "processing" if stage == "running" else stage
-        _set_status(tid, ui_stage, **pending_kwargs)
+    def on_queue_wait(stage: str) -> None:
+        # Only emits "queued" while we're waiting for another thread's
+        # hold to clear.  The post-acquire flow below sets
+        # "starting_sandbox" → "processing" itself, so we don't need
+        # the "running" rewrite here.
+        if stage == "queued":
+            _set_status(tid, "queued", **pending_kwargs)
 
     try:
-        _set_status(tid, "starting_sandbox", **pending_kwargs)
-        sandbox = _get_sandbox_backend(tid)
-        try:
-            chat = MANAGER.get(tid, sandbox_backend=sandbox,
-                               on_queue_state=on_queue_state)
-        except FileNotFoundError:
-            return
-        # The queue callback drives status from "starting_sandbox" through
-        # "queued" (if needed) and finally "processing" once acquired.
-        # Without the callback we'd jump straight to "processing" here.
-        resp = chat.message(text)
+        # Acquire the queue BEFORE starting the sandbox.  The sandbox
+        # container has a 1h TTL (sleep 3600 in Dockerfile.sandbox); if
+        # we created it at message-receipt time but then waited hours
+        # for the queue (a holder past its hold_timeout_s, or many
+        # backlogged threads), the container would age out before the
+        # agent ever used it — `SandboxContainerLostError` on first
+        # exec.  Observed on 2026-05-30 thread 20260530160651-fee1ddc5
+        # whose sandbox started at 16:06:52, sat queued behind a
+        # 2-hour-wedged thread, then 404'd at 17:52:15 (1h 45m later).
+        #
+        # `chat.message()` below tries to acquire the queue again
+        # internally; the reentrant fast path (same thread_id + same
+        # contextvar) makes it a no-op, so we don't double-count or
+        # double-callback.
+        with THREAD_QUEUE.acquire(tid, on_state_change=on_queue_wait):
+            _set_status(tid, "starting_sandbox", **pending_kwargs)
+            sandbox = _get_sandbox_backend(tid)
+            try:
+                # on_queue_state=None: the outer acquire above already
+                # owns the callback; the inner acquire is the reentrant
+                # no-op fast path (no state callback fires from it).
+                chat = MANAGER.get(tid, sandbox_backend=sandbox,
+                                   on_queue_state=None)
+            except FileNotFoundError:
+                return
+            _set_status(tid, "processing", **pending_kwargs)
+            resp = chat.message(text)
         MANAGER.touch(tid)
 
         # Generate description if there is none
