@@ -556,3 +556,92 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
             "What were the headlines from the Federal Reserve's most "
             "recent interest-rate decision?")
         self._assert_relays_unavailable(agent, res)
+
+
+class TestResearchSearchBudget(AgentTestMixin, TestCase):
+    """The research flow must converge on a bounded number of searches.
+
+    Background: a prod thread ("waterproof watches for Sam") did ~100
+    `search_internet` calls across three nested research-agent dispatches
+    for a trivial query — the research orchestrator re-dispatched the
+    inner research-agent, each of which searched dozens of times under
+    the only guidance it had ("conduct thorough research").  This eval
+    pins an effort budget: a healthy research turn searches a handful of
+    times and finalizes.
+
+    We patch `search_internet` to a counted stub returning canned,
+    real-looking results (so the model has usable hits and isn't
+    searching for lack of results), and assert the TOTAL invocation count
+    across the whole flow stays under budget.  The count is the right
+    observable: the orchestrator's inner re-dispatches live in nested
+    sub-agent namespaces invisible to the top-level message state, but
+    every search — at any nesting depth — goes through the one patched
+    function, so a global counter captures aggregate effort exactly.
+
+    Same patch-site reasoning as TestResearchRateLimitHandoff: patch
+    `assist.agent.search_internet` (the name bound into assist.agent at
+    import), not `assist.tools.search_internet`.
+    """
+
+    # Aggregate effort budget for a single research turn.  Prod ran ~100;
+    # a healthy flow is one orchestrator pass of a handful of searches.
+    SEARCH_BUDGET = 12
+
+    def setUp(self):
+        self.model = select_chat_model(0.1)
+
+    def _run_counting_searches(self, prompt: str):
+        import assist.tools as _tools
+        calls = {"search": 0}
+
+        _canned = str([
+            {"title": "Example result one",
+             "url": "https://example.com/a",
+             "content": "A detailed, directly relevant paragraph answering "
+                        "the question with specifics, figures, and names."},
+            {"title": "Example result two",
+             "url": "https://example.com/b",
+             "content": "A second corroborating source with concrete detail "
+                        "covering the same topic from another angle."},
+        ])
+
+        @functools.wraps(_tools.search_internet)
+        def _counted_search(query, max_results=5):
+            calls["search"] += 1
+            return _canned
+
+        @functools.wraps(_tools.read_url)
+        def _canned_fetch(url):
+            return ("Relevant page text with concrete, specific information "
+                    "that fully answers the question. " * 20)
+
+        root = tempfile.mkdtemp(prefix="search_budget_eval_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        create_filesystem(root, {"README.org": "My notes live in notes/.",
+                                 "notes": {"misc.org": "Personal notes."}})
+        with patch("assist.agent.search_internet", _counted_search), \
+             patch("assist.agent.read_url", _canned_fetch):
+            agent = AgentHarness(create_agent(self.model, root))
+            res = agent.message(prompt)
+        return agent, res, calls["search"]
+
+    def _assert_bounded(self, res, n_searches):
+        self.assertTrue(res, "Agent returned an empty response")
+        self.assertLessEqual(
+            n_searches, self.SEARCH_BUDGET,
+            f"Research flow ran {n_searches} searches for one query — over "
+            f"the {self.SEARCH_BUDGET} budget.  This is the over-search "
+            "runaway: the orchestrator re-dispatches the inner "
+            "research-agent and/or the inner agent searches without a "
+            "stopping rule.")
+
+    def test_search_budget_product_lookup(self):
+        agent, res, n = self._run_counting_searches(
+            "What are good waterproof watches for a 10-year-old?")
+        self._assert_bounded(res, n)
+
+    def test_search_budget_howto_lookup(self):
+        # A differently-shaped, non-telegraphed query.  Same budget.
+        agent, res, n = self._run_counting_searches(
+            "How do tabata intervals work?")
+        self._assert_bounded(res, n)
