@@ -1,9 +1,14 @@
 """Web tools the agent exposes: a throttled DuckDuckGo search and a
 per-host throttled URL fetch.
 
-Throttle/rate-limit shape (added 2026-05-31 after a research-agent ran
-~9,000 fetch_url calls in two hours and got the dev box's IP
-soft-blocked by DDG):
+Throttle/rate-limit shape (added 2026-05-31 after two adjacent failure
+modes burned the dev box's IP: a research-agent emitted ~9,000
+`fetch_url` calls across many distinct URLs on bot-protected sites
+(mostly casio.com) over two hours, and separately the `ddgs` library's
+mirror-fallback retry cycled DDG endpoints — `duckduckgo.com` /
+`html.duckduckgo.com` / `duck.ai` / the onion mirror — ~1,314 times
+each in a few minutes, which DDG's edge correctly read as obviously-a-bot
+and dropped):
 
 - ``search_internet`` is throttled to ~one call every ``_SEARCH_MIN_DELAY``
   seconds and circuit-broken after ``_SEARCH_CIRCUIT_FAILURE_THRESHOLD``
@@ -87,6 +92,13 @@ _RATE_LIMIT_EXC_INDICATORS = (
 _host_lock = threading.Lock()
 _host_last_call: dict[str, float] = {}
 _HOST_MIN_DELAY = 1.0
+# When the per-host dict crosses this size, drop entries we haven't
+# touched in `_HOST_DICT_PRUNE_KEEP_S` seconds.  Bounds memory in a
+# long-running process that fetches many distinct hosts (PR #118
+# Copilot review #1).  Cheap when small (the comparison is the only
+# work); the prune scan runs only on threshold-cross.
+_HOST_DICT_PRUNE_THRESHOLD = 256
+_HOST_DICT_PRUNE_KEEP_S = 60.0
 
 
 def _search_throttle() -> None:
@@ -103,7 +115,11 @@ def _search_throttle() -> None:
 
 def _host_throttle(host: str) -> None:
     """Block until at least ``_HOST_MIN_DELAY`` has passed since the last
-    fetch to this specific ``host``.  No-op for empty/None host."""
+    fetch to this specific ``host``.  No-op for empty/None host.
+
+    Opportunistically prunes ``_host_last_call`` when it crosses
+    ``_HOST_DICT_PRUNE_THRESHOLD`` entries — see the constant for the
+    rationale (long-running process + many distinct hosts)."""
     if not host:
         return
     with _host_lock:
@@ -112,12 +128,21 @@ def _host_throttle(host: str) -> None:
         elapsed = now - last
         if elapsed < _HOST_MIN_DELAY:
             time.sleep(_HOST_MIN_DELAY - elapsed)
-        _host_last_call[host] = time.time()
+            now = time.time()  # refresh after sleep so the recorded call-time is accurate
+        _host_last_call[host] = now
+        if len(_host_last_call) > _HOST_DICT_PRUNE_THRESHOLD:
+            cutoff = now - _HOST_DICT_PRUNE_KEEP_S
+            for h in list(_host_last_call):
+                if _host_last_call[h] < cutoff:
+                    del _host_last_call[h]
 
 
 def _circuit_is_open() -> bool:
-    """True if the search circuit is currently open (wall-clock-bounded)."""
-    return time.time() < _search_circuit_open_until
+    """True if the search circuit is currently open (wall-clock-bounded).
+    Acquires ``_search_circuit_lock`` for read consistency with the
+    open/close writers; the lock is uncontended in the common path."""
+    with _search_circuit_lock:
+        return time.time() < _search_circuit_open_until
 
 
 def _record_search_failure() -> None:
@@ -186,10 +211,9 @@ def read_url(url: str) -> str:
     Per-host throttled (~1s between calls to the same host) so a burst
     of fetches to different sites isn't artificially serialised, but a
     tight loop against one bot-protected site is rate-limited locally."""
-    try:
-        host = urlparse(url).hostname or ""
-    except Exception:
-        host = ""
+    # `urlparse` never raises on str input; for empty/malformed URLs
+    # `.hostname` is None and `_host_throttle` no-ops on the empty string.
+    host = urlparse(url).hostname or ""
     _host_throttle(host)
     try:
         resp = requests.get(
