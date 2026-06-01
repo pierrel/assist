@@ -1,8 +1,8 @@
-#+TITLE: General agent must heed the research-agent's rate-limit signal
+#+TITLE: General agent must heed the research-agent's "search unavailable" signal
 #+DATE: 2026-05-31
-State: Design.  Eval-first — write the eval, watch it fail on the
-current general agent, then iterate the prompt (and only the prompt,
-hopefully) until it passes.
+State: Design (design-review team round 1 incorporated).  Eval-first —
+write the eval, watch it fail on the current general agent, then move
+the agent's behavior until it passes.
 
 * Problem
 PR #118 added a search-circuit-breaker with an *explicit* return
@@ -14,30 +14,45 @@ Finalize your response using what's already gathered; tell the user
 search is temporarily rate-limited and to try again in a few minutes.
 #+END_QUOTE
 
-Validation on a live request showed the search layer itself behaves
-correctly: 128 short-circuit returns served, zero retries against DDG
-after the circuit opened.  But the *general agent* (=create_agent= in
-=assist/agent.py:112=) does NOT propagate the signal to the user.  It
-re-dispatches =task("research-agent", ...)= — the research subagent
-runs again, hits the circuit, returns "I couldn't search" — and the
-parent dispatches a *third* time.  The thread wedges in a meta-loop
-that =LoopDetectionMiddleware= (Pattern D) doesn't catch because each
-sub-agent dispatch gets fresh middleware state, so the failure streak
-never accumulates at the parent layer.
+Live validation confirmed the *search layer* behaves correctly: 128
+short-circuit returns served, zero retries against DDG after the
+circuit opened.  What was *also* observed on that run was an orphaned
+thread wedged with =status.json= stuck at "processing" — and the
+diagnosed mechanism is that the *general agent* (=create_agent= in
+=assist/agent.py:112=) does not relay the signal to the user.  It
+re-dispatches =task("research-agent", ...)=; the research subagent
+runs, hits the open circuit, returns the message; the parent reads it
+as "research failed, and I must research", and dispatches again.
+
+=LoopDetectionMiddleware= (Pattern D) does not catch this, and
+correctly so: the middleware is stateless and scoped to a *single
+agent graph's* message tail (=loop_detection.py:608=,
+=_current_turn_slice=).  Each =task("research-agent", …)= dispatch runs
+the research subagent's *own* compiled graph with its *own* middleware
+over its *own* message list.  In the parent's stream each dispatch
+collapses to one =AIMessage(tool_calls=[task])= + one =ToolMessage=,
+and since each dispatch carries a different prompt arg, neither the
+http-failure streak (Pattern D) nor the args-repeat run (Pattern B)
+accumulates at the parent layer.  This is a gap *between* agent runs,
+which the within-run loop detector was never meant to cover.
 
 The root cause is in the prompt, not the middleware.  The general
 agent prompt (=assist/templates/deepagents/general_instructions.md.j2=)
-hammers "ALWAYS call research-agent", "NEVER answer from your own
-knowledge when research-agent could answer".  Nothing tells it what
-"the research-agent returned but says it couldn't search" means or how
-to respond.  In that ambiguity the model defaults to its prior
-("retry; you must research"), so it keeps spawning.
+hammers "ALWAYS call research-agent" and "NEVER answer from your own
+knowledge when research-agent could answer" (lines 22, 63, 78, 82).
+Nothing tells it what "the research-agent returned but says it couldn't
+search" means or how to respond.  In that ambiguity the small model
+defaults to its heavily-repeated prior ("retry; you must research"),
+so it keeps spawning.
 
-A meta-loop detector at the parent layer was considered and rejected:
-it papers over the prompt gap, adds another bespoke pattern to
-=LoopDetectionMiddleware=, and trains the model to expect the system to
-catch it rather than learning to read its tools' output.  The cheaper,
-more general fix is to teach the agent to read.
+A meta-loop detector at the parent layer was considered and rejected
+(this is also the user's explicit instruction: "I don't think we need
+a meta-loop detector … we just need the top-level agent to listen to
+the research agent and heed its results").  It would paper over the
+prompt gap, add another bespoke pattern to =LoopDetectionMiddleware=,
+and train the model to expect the system to catch it rather than
+learning to read its tools' output.  The cheaper, more general fix is
+to teach the agent to read.
 
 * Solution outline (eval-first; fix lands after the eval pins the
   contract)
@@ -47,141 +62,222 @@ New test in =edd/eval/test_agent.py= (or a new file
 =test_agent_rate_limit_handoff.py= if =test_agent.py= is getting
 crowded — judgment call at implementation time).  Shape:
 
-1. Patch =assist.tools.search_internet= AND =assist.tools._circuit_is_open=
-   so every search returns =_CIRCUIT_OPEN_MESSAGE= and the circuit
-   reads as open.  Patch at the =assist.tools.= import site so both
-   the parent agent's tool list and the research subagent's tool list
-   pick up the mock (both import from =assist.tools=).
-2. Track =task= tool dispatches.  Two cheap ways:
-   - Spy on the underlying tool function — wrap =task= in a counter
-     in the parent agent's tool registry before the agent is built.
-   - Or count =AIMessage.tool_calls= for =name == "task"= after the
-     run by walking the returned message history.
-   Prefer the second — it's a black-box assertion on what the model
-   actually decided, no monkey-patching of the deepagents internals.
-3. Issue a clearly-research-shaped prompt that, on a healthy system,
-   would dispatch =research-agent= exactly once.  Candidate:
-   ="What's the latest LangGraph release and what changed?"=  (Pure
-   external lookup; no local-file ambiguity to muddy the dispatch
-   decision.)
-4. Assert:
-   - *=task= dispatches to research-agent ≤ 1.*  Zero is also fine
-     — a model that reads the message before dispatching is even
-     better.  Two or more is the failure.
-   - *Final response surfaces the rate-limit signal to the user.*
-     A regex over the final assistant message: =/(rate.?limit|try
-     again|temporarily|few minutes)/i= AND NOT a fabricated
-     research answer.  The "NOT a fabricated answer" check is the
-     hard half — the cheap proxy is asserting the response is
-     *short* (≤ ~600 chars) and contains the apology+wait shape;
-     the model is unlikely to both apologize for rate-limiting AND
-     fabricate a long langgraph release note in the same turn.
-   - *No infinite loop fallback.*  Bound the run with the
-     agent's existing recursion limit (=300=) and assert it didn't
-     hit the limit (=res= is non-empty and the harness returned
-     cleanly).  A hit means we're back in the runaway shape.
+1. *Force the "search unavailable" condition.*  Patch
+   =assist.agent.search_internet= (NOT =assist.tools.search_internet=)
+   to a stub that returns =_CIRCUIT_OPEN_MESSAGE= on every call.  The
+   patch target matters: =assist/agent.py:17= does
+   =from assist.tools import search_internet=, which binds the name
+   into the =assist.agent= namespace at import time — patching
+   =assist.tools.search_internet= would NOT rebind the reference the
+   research subagent's tool list already captured.  Mocking
+   =search_internet= wholesale also makes a separate =_circuit_is_open=
+   patch unnecessary (the circuit check lives *inside* the real
+   =search_internet=; the stub bypasses it).  This is the only
+   monkey-patch the eval needs — keep the surface minimal and document
+   it at the test-class level (see R1).
+2. *Count research-agent dispatches via the existing helper.*  Reuse
+   =_task_subagents_called= (=edd/eval/test_agent.py:283=), which walks
+   the returned message history for =task= tool calls and extracts the
+   subagent name from =args.subagent_type / .agent / .name=.  Assert on
+   the count of dispatches whose subagent is =research-agent=
+   specifically — the general agent dispatches =context-agent= in
+   parallel by default (=general_instructions.md.j2:80=), so a bare
+   =task=-call count would conflate the two.  This is a black-box
+   assertion on what the model actually decided; no patching of
+   deepagents internals.
+3. *Issue a clearly-research-shaped prompt* that, on a healthy system,
+   dispatches =research-agent= exactly once.  Candidate: ="What's the
+   latest LangGraph release and what changed?"=  (Pure external lookup;
+   no local-file ambiguity to muddy the dispatch decision.)
+4. *Assert:*
+   - *research-agent dispatched exactly once.*  Not =≤ 1=: zero
+     dispatches would mean the parent answered a research question from
+     its own knowledge, which the prompt forbids elsewhere — a
+     *different* failure we don't want to reward as a pass.  The
+     contract is: dispatch once, read the signal, stop.  Two or more is
+     the runaway failure; zero is the answer-from-knowledge failure.
+   - *Final response relays "search unavailable, wait" to the user.*
+     Regex over the final assistant message requiring BOTH a
+     rate-limit token AND a wait-time token:
+     =/rate.?limit|temporarily|unavailable/i= AND
+     =/try again|few minutes|10 ?min|later/i=.  The user specifically
+     asked that the agent "ask that the user wait ~10m", so the
+     wait-time half is required, not optional.
+   - *Did not hit the recursion ceiling.*  Belt-and-suspenders: assert
+     the harness returned cleanly (=res= non-empty, no recursion-limit
+     hit at =300=).  The dispatch-==1 assertion already makes a runaway
+     impossible to pass; this is a cheap sanity guard, not the primary
+     contract.
+   - *No char-count proxy.*  An earlier draft asserted the response is
+     "short (≤600 chars)" as a proxy for "didn't fabricate".  Cut: with
+     search mocked to always return the unavailable message and
+     dispatch pinned at exactly 1, the agent has no research data to
+     fabricate from without re-dispatching — already caught by the
+     dispatch assertion.  The proxy added a flaky knob coupled to model
+     verbosity for no new coverage.
+   The eval asserts *behavior* (dispatch count) and *user-facing
+   meaning* (the relay), deliberately NOT any internal signal token.
+   This keeps it mechanism-agnostic: it must run *before* the Phase B
+   fix exists, and whatever mechanism Phase B picks (prompt-only,
+   structured marker, …) the marker should be *stripped* from
+   user-facing text anyway, so asserting on it would be wrong.
 5. *N=3 baseline before any fix*, expecting failures (that's the
    point).  Captures the current general agent's behavior so we know
    what we're moving off of.
 
 ** Phase B — Fix (separate doc / separate branch)
-Pick up after the eval is green-red.  Hypothesis: a few lines added
-to =general_instructions.md.j2= are enough.  Sketch:
+Pick up after the eval is green-red.  The eval is the arbiter of which
+mechanism is needed; start with the cheapest and let the result decide.
+
+*First probe — prompt only.*  Add a conditional to
+=general_instructions.md.j2=.  The salience challenge is real: the same
+file asserts the opposite prior eight times, so one buried sentence may
+lose to "NEVER answer from your own knowledge."  Sketch:
 
 #+BEGIN_QUOTE
-*When the research-agent returns a message saying it's rate-limited
-or cannot search* (look for "rate-limited", "try again", "cannot
-retry"), DO NOT call research-agent again this turn.  Apologize to
-the user, relay the wait time the research-agent gave you, and end
-the turn.  Do NOT fabricate research findings.
+*When a sub-agent reports it could not complete the work because a
+dependency is unavailable* (e.g. the research-agent says search is
+rate-limited / "try again later"), DO NOT re-dispatch that sub-agent
+this turn.  Relay the situation and the wait time to the user, then end
+the turn.  Do NOT fabricate findings.
 #+END_QUOTE
 
-If the prompt alone doesn't move the eval, fall back to (in order of
-preference):
+*Recommended mechanism if the prompt-only probe is unstable — a
+structured sentinel.*  R2 predicts the small model will paraphrase the
+free-text message unreliably, making a prose match fragile.  The clean
+fix is a structured sentinel emitted by the research-agent, and the
+repo *already has this exact pattern at this exact boundary*: the
+research-agent ends its final message with =FINAL_REPORT: <filename>=,
+matched by =_FINAL_REPORT_LINE = re.compile(r"^FINAL_REPORT:\s*(\S+)…")=
+in =assist/research_cleanup.py:54= and instructed in
+=research_instructions.txt.j2:20-24,137=.  A sibling sentinel (e.g.
+=SEARCH_UNAVAILABLE=) defined next to =_CIRCUIT_OPEN_MESSAGE= in
+=assist/tools.py=, instructed in the research-agent prompts the same way
+=FINAL_REPORT:= is, and keyed off by the general-agent prompt, is
+*consistency with an existing contract*, not new machinery.  This is
+still "teach the agent to heed" — it just gives the agent a stable
+signal to heed instead of fragile prose.  Frame the sentinel and the
+parent rule *generically* ("a sub-agent reports a dependency is
+unavailable"), not specifically around rate-limiting: =read_url=
+throttling and a future real-search-API outage are the same shape, and
+generic framing costs nothing extra now (the eval still exercises only
+the search-rate-limit instance).
 
-1. *Tool-level signaling.*  Have the =research-agent= subagent
-   return a structured marker (e.g., prefix =[RATE_LIMITED]=) that
-   the prompt can pattern-match more reliably than free-text.
-   Cheap, no middleware code.
-2. *Parent-side post-processing.*  In the =CompiledSubAgent= wrapper
-   for =research_sub=, detect the circuit-open shape in the
-   sub-agent's output and inject a tool-result instruction the
-   parent will read.  More plumbing, no prompt dependency.
+*Mechanisms deliberately deferred / gated, in order:*
+1. *Framework-idiomatic structured output (=response_format=).*  In
+   deepagents a subagent that sets =response_format= has its
+   =structured_response= JSON-serialized into the =ToolMessage= the
+   parent reads (=subagents.py:495-502=) — the blessed channel for
+   "make a subagent's status legible to the parent".  Deferred, not
+   ignored: =research_sub= is a =CompiledSubAgent= wrapping
+   =ReferencesCleanupRunnable= → =RollbackRunnable= → deep-agent
+   (=agent.py:253-266,537=), not a vanilla =create_deep_agent= with a
+   =response_format=, so adopting it means threading a format through
+   three wrapper layers.  The string sentinel above gets the same
+   legibility for far less plumbing; revisit =response_format= only if
+   the sentinel proves insufficient.
+2. *Shape the subagent's terminal message in the wrapper.*  The
+   =ReferencesCleanupRunnable= wrapper (already the seam that interprets
+   =FINAL_REPORT:=) can ensure the research subagent's *final AIMessage*
+   carries the sentinel when search was unavailable.  Note: the wrapper
+   returns a *state dict* and the framework derives the =ToolMessage=
+   from the last non-empty AIMessage (=subagents.py:509-520=) — so the
+   wrapper can shape the *terminal message*, it cannot "inject a
+   tool-result" after the fact.  This nearly collapses into mechanism
+   (the sentinel) above; it's the enforcement point if the prompt can't
+   be trusted to make the subagent emit the sentinel.
 3. *Parent =LoopDetectionMiddleware= rule.*  Treat repeated
-   =task("research-agent", ...)= calls whose results contain the
-   circuit-open shape as a Pattern-D-equivalent at the parent layer.
-   Last resort: this re-introduces the meta-loop detector this
-   design explicitly rejected, but if the prompt and structured-
-   signal approaches both fail, the safety net is justified.
+   =task("research-agent", …)= calls whose results contain the
+   unavailable shape as a parent-layer pattern.  *Last resort, and NOT
+   to be implemented without checking back with the user* — it reverses
+   the user's explicit "we don't need a meta-loop detector" decision.
+   Listed only so the escape hatch and its cost are on record; an
+   implementer must not reach it autonomously.
 
-The eval pins the contract independent of which mechanism we
-end up using.
+The eval pins the contract independent of which mechanism wins.
 
 * Tests
-- New eval (above).  N=3 baseline, then N=5 after the fix lands,
-  then N=10 stability per the project's eval cadence.
-- =tests/test_tools.py= — unchanged; the circuit-breaker primitives
-  already have their own coverage.  This work is one layer up.
-- Existing =edd/eval/test_agent.py= cases — must still pass.  The
-  fix prompt addition is *conditional* ("when the research-agent
-  returns a rate-limited message"), so the healthy-path dispatch
-  decisions should be unchanged.  Run a small re-validation on
+- New eval (above).  N=3 baseline, then N=5 after the fix lands, then
+  N=10 stability per the project's eval cadence.  Schedule outside the
+  11p-3a nightly window (=reference_nightly_eval_window.md=).
+- =tests/test_tools.py= — unchanged; the circuit-breaker primitives have
+  their own coverage.  This work is one layer up.
+- Existing =edd/eval/test_agent.py= cases — must still pass.  The fix is
+  *conditional* (only fires when a sub-agent reports unavailable), so
+  healthy-path dispatch decisions should be unchanged.  Re-validate
   =test_finds_and_updates_relevant_files_direct= and
-  =test_adds_item_correctly= at N=3 to confirm.
+  =test_adds_item_correctly= at N=3 to confirm no regression.
 
 * Risks
-- *R1 — Mocking pattern is new in =edd/eval/=.*  Existing evals hit
-  real LLM + real tools deliberately ("Eval-first contracts" in
-  CLAUDE.md).  This eval departs because the failure mode is
-  unobservable without forcing the circuit open.  Justification:
-  we're testing the model's *reaction to a specific tool output*,
-  not the tool itself; the tool is well-covered.  Document the
-  monkey-patch clearly at the test class level.
-- *R2 — Small-model brittleness on the regex assertion.*  Qwen3.6-27B
-  Q4 can spell "rate-limited" with or without the hyphen, in
-  different casings, sometimes as "rate limited" or "rate-limiting".
-  Regex is broad =(rate.?limit|try again|temporarily|few minutes)/i=
-  on purpose.  If it false-passes on some unrelated phrasing, tighten
-  to require BOTH "rate" AND ("try" OR "minute").
-- *R3 — Eval cost.*  One additional LLM-call-heavy eval per run.
-  The general agent's research-shaped prompts are 5-15 turns; at N=10
-  this is non-trivial.  Schedule it outside the 11p-3a nightly window
-  per =reference_nightly_eval_window.md=.
-- *R4 — The fix may need more than a prompt tweak.*  Phase B lists
-  fallbacks.  If the prompt alone doesn't move the eval after two
-  iterations, escalate to the structured-marker approach rather than
-  thrashing the prompt indefinitely.
+- *R1 — Mocking is new in =edd/eval/=.*  Existing evals hit real LLM +
+  real tools deliberately ("Eval-first contracts" in CLAUDE.md).  This
+  eval departs because the failure mode is unobservable without forcing
+  search-unavailable.  Justification: we test the model's *reaction to a
+  specific tool output*, not the tool (which =test_tools.py= covers).
+  Document the single monkey-patch at the test-class level.
+- *R2 — Small-model brittleness on the relay regex.*  Qwen3.6-27B Q4
+  spells "rate-limited" / "rate limited" / "rate-limiting" inconsistently
+  and may relay the wait time loosely.  The assertion requires a
+  rate-limit/unavailable token AND a wait-time token to pin the part the
+  user cared about, while staying broad on spelling.  If it false-passes
+  on unrelated phrasing, tighten the wait-time branch.  This same
+  brittleness is the argument for the structured sentinel in Phase B.
+- *R3 — Eval cost.*  One LLM-heavy eval (5-15 turns) per run; at N=10
+  non-trivial.  Run outside the nightly window.
+- *R4 — The fix may need more than a prompt tweak.*  If the prompt-only
+  probe doesn't move the eval after *two* iterations, escalate to the
+  structured sentinel rather than thrashing the prompt — do not iterate
+  the prompt indefinitely.
 
 * What this design deliberately does NOT do
-- *Does NOT add a parent-layer meta-loop detector.*  Considered and
-  rejected: papers over a prompt gap, adds a bespoke pattern to
-  =LoopDetectionMiddleware=, doesn't teach the agent the general
-  skill of reading sub-agent output.  Phase B fallback (3) is the
-  only path back to this option.
-- *Does NOT change the =_CIRCUIT_OPEN_MESSAGE= wording.*  Live
-  validation showed it works at the search layer; the user-facing
-  language ("temporarily rate-limited", "try again in a few minutes")
-  is exactly what we want the general agent to echo, so the message
-  doubles as the answer template.
-- *Does NOT widen the eval to cover read_url rate-limiting.*
-  =read_url= has its own per-host throttle but no circuit-breaker
-  message; the symptom shape (URL fetch fails) is different and the
-  agent already handles per-fetch failures.  Out of scope.
-- *Does NOT add a structured marker yet.*  Phase B fallback (1).
-  Try the cheap prompt fix first; the marker is a fix-side decision
-  that doesn't change the eval contract.
+- *Does NOT add a parent-layer meta-loop detector* (Phase B mechanism 3
+  is the only path back, and it is user-sign-off-gated).  Honors the
+  user's explicit instruction.
+- *Does NOT change =_CIRCUIT_OPEN_MESSAGE= wording.*  Live validation
+  showed it works at the search layer; its user-facing language is the
+  template we want the general agent to relay.
+- *Does NOT widen the eval to cover =read_url= rate-limiting.*  Same
+  generic shape (Phase B frames the contract to include it), but
+  =read_url= has no circuit message and the agent already handles
+  per-fetch failures; out of scope for the eval.
+- *Does NOT build the structured sentinel in Phase A.*  Phase A is the
+  eval only; the sentinel is a Phase B mechanism the eval will or won't
+  call for.
 
 * Relationship to other work
 - PR #116 (=loop-detection-pattern-d=) — Pattern D catches HTTP-failure
   streaks *within a single agent run*.  It does not (and should not)
-  catch this case, which spans multiple sub-agent dispatches.  The
-  Phase A eval validates the layer Pattern D was never meant to cover.
-- PR #118 (=search-rate-limit-throttle=) — produces the
-  =_CIRCUIT_OPEN_MESSAGE= this eval depends on.  Must be merged before
-  the eval can run.
-- =roadmap.org= item "Explore a real Search API to replace the
-  scraped DDG endpoints" — independent.  A real search API would
-  reduce the *frequency* of circuit-open, not change the contract:
-  the general agent still needs to handle "search is unavailable"
-  gracefully.  This eval pins that contract regardless of the
-  underlying transport.
+  catch this cross-dispatch case.  The Phase A eval validates the layer
+  Pattern D was never meant to cover.
+- PR #118 (=search-rate-limit-throttle=) — produces
+  =_CIRCUIT_OPEN_MESSAGE= this eval depends on.  Must be merged to =main=
+  before the eval can run (this branch is off =main=; #118 is not yet
+  merged, so =_CIRCUIT_OPEN_MESSAGE= is not present here yet).
+- =roadmap.org= item "Explore a real Search API to replace the scraped
+  DDG endpoints" — independent.  A real search API reduces the
+  *frequency* of unavailability, not the contract: the general agent
+  still must relay "search is unavailable" gracefully.  This eval pins
+  that contract regardless of transport.
+
+* Design changes from review (round 1)
+Folded in: assert dispatch =exactly 1= (not =≤1=); reuse
+=_task_subagents_called= and filter on =research-agent=; cut the
+=≤600 char= "not fabricated" proxy; patch =assist.agent.search_internet=
+(not =assist.tools=) and drop the redundant =_circuit_is_open= patch;
+require a wait-time token in the relay regex; reword Phase B mechanism 2
+to "shape the terminal message" (the wrapper can't inject a ToolMessage);
+elevate the structured sentinel from a fallback to the recommended
+mechanism, grounded in the existing =FINAL_REPORT:= precedent
+(=research_cleanup.py:54=); frame the sentinel/parent-rule generically;
+gate the parent-middleware option behind explicit user sign-off.
+
+Pushed back (rejected reviewer suggestions, with rationale): the
+clean-interfaces lens wanted the eval to assert on the structured
+marker.  Declined — the eval must run before the fix and stay
+mechanism-agnostic, and the marker must be stripped from user-facing
+text, so the correct observable is dispatch-count + user-facing relay,
+not an internal token.  The same lens wanted the marker as the
+*primary* fix mechanism; kept the prompt-only probe as the first step
+(cheapest, and the user framed this as "teach the agent to listen"),
+with the eval — not a priori reasoning — deciding whether the sentinel
+is needed.
