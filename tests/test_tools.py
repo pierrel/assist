@@ -275,18 +275,27 @@ class TestRateLimitDetection:
         """End-to-end through search_internet: a `DDGSException` raised
         after ~5s (TCP-timeout shape) should open the circuit
         immediately on the FIRST failure, returning the explicit
-        message rather than the bare '[]'."""
+        message rather than the bare '[]'.
+
+        Drives ``time.time`` via a stateful counter (rather than a fixed
+        side_effect list) because the precise number of internal
+        ``time.time()`` calls per ``search_internet`` invocation is an
+        implementation detail (circuit check, throttle x2, t0, elapsed,
+        circuit-open, plus any future probes); a list would have to grow
+        every refactor."""
         if not tools._DDGS_RATE_LIMIT_TYPES:
             pytest.skip("ddgs.exceptions module not importable here")
         import ddgs.exceptions
-        with patch.object(tools, "time") as t, \
+        # Stateful clock: the first 4 calls (circuit_check + throttle x2 +
+        # t0) return 5000, then the elapsed call and onward return 5005
+        # so `elapsed == 5.0` (> 3s threshold = treated as TCP timeout).
+        calls = {"n": 0}
+        def fake_time():
+            calls["n"] += 1
+            return 5000.0 if calls["n"] <= 4 else 5005.0
+        with patch.object(tools.time, "time", side_effect=fake_time), \
+             patch.object(tools.time, "sleep"), \
              patch.object(tools, "DDGS") as ddgs_class:
-            # Simulate t0=5000 → 5005 (5s elapsed during DDGS().text()).
-            t.time.side_effect = [5000.0,   # _search_throttle entry
-                                  5000.0,   # _search_throttle last-call update
-                                  5000.0,   # t0
-                                  5005.0,   # elapsed measurement
-                                  5005.0]   # _open_search_circuit_now
             ddgs_class.return_value.text.side_effect = (
                 ddgs.exceptions.DDGSException("No results found.")
             )
@@ -300,10 +309,14 @@ class TestRateLimitDetection:
         if not tools._DDGS_RATE_LIMIT_TYPES:
             pytest.skip("ddgs.exceptions module not importable here")
         import ddgs.exceptions
-        with patch.object(tools, "time") as t, \
+        # 100ms elapsed (genuine empty parse), well below the 3s threshold.
+        calls = {"n": 0}
+        def fake_time():
+            calls["n"] += 1
+            return 5000.0 if calls["n"] <= 4 else 5000.1
+        with patch.object(tools.time, "time", side_effect=fake_time), \
+             patch.object(tools.time, "sleep"), \
              patch.object(tools, "DDGS") as ddgs_class:
-            # t0=5000 → 5000.1 (100ms elapsed = genuine empty parse).
-            t.time.side_effect = [5000.0, 5000.0, 5000.0, 5000.1, 5000.1]
             ddgs_class.return_value.text.side_effect = (
                 ddgs.exceptions.DDGSException("No results found.")
             )
