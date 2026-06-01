@@ -29,6 +29,19 @@ from urllib.parse import urlparse
 import requests
 from ddgs import DDGS
 
+# Explicit rate-limit exception types from the `ddgs` library.  These are
+# the unambiguous cases — when ddgs itself recognises rate-limiting or a
+# transport timeout, it raises one of these.  Wrapped in try/except so a
+# future ddgs that renames or drops the module doesn't break import here.
+try:
+    import ddgs.exceptions as _ddgs_exc
+    _DDGS_RATE_LIMIT_TYPES: tuple[type[BaseException], ...] = (
+        _ddgs_exc.RatelimitException,
+        _ddgs_exc.TimeoutException,
+    )
+except Exception:  # noqa: BLE001 — defensive: never block import on this
+    _DDGS_RATE_LIMIT_TYPES = ()
+
 # --- Search throttle (cross-tool, global) ---
 _search_lock = threading.Lock()
 _search_last_call_time = 0.0
@@ -134,13 +147,37 @@ def _open_search_circuit_now() -> None:
         _search_circuit_open_until = time.time() + _SEARCH_CIRCUIT_DURATION_S
 
 
-def _exception_looks_like_rate_limit(exc: BaseException) -> bool:
-    """Heuristic: does ``exc`` (its type-name + str()) match any
-    `_RATE_LIMIT_EXC_INDICATORS` substring?  Used by `search_internet`
-    to short-circuit on detected upstream blocks instead of waiting for
-    the consecutive-failures threshold.  Case-insensitive."""
+def _exception_looks_like_rate_limit(exc: BaseException, elapsed_s: float = 0.0) -> bool:
+    """Heuristic: does ``exc`` look like an upstream rate-limit / block?
+
+    Three signals, any one is enough:
+
+    1. *Explicit type match.*  ``ddgs.exceptions.RatelimitException`` or
+       ``TimeoutException`` are unambiguous — the library knows.
+
+    2. *Substring match.*  type-name + str() contains one of
+       ``_RATE_LIMIT_EXC_INDICATORS`` (timeout / 429 / forbidden /
+       captcha / etc.).  Catches the requests / httpcore / urllib3
+       cases where the underlying error escapes ddgs's wrapping.
+
+    3. *Timing heuristic for ddgs's misleading ``DDGSException("No
+       results found.")``.*  ddgs raises this on BOTH "genuine zero
+       results for query" AND "couldn't reach DDG at all" (because in
+       both cases it parsed zero results).  A call that took >=3s
+       almost certainly hit a TCP timeout, not a fast empty-parse;
+       treat as rate-limit.  Fast (<3s) ``"No results found."`` is a
+       genuine empty result and we let it fall through.
+
+    Caller passes ``elapsed_s`` (time the call took); defaults to 0
+    so the test/standalone path still works."""
+    if _DDGS_RATE_LIMIT_TYPES and isinstance(exc, _DDGS_RATE_LIMIT_TYPES):
+        return True
     blob = f"{type(exc).__name__}: {exc}".lower()
-    return any(ind in blob for ind in _RATE_LIMIT_EXC_INDICATORS)
+    if any(ind in blob for ind in _RATE_LIMIT_EXC_INDICATORS):
+        return True
+    if elapsed_s >= 3.0 and "no results found" in blob:
+        return True
+    return False
 
 
 def read_url(url: str) -> str:
@@ -183,18 +220,22 @@ def search_internet(
     if _circuit_is_open():
         return _CIRCUIT_OPEN_MESSAGE
     _search_throttle()
+    t0 = time.time()
     try:
         results = DDGS().text(query,
                               max_results=max_results,
                               backend="duckduckgo")
         _record_search_success()
     except Exception as e:
+        elapsed = time.time() - t0
         # Rate-limit / block DETECTED (timeout, connection reset, 429,
-        # 403, captcha challenge, etc.)?  Skip the slow consecutive-failures
-        # threshold and open the circuit NOW so we stop hitting an
-        # already-blocking endpoint.  The model gets the same explicit
-        # "search is rate-limited" instruction it would after threshold.
-        if _exception_looks_like_rate_limit(e):
+        # 403, captcha challenge, or a slow ddgs DDGSException that's
+        # really a TCP timeout — see `_exception_looks_like_rate_limit`)?
+        # Skip the slow consecutive-failures threshold and open the
+        # circuit NOW so we stop hitting an already-blocking endpoint.
+        # The model gets the same explicit "search is rate-limited"
+        # instruction it would after threshold.
+        if _exception_looks_like_rate_limit(e, elapsed):
             _open_search_circuit_now()
             return _CIRCUIT_OPEN_MESSAGE
         _record_search_failure()
