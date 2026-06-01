@@ -243,3 +243,70 @@ class TestRateLimitDetection:
             result = tools.search_internet("query")
             assert result == "[]"
             assert not tools._circuit_is_open()
+
+    def test_ddgs_ratelimit_exception_type_detected_explicitly(self):
+        """If `ddgs` itself raises `RatelimitException`, the explicit
+        type check should match even though the message text might not
+        contain our substring indicators."""
+        if not tools._DDGS_RATE_LIMIT_TYPES:
+            pytest.skip("ddgs.exceptions module not importable here")
+        RL = tools._DDGS_RATE_LIMIT_TYPES[0]  # RatelimitException
+        # Message intentionally contains NO substring indicator — the type
+        # check is what must catch this.
+        exc = RL("blip")
+        assert tools._exception_looks_like_rate_limit(exc, elapsed_s=0.0)
+
+    def test_slow_ddgs_no_results_treated_as_rate_limit(self):
+        """ddgs's `DDGSException("No results found.")` is its catch-all
+        when nothing parses — raised both for *genuine* empty results
+        AND for TCP timeouts (the message is misleading).  A call that
+        took >=3s is almost certainly a timeout disguised as empty."""
+        if not tools._DDGS_RATE_LIMIT_TYPES:
+            pytest.skip("ddgs.exceptions module not importable here")
+        # Use the base DDGSException so the type check DOESN'T trip; we
+        # need the timing heuristic to be what catches it.
+        import ddgs.exceptions
+        exc = ddgs.exceptions.DDGSException("No results found.")
+        assert tools._exception_looks_like_rate_limit(exc, elapsed_s=4.5)
+        # And the FAST counterpart is treated as a genuine empty result.
+        assert not tools._exception_looks_like_rate_limit(exc, elapsed_s=0.2)
+
+    def test_search_internet_opens_circuit_on_slow_no_results(self):
+        """End-to-end through search_internet: a `DDGSException` raised
+        after ~5s (TCP-timeout shape) should open the circuit
+        immediately on the FIRST failure, returning the explicit
+        message rather than the bare '[]'."""
+        if not tools._DDGS_RATE_LIMIT_TYPES:
+            pytest.skip("ddgs.exceptions module not importable here")
+        import ddgs.exceptions
+        with patch.object(tools, "time") as t, \
+             patch.object(tools, "DDGS") as ddgs_class:
+            # Simulate t0=5000 → 5005 (5s elapsed during DDGS().text()).
+            t.time.side_effect = [5000.0,   # _search_throttle entry
+                                  5000.0,   # _search_throttle last-call update
+                                  5000.0,   # t0
+                                  5005.0,   # elapsed measurement
+                                  5005.0]   # _open_search_circuit_now
+            ddgs_class.return_value.text.side_effect = (
+                ddgs.exceptions.DDGSException("No results found.")
+            )
+            result = tools.search_internet("query")
+            assert result == tools._CIRCUIT_OPEN_MESSAGE
+            assert tools._circuit_is_open()
+
+    def test_search_internet_fast_no_results_does_NOT_open_circuit(self):
+        """End-to-end: a fast `DDGSException` (genuine empty results, not
+        a timeout) must NOT trip the circuit — just return '[]'."""
+        if not tools._DDGS_RATE_LIMIT_TYPES:
+            pytest.skip("ddgs.exceptions module not importable here")
+        import ddgs.exceptions
+        with patch.object(tools, "time") as t, \
+             patch.object(tools, "DDGS") as ddgs_class:
+            # t0=5000 → 5000.1 (100ms elapsed = genuine empty parse).
+            t.time.side_effect = [5000.0, 5000.0, 5000.0, 5000.1, 5000.1]
+            ddgs_class.return_value.text.side_effect = (
+                ddgs.exceptions.DDGSException("No results found.")
+            )
+            result = tools.search_internet("query")
+            assert result == "[]"
+            assert not tools._circuit_is_open()
