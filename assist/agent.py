@@ -385,11 +385,14 @@ def create_context_agent(model: BaseChatModel,
 # aggregate search volume to ~this many for a research turn.
 _RESEARCH_TOOL_VOLUME_CAP = 6
 
-# Pattern E only caps these tools.  Just search_internet — NOT read_url:
-# reading several sources is normal research (and is per-host throttled +
-# Pattern-D-protected against the 403 storm), and capping read_url stripped
-# AI messages that batched a read with the report write, leaving no report.
-_RESEARCH_VOLUME_TOOLS = frozenset({"search_internet"})
+# Pattern E caps these tools.  Applied ONLY to the research SUBAGENTS
+# (research / critique / fact-check) — none of which write the report — so
+# stripping a capped-tool batch never loses a write.  We cap BOTH
+# search_internet and read_url there: an uncapped read_url let the
+# research-agent read many pages and balloon the turn to ~12 min.  The
+# orchestrator (which writes the report and reads URLs to do so) gets NO
+# volume cap, precisely so its read+write batches are never stripped.
+_RESEARCH_VOLUME_TOOLS = frozenset({"search_internet", "read_url"})
 
 # Wider LoopDetection window for the research-agent so the volume cap
 # counts searches across the WHOLE turn, not just the last 12 mixed

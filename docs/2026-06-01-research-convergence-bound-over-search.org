@@ -191,10 +191,13 @@ one insufficient; all are committed separately.
    searcher → both budget queries pass <=12.
 
 *Residuals / known limitations:*
-- =read_url= is not volume-capped.  It is bounded indirectly: the agent
-  can only read URLs it found via the (capped) search, so reads can't run
-  away beyond the search results.  Pattern D + per-host throttle cover
-  the failure-storm case.
+- =read_url= IS volume-capped, but only on the research SUBAGENTS (which
+  have no write tool), never on the orchestrator (which writes the
+  report).  An uncapped subagent =read_url= ballooned a research turn to
+  ~12 min; capping it there cut that to ~2 min with no write-stripping
+  risk.  The orchestrator's own =read_url= (for report writing) is
+  uncapped but naturally bounded by the references in the (capped)
+  research result.
 - The deterministic caps strip the *whole* latest AI message's tool
   calls.  Safe as wired (only the inner research-agent — which has no
   write tool — is volume-capped), but a future agent that batches a
