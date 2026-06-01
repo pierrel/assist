@@ -61,7 +61,10 @@ class TestHostThrottle:
 
     def test_second_call_to_same_host_within_window_sleeps(self):
         with patch.object(tools, "time") as t:
-            t.time.side_effect = [1000.0, 1000.0, 1000.3, 1000.3]
+            # Three time.time() calls expected: call 1 (not-slept) = 1;
+            # call 2 (slept) = 2 (one before-sleep check, one after-sleep
+            # to record the actual call time).
+            t.time.side_effect = [1000.0, 1000.3, 1000.3]
             tools._host_throttle("example.com")
             tools._host_throttle("example.com")
             t.sleep.assert_called_once()
@@ -85,6 +88,34 @@ class TestHostThrottle:
             tools._host_throttle("")
             t.sleep.assert_not_called()
             t.time.assert_not_called()
+
+    def test_host_dict_pruned_when_over_threshold(self):
+        """Over-threshold dict size triggers a prune that drops entries
+        older than _HOST_DICT_PRUNE_KEEP_S, bounding memory in a
+        long-running process that touches many distinct hosts
+        (Copilot PR #118 review item #1)."""
+        # Seed the dict: half "fresh" (within keep-window), half "stale".
+        threshold = tools._HOST_DICT_PRUNE_THRESHOLD
+        keep_s = tools._HOST_DICT_PRUNE_KEEP_S
+        now_anchor = 10_000.0
+        # Stale: their last-call is `keep_s + 10` seconds ago.
+        for i in range(threshold // 2 + 5):
+            tools._host_last_call[f"stale-{i}.example"] = now_anchor - keep_s - 10
+        # Fresh: their last-call is 1 second ago.
+        for i in range(threshold // 2 + 5):
+            tools._host_last_call[f"fresh-{i}.example"] = now_anchor - 1
+        # Sanity: we should be over threshold so the prune triggers.
+        assert len(tools._host_last_call) > threshold
+        # Drive `_host_throttle` for a new host at `now_anchor`.
+        with patch.object(tools.time, "time", return_value=now_anchor), \
+             patch.object(tools.time, "sleep"):
+            tools._host_throttle("new-host.example")
+        # All stale entries should be gone; all fresh + the new one stay.
+        assert not any(h.startswith("stale-") for h in tools._host_last_call)
+        assert all(h.startswith("fresh-") or h == "new-host.example"
+                   for h in tools._host_last_call)
+        # And size is now bounded by the fresh-plus-new count.
+        assert len(tools._host_last_call) == threshold // 2 + 5 + 1
 
 
 # -------------------- circuit breaker primitives ------------------------
