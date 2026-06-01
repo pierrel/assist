@@ -1,8 +1,11 @@
 #+TITLE: General agent must heed the research-agent's "search unavailable" signal
 #+DATE: 2026-05-31
-State: Design (design-review team round 1 incorporated).  Eval-first —
-write the eval, watch it fail on the current general agent, then move
-the agent's behavior until it passes.
+State: Implemented (design-review + code-review rounds incorporated).
+Eval-first — wrote the eval, confirmed it fails on the current general
+agent, then moved the agent's behavior until it passes.  Per the user's
+direction to do evals + code + review in one pass, Phase A (eval) and
+the Phase B prompt-only probe landed together on this branch rather
+than as separate branches.
 
 * Problem
 PR #118 added a search-circuit-breaker with an *explicit* return
@@ -250,9 +253,9 @@ The eval pins the contract independent of which mechanism wins.
   catch this cross-dispatch case.  The Phase A eval validates the layer
   Pattern D was never meant to cover.
 - PR #118 (=search-rate-limit-throttle=) — produces
-  =_CIRCUIT_OPEN_MESSAGE= this eval depends on.  Must be merged to =main=
-  before the eval can run (this branch is off =main=; #118 is not yet
-  merged, so =_CIRCUIT_OPEN_MESSAGE= is not present here yet).
+  =_CIRCUIT_OPEN_MESSAGE= this eval depends on.  *Merged to =main= on
+  2026-06-01* (rebase merge); this branch was cut from =main= and then
+  rebased onto it, so the constant is present and the eval imports it.
 - =roadmap.org= item "Explore a real Search API to replace the scraped
   DDG endpoints" — independent.  A real search API reduces the
   *frequency* of unavailability, not the contract: the general agent
@@ -281,3 +284,51 @@ not an internal token.  The same lens wanted the marker as the
 (cheapest, and the user framed this as "teach the agent to listen"),
 with the eval — not a priori reasoning — deciding whether the sentinel
 is needed.
+
+* Implementation + code-review changes (round 2)
+What landed, and the code-review findings folded in:
+
+- *The fix is prompt-only, three prompts.*  The parent
+  (=general_instructions.md.j2=) gets a Step-3 action pattern + one Rule
+  line.  Code review (bugs lens) flagged that the rate-limit signal must
+  survive *two* research-agent summarization hops before it reaches the
+  parent — the inner research-agent (=sub_research.txt.j2=) and the outer
+  research orchestrator (=research_instructions.txt.j2=), both of which
+  are instructed to "write a polished report".  A parent-only fix is
+  fragile because either hop can launder the signal into a
+  knowledge-based report.  So the same prompt-only change also adds a
+  conditional relay line to *both* research prompts: "if a search/fetch
+  tool reports unavailable/rate-limited, do NOT answer from your own
+  knowledge — relay that status (incl. wait time) and stop."  The outer
+  prompt additionally says to skip the report file and omit the
+  =FINAL_REPORT:= line in that case (=research_cleanup.py='s missing-line
+  path leaves files untouched and passes the relay text through — safe).
+
+- *Eval =read_url= patch.*  The eval patches =read_url= too (returns a
+  rate-limit-flavoured error) so a model that ignores the blocked search
+  and hallucinates a URL can't hit the live network and re-burn the IP.
+  This widens the doc's "single monkey-patch" wording from round 1 — kept
+  deliberately, documented in the test; the eval still *asserts* nothing
+  about =read_url=.
+
+- *Second eval prompt.*  Code review (eval-alignment lens) flagged that
+  the fix prompt now contains "rate-limited"/"try again", and the eval
+  greps for those — a lexical-proximity risk.  Mitigations: the
+  dispatch-==1 assertion is pure behavior (un-parrotable), and the
+  baseline fails (fabricates / dispatches >1).  Added a second,
+  differently-shaped prompt (a non-technical news lookup) asserting the
+  same contract, so a pass shows the agent heeds the *signal*, not one
+  LangGraph-shaped prompt.
+
+- *Helper de-dup.*  Hoisted the =task=-dispatch counting into
+  =AgentTestMixin.subagent_calls()=; deleted the duplicate
+  =_task_subagents_called= and pointed its caller (+ =assertSubAgentCall=)
+  at the shared method.  Dropped the speculative =args.get("agent")/
+  ("name")= fallback keys — deepagents only emits =subagent_type=
+  (no-theoretical-code rule).
+
+- *Eval numbers.*  Baseline (current agent, pre-fix): fails — observed
+  both predicted failure modes (answer-from-training-data once; 3×
+  research-agent re-dispatch once).  Post-fix tech prompt: 4/4 pass
+  (1 standalone + N=3).  Post-review N=5 (both prompts) + N=10 stability:
+  see the PR description.

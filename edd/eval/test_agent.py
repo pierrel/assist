@@ -233,7 +233,7 @@ def _cleanup_workspace(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-class TestAgentSandboxIntegration(TestCase):
+class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
     """Integration evals that need a real sandbox.
 
     Lives alongside ``TestAgent`` because the user thinks of these as
@@ -282,19 +282,6 @@ class TestAgentSandboxIntegration(TestCase):
                     if isinstance(v, str) and path_needle in v:
                         return True
         return False
-
-    def _task_subagents_called(self, agent) -> list[str]:
-        out = []
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage) or not m.tool_calls:
-                continue
-            for tc in m.tool_calls:
-                if tc.get("name") == "task":
-                    args = tc.get("args") or {}
-                    sa = args.get("subagent_type") or args.get("agent") or args.get("name") or ""
-                    if sa:
-                        out.append(sa)
-        return out
 
     def _ran_python_via_execute(self, agent) -> bool:
         """True iff at least one `execute` tool call invoked Python.
@@ -368,7 +355,7 @@ class TestAgentSandboxIntegration(TestCase):
         )
 
         # 1. Research delegation happened.
-        subagents = self._task_subagents_called(agent)
+        subagents = self.subagent_calls(agent)
         self.assertIn(
             "research-agent", subagents,
             f"Should have delegated strategy research to research-agent. "
@@ -476,23 +463,22 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
     name at import via ``from assist.tools import search_internet``, so
     the research subagent's tool list captured that module-level
     reference — patching the ``assist.tools`` attribute would not rebind
-    it.  ``read_url`` is patched too, purely so a model that ignores the
-    blocked search and hallucinates a URL can't reach the live network
-    and re-burn the IP; the eval asserts nothing about ``read_url``.
+    it.  See ``_run_with_blocked_search`` for the mock details.
     """
 
     def setUp(self):
         self.model = select_chat_model(0.1)
 
-    def _create_agent(self, filesystem: dict):
-        root = tempfile.mkdtemp(prefix="rate_limit_handoff_eval_")
-        create_filesystem(root, filesystem)
-        return AgentHarness(create_agent(self.model, root)), root
+    def _run_with_blocked_search(self, prompt: str):
+        """Build the general agent with search/fetch forced to report
+        rate-limited, send ``prompt``, and return ``(agent, response)``.
 
-    def test_relays_unavailable_instead_of_redispatching(self):
-        # Build the search/fetch stubs with the real functions' metadata
-        # (name, docstring, signature) so deepagents wraps them as the
-        # same-named tools the prompts reference.
+        Stubs carry the real functions' metadata (name, docstring,
+        signature) via ``functools.wraps`` so deepagents wraps them as the
+        same-named tools the prompts reference.  The agent is built INSIDE
+        the patch so ``create_research_agent``'s tool list (constructed by
+        ``create_agent``) captures the stubs.
+        """
         import assist.tools as _tools
 
         @functools.wraps(_tools.search_internet)
@@ -503,21 +489,27 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
         # external surface speaks with one voice ("rate-limited, retry in
         # a few minutes") and the model can't read eval-awareness into a
         # bespoke "unavailable in this environment" string.  Mirrors
-        # read_url's real "Error fetching URL: <e>" shape.
+        # read_url's real "Error fetching URL: <e>" shape.  The eval
+        # asserts nothing about read_url; this is purely network safety.
         @functools.wraps(_tools.read_url)
         def _blocked_fetch(url):
             return ("Error fetching URL: rate-limited; cannot retry for "
                     "~10 minutes. Try again in a few minutes.")
 
-        # Patch BEFORE building the agent so create_research_agent's tool
-        # list (built inside create_agent) captures the stubs.
+        root = tempfile.mkdtemp(prefix="rate_limit_handoff_eval_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        create_filesystem(root, {"README.org": "My notes live in notes/.",
+                                 "notes": {"misc.org": "Personal notes."}})
         with patch("assist.agent.search_internet", _blocked_search), \
              patch("assist.agent.read_url", _blocked_fetch):
-            agent, _root = self._create_agent(
-                {"README.org": "My notes live in notes/.",
-                 "notes": {"misc.org": "Personal notes."}})
-            res = agent.message(
-                "What's the latest LangGraph release and what changed?")
+            agent = AgentHarness(create_agent(self.model, root))
+            res = agent.message(prompt)
+        return agent, res
+
+    def _assert_relays_unavailable(self, agent, res):
+        # Belt-and-suspenders: a recursion-killed / empty turn fails here
+        # with a clearer message than the regexes' "didn't match".
+        self.assertTrue(res, "Agent returned an empty response")
 
         # 1. research-agent dispatched EXACTLY once.  Zero would mean the
         #    parent answered from its own knowledge (a different failure
@@ -539,3 +531,17 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
         self.assertRegex(
             res, r"(?i)try again|few minutes|10 ?min|moment|shortly|later",
             f"Response should tell the user to wait and retry.  Got: {res[:600]}")
+
+    def test_relays_unavailable_tech_lookup(self):
+        agent, res = self._run_with_blocked_search(
+            "What's the latest LangGraph release and what changed?")
+        self._assert_relays_unavailable(agent, res)
+
+    def test_relays_unavailable_news_lookup(self):
+        # A differently-shaped, non-technical lookup.  Same contract — if
+        # the agent heeds the blocked signal here too, it's reading the
+        # signal, not pattern-matching one LangGraph-shaped prompt.
+        agent, res = self._run_with_blocked_search(
+            "What were the headlines from the Federal Reserve's most "
+            "recent interest-rate decision?")
+        self._assert_relays_unavailable(agent, res)
