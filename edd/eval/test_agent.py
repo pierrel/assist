@@ -536,8 +536,11 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
             f"Response should tell the user search is unavailable.  Got: {res[:600]}")
         self.assertRegex(
             res,
+            # Explicit retry phrase OR a time reference.  Deliberately no
+            # bare "moment" — it matches "at the moment", which isn't a
+            # wait/retry instruction and would let a fabrication pass.
             r"(?i)\bmins?\b|minute|try again|ask again|in a bit|in a moment"
-            r"|in a while|shortly|soon|later|moment",
+            r"|in a while|shortly|soon|later",
             f"Response should tell the user to wait and retry.  Got: {res[:600]}")
 
     def test_relays_unavailable_tech_lookup(self):
