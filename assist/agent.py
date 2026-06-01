@@ -185,7 +185,15 @@ def create_agent(model: BaseChatModel,
     # of `loop_detection_mw` so the rejection is what the loop
     # detector sees if the model retries.
     git_push_blocker_mw = GitPushBlockerMiddleware()
-    loop_detection_mw = LoopDetectionMiddleware(exploration_tools=loop_exploration_tools)
+    # subagent_dispatch_threshold caps re-dispatch of the same sub-agent
+    # (context / research / critique) to once — the general-agent prompt's
+    # "call each sub-agent ONCE" made deterministic.  Stops the general
+    # agent from re-dispatching the research orchestrator, which multiplies
+    # the inner search volume, and reinforces the #119 rate-limit handoff.
+    loop_detection_mw = LoopDetectionMiddleware(
+        exploration_tools=loop_exploration_tools,
+        subagent_dispatch_threshold=_SUBAGENT_DISPATCH_CAP,
+    )
     # Innermost wrap_model_call middleware — recovers from empty terminal
     # AIMessages after every outer retry/sanitization layer has had its turn.
     empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
@@ -377,11 +385,16 @@ def create_context_agent(model: BaseChatModel,
 # aggregate search volume to ~this many for a research turn.
 _RESEARCH_TOOL_VOLUME_CAP = 6
 
-# Pattern F: max dispatches of any single subagent (research / critique /
-# fact-check) by the research orchestrator.  1 = each at most once, the
-# budget the prompt already states — made deterministic because the soft
-# prompt rule did not hold (the model re-dispatched research-agent ~3x).
-_RESEARCH_SUBAGENT_DISPATCH_CAP = 1
+# Pattern F: max dispatches of any single subagent by an orchestrating
+# agent.  1 = each subagent at most once — the budget both the general
+# agent ("call each sub-agent ONCE") and the research orchestrator
+# ("research once, critique once, fact-check once") already state in
+# prose.  Made deterministic because the soft prompt rule did not hold:
+# the model re-dispatched the research-agent ~3x (at the orchestrator)
+# and, on some runs, re-dispatched the research orchestrator at the
+# general-agent level — each multiplying the inner search volume.
+# Enabled on BOTH the general agent and the research orchestrator.
+_SUBAGENT_DISPATCH_CAP = 1
 
 
 def create_research_agent(model: BaseChatModel,
@@ -426,7 +439,7 @@ def create_research_agent(model: BaseChatModel,
     # research-agent re-dispatch that multiplies inner search volume.
     base_mw.append(LoopDetectionMiddleware(
         volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
-        subagent_dispatch_threshold=_RESEARCH_SUBAGENT_DISPATCH_CAP,
+        subagent_dispatch_threshold=_SUBAGENT_DISPATCH_CAP,
     ))
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
@@ -534,9 +547,14 @@ def create_research_agent(model: BaseChatModel,
         "middleware": _subagent_safety_mw(),
     }
 
+    # The orchestrator DELEGATES searching to the research-agent (see its
+    # prompt) — it does not search directly.  Giving it search_internet too
+    # was redundant and doubled the over-search (orchestrator-direct +
+    # inner agent both ran capped search passes).  It keeps read_url for
+    # reading specific URLs while writing/fact-checking the report.
     agent = create_deep_agent(
         model=model,
-        tools=[search_internet, read_url],
+        tools=[read_url],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
                                       workspace_dir=workspace_dir),
