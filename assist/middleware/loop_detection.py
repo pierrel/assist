@@ -39,6 +39,7 @@ import hashlib
 import json
 import logging
 import re
+from collections import Counter
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
@@ -239,12 +240,14 @@ def _detect_loop(
     exploration_tools: frozenset[str] = frozenset(),
     exploration_args_threshold: int = _EXPLORATION_DISTINCT_ARGS_THRESHOLD,
     http_failure_threshold: int = 4,
+    volume_threshold: int = 0,
 ) -> dict | None:
     """Return loop-detection info or ``None`` if no loop.
 
     Result keys:
       pattern     -- "same-tool-same-error" | "same-tool-same-args" |
-                     "distinct-args-thrash"
+                     "distinct-args-thrash" | "http-failure-streak" |
+                     "tool-volume"
       reason      -- short human-readable string for logs
       tools       -- set of looping tool names
       run_length  -- length of the trailing run (or distinct-arg count)
@@ -424,6 +427,29 @@ def _detect_loop(
             "run_length": http_fail_len,
         }
 
+    # Pattern E: sheer VOLUME of one tool within the window, regardless of
+    # args or errors.  Off unless volume_threshold > 0 (enabled on the
+    # research flow, where the small model otherwise searches dozens of
+    # times under "conduct thorough research" — observed: 50+ search calls
+    # for one trivial query).  This is a HIGHER, looser bound than Pattern
+    # C: distinct-query exploration is the *normal* shape of research, but
+    # calling one tool volume_threshold+ times in a short window is a
+    # runaway no matter how varied the args.  Comes last so the
+    # args/error-specific patterns (which carry better terminal messages)
+    # win when they also apply.
+    if volume_threshold > 0 and completed_events:
+        tool, n = Counter(
+            e["tool_name"] for e in completed_events
+        ).most_common(1)[0]
+        if n >= volume_threshold:
+            return {
+                "pattern": "tool-volume",
+                "reason": (f"tool-volume: {tool} x{n} within last "
+                           f"{len(completed_events)} calls"),
+                "tools": {tool},
+                "run_length": n,
+            }
+
     return None
 
 
@@ -495,6 +521,15 @@ def _compose_terminal_message(detection: dict, messages: list) -> str:
             f"I kept making the same {tool_list} call and wasn't getting new "
             "information. I won't repeat it. Could you tell me how you'd "
             "like to proceed?"
+        )
+
+    if pattern == "tool-volume":
+        # A graceful "enough" — not an error.  The agent has gathered
+        # plenty; tell it to finalize with what it has rather than asking
+        # the user for direction (there's nothing wrong, just over-effort).
+        return (
+            f"I've already used {tool_list} enough times to answer this. "
+            "I'll stop gathering and write up what I have now."
         )
 
     # distinct-args-thrash
@@ -591,6 +626,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
         distinct_args_window: int = 10,
         exploration_tools: frozenset[str] | None = None,
         http_failure_threshold: int = 4,
+        volume_threshold: int = 0,
     ):
         super().__init__()
         self.window = window
@@ -602,6 +638,10 @@ class LoopDetectionMiddleware(AgentMiddleware):
         # yields an immutable attribute (matches the type annotation).
         self.exploration_tools = frozenset(exploration_tools or ())
         self.http_failure_threshold = http_failure_threshold
+        # Pattern E volume cap.  0 disables it (default) so non-research
+        # agents are unaffected; the research flow opts in.  See Pattern E
+        # in _detect_loop.
+        self.volume_threshold = volume_threshold
         self.tools = []
         self._intervention_count = 0
 
@@ -627,6 +667,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
             distinct_args_window=self.distinct_args_window,
             exploration_tools=self.exploration_tools,
             http_failure_threshold=self.http_failure_threshold,
+            volume_threshold=self.volume_threshold,
         )
         if detection is None:
             return None

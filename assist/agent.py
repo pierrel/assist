@@ -363,6 +363,18 @@ def create_context_agent(model: BaseChatModel,
     return RollbackRunnable(agent, recursion_limit=500)
 
 
+# LoopDetection Pattern-E volume cap for the research flow.  The small
+# model reads "conduct thorough research" as "search dozens of times"
+# (prod: 50-100 search_internet calls for one trivial query), which the
+# args/error-based loop patterns don't catch because each query is
+# distinct and succeeds.  This caps any single tool (search_internet,
+# task re-dispatch, read_url) to ~this many calls per agent within the
+# detection window, then makes the agent finalize with what it has.
+# Deliberately higher than a healthy research pass (~4 searches) so it
+# only fires on genuine runaway, not normal multi-query exploration.
+_RESEARCH_TOOL_VOLUME_CAP = 8
+
+
 def create_research_agent(model: BaseChatModel,
                           working_dir: str,
                           checkpointer=None,
@@ -398,7 +410,7 @@ def create_research_agent(model: BaseChatModel,
     # trap (multi-pass critique → "I have completed the research" → another
     # write_file).
     base_mw.append(WriteCollisionMiddleware())
-    base_mw.append(LoopDetectionMiddleware())
+    base_mw.append(LoopDetectionMiddleware(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP))
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
 
@@ -478,7 +490,7 @@ def create_research_agent(model: BaseChatModel,
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
-                LoopDetectionMiddleware(),
+                LoopDetectionMiddleware(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 

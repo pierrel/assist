@@ -1123,3 +1123,58 @@ class TestLoopDetectionMiddleware:
         result = mw.after_model({"messages": prior_turn + current_turn}, Mock())
         assert result is not None
         assert result["messages"][-1].tool_calls == []
+
+
+class TestPatternEVolume:
+    """Pattern E: sheer per-tool call volume, regardless of args/errors.
+
+    Off unless volume_threshold > 0.  Uses search_internet (a read-only
+    tool with distinct, successful args) so Patterns A/B/C/D all skip and
+    only the volume pattern can fire — proving it catches a runaway the
+    other patterns deliberately ignore (distinct-query exploration is
+    normal; sheer volume is not).
+    """
+    def _searches(self, n):
+        return [{
+            "tool_name": "search_internet",
+            "args_sig": _normalise_args({"query": f"q{i}"}),
+            "result_content": "[{'title': 'r', 'url': 'u', 'content': 'c'}]",
+            "is_error": False,
+            "http_failure": False,
+            "completed": True,
+        } for i in range(n)]
+
+    def test_disabled_by_default(self):
+        # 20 distinct successful searches, volume cap off -> no detection.
+        assert _detect_loop(self._searches(20), 2, 3, 3, 10) is None
+
+    def test_fires_at_threshold(self):
+        result = _detect_loop(self._searches(8), 2, 3, 3, 10, volume_threshold=8)
+        assert result is not None
+        assert result["pattern"] == "tool-volume"
+        assert result["tools"] == {"search_internet"}
+        assert result["run_length"] == 8
+
+    def test_does_not_fire_below_threshold(self):
+        assert _detect_loop(self._searches(7), 2, 3, 3, 10, volume_threshold=8) is None
+
+    def test_picks_highest_count_tool(self):
+        events = self._searches(8) + [{
+            "tool_name": "read_url",
+            "args_sig": _normalise_args({"url": f"u{i}"}),
+            "result_content": "page text",
+            "is_error": False, "http_failure": False, "completed": True,
+        } for i in range(3)]
+        result = _detect_loop(events, 2, 3, 3, 10, volume_threshold=8)
+        assert result is not None
+        assert result["tools"] == {"search_internet"}
+
+    def test_terminal_message_is_graceful(self):
+        msg = _compose_terminal_message(
+            {"pattern": "tool-volume", "tools": {"search_internet"},
+             "run_length": 8, "reason": "x"},
+            [],
+        )
+        # Not an error/ask-for-direction message — a "finalize now" one.
+        assert "search_internet" in msg
+        assert "?" not in msg
