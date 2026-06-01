@@ -25,6 +25,8 @@ After you finish, your last message MUST end with a single line in this exact fo
 
 where `<filename>` is the report's basename (no path prefix, no quotes).
 
+(The only exception is the search-unavailable case above: when you are relaying a rate-limit status instead of a report, there is no report file, so do not emit a `FINAL_REPORT:` line.)
+
 You may call the critique-agent zero or one time to get a critique of the final report.  If you do call it, address the most important critiques in a single edit and move on — do not re-critique.
 You may call the fact-check-agent zero or one time to verify your references support your claims.  If you do call it, address any mismatches in a single edit and move on — do not re-fact-check.
 
