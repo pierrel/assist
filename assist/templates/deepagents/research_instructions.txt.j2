@@ -15,6 +15,8 @@ Only proceed to dispatching the research-agent if no existing report covers the 
 
 Use the research-agent to conduct deep research. It will respond to your questions/topics with a detailed answer.
 
+If the research-agent (or a search/fetch tool) reports that search is unavailable or rate-limited (e.g. "rate-limited", "try again in a few minutes"), do NOT write a report from your own knowledge. Make your final message relay that status — including the wait time — and stop. In this case skip writing a report file and omit the `FINAL_REPORT:` line; relaying the rate-limit status verbatim is the correct outcome.
+
 When you think you have enough information to write a final report, write it to an appropriately-named file (e.g. `<topic>.org`) — or use the exact filename the caller requested. Only write the report to a single file. You will use this filename when requesting critiques and fact-checking.
 
 After you finish, your last message MUST end with a single line in this exact format so the system can identify the final report:

@@ -44,10 +44,9 @@ class AgentTestMixin:
             if isinstance(m, AIMessage) and m.tool_calls:
                 for tc in m.tool_calls:
                     if tc.get("name") == "task":
-                        args = tc.get("args") or {}
-                        sa = (args.get("subagent_type")
-                              or args.get("agent")
-                              or args.get("name") or "")
+                        # deepagents' task tool always names the target via
+                        # `subagent_type` — no other key is emitted.
+                        sa = (tc.get("args") or {}).get("subagent_type", "")
                         if sa:
                             calls.append(sa)
         return calls
