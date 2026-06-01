@@ -1,0 +1,152 @@
+#+TITLE: Bound the research agent's effort — stop the over-search runaway
+#+DATE: 2026-06-01
+State: Design.  Eval-first.  Follow-up to the rate-limit-handoff PR
+(#119); surfaced by a confirmation-eval flake AND a live prod thread.
+
+* Problem
+Two related research-agent runaways, one trivial query.
+
+** Prod evidence (thread 20260601080949-ba9df2c2, "waterproof watches for Sam")
+Ran *after* #119 deployed.  Search was working (results were real, not
+rate-limited).  The research subtree still produced:
+- ~100 =search_internet= calls total, across *3 nested research-agent
+  dispatches* (60 + 18 + 23) under one orchestrator,
+- 818 checkpoints in the research subtree.
+
+For "waterproof watches for Sam."  Two compounding causes:
+1. *Inner research-agent* (=sub_research.txt.j2=) is told only "conduct
+   thorough research" — no effort bound — so the small model reads
+   "thorough" as "search 60 times."
+2. *Orchestrator* (=research_instructions.txt.j2=) permits "at most 5
+   =task= calls" and re-dispatches the inner research-agent repeatedly
+   to gather more, multiplying the searches.
+
+** Eval evidence (confirmation flake from #119)
+With search mocked rate-limited, the orchestrator's Step 0 ("check the
+workspace for a prior report") over-eagerly =read_file='d on an empty
+workspace, looped on "File '/' not found", got caught by
+LoopDetection, and the derailed first dispatch made the parent
+re-dispatch research-agent (2 != 1).  ~1/36 flake.
+
+Both are the same family: *the research agent does not converge — it
+over-works (search volume) or thrashes (read_file on an empty
+workspace) instead of finishing.*
+
+* Solution (prompt-only first; eval decides if a hard cap is needed)
+
+** Fix A — Step 0 read_file thrash (=research_instructions.txt.j2=)
+Empty or no-name-match workspace → do NOT =read_file=, go straight to
+research; =read_file= only a bare filename seen in =ls('/')=, never
+=/=; on a read error, treat the file as absent and proceed (don't retry
+variations).  *Already drafted on the branch.*
+
+** Fix B — bound the inner research-agent (=sub_research.txt.j2=)
+Add an explicit stopping rule: stop after about 4 searches, and as soon
+as you can answer — you do NOT need exhaustive coverage.  One crisp
+ceiling, not a range; the small model currently has no stopping rule at
+all (only the vague "conduct thorough research", which it read as 60
+searches).
+
+** Fix C — orchestrator dispatches the inner research-agent ONCE
+(=research_instructions.txt.j2=)
+Replace "at most 5 task calls" with: dispatch the research-agent ONCE;
+re-dispatch only if the first result genuinely failed to address the
+question at all — never just to gather more detail.  One thorough pass
+is the contract.
+
+** Escalation (only if the eval shows prompt bounds don't hold)
+A *deterministic* cap.  Per the agentic design review, host it in the
+existing =LoopDetectionMiddleware= (already wired onto the research
+subagent at =agent.py:481= and the base at =:401=) as a new
+volume pattern — "the same read-only tool name called >= N times in the
+window" — rather than a bespoke parallel counter middleware.  That
+reuses the middleware's event extraction, per-turn slicing, graceful
+terminal-message composition, and strip-tool-calls-to-end-the-loop
+mechanism.  It is a HIGHER, looser bound than Pattern C (which is
+deliberately exempt for read-only tools because distinct queries are
+normal exploration) — it fires only on genuine runaway volume (~15),
+not on normal multi-query research.
+
+Enforcement is per-agent (each nested research-agent has its own
+middleware instance seeing only its own messages), so the volume
+pattern caps each DISPATCH; Fix C (orchestrator dispatches once) caps
+the MULTIPLIER.  Together they bound the aggregate the eval measures.
+Deferred only because the crisp prompt ceiling (Fix B) is a different
+kind of instruction than the vague "thorough" that failed, and might
+hold; the eval decides in ONE round (no indefinite prompt tuning).
+
+* Eval (Phase A — pin the contract)
+New eval, =edd/eval/test_research_agent.py= (or test_agent.py):
+1. Patch =assist.agent.search_internet= to a stub returning canned,
+   real-looking results, wrapped in a *call counter*.  (Same patch-site
+   reasoning as #119: =assist.agent=, not =assist.tools=.)  Patch
+   =read_url= similarly for hermeticity.
+2. Run the general agent on a research query.  Use TWO differently-shaped
+   queries (per the eval-alignment convention), since the prod-mirroring
+   one ("waterproof watches for a 10-year-old") is lexically close to the
+   Step 0 example: add a second, unrelated subject (e.g. "how do tabata
+   intervals work?").  A bound that holds on both is bounding effort,
+   not pattern-matching one query.
+3. Assert:
+   - total =search_internet= invocations <= a budget (start at ~12 —
+     well under the prod ~100, comfortably above one healthy pass).
+   - research-agent dispatched a bounded number of times at the
+     orchestrator level (reuse =subagent_calls=; expect 1).
+   - the run returns a non-empty answer (it still researches; we're
+     bounding effort, not disabling it).
+4. Baseline (current prompts): expect FAIL (search count blows the
+   budget).  N=3.
+
+Also keep =TestResearchRateLimitHandoff= green — Fix A/B/C are additive
+and conditional, so the rate-limit path should be unchanged; re-run it
+at N=5 alongside.
+
+* Risks
+- *R1 — small model ignores a soft count.*  "~3-5 searches" is
+  guidance, not enforcement.  The eval is the arbiter; if the budget
+  blows, escalate to the hard cap.  Don't iterate the prompt
+  indefinitely (cap at two tries, per #119's R4).
+- *R2 — under-research regression.*  Bounding effort could make reports
+  thinner.  Mitigate: the budget (~3-5 inner searches, one orchestrator
+  pass) is still real research, and the existing research evals
+  (=test_research_agent.py=, =test_research_saved_to_references=) must
+  stay green — re-validate them at N=3.
+- *R3 — counting searches across nested namespaces.*  The stub counter
+  is global (module-level), so it counts every invocation regardless of
+  which nested research-agent made it — exactly what we want (total
+  effort, not per-dispatch).
+
+* What this deliberately does NOT do
+- Does NOT add the hard-cap middleware up front (escalation only).
+- Does NOT change =max_results= or the search tool itself — this is
+  about how many *times* the agent searches, not results per search.
+- Does NOT touch the circuit breaker / rate-limit relay (#119); this is
+  the working-search over-research path.
+
+* Relationship
+- Follows #119 (rate-limit handoff).  The read_file Step 0 fix (A) also
+  closes #119's confirmation flake.  Same branch per user direction
+  ("both as one PR").
+
+* Design changes from review (round 1)
+- *Divergence resolved eval-first.*  Simplicity lens: prompt-only first,
+  defer the cap.  Agentic lens: we already have evidence soft guidance
+  fails on this model, so a deterministic cap should lead.  Resolution:
+  the new prompt is a crisp stopping rule (not the vague "thorough" that
+  failed), so it might hold — the eval decides in ONE round; if it
+  blows the budget, escalate immediately to the LoopDetection volume
+  pattern (no indefinite prompt tuning).
+- *Cap mechanism = a new LoopDetection volume pattern*, not a bespoke
+  counter middleware (agentic Finding 2): reuse existing plumbing; fire
+  at a higher count than normal exploration; per-agent enforcement +
+  orchestrator "dispatch once" bound the aggregate.
+- *Fix B is one crisp ceiling*, not a "3-5" range (simplicity NIT).
+- *Fix C must REPLACE the conflicting "at most 5 task calls" line*, not
+  sit beside it — two numbers (1 vs 5) in one prompt is a small-model
+  failure source.  Keep critique/fact-check at "once each"; the "once"
+  rule is scoped to research-agent re-dispatch only (it does not fight
+  the legitimate research->critique->fact-check fan-out).
+- *Fix A framed as carried-over* from #119's confirmation flake
+  (distinct failure path from B/C), included per the user's "both as
+  one PR" direction — not claimed to be the same root cause.
+- *Two eval queries* (one non-telegraphed) per the eval-alignment rule.
