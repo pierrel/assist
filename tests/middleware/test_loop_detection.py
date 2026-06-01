@@ -1178,3 +1178,61 @@ class TestPatternEVolume:
         # Not an error/ask-for-direction message — a "finalize now" one.
         assert "search_internet" in msg
         assert "?" not in msg
+
+
+class TestPatternFRedispatch:
+    """Pattern F: per-subagent `task` re-dispatch cap (orchestrator).
+
+    With subagent_dispatch_threshold=1, each subagent may be dispatched
+    once; re-dispatching an already-used one is stripped, but dispatching
+    a fresh subagent (the research -> critique -> fact-check progression)
+    passes through.
+    """
+    def test_off_by_default(self):
+        # Three research dispatches, distinct descriptions (so Pattern B
+        # does not fire), default middleware (threshold 0) -> no action.
+        mw = LoopDetectionMiddleware()
+        last = _ai_with_call("c3", "task",
+                             {"subagent_type": "research-agent", "description": "c"})
+        messages = [
+            HumanMessage(content="go"),
+            _ai_with_call("c1", "task",
+                          {"subagent_type": "research-agent", "description": "a"}),
+            _tool_msg("c1", "research result one"),
+            _ai_with_call("c2", "task",
+                          {"subagent_type": "research-agent", "description": "b"}),
+            _tool_msg("c2", "research result two"),
+            last,
+        ]
+        assert mw.after_model({"messages": messages}, Mock()) is None
+
+    def test_strips_redispatch_of_same_subagent(self):
+        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
+        last = _ai_with_call("c2", "task",
+                             {"subagent_type": "research-agent", "description": "again"})
+        messages = [
+            HumanMessage(content="go"),
+            _ai_with_call("c1", "task",
+                          {"subagent_type": "research-agent", "description": "first"}),
+            _tool_msg("c1", "research result"),
+            last,
+        ]
+        result = mw.after_model({"messages": messages}, Mock())
+        assert result is not None
+        assert result["messages"][-1].tool_calls == []
+        assert "gathered" in result["messages"][-1].content.lower()
+
+    def test_fresh_subagent_passes(self):
+        # research already dispatched; dispatching critique (fresh) is the
+        # normal progression and must not be stripped.
+        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
+        last = _ai_with_call("c2", "task",
+                             {"subagent_type": "critique-agent", "description": "review"})
+        messages = [
+            HumanMessage(content="go"),
+            _ai_with_call("c1", "task",
+                          {"subagent_type": "research-agent", "description": "first"}),
+            _tool_msg("c1", "research result"),
+            last,
+        ]
+        assert mw.after_model({"messages": messages}, Mock()) is None

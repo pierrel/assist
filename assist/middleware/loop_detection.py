@@ -202,6 +202,12 @@ def _extract_events(messages: list, window: int) -> list[dict]:
             tc_id = tc.get("id")
             tm = tool_msgs.get(tc_id)
             args = tc.get("args") or {}
+            # For `task` calls, record which subagent was dispatched so
+            # Pattern F can cap per-subagent re-dispatch.  deepagents emits
+            # `subagent_type`; the small model sometimes uses agent/name.
+            subagent = (args.get("subagent_type")
+                        or args.get("agent")
+                        or args.get("name") or "") if (tc.get("name") == "task") else ""
             if tm is not None:
                 content = str(tm.content) if tm.content is not None else ""
                 is_error = (
@@ -211,6 +217,7 @@ def _extract_events(messages: list, window: int) -> list[dict]:
                 events.append({
                     "tool_name": tc.get("name") or "",
                     "args_sig": _normalise_args(args),
+                    "subagent": subagent,
                     "result_content": content,
                     "is_error": is_error,
                     # Pattern D signal: HTTP-failure-shaped body even when
@@ -222,6 +229,7 @@ def _extract_events(messages: list, window: int) -> list[dict]:
                 events.append({
                     "tool_name": tc.get("name") or "",
                     "args_sig": _normalise_args(args),
+                    "subagent": subagent,
                     "result_content": "",
                     "is_error": False,
                     "http_failure": False,
@@ -241,6 +249,7 @@ def _detect_loop(
     exploration_args_threshold: int = _EXPLORATION_DISTINCT_ARGS_THRESHOLD,
     http_failure_threshold: int = 4,
     volume_threshold: int = 0,
+    subagent_dispatch_threshold: int = 0,
 ) -> dict | None:
     """Return loop-detection info or ``None`` if no loop.
 
@@ -427,6 +436,32 @@ def _detect_loop(
             "run_length": http_fail_len,
         }
 
+    # Pattern F: per-subagent `task` RE-DISPATCH.  The research orchestrator
+    # is meant to dispatch each subagent (research / critique / fact-check)
+    # at most once; the small model re-dispatches the research-agent
+    # repeatedly (prod: 3x for one query), multiplying the inner search
+    # volume that Pattern E caps only per-agent.  Off unless
+    # subagent_dispatch_threshold > 0.  Keyed BY subagent, so dispatching
+    # three DIFFERENT subagents once each never trips it.  Returns the set
+    # of over-threshold subagents; after_model strips only a latest call
+    # that re-dispatches one of them.
+    if subagent_dispatch_threshold > 0:
+        sub_counts = Counter(
+            e.get("subagent") for e in completed_events
+            if e["tool_name"] == "task" and e.get("subagent")
+        )
+        over = {s for s, n in sub_counts.items()
+                if n >= subagent_dispatch_threshold}
+        if over:
+            return {
+                "pattern": "subagent-redispatch",
+                "reason": (f"subagent-redispatch: "
+                           + ", ".join(f"{s} x{sub_counts[s]}" for s in sorted(over))),
+                "tools": {"task"},
+                "subagents": over,
+                "run_length": max(sub_counts[s] for s in over),
+            }
+
     # Pattern E: sheer VOLUME of one tool within the window, regardless of
     # args or errors.  Off unless volume_threshold > 0 (enabled on the
     # research flow, where the small model otherwise searches dozens of
@@ -532,6 +567,14 @@ def _compose_terminal_message(detection: dict, messages: list) -> str:
             "I'll stop gathering and write up what I have now."
         )
 
+    if pattern == "subagent-redispatch":
+        # Graceful: the orchestrator already has this sub-agent's result;
+        # tell it to use what it has rather than re-dispatching.
+        return (
+            "I've already gathered that sub-agent's result. I'll finalize "
+            "with what I have rather than dispatching it again."
+        )
+
     # distinct-args-thrash
     excerpt = _last_error_excerpt(messages, looping_tools)
     excerpt_clause = f' (most recent issue: "{excerpt}")' if excerpt else ""
@@ -627,6 +670,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
         exploration_tools: frozenset[str] | None = None,
         http_failure_threshold: int = 4,
         volume_threshold: int = 0,
+        subagent_dispatch_threshold: int = 0,
     ):
         super().__init__()
         self.window = window
@@ -642,6 +686,9 @@ class LoopDetectionMiddleware(AgentMiddleware):
         # agents are unaffected; the research flow opts in.  See Pattern E
         # in _detect_loop.
         self.volume_threshold = volume_threshold
+        # Pattern F per-subagent re-dispatch cap.  0 disables it (default);
+        # the research orchestrator opts in.  See Pattern F in _detect_loop.
+        self.subagent_dispatch_threshold = subagent_dispatch_threshold
         self.tools = []
         self._intervention_count = 0
 
@@ -668,6 +715,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
             exploration_tools=self.exploration_tools,
             http_failure_threshold=self.http_failure_threshold,
             volume_threshold=self.volume_threshold,
+            subagent_dispatch_threshold=self.subagent_dispatch_threshold,
         )
         if detection is None:
             return None
@@ -685,6 +733,25 @@ class LoopDetectionMiddleware(AgentMiddleware):
                 sorted(last_call_names),
             )
             return None
+
+        # Pattern F is subagent-specific: only intervene if the latest
+        # message RE-dispatches an already-used subagent.  A `task` call to
+        # a fresh subagent (the normal research -> critique -> fact-check
+        # progression) must pass through untouched.
+        if detection["pattern"] == "subagent-redispatch":
+            latest_subagents = {
+                (tc.get("args") or {}).get("subagent_type")
+                or (tc.get("args") or {}).get("agent")
+                or (tc.get("args") or {}).get("name")
+                for tc in last.tool_calls if tc.get("name") == "task"
+            }
+            if latest_subagents.isdisjoint(detection["subagents"]):
+                logger.info(
+                    "LoopDetection: subagent-redispatch matched (%s) but "
+                    "latest dispatches a fresh subagent (%s) — continuing.",
+                    detection["reason"], sorted(s for s in latest_subagents if s),
+                )
+                return None
 
         artifact = _last_successful_artifact(messages)
         terminal_content = _compose_terminal_message(detection, messages)

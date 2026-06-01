@@ -372,7 +372,16 @@ def create_context_agent(model: BaseChatModel,
 # detection window, then makes the agent finalize with what it has.
 # Deliberately higher than a healthy research pass (~4 searches) so it
 # only fires on genuine runaway, not normal multi-query exploration.
-_RESEARCH_TOOL_VOLUME_CAP = 8
+# Per-AGENT cap; combined with the per-subagent re-dispatch cap below
+# (which holds the orchestrator to one research dispatch), this bounds the
+# aggregate search volume to ~this many for a research turn.
+_RESEARCH_TOOL_VOLUME_CAP = 6
+
+# Pattern F: max dispatches of any single subagent (research / critique /
+# fact-check) by the research orchestrator.  1 = each at most once, the
+# budget the prompt already states — made deterministic because the soft
+# prompt rule did not hold (the model re-dispatched research-agent ~3x).
+_RESEARCH_SUBAGENT_DISPATCH_CAP = 1
 
 
 def create_research_agent(model: BaseChatModel,
@@ -410,7 +419,15 @@ def create_research_agent(model: BaseChatModel,
     # trap (multi-pass critique → "I have completed the research" → another
     # write_file).
     base_mw.append(WriteCollisionMiddleware())
-    base_mw.append(LoopDetectionMiddleware(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP))
+    # The orchestrator gets BOTH the per-agent volume cap AND the
+    # per-subagent re-dispatch cap (Pattern F): each subagent
+    # (research / critique / fact-check) at most once, matching the
+    # prompt's stated budget and deterministically stopping the
+    # research-agent re-dispatch that multiplies inner search volume.
+    base_mw.append(LoopDetectionMiddleware(
+        volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
+        subagent_dispatch_threshold=_RESEARCH_SUBAGENT_DISPATCH_CAP,
+    ))
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
 
