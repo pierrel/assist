@@ -16,7 +16,7 @@ Your **first tool call MUST** be `ls('/')` to list the reports already saved in 
 
 `read_file` takes a **bare filename copied from the `ls('/')` output** — never `/`, never a directory, never a name you did not see in the listing. If a `read_file` call errors, do NOT retry it with variations; treat the file as absent and proceed to dispatching the research-agent.
 
-Use the research-agent to conduct deep research. It will respond to your questions/topics with a detailed answer.
+Use the research-agent to conduct deep research. It will respond to your questions/topics with a detailed answer. Dispatch it ONCE for the question — one thorough pass is the contract. Do NOT dispatch it again to gather more detail or a second opinion; re-dispatch only if the first result genuinely failed to address the question at all.
 
 If the research-agent (or a search/fetch tool) reports that search is unavailable or rate-limited (e.g. "rate-limited", "try again in a few minutes"), do NOT write a report from your own knowledge. Make your final message relay that status — including the wait time — and stop. In this case skip writing a report file and omit the `FINAL_REPORT:` line; relaying the rate-limit status verbatim is the correct outcome.
 
@@ -33,7 +33,7 @@ where `<filename>` is the report's basename (no path prefix, no quotes).
 You may call the critique-agent zero or one time to get a critique of the final report.  If you do call it, address the most important critiques in a single edit and move on — do not re-critique.
 You may call the fact-check-agent zero or one time to verify your references support your claims.  If you do call it, address any mismatches in a single edit and move on — do not re-fact-check.
 
-Total subagent budget: at most 5 `task` calls across research-agent + critique-agent + fact-check-agent combined.  Once you have made 5 task calls, finalize the report with what you have rather than spawning more subagents.
+Subagent budget: dispatch the research-agent once, the critique-agent at most once, and the fact-check-agent at most once — at most 3 `task` calls total for a normal report. Once you have your research result, finalize the report with what you have rather than spawning more subagents to gather extra detail.
 
 Only edit the file once at a time (if you call this tool in parallel, there may be conflicts).
 
