@@ -52,6 +52,24 @@ _CIRCUIT_OPEN_MESSAGE = (
     "search is temporarily rate-limited and to try again in a few minutes."
 )
 
+# Substrings in an exception's type-name + str() that suggest the failure
+# is an upstream rate-limit / block (as opposed to a transient network
+# blip or a parse failure on a one-off bad result).  When detected, we
+# open the circuit IMMEDIATELY rather than waiting for
+# _SEARCH_CIRCUIT_FAILURE_THRESHOLD failures — the cost of a false
+# positive (10 min of no search; the agent finalizes with what it has)
+# is much lower than the cost of a false negative (more requests to a
+# blocked endpoint, deeper IP burn, longer recovery).  Biased toward
+# false positives accordingly: timeouts, connection-resets, and
+# explicit 4xx/429 all count.
+_RATE_LIMIT_EXC_INDICATORS = (
+    "timeout", "timed out", "read timeout",
+    "connection refused", "connection reset", "reset by peer",
+    "rate limit", "rate-limit", "too many requests",
+    "blocked", "challenge", "captcha", "forbidden",
+    " 429", " 403",
+)
+
 # --- Per-host fetch throttle ---
 _host_lock = threading.Lock()
 _host_last_call: dict[str, float] = {}
@@ -106,6 +124,25 @@ def _record_search_success() -> None:
         _search_consecutive_failures = 0
 
 
+def _open_search_circuit_now() -> None:
+    """Open the search circuit immediately (rate-limit DETECTED, not
+    just a generic failure).  Distinct from `_record_search_failure`,
+    which counts toward the threshold — this jumps straight to open."""
+    global _search_consecutive_failures, _search_circuit_open_until
+    with _search_circuit_lock:
+        _search_consecutive_failures = _SEARCH_CIRCUIT_FAILURE_THRESHOLD
+        _search_circuit_open_until = time.time() + _SEARCH_CIRCUIT_DURATION_S
+
+
+def _exception_looks_like_rate_limit(exc: BaseException) -> bool:
+    """Heuristic: does ``exc`` (its type-name + str()) match any
+    `_RATE_LIMIT_EXC_INDICATORS` substring?  Used by `search_internet`
+    to short-circuit on detected upstream blocks instead of waiting for
+    the consecutive-failures threshold.  Case-insensitive."""
+    blob = f"{type(exc).__name__}: {exc}".lower()
+    return any(ind in blob for ind in _RATE_LIMIT_EXC_INDICATORS)
+
+
 def read_url(url: str) -> str:
     """Extract the content from the given url.
 
@@ -151,7 +188,15 @@ def search_internet(
                               max_results=max_results,
                               backend="duckduckgo")
         _record_search_success()
-    except Exception:
+    except Exception as e:
+        # Rate-limit / block DETECTED (timeout, connection reset, 429,
+        # 403, captcha challenge, etc.)?  Skip the slow consecutive-failures
+        # threshold and open the circuit NOW so we stop hitting an
+        # already-blocking endpoint.  The model gets the same explicit
+        # "search is rate-limited" instruction it would after threshold.
+        if _exception_looks_like_rate_limit(e):
+            _open_search_circuit_now()
+            return _CIRCUIT_OPEN_MESSAGE
         _record_search_failure()
         # If THIS failure tipped us into circuit-open state, surface the
         # explicit message immediately rather than the bare "[]" — the
