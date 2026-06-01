@@ -44,9 +44,20 @@ class AgentTestMixin:
             if isinstance(m, AIMessage) and m.tool_calls:
                 for tc in m.tool_calls:
                     if tc.get("name") == "task":
-                        # deepagents' task tool always names the target via
-                        # `subagent_type` — no other key is emitted.
-                        sa = (tc.get("args") or {}).get("subagent_type", "")
+                        # deepagents' task tool names the target via
+                        # `subagent_type`, but the small model sometimes
+                        # emits it under `agent`/`name` instead — the
+                        # dev-agent evals (test_dev_agent.py:167,
+                        # test_dev_agent_planning_flow.py:157) carry the
+                        # same fallback against that observed shape, so
+                        # match it here for consistent counting.  The
+                        # `or` chain also recovers an empty `subagent_type`
+                        # (which SubagentTypeInferenceMiddleware would
+                        # otherwise default to general-purpose).
+                        args = tc.get("args") or {}
+                        sa = (args.get("subagent_type")
+                              or args.get("agent")
+                              or args.get("name") or "")
                         if sa:
                             calls.append(sa)
         return calls

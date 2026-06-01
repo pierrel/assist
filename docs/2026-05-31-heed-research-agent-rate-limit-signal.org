@@ -323,9 +323,16 @@ What landed, and the code-review findings folded in:
 - *Helper de-dup.*  Hoisted the =task=-dispatch counting into
   =AgentTestMixin.subagent_calls()=; deleted the duplicate
   =_task_subagents_called= and pointed its caller (+ =assertSubAgentCall=)
-  at the shared method.  Dropped the speculative =args.get("agent")/
-  ("name")= fallback keys — deepagents only emits =subagent_type=
-  (no-theoretical-code rule).
+  at the shared method.  Round 2 dropped the =args.get("agent")/("name")=
+  fallback keys on a code-reviewer's "no-theoretical-code" advice — but
+  *Copilot round 3 reversed this*, correctly: two existing eval files
+  (=test_dev_agent.py:167=, =test_dev_agent_planning_flow.py:157=) carry
+  the same fallback against an *observed* small-model shape (it sometimes
+  emits the target under =agent=/=name=, not =subagent_type=), and
+  =SubagentTypeInferenceMiddleware= repairs a missing =subagent_type= only
+  by inferring from =description= (defaulting to =general-purpose=), not
+  by reading =agent=/=name=.  So the fallback is grounded, not
+  speculative; restored it for a robust, repo-consistent shared helper.
 
 - *Eval numbers.*  Baseline (current agent, pre-fix): fails — observed
   both predicted failure modes (answer-from-training-data once; 3×
