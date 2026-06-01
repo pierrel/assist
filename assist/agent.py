@@ -375,9 +375,11 @@ def create_context_agent(model: BaseChatModel,
 # model reads "conduct thorough research" as "search dozens of times"
 # (prod: 50-100 search_internet calls for one trivial query), which the
 # args/error-based loop patterns don't catch because each query is
-# distinct and succeeds.  This caps any single tool (search_internet,
-# task re-dispatch, read_url) to ~this many calls per agent within the
-# detection window, then makes the agent finalize with what it has.
+# distinct and succeeds.  Pattern E caps the per-agent VOLUME of each tool
+# in _RESEARCH_VOLUME_TOOLS (search_internet + read_url) to ~this many
+# calls within the detection window, then makes the agent finalize with
+# what it has.  (Task RE-DISPATCH is a separate concern, capped by
+# Pattern F / _SUBAGENT_DISPATCH_CAP below — not by this volume cap.)
 # Deliberately higher than a healthy research pass (~4 searches) so it
 # only fires on genuine runaway, not normal multi-query exploration.
 # Per-AGENT cap; combined with the per-subagent re-dispatch cap below

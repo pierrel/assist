@@ -257,10 +257,13 @@ def _detect_loop(
     Result keys:
       pattern     -- "same-tool-same-error" | "same-tool-same-args" |
                      "distinct-args-thrash" | "http-failure-streak" |
-                     "tool-volume"
+                     "tool-volume" | "subagent-redispatch"
       reason      -- short human-readable string for logs
       tools       -- set of looping tool names
       run_length  -- length of the trailing run (or distinct-arg count)
+      subagents   -- (subagent-redispatch only) set of over-threshold
+                     subagent names; used by after_model to strip only a
+                     latest call that re-dispatches one of them
     """
 
     if not completed_events:
@@ -465,20 +468,22 @@ def _detect_loop(
 
     # Pattern E: sheer VOLUME of one tool within the window, regardless of
     # args or errors.  Off unless volume_threshold > 0 AND the tool is in
-    # volume_tools (enabled on the research flow for `search_internet`,
-    # where the small model otherwise searches dozens of times under
-    # "conduct thorough research" — observed: 50+ search calls for one
-    # trivial query).  This is a HIGHER, looser bound than Pattern C:
-    # distinct-query exploration is the *normal* shape of research, but
-    # calling one capped tool volume_threshold+ times is a runaway no
-    # matter how varied the args.
+    # volume_tools (enabled on the research flow — see _RESEARCH_VOLUME_TOOLS
+    # in agent.py, which caps search_internet + read_url — where the small
+    # model otherwise searches/reads dozens of times under "conduct thorough
+    # research"; observed: 50+ search calls for one trivial query).  This is
+    # a HIGHER, looser bound than Pattern C: distinct-query exploration is
+    # the *normal* shape of research, but calling one capped tool
+    # volume_threshold+ times is a runaway no matter how varied the args.
     #
-    # Scoped to volume_tools deliberately: `read_url` is NOT capped here —
-    # reading several sources is normal research, it is per-host throttled
-    # already, and its failure-runaway (the casio 403 storm) is Pattern D's
-    # job.  Capping it stripped AI messages that batched read_url WITH the
-    # report write, leaving no report.  Comes last so the args/error
-    # patterns (with better terminal messages) win when they also apply.
+    # The CALLER decides which tools to cap via volume_tools.  Important:
+    # because firing strips the WHOLE latest AI message's tool calls, only
+    # cap tools on agents that don't batch a capped tool with a call you
+    # must keep (e.g. a write).  The research flow caps read_url on the
+    # write-less subagents but NOT on the report-writing orchestrator,
+    # precisely to avoid stripping a read+write batch.  Comes last so the
+    # args/error patterns (with better terminal messages) win when they
+    # also apply.
     if volume_threshold > 0 and volume_tools and completed_events:
         capped = Counter(
             e["tool_name"] for e in completed_events
@@ -668,6 +673,20 @@ class LoopDetectionMiddleware(AgentMiddleware):
             distinct URLs that all return 403 / captcha / rate-limit pages
             — Patterns A/B/C all miss this because the result body is HTML,
             not a Python error, and the args differ across calls.  Default 4.
+        volume_threshold: Pattern E. Max calls to any single tool in
+            ``volume_tools`` within the window before intervening, regardless
+            of args/errors. Catches sheer over-use of a successful tool
+            (e.g. the research over-search runaway). 0 disables (default), so
+            non-research agents are unaffected.
+        volume_tools: Tool names the Pattern-E volume cap applies to. Default
+            ``None`` → empty (cap inert even if volume_threshold > 0). Cap
+            only tools on agents that don't batch a capped tool with a call
+            you must keep (firing strips the whole AI message — see Pattern E).
+        subagent_dispatch_threshold: Pattern F. Max times the same subagent
+            may be dispatched via ``task`` within the window before a further
+            re-dispatch of it is stripped. 1 = each subagent at most once.
+            0 disables (default). Counts per-subagent, so dispatching several
+            *different* subagents once each never trips it.
     """
 
     def __init__(
@@ -695,8 +714,8 @@ class LoopDetectionMiddleware(AgentMiddleware):
         self.http_failure_threshold = http_failure_threshold
         # Pattern E volume cap.  0 disables it (default) so non-research
         # agents are unaffected; the research flow opts in.  volume_tools
-        # scopes which tools it caps (e.g. just search_internet — NOT
-        # read_url).  See Pattern E in _detect_loop.
+        # scopes which tools it caps (the research flow caps search_internet
+        # + read_url on its subagents).  See Pattern E in _detect_loop.
         self.volume_threshold = volume_threshold
         self.volume_tools = frozenset(volume_tools or ())
         # Pattern F per-subagent re-dispatch cap.  0 disables it (default);
