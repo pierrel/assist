@@ -1,7 +1,9 @@
 #+TITLE: Bound the research agent's effort — stop the over-search runaway
 #+DATE: 2026-06-01
-State: Design.  Eval-first.  Follow-up to the rate-limit-handoff PR
-(#119); surfaced by a confirmation-eval flake AND a live prod thread.
+State: Implemented (eval-first escalation went deeper than the original
+design — see "Implementation + review (round 2)" at the end).  Follow-up
+to the rate-limit-handoff PR (#119); surfaced by a confirmation-eval
+flake AND a live prod thread.
 
 * Problem
 Two related research-agent runaways, one trivial query.
@@ -150,3 +152,61 @@ at N=5 alongside.
   (distinct failure path from B/C), included per the user's "both as
   one PR" direction — not claimed to be the same root cause.
 - *Two eval queries* (one non-telegraphed) per the eval-alignment rule.
+
+* Implementation + review (round 2)
+The eval-first ladder descended further than the round-1 design
+predicted.  Each rung was added only after the eval showed the prior
+one insufficient; all are committed separately.
+
+1. *Prompt bounds (Fix A/B/C) — insufficient.*  With the crisp stopping
+   rule + dispatch-once prompts, the eval still measured 23 and 50
+   searches.  The small model ignored the soft count, as the agentic
+   design reviewer predicted.  Kept anyway: they make the *healthy* case
+   converge (~4 searches) so the deterministic cap is a backstop, not the
+   primary path, and they explain the behavior the cap enforces.
+
+2. *Pattern E — per-agent search-volume cap (deterministic).*  Scoped via
+   =volume_tools= to =search_internet= only.  NOT =read_url=: reading
+   several sources is normal research, it's per-host throttled, its
+   failure-storm is Pattern D's job, and capping it stripped AI messages
+   that batched a read with the report write (regressed
+   =test_research_saved_to_references= to an empty references dir).
+   Counts over a turn-wide window (=_RESEARCH_LOOP_WINDOW=50=) so
+   interleaved reads can't dilute the search count below the cap in a
+   12-event tail (code-review finding).
+
+3. *Pattern F — per-subagent re-dispatch cap (deterministic).*  Each
+   subagent dispatched at most once.  Pattern E bounded each agent but
+   not the aggregate while the orchestrator re-dispatched the inner
+   research-agent; F closes that.  Enabled on BOTH the research
+   orchestrator and the general agent (the latter also reinforces #119's
+   "don't re-dispatch research on a rate-limit").
+
+4. *Removed =search_internet= from the research orchestrator.*  The log
+   capture showed the over-search was TWO agents: the orchestrator
+   searched directly AND the inner research-agent searched (~8 + ~7 =
+   15).  The orchestrator's prompt already says to delegate searching, so
+   its direct search tool was redundant.  Removing it (keep =read_url=
+   for reading specific pages) left the inner research-agent as the sole
+   searcher → both budget queries pass <=12.
+
+*Residuals / known limitations:*
+- =read_url= is not volume-capped.  It is bounded indirectly: the agent
+  can only read URLs it found via the (capped) search, so reads can't run
+  away beyond the search results.  Pattern D + per-host throttle cover
+  the failure-storm case.
+- The deterministic caps strip the *whole* latest AI message's tool
+  calls.  Safe as wired (only the inner research-agent — which has no
+  write tool — is volume-capped), but a future agent that batches a
+  capped tool with a write would lose the write.  Documented so the next
+  reader keeps the volume cap off write-capable agents.
+- =test_research_saved_to_references= uses REAL DDG and fails in this
+  environment (the dev box IP is blocked; real search returns =[]= in
+  0.3s).  Not a regression from this change — it would fail on =main=
+  too here.  The hermetic budget + rate-limit evals are the reliable
+  signal.
+
+*Eval numbers:* baseline (no fix) 15-50 searches; prompts-only 23-50;
+per-agent cap only 14-20 (aggregate not bounded); full fix (cap +
+re-dispatch cap + orchestrator-delegates) both queries <=12.  #119
+rate-limit relay still 2/2.  78 loop_detection unit tests pass.

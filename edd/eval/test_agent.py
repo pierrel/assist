@@ -440,6 +440,30 @@ class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
         )
 
 
+def _run_general_agent_with_search_stubs(test, model, prompt,
+                                         search_stub, read_url_stub):
+    """Build the general agent with search_internet/read_url patched to the
+    given stubs, send ``prompt``, return ``(agent, response)``.
+
+    Shared by the two mocked research evals.  Patches ``assist.agent.*``
+    (the names bound into ``assist.agent`` at import, which
+    ``create_research_agent``'s tool lists capture) — NOT ``assist.tools.*``.
+    Builds the agent INSIDE the patch so those tool lists capture the
+    stubs.  Stubs should carry the real functions' metadata via
+    ``functools.wraps`` so deepagents wraps them as the same-named tools.
+    ``test`` is the TestCase (for ``addCleanup``).
+    """
+    root = tempfile.mkdtemp(prefix="research_eval_")
+    test.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    create_filesystem(root, {"README.org": "My notes live in notes/.",
+                             "notes": {"misc.org": "Personal notes."}})
+    with patch("assist.agent.search_internet", search_stub), \
+         patch("assist.agent.read_url", read_url_stub):
+        agent = AgentHarness(create_agent(model, root))
+        res = agent.message(prompt)
+    return agent, res
+
+
 class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
     """The general agent must HEED a research-agent that reports search
     is unavailable — relay the wait to the user, not re-dispatch.
@@ -472,14 +496,7 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
 
     def _run_with_blocked_search(self, prompt: str):
         """Build the general agent with search/fetch forced to report
-        rate-limited, send ``prompt``, and return ``(agent, response)``.
-
-        Stubs carry the real functions' metadata (name, docstring,
-        signature) via ``functools.wraps`` so deepagents wraps them as the
-        same-named tools the prompts reference.  The agent is built INSIDE
-        the patch so ``create_research_agent``'s tool list (constructed by
-        ``create_agent``) captures the stubs.
-        """
+        rate-limited, send ``prompt``, return ``(agent, response)``."""
         import assist.tools as _tools
 
         @functools.wraps(_tools.search_internet)
@@ -497,15 +514,8 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
             return ("Error fetching URL: rate-limited; cannot retry for "
                     "~10 minutes. Try again in a few minutes.")
 
-        root = tempfile.mkdtemp(prefix="rate_limit_handoff_eval_")
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        create_filesystem(root, {"README.org": "My notes live in notes/.",
-                                 "notes": {"misc.org": "Personal notes."}})
-        with patch("assist.agent.search_internet", _blocked_search), \
-             patch("assist.agent.read_url", _blocked_fetch):
-            agent = AgentHarness(create_agent(self.model, root))
-            res = agent.message(prompt)
-        return agent, res
+        return _run_general_agent_with_search_stubs(
+            self, self.model, prompt, _blocked_search, _blocked_fetch)
 
     def _assert_relays_unavailable(self, agent, res):
         # Belt-and-suspenders: a recursion-killed / empty turn fails here
@@ -583,8 +593,13 @@ class TestResearchSearchBudget(AgentTestMixin, TestCase):
     import), not `assist.tools.search_internet`.
     """
 
-    # Aggregate effort budget for a single research turn.  Prod ran ~100;
-    # a healthy flow is one orchestrator pass of a handful of searches.
+    # Aggregate effort budget for a single research turn.  The designed
+    # ceiling is mechanical: the orchestrator does not search (it delegates),
+    # so the research-agent is the sole searcher, capped per-agent at
+    # _RESEARCH_TOOL_VOLUME_CAP (6) and dispatched once (_SUBAGENT_DISPATCH_CAP
+    # = 1).  So ~6 searches by design; 12 is 2x headroom for batch overshoot
+    # (the agent can emit several search calls in one message before the cap
+    # observes them).  Prod ran ~100; baseline (no fix) ran 15-50.
     SEARCH_BUDGET = 12
 
     def setUp(self):
@@ -615,33 +630,35 @@ class TestResearchSearchBudget(AgentTestMixin, TestCase):
             return ("Relevant page text with concrete, specific information "
                     "that fully answers the question. " * 20)
 
-        root = tempfile.mkdtemp(prefix="search_budget_eval_")
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        create_filesystem(root, {"README.org": "My notes live in notes/.",
-                                 "notes": {"misc.org": "Personal notes."}})
-        with patch("assist.agent.search_internet", _counted_search), \
-             patch("assist.agent.read_url", _canned_fetch):
-            agent = AgentHarness(create_agent(self.model, root))
-            res = agent.message(prompt)
+        agent, res = _run_general_agent_with_search_stubs(
+            self, self.model, prompt, _counted_search, _canned_fetch)
         return agent, res, calls["search"]
 
-    def _assert_bounded(self, res, n_searches):
+    def _assert_bounded(self, agent, res, n_searches):
         self.assertTrue(res, "Agent returned an empty response")
+        # Lower bound: the flow must actually research.  Catches a
+        # regression that "bounds" searches by BREAKING research (answering
+        # from the model's own knowledge, or stripping the dispatch) — that
+        # would still produce a non-empty res and pass the upper bound alone.
+        self.assertGreaterEqual(
+            n_searches, 1,
+            "Expected the flow to search at least once (it answered without "
+            f"searching).  MAIN dispatches: {self.subagent_calls(agent)}")
+        # Upper bound: no over-search runaway.  MAIN-level dispatches in the
+        # message help locate the source if this fails.
         self.assertLessEqual(
             n_searches, self.SEARCH_BUDGET,
             f"Research flow ran {n_searches} searches for one query — over "
-            f"the {self.SEARCH_BUDGET} budget.  This is the over-search "
-            "runaway: the orchestrator re-dispatches the inner "
-            "research-agent and/or the inner agent searches without a "
-            "stopping rule.")
+            f"the {self.SEARCH_BUDGET} budget.  MAIN dispatches: "
+            f"{self.subagent_calls(agent)}.")
 
     def test_search_budget_product_lookup(self):
         agent, res, n = self._run_counting_searches(
             "What are good waterproof watches for a 10-year-old?")
-        self._assert_bounded(res, n)
+        self._assert_bounded(agent, res, n)
 
     def test_search_budget_howto_lookup(self):
         # A differently-shaped, non-telegraphed query.  Same budget.
         agent, res, n = self._run_counting_searches(
             "How do tabata intervals work?")
-        self._assert_bounded(res, n)
+        self._assert_bounded(agent, res, n)

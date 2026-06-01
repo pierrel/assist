@@ -391,6 +391,16 @@ _RESEARCH_TOOL_VOLUME_CAP = 6
 # AI messages that batched a read with the report write, leaving no report.
 _RESEARCH_VOLUME_TOOLS = frozenset({"search_internet"})
 
+# Wider LoopDetection window for the research-agent so the volume cap
+# counts searches across the WHOLE turn, not just the last 12 mixed
+# tool events.  Without this, interleaving search with read_url could
+# keep fewer than _RESEARCH_TOOL_VOLUME_CAP searches in a 12-event tail
+# and evade the cap (the very search-heavy-with-reads shape it targets).
+# Only widens the count window (and the max trailing-run length for the
+# args/error patterns, which is harmless); Pattern C keeps its own
+# distinct_args_window.
+_RESEARCH_LOOP_WINDOW = 50
+
 # Pattern F: max dispatches of any single subagent by an orchestrating
 # agent.  1 = each subagent at most once — the budget both the general
 # agent ("call each sub-agent ONCE") and the research orchestrator
@@ -438,14 +448,13 @@ def create_research_agent(model: BaseChatModel,
     # trap (multi-pass critique → "I have completed the research" → another
     # write_file).
     base_mw.append(WriteCollisionMiddleware())
-    # The orchestrator gets BOTH the per-agent volume cap AND the
-    # per-subagent re-dispatch cap (Pattern F): each subagent
-    # (research / critique / fact-check) at most once, matching the
-    # prompt's stated budget and deterministically stopping the
-    # research-agent re-dispatch that multiplies inner search volume.
+    # The orchestrator gets the per-subagent re-dispatch cap (Pattern F):
+    # each subagent (research / critique / fact-check) at most once,
+    # matching the prompt's stated budget and deterministically stopping
+    # the research-agent re-dispatch that multiplies inner search volume.
+    # No volume cap here — the orchestrator delegates searching and has no
+    # search_internet tool, so a volume cap would be inert.
     base_mw.append(LoopDetectionMiddleware(
-        volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
-        volume_tools=_RESEARCH_VOLUME_TOOLS,
         subagent_dispatch_threshold=_SUBAGENT_DISPATCH_CAP,
     ))
     base_mw.append(ThreadQueueMiddleware())
@@ -527,7 +536,11 @@ def create_research_agent(model: BaseChatModel,
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
-                LoopDetectionMiddleware(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
+                # The research-agent is the sole searcher: cap its search
+                # volume (Pattern E) over a turn-wide window so interleaved
+                # reads can't dilute the count below the cap.
+                LoopDetectionMiddleware(window=_RESEARCH_LOOP_WINDOW,
+                                        volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
                                         volume_tools=_RESEARCH_VOLUME_TOOLS),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
