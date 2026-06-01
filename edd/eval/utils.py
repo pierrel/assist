@@ -31,6 +31,27 @@ class AgentTestMixin:
 
         self.assertIn(tool_name, tool_calls, msg)
 
+    def subagent_calls(self, agent) -> list[str]:
+        """Names of every subagent dispatched via the `task` tool, in order.
+
+        Reads AIMessage tool_calls (outgoing) rather than ToolMessages
+        (results), so a dispatch counts even if the subagent errored.
+        Returns a list (not a set) so callers can assert on *how many*
+        times a subagent was dispatched, not just whether it was.
+        """
+        calls = []
+        for m in agent.all_messages():
+            if isinstance(m, AIMessage) and m.tool_calls:
+                for tc in m.tool_calls:
+                    if tc.get("name") == "task":
+                        args = tc.get("args") or {}
+                        sa = (args.get("subagent_type")
+                              or args.get("agent")
+                              or args.get("name") or "")
+                        if sa:
+                            calls.append(sa)
+        return calls
+
     def assertSubAgentCall(self, agent, subagent_name: str, msg: str = None):
         """
         Assert that a specific subagent was called by the agent via the task tool.
@@ -43,18 +64,12 @@ class AgentTestMixin:
             subagent_name: The subagent_type value to look for (e.g. "dev-agent")
             msg: Optional custom assertion message
         """
-        subagent_calls = []
-        for m in agent.all_messages():
-            if isinstance(m, AIMessage) and m.tool_calls:
-                for tc in m.tool_calls:
-                    if tc.get("name") == "task":
-                        subagent = tc.get("args", {}).get("subagent_type", "")
-                        subagent_calls.append(subagent)
+        calls = self.subagent_calls(agent)
 
         if msg is None:
-            msg = f"Subagent '{subagent_name}' should have been called via task tool. Called subagents: {subagent_calls}"
+            msg = f"Subagent '{subagent_name}' should have been called via task tool. Called subagents: {calls}"
 
-        self.assertIn(subagent_name, subagent_calls, msg)
+        self.assertIn(subagent_name, calls, msg)
 
 
 def assertToolCall(test_case, agent, tool_name: str, msg: str = None):
