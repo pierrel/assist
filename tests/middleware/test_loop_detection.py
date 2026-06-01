@@ -1128,12 +1128,14 @@ class TestLoopDetectionMiddleware:
 class TestPatternEVolume:
     """Pattern E: sheer per-tool call volume, regardless of args/errors.
 
-    Off unless volume_threshold > 0.  Uses search_internet (a read-only
-    tool with distinct, successful args) so Patterns A/B/C/D all skip and
-    only the volume pattern can fire — proving it catches a runaway the
-    other patterns deliberately ignore (distinct-query exploration is
-    normal; sheer volume is not).
+    Off unless volume_threshold > 0 AND the tool is in volume_tools.  Uses
+    search_internet (a read-only tool with distinct, successful args) so
+    Patterns A/B/C/D all skip and only the volume pattern can fire —
+    proving it catches a runaway the other patterns deliberately ignore
+    (distinct-query exploration is normal; sheer volume is not).
     """
+    SEARCH = frozenset({"search_internet"})
+
     def _searches(self, n):
         return [{
             "tool_name": "search_internet",
@@ -1148,24 +1150,45 @@ class TestPatternEVolume:
         # 20 distinct successful searches, volume cap off -> no detection.
         assert _detect_loop(self._searches(20), 2, 3, 3, 10) is None
 
+    def test_disabled_without_volume_tools(self):
+        # threshold set but no tools scoped -> no detection.
+        assert _detect_loop(self._searches(20), 2, 3, 3, 10,
+                            volume_threshold=8) is None
+
     def test_fires_at_threshold(self):
-        result = _detect_loop(self._searches(8), 2, 3, 3, 10, volume_threshold=8)
+        result = _detect_loop(self._searches(8), 2, 3, 3, 10,
+                              volume_threshold=8, volume_tools=self.SEARCH)
         assert result is not None
         assert result["pattern"] == "tool-volume"
         assert result["tools"] == {"search_internet"}
         assert result["run_length"] == 8
 
     def test_does_not_fire_below_threshold(self):
-        assert _detect_loop(self._searches(7), 2, 3, 3, 10, volume_threshold=8) is None
+        assert _detect_loop(self._searches(7), 2, 3, 3, 10,
+                            volume_threshold=8, volume_tools=self.SEARCH) is None
 
-    def test_picks_highest_count_tool(self):
+    def test_only_caps_tools_in_volume_tools(self):
+        # 9 read_url calls but volume_tools is search-only -> not capped
+        # (read_url is legitimate research, throttled + Pattern-D-protected).
+        reads = [{
+            "tool_name": "read_url",
+            "args_sig": _normalise_args({"url": f"u{i}"}),
+            "result_content": "page text",
+            "is_error": False, "http_failure": False, "completed": True,
+        } for i in range(9)]
+        assert _detect_loop(reads, 2, 3, 3, 10,
+                            volume_threshold=6, volume_tools=self.SEARCH) is None
+
+    def test_picks_capped_tool_not_uncapped(self):
+        # search (8, capped) + read_url (3, uncapped) -> fires on search.
         events = self._searches(8) + [{
             "tool_name": "read_url",
             "args_sig": _normalise_args({"url": f"u{i}"}),
             "result_content": "page text",
             "is_error": False, "http_failure": False, "completed": True,
         } for i in range(3)]
-        result = _detect_loop(events, 2, 3, 3, 10, volume_threshold=8)
+        result = _detect_loop(events, 2, 3, 3, 10,
+                              volume_threshold=8, volume_tools=self.SEARCH)
         assert result is not None
         assert result["tools"] == {"search_internet"}
 

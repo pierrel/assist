@@ -249,6 +249,7 @@ def _detect_loop(
     exploration_args_threshold: int = _EXPLORATION_DISTINCT_ARGS_THRESHOLD,
     http_failure_threshold: int = 4,
     volume_threshold: int = 0,
+    volume_tools: frozenset[str] = frozenset(),
     subagent_dispatch_threshold: int = 0,
 ) -> dict | None:
     """Return loop-detection info or ``None`` if no loop.
@@ -463,27 +464,36 @@ def _detect_loop(
             }
 
     # Pattern E: sheer VOLUME of one tool within the window, regardless of
-    # args or errors.  Off unless volume_threshold > 0 (enabled on the
-    # research flow, where the small model otherwise searches dozens of
-    # times under "conduct thorough research" — observed: 50+ search calls
-    # for one trivial query).  This is a HIGHER, looser bound than Pattern
-    # C: distinct-query exploration is the *normal* shape of research, but
-    # calling one tool volume_threshold+ times in a short window is a
-    # runaway no matter how varied the args.  Comes last so the
-    # args/error-specific patterns (which carry better terminal messages)
-    # win when they also apply.
-    if volume_threshold > 0 and completed_events:
-        tool, n = Counter(
+    # args or errors.  Off unless volume_threshold > 0 AND the tool is in
+    # volume_tools (enabled on the research flow for `search_internet`,
+    # where the small model otherwise searches dozens of times under
+    # "conduct thorough research" — observed: 50+ search calls for one
+    # trivial query).  This is a HIGHER, looser bound than Pattern C:
+    # distinct-query exploration is the *normal* shape of research, but
+    # calling one capped tool volume_threshold+ times is a runaway no
+    # matter how varied the args.
+    #
+    # Scoped to volume_tools deliberately: `read_url` is NOT capped here —
+    # reading several sources is normal research, it is per-host throttled
+    # already, and its failure-runaway (the casio 403 storm) is Pattern D's
+    # job.  Capping it stripped AI messages that batched read_url WITH the
+    # report write, leaving no report.  Comes last so the args/error
+    # patterns (with better terminal messages) win when they also apply.
+    if volume_threshold > 0 and volume_tools and completed_events:
+        capped = Counter(
             e["tool_name"] for e in completed_events
-        ).most_common(1)[0]
-        if n >= volume_threshold:
-            return {
-                "pattern": "tool-volume",
-                "reason": (f"tool-volume: {tool} x{n} within last "
-                           f"{len(completed_events)} calls"),
-                "tools": {tool},
-                "run_length": n,
-            }
+            if e["tool_name"] in volume_tools
+        )
+        if capped:
+            tool, n = capped.most_common(1)[0]
+            if n >= volume_threshold:
+                return {
+                    "pattern": "tool-volume",
+                    "reason": (f"tool-volume: {tool} x{n} within last "
+                               f"{len(completed_events)} calls"),
+                    "tools": {tool},
+                    "run_length": n,
+                }
 
     return None
 
@@ -670,6 +680,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
         exploration_tools: frozenset[str] | None = None,
         http_failure_threshold: int = 4,
         volume_threshold: int = 0,
+        volume_tools: frozenset[str] | None = None,
         subagent_dispatch_threshold: int = 0,
     ):
         super().__init__()
@@ -683,9 +694,11 @@ class LoopDetectionMiddleware(AgentMiddleware):
         self.exploration_tools = frozenset(exploration_tools or ())
         self.http_failure_threshold = http_failure_threshold
         # Pattern E volume cap.  0 disables it (default) so non-research
-        # agents are unaffected; the research flow opts in.  See Pattern E
-        # in _detect_loop.
+        # agents are unaffected; the research flow opts in.  volume_tools
+        # scopes which tools it caps (e.g. just search_internet — NOT
+        # read_url).  See Pattern E in _detect_loop.
         self.volume_threshold = volume_threshold
+        self.volume_tools = frozenset(volume_tools or ())
         # Pattern F per-subagent re-dispatch cap.  0 disables it (default);
         # the research orchestrator opts in.  See Pattern F in _detect_loop.
         self.subagent_dispatch_threshold = subagent_dispatch_threshold
@@ -715,6 +728,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
             exploration_tools=self.exploration_tools,
             http_failure_threshold=self.http_failure_threshold,
             volume_threshold=self.volume_threshold,
+            volume_tools=self.volume_tools,
             subagent_dispatch_threshold=self.subagent_dispatch_threshold,
         )
         if detection is None:

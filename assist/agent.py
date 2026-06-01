@@ -385,6 +385,12 @@ def create_context_agent(model: BaseChatModel,
 # aggregate search volume to ~this many for a research turn.
 _RESEARCH_TOOL_VOLUME_CAP = 6
 
+# Pattern E only caps these tools.  Just search_internet — NOT read_url:
+# reading several sources is normal research (and is per-host throttled +
+# Pattern-D-protected against the 403 storm), and capping read_url stripped
+# AI messages that batched a read with the report write, leaving no report.
+_RESEARCH_VOLUME_TOOLS = frozenset({"search_internet"})
+
 # Pattern F: max dispatches of any single subagent by an orchestrating
 # agent.  1 = each subagent at most once — the budget both the general
 # agent ("call each sub-agent ONCE") and the research orchestrator
@@ -439,6 +445,7 @@ def create_research_agent(model: BaseChatModel,
     # research-agent re-dispatch that multiplies inner search volume.
     base_mw.append(LoopDetectionMiddleware(
         volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
+        volume_tools=_RESEARCH_VOLUME_TOOLS,
         subagent_dispatch_threshold=_SUBAGENT_DISPATCH_CAP,
     ))
     base_mw.append(ThreadQueueMiddleware())
@@ -520,7 +527,8 @@ def create_research_agent(model: BaseChatModel,
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
-                LoopDetectionMiddleware(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP),
+                LoopDetectionMiddleware(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
+                                        volume_tools=_RESEARCH_VOLUME_TOOLS),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
