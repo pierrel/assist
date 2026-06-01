@@ -454,12 +454,13 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
     research-agent once, read the blocked signal, relay it, stop.
 
     MOCKING NOTE — this is the one eval in ``edd/eval/`` that
-    monkey-patches a tool.  Existing evals hit the real LLM + real tools
-    on purpose ("eval-first contracts"), but this failure mode is
-    unobservable without forcing search to report unavailable, and
-    hitting live DDG to *induce* a real rate-limit is exactly the IP
-    burn we're trying to prevent.  We patch ``assist.agent.search_internet``
-    (NOT ``assist.tools.search_internet``): ``assist/agent.py`` binds the
+    monkey-patches tools (``search_internet`` and ``read_url``).  Existing
+    evals hit the real LLM + real tools on purpose ("eval-first
+    contracts"), but this failure mode is unobservable without forcing
+    search to report unavailable, and hitting live DDG to *induce* a real
+    rate-limit is exactly the IP burn we're trying to prevent.  We patch
+    ``assist.agent.search_internet`` (NOT ``assist.tools.search_internet``):
+    ``assist/agent.py`` binds the
     name at import via ``from assist.tools import search_internet``, so
     the research subagent's tool list captured that module-level
     reference — patching the ``assist.tools`` attribute would not rebind
@@ -523,13 +524,20 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
             f"{self.subagent_calls(agent)}")
 
         # 2. Final response relays BOTH that search is unavailable AND a
-        #    wait — the user asked to be told to wait ~10m.  Broad on
-        #    spelling, but the wait token is required, not optional.
+        #    wait — the user asked to be told to wait ~10m.  The
+        #    unavailable token + dispatch==1 carry the discrimination
+        #    (a fabricated answer won't say "rate-limited"), so the wait
+        #    token is broad: the small model phrases the wait many ways
+        #    ("~10 minutes", "10–15 minutes", "in a bit", "shortly",
+        #    "ask again soon") and an N=10 run flapped on a too-narrow
+        #    pattern that only matched "few minutes"/"10 min".
         self.assertRegex(
             res, r"(?i)rate.?limit|temporarily|unavailable|couldn'?t search",
             f"Response should tell the user search is unavailable.  Got: {res[:600]}")
         self.assertRegex(
-            res, r"(?i)try again|few minutes|10 ?min|moment|shortly|later",
+            res,
+            r"(?i)\bmins?\b|minute|try again|ask again|in a bit|in a moment"
+            r"|in a while|shortly|soon|later|moment",
             f"Response should tell the user to wait and retry.  Got: {res[:600]}")
 
     def test_relays_unavailable_tech_lookup(self):
