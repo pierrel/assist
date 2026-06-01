@@ -79,6 +79,46 @@ See [[file:docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org][docs/2026-
 *** TODO Layer 3 — Tool-result eviction at write time (snapshot-aware)
 See [[file:docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org][docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org]] (original design) and [[file:docs/2026-05-16-deltachannel-spike.org][docs/2026-05-16-deltachannel-spike.org]] (revised plan post-DeltaChannel).  Extend =ContextAwareToolEvictionMiddleware= to evict large =ToolMessage= contents to =/workspace/large_tool_results/<id>= before the checkpoint write, leaving a stub in the message list.  *Held pending PR #89 rewrite:* under DeltaChannel, =checkpoint["channel_values"]["messages"]= is =None= on most rows and =langgraph.channels.delta._DeltaSnapshot(value=[...])= on snapshot rows.  PR #89's current =EvictionSaver= iterates the field as a list and would silently no-op on delta rows + raise on snapshot rows.  Concrete fix: =isinstance(messages, _DeltaSnapshot)= branch — unwrap → evict → rewrap; =None= → no-op (already evicted upstream); =list= → existing path (writes-call shape).  Plus an eval that asserts eviction fires on a K-aligned step.  Eval-side equivalent already shipped (commit f9df751).
 ** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response
+** TODO Explore a real Search API to replace the scraped DDG endpoints
+*Why.*  The current =search_internet= scrapes DuckDuckGo's anonymous
+HTML/lite endpoints via the =ddgs= library.  DDG publishes no
+rate-limit documentation for those (they aren't officially supported as
+APIs), and the library's mirror-fallback retry — cycling
+=duckduckgo.com=, =duck.ai=, =html.duckduckgo.com=, the onion mirror —
+makes a single rate-limited burst look obviously-bot to DDG's edge and
+gets the IP blocked for hours.  This burned the dev box's IP on
+2026-05-30 / 05-31 during a research-agent runaway and is the kind of
+fragility every research-shaped query is one bad turn away from.
+
+*What landed first as a stopgap* (PR #118, 2026-05-31): per-tool throttles
+(4s for search, 1s per host for fetch) + a 3-failure / 10-min circuit
+breaker that returns an explicit "search is rate-limited, finalize what
+you have" message to the model.  Buys us reliability against the
+runaway loop and makes the failure mode legible to the agent, but the
+underlying issue — scraping an endpoint with no SLA, no documented
+limits, and active anti-bot — stays.
+
+*Direction.*  Pick a real search API with documented rate limits and an
+authenticated request shape:
+- *Brave Search API* — free tier 2000 q/mo, 1 qps; paid tiers higher.
+  Independent index, decent quality, REST + JSON, simple to wire.
+- *Tavily Search API* — purpose-built for agent use, returns
+  research-shaped JSON (snippets + URLs + content excerpts); has a
+  free tier; the closest drop-in for what an LLM actually needs.
+- *Serper / SerpAPI* — Google-results-as-API; higher fidelity but
+  paid-only past a small free tier, and the dep on Google adds a
+  different fragility.
+- *Bing Web Search API* — discontinued/transitioned as of 2025;
+  evaluate the successor (Microsoft's Grounding-with-Bing endpoint
+  through Azure AI).
+
+*Done when.*  =search_internet= calls an authenticated API with a
+documented rate limit; the circuit breaker remains as a defense in depth
+but should rarely trip in normal use; eval suite includes a "search
+worked" assertion that the API actually returns results for a stable
+query.  Keep =ddgs= as a fallback only if doing so doesn't reintroduce
+the IP-burn risk (probably not worth it; remove instead).
+
 ** TODO Self-healing flow on errors / suboptimal output
 See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].  Catch exceptions during agent execution and either spawn a remediation thread or surface for user-directed fix; reuse the "capture conversation" flow.
 ** TODO Tool-call mocking system for evals (record-and-replay cassettes)
