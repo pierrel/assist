@@ -1,3 +1,4 @@
+import functools
 import os
 import re
 import subprocess
@@ -6,12 +7,14 @@ import shutil
 from textwrap import dedent
 
 from unittest import TestCase
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
 from assist.model_manager import select_chat_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
+from assist.tools import _CIRCUIT_OPEN_MESSAGE
 
 from .utils import read_file, create_filesystem, AgentTestMixin
 
@@ -448,3 +451,91 @@ class TestAgentSandboxIntegration(TestCase):
             f"Response amounts: {response_amounts}.  "
             f"Response: {res[:500]}",
         )
+
+
+class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
+    """The general agent must HEED a research-agent that reports search
+    is unavailable — relay the wait to the user, not re-dispatch.
+
+    Background: PR #118 gave ``search_internet`` a circuit breaker that
+    returns ``_CIRCUIT_OPEN_MESSAGE`` ("rate-limited … try again in a
+    few minutes") instead of silently failing.  The search layer works,
+    but the *general agent* was observed re-dispatching the
+    research-agent on the blocked result — a cross-dispatch meta-loop
+    that ``LoopDetectionMiddleware`` (a within-run detector) cannot and
+    should not catch.  The contract this eval pins: dispatch
+    research-agent once, read the blocked signal, relay it, stop.
+
+    MOCKING NOTE — this is the one eval in ``edd/eval/`` that
+    monkey-patches a tool.  Existing evals hit the real LLM + real tools
+    on purpose ("eval-first contracts"), but this failure mode is
+    unobservable without forcing search to report unavailable, and
+    hitting live DDG to *induce* a real rate-limit is exactly the IP
+    burn we're trying to prevent.  We patch ``assist.agent.search_internet``
+    (NOT ``assist.tools.search_internet``): ``assist/agent.py`` binds the
+    name at import via ``from assist.tools import search_internet``, so
+    the research subagent's tool list captured that module-level
+    reference — patching the ``assist.tools`` attribute would not rebind
+    it.  ``read_url`` is patched too, purely so a model that ignores the
+    blocked search and hallucinates a URL can't reach the live network
+    and re-burn the IP; the eval asserts nothing about ``read_url``.
+    """
+
+    def setUp(self):
+        self.model = select_chat_model(0.1)
+
+    def _create_agent(self, filesystem: dict):
+        root = tempfile.mkdtemp(prefix="rate_limit_handoff_eval_")
+        create_filesystem(root, filesystem)
+        return AgentHarness(create_agent(self.model, root)), root
+
+    def test_relays_unavailable_instead_of_redispatching(self):
+        # Build the search/fetch stubs with the real functions' metadata
+        # (name, docstring, signature) so deepagents wraps them as the
+        # same-named tools the prompts reference.
+        import assist.tools as _tools
+
+        @functools.wraps(_tools.search_internet)
+        def _blocked_search(query, max_results=5):
+            return _CIRCUIT_OPEN_MESSAGE
+
+        # read_url returns a rate-limit-flavoured error too, so the whole
+        # external surface speaks with one voice ("rate-limited, retry in
+        # a few minutes") and the model can't read eval-awareness into a
+        # bespoke "unavailable in this environment" string.  Mirrors
+        # read_url's real "Error fetching URL: <e>" shape.
+        @functools.wraps(_tools.read_url)
+        def _blocked_fetch(url):
+            return ("Error fetching URL: rate-limited; cannot retry for "
+                    "~10 minutes. Try again in a few minutes.")
+
+        # Patch BEFORE building the agent so create_research_agent's tool
+        # list (built inside create_agent) captures the stubs.
+        with patch("assist.agent.search_internet", _blocked_search), \
+             patch("assist.agent.read_url", _blocked_fetch):
+            agent, _root = self._create_agent(
+                {"README.org": "My notes live in notes/.",
+                 "notes": {"misc.org": "Personal notes."}})
+            res = agent.message(
+                "What's the latest LangGraph release and what changed?")
+
+        # 1. research-agent dispatched EXACTLY once.  Zero would mean the
+        #    parent answered from its own knowledge (a different failure
+        #    the prompt forbids); two-or-more is the runaway meta-loop.
+        research_dispatches = [s for s in self.subagent_calls(agent)
+                               if s == "research-agent"]
+        self.assertEqual(
+            len(research_dispatches), 1,
+            "Expected research-agent dispatched exactly once (dispatch, "
+            "read the blocked signal, stop).  Dispatches seen: "
+            f"{self.subagent_calls(agent)}")
+
+        # 2. Final response relays BOTH that search is unavailable AND a
+        #    wait — the user asked to be told to wait ~10m.  Broad on
+        #    spelling, but the wait token is required, not optional.
+        self.assertRegex(
+            res, r"(?i)rate.?limit|temporarily|unavailable|couldn'?t search",
+            f"Response should tell the user search is unavailable.  Got: {res[:600]}")
+        self.assertRegex(
+            res, r"(?i)try again|few minutes|10 ?min|moment|shortly|later",
+            f"Response should tell the user to wait and retry.  Got: {res[:600]}")
