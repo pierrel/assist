@@ -186,3 +186,60 @@ class TestSearchInternet:
             tools.search_internet("q3")
             # 1 failure → success (reset) → 1 failure = below threshold.
             assert not tools._circuit_is_open()
+
+
+# -------------------- rate-limit detection on exception -----------------
+
+class TestRateLimitDetection:
+    @pytest.mark.parametrize("exc", [
+        TimeoutError("operation timed out"),
+        ConnectionError("Connection refused"),
+        ConnectionResetError("Connection reset by peer"),
+        Exception("HTTP 429 Too Many Requests"),
+        Exception("HTTP 403 Forbidden"),
+        Exception("DuckDuckGo blocked the request: please solve the CAPTCHA"),
+        Exception("Rate limit exceeded"),
+    ])
+    def test_detector_matches_known_rate_limit_shapes(self, exc):
+        assert tools._exception_looks_like_rate_limit(exc), \
+            f"detector should have caught {type(exc).__name__}: {exc}"
+
+    @pytest.mark.parametrize("exc", [
+        ValueError("invalid query"),
+        KeyError("missing field 'href'"),
+        Exception("Unable to parse response as JSON"),
+        RuntimeError("internal library error"),
+    ])
+    def test_detector_does_not_match_generic_failures(self, exc):
+        assert not tools._exception_looks_like_rate_limit(exc), \
+            f"detector falsely flagged {type(exc).__name__}: {exc}"
+
+    def test_rate_limit_exception_opens_circuit_on_first_failure(self):
+        """The whole point: a single timeout/429/etc should NOT wait for
+        the 3-failure threshold — it should open immediately and return
+        the explicit message, so the next search call short-circuits."""
+        with patch.object(tools, "time") as t, \
+             patch.object(tools, "DDGS") as ddgs:
+            t.time.return_value = 5000.0
+            ddgs.return_value.text.side_effect = TimeoutError("Read timeout")
+            result = tools.search_internet("query")
+            assert result == tools._CIRCUIT_OPEN_MESSAGE
+            assert tools._circuit_is_open()
+            # And the NEXT call doesn't even invoke DDGS — short-circuited.
+            ddgs.reset_mock()
+            result2 = tools.search_internet("another query")
+            assert result2 == tools._CIRCUIT_OPEN_MESSAGE
+            ddgs.assert_not_called()
+
+    def test_generic_exception_still_uses_threshold_path(self):
+        """Counterpart: a non-rate-limit exception must NOT trip the
+        circuit early — sporadic parse errors etc. shouldn't take search
+        offline for 10 minutes.  Still returns the bare '[]' so the model
+        treats it as 'no results' and pivots."""
+        with patch.object(tools, "time") as t, \
+             patch.object(tools, "DDGS") as ddgs:
+            t.time.return_value = 5000.0
+            ddgs.return_value.text.side_effect = ValueError("bad query")
+            result = tools.search_internet("query")
+            assert result == "[]"
+            assert not tools._circuit_is_open()
