@@ -8,14 +8,14 @@ flake AND a live prod thread.
 * Problem
 Two related research-agent runaways, one trivial query.
 
-** Prod evidence (thread 20260601080949-ba9df2c2, "waterproof watches for Sam")
+** Prod evidence (thread 20260601080949-ba9df2c2 (a trivial product-lookup query))
 Ran *after* #119 deployed.  Search was working (results were real, not
 rate-limited).  The research subtree still produced:
 - ~100 =search_internet= calls total, across *3 nested research-agent
   dispatches* (60 + 18 + 23) under one orchestrator,
 - 818 checkpoints in the research subtree.
 
-For "waterproof watches for Sam."  Two compounding causes:
+For one trivial product-lookup query.  Two compounding causes:
 1. *Inner research-agent* (=sub_research.txt.j2=) is told only "conduct
    thorough research" — no effort bound — so the small model reads
    "thorough" as "search 60 times."
@@ -85,7 +85,7 @@ New eval, =edd/eval/test_research_agent.py= (or test_agent.py):
    =read_url= similarly for hermeticity.
 2. Run the general agent on a research query.  Use TWO differently-shaped
    queries (per the eval-alignment convention), since the prod-mirroring
-   one ("waterproof watches for a 10-year-old") is lexically close to the
+   one (a trivial product lookup) is lexically close to the
    Step 0 example: add a second, unrelated subject (e.g. "how do tabata
    intervals work?").  A bound that holds on both is bounding effort,
    not pattern-matching one query.

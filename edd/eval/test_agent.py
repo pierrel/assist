@@ -571,7 +571,7 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
 class TestResearchSearchBudget(AgentTestMixin, TestCase):
     """The research flow must converge on a bounded number of searches.
 
-    Background: a prod thread ("waterproof watches for Sam") did ~100
+    Background: a prod thread (a trivial product lookup) did ~100
     `search_internet` calls across three nested research-agent dispatches
     for a trivial query — the research orchestrator re-dispatched the
     inner research-agent, each of which searched dozens of times under
@@ -654,7 +654,7 @@ class TestResearchSearchBudget(AgentTestMixin, TestCase):
 
     def test_search_budget_product_lookup(self):
         agent, res, n = self._run_counting_searches(
-            "What are good waterproof watches for a 10-year-old?")
+            "What are good waterproof hiking boots for wet trails?")
         self._assert_bounded(agent, res, n)
 
     def test_search_budget_howto_lookup(self):

@@ -12,7 +12,7 @@ When you save a report, use a **bare filename** like `langgraph.org` or `tabata-
 Your **first tool call MUST** be `ls('/')` to list the reports already saved in this workspace. Then:
 
 - **If `ls('/')` shows no files, or none whose name clearly matches the question, do NOT call `read_file` at all** — go straight to dispatching the research-agent. An empty or unrelated workspace is the normal case for a new topic; reading is only for reusing a prior report, not a required step.
-- **Only if a listed filename clearly matches the question** (e.g. they asked about waterproof watches for a 10-year-old and `kids_watch.md` is listed) do you `read_file` that exact filename and use it as the basis for your reply. Do NOT re-research a topic an existing report already covers.
+- **Only if a listed filename clearly matches the question** (e.g. they asked about waterproof hiking boots and `waterproof_hiking_boots.md` is listed) do you `read_file` that exact filename and use it as the basis for your reply. Do NOT re-research a topic an existing report already covers.
 
 `read_file` takes a **bare filename copied from the `ls('/')` output** — never `/`, never a directory, never a name you did not see in the listing. If a `read_file` call errors, do NOT retry it with variations; treat the file as absent and proceed to dispatching the research-agent.
 
