@@ -24,6 +24,18 @@ PYTEST="${PYTEST:-.venv/bin/pytest}"
 HISTORY_DIR="edd/history"
 PER_TEST_TIMEOUT="${PER_TEST_TIMEOUT:-600}"
 PER_FILE_TIMEOUT="${PER_FILE_TIMEOUT:-1800}"
+
+# A few eval files are legitimately long — many sequential LLM calls or
+# many simulated turns on the slow local model — and were hitting the
+# default caps as NO-XML even though nothing is hung.  The 2026-06-03
+# slot-trace investigation confirmed the model generates normally
+# throughout (busy ~88% of the window, no frozen decode, no runaway
+# generation); these files just do a lot of real work.  Give them
+# headroom so they produce JUnit XML instead of timing out.  See
+# HEAVY_FILES below.
+HEAVY_TEST_TIMEOUT="${HEAVY_TEST_TIMEOUT:-1200}"
+HEAVY_FILE_TIMEOUT="${HEAVY_FILE_TIMEOUT:-3600}"
+HEAVY_FILES="test_agent test_dev_agent test_research_multi_turn_token_regression"
 TS="$(date +%Y%m%d-%H%M)"
 
 # All eval-time tempfile activity (test workspaces, langgraph SqliteSaver
@@ -75,10 +87,16 @@ for f in edd/eval/test_*.py; do
     xml="$HISTORY_DIR/${base}-${TS}.xml"
     log="$HISTORY_DIR/${base}-${TS}.log"
 
-    echo "===> $base" | tee -a "$SUMMARY"
+    # Heavy files get the larger caps; everything else the defaults.
+    pt="$PER_TEST_TIMEOUT"; pf="$PER_FILE_TIMEOUT"
+    case " $HEAVY_FILES " in
+        *" $base "*) pt="$HEAVY_TEST_TIMEOUT"; pf="$HEAVY_FILE_TIMEOUT" ;;
+    esac
+
+    echo "===> $base (per-test ${pt}s, per-file ${pf}s)" | tee -a "$SUMMARY"
     start=$(date +%s)
-    timeout "$PER_FILE_TIMEOUT" "$PYTEST" \
-        --timeout="$PER_TEST_TIMEOUT" \
+    timeout "$pf" "$PYTEST" \
+        --timeout="$pt" \
         --timeout-method=thread \
         --junit-xml="$xml" \
         "$f" \
