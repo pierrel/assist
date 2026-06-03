@@ -42,7 +42,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 
 from assist.agent import create_agent, AgentHarness
-from assist.model_manager import select_chat_model
+from assist.model_manager import select_assistant_model
 
 from .utils import create_filesystem
 
@@ -108,7 +108,7 @@ class TestDevSkillLoading(TestCase):
     of prompt implicitness levels — without the hard-inject path."""
 
     def setUp(self):
-        self.model = select_chat_model(0.1, enable_thinking=False)
+        self.model = select_assistant_model(0.1)
 
     def _make_agent(self):
         """Create an agent rooted at a temp dir that looks like a Python

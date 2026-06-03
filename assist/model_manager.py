@@ -331,9 +331,12 @@ def select_chat_model(
     and we don't actually want a quiet fallback to a remote API.
 
     ``enable_thinking`` (default ``None``): see
-    ``_build_openai_chat_model``.  Used by the reasoning-impact eval
-    in ``edd/eval/test_reasoning_impact.py`` to A/B Qwen3 thinking
-    mode against latency.  Production callers leave it unset.
+    ``_build_openai_chat_model``.  Most callers should use
+    :func:`select_assistant_model` instead, which defaults Qwen3
+    reasoning OFF to match production; this lower-level entry point
+    leaves the upstream behavior alone unless told otherwise and is for
+    callers that need that (e.g. the reasoning-impact A/B eval, which
+    passes an explicit flag).
     """
 
     config = _get_config()
@@ -352,3 +355,22 @@ def select_chat_model(
     )
     llm.profile = {"max_input_tokens": config.context_len}
     return llm
+
+
+def select_assistant_model(
+    temperature: float,
+    *,
+    enable_thinking: bool = False,
+) -> BaseChatModel:
+    """Chat model configured the way assist actually runs it.
+
+    Thin wrapper over :func:`select_chat_model` that defaults Qwen3
+    reasoning OFF — the production configuration (see ``Thread`` and the
+    web summary flow).  Both prod and the eval harness build their models
+    through here so the reasoning setting can't drift apart as new call
+    sites are added: the eval/prod mismatch this consolidates cost a full
+    night of NO-XML eval timeouts before it was found.
+
+    Pass ``enable_thinking=True`` for the rare reasoning-on path.
+    """
+    return select_chat_model(temperature, enable_thinking=enable_thinking)

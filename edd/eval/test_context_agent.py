@@ -5,7 +5,7 @@ from unittest import TestCase
 
 from assist.agent import create_context_agent, AgentHarness
 
-from assist.model_manager import select_chat_model
+from assist.model_manager import select_assistant_model
 
 from .utils import create_filesystem
 
@@ -22,7 +22,7 @@ class TestContextAgent(TestCase):
                                                   root)), root
 
     def setUp(self):
-        self.model = select_chat_model(0.1, enable_thinking=False)
+        self.model = select_assistant_model(0.1)
 
     def test_surfaces_todo_files_for_task_request(self):
         """When the query implies a task, surface the task files directly."""

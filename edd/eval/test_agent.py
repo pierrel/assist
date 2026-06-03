@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
-from assist.model_manager import select_chat_model
+from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 from assist.tools import _CIRCUIT_OPEN_MESSAGE
@@ -27,7 +27,7 @@ class TestAgent(AgentTestMixin, TestCase):
                                          root)), root
 
     def setUp(self):
-        self.model = select_chat_model(0.1, enable_thinking=False)
+        self.model = select_assistant_model(0.1)
 
     def test_adds_item_correctly(self):
         agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
@@ -244,7 +244,7 @@ class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = select_chat_model(0.1, enable_thinking=False)
+        cls.model = select_assistant_model(0.1)
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp(prefix="agent_integration_eval_")
@@ -468,7 +468,7 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
     """
 
     def setUp(self):
-        self.model = select_chat_model(0.1, enable_thinking=False)
+        self.model = select_assistant_model(0.1)
 
     def _run_with_blocked_search(self, prompt: str):
         """Build the general agent with search/fetch forced to report

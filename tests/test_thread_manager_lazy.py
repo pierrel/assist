@@ -28,8 +28,8 @@ class TestThreadManagerLazy(TestCase):
     def test_init_does_not_call_select_chat_model(self):
         """Constructing a ``ThreadManager`` must not touch the model."""
         with patch(
-            "assist.thread.select_chat_model",
-            side_effect=AssertionError("select_chat_model called at init"),
+            "assist.thread.select_assistant_model",
+            side_effect=AssertionError("select_assistant_model called at init"),
         ):
             with tempfile.TemporaryDirectory() as tmp:
                 ThreadManager(root_dir=tmp)
@@ -39,7 +39,7 @@ class TestThreadManagerLazy(TestCase):
         result is cached for subsequent reads."""
         sentinel = object()
         with patch(
-            "assist.thread.select_chat_model", return_value=sentinel
+            "assist.thread.select_assistant_model", return_value=sentinel
         ) as fake_select:
             with tempfile.TemporaryDirectory() as tmp:
                 manager = ThreadManager(root_dir=tmp)
@@ -73,7 +73,7 @@ class TestThreadManagerLazy(TestCase):
         # init_chat_model() which requires a real model string.  We
         # don't care about the agent itself here; we care about the
         # filesystem side effects of the wiring around it.
-        with patch("assist.thread.select_chat_model", return_value=MagicMock()), \
+        with patch("assist.thread.select_assistant_model", return_value=MagicMock()), \
              patch("assist.agent.create_deep_agent", return_value=MagicMock()):
             with tempfile.TemporaryDirectory() as tmp:
                 manager = ThreadManager(root_dir=tmp)

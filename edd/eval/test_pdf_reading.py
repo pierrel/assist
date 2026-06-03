@@ -30,7 +30,7 @@ from unittest import TestCase
 from langchain_core.messages import AIMessage
 
 from assist.agent import AgentHarness, create_agent
-from assist.model_manager import select_chat_model
+from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
 
@@ -63,7 +63,7 @@ class TestPdfReading(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = select_chat_model(0.1, enable_thinking=False)
+        cls.model = select_assistant_model(0.1)
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp(prefix="pdf_reading_eval_")

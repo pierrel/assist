@@ -163,7 +163,7 @@ class TestThreadDefaultBackend:
         from assist.thread import Thread
 
         with patch("assist.thread.create_agent") as fake_ca, \
-             patch("assist.thread.select_chat_model") as fake_model:
+             patch("assist.thread.select_assistant_model") as fake_model:
             fake_ca.return_value = MagicMock()
             fake_model.return_value = MagicMock()
             with tempfile.TemporaryDirectory() as wd:
@@ -182,7 +182,7 @@ class TestThreadDefaultBackend:
         # guard runs (it raises on the first statement, before any heavy work).
         from assist.thread import Thread
 
-        with patch("assist.thread.select_chat_model") as fake_model:
+        with patch("assist.thread.select_assistant_model") as fake_model:
             fake_model.return_value = MagicMock()
             with tempfile.TemporaryDirectory() as wd:
                 with pytest.raises(ValueError):

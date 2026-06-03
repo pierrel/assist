@@ -755,9 +755,9 @@ async def merge_thread(tid: str):
         raise HTTPException(status_code=400, detail="No git repository configured for this thread")
 
     # Get a model for summarizing
-    from assist.model_manager import select_chat_model
+    from assist.model_manager import select_assistant_model
     try:
-        summary_model = select_chat_model(temperature=0.1, enable_thinking=False)
+        summary_model = select_assistant_model(temperature=0.1)
     except Exception:
         # If model fails to load, pass None and use fallback summary
         summary_model = None
