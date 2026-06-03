@@ -380,6 +380,37 @@ class TestSelectChatModel(TestCase):
         self.assertFalse(eb, f"Expected no extra_body for True; got {eb!r}")
 
 
+class TestSelectAssistantModel(TestCase):
+    """``select_assistant_model`` is the prod/eval-shared constructor.
+
+    Its contract: reasoning OFF by default, overrideable to on.  The
+    whole point is that prod and the eval harness can't drift apart on
+    the reasoning setting, so these tests pin the default.
+    """
+
+    def test_defaults_thinking_off(self):
+        """No flag -> reasoning off (``chat_template_kwargs`` payload),
+        matching the production ``Thread`` config.
+        """
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
+            llm = model_manager.select_assistant_model(0.1)
+        eb = getattr(llm, "extra_body", None) or {}
+        self.assertEqual(
+            eb.get("chat_template_kwargs"),
+            {"enable_thinking": False},
+            f"default should disable thinking; got {eb!r}",
+        )
+
+    def test_enable_thinking_true_opts_back_in(self):
+        """``enable_thinking=True`` is the rare reasoning-on path; it
+        defers to Qwen3's own default and sends no payload.
+        """
+        with patch.dict("os.environ", {"ASSIST_MODEL_URL": "http://x/v1"}):
+            llm = model_manager.select_assistant_model(0.1, enable_thinking=True)
+        eb = getattr(llm, "extra_body", None)
+        self.assertFalse(eb, f"Expected no extra_body for True; got {eb!r}")
+
+
 class TestRequestTimeoutAndRetries(TestCase):
     """Pin the per-phase httpx Timeout shape and the OpenAI client's
     ``max_retries=0`` invariant.  Both are construction-time config —

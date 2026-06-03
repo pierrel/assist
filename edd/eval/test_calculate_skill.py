@@ -40,7 +40,7 @@ from unittest import TestCase
 from langchain_core.messages import AIMessage, ToolMessage
 
 from assist.agent import create_agent, AgentHarness
-from assist.model_manager import select_chat_model
+from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
 from .utils import create_filesystem
@@ -78,7 +78,7 @@ class TestCalculateSkill(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = select_chat_model(0.1, enable_thinking=False)
+        cls.model = select_assistant_model(0.1)
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp(prefix="calculate_skill_eval_")

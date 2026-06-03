@@ -18,7 +18,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from deepagents.backends.protocol import BackendProtocol
 
 from assist.promptable import base_prompt_for
-from assist.model_manager import select_chat_model
+from assist.model_manager import select_assistant_model
 from assist.agent import create_research_agent, create_agent
 from assist.checkpoint_rollback import invoke_with_rollback
 from assist.sandbox_manager import SandboxManager
@@ -162,7 +162,7 @@ class Thread:
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
-        self.model = model or select_chat_model(0.1, enable_thinking=False)
+        self.model = model or select_assistant_model(0.1)
         self.max_concurrency = max_concurrency
         # Notified with "queued" if another thread is holding the LLM
         # queue when this Thread.message() runs, then "running" once
@@ -376,7 +376,7 @@ n    checkpointing via SqliteSaver.
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
-                    self._model = select_chat_model(0.1, enable_thinking=False)
+                    self._model = select_assistant_model(0.1)
         return self._model
 
     def list(self) -> list[str]:

@@ -110,7 +110,7 @@ class TestThreadExtraTools:
     def _build(self, **kwargs):
         from assist.thread import Thread
         with patch("assist.thread.create_agent") as fake_ca, \
-             patch("assist.thread.select_chat_model") as fake_model:
+             patch("assist.thread.select_assistant_model") as fake_model:
             fake_ca.return_value = MagicMock()
             fake_model.return_value = MagicMock()
             with tempfile.TemporaryDirectory() as wd:
@@ -153,7 +153,7 @@ class TestThreadExtraConfig:
     def _build(self, **kwargs):
         from assist.thread import Thread
         with patch("assist.thread.create_agent") as fake_ca, \
-             patch("assist.thread.select_chat_model") as fake_model:
+             patch("assist.thread.select_assistant_model") as fake_model:
             fake_ca.return_value = MagicMock()
             fake_model.return_value = MagicMock()
             with tempfile.TemporaryDirectory() as wd:
