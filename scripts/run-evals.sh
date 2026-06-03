@@ -11,9 +11,10 @@
 # session.  Running pytest one file at a time bounds the blast radius:
 # we lose at most one file's XML, not the entire night.
 #
-# Each file gets:
-#   - per-test cap: 600s (pytest-timeout, thread method)
-#   - per-file cap: 1800s (outer `timeout`)
+# Each file gets (DEFAULT caps; a few "heavy" files override — see
+# HEAVY_FILES below):
+#   - per-test cap: 600s (pytest-timeout, thread method) [heavy: 1200s]
+#   - per-file cap: 1800s (outer `timeout`)              [heavy: 3600s]
 #   - own JUnit XML at edd/history/<base>-<ts>.xml
 #
 # A summary line lands in edd/history/eval-summary-<ts>.txt as each file
@@ -79,7 +80,8 @@ mkdir -p "$HISTORY_DIR"
 SUMMARY="$HISTORY_DIR/eval-summary-$TS.txt"
 
 echo "=== eval suite starting at $(date -Iseconds) ===" | tee -a "$SUMMARY"
-echo "  per-test timeout: ${PER_TEST_TIMEOUT}s, per-file timeout: ${PER_FILE_TIMEOUT}s" | tee -a "$SUMMARY"
+echo "  default per-test timeout: ${PER_TEST_TIMEOUT}s, per-file timeout: ${PER_FILE_TIMEOUT}s" | tee -a "$SUMMARY"
+echo "  heavy files (${HEAVY_TEST_TIMEOUT}s/${HEAVY_FILE_TIMEOUT}s): ${HEAVY_FILES}" | tee -a "$SUMMARY"
 echo "  TMPDIR: $TMPDIR (wiped, $(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"}'))" | tee -a "$SUMMARY"
 
 for f in edd/eval/test_*.py; do
