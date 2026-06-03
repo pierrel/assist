@@ -11,7 +11,9 @@ those tool calls are stripped and the AI message content is replaced
 with a short terminal summary. The agent loop then ends naturally
 because the AI message carries no tool calls.
 
-Three patterns are recognised:
+Six patterns are recognised (A-F). A-D are general and on by default;
+E and F are opt-in (off unless their threshold is set) and used by the
+research flow — see ``agent.py``.
 
 A. Same tool + same normalised error, repeated >=
    ``error_repeat_threshold`` times in a row. Errors are normalised
@@ -33,6 +35,22 @@ C. Same tool + >= ``distinct_args_threshold`` distinct arg sets within
    but get a HIGHER breadth threshold
    (``_EXPLORATION_DISTINCT_ARGS_THRESHOLD``); they remain fully subject
    to A and B.
+
+D. >= ``http_failure_threshold`` consecutive tool results whose bodies
+   look like an HTTP 4xx/5xx page (bot-detection, rate-limit, captcha),
+   regardless of args. Catches a fetch loop across distinct URLs that
+   all return error pages — A/B/C miss it because the body is HTML, not
+   a Python error, and the args differ.
+
+E. Sheer VOLUME: >= ``volume_threshold`` calls to a single tool in
+   ``volume_tools`` within the window, regardless of args or errors
+   (counted per-tool). Catches over-use of a *successful* tool — the
+   research over-search runaway. Off unless ``volume_threshold`` > 0.
+
+F. Per-subagent ``task`` RE-DISPATCH: the same subagent dispatched >=
+   ``subagent_dispatch_threshold`` times within the window. Catches an
+   orchestrator re-dispatching the same sub-agent. Off unless
+   ``subagent_dispatch_threshold`` > 0.
 """
 
 import hashlib

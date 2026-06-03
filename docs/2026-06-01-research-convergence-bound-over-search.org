@@ -165,15 +165,21 @@ one insufficient; all are committed separately.
    converge (~4 searches) so the deterministic cap is a backstop, not the
    primary path, and they explain the behavior the cap enforces.
 
-2. *Pattern E — per-agent search-volume cap (deterministic).*  Scoped via
-   =volume_tools= to =search_internet= only.  NOT =read_url=: reading
-   several sources is normal research, it's per-host throttled, its
-   failure-storm is Pattern D's job, and capping it stripped AI messages
-   that batched a read with the report write (regressed
-   =test_research_saved_to_references= to an empty references dir).
+2. *Pattern E — per-agent, per-tool volume cap (deterministic).*  Counts
+   each capped tool SEPARATELY (not summed), so a healthy pass (~4
+   searches plus a read or two) stays under the cap.  Scoped via
+   =volume_tools= per subagent: the research-agent caps BOTH
+   =search_internet= and =read_url= at 6 (an uncapped =read_url= let it
+   read many pages and balloon the turn to ~12 min); the fact-check-agent
+   caps =read_url= only, at the higher =_FACTCHECK_READ_URL_CAP=12= so a
+   compliant multi-source check (its prompt sanctions up to 10) isn't cut
+   off.  The cap is applied ONLY to subagents with no write tool, so
+   stripping a capped-tool batch never loses the report write (capping
+   =read_url= on a writer regressed =test_research_saved_to_references= to
+   an empty references dir — hence the orchestrator is never volume-capped).
    Counts over a turn-wide window (=_RESEARCH_LOOP_WINDOW=50=) so
-   interleaved reads can't dilute the search count below the cap in a
-   12-event tail (code-review finding).
+   interleaved reads can't dilute the count below the cap in a 12-event
+   tail (code-review finding).
 
 3. *Pattern F — per-subagent re-dispatch cap (deterministic).*  Each
    subagent dispatched at most once.  Pattern E bounded each agent but
@@ -195,9 +201,10 @@ one insufficient; all are committed separately.
   have no write tool), never on the orchestrator (which writes the
   report).  An uncapped subagent =read_url= ballooned a research turn to
   ~12 min; capping it there cut that to ~2 min with no write-stripping
-  risk.  The orchestrator's own =read_url= (for report writing) is
-  uncapped but naturally bounded by the references in the (capped)
-  research result.
+  risk.  The research-agent's =read_url= cap is 6; the fact-check-agent's
+  is =_FACTCHECK_READ_URL_CAP=12= (it legitimately reads more sources).
+  The orchestrator's own =read_url= (for report writing) is uncapped but
+  naturally bounded by the references in the (capped) research result.
 - The deterministic caps strip the *whole* latest AI message's tool
   calls.  Safe as wired (only the inner research-agent — which has no
   write tool — is volume-capped), but a future agent that batches a

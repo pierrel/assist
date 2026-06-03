@@ -472,9 +472,13 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
     returns ``_CIRCUIT_OPEN_MESSAGE`` ("rate-limited … try again in a
     few minutes") instead of silently failing.  The search layer works,
     but the *general agent* was observed re-dispatching the
-    research-agent on the blocked result — a cross-dispatch meta-loop
-    that ``LoopDetectionMiddleware`` (a within-run detector) cannot and
-    should not catch.  The contract this eval pins: dispatch
+    research-agent on the blocked result.  Two layers now hold the line:
+    the prompt's rate-limit handoff (relay-and-stop), and — as a
+    deterministic backstop — ``LoopDetectionMiddleware`` Pattern F on the
+    general agent, which strips a *within-turn* second dispatch of the
+    research-agent (``subagent_dispatch_threshold=1``).  A genuinely
+    cross-*turn* re-dispatch is outside a within-run detector and stays
+    the prompt's job.  The contract this eval pins: dispatch
     research-agent once, read the blocked signal, relay it, stop.
 
     MOCKING NOTE — this is the one eval in ``edd/eval/`` that

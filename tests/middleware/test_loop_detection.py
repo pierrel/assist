@@ -1192,6 +1192,22 @@ class TestPatternEVolume:
         assert result is not None
         assert result["tools"] == {"search_internet"}
 
+    def test_counts_per_tool_not_aggregate(self):
+        # Two capped tools, each BELOW the threshold, summing ABOVE it:
+        # 4 search + 4 read_url, both capped, threshold 6.  Per-tool the
+        # max is 4 (< 6) so nothing fires.  Pins the per-tool semantics:
+        # a healthy pass (~4 searches + a read or two) must not trip an
+        # aggregate-counting bug.
+        both = frozenset({"search_internet", "read_url"})
+        events = self._searches(4) + [{
+            "tool_name": "read_url",
+            "args_sig": _normalise_args({"url": f"u{i}"}),
+            "result_content": "page text",
+            "is_error": False, "http_failure": False, "completed": True,
+        } for i in range(4)]
+        assert _detect_loop(events, 2, 3, 3, 10,
+                            volume_threshold=6, volume_tools=both) is None
+
     def test_terminal_message_is_graceful(self):
         msg = _compose_terminal_message(
             {"pattern": "tool-volume", "tools": {"search_internet"},

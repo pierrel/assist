@@ -382,18 +382,29 @@ def create_context_agent(model: BaseChatModel,
 # Pattern F / _SUBAGENT_DISPATCH_CAP below — not by this volume cap.)
 # Deliberately higher than a healthy research pass (~4 searches) so it
 # only fires on genuine runaway, not normal multi-query exploration.
-# Per-AGENT cap; combined with the per-subagent re-dispatch cap below
-# (which holds the orchestrator to one research dispatch), this bounds the
-# aggregate search volume to ~this many for a research turn.
+# Per-AGENT, per-TOOL cap (each tool in _RESEARCH_VOLUME_TOOLS is counted
+# separately — NOT summed).  Combined with the per-subagent re-dispatch cap
+# below (which holds the orchestrator to one research dispatch), this bounds
+# each capped tool's volume to ~this many for a research turn.  Per-tool is
+# deliberate: a healthy pass is ~4 searches PLUS a read or two, so an
+# aggregate cap of 6 would fire on healthy behavior.
 _RESEARCH_TOOL_VOLUME_CAP = 6
 
-# Pattern E caps these tools.  Applied ONLY to the research SUBAGENTS
-# (research / critique / fact-check) — none of which write the report — so
-# stripping a capped-tool batch never loses a write.  We cap BOTH
-# search_internet and read_url there: an uncapped read_url let the
-# research-agent read many pages and balloon the turn to ~12 min.  The
-# orchestrator (which writes the report and reads URLs to do so) gets NO
-# volume cap, precisely so its read+write batches are never stripped.
+# The fact-check-agent reads many DISTINCT reference URLs to verify a
+# report's claims, and its prompt sanctions up to 10 read_url calls — so it
+# gets its OWN, higher read_url cap (vs the research-agent's 6) so a
+# compliant multi-source check isn't cut off mid-way.  Still finite, so the
+# 200+ read_url runaway observed when it was unbounded is still caught.
+_FACTCHECK_READ_URL_CAP = 12
+
+# Pattern E caps these tools on the research-agent (the sole searcher).  We
+# cap BOTH search_internet and read_url there: an uncapped read_url let it
+# read many pages and balloon the turn to ~12 min.  The fact-check-agent
+# gets its own read_url-only cap (above); the critique-agent has no capped
+# tools.  The orchestrator (which writes the report and reads URLs to do so)
+# gets NO volume cap, precisely so its read+write batches are never stripped
+# — none of the capped subagents write the report, so stripping a
+# capped-tool batch on them never loses a write.
 _RESEARCH_VOLUME_TOOLS = frozenset({"search_internet", "read_url"})
 
 # Wider LoopDetection window for the research-agent so the volume cap
@@ -535,18 +546,20 @@ def create_research_agent(model: BaseChatModel,
     # left the fact-check-agent unbounded — it ran 200+ `read_url`
     # calls in a diag because nothing would short-circuit a model that
     # kept "thinking of more references to verify".
-    def _subagent_safety_mw():
+    def _subagent_safety_mw(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
+                            volume_tools=_RESEARCH_VOLUME_TOOLS):
         return [_make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
-                # The research-agent is the sole searcher: cap its search
-                # volume (Pattern E) over a turn-wide window so interleaved
-                # reads can't dilute the count below the cap.
+                # Pattern-E volume cap over a turn-wide window so interleaved
+                # reads can't dilute the count below the cap.  Defaults suit
+                # the research-agent (search + read, cap 6); the fact-check
+                # agent overrides with its own read_url-only, higher cap.
                 LoopDetectionMiddleware(window=_RESEARCH_LOOP_WINDOW,
-                                        volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
-                                        volume_tools=_RESEARCH_VOLUME_TOOLS),
+                                        volume_threshold=volume_threshold,
+                                        volume_tools=volume_tools),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
@@ -570,7 +583,12 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url],
-        "middleware": _subagent_safety_mw(),
+        # Own read_url-only cap (higher than the research-agent's) so a
+        # compliant multi-source fact-check isn't cut off — see
+        # _FACTCHECK_READ_URL_CAP.
+        "middleware": _subagent_safety_mw(
+            volume_threshold=_FACTCHECK_READ_URL_CAP,
+            volume_tools=frozenset({"read_url"})),
     }
 
     # The orchestrator DELEGATES searching to the research-agent (see its
