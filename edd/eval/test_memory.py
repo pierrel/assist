@@ -19,7 +19,7 @@ class TestMemory(AgentTestMixin, TestCase):
                                          root)), root
 
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_chat_model(0.1, enable_thinking=False)
 
     def test_reads_memory(self):
         agent, root = self.create_agent({"AGENTS.md": "I have 3 cats"})

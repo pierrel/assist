@@ -24,7 +24,7 @@ class TestResearchAgent(TestCase):
                                                   root)), root
     
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_chat_model(0.1, enable_thinking=False)
         
     def test_follows_result_guidance(self):
         # research-agent is confined to <root>/references/, so the

@@ -108,7 +108,7 @@ class TestDevSkillLoading(TestCase):
     of prompt implicitness levels — without the hard-inject path."""
 
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_chat_model(0.1, enable_thinking=False)
 
     def _make_agent(self):
         """Create an agent rooted at a temp dir that looks like a Python

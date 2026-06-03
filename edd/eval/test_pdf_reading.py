@@ -63,7 +63,7 @@ class TestPdfReading(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = select_chat_model(0.1)
+        cls.model = select_chat_model(0.1, enable_thinking=False)
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp(prefix="pdf_reading_eval_")
