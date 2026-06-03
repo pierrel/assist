@@ -25,7 +25,7 @@ from assist.thread import ThreadManager
 
 
 class TestThreadManagerLazy(TestCase):
-    def test_init_does_not_call_select_chat_model(self):
+    def test_init_does_not_call_select_assistant_model(self):
         """Constructing a ``ThreadManager`` must not touch the model."""
         with patch(
             "assist.thread.select_assistant_model",
@@ -35,8 +35,8 @@ class TestThreadManagerLazy(TestCase):
                 ThreadManager(root_dir=tmp)
 
     def test_first_model_access_calls_select(self):
-        """First read of ``.model`` triggers ``select_chat_model``; the
-        result is cached for subsequent reads."""
+        """First read of ``.model`` triggers ``select_assistant_model``;
+        the result is cached for subsequent reads."""
         sentinel = object()
         with patch(
             "assist.thread.select_assistant_model", return_value=sentinel
