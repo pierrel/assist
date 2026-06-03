@@ -11,11 +11,20 @@
 # session.  Running pytest one file at a time bounds the blast radius:
 # we lose at most one file's XML, not the entire night.
 #
-# Each file gets (DEFAULT caps; a few "heavy" files override — see
-# HEAVY_FILES below):
-#   - per-test cap: 600s (pytest-timeout, thread method) [heavy: 1200s]
-#   - per-file cap: 1800s (outer `timeout`)              [heavy: 3600s]
+# Each file gets:
+#   - per-test cap: 1200s (pytest-timeout, thread method)
+#   - per-file cap: 3600s (outer `timeout`)
 #   - own JUnit XML at edd/history/<base>-<ts>.xml
+#
+# One timeout for every file, deliberately generous.  A few files
+# (test_agent, test_dev_agent, test_research_multi_turn) legitimately
+# run for many minutes — many sequential LLM calls / simulated turns on
+# the slow local model — and the 2026-06-03 slot-trace investigation
+# confirmed the model generates normally throughout (busy ~88% of the
+# window, no frozen decode, no runaway), so the long runs are real work,
+# not hangs.  Rather than special-case those files, every file gets the
+# same headroom: simpler, and per-file isolation still bounds the blast
+# radius if one ever does hang.
 #
 # A summary line lands in edd/history/eval-summary-<ts>.txt as each file
 # completes, so partial progress is visible during long runs.
@@ -23,20 +32,8 @@ set -u
 
 PYTEST="${PYTEST:-.venv/bin/pytest}"
 HISTORY_DIR="edd/history"
-PER_TEST_TIMEOUT="${PER_TEST_TIMEOUT:-600}"
-PER_FILE_TIMEOUT="${PER_FILE_TIMEOUT:-1800}"
-
-# A few eval files are legitimately long — many sequential LLM calls or
-# many simulated turns on the slow local model — and were hitting the
-# default caps as NO-XML even though nothing is hung.  The 2026-06-03
-# slot-trace investigation confirmed the model generates normally
-# throughout (busy ~88% of the window, no frozen decode, no runaway
-# generation); these files just do a lot of real work.  Give them
-# headroom so they produce JUnit XML instead of timing out.  See
-# HEAVY_FILES below.
-HEAVY_TEST_TIMEOUT="${HEAVY_TEST_TIMEOUT:-1200}"
-HEAVY_FILE_TIMEOUT="${HEAVY_FILE_TIMEOUT:-3600}"
-HEAVY_FILES="test_agent test_dev_agent test_research_multi_turn_token_regression"
+PER_TEST_TIMEOUT="${PER_TEST_TIMEOUT:-1200}"
+PER_FILE_TIMEOUT="${PER_FILE_TIMEOUT:-3600}"
 TS="$(date +%Y%m%d-%H%M)"
 
 # All eval-time tempfile activity (test workspaces, langgraph SqliteSaver
@@ -80,8 +77,7 @@ mkdir -p "$HISTORY_DIR"
 SUMMARY="$HISTORY_DIR/eval-summary-$TS.txt"
 
 echo "=== eval suite starting at $(date -Iseconds) ===" | tee -a "$SUMMARY"
-echo "  default per-test timeout: ${PER_TEST_TIMEOUT}s, per-file timeout: ${PER_FILE_TIMEOUT}s" | tee -a "$SUMMARY"
-echo "  heavy files (${HEAVY_TEST_TIMEOUT}s/${HEAVY_FILE_TIMEOUT}s): ${HEAVY_FILES}" | tee -a "$SUMMARY"
+echo "  per-test timeout: ${PER_TEST_TIMEOUT}s, per-file timeout: ${PER_FILE_TIMEOUT}s" | tee -a "$SUMMARY"
 echo "  TMPDIR: $TMPDIR (wiped, $(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"}'))" | tee -a "$SUMMARY"
 
 for f in edd/eval/test_*.py; do
@@ -89,16 +85,10 @@ for f in edd/eval/test_*.py; do
     xml="$HISTORY_DIR/${base}-${TS}.xml"
     log="$HISTORY_DIR/${base}-${TS}.log"
 
-    # Heavy files get the larger caps; everything else the defaults.
-    pt="$PER_TEST_TIMEOUT"; pf="$PER_FILE_TIMEOUT"
-    case " $HEAVY_FILES " in
-        *" $base "*) pt="$HEAVY_TEST_TIMEOUT"; pf="$HEAVY_FILE_TIMEOUT" ;;
-    esac
-
-    echo "===> $base (per-test ${pt}s, per-file ${pf}s)" | tee -a "$SUMMARY"
+    echo "===> $base" | tee -a "$SUMMARY"
     start=$(date +%s)
-    timeout "$pf" "$PYTEST" \
-        --timeout="$pt" \
+    timeout "$PER_FILE_TIMEOUT" "$PYTEST" \
+        --timeout="$PER_TEST_TIMEOUT" \
         --timeout-method=thread \
         --junit-xml="$xml" \
         "$f" \
