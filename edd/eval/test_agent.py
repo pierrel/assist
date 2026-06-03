@@ -27,7 +27,7 @@ class TestAgent(AgentTestMixin, TestCase):
                                          root)), root
 
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_chat_model(0.1, enable_thinking=False)
 
     def test_adds_item_correctly(self):
         agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
@@ -244,7 +244,7 @@ class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = select_chat_model(0.1)
+        cls.model = select_chat_model(0.1, enable_thinking=False)
 
     def setUp(self):
         self.workspace = tempfile.mkdtemp(prefix="agent_integration_eval_")
@@ -468,7 +468,7 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
     """
 
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_chat_model(0.1, enable_thinking=False)
 
     def _run_with_blocked_search(self, prompt: str):
         """Build the general agent with search/fetch forced to report

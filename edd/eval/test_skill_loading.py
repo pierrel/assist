@@ -58,7 +58,7 @@ class TestSkillLoading(TestCase):
     range of prompt implicitness levels."""
 
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_chat_model(0.1, enable_thinking=False)
 
     def _make_agent(self):
         root = tempfile.mkdtemp()

@@ -59,7 +59,7 @@ class TestDevAgentRunsEval(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.model = select_chat_model(0.1)
+        cls.model = select_chat_model(0.1, enable_thinking=False)
         cls.workspace = tempfile.mkdtemp(prefix="dev_agent_eval_runs_eval_")
         _rsync_project(cls.workspace)
 

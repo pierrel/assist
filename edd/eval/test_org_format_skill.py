@@ -32,7 +32,7 @@ class TestOrgFormatSkill(TestCase):
         return AgentHarness(create_agent(self.model, root)), root
 
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_chat_model(0.1, enable_thinking=False)
 
     def test_inserts_heading_without_orphaning_previous_body(self):
         """Insert a new top-level heading between two existing top-level
