@@ -66,13 +66,31 @@ New heading's body.
 * Heading 2
 ```
 
+### WRONG — anchored on a mid-body line (the real failure)
+
+Sections often have several paragraphs separated by blank lines, and an org *bold* line like `*Direction.*` starts with `*` and can look like a heading. Anchoring your edit on a mid-body line — or just before such a bold line — drops the new heading inside the section and orphans the rest:
+
+```
+* Research notes
+The endpoint is rate-limited and behind anti-bot — stays.
+
+* Moonshot                       ← WRONG: dropped mid-section
+Moonshot's body.
+*Direction.*  Pick a real API.   ← orphaned: this still belongs to Research notes
+Keep the scraped endpoint for now.
+* Next section
+```
+
+`*Direction.*` is *bold text*, NOT a heading — a heading needs a space after the asterisks (`* Direction`). Never anchor your edit on a bold line, a body sentence, or a blank line.
+
 ### Procedure for inserting a new heading
 
-1. Identify the heading you're inserting after.
-2. Scan downward through its body — including any deeper-level subsections.
-3. Stop at the next line that is a heading at the SAME level or a HIGHER level (equal-or-fewer asterisks).
-4. Insert your new heading on the line immediately before that next heading.
-5. If no such next heading exists (the heading you're appending under is the last one at its level in the file), append at the end of the file.
+Do this literally, in order:
+
+1. Decide which heading the new one goes after (or under).
+2. From there, scan DOWN past everything beneath it — every body line, every blank line, every deeper `**`/`***` subsection — until you reach the next line that is a real heading at the same or a higher level: a line that begins with asterisks then a SPACE (`* ` or `** `).
+3. That heading line is your edit anchor: set your `edit_file` `old_string` to it and put your new heading immediately before it. If there is no such next heading, append at the very end of the file.
+4. NEVER anchor on a body sentence, a blank line, or an org *bold* line like `*Direction.*` (bold has no space after the `*`, so it is NOT a heading). Anchoring on any of those drops your new heading mid-section and splits it.
 
 ### Inserting a sub-heading
 
