@@ -607,7 +607,7 @@ class TestResearchSearchBudget(AgentTestMixin, TestCase):
     SEARCH_BUDGET = 12
 
     def setUp(self):
-        self.model = select_chat_model(0.1)
+        self.model = select_assistant_model(0.1)
 
     def _run_counting_searches(self, prompt: str):
         import assist.tools as _tools
