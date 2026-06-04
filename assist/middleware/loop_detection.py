@@ -507,16 +507,22 @@ def _detect_loop(
             e["tool_name"] for e in completed_events
             if e["tool_name"] in volume_tools
         )
-        if capped:
-            tool, n = capped.most_common(1)[0]
-            if n >= volume_threshold:
-                return {
-                    "pattern": "tool-volume",
-                    "reason": (f"tool-volume: {tool} x{n} within last "
-                               f"{len(completed_events)} calls"),
-                    "tools": {tool},
-                    "run_length": n,
-                }
+        # Report EVERY over-threshold tool, not just the most frequent.  The
+        # cap is per-tool, and `after_model` only intervenes when the latest
+        # call extends a tool in `tools` — so if two capped tools both exceed
+        # the threshold (e.g. search_internet AND read_url on the research
+        # agent) and we named only the busiest, a latest call to the *other*
+        # over-threshold tool would slip through uncapped.
+        over = {t for t, n in capped.items() if n >= volume_threshold}
+        if over:
+            return {
+                "pattern": "tool-volume",
+                "reason": ("tool-volume: "
+                           + ", ".join(f"{t} x{capped[t]}" for t in sorted(over))
+                           + f" within last {len(completed_events)} calls"),
+                "tools": over,
+                "run_length": max(capped[t] for t in over),
+            }
 
     return None
 

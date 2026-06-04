@@ -1226,6 +1226,23 @@ class TestPatternEVolume:
         assert _detect_loop(events, 2, 3, 3, 10,
                             volume_threshold=6, volume_tools=both) is None
 
+    def test_reports_all_over_threshold_tools(self):
+        # Both capped tools exceed the threshold: search=7, read=7, cap=6.
+        # detection["tools"] must include BOTH so after_model intervenes on
+        # a latest call to either — naming only the busiest would let the
+        # other slip through.
+        both = frozenset({"search_internet", "read_url"})
+        events = self._searches(7) + [{
+            "tool_name": "read_url",
+            "args_sig": _normalise_args({"url": f"u{i}"}),
+            "result_content": "page text",
+            "is_error": False, "http_failure": False, "completed": True,
+        } for i in range(7)]
+        result = _detect_loop(events, 2, 3, 3, 10,
+                              volume_threshold=6, volume_tools=both)
+        assert result is not None
+        assert result["tools"] == {"search_internet", "read_url"}
+
     def test_terminal_message_is_graceful(self):
         msg = _compose_terminal_message(
             {"pattern": "tool-volume", "tools": {"search_internet"},
