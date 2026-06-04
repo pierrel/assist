@@ -1,0 +1,365 @@
+* Observability
+** TODO Add sub-agent tracing to web conversation
+Make it expandable from the main web ui. Not always expanded.
+* Basics
+** TODO Fix cli
+* Vision
+** TODO Test a single vision experiment
+* Architecture
+** TODO Refactor assist into a framework (deepagents / assist / client boundary)
+We've been "opening up" assist to emacsos's needs by *accretion* — a new
+keyword threaded through =Thread= → =create_agent= each time a client
+needs to influence the agent (=extra_tools=, =extra_config=,
+=extra_skill_sources=, =loop_exploration_tools=, …).  Each was a fine
+small change in isolation, but the pattern is the problem.  Instead:
+design a deliberate *embedder contract*, separate assist's reusable
+small-model-hardening core from its app-specific pieces (the
+dev/research/critique subagents, dev prompts, =ThreadManager= /
+=threads.db=) so the dev app AND emacsos are both *clients* of a
+framework, and decide which hardening middleware belongs upstream in
+deepagents.  Thinking + options (spec object / composable middleware /
+builder / package split) in
+[[file:docs/2026-05-23-assist-as-a-framework.org][docs/2026-05-23-assist-as-a-framework.org]].  Action: stop accreting
+per-need kwargs; run a design phase before the embedder surface grows
+further.  Must keep =manage.web= working — incremental migration, not a
+big-bang rewrite.
+
+* Dev updates
+The dev agent needs significant improvements
+** TODO Many more evals
+Consider checking out a version of this app to make changes to
+** TODO Language/project-specific guidance
+** TODO Explore upgrading the local small model to Qwen3.7
+The dev/agent stack now targets Qwen3.6-27B (Q4_K_M gguf) on local
+llama.cpp (see CLAUDE.md "Small-model targeting").  A newer
+Qwen3.7-class release may close the gap to GPT-4-class behavior on the
+failure modes we prompt-engineer around (tool-call composition,
+multi-turn instruction following, elisp/config restatement for the
+emacsos channel).  Explore: stand it up on vLLM, re-run =edd/eval/= at
+the standard N=3/5/10 cadence, and quantify the pass-rate delta vs. the
+current model before committing to a switch (VRAM/throughput cost,
+context window, AWQ availability).  Eval-measured, not intuition.
+* Research improvements
+Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
+** TODO Create some evals on how you want it to act
+Consider:
+1. URLs that do not work (404, etc)
+2. URLs that do not corroborate the information in the final report
+3. Better ways to search
+* Reliability
+** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
+*Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
+
+*Root cause (py-spy dump, 2026-05-25 — saved analysis).*  THREAD-POOL EXHAUSTION in langgraph's chained checkpoint put, =_checkpointer_put_after_previous= (=langgraph/pregel/_loop.py:1508/1511=).  The dump showed five =ThreadPoolExecutor-4_*= threads all parked in =result()= waiting on the *previous* put's future, with no free worker left to complete any — a self-deadlocked future chain.  Above it: =ThreadPoolExecutor-1_0= = the top-level =agent.stream()= tick (=assist/thread.py:204=) waiting; =ThreadPoolExecutor-3_0= = the =subagent.invoke()= (=deepagents/middleware/subagents.py:493=) tick waiting; =ThreadPoolExecutor-1_1= = a second turn blocked on =thread_queue.acquire= (the wedge propagating).  The streamed path adds an extra executor layer (=run_in_executor= for =next()=) on top of the nested =general.stream → research.invoke → nested trio + concurrent tools/DDGS=, and the deep nesting + concurrency exhausts the pool feeding the put chain.  Backend-independent: deadlocks the same on =InMemorySaver= or =SqliteSaver=.  Obscure research prompts make it worse (122 floundering searches → deeper nesting); test with easy topics ("when was Paris founded").
+
+*Fix (DONE, lever 1).*  Pass =durability="sync"= to =agent.stream()= in
+=Thread.stream_message= (=assist/thread.py=): checkpoints persist synchronously
+before the next step instead of chaining through the exhaustible
+=BackgroundExecutor=, so the put-chain can't self-deadlock.  Kept per-step
+checkpoints (so sub-agent rollback still works); did NOT need lever 2/3.
+
+Fixing the deadlock unmasked two streamed-path consumer bugs (langgraph 1.2)
+that turns never reached while they wedged: (A) an =updates= chunk's =messages=
+can be a =langgraph.types.Overwrite= wrapper, crashing the naive list-iteration
+— fixed by the shared =assist.stream_chunks.unwrap_messages= (used by the CLI
+and emacsos-server); (B) the emacsos consumer advanced this thread-affine
+generator across the default thread pool → cross-thread =THREAD_QUEUE= lock
+release → worker crash — fixed in emacsos by pinning the generator to a
+=max_workers=1= pump (branch =fix-streamed-chat-langgraph-1.2=).  Verified e2e
+2026-05-25.  assist side ships on =fix-streamed-subagent-deadlock=.
+
+*Related (hygiene, NOT the fix).*  Branch =isolate-subagent-checkpointer= (assist, pushed/unmerged, commit f93d451): gives each ephemeral sub-agent its own =InMemorySaver= instead of the parent's persistent one.  Correct on its own — merge when convenient — but it does not resolve the wedge (confirmed by the dump).
+
+** Bound production =threads.db= growth
+Overall plan + history: [[file:docs/2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]].  Prod DB hit 187 GB on 2026-05-03 because nothing capped thread count, checkpoints per thread, or content per checkpoint.  Four layers, each with its own design doc and TODO below.
+
+*** DEFERRED Layer 2 — Per-thread checkpoint retention
+See [[file:docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org][docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org]] (original design) and [[file:docs/2026-05-16-deltachannel-spike.org][docs/2026-05-16-deltachannel-spike.org]] (decision).  *Deferred indefinitely.*  Wrapper over =SqliteSaver= that prunes older checkpoints in =put()= to keep =RETAIN_LAST=10= per thread.  After the DeltaChannel adoption in PR #100 (42× per-thread file-bytes reduction), per-thread DB footprint is bounded enough that row pruning is no longer urgent — and Layer 2's blind row-pruning may unsafely delete snapshot rows that surviving delta rows reference.  PR #88 should close without merging; revisit a delta-epoch-aware Layer 2 if/when =DeltaChannel= exits beta.
+
+*** TODO Layer 3 — Tool-result eviction at write time (snapshot-aware)
+See [[file:docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org][docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org]] (original design) and [[file:docs/2026-05-16-deltachannel-spike.org][docs/2026-05-16-deltachannel-spike.org]] (revised plan post-DeltaChannel).  Extend =ContextAwareToolEvictionMiddleware= to evict large =ToolMessage= contents to =/workspace/large_tool_results/<id>= before the checkpoint write, leaving a stub in the message list.  *Held pending PR #89 rewrite:* under DeltaChannel, =checkpoint["channel_values"]["messages"]= is =None= on most rows and =langgraph.channels.delta._DeltaSnapshot(value=[...])= on snapshot rows.  PR #89's current =EvictionSaver= iterates the field as a list and would silently no-op on delta rows + raise on snapshot rows.  Concrete fix: =isinstance(messages, _DeltaSnapshot)= branch — unwrap → evict → rewrap; =None= → no-op (already evicted upstream); =list= → existing path (writes-call shape).  Plus an eval that asserts eviction fires on a K-aligned step.  Eval-side equivalent already shipped (commit f9df751).
+** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response
+** TODO Explore a real Search API to replace the scraped DDG endpoints
+*Why.*  The current =search_internet= scrapes DuckDuckGo's anonymous
+HTML/lite endpoints via the =ddgs= library.  DDG publishes no
+rate-limit documentation for those (they aren't officially supported as
+APIs), and the library's mirror-fallback retry — cycling
+=duckduckgo.com=, =duck.ai=, =html.duckduckgo.com=, the onion mirror —
+makes a single rate-limited burst look obviously-bot to DDG's edge and
+gets the IP blocked for hours.  This burned the dev box's IP on
+2026-05-30 / 05-31 during a research-agent runaway and is the kind of
+fragility every research-shaped query is one bad turn away from.
+
+*What landed first as a stopgap* (PR #118, 2026-05-31): per-tool throttles
+(4s for search, 1s per host for fetch) + a 3-failure / 10-min circuit
+breaker that returns an explicit "search is rate-limited, finalize what
+you have" message to the model.  Buys us reliability against the
+runaway loop and makes the failure mode legible to the agent, but the
+underlying issue — scraping an endpoint with no SLA, no documented
+limits, and active anti-bot — stays.
+
+*Direction.*  Pick a real search API with documented rate limits and an
+authenticated request shape:
+- *Brave Search API* — free tier 2000 q/mo, 1 qps; paid tiers higher.
+  Independent index, decent quality, REST + JSON, simple to wire.
+- *Tavily Search API* — purpose-built for agent use, returns
+  research-shaped JSON (snippets + URLs + content excerpts); has a
+  free tier; the closest drop-in for what an LLM actually needs.
+- *Serper / SerpAPI* — Google-results-as-API; higher fidelity but
+  paid-only past a small free tier, and the dep on Google adds a
+  different fragility.
+- *Bing Web Search API* — discontinued/transitioned as of 2025;
+  evaluate the successor (Microsoft's Grounding-with-Bing endpoint
+  through Azure AI).
+
+*Done when.*  =search_internet= calls an authenticated API with a
+documented rate limit; the circuit breaker remains as a defense in depth
+but should rarely trip in normal use; eval suite includes a "search
+worked" assertion that the API actually returns results for a stable
+query.  Keep =ddgs= as a fallback only if doing so doesn't reintroduce
+the IP-burn risk (probably not worth it; remove instead).
+
+** TODO Self-healing flow on errors / suboptimal output
+See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].  Catch exceptions during agent execution and either spawn a remediation thread or surface for user-directed fix; reuse the "capture conversation" flow.
+** TODO Tool-call mocking system for evals (record-and-replay cassettes)
+*Motivation.*  Eval runs default to real tool calls, which couples
+their pass/fail to live network reliability + provider-side response
+drift.  Concrete pain points:
+- 2026-05-16 PR #89 (Layer 3 eviction) —
+  =test_research_multi_turn_token_regression.py= timed out at 702s
+  with a stack trace showing =DDGS_*= worker threads stuck on
+  =work_queue.get(block=True)= waiting on real DuckDuckGo searches
+  that never returned.  0 HTTP requests visible in capture.
+- 2026-05-16 PR #101 (context overhaul) — same eval timed out at 900s;
+  deeper langgraph chain stuck on =subagent.invoke → runner.tick →
+  concurrent.futures.wait=, multiple idle DDGS workers in the executor.
+- DDG result drift: a "President of France" query returns different
+  ordering / different bodies week-to-week, making any eval that pins
+  response shape brittle.
+
+A point fix for DDGS (timeout wrapper / subprocess kill / Tavily swap)
+only addresses one tool.  Every other network tool (=read_url=, any
+future API integration) has the same exposure.  Mocking at the
+tool-call layer is the architecturally right move.
+
+*Design — cassette-style record-and-replay.*  Pattern after
+=pytest-recording= / =vcrpy= but at the *tool* layer (not HTTP layer),
+because our tools sit above the network and the tool return value is
+what assist actually consumes:
+
+1. *Cassette format.*  One JSON file per test, e.g.
+   =edd/eval/cassettes/test_research_multi_turn_token_regression.json=.
+   Top-level dict keyed by =(tool_name, args_hash)=.  Value is the
+   serialized tool return (string, dict, or list — whatever the tool
+   normally returns).  Args hash = stable sha256 of
+   =json.dumps(args, sort_keys=True)= so the same call with the same
+   args replays deterministically.
+2. *Replay path (default).*  A pytest fixture (autouse for
+   =edd/eval/=) wraps every tool registered with the agent.  On call:
+   look up =(tool_name, args_hash)= in the cassette.  Found →
+   return the recorded value.  Missing → fall through to the real
+   tool call, save the response into the cassette before returning.
+3. *Record-from-scratch mode.*  Env var (=ASSIST_EVAL_RECORD=1=) or
+   pytest marker (=@pytest.mark.eval_record=).  Deletes the existing
+   cassette and re-records from live calls.  Run manually when an
+   eval's expected behavior legitimately changes (e.g. a tool's
+   schema evolved).
+4. *Append mode (default for missing entries).*  Default behavior when
+   ASSIST_EVAL_RECORD is unset: replay matches, record misses.  This
+   means a brand-new test's first run records cassettes for it; second
+   run replays.  Net behavior: cassettes grow over time but never
+   block the test.
+5. *Strict mode.*  Env var (=ASSIST_EVAL_STRICT=1=) flips missing
+   entries from "fall through and record" to "fail loudly."  Use this
+   in CI so an unintended live tool call (e.g. a new tool call
+   introduced by an agent-prompt change) fails the test instead of
+   silently hitting the network.
+6. *Scope.*  Per-test cassette (not per-test-class or per-test-file)
+   — keeps blast radius small when a single test's prompt changes.
+   Cassette path derives from pytest's =request.node.nodeid=.
+7. *Time-sensitive determinism.*  Mock the agent's
+   =get_current_date()= analog (currently
+   =assist.promptable.base_prompt_for= injects =datetime.now()=) to
+   a frozen value during eval runs.  Cassettes assume a known wall
+   clock to be reproducible.
+
+*Implementation sketch:*
+- =edd/eval/conftest.py= — autouse fixture
+  =mock_tool_calls(request, tmp_path)= that installs the
+  wrap-and-replay shim on every tool the agent registers.  Uses
+  =unittest.mock.patch.object= per tool, or registers via a
+  middleware that intercepts =wrap_tool_call= (likely cleaner —
+  matches the existing middleware pattern in
+  =assist/middleware/=).
+- =edd/eval/_cassette.py= — load / save / hash logic.  Pure
+  functions, no pytest knowledge.
+- =edd/eval/cassettes/= — git-tracked JSON cassettes.  PR-time
+  review of cassette diffs is the human signal that an eval's
+  expected upstream-response shape changed.
+- pytest CLI: =--eval-record= (record all), =--eval-strict= (fail
+  on miss), default = replay-with-record-on-miss.
+
+*Why middleware (not monkeypatch) for the shim:*
+The agent registers tools via =deepagents.create_deep_agent=.  Tools
+are invoked through the =wrap_tool_call= chain we've already added
+several middlewares to (=OutputSanitizationMiddleware=,
+=GitPushBlockerMiddleware=, etc.).  A
+=CassetteReplayMiddleware= slots in at that layer with no special
+import-time knowledge, and works for both sync (=wrap_tool_call=)
+and async (=awrap_tool_call=) paths.  It also naturally handles
+subagent tool calls — they go through the same chain.
+
+*Verification path:*
+- Pick one eval, e.g. =eval_large_tool_results.py= (already mocks
+  DDGS via =unittest.mock.patch('ddgs.DDGS.text', mock_ddg_search)=
+  — gradually migrate this hand-rolled mock to the cassette
+  system).
+- =scripts/run-evals.sh edd/eval/= — should run faster and
+  deterministically after migration.
+- Add a wiring test (=tests/test_cassette_replay.py=) that
+  constructs a 2-call sequence: first records, second replays,
+  cassette content matches expected hash.
+
+*Files to touch:*
+- =edd/eval/conftest.py= (new)
+- =edd/eval/_cassette.py= (new)
+- =edd/eval/cassettes/= (new directory)
+- =assist/middleware/cassette_replay.py= (new) — likely lives in
+  the assist tree even though only eval-active, because it
+  participates in the middleware chain
+- Existing evals: gradually replace =@patch('ddgs.DDGS.text')=
+  blocks with cassette reliance
+- =scripts/run-evals.sh= — surface =--eval-record= / =--eval-strict=
+  flags
+- design doc per the doc-per-feature rule:
+  =docs/2026-MM-DD-eval-cassettes.org=
+
+*Replaces / makes obsolete:*
+- The earlier hypothesis-set for DDGS-specific fixes (timeout
+  wrapper, subprocess sandbox, Tavily swap).  Those become
+  follow-ups only if a SPECIFIC prod path needs them — eval
+  reliability is the real motivator and this addresses it
+  systemically.
+
+*Open questions for the implementing session:*
+1. Cassette diff readability for large tool results — JSON-pretty
+   helps but a 50 KB =read_url= response is hard to diff.  Maybe
+   gzip + base64 + a sidecar hash file?  Or accept the diff noise
+   and rely on PR review judgment.
+2. Tool-result drift detection — when running in append mode,
+   compare the live response to the cassette and warn if they
+   differ structurally (different keys / different list lengths).
+   Out of scope for v1; potential v2 feature.
+3. How to handle non-deterministic tool args (e.g., a tool that
+   uses a random ID).  Cassette miss → real call → mismatched
+   args every time → cassette never reused.  May need
+   "args canonicalizer" hooks per tool, or accept that some tools
+   bypass the cassette.
+
+** TODO Refresh sandbox container TTL on activity (assist-side)
+The sandbox container's PID 1 is currently =sleep 3600=
+(=dockerfiles/Dockerfile.sandbox:71=), so any thread that runs longer
+than an hour loses its container mid-flight.  Symptom:
+=SandboxContainerLostError= raised from =DockerSandboxBackend.execute=
+(=assist/sandbox.py:69-89=); thread is marked errored.  Not theoretical:
+the winged-horse-flag thread (2026-05-16, =20260516165139-36e38c0a=)
+was killed at sandbox-start + 1h on a research flow that legitimately
+needed >60 min.  Docker events confirmed: =container die execDuration=3600
+exitCode=0= followed immediately by =container destroy=.
+
+*Direction:* assist-side refresh-on-activity (NOT docker-internal
+=sleep $((3600 - elapsed))= games — those bake the TTL into the image
+and can't see "is the agent still working" signals).  The TTL clock
+should reset whenever the agent makes a tool call.
+
+Open mechanisms (architect/team to pick):
+1. Watchdog thread inside =SandboxManager= that bumps a per-container
+   =last_seen= on every =get_sandbox_backend= reuse / every
+   =DockerSandboxBackend.execute= call; periodically =container.stop=s
+   any container idle >N minutes.  Replace PID 1's =sleep 3600= with
+   =sleep infinity= + an external kill signal from the watchdog.
+2. Swap PID 1 for an assist-ping-driven process: tiny script that waits
+   for a Unix socket signal from the assist host, resetting an internal
+   timer each ping; expires if no ping in N minutes.
+3. Use =container.restart()= / =container.start()= keepalive — feasible
+   only if PID 1 is restart-safe (re-mounts, no state).
+
+Constraints:
+- Must NOT bake in extra Docker daemon calls *per tool invocation* (cost
+  adds up at 100s of calls/thread; option 1 with batched watchdog ticks
+  every N seconds is fine, option 1 with a Docker call per
+  =execute()= is not).
+- Must still self-destruct on truly-orphan threads — the 1h cap exists
+  for a reason (abandoned web threads shouldn't pin sandbox containers
+  forever).  Idle-timeout should still fire when there's genuinely no
+  activity, just based on assist-observed activity, not wall clock.
+- Must coexist with the privilege-separation layer (non-root user,
+  internal egress network).
+
+See =assist/sandbox.py:74-77= for the existing TTL discussion and
+=SandboxContainerLostError= for the current bubble-up behavior.
+
+** TODO Clamp =glob= (and sibling fs tools) to the workspace
+On 2026-05-16, thread =20260516102611-410cae36= emitted =glob.glob("**/references/**/*", recursive=True)= from =/= inside the sandbox container after =LoopDetection= bounced the research-agent.  Walked =/proc=, =/sys=, and every mounted host path for 18+ minutes at 99% CPU before the container was killed, blocking the whole thread on the Docker exec stream.  Filesystem tools that accept a =path= argument should refuse paths outside the workspace (no =/=, no =..= traversal), and =glob= should reject unbounded-depth patterns that don't anchor inside the workspace.
+** DONE Raise total context + smarter context management
+*Status: largely shipped on 2026-05-16.*  See
+[[file:docs/2026-05-16-context-management-overhaul.org][docs/2026-05-16-context-management-overhaul.org]]
+(PR #101) and the companion =~/llama-cpp/scripts/serve.sh= restore.
+
+What landed:
+- llama-server =n_ctx= 96k → 131k (Parler-TTS gated → headroom).
+- Deleted the custom =ContextAwareToolEvictionMiddleware= (was triggering
+  at 0.55–0.60 of a hardcoded-128k fallback — silent plumbing bug, never
+  fired correctly).
+- Adopted deepagents 0.6.1's built-in =SummarizationMiddleware=
+  (trigger 0.85 of real =max_input_tokens=, LLM-summarization,
+  offload to =/conversation_history/{thread_id}.md=) as the primary
+  compaction path.
+- Added small =OutputSanitizationMiddleware= for proactive ANSI/CSI/OSC
+  strip on =ToolMessage= content.
+- Effective trigger post-merge: ≈111k tokens (0.85 × 131k).
+
+Open follow-ups (still TODO):
+1. Push =n_ctx= toward 200k (the validated comfortable ceiling) if
+   eval evidence shows the 131k cap is hit in practice.  Q4_0 KV math
+   in =~/llama-cpp/README.md= "Memory math" table.
+2. =SummarizationToolMiddleware= (deepagents builtin) — gives the
+   model a =compact_conversation= tool to proactively compact when
+   it knows a sub-task wrapped up.  Currently unwired.  Worth a
+   short eval-driven probe to decide if model-initiated compaction
+   beats threshold-driven.
+3. Cross-graph state introspection for evals — see the
+   =eval_large_tool_results.py= note: subagent state isn't reachable
+   from the parent, so eviction artifacts there are opaque.  Either
+   add a deepagents API for cross-graph introspection or write a
+   per-subagent harness.
+* Phone
+These are the tasks that would make this project more useful for an emacs-based phone.
+** TODO Setup sandboxed emacs for testing (through cli?)
+** TODO Emacs skill
+** TODO Elisp skill
+** TODO Goal: setup and properly configure gnus
+** TODO Snapshot and rollback
+* Skills migration follow-ups
+The dev-agent → skill migration shipped in four phases (see [[file:docs/2026-04-25-skills-rearchitecture.org][docs/2026-04-25-skills-rearchitecture.org]]) but a few cleanups were left for later:
+** TODO Sandbox parity in evals
+Production already passes =sandbox_backend= through every agent factory (see =assist/thread.py=).  Most evals (=test_agent.py=, =test_context_agent.py=, =test_org_format_skill.py=) still use the standard filesystem backend for speed.  Add a config knob (env var or pytest marker) so the suite can be run in sandbox-mode without slowing the fast path.
+** TODO Memory-middleware / tool-API trap
+Documented as an open question in the skills doc and partly overlaps with the =write_file= recoverability item above.  The deepagents memory middleware presents synthetic placeholders ("(No memory loaded)", "System reminder: File exists but has empty contents") that the small model treats as editable content; combined with =write_file='s refuse-overwrite policy this produces a no-clean-exit loop.  Either fix needs both ends to align.
+** TODO Make more evals around skill use
+The evals should test varying levels of skill mentions (implicit vs explicit) and check whether the appropriate skill(s) were loaded.
+** TODO Explore deepagents code interpreter for the =calculate= skill
+LangChain shipped a code-interpreter middleware for deepagents (=CodeInterpreterMiddleware= from =langchain_quickjs=) and an "interpreter skill" pattern that layers reusable typed modules on top.  See [[https://www.langchain.com/blog/give-your-agents-an-interpreter][blog: Give Your Agents an Interpreter]] and [[https://www.langchain.com/blog/interpreter-skills][blog: Interpreter Skills]].
+
+*Current.*  =assist/skills/calculate/SKILL.md= tells the model to call =execute("python3 -c '...'")= in the sandbox container for every numeric answer.  Works, but every call spins up a fresh =python3=, the shell-escaping dance for multi-line is awkward (heredoc), and there's no state across calls within a turn (multi-step calculations re-import + re-define).
+
+*Interpreter approach.*  =CodeInterpreterMiddleware(ptc=[...])= runs JS/TS in an embedded QuickJS runtime IN-PROCESS.  Persistent state across =eval= calls within a turn.  Programmatic tool calling (PTC) lets the model call our existing tools from interpreter code instead of via separate tool calls — LangChain reports up to ~35% token reduction on some tasks.  No shell escaping; typed function boundaries; structured returns.
+
+*Open questions before committing.*
+- Language fit: =calculate= is Python-flavored (=math=, =statistics=).  QuickJS is JS.  How much of =math.sqrt= / =statistics.stdev= / =statistics.fmean= do we re-implement in TS, vs ship a small TS stats library, vs keep the Python =execute= path for stdlib-heavy answers and use the interpreter for compose-y multi-step work?
+- Token saving math: their 35% number is on their model + workload.  Verify on Qwen3.6-27B with our actual calculate eval set (=edd/eval/test_calculate_skill.py=) before deciding.
+- Sandbox parity: the interpreter is in-process — no docker boundary.  For calculate this is FINE (no fs/network), but it sets a precedent that complicates the "every tool execution runs in the sandbox" mental model.
+- Interpreter-skill packaging: an =index.ts= module alongside =SKILL.md= is a different layout than the markdown-only skills today.  Need to decide whether the skill loader treats it as a separate kind or unifies.
+- Dependency footprint: adds =langchain_quickjs= + a JS runtime to the wheel.  Size?  Cold-start?
+
+*Concrete next step.*  Spike: build an interpreter version of calculate covering the 3-5 most common eval-prompt shapes, run =test_calculate_skill.py= at N=3 on both versions side-by-side, compare token usage + pass rate.  Decide based on data.  Out of scope: rewriting *other* skills (research, context, dev) — calculate is the cleanest test case because its semantics are simple and its sandbox dependency is shallow.

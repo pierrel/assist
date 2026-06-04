@@ -52,7 +52,42 @@ Likely a prompt rung + a deterministic backstop (per the over-search
 lesson: the prompt sets the healthy path, a deterministic check holds the
 line).  Decide on eval evidence.
 
+* Experiment results (2026-06-04) — skill-only does NOT fix it
+Reproduction required the REAL file: synthetic fixtures up to 139 lines /
+41 sections passed 34/34 (the model anchored correctly).  A frozen
+snapshot of the real, tracked, PII-free =roadmap.org= (~365 lines, deep
+nesting, the =* Reliability= section spanning ~286 lines, many org *bold*
+lines like =*Direction.*= / =*Concrete next step.*= with two spaces after
+the bold) reproduces it reliably: *baseline 5/5 FAIL*.  The eval asserts
+the FIRST edit is clean (prod sometimes self-corrected over several edits,
+so a final-only check misses it); an instrumented run also showed a
+single mis-anchored edit shipping a BROKEN final file (no self-correction).
+
+Isolation of the two proposed skill changes (and two more), each N=3 on
+complex / simple / inbox:
+
+| variant                     | complex | simple | inbox |
+| (1) failure-mirroring example |   0/3 |   3/3 |  3/3 |
+| (2) procedural "anchor on next heading; never a body/blank/bold line" | 0/3 | 3/3 | 3/3 |
+| (1)+(2) combined            |   0/3 |   3/3 |  3/3 |
+| (3) default: append at end of file | 0/3 | 3/3 | 3/3 |
+
+*Conclusion.*  No skill/prompt variant fixes the real-file case — the
+small model mistakes the org *bold* line =*Direction.*= for a heading and
+anchors its insert there, splitting =* Reliability=, regardless of
+explicit guidance ("bold is not a heading; never anchor on it" was in
+context and ignored).  Simple + inbox never regressed.  This is the PR
+#120 shape: the prompt holds the easy cases, the hard case needs a
+DETERMINISTIC check.  The skill is left unchanged (none of the variants
+helped); =Direction 1 (prompt-only)= is empirically ruled out.
+
+*Recommendation.*  Direction 2 (deterministic backstop) — now justified by
+data, not theoretical: an observed, reliably-reproduced, prompt-resistant
+failure that currently ships broken org.  Validate against this eval with
+the contract = final state (don't ship a split file).  Decision pending.
+
 * Status
-Failure mode characterized from prod; eval written.  Running evals
-(baseline 3 / 5 / 10) deferred to the post-03:00 window (nightly eval
-cron at 23:00 — do not contend the LLM queue 23:00-03:00).
+- Eval committed; the complex real-file case is marked =xfail= (reproduced
+  bug, fix pending) so the suite stays green; simple + inbox are active.
+- Fix NOT yet implemented — awaiting a direction decision (deterministic
+  backstop vs. accept-the-limitation vs. a write-whole-file skill attempt).
