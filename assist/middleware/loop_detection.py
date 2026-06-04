@@ -51,6 +51,13 @@ F. Per-subagent ``task`` RE-DISPATCH: the same subagent dispatched >=
    ``subagent_dispatch_threshold`` times within the window. Catches an
    orchestrator re-dispatching the same sub-agent. Off unless
    ``subagent_dispatch_threshold`` > 0.
+
+Threshold semantics (all patterns): the counts above are over the
+*completed* history (calls whose results are back), and ``after_model``
+only strips when the latest, not-yet-run message would *extend* the
+pattern.  So a threshold of N effectively allows up to N completed calls
+and strips the (N+1)th attempt — read the thresholds as "max allowed
+completed calls", not "intervene the instant the Nth is requested".
 """
 
 import hashlib
