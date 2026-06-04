@@ -220,3 +220,31 @@ one insufficient; all are committed separately.
 per-agent cap only 14-20 (aggregate not bounded); full fix (cap +
 re-dispatch cap + orchestrator-delegates) both queries <=12.  #119
 rate-limit relay still 2/2.  78 loop_detection unit tests pass.
+
+* Ablation findings (2026-06-03) — corrects the attribution above
+Each fix was removed one at a time off the full branch (others intact)
+and measured with vs. without (mocked search, N up to 5).  Search count
+is the clean signal (the orchestrator delegates, so it doesn't search).
+Baseline median = 8 searches.
+
+| fix removed                  | median searches | verdict             |
+| prompts (revert to thorough) |              21 | LOAD-BEARING (top)  |
+| orchestrator-delegates       |     16 (6-28)   | LOAD-BEARING (top)  |
+| Pattern F (orchestrator)     |              14 | backstop (~3/5)     |
+| window 50->12                |              12 | minor (+4)          |
+| Pattern E (volume cap)       |              11 | minor (+3, margin)  |
+| fact-check read cap          |               8 | no steady effect    |
+
+Rate-limit handoff (dispatch count, baseline 1): removing Pattern F on
+the GENERAL agent re-dispatched in 2/5 runs — it caps a real meta-loop.
+
+Correction to round-2 item 1: the prompt edits are *load-bearing*, not
+merely the healthy-path documentation it claims.  With every cap on but
+the prompts reverted, search ran 20-26.  The dominant levers are
+=orchestrator-delegates= and the focused-research *prompt*; Pattern E,
+the window, and Pattern F hold the *margin* and the bimodal tail.  The
+fact-check read cap shows no measurable steady-state effect — kept as
+explicit rare-runaway insurance, and the volume cap now logs a warning
+when it fires (a firing means an upstream lever regressed).  Caveat:
+mocked canned results likely *understate* real over-search, so the
+load-bearing fixes probably separate further with live results.
