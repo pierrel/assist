@@ -1,0 +1,58 @@
+#+title: Org insertion lands a new heading mid-section
+#+date: <2026-06-03>
+
+* Problem (observed in production)
+Two prod threads today asked the agent to add an item to an org file and
+it mis-placed the new heading, then thrashed to fix it.
+
+- =20260603202444= "Add moonshot roadmap item" (=roadmap.org=).  FOUR
+  =edit_file= calls: the first anchored =old_string= on a body line in
+  the MIDDLE of an unrelated section ("limits, and active anti-bot —
+  stays.") and inserted =* Moonshot\n** TODO ...= right there — a
+  top-level heading dropped inside another section's body, orphaning the
+  rest of that section under Moonshot.  Edits 2-4 detected it, reverted,
+  and retried until it landed at the end.
+- =20260603195409= "Add tax review task" (=gtd/inbox.org=).  Same shape,
+  2 edits: anchored on a body line, inserted the new =** TODO= there,
+  then corrected.
+
+* Root cause
+The agent edits org files with the generic =edit_file= (old_string /
+new_string) tool.  The small model is poor at choosing a structural
+anchor: it grabs whatever line is lexically near its target and inserts
+there, with no notion of "section boundary" or "heading level".  So a new
+top-level item can land between two body lines of an unrelated section,
+breaking the hierarchy.  The model often *notices* (the result looks
+wrong) and burns extra edits undoing it — wasted turns, and sometimes it
+ships the broken structure.
+
+* Contract (eval-first)
+=edd/eval/test_org_insertion.py= (synthetic fixtures — real org files have
+PII) pins:
+- Adding a new top-level section to a multi-section file does NOT split an
+  existing section (every original heading keeps all its body lines).
+- Adding a =** TODO= to a gtd inbox does NOT split an existing item's body.
+
+* Design — APPROACH TBD (Phase 1)
+Candidate directions (architect to evaluate, simplest-that-works):
+1. *Org-aware insertion guidance (prompt/skill).*  Teach the org-editing
+   path to anchor on a heading line and append at a section boundary, not
+   a mid-body line.  Cheapest; relies on the small model following it
+   (the over-search work showed prompts are load-bearing but not
+   sufficient alone).
+2. *Post-edit org-structure validation (middleware).*  After an edit to a
+   =.org= file, detect a structural break (a heading inserted mid-section)
+   and reject/repair so the model retries with feedback — deterministic
+   backstop, mirrors the LoopDetection pattern.
+3. *Dedicated org-insert tool.*  A structure-aware "add item under
+   heading X / append section" tool so the model never hand-anchors.
+   Strongest guarantee; largest surface.
+
+Likely a prompt rung + a deterministic backstop (per the over-search
+lesson: the prompt sets the healthy path, a deterministic check holds the
+line).  Decide on eval evidence.
+
+* Status
+Failure mode characterized from prod; eval written.  Running evals
+(baseline 3 / 5 / 10) deferred to the post-03:00 window (nightly eval
+cron at 23:00 — do not contend the LLM queue 23:00-03:00).
