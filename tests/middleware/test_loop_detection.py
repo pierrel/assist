@@ -894,8 +894,8 @@ class TestLoopDetectionMiddleware:
             result = mw.after_model({"messages": msgs}, Mock())
         assert result is not None
         assert result["messages"][-1].tool_calls == []
-        assert any("backstop fired" in r.message for r in caplog.records), \
-            f"expected backstop warning; got {[r.message for r in caplog.records]}"
+        assert any("backstop fired" in r.getMessage() for r in caplog.records), \
+            f"expected backstop warning; got {[r.getMessage() for r in caplog.records]}"
 
     def test_no_action_when_no_loop(self):
         mw = LoopDetectionMiddleware()
