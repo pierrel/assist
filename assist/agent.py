@@ -32,6 +32,7 @@ from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
+from assist.middleware.org_structure_guard import OrgStructureGuardMiddleware
 from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
 from assist.env import env_int
 
@@ -185,6 +186,12 @@ def create_agent(model: BaseChatModel,
     # of `loop_detection_mw` so the rejection is what the loop
     # detector sees if the model retries.
     git_push_blocker_mw = GitPushBlockerMiddleware()
+    # Reject a `.org` edit_file that would drop a new heading mid-section
+    # (the new heading anchored on body text — the small model misreads org
+    # *bold* lines as headings).  Before loop_detection_mw so the redirect is
+    # what the loop detector sees on a retry.  See OrgStructureGuardMiddleware
+    # + docs/2026-06-03-org-insertion-mid-section.org (skill-only didn't fix it).
+    org_structure_guard_mw = OrgStructureGuardMiddleware()
     # subagent_dispatch_threshold caps re-dispatch of the same sub-agent
     # (context / research / critique) to once — the general-agent prompt's
     # "call each sub-agent ONCE" made deterministic.  Stops the general
@@ -209,7 +216,7 @@ def create_agent(model: BaseChatModel,
     # (proactive, before content lands in state).
     mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
           OutputSanitizationMiddleware(),
-          write_collision_mw, git_push_blocker_mw,
+          write_collision_mw, org_structure_guard_mw, git_push_blocker_mw,
           loop_detection_mw, ThreadQueueMiddleware(), empty_response_recovery_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"

@@ -86,8 +86,41 @@ data, not theoretical: an observed, reliably-reproduced, prompt-resistant
 failure that currently ships broken org.  Validate against this eval with
 the contract = final state (don't ship a split file).  Decision pending.
 
+* Fix (2026-06-04) — deterministic guard whose rejection does NOT trip loop detection
+=OrgStructureGuardMiddleware= (before =LoopDetectionMiddleware= in the
+general agent).  On a =.org= =edit_file= it detects, from the args alone,
+a new heading anchored such that it would land mid-section: the new
+heading's level is SHALLOWER than the shallowest heading in =old_string=
+(covers both "anchored on body text — no heading at all" and "=*= heading
+anchored on a =**= sub-heading", the two mis-anchors seen in the eval).
+The bad edit is rejected BEFORE it applies, so the file is never split.
+
+Crucial detail (the first attempt failed without it): the rejection is
+returned with =status="success"= and a message that does NOT start with an
+error prefix, so =LoopDetectionMiddleware= does NOT count it as a loop
+error.  A first cut returned =status="error"=; LoopDetection's
+same-tool-same-error rule then killed the turn after 2 rejections and the
+model gave up (0/5 added).  Letting the corrective redirect through lets
+the model keep re-anchoring — which is how it self-corrects, the same way
+prod eventually did with more retries.
+
+Results (complex = the real ~365-line roadmap, N=5):
+| config                                   | splits (corrupt) | added (complete) |
+| baseline (no guard)                      | ships broken     |             0/5 |
+| 6 skill variants                         | ships broken     |             0/3 |
+| reject-guard, status="error"             |     0/5 (2 gaps) |             1/5 |
+| reject-guard, refined level rule, error  |             0/5 |             0/5 |
+| *guard, refined + status="success" (B)*  |         *0/5*    |          *4/5*  |
+Simple + inbox: PASS throughout (no regression).  224 middleware unit
+tests pass.
+
+The guarantee is the safety property — *never ship a split file* (0/5
+corrupt in every guarded config).  Completion is 4/5: the one miss is an
+honest give-up (file intact, nothing added), not corruption.
+
 * Status
-- Eval committed; the complex real-file case is marked =xfail= (reproduced
-  bug, fix pending) so the suite stays green; simple + inbox are active.
-- Fix NOT yet implemented — awaiting a direction decision (deterministic
-  backstop vs. accept-the-limitation vs. a write-whole-file skill attempt).
+- Fix implemented + tested.  Eval uses the final-state contract (no xfail):
+  complex ~4/5, simple/inbox pass.
+- Follow-up: try skill guidance to reduce/replace the middleware (user
+  prefers less middleware); prior skill variants alone were 0/3, revisit
+  with the working eval as the bar.

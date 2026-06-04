@@ -1,14 +1,17 @@
-"""Eval: adding an item to an org file must not split an existing section,
-and must get the anchor right on the FIRST edit (no mid-section thrash).
+"""Eval: adding an item to an org file must not split an existing section.
 
 Reproduces a production failure mode (2026-06-03 threads): asked to add a
-new heading to a LARGE org file, the small model anchored its first
-``edit_file`` on a body line in the MIDDLE of an unrelated section —
-often around an org *bold* line (``*Direction.*``, ``*Concrete next
-step.*``) that LOOKS like a heading — dropping the new heading there and
-splitting the section, then burning several more edits self-correcting.
-The final file sometimes ended up fine, so a final-state-only check
-misses it; we assert the FIRST edit is already structurally correct.
+new heading to a LARGE org file, the small model anchors its ``edit_file``
+on a body line in the MIDDLE of an unrelated section — often an org *bold*
+line (``*Direction.*``, ``*Concrete next step.*``) that LOOKS like a
+heading — dropping the new heading there and splitting the section.
+
+Contract = the SHIPPED file is well-formed (no target section split).  The
+deterministic guard (``OrgStructureGuardMiddleware``) rejects a
+mid-section-anchored edit before it applies and redirects the model to
+anchor on a real heading, so a broken file is never written even if the
+first attempt mis-anchors.  Skill-only fixes were tried and did NOT work
+(six variants, 0/3) — see the design doc.
 
 The roadmap fixture is a frozen snapshot of the real (tracked, PII-free)
 ``roadmap.org`` that triggered the failure — ~365 lines, deep nesting,
@@ -20,8 +23,6 @@ import tempfile
 from pathlib import Path
 from textwrap import dedent
 from unittest import TestCase
-
-import pytest
 
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
@@ -92,31 +93,18 @@ class OrgInsertionMixin(AgentTestMixin):
     def setUp(self):
         self.model = select_assistant_model(0.1)
 
-    def first_edit_result(self, agent, original: str, basename: str):
-        """Apply the FIRST edit_file to ``basename`` to ``original``; return
-        the result, or None if the model used write_file / no edit_file."""
-        for m in agent.all_messages():
-            for tc in (getattr(m, "tool_calls", None) or []):
-                a = tc.get("args") or {}
-                fp = a.get("file_path") or a.get("path") or ""
-                if tc.get("name") == "edit_file" and fp.endswith(basename):
-                    old = a.get("old_string") or ""
-                    new = a.get("new_string") or ""
-                    return original.replace(old, new, 1) if old and old in original else original
-                if tc.get("name") == "write_file" and fp.endswith(basename):
-                    return None
-        return None
+    def assertNoSplit(self, after: str, level: int, targets: dict):
+        """The FINAL file must not have split any target section.
 
-    def assertFirstEditClean(self, agent, original, basename, level, targets):
-        first = self.first_edit_result(agent, original, basename)
-        if first is None:
-            return  # whole-file write / no edit — not a mid-anchor failure
+        Contract = the shipped file is well-formed.  The deterministic guard
+        (OrgStructureGuardMiddleware) rejects a mid-section-anchored edit
+        before it applies and redirects the model to anchor on a heading, so
+        a broken file is never written even if the model's first attempt
+        mis-anchors."""
         for head, body in targets.items():
-            err = _section_intact(first, level, head, body)
             self.assertIsNone(
-                err,
-                f"FIRST edit split a section ({err}). The model mis-anchored "
-                f"its first edit_file mid-section.\n--- first-edit result ---\n{first}")
+                _section_intact(after, level, head, body),
+                f"section {head!r} was split in the shipped file.\n---\n{after}")
 
 
 class TestAddTopLevelSection(OrgInsertionMixin, TestCase):
@@ -124,15 +112,7 @@ class TestAddTopLevelSection(OrgInsertionMixin, TestCase):
     the 'moonshot' prod case).  Vague prompt — does not telegraph 'top-level
     section' or where it goes."""
 
-    # KNOWN FAILING (reproduced bug, fix pending — see the design doc).
-    # Baseline 5/5 FAIL; four skill variants (example, procedure, both,
-    # append-at-end) all failed 0/3 — the small model mistakes the org *bold*
-    # line `*Direction.*` for a heading and anchors there.  strict=False so an
-    # occasional pass won't break the suite; remove the marker when a real fix
-    # (e.g. a deterministic guard) lands.
-    @pytest.mark.xfail(reason="org bold mis-anchor on large files; skill-only "
-                              "changes don't fix it — fix pending", strict=False)
-    def test_first_edit_does_not_split_section(self):
+    def test_does_not_split_section(self):
         agent, root = self.create_agent({"roadmap.org": _ROADMAP})
         agent.message(
             "Add Moonshot to the roadmap — the idea of a self-improving agent "
@@ -140,10 +120,7 @@ class TestAddTopLevelSection(OrgInsertionMixin, TestCase):
         after = read_file(f"{root}/roadmap.org")
         self.assertRegex(after, r"(?im)^\* .*moonshot",
                          f"Expected a top-level Moonshot heading.\n---\n{after}")
-        self.assertFirstEditClean(agent, _ROADMAP, "roadmap.org", 1, _ROADMAP_TARGETS)
-        for head, body in _ROADMAP_TARGETS.items():
-            self.assertIsNone(_section_intact(after, 1, head, body),
-                              f"final state split {head!r}.\n---\n{after}")
+        self.assertNoSplit(after, 1, _ROADMAP_TARGETS)
 
 
 _SIMPLE = dedent("""\
@@ -167,16 +144,13 @@ class TestAddSimpleSection(OrgInsertionMixin, TestCase):
     be tuned only for the hard real-roadmap case at the expense of simple
     ones.  (Passes at baseline; must still pass after the fix.)"""
 
-    def test_first_edit_does_not_split_section(self):
+    def test_does_not_split_section(self):
         agent, root = self.create_agent({"notes.org": _SIMPLE})
         agent.message("Add a section called Reading with a note to finish my book.")
         after = read_file(f"{root}/notes.org")
         self.assertRegex(after, r"(?im)^\* .*reading",
                          f"Expected a Reading section.\n---\n{after}")
-        self.assertFirstEditClean(agent, _SIMPLE, "notes.org", 1, _SIMPLE_TARGETS)
-        for head, body in _SIMPLE_TARGETS.items():
-            self.assertIsNone(_section_intact(after, 1, head, body),
-                              f"final state split {head!r}.\n---\n{after}")
+        self.assertNoSplit(after, 1, _SIMPLE_TARGETS)
 
 
 _INBOX = dedent("""\
@@ -208,7 +182,7 @@ class TestAddTodoUnderHeading(OrgInsertionMixin, TestCase):
     """Add a TODO to a gtd inbox without splitting an existing item (mirrors
     the 'tax review' prod case)."""
 
-    def test_first_edit_does_not_split_item(self):
+    def test_does_not_split_item(self):
         agent, root = self.create_agent({"gtd": {"inbox.org": _INBOX}})
         agent.message("Add a task to review the quarterly budget.")
         after = read_file(f"{root}/gtd/inbox.org")
@@ -218,7 +192,4 @@ class TestAddTodoUnderHeading(OrgInsertionMixin, TestCase):
             "** TODO Call the plumber": ["He said to call back after Tuesday."],
             "** TODO Fix the bike tire": ["Patch kit is in the garage somewhere."],
         }
-        self.assertFirstEditClean(agent, _INBOX, "inbox.org", 2, targets)
-        for head, body in targets.items():
-            self.assertIsNone(_section_intact(after, 2, head, body),
-                              f"final state split {head!r}.\n---\n{after}")
+        self.assertNoSplit(after, 2, targets)
