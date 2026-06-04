@@ -210,6 +210,14 @@ one insufficient; all are committed separately.
   write tool — is volume-capped), but a future agent that batches a
   capped tool with a write would lose the write.  Documented so the next
   reader keeps the volume cap off write-capable agents.
+- Pattern F counts *completed* dispatches, so two =task= calls to the
+  SAME subagent batched in one message (before either completes) are not
+  capped — the cap catches the cross-message re-dispatch, not in-message
+  batching.  This matches the observed cases (prod 3x re-dispatch and the
+  ablation's rdisp=2 were both cross-message).  Not fixed: the
+  whole-message strip would over-correct (drop the legitimate first
+  dispatch), and in-message identical-subagent batching is unobserved.
+  Pinned by =test_in_message_batch_not_capped_known_limitation=.
 - =test_research_saved_to_references= uses REAL DDG and fails in this
   environment (the dev box IP is blocked; real search returns =[]= in
   0.3s).  Not a regression from this change — it would fail on =main=

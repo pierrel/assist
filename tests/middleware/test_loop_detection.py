@@ -1296,6 +1296,32 @@ class TestPatternFRedispatch:
         assert result["messages"][-1].tool_calls == []
         assert "gathered" in result["messages"][-1].content.lower()
 
+    def test_in_message_batch_not_capped_known_limitation(self):
+        """KNOWN LIMITATION (pinned, not a bug to fix here).
+
+        Pattern F counts COMPLETED dispatches, so two `task` calls to the
+        same subagent batched in ONE message — before either completes —
+        are not capped.  The observed prod re-dispatches (and the
+        2026-06-03 ablation's rdisp=2) are all CROSS-message: dispatch,
+        read the result, dispatch again — which Pattern F catches on the
+        next message.  In-message batching of an *identical* subagent is
+        unobserved, and the whole-message strip would over-correct (drop
+        the legitimate first dispatch too), so we pin current behavior
+        rather than add speculative partial-strip logic.  See the design
+        doc residuals.
+        """
+        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
+        batched = AIMessage(content="", tool_calls=[
+            {"name": "task",
+             "args": {"subagent_type": "research-agent", "description": "a"},
+             "id": "a"},
+            {"name": "task",
+             "args": {"subagent_type": "research-agent", "description": "b"},
+             "id": "b"},
+        ])
+        messages = [HumanMessage(content="go"), batched]
+        assert mw.after_model({"messages": messages}, Mock()) is None
+
     def test_fresh_subagent_passes(self):
         # research already dispatched; dispatching critique (fresh) is the
         # normal progression and must not be stripped.
