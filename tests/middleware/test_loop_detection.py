@@ -879,6 +879,24 @@ class TestLoopDetectionMiddleware:
         assert "write_file" in new_last.content
         assert "more direction" in new_last.content.lower()
 
+    def test_volume_cap_fire_logs_backstop_warning(self, caplog):
+        """When the tool-volume backstop fires it emits an extra warning
+        pointing at an upstream cause — the cap shouldn't be the bound."""
+        mw = LoopDetectionMiddleware(
+            volume_threshold=4, volume_tools=frozenset({"search_internet"}))
+        msgs = [HumanMessage(content="go")]
+        for i in range(4):
+            msgs.append(_ai_with_call(f"c{i}", "search_internet", {"q": f"q{i}"}))
+            msgs.append(_tool_msg(f"c{i}", "[results]"))
+        msgs.append(_ai_with_call("clast", "search_internet", {"q": "more"}))
+        with caplog.at_level(logging.WARNING,
+                             logger="assist.middleware.loop_detection"):
+            result = mw.after_model({"messages": msgs}, Mock())
+        assert result is not None
+        assert result["messages"][-1].tool_calls == []
+        assert any("backstop fired" in r.message for r in caplog.records), \
+            f"expected backstop warning; got {[r.message for r in caplog.records]}"
+
     def test_no_action_when_no_loop(self):
         mw = LoopDetectionMiddleware()
         last = _ai_with_call("c2", "write_file", {"file_path": "/b"})

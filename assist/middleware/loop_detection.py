@@ -824,6 +824,24 @@ class LoopDetectionMiddleware(AgentMiddleware):
             preview,
         )
 
+        # The volume cap is a deterministic BACKSTOP, not the primary bound on
+        # research effort — the 2026-06-03 ablation showed the dominant levers
+        # are the orchestrator delegating search and the focused-research
+        # prompt, with this cap only holding the margin.  So if it actually
+        # fires, the likely real cause is upstream: a prompt regression, a
+        # search tool returning poor/empty results (so the model keeps
+        # retrying), or a loop the args/error patterns missed.  Flag it loudly
+        # so a firing prompts an investigation rather than being silently
+        # absorbed as "working as intended".
+        if detection["pattern"] == "tool-volume":
+            logger.warning(
+                "LoopDetection: tool-volume backstop fired (%s).  This cap "
+                "should rarely trigger — investigate an upstream cause for the "
+                "over-use (prompt drift, poor/empty tool results, or a loop the "
+                "other patterns missed), don't rely on this cap as the bound.",
+                detection["reason"],
+            )
+
         new_last = last.model_copy() if hasattr(last, "model_copy") else last.copy()
         new_last.tool_calls = []
         new_last.content = terminal_content
