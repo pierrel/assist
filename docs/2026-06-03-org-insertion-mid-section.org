@@ -87,8 +87,12 @@ failure that currently ships broken org.  Validate against this eval with
 the contract = final state (don't ship a split file).  Decision pending.
 
 * Fix (2026-06-04) — deterministic guard whose rejection does NOT trip loop detection
-=OrgStructureGuardMiddleware= (before =LoopDetectionMiddleware= in the
-general agent).  On a =.org= =edit_file= it detects, from the args alone,
+A generic =FileEditGuardMiddleware= (before =LoopDetectionMiddleware= in the
+general agent) runs pluggable =EditValidator=s on every =edit_file=; the
+first one, =OrgHeadingInsertionValidator=, handles =.org=.  (The middleware
+is file-type-agnostic so other validators — JSON/YAML well-formedness, a
+"don't delete this marker" check, etc. — can be added without touching it.)
+On a =.org= =edit_file= the org validator detects, from the args alone,
 a new heading anchored such that it would land mid-section: the new
 heading's level is SHALLOWER than the shallowest heading in =old_string=
 (covers both "anchored on body text — no heading at all" and "=*= heading
