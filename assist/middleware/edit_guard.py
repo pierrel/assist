@@ -90,7 +90,13 @@ class FileEditGuardMiddleware(AgentMiddleware):
     def _guarded(self, request: ToolCallRequest) -> ToolMessage | None:
         if not _is_edit_file(request):
             return None
-        args = request.tool_call.get("args") or {}
+        # Tool-call args land under "args" or (some shapes) "arguments" —
+        # match GitPushBlockerMiddleware so a differently-shaped edit_file
+        # can't slip past validation.  A non-dict (e.g. raw JSON string) is
+        # skipped rather than crashing the call.
+        args = request.tool_call.get("args") or request.tool_call.get("arguments") or {}
+        if not isinstance(args, dict):
+            return None
         path = args.get("file_path") or args.get("path") or ""
         old = args.get("old_string")
         new = args.get("new_string")

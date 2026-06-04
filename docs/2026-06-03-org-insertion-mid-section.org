@@ -58,10 +58,13 @@ Reproduction required the REAL file: synthetic fixtures up to 139 lines /
 snapshot of the real, tracked, PII-free =roadmap.org= (~365 lines, deep
 nesting, the =* Reliability= section spanning ~286 lines, many org *bold*
 lines like =*Direction.*= / =*Concrete next step.*= with two spaces after
-the bold) reproduces it reliably: *baseline 5/5 FAIL*.  The eval asserts
-the FIRST edit is clean (prod sometimes self-corrected over several edits,
-so a final-only check misses it); an instrumented run also showed a
-single mis-anchored edit shipping a BROKEN final file (no self-correction).
+the bold) reproduces it reliably: *baseline 5/5 FAIL*.  During the
+experiment the eval asserted the FIRST edit was clean (prod sometimes
+self-corrected over several edits, so a final-only check would miss the
+mis-anchor); an instrumented run also showed a single mis-anchored edit
+shipping a BROKEN final file (no self-correction).  (The SHIPPED eval, once
+the guard landed, switched to the final-state contract — "don't ship a
+split file" — since the guard makes the model retry; see the Fix section.)
 
 Isolation of the two proposed skill changes (and two more), each N=3 on
 complex / simple / inbox:

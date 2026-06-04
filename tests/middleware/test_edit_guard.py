@@ -79,6 +79,27 @@ def test_multiple_validators_first_match_wins():
     assert r2.content == "other"
 
 
+def test_reads_args_from_arguments_key():
+    # Some tool-call shapes put args under "arguments" (cf. GitPushBlocker).
+    mw = FileEditGuardMiddleware([_FlagValidator()])
+    r = Mock()
+    r.tool = Mock(); r.tool.name = "edit_file"
+    r.tool_call = {"name": "edit_file", "id": "tc1",
+                   "arguments": {"file_path": "a.flag",
+                                 "old_string": "", "new_string": "bad"}}
+    result = mw.wrap_tool_call(r, lambda req: None)
+    assert result is not None and result.content == "fix it"
+
+
+def test_non_dict_args_skipped_without_crashing():
+    mw = FileEditGuardMiddleware([_FlagValidator()])
+    r = Mock()
+    r.tool = Mock(); r.tool.name = "edit_file"
+    r.tool_call = {"name": "edit_file", "id": "tc1", "args": "not-a-dict"}
+    sentinel = ToolMessage(content="ok", tool_call_id="tc1", name="edit_file")
+    assert mw.wrap_tool_call(r, lambda req: sentinel) is sentinel
+
+
 # --- integration with the real org validator ---
 
 def test_org_validator_integration_rejects_mid_section():
