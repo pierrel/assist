@@ -7,7 +7,8 @@ line (``*Direction.*``, ``*Concrete next step.*``) that LOOKS like a
 heading — dropping the new heading there and splitting the section.
 
 Contract = the SHIPPED file is well-formed (no target section split).  The
-deterministic guard (``OrgStructureGuardMiddleware``) rejects a
+deterministic guard (``FileEditGuardMiddleware`` +
+``OrgHeadingInsertionValidator``) rejects a
 mid-section-anchored edit before it applies and redirects the model to
 anchor on a real heading, so a broken file is never written even if the
 first attempt mis-anchors.  Skill-only fixes were tried and did NOT work
@@ -97,7 +98,8 @@ class OrgInsertionMixin(AgentTestMixin):
         """The FINAL file must not have split any target section.
 
         Contract = the shipped file is well-formed.  The deterministic guard
-        (OrgStructureGuardMiddleware) rejects a mid-section-anchored edit
+        (FileEditGuardMiddleware + OrgHeadingInsertionValidator) rejects a
+        mid-section-anchored edit
         before it applies and redirects the model to anchor on a heading, so
         a broken file is never written even if the model's first attempt
         mis-anchors."""
