@@ -132,7 +132,7 @@ honest give-up (file intact, nothing added), not corruption.
 * UPDATE (2026-06-04, later) — middleware was leaky; REMOVED; back to skill-only
 The "4/5, 0/5 corrupt" above was small-sample luck.  A worst-case trace
 (then a clean N=5) showed the args-only guard still ships a SPLIT up to 5/5
-at real scale.  Root cause it CANNOT cover: the model anchors =old_string=
+at real scale.  The root cause it CANNOT cover: the model anchors =old_string=
 on a section's heading + only PART of its body and appends the new heading
 after that partial capture; the section's remaining body continues in the
 file OUTSIDE =old_string=, so it's orphaned with no trace in the edit args.

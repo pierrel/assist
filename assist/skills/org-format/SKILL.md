@@ -9,13 +9,15 @@ When your response involves any `.org` file, end the response with a brief note 
 
 ## Headings
 
-Lines starting with one or more asterisks are headings. The heading level is the number of asterisks:
+A heading is a line that starts (at column 0) with one or more asterisks **followed by a space**, then the title. The heading level is the number of asterisks:
 
 ```
 * Top-level heading
 ** Second-level heading
 *** Third-level heading
 ```
+
+A line whose asterisks have **no space after them** is NOT a heading — it is *bold* body text, e.g. `*Direction.*` or `*Note.* ...`. An indented `* ` (not at column 0) is a list bullet, also not a heading.
 
 ## Heading body — the critical rule
 
