@@ -2,8 +2,8 @@
 #+date: <2026-06-03>
 
 * Problem (observed in production)
-Two prod threads today asked the agent to add an item to an org file and
-it mis-placed the new heading, then thrashed to fix it.
+Two prod threads on 2026-06-03 asked the agent to add an item to an org
+file and it misplaced the new heading, then thrashed to fix it.
 
 - =20260603202444= "Add moonshot roadmap item" (=roadmap.org=).  FOUR
   =edit_file= calls: the first anchored =old_string= on a body line in
