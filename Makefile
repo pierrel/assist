@@ -147,10 +147,12 @@ searxng-down:
 
 deploy-searxng:
 	@echo "→ Pulling + starting SearXNG on $(DEPLOY_HOST)..."
+	@# Resolve the image in Make ($(or …) → pin or default) so `docker pull`
+	@# gets the right one, and put the env assignments directly on the
+	@# searxng.sh command (not as an ssh prefix — that would only apply to the
+	@# first `cd` in the && chain) so the script actually sees the port/image.
 	@ssh $(DEPLOY_HOST) \
-		SEARXNG_IMAGE='$(SEARXNG_IMAGE)' \
-		SEARXNG_PORT='$(SEARXNG_PORT)' \
-		'cd $(DEPLOY_PATH) && docker pull $${SEARXNG_IMAGE:-searxng/searxng:latest} && ./scripts/searxng.sh up'
+		'cd $(DEPLOY_PATH) && docker pull $(or $(SEARXNG_IMAGE),searxng/searxng:latest) && SEARXNG_IMAGE=$(SEARXNG_IMAGE) SEARXNG_PORT=$(SEARXNG_PORT) ./scripts/searxng.sh up'
 	@echo "✓ SearXNG running on $(DEPLOY_HOST) (see ASSIST_SEARCH_URL)"
 
 deploy-install:
