@@ -157,8 +157,11 @@ def search_internet(
         # Distinguish "empty results while at least one engine reported a
         # failure" (a loud backend failure) from a genuine empty result set
         # for this query.  SearXNG lists failing engines in
-        # `unresponsive_engines`; any entry alongside zero results is unhealthy.
-        unresponsive = payload.get("unresponsive_engines") or []
+        # `unresponsive_engines`; any truthy value alongside zero results is
+        # unhealthy.  Don't coerce with `or []` — a malformed falsy non-list
+        # ({}/"") should be treated the same as "no failures" only because it's
+        # falsy, while a malformed *truthy* value still trips the loud path.
+        unresponsive = payload.get("unresponsive_engines")
         if unresponsive:
             logger.error(
                 "SearXNG returned no results and engines failed: %s", unresponsive
