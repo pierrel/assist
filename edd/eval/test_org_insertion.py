@@ -35,9 +35,11 @@ from .utils import read_file, create_filesystem, AgentTestMixin
 
 
 def _heading_depth(line: str) -> int | None:
-    st = line.lstrip()
-    if st.startswith("*") and st.lstrip("*").startswith(" "):
-        return len(st) - len(st.lstrip("*"))
+    # Org headings start at column 0; an INDENTED `* ` is a list bullet, not
+    # a heading, so do not lstrip (that would misparse bullets as headings
+    # and could mask a mid-section split).
+    if line.startswith("*") and line.lstrip("*").startswith(" "):
+        return len(line) - len(line.lstrip("*"))
     return None
 
 
