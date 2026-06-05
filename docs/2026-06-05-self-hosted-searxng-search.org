@@ -1,6 +1,6 @@
 #+title: Self-hosted SearXNG as the search backend
 #+date: <2026-06-05>
-State: Design (validated core empirically; implementing).
+State: Implemented + validated end-to-end (see Status).
 
 * Motivation
 Follows the =backend="auto"= fix (PR #125): in-process =ddgs= scraping is
@@ -48,8 +48,8 @@ outage to be obvious.  =assist/tools.py= =search_internet=:
    fallback so this can't be a silent no-op).
 2. Query SearXNG's JSON API; on unreachable / HTTP error / bad JSON → log at
    ERROR and raise =RuntimeError= ("…is unavailable: …").
-3. Zero results: if SearXNG reports =unresponsive_engines= (every engine
-   errored) → raise (loud backend failure); otherwise return =[]= (a genuine
+3. Zero results: if SearXNG reports any failing engines (=unresponsive_engines=
+   non-empty) → raise (loud backend failure); otherwise return =[]= (a genuine
    "no results" for this query is a valid answer, not a failure).
 4. Otherwise normalize =results= to =[{title,url,content}]=.
 
