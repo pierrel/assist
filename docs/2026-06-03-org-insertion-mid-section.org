@@ -179,4 +179,5 @@ nightly.  simple/inbox: pass.  No middleware.
 
 * Status
 - Skill-only fix shipped + eval-validated (4/5 complex, simple/inbox pass);
-  no middleware.  Copilot review in progress.
+  no middleware.  Residual ~1/5 split on very large files is a known
+  limitation (complex eval is =xfail(strict=False)=).
