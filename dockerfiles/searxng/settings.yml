@@ -1,0 +1,52 @@
+# SearXNG settings for assist's self-hosted, localhost-only metasearch.
+#
+# Overrides only what assist needs on top of SearXNG's defaults:
+#   * a curated, auditable engine set (below) instead of all ~240 — every
+#     engine here is a search engine assist deliberately queries; nothing
+#     else phones out, image_proxy is off, and the UI/limiter are unused
+#     because this instance is bound to 127.0.0.1 and called only by the
+#     local assist process over the JSON API,
+#   * the JSON output format (off by default),
+#   * the bot-limiter off (it would 429 our own JSON calls).
+#
+# This buys query/privacy sovereignty and routing resilience: queries leave
+# only to the engines below, from this host, with no identity attached and
+# nothing logged.  It does NOT give index sovereignty — coverage is still the
+# upstream engines' crawls.  brave and mojeek are independent indexes; the
+# rest are mainstream engines kept for fallback breadth.
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - google
+      - brave
+      - startpage
+      - mojeek
+      - wikipedia
+
+server:
+  # Replaced per host by scripts/searxng.sh, which renders a copy of this file
+  # with a generated secret into a gitignored runtime dir.  This placeholder is
+  # NOT a secret and must never be used as-is.
+  secret_key: "ultrasecretkey"
+  # localhost-only, JSON-only consumer → no bot traffic to limit.
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+
+# --- Adding a keyed engine later (optional) --------------------------------
+# brave and mojeek above are keyless scraped engines, so their independent
+# indexes are already in the mix.  To add an engine that takes an API key
+# later (a paid/managed backend, Google's API, etc.), add it under `engines:`
+# and keep the key OUT of git — render it from an env var the way the secret
+# is, or use a gitignored overlay.  Shape:
+#
+# engines:
+#   - name: my-keyed-backend
+#     engine: <searxng engine module>
+#     api_key: "{{ MY_BACKEND_KEY }}"   # substituted at render time, never committed
+#     disabled: false

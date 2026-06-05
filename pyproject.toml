@@ -12,7 +12,6 @@ version = "0.1.0"
 #   pip install -e /path/to/assist -c /path/to/assist/requirements.txt
 # to pick up these deps while honouring assist's pinned versions.
 dependencies = [
-    "ddgs",
     "deepagents",
     "docker",
     "fastapi",

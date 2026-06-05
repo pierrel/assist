@@ -1,116 +1,46 @@
-"""Web tools the agent exposes: a throttled multi-engine web search
-(via ``ddgs`` with ``backend="auto"``) and a per-host throttled URL fetch.
+"""Web tools the agent exposes: a self-hosted SearXNG metasearch and a
+per-host throttled URL fetch.
 
-Throttle/rate-limit shape (added 2026-05-31 after two adjacent failure
-modes burned the dev box's IP: a research-agent emitted ~9,000
-`fetch_url` calls across many distinct URLs on bot-protected sites
-(mostly casio.com) over two hours, and separately the `ddgs` library's
-mirror-fallback retry cycled DDG endpoints — `duckduckgo.com` /
-`html.duckduckgo.com` / `duck.ai` / the onion mirror — ~1,314 times
-each in a few minutes, which DDG's edge correctly read as obviously-a-bot
-and dropped):
+Search goes through a self-hosted SearXNG instance (``ASSIST_SEARCH_URL``) —
+private, on hardware we control, multi-engine, no API key.  There is NO
+fallback: if SearXNG is unset, unreachable, errors, or returns nothing
+because every engine failed, ``search_internet`` raises.  A broken search
+backend must fail LOUDLY (logged + surfaced as a tool error) rather than
+silently degrade to a flaky scraper that hides the outage behind worse
+results.
 
-- ``search_internet`` is throttled to ~one call every ``_SEARCH_MIN_DELAY``
-  seconds and circuit-broken after ``_SEARCH_CIRCUIT_FAILURE_THRESHOLD``
-  consecutive failures.  DDG has no public rate-limit documentation for
-  anonymous HTML/lite endpoints; community-observed safe rates are
-  ~1 query / 2-5s, so 4s is the conservative middle.  When the circuit
-  is open we return an explicit message ``_CIRCUIT_OPEN_MESSAGE`` rather
-  than the silent ``"[]"`` (no results) — the latter would let the model
-  retry or write a confidently-empty report; the former tells the model
-  *why* it can't search and what to do.
-- ``read_url`` is throttled per-host (1s between calls to the same host)
-  rather than globally, so a burst of fetches to different sites isn't
-  artificially serialised but a tight loop against one bot-protected
-  site (the casio-runaway shape) is locally rate-limited before that
-  site's edge does the same to us.
+``read_url`` is throttled per-host (1s between calls to the same host) rather
+than globally, so a burst of fetches to different sites isn't artificially
+serialised, but a tight loop against one bot-protected site is rate-limited
+locally before that site's edge does the same to us (the 2026-05-31
+casio-runaway shape: ~9,000 fetches across many distinct URLs in two hours).
 """
 
+import logging
+import os
 import re
 import time
 import threading
 from urllib.parse import urlparse
 
 import requests
-from ddgs import DDGS
 
-# Explicit rate-limit exception types from the `ddgs` library.  These are
-# the unambiguous cases — when ddgs itself recognises rate-limiting or a
-# transport timeout, it raises one of these.  Wrapped in try/except so a
-# future ddgs that renames or drops the module doesn't break import here.
-try:
-    import ddgs.exceptions as _ddgs_exc
-    _DDGS_RATE_LIMIT_TYPES: tuple[type[BaseException], ...] = (
-        _ddgs_exc.RatelimitException,
-        _ddgs_exc.TimeoutException,
-    )
-except Exception:  # noqa: BLE001 — defensive: never block import on this
-    _DDGS_RATE_LIMIT_TYPES = ()
+logger = logging.getLogger(__name__)
 
-# --- Search throttle (cross-tool, global) ---
-_search_lock = threading.Lock()
-_search_last_call_time = 0.0
-_SEARCH_MIN_DELAY = 4.0
-
-# --- Search circuit breaker ---
-# After N consecutive search failures (DDG timeout / exception), open the
-# circuit for `_SEARCH_CIRCUIT_DURATION_S` and return the explicit message
-# below instead of attempting the call — saves further hits to a DDG
-# endpoint that's already blocking us, and gives the model an
-# unambiguous "search is dead, finalize what you have" instruction.
-_search_circuit_lock = threading.Lock()
-_search_consecutive_failures = 0
-_SEARCH_CIRCUIT_FAILURE_THRESHOLD = 3
-_search_circuit_open_until = 0.0
-_SEARCH_CIRCUIT_DURATION_S = 600  # 10 minutes
-
-_CIRCUIT_OPEN_MESSAGE = (
-    "Search is rate-limited (web search). Cannot retry for ~10 minutes. "
-    "Finalize your response using what's already gathered; tell the user "
-    "search is temporarily rate-limited and to try again in a few minutes."
-)
-
-# Substrings in an exception's type-name + str() that suggest the failure
-# is an upstream rate-limit / block (as opposed to a transient network
-# blip or a parse failure on a one-off bad result).  When detected, we
-# open the circuit IMMEDIATELY rather than waiting for
-# _SEARCH_CIRCUIT_FAILURE_THRESHOLD failures — the cost of a false
-# positive (10 min of no search; the agent finalizes with what it has)
-# is much lower than the cost of a false negative (more requests to a
-# blocked endpoint, deeper IP burn, longer recovery).  Biased toward
-# false positives accordingly: timeouts, connection-resets, and
-# explicit 4xx/429 all count.
-_RATE_LIMIT_EXC_INDICATORS = (
-    "timeout", "timed out", "read timeout",
-    "connection refused", "connection reset", "reset by peer",
-    "rate limit", "rate-limit", "too many requests",
-    "blocked", "challenge", "captcha", "forbidden",
-    " 429", " 403",
-)
+# Self-hosted SearXNG metasearch endpoint (see scripts/searxng.sh /
+# `make searxng-up`).  search_internet REQUIRES this — there is no fallback.
+_SEARXNG_TIMEOUT_S = 10.0
 
 # --- Per-host fetch throttle ---
 _host_lock = threading.Lock()
 _host_last_call: dict[str, float] = {}
 _HOST_MIN_DELAY = 1.0
-# When the per-host dict crosses this size, drop entries we haven't
-# touched in `_HOST_DICT_PRUNE_KEEP_S` seconds.  Bounds memory in a
-# long-running process that fetches many distinct hosts (PR #118
-# Copilot review #1).  Cheap when small (the comparison is the only
-# work); the prune scan runs only on threshold-cross.
+# When the per-host dict crosses this size, drop entries we haven't touched in
+# `_HOST_DICT_PRUNE_KEEP_S` seconds.  Bounds memory in a long-running process
+# that fetches many distinct hosts (PR #118 Copilot review #1).  Cheap when
+# small; the prune scan runs only on threshold-cross.
 _HOST_DICT_PRUNE_THRESHOLD = 256
 _HOST_DICT_PRUNE_KEEP_S = 60.0
-
-
-def _search_throttle() -> None:
-    """Block until at least ``_SEARCH_MIN_DELAY`` has passed since the
-    last search call."""
-    global _search_last_call_time
-    with _search_lock:
-        now = time.time()
-        elapsed = now - _search_last_call_time
-        if elapsed < _SEARCH_MIN_DELAY:
-            time.sleep(_SEARCH_MIN_DELAY - elapsed)
-        _search_last_call_time = time.time()
 
 
 def _host_throttle(host: str) -> None:
@@ -137,80 +67,12 @@ def _host_throttle(host: str) -> None:
                     del _host_last_call[h]
 
 
-def _circuit_is_open() -> bool:
-    """True if the search circuit is currently open (wall-clock-bounded).
-    Acquires ``_search_circuit_lock`` for read consistency with the
-    open/close writers; the lock is uncontended in the common path."""
-    with _search_circuit_lock:
-        return time.time() < _search_circuit_open_until
-
-
-def _record_search_failure() -> None:
-    """Bump the consecutive-failure counter; open the circuit if at threshold."""
-    global _search_consecutive_failures, _search_circuit_open_until
-    with _search_circuit_lock:
-        _search_consecutive_failures += 1
-        if _search_consecutive_failures >= _SEARCH_CIRCUIT_FAILURE_THRESHOLD:
-            _search_circuit_open_until = time.time() + _SEARCH_CIRCUIT_DURATION_S
-
-
-def _record_search_success() -> None:
-    """Reset the consecutive-failure counter; a successful call closes
-    the circuit's path back to working."""
-    global _search_consecutive_failures
-    with _search_circuit_lock:
-        _search_consecutive_failures = 0
-
-
-def _open_search_circuit_now() -> None:
-    """Open the search circuit immediately (rate-limit DETECTED, not
-    just a generic failure).  Distinct from `_record_search_failure`,
-    which counts toward the threshold — this jumps straight to open."""
-    global _search_consecutive_failures, _search_circuit_open_until
-    with _search_circuit_lock:
-        _search_consecutive_failures = _SEARCH_CIRCUIT_FAILURE_THRESHOLD
-        _search_circuit_open_until = time.time() + _SEARCH_CIRCUIT_DURATION_S
-
-
-def _exception_looks_like_rate_limit(exc: BaseException, elapsed_s: float = 0.0) -> bool:
-    """Heuristic: does ``exc`` look like an upstream rate-limit / block?
-
-    Three signals, any one is enough:
-
-    1. *Explicit type match.*  ``ddgs.exceptions.RatelimitException`` or
-       ``TimeoutException`` are unambiguous — the library knows.
-
-    2. *Substring match.*  type-name + str() contains one of
-       ``_RATE_LIMIT_EXC_INDICATORS`` (timeout / 429 / forbidden /
-       captcha / etc.).  Catches the requests / httpcore / urllib3
-       cases where the underlying error escapes ddgs's wrapping.
-
-    3. *Timing heuristic for ddgs's misleading ``DDGSException("No
-       results found.")``.*  ddgs raises this on BOTH "genuine zero
-       results for query" AND "couldn't reach DDG at all" (because in
-       both cases it parsed zero results).  A call that took >=3s
-       almost certainly hit a TCP timeout, not a fast empty-parse;
-       treat as rate-limit.  Fast (<3s) ``"No results found."`` is a
-       genuine empty result and we let it fall through.
-
-    Caller passes ``elapsed_s`` (time the call took); defaults to 0
-    so the test/standalone path still works."""
-    if _DDGS_RATE_LIMIT_TYPES and isinstance(exc, _DDGS_RATE_LIMIT_TYPES):
-        return True
-    blob = f"{type(exc).__name__}: {exc}".lower()
-    if any(ind in blob for ind in _RATE_LIMIT_EXC_INDICATORS):
-        return True
-    if elapsed_s >= 3.0 and "no results found" in blob:
-        return True
-    return False
-
-
 def read_url(url: str) -> str:
     """Extract the content from the given url.
 
-    Per-host throttled (~1s between calls to the same host) so a burst
-    of fetches to different sites isn't artificially serialised, but a
-    tight loop against one bot-protected site is rate-limited locally."""
+    Per-host throttled (~1s between calls to the same host) so a burst of
+    fetches to different sites isn't artificially serialised, but a tight
+    loop against one bot-protected site is rate-limited locally."""
     # `urlparse` never raises on str input; for empty/malformed URLs
     # `.hostname` is None and `_host_throttle` no-ops on the empty string.
     host = urlparse(url).hostname or ""
@@ -235,48 +97,53 @@ def search_internet(
         query: str,
         max_results: int = 5,
 ) -> str:
-    """Used to search the internet for information on a given topic using a query string.
+    """Search the web via the self-hosted SearXNG metasearch at
+    ``ASSIST_SEARCH_URL`` (private, multi-engine, no key).
 
-    Throttled to ~4s between DDG calls and circuit-broken on 3 consecutive
-    failures.  When the circuit is open, returns an explicit-message string
-    so the model finalizes its response instead of silently retrying or
-    writing a confidently-empty report."""
-    if _circuit_is_open():
-        return _CIRCUIT_OPEN_MESSAGE
-    _search_throttle()
-    t0 = time.time()
+    There is deliberately NO fallback.  If SearXNG is unset, unreachable,
+    returns an error, or returns nothing because every engine failed, this
+    RAISES — a broken search backend must fail loudly, not silently degrade.
+    A genuine empty result for a healthy query (no engine errors) returns
+    ``"[]"`` so the agent can treat it as "no results"."""
+    base_url = os.getenv("ASSIST_SEARCH_URL")
+    if not base_url:
+        raise RuntimeError(
+            "ASSIST_SEARCH_URL is not set — a self-hosted SearXNG instance is "
+            "required for web search (run `make searxng-up`)."
+        )
     try:
-        # backend="auto" rotates across ddgs's engines (DuckDuckGo, Bing,
-        # Brave, Mojeek, …) and falls back when one fails.  Pinning a single
-        # backend="duckduckgo" made us hostage to DDG's scrape endpoint, which
-        # flakily raises DDGSException("No results found.") even when the IP is
-        # fine (the browser works) — and our timing heuristic then misreads
-        # that fast empty as a rate-limit and opens the circuit for 10 min.
-        # "auto" only surfaces "No results found." when EVERY engine fails,
-        # which is the genuine-unavailable signal the circuit breaker wants.
-        results = DDGS().text(query,
-                              max_results=max_results,
-                              backend="auto")
-        _record_search_success()
+        resp = requests.get(
+            base_url.rstrip("/") + "/search",
+            params={"q": query, "format": "json"},
+            timeout=_SEARXNG_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
     except Exception as e:
-        elapsed = time.time() - t0
-        # Rate-limit / block DETECTED (timeout, connection reset, 429,
-        # 403, captcha challenge, or a slow ddgs DDGSException that's
-        # really a TCP timeout — see `_exception_looks_like_rate_limit`)?
-        # Skip the slow consecutive-failures threshold and open the
-        # circuit NOW so we stop hitting an already-blocking endpoint.
-        # The model gets the same explicit "search is rate-limited"
-        # instruction it would after threshold.
-        if _exception_looks_like_rate_limit(e, elapsed):
-            _open_search_circuit_now()
-            return _CIRCUIT_OPEN_MESSAGE
-        _record_search_failure()
-        # If THIS failure tipped us into circuit-open state, surface the
-        # explicit message immediately rather than the bare "[]" — the
-        # model gets the same instruction whether the circuit opened
-        # before or during this call.
-        if _circuit_is_open():
-            return _CIRCUIT_OPEN_MESSAGE
+        logger.error("SearXNG search failed at %s: %s", base_url, e)
+        raise RuntimeError(
+            f"Web search backend (SearXNG at {base_url}) is unavailable: {e}"
+        ) from e
+
+    results = payload.get("results", []) or []
+    if not results:
+        # Distinguish "every engine errored" (a loud backend failure) from a
+        # genuine empty result set for this query.  SearXNG reports the former
+        # in `unresponsive_engines`.
+        unresponsive = payload.get("unresponsive_engines") or []
+        if unresponsive:
+            logger.error(
+                "SearXNG returned no results and engines failed: %s", unresponsive
+            )
+            raise RuntimeError(
+                "Web search returned nothing because the search engines failed "
+                f"({unresponsive}) — the search backend is unhealthy."
+            )
         return "[]"
-    normalized = [{"title": r["title"], "url": r["href"], "content": r["body"]} for r in results]
+
+    normalized = [
+        {"title": r.get("title", ""), "url": r.get("url", ""),
+         "content": r.get("content", "")}
+        for r in results[:max_results]
+    ]
     return str(normalized)

@@ -14,7 +14,6 @@ from langchain_core.messages import AIMessage
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
-from assist.tools import _CIRCUIT_OPEN_MESSAGE
 
 from .utils import read_file, create_filesystem, AgentTestMixin
 
@@ -464,59 +463,55 @@ def _run_general_agent_with_search_stubs(test, model, prompt,
     return agent, res
 
 
-class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
+class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
     """The general agent must HEED a research-agent that reports search
-    is unavailable — relay the wait to the user, not re-dispatch.
+    is unavailable — relay that to the user, not re-dispatch or fabricate.
 
-    Background: PR #118 gave ``search_internet`` a circuit breaker that
-    returns ``_CIRCUIT_OPEN_MESSAGE`` ("rate-limited … try again in a
-    few minutes") instead of silently failing.  The search layer works,
-    but the *general agent* was observed re-dispatching the
-    research-agent on the blocked result.  Two layers now hold the line:
-    the prompt's rate-limit handoff (relay-and-stop), and — as a
-    deterministic backstop — ``LoopDetectionMiddleware`` Pattern F on the
-    general agent, which strips a *within-turn* second dispatch of the
-    research-agent (``subagent_dispatch_threshold=1``).  A genuinely
-    cross-*turn* re-dispatch is outside a within-run detector and stays
-    the prompt's job.  The contract this eval pins: dispatch
-    research-agent once, read the blocked signal, relay it, stop.
+    Background: ``search_internet`` now goes through a self-hosted SearXNG
+    with NO fallback, and RAISES when the backend is down (failures must be
+    loud, not silently degraded).  The research subagent surfaces that as a
+    tool error; the contract this eval pins is unchanged in spirit: dispatch
+    research-agent once, read the unavailable signal, relay it, stop — don't
+    loop and don't answer from the model's own knowledge.  A deterministic
+    backstop (``LoopDetectionMiddleware`` Pattern F,
+    ``subagent_dispatch_threshold=1``) strips a within-turn re-dispatch; a
+    cross-turn re-dispatch stays the prompt's job.
 
     MOCKING NOTE — this is the one eval in ``edd/eval/`` that
     monkey-patches tools (``search_internet`` and ``read_url``).  Existing
     evals hit the real LLM + real tools on purpose ("eval-first
-    contracts"), but this failure mode is unobservable without forcing
-    search to report unavailable, and hitting live DDG to *induce* a real
-    rate-limit is exactly the IP burn we're trying to prevent.  We patch
-    ``assist.agent.search_internet`` (NOT ``assist.tools.search_internet``):
-    ``assist/agent.py`` binds the
-    name at import via ``from assist.tools import search_internet``, so
-    the research subagent's tool list captured that module-level
-    reference — patching the ``assist.tools`` attribute would not rebind
-    it.  See ``_run_with_blocked_search`` for the mock details.
+    contracts"), but this failure mode is unobservable without forcing the
+    search backend to fail.  We patch ``assist.agent.search_internet`` (NOT
+    ``assist.tools.search_internet``): ``assist/agent.py`` binds the name at
+    import via ``from assist.tools import search_internet``, so the research
+    subagent's tool list captured that module-level reference — patching the
+    ``assist.tools`` attribute would not rebind it.
     """
 
     def setUp(self):
         self.model = select_assistant_model(0.1)
 
     def _run_with_blocked_search(self, prompt: str):
-        """Build the general agent with search/fetch forced to report
-        rate-limited, send ``prompt``, return ``(agent, response)``."""
+        """Build the general agent with search forced to fail loudly (as a
+        down SearXNG backend does), send ``prompt``, return ``(agent, res)``."""
         import assist.tools as _tools
 
         @functools.wraps(_tools.search_internet)
         def _blocked_search(query, max_results=5):
-            return _CIRCUIT_OPEN_MESSAGE
+            # Mirror the real failure: search_internet raises when the
+            # SearXNG backend is unavailable (no fallback).
+            raise RuntimeError(
+                "Web search backend (SearXNG) is unavailable: connection refused"
+            )
 
-        # read_url returns a rate-limit-flavoured error too, so the whole
-        # external surface speaks with one voice ("rate-limited, retry in
-        # a few minutes") and the model can't read eval-awareness into a
-        # bespoke "unavailable in this environment" string.  Mirrors
-        # read_url's real "Error fetching URL: <e>" shape.  The eval
-        # asserts nothing about read_url; this is purely network safety.
+        # read_url returns an unavailable-flavoured error too, so the whole
+        # external surface speaks with one voice and the model can't read
+        # eval-awareness into a bespoke string.  Mirrors read_url's real
+        # "Error fetching URL: <e>" shape.  The eval asserts nothing about
+        # read_url; this is purely network safety.
         @functools.wraps(_tools.read_url)
         def _blocked_fetch(url):
-            return ("Error fetching URL: rate-limited; cannot retry for "
-                    "~10 minutes. Try again in a few minutes.")
+            return "Error fetching URL: web search/fetch is unavailable right now."
 
         return _run_general_agent_with_search_stubs(
             self, self.model, prompt, _blocked_search, _blocked_fetch)
@@ -537,25 +532,17 @@ class TestResearchRateLimitHandoff(AgentTestMixin, TestCase):
             "read the blocked signal, stop).  Dispatches seen: "
             f"{self.subagent_calls(agent)}")
 
-        # 2. Final response relays BOTH that search is unavailable AND a
-        #    wait — the user asked to be told to wait ~10m.  The
-        #    unavailable token + dispatch==1 carry the discrimination
-        #    (a fabricated answer won't say "rate-limited"), so the wait
-        #    token is broad: the small model phrases the wait many ways
-        #    ("~10 minutes", "10–15 minutes", "in a bit", "shortly",
-        #    "ask again soon") and an N=10 run flapped on a too-narrow
-        #    pattern that only matched "few minutes"/"10 min".
-        self.assertRegex(
-            res, r"(?i)rate.?limit|temporarily|unavailable|couldn'?t search",
-            f"Response should tell the user search is unavailable.  Got: {res[:600]}")
+        # 2. Final response relays that search is unavailable (rather than
+        #    fabricating an answer).  The unavailable token + dispatch==1
+        #    carry the discrimination — a fabricated answer won't say the
+        #    search was down.  No wait-time assertion: the backend is now a
+        #    hard outage to fix, not a rate-limit to wait out, so "try again
+        #    in N minutes" is no longer the expected phrasing.
         self.assertRegex(
             res,
-            # Explicit retry phrase OR a time reference.  Deliberately no
-            # bare "moment" — it matches "at the moment", which isn't a
-            # wait/retry instruction and would let a fabrication pass.
-            r"(?i)\bmins?\b|minute|try again|ask again|in a bit|in a moment"
-            r"|in a while|shortly|soon|later",
-            f"Response should tell the user to wait and retry.  Got: {res[:600]}")
+            r"(?i)unavailable|couldn'?t search|could not search|search.{0,20}"
+            r"(down|failed|unavailable|not available)|rate.?limit|temporarily",
+            f"Response should tell the user search is unavailable.  Got: {res[:600]}")
 
     def test_relays_unavailable_tech_lookup(self):
         agent, res = self._run_with_blocked_search(
@@ -592,7 +579,7 @@ class TestResearchSearchBudget(AgentTestMixin, TestCase):
     every search — at any nesting depth — goes through the one patched
     function, so a global counter captures aggregate effort exactly.
 
-    Same patch-site reasoning as TestResearchRateLimitHandoff: patch
+    Same patch-site reasoning as TestResearchSearchUnavailableHandoff: patch
     `assist.agent.search_internet` (the name bound into assist.agent at
     import), not `assist.tools.search_internet`.
     """

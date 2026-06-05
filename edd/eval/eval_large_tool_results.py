@@ -180,17 +180,29 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
 
     metrics = EvalMetrics()
 
-    # Create mock that returns very large payload
-    def mock_ddg_search(query: str, **kwargs):
-        logger.info(f"Mock DDG search invoked with query: '{query}'")
+    # Mock SearXNG's HTTP response with a very large payload so
+    # search_internet's real parse/normalize path produces a huge tool
+    # result (exercising the eviction middleware).
+    from unittest.mock import MagicMock
+
+    def mock_searxng_get(url, **kwargs):
+        logger.info(f"Mock SearXNG search invoked: {kwargs.get('params')}")
         large_payload = create_large_payload(target_tokens=80000)
         logger.info(f"Returning large payload: {len(large_payload)} characters (~{len(large_payload)//4} tokens)")
-        # Return a list of dicts matching DDG's text() return format
-        # but with a huge body so str() produces a large payload
-        return [{"title": "Mock Result", "href": "https://example.com", "body": large_payload}]
+        resp = MagicMock()
+        resp.json.return_value = {
+            "results": [{"title": "Mock Result", "url": "https://example.com",
+                         "content": large_payload}],
+            "unresponsive_engines": [],
+        }
+        return resp
 
-    # Patch the DDGS.text method BEFORE creating the agent
-    with patch('ddgs.DDGS.text', mock_ddg_search):
+    # search_internet requires ASSIST_SEARCH_URL (no fallback); point it at a
+    # dummy local URL and patch the HTTP call so no network is touched.
+    os.environ["ASSIST_SEARCH_URL"] = "http://127.0.0.1:8890"
+
+    # Patch the HTTP layer BEFORE creating the agent
+    with patch('assist.tools.requests.get', mock_searxng_get):
         with tempfile.TemporaryDirectory() as tmpdir:
             if verbose:
                 print(f"\n{'=' * 80}")
