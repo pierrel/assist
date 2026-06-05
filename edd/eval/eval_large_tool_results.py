@@ -198,12 +198,12 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
         }
         return resp
 
-    # search_internet requires ASSIST_SEARCH_URL (no fallback); point it at a
-    # dummy local URL and patch the HTTP call so no network is touched.
-    os.environ["ASSIST_SEARCH_URL"] = "http://127.0.0.1:8890"
-
-    # Patch the HTTP layer BEFORE creating the agent
-    with patch('assist.tools.requests.get', mock_searxng_get):
+    # Patch the HTTP layer BEFORE creating the agent.  search_internet requires
+    # ASSIST_SEARCH_URL (no fallback); set it scoped (patch.dict auto-restores
+    # so it can't leak into later evals in the same process) and patch the HTTP
+    # call so no network is touched.
+    with patch.dict(os.environ, {"ASSIST_SEARCH_URL": "http://127.0.0.1:8890"}), \
+         patch('assist.tools.requests.get', mock_searxng_get):
         with tempfile.TemporaryDirectory() as tmpdir:
             if verbose:
                 print(f"\n{'=' * 80}")
