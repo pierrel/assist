@@ -31,11 +31,14 @@ ships the broken structure.
 snapshot of the real =roadmap.org=; the gtd inbox fixture is synthetic
 since gtd files have PII) pins:
 - Adding a new top-level section to a multi-section file does NOT split an
-  existing section (every original heading keeps all its body lines).
+  existing section (checked on a few target headings via bracketing
+  body-marker lines — first+last body line of each, which a mid-section
+  insert would orphan).
 - Adding a =** TODO= to a gtd inbox does NOT split an existing item's body.
 
-* Design — APPROACH TBD (Phase 1)
-Candidate directions (architect to evaluate, simplest-that-works):
+* Design — candidate approaches considered (Phase 1, retrospective)
+Candidate directions evaluated early (simplest-that-works); the outcome is
+in the later sections — skill-only shipped, middleware rejected:
 1. *Org-aware insertion guidance (prompt/skill).*  Teach the org-editing
    path to anchor on a heading line and append at a section boundary, not
    a mid-body line.  Cheapest; relies on the small model following it

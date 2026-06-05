@@ -51,14 +51,22 @@ Procedure:
 
 Because `old_string` is a single heading line, you never capture (and so never split) an existing section's body.
 
-Example — add `* New section` before the existing `* Goals` heading:
+Example — add `* New section` before the existing `* Goals` heading.
+(Both strings are flush left — headings live at column 0, no indentation.)
+
+`old_string` is exactly:
 
 ```
-old_string:  * Goals
-new_string:  * New section
-             New section's body.
+* Goals
+```
 
-             * Goals
+`new_string` is:
+
+```
+* New section
+New section's body.
+
+* Goals
 ```
 
 The same rule applies to a sub-heading (a new `**`): anchor on the next `**`-or-shallower heading line and insert before it.

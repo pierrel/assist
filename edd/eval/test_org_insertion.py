@@ -98,15 +98,17 @@ class OrgInsertionMixin(AgentTestMixin):
         self.model = select_assistant_model(0.1)
 
     def assertNoSplit(self, after: str, level: int, targets: dict):
-        """The FINAL (shipped) file must not have split any target section.
+        """The FINAL (shipped) file must not have split a target section.
 
-        Pure structural check: each target heading must still hold all of its
-        original body lines.  The fix that makes this pass is the org-format
-        skill's single-heading-line anchor rule (no middleware)."""
+        Pure structural check: for each target heading, the specific
+        ``body_lines`` markers passed in must still sit under that heading
+        (they bracket the section, so a heading inserted anywhere inside it
+        drops one).  The fix that makes this pass is the org-format skill's
+        single-heading-line anchor rule (no middleware)."""
         for head, body in targets.items():
+            err = _section_intact(after, level, head, body)
             self.assertIsNone(
-                _section_intact(after, level, head, body),
-                f"section {head!r} was split in the shipped file.\n---\n{after}")
+                err, f"{err}\n--- shipped file ---\n{after}")
 
 
 class TestAddTopLevelSection(OrgInsertionMixin, TestCase):
