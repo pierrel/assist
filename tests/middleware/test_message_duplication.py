@@ -18,7 +18,6 @@ crux — these tests assert it (left-operand human/tool are ``id=None``).
 """
 from unittest.mock import Mock
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph.message import add_messages
 
@@ -224,8 +223,10 @@ class TestBeforeModelScrub:
 
         mw = JsonValidationMiddleware(strict=False)
         update = mw.before_model({"messages": incoming}, Mock())
-        if update is None:
-            pytest.skip("json_validation before_model did not flag this input")
+        # The \x07 control char deterministically trips content sanitization,
+        # so the scrub must fire — a skip here would let the suite pass if the
+        # scrub silently stopped working.
+        assert update is not None, "control char should have tripped sanitization"
 
         merged = add_messages(channel, update["messages"])
         counts = _content_counts(merged)
