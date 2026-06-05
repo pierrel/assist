@@ -1,5 +1,5 @@
-"""Web tools the agent exposes: a throttled DuckDuckGo search and a
-per-host throttled URL fetch.
+"""Web tools the agent exposes: a throttled multi-engine web search
+(via ``ddgs`` with ``backend="auto"``) and a per-host throttled URL fetch.
 
 Throttle/rate-limit shape (added 2026-05-31 after two adjacent failure
 modes burned the dev box's IP: a research-agent emitted ~9,000
@@ -65,7 +65,7 @@ _search_circuit_open_until = 0.0
 _SEARCH_CIRCUIT_DURATION_S = 600  # 10 minutes
 
 _CIRCUIT_OPEN_MESSAGE = (
-    "Search is rate-limited (DuckDuckGo). Cannot retry for ~10 minutes. "
+    "Search is rate-limited (web search). Cannot retry for ~10 minutes. "
     "Finalize your response using what's already gathered; tell the user "
     "search is temporarily rate-limited and to try again in a few minutes."
 )
@@ -246,9 +246,17 @@ def search_internet(
     _search_throttle()
     t0 = time.time()
     try:
+        # backend="auto" rotates across ddgs's engines (DuckDuckGo, Bing,
+        # Brave, Mojeek, …) and falls back when one fails.  Pinning a single
+        # backend="duckduckgo" made us hostage to DDG's scrape endpoint, which
+        # flakily raises DDGSException("No results found.") even when the IP is
+        # fine (the browser works) — and our timing heuristic then misreads
+        # that fast empty as a rate-limit and opens the circuit for 10 min.
+        # "auto" only surfaces "No results found." when EVERY engine fails,
+        # which is the genuine-unavailable signal the circuit breaker wants.
         results = DDGS().text(query,
                               max_results=max_results,
-                              backend="duckduckgo")
+                              backend="auto")
         _record_search_success()
     except Exception as e:
         elapsed = time.time() - t0

@@ -218,6 +218,25 @@ class TestSearchInternet:
             # 1 failure → success (reset) → 1 failure = below threshold.
             assert not tools._circuit_is_open()
 
+    def test_uses_auto_backend_for_engine_fallback(self):
+        """Must call ddgs with backend="auto", not a single pinned engine.
+
+        Pinning backend="duckduckgo" made search hostage to DDG's scrape
+        endpoint, which flakily raised "No results found." even when the IP
+        was fine — starving research and tripping the rate-limit heuristic.
+        "auto" rotates across engines and falls back, so one flaky engine no
+        longer kills the request.  Pin the contract so we don't regress to a
+        single backend."""
+        with patch.object(tools, "time") as t, \
+             patch.object(tools, "DDGS") as ddgs:
+            t.time.return_value = 5000.0
+            ddgs.return_value.text.return_value = [
+                {"title": "x", "href": "https://e.com", "body": "y"}
+            ]
+            tools.search_internet("query")
+            _, kwargs = ddgs.return_value.text.call_args
+            assert kwargs.get("backend") == "auto"
+
 
 # -------------------- rate-limit detection on exception -----------------
 

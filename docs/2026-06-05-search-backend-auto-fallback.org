@@ -1,0 +1,68 @@
+#+title: Search returns nothing — pinned to the one flaky ddgs backend
+#+date: <2026-06-05>
+
+* Problem (observed in production)
+Thread =20260605072211-aa01ee43= ("James Blake independent music") — the
+FIRST research request of the morning — produced no answer.  The
+research-agent searched, got nothing, over-searched into the volume cap,
+emitted "I'll write up what I have now" (writing nothing), and the
+orchestrator gave up.  The user noted DuckDuckGo works fine from their
+browser on the SAME IP, and being "rate-limited" on the first request of
+the day makes no sense.
+
+* Root cause
+=search_internet= (=assist/tools.py=) hardcoded
+=DDGS().text(query, backend="duckduckgo")= — a SINGLE scrape backend with
+no fallback (added in =3eca708= "Moving to duckduckgo over tavily").  That
+backend is FLAKY: measured live on the prod box, it intermittently raises
+=DDGSException("No results found.")= in ~0.3s while the IP is perfectly
+fine — the browser works, and =ddgs= backends =auto= / =bing= / =brave= /
+=mojeek= all return 5 real results for the same queries.
+
+Two compounding failures from the single pin:
+1. *No engine fallback.*  When DDG's scrape endpoint flakes, the whole
+   request fails — there's no second engine to try.  A given thread gets
+   nothing; the next one may succeed (it's intermittent), which is why
+   "search works sometimes."
+2. *The flaky empty is misread as a rate-limit.*  The rate-limit timing
+   heuristic treats a fast (<3s) "No results found." as a block and opens
+   the circuit for 10 minutes — so one scrape flake can wedge search for
+   the next 10 minutes, manufacturing the "rate-limited on the first
+   request" symptom the user saw.
+
+This is NOT an IP block and NOT a real rate-limit.  It is the single
+pinned backend being unreliable.
+
+* Fix
+=backend="duckduckgo"= → =backend="auto"=.  =ddgs= "auto" rotates across
+its engines (DuckDuckGo, Bing, Brave, Mojeek, …) and falls back when one
+fails, so a single flaky engine no longer kills the request.  As a bonus
+it makes the rate-limit heuristic ACCURATE: "auto" only surfaces "No
+results found." when EVERY engine fails, which is the genuine
+search-unavailable signal the circuit breaker actually wants.
+
+Verified live on the prod box after the change: =search_internet= returns
+5 real results for every query tried (James Blake album, independent
+record labels, tabata intervals, asyncio) — where the old pin returned
+=[]= / flaky "No results found.".
+
+* Tests
+- =tests/test_tools.py::TestSearchInternet::test_uses_auto_backend_for_engine_fallback=
+  pins =backend="auto"= (fails on the old =duckduckgo= pin).  Existing
+  throttle / circuit-breaker / rate-limit-detection tests unchanged and
+  green (mocked DDGS, backend-agnostic).
+- The circuit-breaker machinery, prompts, and the rate-limit relay
+  (#118/#119) are untouched — this fixes the transport beneath them.
+
+* Out of scope / follow-ups
+- The volume-cap terminal message ("I'll write up what I have now") is a
+  false promise when it fires — the strip ends the turn and nothing is
+  written.  With working search the research-agent converges before the
+  cap, so this no longer bites the common path; the misleading message is
+  a separate UX issue.
+- A real/managed search API (roadmap item) would remove scrape flakiness
+  entirely; "auto" is the cheap, immediate resilience win.
+
+* Status
+- Root cause measured + fixed; transport now returns real results on the
+  prod box.  Backend pinned to "auto" with a regression test.
