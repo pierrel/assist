@@ -195,6 +195,16 @@ class TestSearchInternet:
                 with pytest.raises(RuntimeError, match="unexpected type|results"):
                     tools.search_internet("q")
 
+    def test_malformed_unresponsive_engines_raises(self, monkeypatch):
+        """Empty results with a malformed (non-list) unresponsive_engines —
+        incl. falsy {}/"" — is a broken backend, not 'no results'."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        for bad in ({}, "", {"google": "timeout"}):
+            with patch.object(tools, "requests") as req:
+                req.get.return_value = _resp({"results": [], "unresponsive_engines": bad})
+                with pytest.raises(RuntimeError, match="unexpected type|unresponsive"):
+                    tools.search_internet("q")
+
     def test_transport_error_raises(self, monkeypatch):
         """SearXNG unreachable → loud RuntimeError, no silent fallback."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
