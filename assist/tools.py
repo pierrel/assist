@@ -136,9 +136,17 @@ def search_internet(
             f"response shape ({type(payload).__name__}); the backend is unhealthy."
         )
 
-    # Don't coerce with `or []`: a falsy non-list (e.g. {} or "") must reach
-    # the type check and fail loud, not be silently treated as "no results".
-    results = payload.get("results", [])
+    # A valid SearXNG response always carries a `results` list (possibly
+    # empty).  A missing key, or a non-list value (incl. falsy {}/"" — so
+    # don't coerce with `or []`), is a malformed/unhealthy backend, not a
+    # "no results" answer: fail loud.
+    if "results" not in payload:
+        logger.error("SearXNG response missing 'results' field")
+        raise RuntimeError(
+            f"Web search backend (SearXNG at {base_url}) returned a response with no "
+            f"'results' field; the backend is unhealthy."
+        )
+    results = payload["results"]
     if not isinstance(results, list):
         logger.error("SearXNG 'results' was not a list: %s", type(results).__name__)
         raise RuntimeError(

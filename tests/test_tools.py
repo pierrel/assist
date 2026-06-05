@@ -1,8 +1,8 @@
 """Tests for the web tools in assist.tools.
 
 ``search_internet`` goes through a self-hosted SearXNG instance with NO
-fallback — if SearXNG is unset/unreachable/erroring, or returns nothing
-because every engine failed, it raises (failures must be loud).  The HTTP
+fallback — if SearXNG is unset/unreachable/erroring, or returns zero results
+while reporting any engine failures, it raises (failures must be loud).  The HTTP
 call is mocked so no network is involved.  ``read_url``'s per-host throttle
 is tested by patching the module's ``time``.  Each test resets module state
 in a fixture so order-of-execution doesn't matter."""
@@ -170,6 +170,15 @@ class TestSearchInternet:
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp({"results": {"unexpected": "object"}})
             with pytest.raises(RuntimeError, match="unexpected type|results"):
+                tools.search_internet("q")
+
+    def test_missing_results_field_raises(self, monkeypatch):
+        """A valid SearXNG response always carries a `results` list; a dict
+        with no `results` field is malformed → loud failure, not "[]"."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        with patch.object(tools, "requests") as req:
+            req.get.return_value = _resp({"query": "q"})  # no 'results' key
+            with pytest.raises(RuntimeError, match="no 'results'|results"):
                 tools.search_internet("q")
 
     def test_falsy_non_list_results_raises(self, monkeypatch):
