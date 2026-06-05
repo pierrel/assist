@@ -125,9 +125,33 @@ The guarantee is the safety property — *never ship a split file* (0/5
 corrupt in every guarded config).  Completion is 4/5: the one miss is an
 honest give-up (file intact, nothing added), not corruption.
 
+* UPDATE (2026-06-04, later) — middleware was leaky; REMOVED; back to skill-only
+The "4/5, 0/5 corrupt" above was small-sample luck.  A worst-case trace
+(then a clean N=5) showed the args-only guard still ships a SPLIT up to 5/5
+at real scale.  Root cause it CANNOT cover: the model anchors =old_string=
+on a section's heading + only PART of its body and appends the new heading
+after that partial capture; the section's remaining body continues in the
+file OUTSIDE =old_string=, so it's orphaned with no trace in the edit args.
+Args-only is blind to it.  (Also uncovered: =write_file= whole-file
+rewrites, and =replace_all=/multi-occurrence anchors.)
+
+The only robust guard would read the file (a real before/after check) — but
+that's "do the agent's job for it"; rejected by the operator, who also does
+not want the middleware at all.  Per direction: the middleware
+(=FileEditGuardMiddleware= + =OrgHeadingInsertionValidator=) and its tests
+are REMOVED; we iterate SKILL-ONLY on this PR (the point of agentic dev:
+find the instruction shape the small model actually obeys).
+
+Behavior shape (useful for the skill work): the guard never caused a deep
+loop — every run was <=3 edit attempts / <=2 rejections.  The model always
+mis-anchors attempt 1 (body/bold line), responds to a redirect, and
+re-anchors on a heading; it SUCCEEDS when it grabs a small anchor (heading
++ ~1 line) and SPLITS when it grabs a large partial-section chunk.  So
+skill ideas should push it toward a tiny, heading-only anchor.
+
 * Status
-- Fix implemented + tested.  Eval uses the final-state contract (no xfail):
-  complex ~4/5, simple/inbox pass.
-- Follow-up: try skill guidance to reduce/replace the middleware (user
-  prefers less middleware); prior skill variants alone were 0/3, revisit
-  with the working eval as the bar.
+- Middleware removed; eval kept as the bar; complex case =xfail= (skill fix
+  in progress), simple/inbox active.
+- Iterating skill-only: 6 variants already 0/3 (failure example, procedure,
+  both, append-at-end, "go before"+bold distinction, that+example).  New
+  ideas under evaluation by the agent team — see the PR.
