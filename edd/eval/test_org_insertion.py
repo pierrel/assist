@@ -12,8 +12,8 @@ fix is SKILL-ONLY: the ``org-format`` skill tells the model to anchor
 ``*bold*`` / a multi-line block) and insert the new section before it, so
 it can't capture — and so can't split — a section's body.  Six earlier
 skill phrasings failed (0/3); the anchor-shape rule reaches ~4/5 on the
-large file (the complex case below is xfail strict=False for the ~1/5
-residual).  See the design doc.
+large file (the ~1/5 residual is expected — this is an eval, not a hard
+gate).  See the design doc.
 
 The roadmap fixture is a frozen snapshot of the real (tracked, PII-free)
 ``roadmap.org`` that triggered the failure — ~365 lines, deep nesting,
@@ -25,8 +25,6 @@ import tempfile
 from pathlib import Path
 from textwrap import dedent
 from unittest import TestCase
-
-import pytest
 
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
@@ -123,11 +121,8 @@ class TestAddTopLevelSection(OrgInsertionMixin, TestCase):
     # The org-format skill rewrite brings this from 0/5 (baseline + 6 earlier
     # skill variants) to ~4/5 on this large real-file fixture; ~1/5 still
     # splits (the small model occasionally ignores the single-heading-line
-    # anchor rule).  strict=False xfail so the residual ~20% doesn't flap the
-    # nightly while it counts the wins as xpass; the simple/inbox cases (below)
-    # are active and pass.  Tighten/remove when the residual is closed.
-    @pytest.mark.xfail(reason="org mid-section split: skill fix reaches ~4/5, "
-                              "~1/5 residual on large files", strict=False)
+    # anchor rule).  Left as a normal eval — a partial pass-rate is expected
+    # for evals, not a hard gate.
     def test_does_not_split_section(self):
         agent, root = self.create_agent({"roadmap.org": _ROADMAP})
         agent.message(
