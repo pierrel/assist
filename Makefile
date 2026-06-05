@@ -147,7 +147,10 @@ searxng-down:
 
 deploy-searxng:
 	@echo "→ Pulling + starting SearXNG on $(DEPLOY_HOST)..."
-	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker pull $${SEARXNG_IMAGE:-searxng/searxng:latest} && ./scripts/searxng.sh up'
+	@ssh $(DEPLOY_HOST) \
+		SEARXNG_IMAGE='$(SEARXNG_IMAGE)' \
+		SEARXNG_PORT='$(SEARXNG_PORT)' \
+		'cd $(DEPLOY_PATH) && docker pull $${SEARXNG_IMAGE:-searxng/searxng:latest} && ./scripts/searxng.sh up'
 	@echo "✓ SearXNG running on $(DEPLOY_HOST) (see ASSIST_SEARCH_URL)"
 
 deploy-install:
