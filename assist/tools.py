@@ -101,10 +101,11 @@ def search_internet(
     ``ASSIST_SEARCH_URL`` (private, multi-engine, no key).
 
     There is deliberately NO fallback.  If SearXNG is unset, unreachable,
-    returns an error, or returns nothing because every engine failed, this
-    RAISES — a broken search backend must fail loudly, not silently degrade.
-    A genuine empty result for a healthy query (no engine errors) returns
-    ``"[]"`` so the agent can treat it as "no results"."""
+    returns an error, or returns zero results while reporting any engine
+    failures (``unresponsive_engines``), this RAISES — a broken search backend
+    must fail loudly, not silently degrade.  A genuine empty result for a
+    healthy query (zero results, no engine errors) returns ``"[]"`` so the
+    agent can treat it as "no results"."""
     base_url = os.getenv("ASSIST_SEARCH_URL")
     if not base_url:
         raise RuntimeError(
@@ -143,9 +144,10 @@ def search_internet(
             f"of unexpected type ({type(results).__name__}); the backend is unhealthy."
         )
     if not results:
-        # Distinguish "every engine errored" (a loud backend failure) from a
-        # genuine empty result set for this query.  SearXNG reports the former
-        # in `unresponsive_engines`.
+        # Distinguish "empty results while at least one engine reported a
+        # failure" (a loud backend failure) from a genuine empty result set
+        # for this query.  SearXNG lists failing engines in
+        # `unresponsive_engines`; any entry alongside zero results is unhealthy.
         unresponsive = payload.get("unresponsive_engines") or []
         if unresponsive:
             logger.error(
