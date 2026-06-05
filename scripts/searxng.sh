@@ -35,6 +35,14 @@ up() {
   # an incidental "ultrasecretkey" elsewhere in the file.
   sed "s|secret_key: \"ultrasecretkey\"|secret_key: \"$(cat "$SECRET_FILE")\"|" \
     "$CONF_SRC" > "$RUNTIME_DIR/settings.yml"
+  # Fail loud rather than run with the public placeholder secret: if the
+  # placeholder is still present, the committed config drifted (the secret_key
+  # line changed) and the sed silently no-op'd.  ($(cat) already strips the
+  # secret file's trailing newline, so the value can't split the YAML line.)
+  if grep -q "ultrasecretkey" "$RUNTIME_DIR/settings.yml"; then
+    echo "ERROR: secret placeholder not substituted — refusing to start SearXNG with the public placeholder secret." >&2
+    exit 1
+  fi
   # The rendered file contains the secret — keep it owner-only regardless of umask.
   chmod 600 "$RUNTIME_DIR/settings.yml"
   docker rm -f "$NAME" >/dev/null 2>&1 || true

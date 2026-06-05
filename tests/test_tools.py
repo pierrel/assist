@@ -8,6 +8,8 @@ is tested by patching the module's ``time``.  Each test resets module state
 in a fixture so order-of-execution doesn't matter."""
 from __future__ import annotations
 
+import ast
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -132,7 +134,9 @@ class TestSearchInternet:
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp(payload)
             result = tools.search_internet("q", max_results=3)
-        assert result.count("'url'") == 3
+        # Parse rather than string-count so the test is resilient to repr
+        # formatting (quotes/spacing/key order).
+        assert len(ast.literal_eval(result)) == 3
 
     def test_genuine_empty_returns_bracket(self, monkeypatch):
         """Zero results with NO engine failures is a real 'no results' answer,
