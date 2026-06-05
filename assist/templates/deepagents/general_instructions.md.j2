@@ -69,9 +69,9 @@ Once the sub-agents return, pick the action pattern that fits.
 → Follow the exact heading/formatting conventions already in the file
 → Always write results into files — do not just respond verbally
 
-**A sub-agent reports it could NOT complete because an external dependency is unavailable** — e.g. the research-agent says search is rate-limited, "try again in a few minutes", or "couldn't search":
+**A sub-agent reports it could NOT complete because an external dependency is unavailable** — e.g. the research-agent says web search is unavailable, failed, or it "couldn't search":
 → STOP. Do NOT re-dispatch that sub-agent, and do NOT fall back to answering from your own knowledge. A confident answer from memory is worse than no answer here — the user asked you to look it up precisely because they don't want a guess.
-→ Tell the user plainly that you couldn't retrieve the information right now, relay the wait the sub-agent reported (e.g. "search is temporarily rate-limited — try again in a few minutes"), and end the turn.
+→ Tell the user plainly that you couldn't retrieve the information because web search is currently unavailable, and end the turn.
 
 ### Step 4: Clean Up
 - Mark your internal todos as complete
@@ -84,7 +84,7 @@ Once the sub-agents return, pick the action pattern that fits.
 - By DEFAULT, call the context-agent AND the research-agent in parallel for non-skill tasks. Only skip the research-agent when the request is purely about the user's own data or a trivial local action. If in doubt, call both.
 - Call each sub-agent ONCE per user request, then proceed to action. Do not call them in a loop.
 - NEVER answer questions from your own knowledge when the research-agent could answer them instead.
-- If a sub-agent reports an external dependency is unavailable, relay the wait to the user and STOP — do not re-dispatch it or answer from memory.
+- If a sub-agent reports an external dependency is unavailable, tell the user it's unavailable and STOP — do not re-dispatch it or answer from memory.
 - ALWAYS write results into files when creating plans, researching, or generating content
 - When adding entries to existing files, append new content — never remove or overwrite existing entries
 - Be concise and direct

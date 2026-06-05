@@ -1,0 +1,132 @@
+#+title: Self-hosted SearXNG as the search backend
+#+date: <2026-06-05>
+State: Design (validated core empirically; implementing).
+
+* Motivation
+Follows the =backend="auto"= fix (PR #125): in-process =ddgs= scraping is
+fragile and owns no privacy boundary.  The manifesto
+(=larochelle.io/manifesto=) wants search that is Private (queries stay on
+hardware I control; a third party only gets what I deliberately send),
+Sovereign (read/change/freeze the code), Independent (keeps working when a
+SaaS pivots), and Malleable (inspectable/forkable).
+
+A *self-hosted metasearch* (SearXNG) is the only option that hits all four:
+it runs on our box, proxies queries to many engines with fallback, logs
+nothing, needs no API key or recurring bill, and is open source.  It does
+NOT crawl/index the web — it aggregates other engines' indexes — so it buys
+*query/privacy* sovereignty and *routing* resilience, not *index*
+sovereignty (that would be Mojeek/Brave's rented crawl, or running our own).
+That trade-off is the right one for an agent: own the privacy boundary and
+the routing; don't try to own a web-scale index.
+
+* Validated (measured before designing)
+- =docker run searxng/searxng= bound to =127.0.0.1:8888=, JSON format on,
+  limiter off → =GET /search?q=...&format=json= returned 31 results
+  aggregated from brave/duckduckgo/google/startpage for "James Blake latest
+  album" — the exact query that produced no answer in prod thread
+  =20260605072211-aa01ee43=.
+
+* Architecture
+** SearXNG runtime — standalone container, localhost-only
+A long-lived =docker run -d --restart unless-stopped= of the official
+=searxng/searxng= image, published to =127.0.0.1:8888= ONLY (never exposed
+off-box — privacy).  Config mounted from =dockerfiles/searxng/settings.yml=.
+NOT the egress-proxy pattern (that is sandbox-tied + ephemeral — wrong for a
+persistent service).  Managed by Make targets + a small script; the restart
+policy keeps it alive across reboots.
+
+=secret_key= is NOT committed (no-secrets-in-repo rule): the committed
+settings.yml carries the =ultrasecretkey= placeholder; =scripts/searxng.sh=
+generates a per-host secret into a gitignored runtime dir and renders a copy
+of settings.yml with it substituted in, mounting that copy into the container.
+
+** search_internet — SearXNG only, fail LOUD (no fallback)
+Per operator directive: ddgs is REMOVED entirely — not kept as a backup.  A
+silent fallback hides a broken search behind worse results; we want a search
+outage to be obvious.  =assist/tools.py= =search_internet=:
+1. =ASSIST_SEARCH_URL= unset → raise (misconfiguration; search has no
+   fallback so this can't be a silent no-op).
+2. Query SearXNG's JSON API; on unreachable / HTTP error / bad JSON → log at
+   ERROR and raise =RuntimeError= ("…is unavailable: …").
+3. Zero results: if SearXNG reports =unresponsive_engines= (every engine
+   errored) → raise (loud backend failure); otherwise return =[]= (a genuine
+   "no results" for this query is a valid answer, not a failure).
+4. Otherwise normalize =results= to =[{title,url,content}]=.
+
+The entire ddgs path is gone: the =ddgs= dependency, the cross-tool search
+throttle, the rate-limit circuit breaker, =_CIRCUIT_OPEN_MESSAGE=, and the
+rate-limit exception heuristic are all removed.  =read_url= and its per-host
+throttle are unchanged.
+
+** Engines
+Start with SearXNG's free scraped engines (google, duckduckgo, brave,
+startpage, bing, wikipedia, …) — the validation already used four.
+=settings.yml= ships COMMENTED stubs for keyed independent indexes
+(=brave= API, =mojeek= API) so adding a real independent index later is a
+key + uncomment, behind the same private front door.
+
+** Config / deploy
+- =ASSIST_SEARCH_URL= added to =.dev.env.example= / =.deploy.env.example=
+  (e.g. =http://127.0.0.1:8888=); read via =os.getenv= in tools.py.
+- Threaded into the systemd unit via =deploy-service= → =install-service.sh=
+  like the other =ASSIST_*= vars.
+- Make targets: =searxng-up=, =searxng-down=, =searxng-logs= (local), and a
+  =deploy-searxng= that ssh-runs the container on prod; pull image in the
+  deploy flow.
+
+** Tests
+- Unit (hermetic, =tests/test_tools.py=, patch =tools.requests=): results
+  normalized; unset URL raises; transport/HTTP error raises; zero-results +
+  =unresponsive_engines= raises; genuine zero-results returns =[]=;
+  =max_results= respected; correct JSON endpoint/params.
+- The ddgs throttle / circuit / rate-limit tests are DELETED with the code
+  they covered; =read_url= per-host throttle tests remain.
+- Evals adapted: =eval_large_tool_results.py= mocks =tools.requests.get=
+  (not =ddgs.DDGS.text=); the rate-limit-handoff eval becomes a
+  search-unavailable handoff (stub raises; relay-and-stop contract kept).
+- Live end-to-end validated against a real local SearXNG.
+
+* Trade-offs / limitations
+- Metasearch, not a crawler: no index sovereignty (covered above).
+- SearXNG still scrapes engines, so individual engines can throttle — but
+  across many engines with fallback it is far more robust than one library.
+- Adds a service to run/maintain (one container), and — with no fallback —
+  makes it a hard dependency for search.  This is the deliberate trade per
+  the operator: search must fail loudly when the backend is down, not mask
+  the outage.  =deploy-searxng= re-ups it idempotently; the failure is
+  logged + surfaced if it's ever down.
+
+* Design-review resolutions (folded in)
+- *No fallback — fail loud (operator directive, supersedes the review's
+  empty-fallback option).*  Originally the design fell back to ddgs on a
+  SearXNG error/empty.  The operator removed ddgs entirely: a silent
+  fallback masks a broken backend.  Now SearXNG failure (unreachable / HTTP
+  error / all-engines-unresponsive / unset URL) RAISES and is logged at
+  ERROR; only a genuine zero-results (no engine errors) returns =[]=.  This
+  also makes the "DDG circuit breaker" moot — it's deleted with the rest of
+  the ddgs machinery.
+- *Reboot survival.*  =--restart unless-stopped= only resurrects the
+  container if the docker daemon is enabled on boot; the doc/Make note the
+  =systemctl enable docker= prerequisite, and =deploy-searxng= re-ups the
+  container idempotently on every deploy.  With no fallback, SearXNG is now a
+  HARD dependency for search — if it's down, =search_internet= fails loudly
+  (logged + surfaced as a tool error) rather than degrading.  That is the
+  intended behavior: a broken search backend should be obvious, not masked.
+- *Port 8890, not 8888* — avoids cognitive collision with the egress-proxy's
+  internal 8888 (no real conflict, but two "8888"s mislead).
+- *Curated, auditable engine set* (=use_default_settings.engines.keep_only=:
+  duckduckgo/google/brave/startpage/mojeek/wikipedia) instead of all ~240, so
+  the committed config is auditable and nothing fetches off-box except those
+  engines (image_proxy off, UI/limiter unused).  brave + mojeek are the
+  independent indexes.
+- *Trimmed Make surface* to =searxng-up= / =searxng-down= + =deploy-searxng=
+  (folded into =deploy=); logs/status live in the script.
+
+* Status
+- Implemented + validated end-to-end: =search_internet= with
+  =ASSIST_SEARCH_URL= set returns real results from the local SearXNG (brave/
+  google/duckduckgo/startpage) for the exact query that previously produced
+  nothing.  ddgs removed entirely (dep + throttle + circuit breaker); search
+  is SearXNG-only and fails loud.  Unit tests cover normalize, unset→raise,
+  transport/HTTP error→raise, empty+engines-failed→raise, genuine empty→[].
+  Full unit suite green; evals adapted + collect cleanly.

@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build egress-proxy-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build egress-proxy-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -81,7 +81,7 @@ sandbox-shell:
 
 # === Deployment Targets ===
 
-deploy: deploy-code deploy-sandbox-build deploy-install deploy-service restart
+deploy: deploy-code deploy-sandbox-build deploy-searxng deploy-install deploy-service restart
 	@echo "✓ Deployment complete!"
 	@echo "Check status with: make status"
 	@echo "View logs with: make logs"
@@ -126,8 +126,28 @@ deploy-service:
 		ASSIST_PORT='$(ASSIST_PORT)' \
 		ASSIST_MODEL_URL='$(ASSIST_MODEL_URL)' \
 		ASSIST_DOMAINS='$(ASSIST_DOMAINS)' \
+		ASSIST_SEARCH_URL='$(ASSIST_SEARCH_URL)' \
 		'bash -s' < scripts/install-service.sh
 	@echo "✓ Service installed"
+
+# --- Self-hosted SearXNG metasearch (search backend) ---------------------
+# Local: bring the container up / down (localhost-only, JSON API).  Prod:
+# deploy-searxng pulls the image and (re)starts the container idempotently;
+# it's folded into the `deploy` chain.  search_internet has NO fallback — if
+# SearXNG is down, search fails loudly rather than silently degrading — so the
+# container is a hard dependency.  Requires the docker daemon to be enabled on
+# boot (`systemctl enable docker`) for the container to survive a reboot.  Note
+# `up` does rm+run, so search is briefly down mid-deploy until `restart`.
+searxng-up:
+	@./scripts/searxng.sh up
+
+searxng-down:
+	@./scripts/searxng.sh down
+
+deploy-searxng:
+	@echo "→ Pulling + starting SearXNG on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker pull searxng/searxng:latest && ./scripts/searxng.sh up'
+	@echo "✓ SearXNG running on $(DEPLOY_HOST) (127.0.0.1:8890)"
 
 deploy-install:
 	@echo "→ Installing dependencies on remote server..."
