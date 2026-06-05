@@ -143,7 +143,7 @@ class TestSearchInternet:
             assert tools.search_internet("obscure") == "[]"
 
     def test_empty_with_failed_engines_raises(self, monkeypatch):
-        """Zero results BECAUSE every engine errored is a loud backend
+        """Zero results while any engine reported a failure is a loud backend
         failure, not a 'no results' answer."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
@@ -171,6 +171,16 @@ class TestSearchInternet:
             req.get.return_value = _resp({"results": {"unexpected": "object"}})
             with pytest.raises(RuntimeError, match="unexpected type|results"):
                 tools.search_internet("q")
+
+    def test_falsy_non_list_results_raises(self, monkeypatch):
+        """A FALSY non-list `results` (e.g. {} or "") must also raise — it must
+        not be silently coerced to [] and treated as a genuine 'no results'."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        for bad in ({}, ""):
+            with patch.object(tools, "requests") as req:
+                req.get.return_value = _resp({"results": bad})
+                with pytest.raises(RuntimeError, match="unexpected type|results"):
+                    tools.search_internet("q")
 
     def test_transport_error_raises(self, monkeypatch):
         """SearXNG unreachable → loud RuntimeError, no silent fallback."""

@@ -3,9 +3,9 @@ per-host throttled URL fetch.
 
 Search goes through a self-hosted SearXNG instance (``ASSIST_SEARCH_URL``) —
 private, on hardware we control, multi-engine, no API key.  There is NO
-fallback: if SearXNG is unset, unreachable, errors, or returns nothing
-because every engine failed, ``search_internet`` raises.  A broken search
-backend must fail LOUDLY (logged + surfaced as a tool error) rather than
+fallback: if SearXNG is unset, unreachable, errors, or returns zero results
+while reporting any engine failures, ``search_internet`` raises.  A broken
+search backend must fail LOUDLY (logged + surfaced as a tool error) rather than
 silently degrade to a flaky scraper that hides the outage behind worse
 results.
 
@@ -136,7 +136,9 @@ def search_internet(
             f"response shape ({type(payload).__name__}); the backend is unhealthy."
         )
 
-    results = payload.get("results", []) or []
+    # Don't coerce with `or []`: a falsy non-list (e.g. {} or "") must reach
+    # the type check and fail loud, not be silently treated as "no results".
+    results = payload.get("results", [])
     if not isinstance(results, list):
         logger.error("SearXNG 'results' was not a list: %s", type(results).__name__)
         raise RuntimeError(
