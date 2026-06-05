@@ -116,13 +116,14 @@ class TestAddTopLevelSection(OrgInsertionMixin, TestCase):
     the 'moonshot' prod case).  Vague prompt — does not telegraph 'top-level
     section' or where it goes."""
 
-    # KNOWN FAILING while we iterate on a SKILL-ONLY fix (no middleware).
-    # Baseline 5/5 FAIL; the small model anchors edit_file on a body/bold
-    # line or a partial-section chunk and splits the section.  strict=False so
-    # an occasional pass doesn't break the suite; remove the marker when a
-    # skill variant makes this reliably pass.
-    @pytest.mark.xfail(reason="org mid-section split on large files; skill-only "
-                              "fix in progress", strict=False)
+    # The org-format skill rewrite brings this from 0/5 (baseline + 6 earlier
+    # skill variants) to ~4/5 on this large real-file fixture; ~1/5 still
+    # splits (the small model occasionally ignores the single-heading-line
+    # anchor rule).  strict=False xfail so the residual ~20% doesn't flap the
+    # nightly while it counts the wins as xpass; the simple/inbox cases (below)
+    # are active and pass.  Tighten/remove when the residual is closed.
+    @pytest.mark.xfail(reason="org mid-section split: skill fix reaches ~4/5, "
+                              "~1/5 residual on large files", strict=False)
     def test_does_not_split_section(self):
         agent, root = self.create_agent({"roadmap.org": _ROADMAP})
         agent.message(
