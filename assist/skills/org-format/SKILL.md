@@ -36,11 +36,18 @@ This is heading 2's body, NOT heading 1's.
 
 `edit_file` replaces `old_string` with `new_string`. To add a new heading WITHOUT splitting an existing section, **anchor `old_string` on a single heading line — never on body text, and never on a multi-line block.**
 
+A heading line is asterisks **followed by a space**, then a title: `* Foo`, `** Bar`. These are NOT heading lines — never anchor on them:
+- a plain sentence / body text (e.g. `The endpoint is rate-limited.`)
+- an org *bold* line: `*Direction.*`, `*Note.* ...` — the asterisks have **no space** after them, so it is body text, not a heading.
+
+If `old_string` is anything other than a real `* `/`** ` heading line, your new heading lands in the middle of a section and splits it.
+
 Procedure:
 
-1. Pick the existing heading your new heading should go immediately **before** — the next heading at the same level or a higher level (equal-or-fewer asterisks) that should follow your new one.
-2. Set `old_string` to **exactly that one heading line, copied verbatim** — no body lines, nothing else.
-3. Set `new_string` to your new heading and its body, then that same heading line, unchanged.
+1. **`read_file` the file first**, so you can copy a heading line that actually exists in it. Do not type an anchor from memory.
+2. Pick the existing heading your new heading should go immediately **before** — the next heading at the same level or a higher level (equal-or-fewer asterisks) that should follow your new one.
+3. Set `old_string` to **exactly that one heading line, copied verbatim from what you just read** — no body lines, nothing else.
+4. Set `new_string` to your new heading and its body, then that same heading line, unchanged.
 
 Because `old_string` is a single heading line, you never capture (and so never split) an existing section's body.
 
