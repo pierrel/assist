@@ -24,9 +24,12 @@ def _reset_tool_state(monkeypatch):
 
 
 def _resp(json_payload):
-    """A fake requests.Response with .raise_for_status() + .json()."""
+    """A fake requests.Response: .json() returns the payload, and
+    .raise_for_status() is a no-op (MagicMock auto-creates it; set it
+    explicitly so the success path can't accidentally raise)."""
     r = MagicMock()
     r.json.return_value = json_payload
+    r.raise_for_status.return_value = None
     return r
 
 

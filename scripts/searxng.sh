@@ -12,7 +12,10 @@
 set -euo pipefail
 
 NAME="assist-searxng"
-IMAGE="searxng/searxng:latest"
+# Pin the image for reproducible deploys (manifesto: "freeze a version that
+# works").  Override via SEARXNG_IMAGE (e.g. to a digest) when you want to
+# move deliberately; default tracks the maintained image.
+IMAGE="${SEARXNG_IMAGE:-searxng/searxng:latest}"
 PORT="${SEARXNG_PORT:-8890}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONF_SRC="$REPO_DIR/dockerfiles/searxng/settings.yml"
@@ -28,7 +31,10 @@ up() {
   fi
   # Render a runtime settings.yml with the per-host secret injected; the
   # committed config keeps only the placeholder, so no secret lands in git.
-  sed "s|ultrasecretkey|$(cat "$SECRET_FILE")|" "$CONF_SRC" > "$RUNTIME_DIR/settings.yml"
+  # Anchor on the whole secret_key line so only the value is replaced, never
+  # an incidental "ultrasecretkey" elsewhere in the file.
+  sed "s|secret_key: \"ultrasecretkey\"|secret_key: \"$(cat "$SECRET_FILE")\"|" \
+    "$CONF_SRC" > "$RUNTIME_DIR/settings.yml"
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   docker run -d --name "$NAME" --restart unless-stopped \
     -p "127.0.0.1:${PORT}:8080" \
