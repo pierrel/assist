@@ -32,54 +32,29 @@ This subsection is also part of heading 1's body.
 This is heading 2's body, NOT heading 1's.
 ```
 
-## Inserting a new heading — the most common mistake
+## Inserting a new heading — anchor on ONE heading line
 
-To add a new heading at a given level (for example a new `*` sibling of an existing `*` heading), insert it AFTER the preceding heading's full body — that means **immediately before the next heading at the same level or a higher level**, NOT immediately after the preceding heading's first line.
+`edit_file` replaces `old_string` with `new_string`. To add a new heading WITHOUT splitting an existing section, **anchor `old_string` on a single heading line — never on body text, and never on a multi-line block.**
 
-### WRONG — inserts immediately after the preceding heading
+Procedure:
 
-This separates `* Heading 1` from its body, orphaning the body so it appears to belong to `* New heading`:
+1. Pick the existing heading your new heading should go immediately **before** — the next heading at the same level or a higher level (equal-or-fewer asterisks) that should follow your new one.
+2. Set `old_string` to **exactly that one heading line, copied verbatim** — no body lines, nothing else.
+3. Set `new_string` to your new heading and its body, then that same heading line, unchanged.
 
-```
-* Heading 1
-* New heading                    ← WRONG: inserted right after the preceding heading
-New heading's body.
-This is heading 1's body.        ← orphaned, now reads as if part of "New heading"
+Because `old_string` is a single heading line, you never capture (and so never split) an existing section's body.
 
-More body content for heading 1.
-** Subsection of heading 1
-This subsection is also part of heading 1's body.
-* Heading 2
-```
-
-### RIGHT — inserts after the preceding heading's full body
+Example — add `* New section` before the existing `* Goals` heading:
 
 ```
-* Heading 1
-This is heading 1's body.
+old_string:  * Goals
+new_string:  * New section
+             New section's body.
 
-More body content for heading 1.
-** Subsection of heading 1
-This subsection is also part of heading 1's body.
-* New heading                    ← RIGHT: after heading 1's full body, before * Heading 2
-New heading's body.
-* Heading 2
+             * Goals
 ```
 
-### Procedure for inserting a new heading
-
-1. Identify the heading you're inserting after.
-2. Scan downward through its body — including any deeper-level subsections.
-3. Stop at the next line that is a heading at the SAME level or a HIGHER level (equal-or-fewer asterisks).
-4. Insert your new heading on the line immediately before that next heading.
-5. If no such next heading exists (the heading you're appending under is the last one at its level in the file), append at the end of the file.
-
-### Inserting a sub-heading
-
-To add a deeper-level heading (for example a new `**` under a `*`), the rule applies recursively:
-
-- Place the new sub-heading inside the parent heading's body.
-- If the parent already has same-level sub-headings, insert before the next one of equal-or-fewer asterisks.
+The same rule applies to a sub-heading (a new `**`): anchor on the next `**`-or-shallower heading line and insert before it.
 
 ## Bullets and lists
 
