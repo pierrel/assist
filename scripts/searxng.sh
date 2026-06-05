@@ -35,6 +35,8 @@ up() {
   # an incidental "ultrasecretkey" elsewhere in the file.
   sed "s|secret_key: \"ultrasecretkey\"|secret_key: \"$(cat "$SECRET_FILE")\"|" \
     "$CONF_SRC" > "$RUNTIME_DIR/settings.yml"
+  # The rendered file contains the secret — keep it owner-only regardless of umask.
+  chmod 600 "$RUNTIME_DIR/settings.yml"
   docker rm -f "$NAME" >/dev/null 2>&1 || true
   docker run -d --name "$NAME" --restart unless-stopped \
     -p "127.0.0.1:${PORT}:8080" \

@@ -136,6 +136,12 @@ def search_internet(
         )
 
     results = payload.get("results", []) or []
+    if not isinstance(results, list):
+        logger.error("SearXNG 'results' was not a list: %s", type(results).__name__)
+        raise RuntimeError(
+            f"Web search backend (SearXNG at {base_url}) returned a 'results' field "
+            f"of unexpected type ({type(results).__name__}); the backend is unhealthy."
+        )
     if not results:
         # Distinguish "every engine errored" (a loud backend failure) from a
         # genuine empty result set for this query.  SearXNG reports the former

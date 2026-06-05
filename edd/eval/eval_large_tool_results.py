@@ -190,6 +190,7 @@ def run_eval(verbose: bool = True) -> EvalMetrics:
         large_payload = create_large_payload(target_tokens=80000)
         logger.info(f"Returning large payload: {len(large_payload)} characters (~{len(large_payload)//4} tokens)")
         resp = MagicMock()
+        resp.raise_for_status.return_value = None
         resp.json.return_value = {
             "results": [{"title": "Mock Result", "url": "https://example.com",
                          "content": large_payload}],
