@@ -125,6 +125,16 @@ def search_internet(
             f"Web search backend (SearXNG at {base_url}) is unavailable: {e}"
         ) from e
 
+    if not isinstance(payload, dict):
+        # A 2xx with valid-but-unexpected JSON (list/string/…) is still a
+        # broken backend — fail loud and clear rather than with a bare
+        # AttributeError on the next line.
+        logger.error("SearXNG returned unexpected JSON shape: %s", type(payload).__name__)
+        raise RuntimeError(
+            f"Web search backend (SearXNG at {base_url}) returned an unexpected "
+            f"response shape ({type(payload).__name__}); the backend is unhealthy."
+        )
+
     results = payload.get("results", []) or []
     if not results:
         # Distinguish "every engine errored" (a loud backend failure) from a

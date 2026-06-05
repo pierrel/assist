@@ -20,7 +20,7 @@ That trade-off is the right one for an agent: own the privacy boundary and
 the routing; don't try to own a web-scale index.
 
 * Validated (measured before designing)
-- =docker run searxng/searxng= bound to =127.0.0.1:8888=, JSON format on,
+- =docker run searxng/searxng= bound to =127.0.0.1:8890=, JSON format on,
   limiter off → =GET /search?q=...&format=json= returned 31 results
   aggregated from brave/duckduckgo/google/startpage for "James Blake latest
   album" — the exact query that produced no answer in prod thread
@@ -29,7 +29,7 @@ the routing; don't try to own a web-scale index.
 * Architecture
 ** SearXNG runtime — standalone container, localhost-only
 A long-lived =docker run -d --restart unless-stopped= of the official
-=searxng/searxng= image, published to =127.0.0.1:8888= ONLY (never exposed
+=searxng/searxng= image, published to =127.0.0.1:8890= ONLY (never exposed
 off-box — privacy).  Config mounted from =dockerfiles/searxng/settings.yml=.
 NOT the egress-proxy pattern (that is sandbox-tied + ephemeral — wrong for a
 persistent service).  Managed by Make targets + a small script; the restart
@@ -67,11 +67,12 @@ key + uncomment, behind the same private front door.
 
 ** Config / deploy
 - =ASSIST_SEARCH_URL= added to =.dev.env.example= / =.deploy.env.example=
-  (e.g. =http://127.0.0.1:8888=); read via =os.getenv= in tools.py.
+  (e.g. =http://127.0.0.1:8890=); read via =os.getenv= in tools.py.
 - Threaded into the systemd unit via =deploy-service= → =install-service.sh=
   like the other =ASSIST_*= vars.
-- Make targets: =searxng-up=, =searxng-down=, =searxng-logs= (local), and a
-  =deploy-searxng= that ssh-runs the container on prod; pull image in the
+- Make targets: =searxng-up=, =searxng-down= (local; =logs=/=status= live in
+  =scripts/searxng.sh=), and a =deploy-searxng= that ssh-runs the container on
+  prod; pull image in the
   deploy flow.
 
 ** Tests
