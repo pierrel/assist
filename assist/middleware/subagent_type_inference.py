@@ -143,4 +143,8 @@ class SubagentTypeInferenceMiddleware(AgentMiddleware):
                 new_last.additional_kwargs = dict(new_last.additional_kwargs)
                 new_last.additional_kwargs["tool_calls"] = new_ak_calls
 
-        return {"messages": messages[:-1] + [new_last]}
+        # Return ONLY the modified last message — add_messages replaces by
+        # id (new_last keeps the model id).  Returning the whole list would
+        # re-append id-less Human/Tool messages as duplicates; see
+        # docs/2026-06-05-middleware-message-duplication.org.
+        return {"messages": [new_last]}

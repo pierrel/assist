@@ -867,4 +867,11 @@ class LoopDetectionMiddleware(AgentMiddleware):
                 ak["tool_calls"] = []
             new_last.additional_kwargs = ak
 
-        return {"messages": messages[:-1] + [new_last]}
+        # Return ONLY the modified last message, not the whole list.  The
+        # `messages` channel reducer (`add_messages`) replaces by `.id`, and
+        # `new_last` keeps the model's id (model_copy preserves it), so this
+        # replaces the last AIMessage in place.  Returning `messages[:-1]`
+        # too would re-append every id-less HumanMessage/ToolMessage (the
+        # checkpointer deserializes them with id=None) as duplicates — see
+        # docs/2026-06-05-middleware-message-duplication.org.
+        return {"messages": [new_last]}

@@ -4,6 +4,8 @@ import logging
 import re
 from typing import Any
 from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain_core.messages import RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -386,7 +388,12 @@ class JsonValidationMiddleware(AgentMiddleware):
 
         if modified:
             logger.info(f"Sanitized {len(messages)} messages before sending to model")
-            return {"messages": sanitized_messages}
+            # Overwrite the whole history: clear then re-add the sanitized
+            # list.  Returning the list alone would re-append every id-less
+            # Human/Tool message as a duplicate (add_messages dedupes by id,
+            # and the checkpointer deserializes those with id=None).  See
+            # docs/2026-06-05-middleware-message-duplication.org.
+            return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + sanitized_messages}
 
         return None
 
@@ -451,8 +458,18 @@ class JsonValidationMiddleware(AgentMiddleware):
 
         # If we modified anything, update the state
         if modified:
-            # Update the tool calls in the last message
-            last_message.tool_calls = validated_calls
-            return {"messages": messages}
+            # Return ONLY the modified last message.  Copy it (don't mutate
+            # the channel's object in place) and set the validated calls; it
+            # keeps the model id, so add_messages replaces it by id.
+            # Returning the whole list would re-append id-less Human/Tool
+            # messages as duplicates — see
+            # docs/2026-06-05-middleware-message-duplication.org.
+            new_last = (
+                last_message.model_copy()
+                if hasattr(last_message, "model_copy")
+                else last_message.copy()
+            )
+            new_last.tool_calls = validated_calls
+            return {"messages": [new_last]}
 
         return None
