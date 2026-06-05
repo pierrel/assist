@@ -12,9 +12,9 @@
 set -euo pipefail
 
 NAME="assist-searxng"
-# Pin the image for reproducible deploys (manifesto: "freeze a version that
-# works").  Override via SEARXNG_IMAGE (e.g. to a digest) when you want to
-# move deliberately; default tracks the maintained image.
+# Image is pinnable for reproducible deploys (manifesto: "freeze a version
+# that works"): set SEARXNG_IMAGE to a tag or digest.  The default below is
+# NOT pinned (`:latest`) — set SEARXNG_IMAGE in .deploy.env to freeze it.
 IMAGE="${SEARXNG_IMAGE:-searxng/searxng:latest}"
 PORT="${SEARXNG_PORT:-8890}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
