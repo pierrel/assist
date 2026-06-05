@@ -7,12 +7,13 @@ line (``*Direction.*``, ``*Concrete next step.*``) that LOOKS like a
 heading — dropping the new heading there and splitting the section.
 
 Contract = the SHIPPED file is well-formed (no target section split).  The
-deterministic guard (``FileEditGuardMiddleware`` +
-``OrgHeadingInsertionValidator``) rejects a
-mid-section-anchored edit before it applies and redirects the model to
-anchor on a real heading, so a broken file is never written even if the
-first attempt mis-anchors.  Skill-only fixes were tried and did NOT work
-(six variants, 0/3) — see the design doc.
+fix is SKILL-ONLY: the ``org-format`` skill tells the model to anchor
+``edit_file`` ``old_string`` on one verbatim heading line (never body /
+``*bold*`` / a multi-line block) and insert the new section before it, so
+it can't capture — and so can't split — a section's body.  Six earlier
+skill phrasings failed (0/3); the anchor-shape rule reaches ~4/5 on the
+large file (the complex case below is xfail strict=False for the ~1/5
+residual).  See the design doc.
 
 The roadmap fixture is a frozen snapshot of the real (tracked, PII-free)
 ``roadmap.org`` that triggered the failure — ~365 lines, deep nesting,
@@ -97,14 +98,11 @@ class OrgInsertionMixin(AgentTestMixin):
         self.model = select_assistant_model(0.1)
 
     def assertNoSplit(self, after: str, level: int, targets: dict):
-        """The FINAL file must not have split any target section.
+        """The FINAL (shipped) file must not have split any target section.
 
-        Contract = the shipped file is well-formed.  The deterministic guard
-        (FileEditGuardMiddleware + OrgHeadingInsertionValidator) rejects a
-        mid-section-anchored edit
-        before it applies and redirects the model to anchor on a heading, so
-        a broken file is never written even if the model's first attempt
-        mis-anchors."""
+        Pure structural check: each target heading must still hold all of its
+        original body lines.  The fix that makes this pass is the org-format
+        skill's single-heading-line anchor rule (no middleware)."""
         for head, body in targets.items():
             self.assertIsNone(
                 _section_intact(after, level, head, body),

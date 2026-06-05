@@ -27,8 +27,9 @@ wrong) and burns extra edits undoing it — wasted turns, and sometimes it
 ships the broken structure.
 
 * Contract (eval-first)
-=edd/eval/test_org_insertion.py= (synthetic fixtures — real org files have
-PII) pins:
+=edd/eval/test_org_insertion.py= (the roadmap fixture is a frozen, PII-free
+snapshot of the real =roadmap.org=; the gtd inbox fixture is synthetic
+since gtd files have PII) pins:
 - Adding a new top-level section to a multi-section file does NOT split an
   existing section (every original heading keeps all its body lines).
 - Adding a =** TODO= to a gtd inbox does NOT split an existing item's body.
