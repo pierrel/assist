@@ -137,7 +137,8 @@ deploy-service:
 # SearXNG is down, search fails loudly rather than silently degrading — so the
 # container is a hard dependency.  Requires the docker daemon to be enabled on
 # boot (`systemctl enable docker`) for the container to survive a reboot.  Note
-# `up` does rm+run, so search is briefly down mid-deploy until `restart`.
+# `up` does rm+run, so the SearXNG container is briefly down during that
+# recreate (independent of the later `make restart`, which restarts assist-web).
 searxng-up:
 	@./scripts/searxng.sh up
 
