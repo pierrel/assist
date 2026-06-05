@@ -115,6 +115,22 @@ Always follow these guidelines when writing code:
 20. Simple, emergent design + keep it clean
     — Follows Kent Beck’s four rules (passes tests, no duplication, expresses intent, minimal elements) and the Boy Scout Rule: leave the code cleaner than you found it.
 
+# Steering the small model: prefer guidance over middleware
+This project runs a small local model (Qwen3.6-27B). We shape its behavior primarily by **instructing it** (skills, prompts), not by wrapping it in deterministic middleware. Middleware guardrails are a last resort, not a first reflex.
+
+1. **Guidance first; middleware only when guidance provably can't.** When the model misbehaves, fix it by changing what we tell it (a skill / prompt) before adding a middleware guard. Reach for middleware only after eval evidence shows guidance can't carry it — and even then, weigh it. A guard that has to re-do the model's task, or inspect state the model already has, is usually the wrong tool.
+   - Worked example: the org mid-section insertion bug. A deterministic `edit_file` guard was leaky (blind to anything outside the edit's `old_string`) and amounted to "doing the agent's job for it"; an eval-driven **skill** rewrite took it from 0/5 to ~4/5 with no middleware. See `docs/2026-06-03-org-insertion-mid-section.org`.
+2. **The instruction's shape matters more than its content.** This model follows a **checkable constraint on its tool arguments** far better than prose describing the goal. Prefer "set `old_string` to exactly one heading line" over "insert at the right place." Six prose phrasings of the same rule failed (0/3); the arg-shape constraint moved it.
+
+# Eval-driven behavior changes (process)
+When changing how the model behaves (a skill, a prompt, a tool surface):
+
+1. **Reproduce the failure in an eval FIRST.** Use a realistic fixture — match production scale/shape; small, clean fixtures often pass when the real failure needs a large/messy file (we saw synthetic fixtures pass 34/34 while the real ~365-line file failed every time). The eval is the bar. Reasoning about what the small model "should" do is unreliable — **measure, don't argue.**
+2. **Change one thing at a time and measure (isolate-to-learn).** Add candidate instructions/riders individually, eval each, and combine only if no single one suffices. The goal is to learn *which* instruction the model actually obeys, not just to ship a fix.
+3. **Review for generality; don't overfit to the one case.** A fix tuned to the exact reproduction is a non-fix. Stress-test the rule against the range of real request shapes (an agent reviewing for generality is worth a pass).
+4. **Chasing a residual: 100%-or-revert.** When adding an extra rider to close the last failures, keep it only if it fully clears them; otherwise revert to the simpler version that already worked.
+5. **Evals are not a pass/fail gate.** A partial pass-rate is expected and fine for evals (unlike unit tests). Don't mask a known-partial eval with `xfail` to keep a suite green — let it report its real rate.
+
 # Testing guidelines
 1. Always run python tests (`pytest`) whenever any python files are modified and iterate on any failures until tests pass.
 2. Always run the emacs linter (`eldev lint` or `eldev lint -f [file]`) whenever any elisp files are modified.
