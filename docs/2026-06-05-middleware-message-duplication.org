@@ -1,0 +1,117 @@
+#+title: Middleware corrupts message history by re-appending id-less messages
+#+date: <2026-06-05>
+
+* Problem (observed in production)
+Thread =20260605060257-e3f8753c= ("Tell me about James Blake's latest
+album and what it means to be an independent record.") showed two
+symptoms in the web UI:
+1. The user's prompt rendered TWICE — once at the bottom (oldest) and
+   once at the top (newest).
+2. No answer: the last message in the thread was the user's own prompt,
+   with nothing after it.
+
+* Root cause
+The =messages= channel uses LangGraph's =add_messages= reducer, which
+de-duplicates by =.id=.  Persisted =HumanMessage= / =ToolMessage=
+objects come back from the SqliteSaver checkpointer with =id=None=
+(confirmed: =get_raw_messages= shows id=None for every human/tool
+message; only AIMessages carry the model's =lc_run--…= id).
+
+Several middlewares, when they modify the latest AI message, return the
+ENTIRE message list:
+
+#+begin_src python
+return {"messages": messages[:-1] + [new_last]}
+#+end_src
+
+Because =after_model= receives a freshly-deserialized copy of the
+state, the id-less messages it returns are DIFFERENT objects from the
+ones already in the channel.  =add_messages= assigns fresh ids to both
+copies independently, they don't match, and the id-less messages get
+**re-appended as duplicates**.  The AIMessage (which has an id) is
+correctly replaced; everything else without an id is doubled.
+
+Reproduced against the real reducer (separate deserialized objects):
+- full-list return → duplicate trailing =HumanMessage= + replayed
+  =ToolMessage=s (the prod state had a duplicate prompt at index [10]
+  plus orphan tool results [11–15]).
+- =return {"messages": [new_last]}= → clean (last AIMessage replaced by
+  id, nothing else re-sent).
+
+In the prod thread the trigger was =LoopDetectionMiddleware= Pattern F
+(subagent-redispatch): the research sub-agents hit search rate limits,
+saved no reference files, the orchestrator re-dispatched them, loop
+detection fired and returned the full list → the duplicate prompt.
+That trailing, unanswered =HumanMessage= is why the prompt renders at
+both ends and why it looks like there was no answer.
+
+* Scope — two variants of the same anti-pattern
+** Variant A — after_model modifies ONLY the last AIMessage
+The last AIMessage always carries the model's id, so returning just it
+replaces it in place.  Sites:
+- =loop_detection.py= (the reported trigger)
+- =subagent_type_inference.py=
+- =tool_name_sanitization.py= (after_model)
+- =json_validation_middleware.py= (after_model)
+
+Fix: =return {"messages": [new_last]}= (return only the modified
+message; the reducer replaces by id).
+
+** Variant B — before_model rebuilds the WHOLE history (removes / edits middle messages)
+- =tool_name_sanitization.py= (before_model) — drops bad tool results.
+- =json_validation_middleware.py= (before_model) — fixes invalid JSON
+  escapes in past tool calls.
+
+These are DOUBLY broken: returning a shorter/edited list through
+=add_messages= cannot REMOVE a message (the reducer only adds/replaces
+by id), so the bad message stays AND the id-less messages duplicate.
+Reproduced: a before_model "scrub" of a bad tool message left the bad
+message in place and duplicated the human + good tool message.
+
+Fix: clear and rewrite atomically —
+=return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + cleaned}=.
+=REMOVE_ALL_MESSAGES= ('__remove_all__') is exported from
+=langgraph.graph.message=; per-id =RemoveMessage= is NOT viable because
+the messages to remove have =id=None=.  Verified: yields exactly the
+cleaned history, bad message gone, no duplication.
+
+*Behavior delta (intended).*  This is not a pure de-duplication fix for
+the two before_model scrubs: today they SILENTLY FAIL (the bad tool
+message is never removed, only the good messages duplicate).  After the
+fix they remove the bad messages for the first time, so the model stops
+re-seeing invalid-tool-call results / bad-JSON tool calls on subsequent
+turns.  Desirable and designed-for, but a genuine runtime behavior
+change, not just object identity.
+
+* Contract (tests)
+This is a deterministic reducer-level bug — no LLM eval can reliably
+reproduce the rate-limit→loop chain, so the contract is a unit test, not
+an eval.  Each fixed middleware gets a regression test that:
+1. builds a state with id-less Human/Tool messages (as the checkpointer
+   produces) plus an id'd AIMessage,
+2. invokes the hook,
+3. applies =add_messages= to a SEPARATE copy of the input (faithfully
+   reproducing the deserialization gap), and
+4. asserts no id-less message is duplicated, and for Variant B that the
+   targeted message is actually removed.
+
+* Design-review outcome
+Two proposed hardenings were DROPPED as theoretical (no observed-real
+case), per the repo's no-theoretical-code rule:
+- an empty-=cleaned= guard in tool_name_sanitization before_model — the
+  user's HumanMessage always survives the scrub, so =cleaned= can't be
+  empty when there is anything to remove.
+- an =isinstance(AIMessage)= guard in json_validation after_model — the
+  existing =hasattr('tool_calls') and tool_calls= check already excludes
+  every non-AI message (only AIMessage carries populated tool_calls).
+
+Variant A precondition (pinned by the tests, not by a code guard): the
+last message is always the model's just-generated AIMessage, which
+carries an =lc_run--…= id, so =[new_last]= replaces by id rather than
+appending.  json_validation after_model also stops mutating the channel
+object in place (uses =model_copy=) for parity with the other three.
+
+* Status
+- Investigation + root cause confirmed and reproduced.
+- Fix scope: A + B (6 sites) per operator.
+- Verified against langgraph 1.2.0 / langchain-core 1.4.0.

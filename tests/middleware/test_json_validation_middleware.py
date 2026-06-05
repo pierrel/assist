@@ -9,9 +9,21 @@ requests to vLLM, including:
 import json
 import pytest
 from unittest.mock import Mock
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
+
+
+def _payload(result):
+    """Concrete messages from a before_model return, minus the reset marker.
+
+    before_model rewrites history as ``[RemoveMessage(REMOVE_ALL_MESSAGES)] +
+    cleaned`` (it must clear-then-readd so add_messages actually removes, and
+    doesn't re-append id-less messages as duplicates — see
+    docs/2026-06-05-middleware-message-duplication.org).  The concrete
+    messages are everything after that leading marker.
+    """
+    return [m for m in result["messages"] if not isinstance(m, RemoveMessage)]
 
 
 class TestJsonValidationMiddleware:
@@ -83,7 +95,7 @@ And escaped quote: \"quoted\""""
 
         # Should return modified state
         if result is not None:
-            sanitized_messages = result["messages"]
+            sanitized_messages = _payload(result)
             sanitized_content = sanitized_messages[0].content
 
             # Verify it's JSON-safe
@@ -114,7 +126,7 @@ And escaped quote: \"quoted\""""
 
         # Should return modified state
         if result is not None:
-            sanitized_messages = result["messages"]
+            sanitized_messages = _payload(result)
             sanitized_args = sanitized_messages[0].tool_calls[0]['args']
 
             # Verify args are JSON-safe
@@ -192,7 +204,7 @@ This report provides a comprehensive comparison of technologies A and B.
 
         # Extract the content (modified or original)
         if result is not None:
-            final_content = result["messages"][0].tool_calls[0]['args']['content']
+            final_content = _payload(result)[0].tool_calls[0]['args']['content']
         else:
             final_content = msg.tool_calls[0]['args']['content']
 
@@ -389,7 +401,7 @@ class TestInvalidEscapeInToolCallArguments:
         assert result is not None, "Middleware should have detected and fixed invalid JSON"
 
         # Extract the fixed arguments string
-        fixed_msg = result["messages"][1]
+        fixed_msg = _payload(result)[1]
         fixed_args_str = fixed_msg.additional_kwargs['tool_calls'][0]['function']['arguments']
 
         # The fixed arguments must be valid JSON
@@ -429,7 +441,7 @@ class TestInvalidEscapeInToolCallArguments:
 
         # Should not modify valid arguments
         if result is not None:
-            fixed_args = result["messages"][0].additional_kwargs['tool_calls'][0]['function']['arguments']
+            fixed_args = _payload(result)[0].additional_kwargs['tool_calls'][0]['function']['arguments']
             assert fixed_args == valid_arguments
 
     def test_fix_json_invalid_escapes(self):

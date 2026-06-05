@@ -23,7 +23,8 @@ import re
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,11 @@ class ToolNameSanitizationMiddleware(AgentMiddleware):
                     tc for tc in ak_calls if tc.get("id") in valid_ids
                 ]
 
-        return {"messages": messages[:-1] + [new_last]}
+        # Return ONLY the modified last message — add_messages replaces by
+        # id (new_last keeps the model id).  Returning the whole list would
+        # re-append id-less Human/Tool messages as duplicates; see
+        # docs/2026-06-05-middleware-message-duplication.org.
+        return {"messages": [new_last]}
 
     # ------------------------------------------------------------------
     # before_model: scrub history of any past invalid tool calls
@@ -156,4 +161,11 @@ class ToolNameSanitizationMiddleware(AgentMiddleware):
             "Sanitized %d invalid tool call(s) from conversation history",
             len(bad_ids),
         )
-        return {"messages": cleaned}
+        # Overwrite the whole history: clear then re-add the cleaned list.
+        # add_messages can only add/replace by id — returning a shorter list
+        # alone would NOT remove the bad messages (they'd persist) and would
+        # re-append the id-less ones as duplicates.  REMOVE_ALL_MESSAGES is
+        # the idiom for a true history rewrite; per-id RemoveMessage can't
+        # target the id-less messages we need to drop.  See
+        # docs/2026-06-05-middleware-message-duplication.org.
+        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + cleaned}
