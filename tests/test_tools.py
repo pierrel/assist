@@ -2,7 +2,8 @@
 
 ``search_internet`` goes through a self-hosted SearXNG instance with NO
 fallback — if SearXNG is unset/unreachable/erroring, or returns zero results
-while reporting any engine failures, it raises (failures must be loud).  The HTTP
+while reporting any engine failures, it RETURNS ``_SEARCH_UNAVAILABLE_MESSAGE``
+(loud + logged, not raised, so the agent can relay the outage).  The HTTP
 call is mocked so no network is involved.  ``read_url``'s per-host throttle
 is tested by patching the module's ``time``.  Each test resets module state
 in a fixture so order-of-execution doesn't matter."""
