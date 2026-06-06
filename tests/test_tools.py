@@ -96,11 +96,11 @@ class TestHostThrottle:
 class TestSearchInternet:
     URL = "http://127.0.0.1:8890"
 
-    def test_raises_when_search_url_unset(self):
-        """No ASSIST_SEARCH_URL is a misconfiguration, not a silent no-op —
-        search has no fallback, so it must fail loudly."""
-        with pytest.raises(RuntimeError, match="ASSIST_SEARCH_URL"):
-            tools.search_internet("anything")
+    def test_unset_search_url_returns_unavailable(self):
+        """No ASSIST_SEARCH_URL is a misconfiguration — surfaced loudly as the
+        unavailable message (logged ERROR), not a silent no-op and not an
+        exception that crashes the turn."""
+        assert tools.search_internet("anything") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
     def test_returns_normalized_results(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
@@ -146,79 +146,69 @@ class TestSearchInternet:
             req.get.return_value = _resp({"results": [], "unresponsive_engines": []})
             assert tools.search_internet("obscure") == "[]"
 
-    def test_empty_with_failed_engines_raises(self, monkeypatch):
-        """Zero results while any engine reported a failure is a loud backend
-        failure, not a 'no results' answer."""
+    # --- Backend-failure modes: return the unavailable MESSAGE (loud, logged),
+    # NOT raise.  Raising would crash the research turn; the agent must receive
+    # a tool result it can relay ("couldn't search — unavailable").  Each case
+    # is a distinct malformed/broken-backend shape that must not be read as a
+    # genuine "no results".
+
+    def test_empty_with_failed_engines_returns_unavailable(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp({
                 "results": [],
                 "unresponsive_engines": [["google", "timeout"], ["brave", "CAPTCHA"]],
             })
-            with pytest.raises(RuntimeError, match="unhealthy|engines failed|engines"):
-                tools.search_internet("q")
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
-    def test_non_dict_payload_raises(self, monkeypatch):
-        """Valid JSON of an unexpected top-level shape (list/string) is still
-        a broken backend → clear loud failure, not a bare AttributeError."""
+    def test_non_dict_payload_returns_unavailable(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp(["not", "a", "dict"])
-            with pytest.raises(RuntimeError, match="unexpected response shape"):
-                tools.search_internet("q")
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
-    def test_non_list_results_raises(self, monkeypatch):
-        """A dict payload whose `results` is not a list is also a broken
-        backend → loud failure rather than a TypeError on the slice."""
+    def test_non_list_results_returns_unavailable(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp({"results": {"unexpected": "object"}})
-            with pytest.raises(RuntimeError, match="unexpected type|results"):
-                tools.search_internet("q")
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
-    def test_missing_results_field_raises(self, monkeypatch):
-        """A valid SearXNG response always carries a `results` list; a dict
-        with no `results` field is malformed → loud failure, not "[]"."""
+    def test_missing_results_field_returns_unavailable(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp({"query": "q"})  # no 'results' key
-            with pytest.raises(RuntimeError, match="no 'results'|results"):
-                tools.search_internet("q")
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
-    def test_falsy_non_list_results_raises(self, monkeypatch):
-        """A FALSY non-list `results` (e.g. {} or "") must also raise — it must
-        not be silently coerced to [] and treated as a genuine 'no results'."""
+    def test_falsy_non_list_results_returns_unavailable(self, monkeypatch):
+        """A FALSY non-list `results` ({} or "") must not be coerced to [] and
+        read as a genuine 'no results'."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         for bad in ({}, ""):
             with patch.object(tools, "requests") as req:
                 req.get.return_value = _resp({"results": bad})
-                with pytest.raises(RuntimeError, match="unexpected type|results"):
-                    tools.search_internet("q")
+                assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
-    def test_malformed_unresponsive_engines_raises(self, monkeypatch):
-        """Empty results with a malformed (non-list) unresponsive_engines —
-        incl. falsy {}/"" — is a broken backend, not 'no results'."""
+    def test_malformed_unresponsive_engines_returns_unavailable(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         for bad in ({}, "", {"google": "timeout"}):
             with patch.object(tools, "requests") as req:
                 req.get.return_value = _resp({"results": [], "unresponsive_engines": bad})
-                with pytest.raises(RuntimeError, match="unexpected type|unresponsive"):
-                    tools.search_internet("q")
+                assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
-    def test_transport_error_raises(self, monkeypatch):
-        """SearXNG unreachable → loud RuntimeError, no silent fallback."""
+    def test_transport_error_returns_unavailable(self, monkeypatch):
+        """SearXNG unreachable → unavailable message (relayed), not an
+        exception that crashes the turn."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
             req.get.side_effect = Exception("connection refused")
-            with pytest.raises(RuntimeError, match="unavailable"):
-                tools.search_internet("q")
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
-    def test_http_error_raises(self, monkeypatch):
-        """A non-2xx from SearXNG (raise_for_status) is a loud failure."""
+    def test_http_error_returns_unavailable(self, monkeypatch):
+        """A non-2xx from SearXNG (raise_for_status) is a loud failure relayed
+        as the unavailable message."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         bad = MagicMock()
         bad.raise_for_status.side_effect = Exception("503 Service Unavailable")
         with patch.object(tools, "requests") as req:
             req.get.return_value = bad
-            with pytest.raises(RuntimeError, match="unavailable"):
-                tools.search_internet("q")
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE

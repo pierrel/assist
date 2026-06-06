@@ -40,18 +40,27 @@ settings.yml carries the =ultrasecretkey= placeholder; =scripts/searxng.sh=
 generates a per-host secret into a gitignored runtime dir and renders a copy
 of settings.yml with it substituted in, mounting that copy into the container.
 
-** search_internet — SearXNG only, fail LOUD (no fallback)
+** search_internet — SearXNG only, fail LOUD but graceful (no fallback)
 Per operator directive: ddgs is REMOVED entirely — not kept as a backup.  A
 silent fallback hides a broken search behind worse results; we want a search
 outage to be obvious.  =assist/tools.py= =search_internet=:
-1. =ASSIST_SEARCH_URL= unset → raise (misconfiguration; search has no
-   fallback so this can't be a silent no-op).
-2. Query SearXNG's JSON API; on unreachable / HTTP error / bad JSON → log at
-   ERROR and raise =RuntimeError= ("…is unavailable: …").
-3. Zero results: if SearXNG reports any failing engines (=unresponsive_engines=
-   non-empty) → raise (loud backend failure); otherwise return =[]= (a genuine
-   "no results" for this query is a valid answer, not a failure).
-4. Otherwise normalize =results= to =[{title,url,content}]=.
+1. On ANY backend failure — =ASSIST_SEARCH_URL= unset, SearXNG unreachable /
+   HTTP error / bad JSON / malformed payload (non-dict, missing/non-list
+   =results=, non-list =unresponsive_engines=), or zero results while engines
+   failed — log the specific cause at ERROR and RETURN a uniform
+   =_SEARCH_UNAVAILABLE_MESSAGE= ("web search is unavailable… don't answer from
+   your own knowledge… tell the user and stop").
+2. Genuine empty (zero results, no engine failures) → return =[]= (a real
+   "no results" for this query, not a failure).
+3. Otherwise normalize =results= to =[{title,url,content}]=.
+
+*Why RETURN, not raise (decided 2026-06-05 after the search-unavailable eval):*
+the research-agent must RECEIVE the failure as a tool result so the prompts'
+"relay that status and stop" fires and the user is told plainly; a raised
+exception instead propagates out of the research subagent and crashes the turn
+(the eval caught this — 3/3 deterministic).  Returning a clear message is still
+"fail LOUD" — surfaced to the user + logged ERROR — just not turn-crashing.
+Mirrors =read_url='s "Error fetching URL: …" pattern.
 
 The entire ddgs path is gone: the =ddgs= dependency, the cross-tool search
 throttle, the rate-limit circuit breaker, =_CIRCUIT_OPEN_MESSAGE=, and the
@@ -77,14 +86,16 @@ key + uncomment, behind the same private front door.
 
 ** Tests
 - Unit (hermetic, =tests/test_tools.py=, patch =tools.requests=): results
-  normalized; unset URL raises; transport/HTTP error raises; zero-results +
-  =unresponsive_engines= raises; genuine zero-results returns =[]=;
-  =max_results= respected; correct JSON endpoint/params.
+  normalized; every backend-failure mode (unset URL, transport/HTTP error,
+  non-dict payload, missing/non-list =results=, non-list =unresponsive_engines=,
+  zero-results+engines-failed) returns =_SEARCH_UNAVAILABLE_MESSAGE=; genuine
+  zero-results returns =[]=; =max_results= respected; correct JSON endpoint.
 - The ddgs throttle / circuit / rate-limit tests are DELETED with the code
   they covered; =read_url= per-host throttle tests remain.
 - Evals adapted: =eval_large_tool_results.py= mocks =tools.requests.get=
   (not =ddgs.DDGS.text=); the rate-limit-handoff eval becomes a
-  search-unavailable handoff (stub raises; relay-and-stop contract kept).
+  search-unavailable handoff (stub RETURNS the unavailable message;
+  relay-and-stop contract kept).
 - Live end-to-end validated against a real local SearXNG.
 
 * Trade-offs / limitations
@@ -101,18 +112,23 @@ key + uncomment, behind the same private front door.
 - *No fallback — fail loud (operator directive, supersedes the review's
   empty-fallback option).*  Originally the design fell back to ddgs on a
   SearXNG error/empty.  The operator removed ddgs entirely: a silent
-  fallback masks a broken backend.  Now SearXNG failure (unreachable / HTTP
-  error / all-engines-unresponsive / unset URL) RAISES and is logged at
-  ERROR; only a genuine zero-results (no engine errors) returns =[]=.  This
-  also makes the "DDG circuit breaker" moot — it's deleted with the rest of
-  the ddgs machinery.
+  fallback masks a broken backend.  Now any SearXNG failure (unreachable /
+  HTTP error / malformed / all-engines-unresponsive / unset URL) is logged at
+  ERROR and RETURNS =_SEARCH_UNAVAILABLE_MESSAGE=; only a genuine zero-results
+  (no engine errors) returns =[]=.  This also makes the "DDG circuit breaker"
+  moot — deleted with the rest of the ddgs machinery.
+- *Return, not raise (decided after the search-unavailable eval).*  An earlier
+  cut RAISED on failure; the eval showed that propagates out of the research
+  subagent and crashes the turn (3/3) instead of the agent relaying the status.
+  Returning a clear message keeps it loud (relayed to the user + ERROR log)
+  without crashing — and matches the prompts ("relay that status and stop")
+  and =read_url='s error-string pattern.
 - *Reboot survival.*  =--restart unless-stopped= only resurrects the
   container if the docker daemon is enabled on boot; the doc/Make note the
   =systemctl enable docker= prerequisite, and =deploy-searxng= re-ups the
-  container idempotently on every deploy.  With no fallback, SearXNG is now a
-  HARD dependency for search — if it's down, =search_internet= fails loudly
-  (logged + surfaced as a tool error) rather than degrading.  That is the
-  intended behavior: a broken search backend should be obvious, not masked.
+  container idempotently on every deploy.  With no fallback, SearXNG is a HARD
+  dependency for search — if it's down, =search_internet= surfaces the
+  unavailable message (logged + relayed) rather than degrading silently.
 - *Port 8890, not 8888* — avoids cognitive collision with the egress-proxy's
   internal 8888 (no real conflict, but two "8888"s mislead).
 - *Curated, auditable engine set* (=use_default_settings.engines.keep_only=:
@@ -128,6 +144,7 @@ key + uncomment, behind the same private front door.
   =ASSIST_SEARCH_URL= set returns real results from the local SearXNG (brave/
   google/duckduckgo/startpage) for the exact query that previously produced
   nothing.  ddgs removed entirely (dep + throttle + circuit breaker); search
-  is SearXNG-only and fails loud.  Unit tests cover normalize, unset→raise,
-  transport/HTTP error→raise, empty+engines-failed→raise, genuine empty→[].
-  Full unit suite green; evals adapted + collect cleanly.
+  is SearXNG-only and fails loud-but-graceful (returns the unavailable message,
+  logged ERROR — never raises into the agent loop).  Unit tests cover normalize,
+  and every failure mode → unavailable message, genuine empty → [].  Full unit
+  suite green; the search-unavailable handoff eval re-run after the fix.
