@@ -78,7 +78,34 @@ OUTCOME coverage is thin, and the gap is what let this ship:
    behavior ("the loop ends naturally"); after this, A–D "break", E–F
    "finalize".
 
+* Outcome (2026-06-06)
+- *E (tool-volume) finalize: WORKS.*  Live smoke of the exact prod query
+  (James Blake) through the real agent + real SearXNG at the real cap:
+  PASS — the cap fired, the finalize path ran, and a 3267-char cited answer
+  was produced (vs the give-up before).  Deterministic unit tests green;
+  budget eval 3/3 (no over-search regression); search-unavailable 3/3.
+- *F (subagent-redispatch) finalize: CORRECT BUT INSUFFICIENT for the small
+  model.*  F's first strike now jumps the model a synthesis turn, but the
+  small model frequently RE-DISPATCHES on that turn anyway (instead of
+  answering from the result it already has), hitting the second strike →
+  hard stop → the F give-up stub.  On the adversarial forced-cap=2 eval, the
+  prod-query finalize test still fails ~1-2/5 on the F stub.  E works because
+  its agent's only non-search action is to answer; F's agent can re-dispatch
+  OR answer, and prose ("don't dispatch again") doesn't reliably stop the
+  re-dispatch — the classic "guidance is unreliable for this model" shape
+  (AGENTS.md).  The fix is kept (it is strictly >= no-fix: it gives the model
+  a chance to finalize that it didn't have, and the runaway bound still
+  holds), but it does not fully close F.
+  - *Follow-up (not done):* a STRUCTURAL F fix — e.g. on the finalize turn,
+    withhold the `task` tool so the model must answer from the result it has,
+    or strengthen the orchestrator prompt with a checkable constraint rather
+    than a prose nudge.  Needs its own design pass.
+- *Eval caveat:* forced cap=2 is deliberately adversarial (thin results after
+  2 searches makes re-dispatch more tempting); the real cap is 6 and the live
+  smoke passed.  So the forced eval over-represents F failures vs reality.
+
 * Status
-- Audit complete (inventory + per-pattern verdict).  A–D correct; E–F broken.
-- Implementing eval-first now (lock held on the nightly cron so runs don't
-  contend).  Cadence 3/5/10, then code-review, ship on PR #126, deploy.
+- Shipped on PR #126 (commits up to 989f64a), deployed: audit + E finalize
+  (works) + F finalize (partial) + C/D outcome tests.  E is the user-visible
+  win (research returns a real answer); F has a documented residual needing a
+  structural follow-up.
