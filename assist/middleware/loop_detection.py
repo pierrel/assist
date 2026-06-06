@@ -475,7 +475,10 @@ class LoopDetectionMiddleware(AgentMiddleware):
 
         # Only act if the latest AI message's tool calls would extend the
         # loop. Otherwise the model may already be breaking out.
-        last_call_names = {tc.get("name") for tc in last.tool_calls}
+        # `or ""` matches _extract_events' convention and keeps the set
+        # all-strings, so the sorted() in the log below can't TypeError on a
+        # tool_call with a missing/None name.
+        last_call_names = {(tc.get("name") or "") for tc in last.tool_calls}
         if last_call_names.isdisjoint(looping_tools):
             logger.info(
                 "LoopDetection: pattern matched (%s) but latest tool calls "
