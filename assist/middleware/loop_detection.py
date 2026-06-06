@@ -129,13 +129,33 @@ def _looks_like_error(content: str) -> bool:
 # to the normal hard strip-to-END, so the runaway bound still holds.  The
 # error/stuck patterns (A–D) are NOT here — for them, ending is correct.
 # See docs/2026-06-05-loop-detection-audit.org.
-_FINALIZE_PATTERNS = frozenset({"tool-volume"})
+#
+# E (tool-volume): the research-agent over-searched → finalize by writing the
+# answer from the results it gathered.  F (subagent-redispatch): the agent
+# re-dispatched a sub-agent it already has a result from → finalize by
+# answering from that result instead of dispatching again (observed: without
+# this, F's stub still killed the answer ~1/5 of the time even with E fixed).
+_FINALIZE_PATTERNS = frozenset({"tool-volume", "subagent-redispatch"})
 _FINALIZE_NUDGE = (
     "Search budget reached: I have gathered enough and will now write the "
     "complete final answer from the results I already gathered — not from "
     "memory and without searching or fetching again. If the gathered results "
     "are thin, I will say so rather than invent details."
 )
+_REDISPATCH_NUDGE = (
+    "I already have that sub-agent's result. I will now write the complete "
+    "final answer from what it returned — without dispatching it again. If "
+    "that result is thin, I will say so rather than invent details."
+)
+# All finalize nudges, for the stateless second-strike scan (any of them in a
+# prior AIMessage this turn means we already nudged → next firing hard-stops).
+_FINALIZE_NUDGES = (_FINALIZE_NUDGE, _REDISPATCH_NUDGE)
+
+
+def _finalize_nudge_for(pattern: str) -> str:
+    """The right nudge for a finalize pattern: E synthesizes from gathered
+    results; F answers from the sub-agent result it already has."""
+    return _REDISPATCH_NUDGE if pattern == "subagent-redispatch" else _FINALIZE_NUDGE
 
 
 def _already_finalized_this_turn(messages: list) -> bool:
@@ -149,7 +169,7 @@ def _already_finalized_this_turn(messages: list) -> bool:
     for msg in _current_turn_slice(messages):
         if isinstance(msg, AIMessage):
             content = msg.content if isinstance(msg.content, str) else ""
-            if _FINALIZE_NUDGE in content:
+            if any(nudge in content for nudge in _FINALIZE_NUDGES):
                 return True
     return False
 
@@ -853,13 +873,15 @@ class LoopDetectionMiddleware(AgentMiddleware):
                 )
                 return None
 
-        # ── "Enough"-family finalize path (E tool-volume; A–D fall through) ──
+        # ── "Enough"-family finalize path (E tool-volume + F subagent-redispatch;
+        # A–D fall through) ──
         # The agent has usable state; don't kill the turn with a stub (that
-        # destroys the synthesis it was about to write).  Strip the over-limit
-        # tool calls, leave a finalize nudge as the assistant turn, and jump
-        # back to the model for ONE synthesis turn.  A SECOND firing this turn
-        # (model ignored the nudge) is excluded by _already_finalized_this_turn
-        # and falls through to the hard stop below — the runaway bound holds.
+        # destroys the synthesis/report it was about to write).  Strip the
+        # over-limit tool calls, leave a pattern-appropriate finalize nudge as
+        # the assistant turn, and jump back to the model for ONE synthesis turn.
+        # A SECOND firing this turn (model ignored the nudge) is excluded by
+        # _already_finalized_this_turn and falls through to the hard stop below —
+        # the runaway bound holds.
         if (detection["pattern"] in _FINALIZE_PATTERNS
                 and not _already_finalized_this_turn(messages)):
             self._intervention_count += 1
@@ -880,7 +902,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
             )
             new_last = last.model_copy() if hasattr(last, "model_copy") else last.copy()
             new_last.tool_calls = []
-            new_last.content = _FINALIZE_NUDGE
+            new_last.content = _finalize_nudge_for(detection["pattern"])
             if hasattr(new_last, "additional_kwargs"):
                 ak = dict(getattr(new_last, "additional_kwargs", {}) or {})
                 if ak.get("tool_calls"):
