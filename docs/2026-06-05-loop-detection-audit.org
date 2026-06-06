@@ -1,0 +1,84 @@
+#+title: LoopDetection audit — detection vs. outcome, per pattern
+#+date: <2026-06-05>
+State: Audit (Phase 1). Supersedes the narrower volume-cap doc
+(2026-06-05-research-volume-cap-destroys-output.org) by generalizing it to
+all six patterns.
+
+* Why this audit
+The research flow returned no answer twice in prod (James Blake threads).
+Root cause: =LoopDetectionMiddleware= Pattern E (tool-volume) fired and
+TERMINATED the research-agent with a canned stub before it synthesized, so
+the orchestrator got nothing.  That raised the question: is the cap's
+"terminate" the right OUTCOME for each pattern, or is E one of several broken
+cases?  This audits all six.
+
+* The two families (the core finding)
+The six patterns split by what the agent's state means when they fire:
+
+- *A–D = "you're STUCK"* (errors): same-tool-same-error (A),
+  same-tool-same-args (B), distinct-args-thrash (C), http-failure-streak (D).
+  The agent is repeating a failing action.  ENDING the turn with a "couldn't
+  make progress, here's what went wrong, give me direction" message (and the
+  last successful artifact, if any) is the CORRECT outcome.  Nothing useful is
+  lost by stopping.
+
+- *E–F = "you've done ENOUGH"* (success/over-effort): tool-volume (E),
+  subagent-redispatch (F).  The agent has gathered usable results (E) or
+  already has a subagent's result (F).  The terminal message even SAYS so
+  ("I'll write up what I have now" / "I'll finalize with what I have").  But
+  the mechanism then ENDS the turn before the write-up — destroying the
+  output.  ENDING is the WRONG outcome here; the agent should FINALIZE
+  (produce the synthesis/report from what it has).
+
+So: *A–D correct; E–F broken* (terminate-instead-of-finalize).
+
+* Per-pattern verdict
+| Pattern | Use case | Intended outcome | Actual | Verdict |
+| A same-tool-same-error | retries a tool that keeps erroring | END + report error, ask direction | END | CORRECT |
+| B same-tool-same-args | identical call repeated | END + "won't repeat", ask direction | END | CORRECT |
+| C distinct-args-thrash | mutating tool, many distinct args, ≥1 error | END + "couldn't settle", ask direction | END | CORRECT |
+| D http-failure-streak | consecutive 4xx/5xx pages | END + report unavailability | END | CORRECT |
+| E tool-volume | over-used a SUCCESSFUL tool (research) | FINALIZE with gathered results | END (kills output) | *BROKEN* |
+| F subagent-redispatch | re-dispatch of an already-answered subagent | FINALIZE (write report from result it has) | END (kills output) | *BROKEN* (mostly downstream of E) |
+
+* Test-coverage gaps (from the inventory)
+Detection is well-covered for all six (tests/middleware/test_loop_detection.py).
+OUTCOME coverage is thin, and the gap is what let this ship:
+
+- *The E2E eval is too weak to catch the bug.*  =TestResearchSearchBudget=
+  (edd/eval/test_agent.py:562) asserts only that =res= is NON-EMPTY and the
+  search count is bounded.  The BROKEN behavior produces a non-empty give-up
+  stub ("I've already gathered that sub-agent's result…") AND a bounded
+  search count — so the eval PASSES on broken output.  An eval that can't
+  fail for the right reason proved nothing.  This is the central lesson.
+- *E/F have no outcome eval that distinguishes a real answer from the
+  give-up stub.*  Must assert the answer is a genuine synthesis (cites the
+  canned sources) and is NOT any loop-detection terminal stub.
+- *C/D have no outcome/terminal-message unit tests* (only detection).  Cheap
+  to add for completeness; A/B already cover the same END mechanism.
+
+* Plan
+1. *Strengthen the E2E eval first (eval-first).*  Make =TestResearchSearchBudget=
+   (or a new sibling) assert the answer CITES the canned sources and is NOT a
+   loop-detection stub — so it FAILS on current code (proving the bug) and on
+   any future regression to terminate-instead-of-finalize.  Pin two
+   differently-shaped multi-part queries.
+2. *Fix E (and F if still needed) — finalize-not-kill.*  On E/F, instead of
+   strip-to-END: strip the capped tool's calls, answer them with a ToolMessage
+   nudge ("budget reached — write your final answer NOW from what you have, no
+   more searches; do not answer from memory"), and =jump_to:"model"= for ONE
+   synthesis turn.  Re-fire → existing hard END (runaway bound preserved).
+   =jump_to= feasibility confirmed (after_model edge wired to model_destination
+   with per-hook =can_jump_to=; jump_to is EphemeralValue, auto-cleared).
+   A–D unchanged.
+3. *Add the missing per-pattern OUTCOME tests* (C/D terminal-message + strip
+   shape; E/F finalize shape) so every pattern has detection AND outcome
+   coverage, each isolated to one pattern.
+4. *Update the module/class docstrings* — they assert a single terminal
+   behavior ("the loop ends naturally"); after this, A–D "break", E–F
+   "finalize".
+
+* Status
+- Audit complete (inventory + per-pattern verdict).  A–D correct; E–F broken.
+- Implementing eval-first now (lock held on the nightly cron so runs don't
+  contend).  Cadence 3/5/10, then code-review, ship on PR #126, deploy.

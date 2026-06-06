@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from assist.middleware.loop_detection import (
     LoopDetectionMiddleware,
+    _FINALIZE_NUDGE,
     _compose_terminal_message,
     _detect_loop,
     _extract_events,
@@ -879,23 +880,47 @@ class TestLoopDetectionMiddleware:
         assert "write_file" in new_last.content
         assert "more direction" in new_last.content.lower()
 
-    def test_volume_cap_fire_logs_backstop_warning(self, caplog):
-        """When the tool-volume backstop fires it emits an extra warning
-        pointing at an upstream cause — the cap shouldn't be the bound."""
-        mw = LoopDetectionMiddleware(
-            volume_threshold=4, volume_tools=frozenset({"search_internet"}))
+    def _volume_msgs(self, n=4):
+        """A turn with n completed searches + a trailing over-limit search."""
         msgs = [HumanMessage(content="go")]
-        for i in range(4):
+        for i in range(n):
             msgs.append(_ai_with_call(f"c{i}", "search_internet", {"q": f"q{i}"}))
             msgs.append(_tool_msg(f"c{i}", "[results]"))
         msgs.append(_ai_with_call("clast", "search_internet", {"q": "more"}))
+        return msgs
+
+    def test_volume_cap_first_fire_finalizes_not_kills(self, caplog):
+        """First tool-volume firing must FINALIZE: strip the over-limit calls,
+        leave the finalize nudge, and jump back to the model for one synthesis
+        turn (NOT end the turn with a give-up stub).  Plus the loud cap warning."""
+        mw = LoopDetectionMiddleware(
+            volume_threshold=4, volume_tools=frozenset({"search_internet"}))
         with caplog.at_level(logging.WARNING,
                              logger="assist.middleware.loop_detection"):
-            result = mw.after_model({"messages": msgs}, Mock())
+            result = mw.after_model({"messages": self._volume_msgs()}, Mock())
         assert result is not None
+        assert result.get("jump_to") == "model", \
+            "tool-volume must jump back to the model for a synthesis turn"
         assert result["messages"][-1].tool_calls == []
-        assert any("backstop fired" in r.getMessage() for r in caplog.records), \
-            f"expected backstop warning; got {[r.getMessage() for r in caplog.records]}"
+        assert result["messages"][-1].content == _FINALIZE_NUDGE
+        assert any("cap fired" in r.getMessage() for r in caplog.records), \
+            f"expected cap warning; got {[r.getMessage() for r in caplog.records]}"
+
+    def test_volume_cap_second_fire_hard_stops(self):
+        """If the model searches AGAIN after the finalize nudge (second strike
+        this turn), fall through to the hard stop — no jump, tool calls
+        stripped, terminal stub — so the runaway bound still holds."""
+        mw = LoopDetectionMiddleware(
+            volume_threshold=4, volume_tools=frozenset({"search_internet"}))
+        msgs = self._volume_msgs()
+        # The nudge already happened earlier this turn (model ignored it):
+        msgs.append(AIMessage(content=_FINALIZE_NUDGE))
+        msgs.append(_ai_with_call("again", "search_internet", {"q": "yet more"}))
+        result = mw.after_model({"messages": msgs}, Mock())
+        assert result is not None
+        assert "jump_to" not in result, "second strike must NOT jump — hard stop"
+        assert result["messages"][-1].tool_calls == []
+        assert result["messages"][-1].content != _FINALIZE_NUDGE
 
     def test_no_action_when_no_loop(self):
         mw = LoopDetectionMiddleware()
@@ -1336,3 +1361,38 @@ class TestPatternFRedispatch:
             last,
         ]
         assert mw.after_model({"messages": messages}, Mock()) is None
+
+
+class TestErrorPatternsEndNotFinalize:
+    """Audit verdict: A-D are 'you're STUCK' patterns — after_model must END
+    the turn (strip tool calls, NO jump_to), the opposite of E's finalize.
+    These pin the outcome (not just detection) for the error family, the gap
+    the audit found for C/D.  See docs/2026-06-05-loop-detection-audit.org."""
+
+    def test_pattern_c_distinct_args_thrash_ends_with_direction_ask(self):
+        mw = LoopDetectionMiddleware(distinct_args_threshold=3)
+        msgs = [HumanMessage(content="go")]
+        for i, p in enumerate(["/a", "/b", "/c"]):
+            msgs.append(_ai_with_call(f"c{i}", "write_file", {"file_path": p}))
+            msgs.append(_tool_msg(f"c{i}", f"Error: cannot write {p}"))
+        msgs.append(_ai_with_call("clast", "write_file", {"file_path": "/d"}))
+        result = mw.after_model({"messages": msgs}, Mock())
+        assert result is not None
+        assert "jump_to" not in result, "error pattern C must END, not finalize"
+        assert result["messages"][-1].tool_calls == []
+        content = result["messages"][-1].content.lower()
+        assert "proceed" in content or "direction" in content
+
+    def test_pattern_d_http_failure_streak_ends(self):
+        mw = LoopDetectionMiddleware(http_failure_threshold=4)
+        msgs = [HumanMessage(content="go")]
+        for i in range(4):
+            msgs.append(_ai_with_call(f"c{i}", "read_url",
+                                      {"url": f"https://s{i}.example"}))
+            msgs.append(_tool_msg(f"c{i}", "HTTP 403 Forbidden: access denied"))
+        msgs.append(_ai_with_call("clast", "read_url",
+                                  {"url": "https://s9.example"}))
+        result = mw.after_model({"messages": msgs}, Mock())
+        assert result is not None
+        assert "jump_to" not in result, "error pattern D must END, not finalize"
+        assert result["messages"][-1].tool_calls == []

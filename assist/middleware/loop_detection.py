@@ -67,7 +67,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
@@ -117,6 +117,40 @@ _EXPLORATION_DISTINCT_ARGS_THRESHOLD = 6
 def _looks_like_error(content: str) -> bool:
     head = content.lstrip().lower()[:120]
     return any(head.startswith(p) for p in _ERROR_PREFIXES)
+
+
+# Patterns that mean "you've gathered ENOUGH", not "you're broken".  When one
+# fires the agent has usable state (search results / a subagent's result), so
+# ending the turn with a canned stub destroys the synthesis it was about to
+# write — the stub message is a false promise.  For these, instead of
+# strip-to-END we strip the over-limit tool calls, leave _FINALIZE_NUDGE as the
+# assistant turn, and jump back to the model for ONE synthesis turn.  A SECOND
+# firing in the same turn (model ignored the nudge and kept going) falls through
+# to the normal hard strip-to-END, so the runaway bound still holds.  The
+# error/stuck patterns (A–D) are NOT here — for them, ending is correct.
+# See docs/2026-06-05-loop-detection-audit.org.
+_FINALIZE_PATTERNS = frozenset({"tool-volume"})
+_FINALIZE_NUDGE = (
+    "Search budget reached: I have gathered enough and will now write the "
+    "complete final answer from the results I already have, without searching "
+    "or fetching again."
+)
+
+
+def _already_finalized_this_turn(messages: list) -> bool:
+    """True if a finalize-nudge was already injected in the current turn.
+
+    Used to fall through to the hard stop on a SECOND firing (the model
+    searched again after being nudged), preserving the runaway bound WITHOUT
+    instance state — so the middleware stays stateless / rollback-safe.  Bounded
+    to the current turn (``_current_turn_slice``) so a nudge from a prior turn
+    can't suppress this turn's finalize."""
+    for msg in _current_turn_slice(messages):
+        if isinstance(msg, AIMessage):
+            content = msg.content if isinstance(msg.content, str) else ""
+            if _FINALIZE_NUDGE in content:
+                return True
+    return False
 
 
 def _normalise_error(content: str) -> str:
@@ -755,6 +789,7 @@ class LoopDetectionMiddleware(AgentMiddleware):
         self.tools = []
         self._intervention_count = 0
 
+    @hook_config(can_jump_to=["model"])
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         messages = state.get("messages", [])
         if not messages:
@@ -816,6 +851,44 @@ class LoopDetectionMiddleware(AgentMiddleware):
                     detection["reason"], sorted(s for s in latest_subagents if s),
                 )
                 return None
+
+        # ── "Enough"-family finalize path (E tool-volume; A–D fall through) ──
+        # The agent has usable state; don't kill the turn with a stub (that
+        # destroys the synthesis it was about to write).  Strip the over-limit
+        # tool calls, leave a finalize nudge as the assistant turn, and jump
+        # back to the model for ONE synthesis turn.  A SECOND firing this turn
+        # (model ignored the nudge) is excluded by _already_finalized_this_turn
+        # and falls through to the hard stop below — the runaway bound holds.
+        if (detection["pattern"] in _FINALIZE_PATTERNS
+                and not _already_finalized_this_turn(messages)):
+            self._intervention_count += 1
+            if detection["pattern"] == "tool-volume":
+                logger.warning(
+                    "LoopDetection: tool-volume cap fired (%s).  This cap "
+                    "should rarely trigger — investigate an upstream cause "
+                    "(prompt drift, poor/empty tool results, or a loop the "
+                    "other patterns missed).", detection["reason"],
+                )
+            logger.warning(
+                "LoopDetection: finalize-nudge #%d — pattern=%s tools=%s "
+                "run_length=%d stripped_calls=%d; jumping to model for one "
+                "synthesis turn (hard-stops if it keeps going).",
+                self._intervention_count, detection["pattern"],
+                sorted(looping_tools), detection["run_length"],
+                len(last.tool_calls),
+            )
+            new_last = last.model_copy() if hasattr(last, "model_copy") else last.copy()
+            new_last.tool_calls = []
+            new_last.content = _FINALIZE_NUDGE
+            if hasattr(new_last, "additional_kwargs"):
+                ak = dict(getattr(new_last, "additional_kwargs", {}) or {})
+                if ak.get("tool_calls"):
+                    ak["tool_calls"] = []
+                new_last.additional_kwargs = ak
+            # jump_to:"model" re-enters the model node for the synthesis turn
+            # (the after_model→model edge is wired by the can_jump_to decorator
+            # above); jump_to is an EphemeralValue, auto-cleared after the step.
+            return {"messages": [new_last], "jump_to": "model"}
 
         artifact = _last_successful_artifact(messages)
         terminal_content = _compose_terminal_message(detection, messages)
