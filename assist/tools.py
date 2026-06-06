@@ -4,10 +4,12 @@ per-host throttled URL fetch.
 Search goes through a self-hosted SearXNG instance (``ASSIST_SEARCH_URL``) —
 private, on hardware we control, multi-engine, no API key.  There is NO
 fallback: if SearXNG is unset, unreachable, errors, or returns zero results
-while reporting any engine failures, ``search_internet`` raises.  A broken
-search backend must fail LOUDLY (logged + surfaced as a tool error) rather than
-silently degrade to a flaky scraper that hides the outage behind worse
-results.
+while reporting any engine failures, ``search_internet`` RETURNS an explicit
+``_SEARCH_UNAVAILABLE_MESSAGE`` (logged at ERROR) that the agent relays — it
+does NOT raise into the agent loop (a raised exception would crash the research
+turn).  A broken search backend still fails LOUDLY (logged + surfaced to the
+user), it just doesn't silently degrade to a flaky scraper that hides the
+outage behind worse results.
 
 ``read_url`` is throttled per-host (1s between calls to the same host) rather
 than globally, so a burst of fetches to different sites isn't artificially
