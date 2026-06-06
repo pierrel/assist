@@ -468,9 +468,10 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
     is unavailable — relay that to the user, not re-dispatch or fabricate.
 
     Background: ``search_internet`` now goes through a self-hosted SearXNG
-    with NO fallback, and RAISES when the backend is down (failures must be
-    loud, not silently degraded).  The research subagent surfaces that as a
-    tool error; the contract this eval pins: dispatch research-agent, read the
+    with NO fallback; when the backend is down it RETURNS
+    ``_SEARCH_UNAVAILABLE_MESSAGE`` (logged at ERROR) rather than raising, so
+    the agent receives it as a tool result and can relay it without crashing
+    the turn.  The contract this eval pins: dispatch research-agent, read the
     unavailable signal, relay it, stop — don't fabricate from the model's own
     knowledge.  This is now PROMPT-driven: the loop-detection rollback removed
     the per-subagent re-dispatch cap (old Pattern F), so a stray extra
