@@ -5,7 +5,7 @@ All Docker interactions are mocked — no real Docker daemon needed.
 import os
 import tempfile
 import shutil
-from unittest import TestCase
+from unittest import TestCase, skipIf
 from unittest.mock import patch, MagicMock, PropertyMock
 
 from assist.sandbox import (
@@ -341,6 +341,60 @@ class TestDockerSandboxBackendPathPrefixing(TestCase):
 
         self.assertEqual(len(responses), 1)
         self.assertEqual(responses[0].error, "file_not_found")
+
+    @staticmethod
+    def _uploaded_tarinfo(put_archive_mock):
+        """Pull the single TarInfo out of a captured put_archive(stream) call."""
+        import io
+        import tarfile
+
+        stream = put_archive_mock.call_args[0][1]
+        stream.seek(0)
+        with tarfile.open(fileobj=io.BytesIO(stream.read()), mode="r") as tar:
+            members = tar.getmembers()
+        assert len(members) == 1, members
+        return members[0]
+
+    def test_upload_files_stamps_run_uid_gid(self):
+        # Regression: a bare TarInfo (uid/gid default to 0) makes put_archive
+        # — which extracts as root — leave write_file output root-owned, which
+        # the non-root sandbox then can't edit_file (PermissionError).  The
+        # uploaded file must carry the container's run uid/gid instead.
+        self.container.attrs = {"Config": {"User": "1007:1009"}}
+        self.container.put_archive.return_value = True
+
+        responses = self.sandbox.upload_files([("/workspace/foo.md", b"hello")])
+
+        self.assertIsNone(responses[0].error)
+        member = self._uploaded_tarinfo(self.container.put_archive)
+        self.assertEqual(member.uid, 1007)
+        self.assertEqual(member.gid, 1009)
+        # Names stay empty so the numeric ids are authoritative on extract.
+        self.assertEqual(member.uname, "")
+        self.assertEqual(member.gname, "")
+
+    def test_upload_files_uid_only_user_reuses_for_gid(self):
+        self.container.attrs = {"Config": {"User": "1007"}}
+        self.container.put_archive.return_value = True
+
+        self.sandbox.upload_files([("/workspace/foo.md", b"hi")])
+
+        member = self._uploaded_tarinfo(self.container.put_archive)
+        self.assertEqual((member.uid, member.gid), (1007, 1007))
+
+    @skipIf(os.getuid() == 0, "fallback asserts a non-root owner; meaningless as root")
+    def test_upload_files_falls_back_to_process_owner_when_user_unparseable(self):
+        # A non-numeric / missing Config.User (e.g. a mocked container) must
+        # not silently revert to root-owned uploads.
+        self.container.attrs = {"Config": {"User": ""}}
+        self.container.put_archive.return_value = True
+
+        self.sandbox.upload_files([("/workspace/foo.md", b"hi")])
+
+        member = self._uploaded_tarinfo(self.container.put_archive)
+        self.assertEqual(member.uid, os.getuid())
+        self.assertEqual(member.gid, os.getgid())
+        self.assertNotEqual(member.uid, 0)
 
 
 class TestSandboxManager(TestCase):

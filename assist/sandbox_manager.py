@@ -244,6 +244,15 @@ class SandboxManager:
                 "whole threads dir at once, $ASSIST_THREADS_DIR).  "
                 "See docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org."
             )
+        # SINGLE SOURCE OF TRUTH for the sandbox run user.  This one value
+        # (the workspace owner) is applied via `containers.run(user=...)`
+        # below and governs everything downstream: every `exec_run` inherits
+        # it (no call passes `user=`), and `DockerSandboxBackend.upload_files`
+        # reads it back off the container (`_run_uid_gid`) to stamp uploaded
+        # files with the same ownership — otherwise put_archive's root default
+        # leaves write_file output un-editable.  New features must NOT pass a
+        # different `user=` to `exec_run` or hardcode a uid; derive from the
+        # container's run user so ownership and execution stay aligned.
         user_arg = f"{st.st_uid}:{st.st_gid}"
 
         # Egress proxy bring-up runs OUTSIDE the broad-except below.

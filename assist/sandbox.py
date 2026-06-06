@@ -1,8 +1,10 @@
 """Docker sandbox backend for isolated code execution.
 
 Implements BaseSandbox from deepagents, providing execute() via Docker
-container.exec_run(). All file operations (read, write, edit, grep, glob, ls)
-are inherited from BaseSandbox and work via execute().
+container.exec_run(). Most file operations (read, edit, grep, glob, ls) are
+inherited from BaseSandbox and work via execute(); write() goes through
+upload_files()/put_archive(), which is why upload ownership has to be stamped
+explicitly (see _run_uid_gid / upload_files).
 
 Paths are prefixed with work_dir (/workspace) so that agent paths like
 /myfile.txt map to /workspace/myfile.txt inside the container, which is
@@ -113,6 +115,7 @@ class DockerSandboxBackend(BaseSandbox):
         self.container = container
         self.work_dir = work_dir.rstrip("/")
         self._strip_prefixes = strip_prefixes
+        self._run_ids: tuple[int, int] | None = None
 
     def _strip(self, path: str | None) -> str | None:
         if not path or not self._strip_prefixes:
@@ -138,6 +141,59 @@ class DockerSandboxBackend(BaseSandbox):
         if path.startswith(self.work_dir):
             return path
         return self.work_dir + (path if path.startswith("/") else "/" + path)
+
+    def _run_uid_gid(self) -> tuple[int, int]:
+        """Resolve the container's run user — the single source of file ownership.
+
+        The container is started with ``user="<uid>:<gid>"`` (the workspace
+        owner) in ``SandboxManager.get_sandbox_backend``.  That one decision
+        governs *everything*: the main process, every ``exec_run`` (which
+        inherits the run user when no ``user=`` is passed — so ``read``,
+        ``write``'s preflight, ``edit``, ``execute`` all run as it), and the
+        ownership uploads must stamp.
+
+        ``put_archive`` is the one operation that does NOT inherit it: the
+        Docker daemon extracts archives as root regardless of the container's
+        run user, so a bare ``TarInfo`` (uid/gid default to 0) lands every
+        ``write_file`` as root:root — which the non-root sandbox then can't
+        ``edit_file`` (PermissionError on the rewrite).  ``upload_files``
+        closes that gap by stamping the run uid/gid onto the tar member,
+        reading it back from the live container here so it can never drift
+        from what the container actually runs as.
+
+        Falls back to the web-process owner if the container's configured
+        user is missing/non-numeric (e.g. a mocked container in tests).  In
+        the single-user deploy that equals the run user — and it is still
+        strictly better than leaving uploads root-owned.
+        """
+        if self._run_ids is not None:
+            return self._run_ids
+        uid = gid = None
+        configured = None
+        try:
+            configured = self.container.attrs["Config"]["User"]
+            parts = str(configured).split(":")
+            uid = int(parts[0])
+            gid = int(parts[1]) if len(parts) > 1 else uid
+        except (KeyError, TypeError, ValueError, AttributeError):
+            uid = gid = None
+        if uid is None:
+            # The deploy always starts the container with a numeric
+            # `user="uid:gid"`, so an unparseable Config.User on a real
+            # sandbox means something drifted (docker-py format change, a
+            # container started without `user=`).  Don't silently paper over
+            # it — that's how the original root-owned-upload bug hid.  The
+            # getuid fallback keeps uploads non-root (correct in the
+            # single-user deploy and for mocked containers in tests), but log
+            # loudly so the drift is visible before the next PermissionError.
+            uid, gid = os.getuid(), os.getgid()
+            logger.warning(
+                "Sandbox container %s has no parseable Config.User (%r); "
+                "stamping uploads with the web-process owner %d:%d instead.",
+                getattr(self.container, "id", "?"), configured, uid, gid,
+            )
+        self._run_ids = (uid, gid)
+        return self._run_ids
 
     @property
     def id(self) -> str:
@@ -275,6 +331,7 @@ class DockerSandboxBackend(BaseSandbox):
         import io
         import tarfile
 
+        uid, gid = self._run_uid_gid()
         responses = []
         for path, content in files:
             resolved = self._resolve(path)
@@ -283,6 +340,12 @@ class DockerSandboxBackend(BaseSandbox):
                 with tarfile.open(fileobj=tar_stream, mode="w") as tar:
                     info = tarfile.TarInfo(name=resolved.lstrip("/"))
                     info.size = len(content)
+                    # Stamp the run uid/gid so put_archive (which extracts as
+                    # root) doesn't leave the file root-owned and un-editable
+                    # by the non-root sandbox.  uname/gname stay empty so the
+                    # numeric ids are authoritative.  See _run_uid_gid.
+                    info.uid = uid
+                    info.gid = gid
                     tar.addfile(info, io.BytesIO(content))
                 tar_stream.seek(0)
                 self.container.put_archive("/", tar_stream)
