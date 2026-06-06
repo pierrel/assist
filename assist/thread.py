@@ -115,11 +115,12 @@ class Thread:
         ``assist.agent.create_agent`` docstring for the subagent
         scope.
 
-        `loop_exploration_tools` is forwarded to
-        ``create_agent(loop_exploration_tools=...)`` — tool names whose
-        distinct-args breadth gets a relaxed (but still finite) loop-
-        detection threshold because probing many forms is their normal
-        shape (eg. an embedder's ``eval_elisp``).  Default ``None``.
+        `loop_exploration_tools` is DEPRECATED and now a no-op (it fed the
+        since-removed Pattern-C distinct-args breadth threshold).  Still
+        forwarded to ``create_agent`` and accepted there so embedders that
+        pass it don't break, but ignored — loop detection now catches only
+        exact-repeat loops (A/B), which apply uniformly to every tool.
+        Default ``None``.
 
         `extra_skill_sources` is forwarded to
         ``create_agent(extra_skill_sources=...)`` — a mapping of additional

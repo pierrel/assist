@@ -215,8 +215,7 @@ class TestDetectLoop:
         # Need different args so no pattern fires
         events = [evt, evt.copy()]
         # Pattern A: not all errors → no
-        # Pattern B: only 2 → no (threshold 3)
-        # Pattern C: 1 distinct over 2 → no (threshold 3)
+        # Pattern B: only 2 identical → no (threshold 3)
         assert _detect_loop(events, 2, 3) is None
 
     # ------------------------------------------------------------------
@@ -827,9 +826,9 @@ class TestLoopDetectionMiddleware:
         ``write_todos`` events in the conversation history.  The current
         turn opens with a single ``write_todos`` call (typical
         small-model fresh-task behavior).  Without per-turn bounding,
-        the prior turn's events stay in the loop window and pattern C
-        (distinct-args-thrash) fires instantly, producing a canned
-        terminal message even though the new turn has done nothing.
+        the prior turn's events stay in the loop window and a loop
+        pattern could fire instantly, producing a canned terminal
+        message even though the new turn has done nothing.
 
         With the fix, ``_extract_events`` only sees post-HumanMessage
         events — a single incomplete call — and the detector returns
