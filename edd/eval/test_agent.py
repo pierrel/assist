@@ -652,10 +652,15 @@ class TestResearchRunsToCompletion(AgentTestMixin, TestCase):
                 stub, low,
                 f"Final answer is a loop-detection give-up stub (the turn was "
                 f"cut off before synthesis): matched {stub!r}.\nGot: {res[:600]}")
+        # Backstop for a non-canned terse evasion (the canned give-up stubs
+        # are caught by the string check above; they run ~140-165 chars).  A
+        # real answer to these queries clears 200 comfortably — but we do NOT
+        # demand a long synthesis: a correct, concise answer (e.g. "tabata is
+        # 20s on / 10s off x8") is "ran to completion", not a give-up.
         self.assertGreater(
-            len(res), 400,
-            f"Final answer too short to be a real synthesis ({len(res)} chars) "
-            f"— likely a give-up.\nGot: {res[:600]}")
+            len(res), 200,
+            f"Final answer too short to be a real answer ({len(res)} chars) "
+            f"— likely a give-up or cut off.\nGot: {res[:600]}")
         # Loose sanity ceiling only — NOT the design bound (that's the
         # recursion_limit).  Catches a true pathological runaway, not the few
         # extra hops the rollback intentionally allows.
