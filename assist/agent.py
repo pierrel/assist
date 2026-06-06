@@ -557,6 +557,19 @@ def create_research_agent(model: BaseChatModel,
                 # reads can't dilute the count below the cap.  Defaults suit
                 # the research-agent (search + read, cap 6); the fact-check
                 # agent overrides with its own read_url-only, higher cap.
+                #
+                # ORDERING CONTRACT: LoopDetection must remain the LAST
+                # after_model middleware in this list (only middleware WITHOUT
+                # an after_model hook may follow it).  Its volume cap returns
+                # `jump_to:"model"` to give a capped research-agent one synthesis
+                # turn (see loop_detection finalize path); that jump is only
+                # safe-to-skip-nothing because LoopDetection is the final
+                # after_model link.  Inserting another after_model middleware
+                # after it would let the jump silently bypass that middleware.
+                # ThreadQueueMiddleware/EmptyResponseRecovery below are fine:
+                # ThreadQueue runs BEFORE LoopDetection in the after_model chain
+                # (factory reverses list order), EmptyResponseRecovery has no
+                # after_model hook.
                 LoopDetectionMiddleware(window=_RESEARCH_LOOP_WINDOW,
                                         volume_threshold=volume_threshold,
                                         volume_tools=volume_tools),

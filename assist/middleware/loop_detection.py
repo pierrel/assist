@@ -132,8 +132,9 @@ def _looks_like_error(content: str) -> bool:
 _FINALIZE_PATTERNS = frozenset({"tool-volume"})
 _FINALIZE_NUDGE = (
     "Search budget reached: I have gathered enough and will now write the "
-    "complete final answer from the results I already have, without searching "
-    "or fetching again."
+    "complete final answer from the results I already gathered — not from "
+    "memory and without searching or fetching again. If the gathered results "
+    "are thin, I will say so rather than invent details."
 )
 
 
