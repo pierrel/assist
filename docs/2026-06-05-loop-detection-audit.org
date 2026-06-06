@@ -4,6 +4,21 @@ State: Audit (Phase 1). Supersedes the narrower volume-cap doc
 (2026-06-05-research-volume-cap-destroys-output.org) by generalizing it to
 all six patterns.
 
+* ROLLED BACK (2026-06-06)
+The six-pattern design audited below — and the E/F "finalize-not-kill"
+machinery this audit motivated (jump_to-model nudge) — has been ROLLED BACK.
+In prod (thread 20260606101819) a legitimate research turn got thrashed
+between patterns D/E/F: tool calls stripped, jumped to model, hard-stopped
+mid-research with confusing canned messages. Per the user's call, loop
+detection now keeps ONLY the two exact-repetition guards (A same-tool-same-
+error, B same-tool-same-args) and removes C/D/E/F plus all finalize/jump_to
+machinery and the subagent volume cap. The deliberate runaway backstop is now
+the per-agent =recursion_limit= (research lowered 300→150), not per-tool
+caps — "a few extra research hops" is preferred over an artificial stop. The
+analysis below is retained as the historical record of why the aggressive
+patterns were tried and why they were ultimately not worth their failure
+mode; it no longer describes the shipped middleware.
+
 * Why this audit
 The research flow returned no answer twice in prod (James Blake threads).
 Root cause: =LoopDetectionMiddleware= Pattern E (tool-volume) fired and

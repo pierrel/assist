@@ -73,9 +73,10 @@ class TestCreateAgentExtraTools:
 
 
 class TestCreateAgentLoopExplorationTools:
-    """`loop_exploration_tools` reaches the MAIN agent's
-    `LoopDetectionMiddleware(exploration_tools=...)`; default leaves the
-    dev/code agent unchanged (empty set)."""
+    """`loop_exploration_tools` is a DEPRECATED no-op (it fed the removed
+    Pattern-C breadth threshold).  It must still be ACCEPTED so embedders that
+    pass it don't break, but it no longer affects the middleware — the main
+    agent's LoopDetectionMiddleware is the plain A/B detector."""
 
     def _main_loop_mw(self, **kwargs):
         from assist.agent import create_agent
@@ -94,13 +95,17 @@ class TestCreateAgentLoopExplorationTools:
             mws = fake.call_args.kwargs["middleware"]
             return next(m for m in mws if isinstance(m, LoopDetectionMiddleware))
 
-    def test_default_exploration_tools_is_empty(self):
-        # The dev/code agent (no exploration tools) is unchanged.
-        assert self._main_loop_mw().exploration_tools == frozenset()
+    def test_loop_detection_middleware_present_by_default(self):
+        # A plain A/B LoopDetectionMiddleware is wired on the main agent and
+        # no longer carries any exploration-tools knob.
+        mw = self._main_loop_mw()
+        assert not hasattr(mw, "exploration_tools")
 
-    def test_loop_exploration_tools_forwarded_to_middleware(self):
+    def test_deprecated_loop_exploration_tools_is_accepted_as_noop(self):
+        # Passing the deprecated kwarg must not error (embedder compat) and
+        # must not add any exploration knob to the middleware.
         mw = self._main_loop_mw(loop_exploration_tools=frozenset({"eval_elisp"}))
-        assert mw.exploration_tools == frozenset({"eval_elisp"})
+        assert not hasattr(mw, "exploration_tools")
 
 
 class TestThreadExtraTools:

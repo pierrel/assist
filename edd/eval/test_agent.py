@@ -470,12 +470,12 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
     Background: ``search_internet`` now goes through a self-hosted SearXNG
     with NO fallback, and RAISES when the backend is down (failures must be
     loud, not silently degraded).  The research subagent surfaces that as a
-    tool error; the contract this eval pins is unchanged in spirit: dispatch
-    research-agent once, read the unavailable signal, relay it, stop — don't
-    loop and don't answer from the model's own knowledge.  A deterministic
-    backstop (``LoopDetectionMiddleware`` Pattern F,
-    ``subagent_dispatch_threshold=1``) strips a within-turn re-dispatch; a
-    cross-turn re-dispatch stays the prompt's job.
+    tool error; the contract this eval pins: dispatch research-agent, read the
+    unavailable signal, relay it, stop — don't fabricate from the model's own
+    knowledge.  This is now PROMPT-driven: the loop-detection rollback removed
+    the per-subagent re-dispatch cap (old Pattern F), so a stray extra
+    dispatch is tolerated (a few hops are fine) as long as the agent heeds the
+    signal and relays it rather than answering from memory.
 
     MOCKING NOTE — this is the one eval in ``edd/eval/`` that
     monkey-patches tools (``search_internet`` and ``read_url``).  Existing
@@ -521,16 +521,22 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
         # with a clearer message than the regexes' "didn't match".
         self.assertTrue(res, "Agent returned an empty response")
 
-        # 1. research-agent dispatched EXACTLY once.  Zero would mean the
-        #    parent answered from its own knowledge (a different failure
-        #    the prompt forbids); two-or-more is the runaway meta-loop.
+        # 1. research-agent dispatched at least once (zero would mean the
+        #    parent answered from its own knowledge — a failure the prompt
+        #    forbids).  Post-rollback we tolerate a stray extra dispatch (the
+        #    re-dispatch cap is gone; a few hops are fine), but cap it loosely
+        #    so a true meta-loop still fails.  The relay regex below carries
+        #    the real discrimination.
         research_dispatches = [s for s in self.subagent_calls(agent)
                                if s == "research-agent"]
-        self.assertEqual(
+        self.assertGreaterEqual(
             len(research_dispatches), 1,
-            "Expected research-agent dispatched exactly once (dispatch, "
-            "read the blocked signal, stop).  Dispatches seen: "
-            f"{self.subagent_calls(agent)}")
+            "Expected research-agent dispatched at least once (it answered "
+            f"without researching).  Dispatches seen: {self.subagent_calls(agent)}")
+        self.assertLessEqual(
+            len(research_dispatches), 3,
+            "research-agent dispatched too many times — a re-dispatch meta-loop. "
+            f"Dispatches seen: {self.subagent_calls(agent)}")
 
         # 2. Final response relays that search is unavailable (rather than
         #    fabricating an answer).  The unavailable token + dispatch==1
@@ -559,39 +565,44 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
         self._assert_relays_unavailable(agent, res)
 
 
-class TestResearchSearchBudget(AgentTestMixin, TestCase):
-    """The research flow must converge on a bounded number of searches.
+# Loop-detection terminal stubs the FINAL answer must never be — they mean
+# an exact-repeat loop (Pattern A/B) cut the turn off before synthesis.
+# Lowercased substrings; see loop_detection.py:_compose_terminal_message.
+_LOOPDETECT_STUBS = (
+    "won't retry that approach",      # Pattern A
+    "i won't repeat it",              # Pattern B
+)
 
-    Background: a prod thread (a trivial product lookup) did ~100
-    `search_internet` calls across three nested research-agent dispatches
-    for a trivial query — the research orchestrator re-dispatched the
-    inner research-agent, each of which searched dozens of times under
-    the only guidance it had ("conduct thorough research").  This eval
-    pins an effort budget: a healthy research turn searches a handful of
-    times and finalizes.
 
-    We patch `search_internet` to a counted stub returning canned,
-    real-looking results (so the model has usable hits and isn't
-    searching for lack of results), and assert the TOTAL invocation count
-    across the whole flow stays under budget.  The count is the right
-    observable: the orchestrator's inner re-dispatches live in nested
-    sub-agent namespaces invisible to the top-level message state, but
-    every search — at any nesting depth — goes through the one patched
-    function, so a global counter captures aggregate effort exactly.
+class TestResearchRunsToCompletion(AgentTestMixin, TestCase):
+    """A multi-hop research turn must RUN TO COMPLETION, not be cut off.
 
-    Same patch-site reasoning as TestResearchSearchUnavailableHandoff: patch
-    `assist.agent.search_internet` (the name bound into assist.agent at
-    import), not `assist.tools.search_internet`.
+    This is the positive contract behind the loop-detection rollback: the
+    aggressive patterns (distinct-arg thrash, http-failure streak, sheer
+    volume, sub-agent re-dispatch) were removed precisely so a research turn
+    doing several distinct search/read hops is allowed to finish rather than
+    be yanked into a confusing half-finished state.  So we assert the flow
+    actually searches, produces a substantive synthesized answer, and is NOT
+    a loop-detection give-up stub.
+
+    We deliberately do NOT pin a tight upper bound on search count any more —
+    "a few extra hops" is fine, and the real runaway backstop is the research
+    agent's recursion_limit (see agent.py), not a per-tool cap.  A very loose
+    sanity ceiling stays only to catch a true pathological runaway (the prod
+    ~100-search case), not normal exploration.
+
+    We patch `search_internet`/`read_url` to counted stubs returning canned,
+    real-looking results (so the model has usable hits and isn't searching
+    for lack of results).  Same patch-site reasoning as
+    TestResearchSearchUnavailableHandoff: patch `assist.agent.search_internet`
+    (the name bound into assist.agent at import), not
+    `assist.tools.search_internet`.
     """
 
-    # Aggregate effort budget for a single research turn.  The designed
-    # ceiling is mechanical: the orchestrator does not search (it delegates),
-    # so the research-agent is the sole searcher, capped per-agent at
-    # _RESEARCH_TOOL_VOLUME_CAP (6) and dispatched once (_SUBAGENT_DISPATCH_CAP
-    # = 1).  So ~6 searches by design; 12 is 2x headroom for batch overshoot
-    # (the agent can emit several search calls in one message before the cap
-    # observes them).  Prod ran ~100; baseline (no fix) ran 15-50.
-    SEARCH_BUDGET = 12
+    # Loose sanity ceiling only — NOT a design bound.  A healthy turn searches
+    # a handful of times; this just catches a true runaway (prod ran ~100).
+    # The real bound is the research agent's recursion_limit.
+    SEARCH_BUDGET = 30
 
     def setUp(self):
         self.model = select_assistant_model(0.1)
@@ -625,154 +636,42 @@ class TestResearchSearchBudget(AgentTestMixin, TestCase):
             self, self.model, prompt, _counted_search, _canned_fetch)
         return agent, res, calls["search"]
 
-    def _assert_bounded(self, agent, res, n_searches):
+    def _assert_completes(self, agent, res, n_searches):
         self.assertTrue(res, "Agent returned an empty response")
-        # Lower bound: the flow must actually research.  Catches a
-        # regression that "bounds" searches by BREAKING research (answering
-        # from the model's own knowledge, or stripping the dispatch) — that
-        # would still produce a non-empty res and pass the upper bound alone.
+        # The flow must actually research — catches a regression that answers
+        # from the model's own knowledge or strips the dispatch.
         self.assertGreaterEqual(
             n_searches, 1,
             "Expected the flow to search at least once (it answered without "
             f"searching).  MAIN dispatches: {self.subagent_calls(agent)}")
-        # Upper bound: no over-search runaway.  MAIN-level dispatches in the
-        # message help locate the source if this fails.
-        self.assertLessEqual(
-            n_searches, self.SEARCH_BUDGET,
-            f"Research flow ran {n_searches} searches for one query — over "
-            f"the {self.SEARCH_BUDGET} budget.  MAIN dispatches: "
-            f"{self.subagent_calls(agent)}.")
-
-    def test_search_budget_product_lookup(self):
-        agent, res, n = self._run_counting_searches(
-            "What are good waterproof hiking boots for wet trails?")
-        self._assert_bounded(agent, res, n)
-
-    def test_search_budget_howto_lookup(self):
-        # A differently-shaped, non-telegraphed query.  Same budget.
-        agent, res, n = self._run_counting_searches(
-            "How do tabata intervals work?")
-        self._assert_bounded(agent, res, n)
-
-
-# Loop-detection terminal stubs the FINAL answer must never be (they mean the
-# cap killed the turn before synthesis).  Lowercased substrings; see
-# loop_detection.py:_compose_terminal_message.
-_LOOPDETECT_STUBS = (
-    "enough times to answer",
-    "stop gathering and write up what i have",
-    "already gathered that sub-agent",
-    "finalize with what i have rather than dispatching",
-    "won't retry that approach",
-    "i won't repeat it",
-    "i won't keep trying variations",
-)
-
-
-class TestResearchVolumeCapFinalizes(AgentTestMixin, TestCase):
-    """When the volume cap (Pattern E) fires, the research-agent must still
-    FINALIZE — produce a real synthesized answer from what it gathered — not
-    terminate on the canned 'I'll write up what I have now' stub.
-
-    This is the audit's discriminating eval (docs/2026-06-05-loop-detection-audit.org).
-    TestResearchSearchBudget only asserts res is non-empty + bounded — which
-    the BROKEN give-up stub satisfies, so it can't catch the bug.  Here we:
-      - force the cap to fire deterministically (patch the cap LOW around the
-        build — it's read into the subagent middleware at build time),
-      - return canned results carrying a SENTINEL the synthesis must echo,
-      - assert the final answer is a real synthesis (sentinel present) and is
-        NOT any loop-detection stub.
-    Must FAIL on main (cap kills output → res is the give-up stub) and PASS
-    after the finalize-not-kill fix.
-    """
-
-    FORCED_CAP = 2          # low, so the cap fires after a couple searches
-    SEARCH_CEILING = 12     # runaway bound must still hold (cap + headroom)
-
-    def setUp(self):
-        self.model = select_assistant_model(0.1)
-
-    def _run_forced_cap(self, prompt: str, canned: str):
-        import assist.tools as _tools
-        calls = {"search": 0}
-
-        @functools.wraps(_tools.search_internet)
-        def _counted_search(query, max_results=5):
-            calls["search"] += 1
-            return canned
-
-        @functools.wraps(_tools.read_url)
-        def _canned_fetch(url):
-            return ("Relevant page text with concrete, specific information. "
-                    "Vellichor Report details follow. " * 15)
-
-        # Patch the cap LOW around the build so Pattern E fires quickly.  The
-        # research subagent reads _RESEARCH_TOOL_VOLUME_CAP into its
-        # LoopDetectionMiddleware when the agent is constructed (inside the
-        # helper), so the patch must wrap that build.
-        with patch("assist.agent._RESEARCH_TOOL_VOLUME_CAP", self.FORCED_CAP):
-            agent, res = _run_general_agent_with_search_stubs(
-                self, self.model, prompt, _counted_search, _canned_fetch)
-        return agent, res, calls["search"]
-
-    # Canned, real-looking results so the model has usable material to
-    # synthesize.  Kept plausible (no implausible sentinel) — the small model
-    # ignores canned content it doesn't believe, so the discriminator is
-    # behavioral (not-a-stub + substantive), not "did it echo a magic token".
-    _CANNED = str([
-        {"title": "Source one",
-         "url": "https://example.com/a",
-         "content": "A directly relevant, specific paragraph with concrete "
-                    "figures, names, and dates answering the question."},
-        {"title": "Source two",
-         "url": "https://example.com/b",
-         "content": "A second corroborating source covering the topic from "
-                    "another angle with additional specifics."},
-    ])
-
-    def _assert_finalized(self, agent, res, n_searches):
-        self.assertTrue(res, "Agent returned an empty response")
+        # The answer must be a real synthesis, not a loop-detection give-up
+        # stub — i.e. it ran to completion rather than being cut off.
         low = res.lower()
-        # 1. NOT a loop-detection give-up stub — the CORE discriminator.  On
-        #    main, the cap kills the turn and res IS one of these stubs; the
-        #    finalize fix makes the agent synthesize instead.
         for stub in _LOOPDETECT_STUBS:
             self.assertNotIn(
                 stub, low,
-                f"Final answer is a loop-detection stub (cap killed the turn "
-                f"before synthesis): matched {stub!r}.\nGot: {res[:600]}")
-        # 2. Substantive synthesis, not a one-line give-up.  The broken
-        #    behavior yields a short give-up; a finalized research answer is
-        #    long-form.
+                f"Final answer is a loop-detection give-up stub (the turn was "
+                f"cut off before synthesis): matched {stub!r}.\nGot: {res[:600]}")
         self.assertGreater(
             len(res), 400,
-            f"Final answer is too short to be a real synthesis ({len(res)} "
-            f"chars) — likely a give-up.\nGot: {res[:600]}")
-        # 3. The cap region was actually reached (we exercised Pattern E).  With
-        #    the cap forced to 2, a finalized run searches ~2-3 times; 0 would
-        #    mean the stub wasn't even wired.
-        self.assertGreaterEqual(
-            n_searches, self.FORCED_CAP,
-            f"Only {n_searches} searches (< forced cap {self.FORCED_CAP}) — "
-            f"the test isn't exercising Pattern E.")
-        # 4. Runaway bound preserved (one extra synthesis turn, no more).
+            f"Final answer too short to be a real synthesis ({len(res)} chars) "
+            f"— likely a give-up.\nGot: {res[:600]}")
+        # Loose sanity ceiling only — NOT the design bound (that's the
+        # recursion_limit).  Catches a true pathological runaway, not the few
+        # extra hops the rollback intentionally allows.
         self.assertLessEqual(
-            n_searches, self.SEARCH_CEILING,
-            f"{n_searches} searches exceeds the {self.SEARCH_CEILING} ceiling "
-            f"— the cap's runaway bound regressed.")
+            n_searches, self.SEARCH_BUDGET,
+            f"Research flow ran {n_searches} searches for one query — past the "
+            f"loose sanity ceiling of {self.SEARCH_BUDGET}, a likely runaway.  "
+            f"MAIN dispatches: {self.subagent_calls(agent)}.")
 
-    def test_finalize_prod_query(self):
-        # The exact two-subject prod query that returned no answer (threads
-        # 20260605072211 / 20260605200346).
-        agent, res, n = self._run_forced_cap(
-            "Tell me about James Blake's latest album and what it means to be "
-            "an independent record.", self._CANNED)
-        self._assert_finalized(agent, res, n)
+    def test_research_completes_product_lookup(self):
+        agent, res, n = self._run_counting_searches(
+            "What are good waterproof hiking boots for wet trails?")
+        self._assert_completes(agent, res, n)
 
-    def test_finalize_second_query(self):
-        # A differently-shaped, real two-part query (per the eval-alignment
-        # convention) so a pass means fixing the SHAPE, not one prod prompt.
-        agent, res, n = self._run_forced_cap(
-            "Compare PostgreSQL and MySQL for a high-write workload, and say "
-            "which you would choose and why.", self._CANNED)
-        self._assert_finalized(agent, res, n)
+    def test_research_completes_howto_lookup(self):
+        # A differently-shaped, non-telegraphed query.  Same contract.
+        agent, res, n = self._run_counting_searches(
+            "How do tabata intervals work?")
+        self._assert_completes(agent, res, n)

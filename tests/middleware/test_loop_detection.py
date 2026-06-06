@@ -6,8 +6,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from assist.middleware.loop_detection import (
     LoopDetectionMiddleware,
-    _FINALIZE_NUDGE,
-    _REDISPATCH_NUDGE,
     _compose_terminal_message,
     _detect_loop,
     _extract_events,
@@ -151,25 +149,24 @@ class TestExtractEvents:
 
 class TestDetectLoop:
     def _evt(self, tool="write_file", args=None, content="ok",
-             is_error=False, http_failure=False):
+             is_error=False):
         return {
             "tool_name": tool,
             "args_sig": _normalise_args(args or {}),
             "result_content": content,
             "is_error": is_error,
-            "http_failure": http_failure,
             "completed": True,
         }
 
     def test_no_loop_on_empty_history(self):
-        assert _detect_loop([], 2, 3, 3, 10) is None
+        assert _detect_loop([], 2, 3) is None
 
     def test_pattern_a_two_same_errors_in_a_row(self):
         events = [
             self._evt(content="Cannot write to /a because it already exists.", is_error=True),
             self._evt(content="Cannot write to /b because it already exists.", is_error=True),
         ]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-error"
         assert result["tools"] == {"write_file"}
@@ -180,22 +177,21 @@ class TestDetectLoop:
             self._evt(content="ok"),
             self._evt(content="Cannot write to /a because it already exists.", is_error=True),
         ]
-        assert _detect_loop(events, 2, 3, 3, 10) is None
+        assert _detect_loop(events, 2, 3) is None
 
     def test_pattern_a_breaks_on_intervening_success(self):
+        # Distinct args so Pattern B can't fire — isolates Pattern A's
+        # "intervening success breaks the trailing error run" behavior.
         events = [
-            self._evt(content="Cannot write to /a because it already exists.", is_error=True),
-            self._evt(content="ok"),
-            self._evt(content="Cannot write to /b because it already exists.", is_error=True),
+            self._evt(args={"file_path": "/a"}, content="Cannot write to /a because it already exists.", is_error=True),
+            self._evt(args={"file_path": "/a"}, content="ok"),
+            self._evt(args={"file_path": "/b"}, content="Cannot write to /b because it already exists.", is_error=True),
         ]
-        # Trailing run of errors is length 1 only — no Pattern A.
-        # Pattern C also doesn't fire (only 2 distinct args within window).
-        # But it might fire other patterns; let's just check Pattern A doesn't fire.
-        result = _detect_loop(events, 2, 3, 3, 10)
-        # A non-error in between breaks the trailing run; if other patterns
-        # also don't fire, result should be None.
-        # Pattern C: 3 distinct args (default different per-evt args) over 3 events
-        # would fire. So provide identical args to isolate pattern A behaviour.
+        # Trailing run of errors is length 1 only — Pattern A must not fire
+        # when a success interrupts the run.
+        assert _detect_loop(events, 2, 3) is None
+        # Same tool + same args three times in a row → Pattern B fires even
+        # though the middle call succeeded (B is args-based, not error-based).
         events_same_args = [
             self._evt(args={"file_path": "/a"}, content="Cannot write to /a because it already exists.", is_error=True),
             self._evt(args={"file_path": "/a"}, content="ok"),
@@ -203,14 +199,14 @@ class TestDetectLoop:
         ]
         # Trailing run is just 1 error → Pattern A won't fire
         # 3 same-args-same-tool in a row → Pattern B fires at threshold 3
-        result2 = _detect_loop(events_same_args, 2, 3, 3, 10)
+        result2 = _detect_loop(events_same_args, 2, 3)
         assert result2 is not None
         assert result2["pattern"] == "same-tool-same-args"
 
     def test_pattern_b_three_identical_calls(self):
         evt = self._evt(args={"file_path": "/x"}, content="ok")
         events = [evt, evt.copy(), evt.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-args"
 
@@ -221,156 +217,7 @@ class TestDetectLoop:
         # Pattern A: not all errors → no
         # Pattern B: only 2 → no (threshold 3)
         # Pattern C: 1 distinct over 2 → no (threshold 3)
-        assert _detect_loop(events, 2, 3, 3, 10) is None
-
-    def test_pattern_c_filename_mutation(self):
-        # Three distinct paths with mixed errors that don't normalise alike,
-        # so Pattern A doesn't fire. Pattern C catches it because the tool is
-        # mutating and at least one call errored.
-        events = [
-            self._evt(args={"file_path": "/a"},
-                      content="Error: permission denied", is_error=True),
-            self._evt(args={"file_path": "/b"},
-                      content="Error: disk full", is_error=True),
-            self._evt(args={"file_path": "/c"},
-                      content="Error: already exists", is_error=True),
-        ]
-        result = _detect_loop(events, 2, 3, 3, 10)
-        assert result is not None
-        assert result["pattern"] == "distinct-args-thrash"
-
-    def test_pattern_c_does_not_fire_with_two_distinct(self):
-        events = [
-            self._evt(args={"file_path": "/a"}),
-            self._evt(args={"file_path": "/b"}),
-        ]
-        assert _detect_loop(events, 2, 3, 3, 10) is None
-
-    def test_pattern_c_does_not_fire_for_read_only_tool(self):
-        # Three distinct read_file calls is exploration, not a loop —
-        # regression for thread 20260425110043-4822cf50.
-        events = [
-            self._evt(tool="read_file", args={"file_path": "/a"}, content="<contents of /a>"),
-            self._evt(tool="read_file", args={"file_path": "/b"}, content="<contents of /b>"),
-            self._evt(tool="read_file", args={"file_path": "/c"}, content="<contents of /c>"),
-        ]
-        assert _detect_loop(events, 2, 3, 3, 10) is None
-
-    def test_pattern_c_does_not_fire_without_error(self):
-        # Three successful distinct write_file calls is normal
-        # multi-file work, not a thrash.
-        events = [
-            self._evt(args={"file_path": "/a"}, content="Wrote /a"),
-            self._evt(args={"file_path": "/b"}, content="Wrote /b"),
-            self._evt(args={"file_path": "/c"}, content="Wrote /c"),
-        ]
-        assert _detect_loop(events, 2, 3, 3, 10) is None
-
-    # ------------------------------------------------------------------
-    # Exploration tools (eg. emacsos's eval_elisp): relaxed Pattern-C
-    # breadth threshold, but NOT exempt and still subject to A/B.
-    # ------------------------------------------------------------------
-
-    def test_pattern_c_exploration_tool_gets_higher_threshold(self):
-        # The live emacsos shape: a few distinct eval_elisp probes, one
-        # erroring (the small model fumbles the API).  With eval_elisp
-        # marked as an exploration tool, the higher threshold (default 6)
-        # means this legitimate exploration is NOT terminated.
-        events = [
-            self._evt(tool="eval_elisp", args={"code": "(cursor-type)"}, content="box"),
-            self._evt(tool="eval_elisp",
-                      args={"code": "(frame-parameter nil 'cursor-color)"},
-                      content="nil"),
-            self._evt(tool="eval_elisp", args={"code": "(load-path)"},
-                      content="error: void-function load-path", is_error=True),
-        ]
-        assert _detect_loop(events, 2, 3, 3, 10,
-                            exploration_tools=frozenset({"eval_elisp"})) is None
-
-    def test_pattern_c_fires_for_eval_elisp_when_not_an_exploration_tool(self):
-        # Opt-in: with NO exploration_tools (the dev/code agent's config),
-        # the same 3 distinct erroring probes trip Pattern C at threshold 3.
-        events = [
-            self._evt(tool="eval_elisp", args={"code": "(cursor-type)"}, content="box"),
-            self._evt(tool="eval_elisp",
-                      args={"code": "(frame-parameter nil 'cursor-color)"},
-                      content="nil"),
-            self._evt(tool="eval_elisp", args={"code": "(load-path)"},
-                      content="error: void-function load-path", is_error=True),
-        ]
-        result = _detect_loop(events, 2, 3, 3, 10)
-        assert result is not None
-        assert result["pattern"] == "distinct-args-thrash"
-
-    def test_pattern_c_exploration_tool_boundary_just_below_threshold(self):
-        # 5 distinct erroring forms (one below the exploration threshold of
-        # 6, with DISTINCT errors so A/B don't fire) → not yet a flail.
-        errs = ["void-function a", "void-variable b", "wrong-type c",
-                "args-range d", "scan-error e"]
-        events = [
-            self._evt(tool="eval_elisp", args={"code": f"(p{i})"},
-                      content=f"error: {errs[i]}", is_error=True)
-            for i in range(5)
-        ]
-        assert _detect_loop(events, 2, 3, 3, 10,
-                            exploration_tools=frozenset({"eval_elisp"})) is None
-
-    def test_pattern_c_still_catches_sustained_exploration_flail(self):
-        # A sustained flail (>= the higher threshold of distinct erroring
-        # forms, with DISTINCT errors so A/B don't fire) IS still caught,
-        # faster than the recursion limit.
-        errs = ["void-function foo", "void-variable bar", "wrong-type baz",
-                "args-out-of-range qux", "scan-error quux", "no-catch corge"]
-        events = [
-            self._evt(tool="eval_elisp", args={"code": f"(probe-{i})"},
-                      content=f"error: {errs[i]}", is_error=True)
-            for i in range(6)
-        ]
-        result = _detect_loop(events, 2, 3, 3, 10,
-                              exploration_tools=frozenset({"eval_elisp"}))
-        assert result is not None
-        assert result["pattern"] == "distinct-args-thrash"
-        assert result["run_length"] == 6
-
-    def test_exploration_tool_still_subject_to_pattern_a(self):
-        # The SAME error repeated is a real loop — Pattern A still fires for
-        # an exploration tool (it stays "mutating" for A/B).
-        events = [
-            self._evt(tool="eval_elisp", args={"code": "(a)"},
-                      content="error: void-function frobnicate", is_error=True),
-            self._evt(tool="eval_elisp", args={"code": "(b)"},
-                      content="error: void-function frobnicate", is_error=True),
-        ]
-        result = _detect_loop(events, 2, 3, 3, 10,
-                              exploration_tools=frozenset({"eval_elisp"}))
-        assert result is not None
-        assert result["pattern"] == "same-tool-same-error"
-
-    def test_exploration_tool_still_subject_to_pattern_b(self):
-        # The IDENTICAL form repeated 3x is a real loop — Pattern B still
-        # fires for an exploration tool.
-        evt = self._evt(tool="eval_elisp", args={"code": "(stuck)"}, content="nil")
-        events = [evt, evt.copy(), evt.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10,
-                              exploration_tools=frozenset({"eval_elisp"}))
-        assert result is not None
-        assert result["pattern"] == "same-tool-same-args"
-
-    def test_different_tools_do_not_interleave(self):
-        # Pattern C identifies the offending tool name when 3 distinct
-        # mutating calls share the same name. Custom tool name avoids the
-        # read-only allowlist.
-        events = [
-            self._evt(tool="custom_mutator", args={"q": "a"},
-                      content="Error: failed in mode A", is_error=True),
-            self._evt(tool="custom_mutator", args={"q": "b"},
-                      content="Error: failed in mode B", is_error=True),
-            self._evt(tool="custom_mutator", args={"q": "c"},
-                      content="Error: failed in mode C", is_error=True),
-        ]
-        result = _detect_loop(events, 2, 3, 3, 10)
-        assert result is not None
-        assert result["tools"] == {"custom_mutator"}
+        assert _detect_loop(events, 2, 3) is None
 
     # ------------------------------------------------------------------
     # Read-only-interleaved trailing-run detection
@@ -408,7 +255,7 @@ class TestDetectLoop:
                 is_error=True,
             ),
         ]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None, "Pattern A should fire on ls-interleaved write_file errors"
         assert result["pattern"] == "same-tool-same-error"
         assert result["tools"] == {"write_file"}
@@ -428,7 +275,7 @@ class TestDetectLoop:
                 content="OCI runtime exec failed: chdir to cwd",
                 is_error=True,
             ))
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-error"
         assert result["run_length"] == 4
@@ -444,7 +291,7 @@ class TestDetectLoop:
         )
         gl = self._evt(tool="glob", args={"pattern": "*.org"}, content="[]")
         events = [wf, gl, wf.copy(), gl.copy(), wf.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-args"
         assert result["tools"] == {"write_file"}
@@ -461,7 +308,7 @@ class TestDetectLoop:
             self._evt(tool="ls", args={"path": "/"}, content="['a.org']"),
             self._evt(tool="write_file", args={"file_path": "/b.org"}, content="Wrote /b.org"),
         ]
-        assert _detect_loop(events, 2, 3, 3, 10) is None
+        assert _detect_loop(events, 2, 3) is None
 
     def test_pattern_b_catches_repeated_read_url(self):
         """The 2026-05-30 runaway: a sub-research-agent issued the same
@@ -476,7 +323,7 @@ class TestDetectLoop:
             content="[long page content]",
         )
         events = [ru, ru.copy(), ru.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-args"
         assert result["tools"] == {"read_url"}
@@ -493,7 +340,7 @@ class TestDetectLoop:
             content="[results]",
         )
         events = [si, si.copy(), si.copy(), si.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-args"
         assert result["tools"] == {"search_internet"}
@@ -510,7 +357,7 @@ class TestDetectLoop:
         )
         ls = self._evt(tool="ls", args={"path": "/"}, content="['x.md']")
         events = [ru, ls, ru.copy(), ls.copy(), ru.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-args"
         assert result["run_length"] == 3
@@ -532,7 +379,7 @@ class TestDetectLoop:
             content="[b]",
         )
         events = [ru_a, ru_b, ru_a.copy(), ru_b.copy(), ru_a.copy()]
-        assert _detect_loop(events, 2, 3, 3, 10) is None
+        assert _detect_loop(events, 2, 3) is None
 
     def test_no_false_positive_pure_exploration(self):
         """A run of read-only tools alone (no mutating) must NOT
@@ -545,7 +392,7 @@ class TestDetectLoop:
             self._evt(tool="grep", args={"pattern": "foo"}, content="[]"),
             self._evt(tool="search_internet", args={"query": "x"}, content="[]"),
         ]
-        assert _detect_loop(events, 2, 3, 3, 10) is None
+        assert _detect_loop(events, 2, 3) is None
 
     # ------------------------------------------------------------------
     # Pattern B — trailing-read-only-of-different-tool case
@@ -565,7 +412,7 @@ class TestDetectLoop:
         )
         ls = self._evt(tool="ls", args={"path": "/"}, content="['x.org']")
         events = [wf, ls, wf.copy(), ls.copy(), wf.copy(), ls.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None, "loop missed when trailing event is read-only"
         assert result["pattern"] == "same-tool-same-args"
         assert result["tools"] == {"write_file"}
@@ -580,7 +427,7 @@ class TestDetectLoop:
             content="Wrote /x.org",
         )
         events = [wf, wf.copy(), wf.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-args"
         assert result["run_length"] == 3
@@ -596,7 +443,7 @@ class TestDetectLoop:
             content="[content]",
         )
         events = [ru, ru.copy(), ru.copy()]
-        result = _detect_loop(events, 2, 3, 3, 10)
+        result = _detect_loop(events, 2, 3)
         assert result is not None
         assert result["pattern"] == "same-tool-same-args"
         assert result["run_length"] == 3
@@ -604,84 +451,6 @@ class TestDetectLoop:
     # ------------------------------------------------------------------
     # Pattern D — HTTP-failure streak (the casio runaway shape)
     # ------------------------------------------------------------------
-    def test_pattern_d_catches_distinct_url_4xx_streak(self):
-        """The 2026-05-30 casio.com runaway: ``fetch_url`` returned a
-        403 bot-detection HTML page on each of many distinct watch-product
-        URLs.  Patterns A/B/C all short-circuit (HTML body isn't a
-        Python error, args differ each call, no error flag set), so
-        Pattern D specifically counts consecutive trailing tool calls
-        whose body looks HTTP-failure-shaped, regardless of args."""
-        events = [
-            self._evt(
-                tool="fetch_url",
-                args={"url": f"https://www.casio.com/products/watches/p-{i}/"},
-                content="<html><title>403 Forbidden</title>...",
-                http_failure=True,
-            )
-            for i in range(5)
-        ]
-        result = _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4)
-        assert result is not None
-        assert result["pattern"] == "http-failure-streak"
-        assert result["tools"] == {"fetch_url"}
-        assert result["run_length"] == 5
-
-    def test_pattern_d_does_not_fire_below_threshold(self):
-        """3 consecutive failures (< default threshold 4) should not
-        fire — many normal research sessions hit one or two 4xx hops
-        before finding a working source."""
-        events = [
-            self._evt(tool="fetch_url",
-                      args={"url": f"https://x.example.com/p-{i}/"},
-                      content="403 Forbidden", http_failure=True)
-            for i in range(3)
-        ]
-        assert _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4) is None
-
-    def test_pattern_d_does_not_fire_when_streak_is_broken(self):
-        """A successful response in the trailing window breaks the
-        streak — the model is still making progress."""
-        events = [
-            self._evt(tool="fetch_url",
-                      args={"url": "https://x.example.com/p-1/"},
-                      content="403 Forbidden", http_failure=True),
-            self._evt(tool="fetch_url",
-                      args={"url": "https://x.example.com/p-2/"},
-                      content="403 Forbidden", http_failure=True),
-            # A real successful page — breaks the streak.
-            self._evt(tool="fetch_url",
-                      args={"url": "https://x.example.com/about/"},
-                      content="<html><body>Welcome to our store...</body></html>"),
-            self._evt(tool="fetch_url",
-                      args={"url": "https://x.example.com/p-3/"},
-                      content="403 Forbidden", http_failure=True),
-        ]
-        # The trailing failure-streak is 1; below threshold.
-        assert _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4) is None
-
-    def test_pattern_d_streak_spanning_tool_names(self):
-        """Mixed-tool failure streaks (search_internet 4xx, fetch_url 4xx,
-        fetch_url 4xx, …) trigger on the LATEST failing tool — the
-        signature is the failure shape, not the tool identity."""
-        events = [
-            self._evt(tool="search_internet",
-                      args={"query": "f-91w"},
-                      content="Rate limit exceeded", http_failure=True),
-            self._evt(tool="fetch_url",
-                      args={"url": "https://casio.com/a/"},
-                      content="403 Forbidden", http_failure=True),
-            self._evt(tool="fetch_url",
-                      args={"url": "https://casio.com/b/"},
-                      content="403 Forbidden", http_failure=True),
-            self._evt(tool="fetch_url",
-                      args={"url": "https://casio.com/c/"},
-                      content="403 Forbidden", http_failure=True),
-        ]
-        result = _detect_loop(events, 2, 3, 3, 10, http_failure_threshold=4)
-        assert result is not None
-        assert result["pattern"] == "http-failure-streak"
-        assert result["tools"] == {"fetch_url"}, \
-            "latest failing tool wins (most recent is what the model is currently doing)"
 
 
 class TestLastSuccessfulArtifact:
@@ -835,27 +604,6 @@ class TestComposeTerminalMessage:
         assert "search" in msg
         assert "won't repeat" in msg
 
-    def test_pattern_c_without_artifact_includes_excerpt_when_error(self):
-        detection = {
-            "pattern": "distinct-args-thrash",
-            "reason": "...",
-            "tools": {"write_file"},
-            "run_length": 3,
-        }
-        messages = [
-            _ai_with_call("c1", "write_file", {"file_path": "/a"}),
-            _tool_msg("c1", "Cannot write to /a because it already exists."),
-            _ai_with_call("c2", "write_file", {"file_path": "/b"}),
-            _tool_msg("c2", "Cannot write to /b because it already exists."),
-            _ai_with_call("c3", "write_file", {"file_path": "/c"}),
-            _tool_msg("c3", "Cannot write to /c because it already exists."),
-        ]
-        msg = _compose_terminal_message(detection, messages)
-        assert "write_file" in msg
-        assert "different inputs" in msg
-        assert "already exists" in msg
-        assert "won't keep trying" in msg
-
 
 # ---------------------------------------------------------------------------
 # Middleware integration tests
@@ -889,39 +637,6 @@ class TestLoopDetectionMiddleware:
             msgs.append(_tool_msg(f"c{i}", "[results]"))
         msgs.append(_ai_with_call("clast", "search_internet", {"q": "more"}))
         return msgs
-
-    def test_volume_cap_first_fire_finalizes_not_kills(self, caplog):
-        """First tool-volume firing must FINALIZE: strip the over-limit calls,
-        leave the finalize nudge, and jump back to the model for one synthesis
-        turn (NOT end the turn with a give-up stub).  Plus the loud cap warning."""
-        mw = LoopDetectionMiddleware(
-            volume_threshold=4, volume_tools=frozenset({"search_internet"}))
-        with caplog.at_level(logging.WARNING,
-                             logger="assist.middleware.loop_detection"):
-            result = mw.after_model({"messages": self._volume_msgs()}, Mock())
-        assert result is not None
-        assert result.get("jump_to") == "model", \
-            "tool-volume must jump back to the model for a synthesis turn"
-        assert result["messages"][-1].tool_calls == []
-        assert result["messages"][-1].content == _FINALIZE_NUDGE
-        assert any("cap fired" in r.getMessage() for r in caplog.records), \
-            f"expected cap warning; got {[r.getMessage() for r in caplog.records]}"
-
-    def test_volume_cap_second_fire_hard_stops(self):
-        """If the model searches AGAIN after the finalize nudge (second strike
-        this turn), fall through to the hard stop — no jump, tool calls
-        stripped, terminal stub — so the runaway bound still holds."""
-        mw = LoopDetectionMiddleware(
-            volume_threshold=4, volume_tools=frozenset({"search_internet"}))
-        msgs = self._volume_msgs()
-        # The nudge already happened earlier this turn (model ignored it):
-        msgs.append(AIMessage(content=_FINALIZE_NUDGE))
-        msgs.append(_ai_with_call("again", "search_internet", {"q": "yet more"}))
-        result = mw.after_model({"messages": msgs}, Mock())
-        assert result is not None
-        assert "jump_to" not in result, "second strike must NOT jump — hard stop"
-        assert result["messages"][-1].tool_calls == []
-        assert result["messages"][-1].content != _FINALIZE_NUDGE
 
     def test_no_action_when_no_loop(self):
         mw = LoopDetectionMiddleware()
@@ -1169,256 +884,70 @@ class TestLoopDetectionMiddleware:
         assert result["messages"][-1].tool_calls == []
 
 
-class TestPatternEVolume:
-    """Pattern E: sheer per-tool call volume, regardless of args/errors.
+# ---------------------------------------------------------------------------
+# Rollback contract: the removed patterns (distinct-arg thrash, http-failure
+# streak, sheer volume, sub-agent re-dispatch) must NOT fire any more.  A few
+# extra research hops are allowed; the runaway bound is the recursion_limit.
+# ---------------------------------------------------------------------------
 
-    Off unless volume_threshold > 0 AND the tool is in volume_tools.  Uses
-    search_internet (a read-only tool with distinct, successful args) so
-    Patterns A/B/C/D all skip and only the volume pattern can fire —
-    proving it catches a runaway the other patterns deliberately ignore
-    (distinct-query exploration is normal; sheer volume is not).
-    """
-    SEARCH = frozenset({"search_internet"})
-
-    def _searches(self, n):
-        return [{
-            "tool_name": "search_internet",
-            "args_sig": _normalise_args({"query": f"q{i}"}),
-            "result_content": "[{'title': 'r', 'url': 'u', 'content': 'c'}]",
-            "is_error": False,
-            "http_failure": False,
+class TestRollbackContractNonRepeatLoopsAllowed:
+    def _evt(self, tool, args, content="ok", is_error=False):
+        return {
+            "tool_name": tool,
+            "args_sig": _normalise_args(args),
+            "result_content": content,
+            "is_error": is_error,
             "completed": True,
-        } for i in range(n)]
+        }
 
-    def test_disabled_by_default(self):
-        # 20 distinct successful searches, volume cap off -> no detection.
-        assert _detect_loop(self._searches(20), 2, 3, 3, 10) is None
+    def test_many_distinct_searches_do_not_fire(self):
+        # 12 distinct search queries — the old volume cap (E) would have
+        # fired; now this is allowed (a thorough research pass).
+        events = [self._evt("search_internet", {"q": f"query {i}"}) for i in range(12)]
+        assert _detect_loop(events, 2, 3) is None
 
-    def test_disabled_without_volume_tools(self):
-        # threshold set but no tools scoped -> no detection.
-        assert _detect_loop(self._searches(20), 2, 3, 3, 10,
-                            volume_threshold=8) is None
+    def test_many_distinct_url_reads_do_not_fire(self):
+        events = [self._evt("read_url", {"url": f"https://ex.com/p{i}"}) for i in range(12)]
+        assert _detect_loop(events, 2, 3) is None
 
-    def test_fires_at_threshold(self):
-        result = _detect_loop(self._searches(8), 2, 3, 3, 10,
-                              volume_threshold=8, volume_tools=self.SEARCH)
-        assert result is not None
-        assert result["pattern"] == "tool-volume"
-        assert result["tools"] == {"search_internet"}
-        assert result["run_length"] == 8
-
-    def test_does_not_fire_below_threshold(self):
-        assert _detect_loop(self._searches(7), 2, 3, 3, 10,
-                            volume_threshold=8, volume_tools=self.SEARCH) is None
-
-    def test_only_caps_tools_in_volume_tools(self):
-        # 9 read_url calls but volume_tools is search-only -> not capped
-        # (read_url is legitimate research, throttled + Pattern-D-protected).
-        reads = [{
-            "tool_name": "read_url",
-            "args_sig": _normalise_args({"url": f"u{i}"}),
-            "result_content": "page text",
-            "is_error": False, "http_failure": False, "completed": True,
-        } for i in range(9)]
-        assert _detect_loop(reads, 2, 3, 3, 10,
-                            volume_threshold=6, volume_tools=self.SEARCH) is None
-
-    def test_picks_capped_tool_not_uncapped(self):
-        # search (8, capped) + read_url (3, uncapped) -> fires on search.
-        events = self._searches(8) + [{
-            "tool_name": "read_url",
-            "args_sig": _normalise_args({"url": f"u{i}"}),
-            "result_content": "page text",
-            "is_error": False, "http_failure": False, "completed": True,
-        } for i in range(3)]
-        result = _detect_loop(events, 2, 3, 3, 10,
-                              volume_threshold=8, volume_tools=self.SEARCH)
-        assert result is not None
-        assert result["tools"] == {"search_internet"}
-
-    def test_counts_per_tool_not_aggregate(self):
-        # Two capped tools, each BELOW the threshold, summing ABOVE it:
-        # 4 search + 4 read_url, both capped, threshold 6.  Per-tool the
-        # max is 4 (< 6) so nothing fires.  Pins the per-tool semantics:
-        # a healthy pass (~4 searches + a read or two) must not trip an
-        # aggregate-counting bug.
-        both = frozenset({"search_internet", "read_url"})
-        events = self._searches(4) + [{
-            "tool_name": "read_url",
-            "args_sig": _normalise_args({"url": f"u{i}"}),
-            "result_content": "page text",
-            "is_error": False, "http_failure": False, "completed": True,
-        } for i in range(4)]
-        assert _detect_loop(events, 2, 3, 3, 10,
-                            volume_threshold=6, volume_tools=both) is None
-
-    def test_reports_all_over_threshold_tools(self):
-        # Both capped tools exceed the threshold: search=7, read=7, cap=6.
-        # detection["tools"] must include BOTH so after_model intervenes on
-        # a latest call to either — naming only the busiest would let the
-        # other slip through.
-        both = frozenset({"search_internet", "read_url"})
-        events = self._searches(7) + [{
-            "tool_name": "read_url",
-            "args_sig": _normalise_args({"url": f"u{i}"}),
-            "result_content": "page text",
-            "is_error": False, "http_failure": False, "completed": True,
-        } for i in range(7)]
-        result = _detect_loop(events, 2, 3, 3, 10,
-                              volume_threshold=6, volume_tools=both)
-        assert result is not None
-        assert result["tools"] == {"search_internet", "read_url"}
-
-    def test_terminal_message_is_graceful(self):
-        msg = _compose_terminal_message(
-            {"pattern": "tool-volume", "tools": {"search_internet"},
-             "run_length": 8, "reason": "x"},
-            [],
-        )
-        # Not an error/ask-for-direction message — a "finalize now" one.
-        assert "search_internet" in msg
-        assert "?" not in msg
-
-
-class TestPatternFRedispatch:
-    """Pattern F: per-subagent `task` re-dispatch cap (orchestrator).
-
-    With subagent_dispatch_threshold=1, each subagent may be dispatched
-    once; re-dispatching an already-used one is stripped, but dispatching
-    a fresh subagent (the research -> critique -> fact-check progression)
-    passes through.
-    """
-    def test_off_by_default(self):
-        # Three research dispatches, distinct descriptions (so Pattern B
-        # does not fire), default middleware (threshold 0) -> no action.
-        mw = LoopDetectionMiddleware()
-        last = _ai_with_call("c3", "task",
-                             {"subagent_type": "research-agent", "description": "c"})
-        messages = [
-            HumanMessage(content="go"),
-            _ai_with_call("c1", "task",
-                          {"subagent_type": "research-agent", "description": "a"}),
-            _tool_msg("c1", "research result one"),
-            _ai_with_call("c2", "task",
-                          {"subagent_type": "research-agent", "description": "b"}),
-            _tool_msg("c2", "research result two"),
-            last,
+    def test_distinct_arg_mutating_thrash_does_not_fire(self):
+        # The old Pattern C niche: distinct mutating args AND genuinely
+        # different errors (so A's path-normalisation does NOT collapse them
+        # to one repeated error).  C is removed, so this no longer fires.
+        # (Note: distinct PATHS with the same "...already exists" error DO
+        # normalise alike and are still caught by Pattern A — that's the
+        # winged-horse case, intentionally kept.)
+        events = [
+            self._evt("write_file", {"file_path": "/a"}, "Error: permission denied", True),
+            self._evt("write_file", {"file_path": "/b"}, "Error: disk full", True),
+            self._evt("write_file", {"file_path": "/c"}, "Error: read-only filesystem", True),
         ]
-        assert mw.after_model({"messages": messages}, Mock()) is None
+        assert _detect_loop(events, 2, 3) is None
 
-    def test_redispatch_first_fire_finalizes_not_kills(self):
-        """First re-dispatch firing FINALIZES: strip the task call, leave the
-        redispatch nudge, and jump to the model to answer from the result it
-        already has — NOT a give-up stub."""
-        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
-        last = _ai_with_call("c2", "task",
-                             {"subagent_type": "research-agent", "description": "again"})
-        messages = [
-            HumanMessage(content="go"),
-            _ai_with_call("c1", "task",
-                          {"subagent_type": "research-agent", "description": "first"}),
-            _tool_msg("c1", "research result"),
-            last,
+    def test_http_4xx_streak_across_distinct_urls_does_not_fire(self):
+        # The old Pattern D shape: distinct URLs all returning 403 pages.
+        # Bodies aren't Python errors and args differ → A/B don't fire, and
+        # D is gone, so this is allowed to continue (recursion_limit bounds it).
+        events = [
+            self._evt("read_url", {"url": f"https://casio.com/w{i}"},
+                      "403 Forbidden — access denied")
+            for i in range(6)
         ]
-        result = mw.after_model({"messages": messages}, Mock())
-        assert result is not None
-        assert result.get("jump_to") == "model"
-        assert result["messages"][-1].tool_calls == []
-        assert result["messages"][-1].content == _REDISPATCH_NUDGE
+        assert _detect_loop(events, 2, 3) is None
 
-    def test_redispatch_second_fire_hard_stops(self):
-        """If the agent re-dispatches AGAIN after the redispatch nudge (second
-        strike this turn), fall through to the hard stop — no jump, give-up
-        stub — preserving the bound."""
-        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
-        messages = [
-            HumanMessage(content="go"),
-            _ai_with_call("c1", "task",
-                          {"subagent_type": "research-agent", "description": "first"}),
-            _tool_msg("c1", "research result"),
-            AIMessage(content=_REDISPATCH_NUDGE),   # already nudged this turn
-            _ai_with_call("c2", "task",
-                          {"subagent_type": "research-agent", "description": "again"}),
+    def test_repeated_subagent_dispatch_does_not_fire(self):
+        # The old Pattern F shape: same sub-agent dispatched several times.
+        # task re-dispatch is no longer capped here.
+        events = [
+            self._evt("task", {"subagent_type": "research-agent", "n": i})
+            for i in range(4)
         ]
-        result = mw.after_model({"messages": messages}, Mock())
+        assert _detect_loop(events, 2, 3) is None
+
+    def test_exact_repeat_still_fires_after_rollback(self):
+        # Sanity: B still catches the genuine runaway (same read_url(URL)
+        # back-to-back) that the rollback explicitly keeps protecting against.
+        events = [self._evt("read_url", {"url": "https://ex.com/same"}) for _ in range(3)]
+        result = _detect_loop(events, 2, 3)
         assert result is not None
-        assert "jump_to" not in result
-        assert result["messages"][-1].tool_calls == []
-        assert result["messages"][-1].content != _REDISPATCH_NUDGE
-        assert "gathered" in result["messages"][-1].content.lower()
-
-    def test_in_message_batch_not_capped_known_limitation(self):
-        """KNOWN LIMITATION (pinned, not a bug to fix here).
-
-        Pattern F counts COMPLETED dispatches, so two `task` calls to the
-        same subagent batched in ONE message — before either completes —
-        are not capped.  The observed prod re-dispatches (and the
-        2026-06-03 ablation's rdisp=2) are all CROSS-message: dispatch,
-        read the result, dispatch again — which Pattern F catches on the
-        next message.  In-message batching of an *identical* subagent is
-        unobserved, and the whole-message strip would over-correct (drop
-        the legitimate first dispatch too), so we pin current behavior
-        rather than add speculative partial-strip logic.  See the design
-        doc residuals.
-        """
-        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
-        batched = AIMessage(content="", tool_calls=[
-            {"name": "task",
-             "args": {"subagent_type": "research-agent", "description": "a"},
-             "id": "a"},
-            {"name": "task",
-             "args": {"subagent_type": "research-agent", "description": "b"},
-             "id": "b"},
-        ])
-        messages = [HumanMessage(content="go"), batched]
-        assert mw.after_model({"messages": messages}, Mock()) is None
-
-    def test_fresh_subagent_passes(self):
-        # research already dispatched; dispatching critique (fresh) is the
-        # normal progression and must not be stripped.
-        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
-        last = _ai_with_call("c2", "task",
-                             {"subagent_type": "critique-agent", "description": "review"})
-        messages = [
-            HumanMessage(content="go"),
-            _ai_with_call("c1", "task",
-                          {"subagent_type": "research-agent", "description": "first"}),
-            _tool_msg("c1", "research result"),
-            last,
-        ]
-        assert mw.after_model({"messages": messages}, Mock()) is None
-
-
-class TestErrorPatternsEndNotFinalize:
-    """Audit verdict: A-D are 'you're STUCK' patterns — after_model must END
-    the turn (strip tool calls, NO jump_to), the opposite of E's finalize.
-    These pin the outcome (not just detection) for the error family, the gap
-    the audit found for C/D.  See docs/2026-06-05-loop-detection-audit.org."""
-
-    def test_pattern_c_distinct_args_thrash_ends_with_direction_ask(self):
-        mw = LoopDetectionMiddleware(distinct_args_threshold=3)
-        msgs = [HumanMessage(content="go")]
-        for i, p in enumerate(["/a", "/b", "/c"]):
-            msgs.append(_ai_with_call(f"c{i}", "write_file", {"file_path": p}))
-            msgs.append(_tool_msg(f"c{i}", f"Error: cannot write {p}"))
-        msgs.append(_ai_with_call("clast", "write_file", {"file_path": "/d"}))
-        result = mw.after_model({"messages": msgs}, Mock())
-        assert result is not None
-        assert "jump_to" not in result, "error pattern C must END, not finalize"
-        assert result["messages"][-1].tool_calls == []
-        content = result["messages"][-1].content.lower()
-        assert "proceed" in content or "direction" in content
-
-    def test_pattern_d_http_failure_streak_ends(self):
-        mw = LoopDetectionMiddleware(http_failure_threshold=4)
-        msgs = [HumanMessage(content="go")]
-        for i in range(4):
-            msgs.append(_ai_with_call(f"c{i}", "read_url",
-                                      {"url": f"https://s{i}.example"}))
-            msgs.append(_tool_msg(f"c{i}", "HTTP 403 Forbidden: access denied"))
-        msgs.append(_ai_with_call("clast", "read_url",
-                                  {"url": "https://s9.example"}))
-        result = mw.after_model({"messages": msgs}, Mock())
-        assert result is not None
-        assert "jump_to" not in result, "error pattern D must END, not finalize"
-        assert result["messages"][-1].tool_calls == []
+        assert result["pattern"] == "same-tool-same-args"

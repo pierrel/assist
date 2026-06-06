@@ -140,14 +140,13 @@ def create_agent(model: BaseChatModel,
     ``critique`` subagents are built separately and do not see these
     tools (correctly, given their roles).  Default ``None`` is empty.
 
-    ``loop_exploration_tools`` is forwarded to the MAIN agent's
-    ``LoopDetectionMiddleware(exploration_tools=...)``: tool names whose
-    distinct-args breadth gets a higher Pattern-C threshold (they probe
-    many forms legitimately — e.g. emacsos's ``eval_elisp``).  They are
-    NOT exempt from loop detection (still subject to Patterns A/B and a
-    finite Pattern-C cap).  Only the main agent gets it — the bespoke
-    subagents don't receive ``extra_tools`` so the exploration tool can't
-    reach them.  Default ``None`` leaves the dev/code agent unchanged.
+    ``loop_exploration_tools`` is DEPRECATED and now a no-op.  It used to
+    feed the (since-removed) Pattern-C distinct-args breadth threshold; loop
+    detection now catches only exact-repeat loops (Patterns A/B), which apply
+    uniformly to every tool, so there is nothing to tune per exploration
+    tool.  The param is still accepted (so embedders like emacsos-server that
+    pass it don't break) but ignored — drop the kwarg at the call site and
+    this param can be removed.
 
     ``default_backend`` lets an embedder supply the composite backend's
     *default* — the target for every non-routed path — instead of the
@@ -185,15 +184,12 @@ def create_agent(model: BaseChatModel,
     # of `loop_detection_mw` so the rejection is what the loop
     # detector sees if the model retries.
     git_push_blocker_mw = GitPushBlockerMiddleware()
-    # subagent_dispatch_threshold caps re-dispatch of the same sub-agent
-    # (context / research / critique) to once — the general-agent prompt's
-    # "call each sub-agent ONCE" made deterministic.  Stops the general
-    # agent from re-dispatching the research orchestrator, which multiplies
-    # the inner search volume, and reinforces the #119 rate-limit handoff.
-    loop_detection_mw = LoopDetectionMiddleware(
-        exploration_tools=loop_exploration_tools,
-        subagent_dispatch_threshold=_SUBAGENT_DISPATCH_CAP,
-    )
+    # Loop detection catches only exact-repeat loops (same-tool-same-error /
+    # same-tool-same-args).  Distinct-arg exploration and sub-agent
+    # re-dispatch are deliberately NOT capped here — a few extra hops are
+    # fine; the runaway bound is the per-agent recursion_limit.  See the
+    # rollback note in loop_detection.py.
+    loop_detection_mw = LoopDetectionMiddleware()
     # Innermost wrap_model_call middleware — recovers from empty terminal
     # AIMessages after every outer retry/sanitization layer has had its turn.
     empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
@@ -371,64 +367,6 @@ def create_context_agent(model: BaseChatModel,
     return RollbackRunnable(agent, recursion_limit=500)
 
 
-# LoopDetection Pattern-E volume cap for the research flow.  The small
-# model reads "conduct thorough research" as "search dozens of times"
-# (prod: 50-100 search_internet calls for one trivial query), which the
-# args/error-based loop patterns don't catch because each query is
-# distinct and succeeds.  Pattern E caps the per-agent VOLUME of each tool
-# in _RESEARCH_VOLUME_TOOLS (search_internet + read_url) to ~this many
-# calls within the detection window, then makes the agent finalize with
-# what it has.  (Task RE-DISPATCH is a separate concern, capped by
-# Pattern F / _SUBAGENT_DISPATCH_CAP below — not by this volume cap.)
-# Deliberately higher than a healthy research pass (~4 searches) so it
-# only fires on genuine runaway, not normal multi-query exploration.
-# Per-AGENT, per-TOOL cap (each tool in _RESEARCH_VOLUME_TOOLS is counted
-# separately — NOT summed).  Combined with the per-subagent re-dispatch cap
-# below (which holds the orchestrator to one research dispatch), this bounds
-# each capped tool's volume to ~this many for a research turn.  Per-tool is
-# deliberate: a healthy pass is ~4 searches PLUS a read or two, so an
-# aggregate cap of 6 would fire on healthy behavior.
-_RESEARCH_TOOL_VOLUME_CAP = 6
-
-# The fact-check-agent reads many DISTINCT reference URLs to verify a
-# report's claims, and its prompt sanctions up to 10 read_url calls — so it
-# gets its OWN, higher read_url cap (vs the research-agent's 6) so a
-# compliant multi-source check isn't cut off mid-way.  Still finite, so the
-# 200+ read_url runaway observed when it was unbounded is still caught.
-_FACTCHECK_READ_URL_CAP = 12
-
-# Pattern E caps these tools on the research-agent (the sole searcher).  We
-# cap BOTH search_internet and read_url there: an uncapped read_url let it
-# read many pages and balloon the turn to ~12 min.  The fact-check-agent
-# gets its own read_url-only cap (above); the critique-agent has no capped
-# tools.  The orchestrator (which writes the report and reads URLs to do so)
-# gets NO volume cap, precisely so its read+write batches are never stripped
-# — none of the capped subagents write the report, so stripping a
-# capped-tool batch on them never loses a write.
-_RESEARCH_VOLUME_TOOLS = frozenset({"search_internet", "read_url"})
-
-# Wider LoopDetection window for the research-agent so the volume cap
-# counts searches across the WHOLE turn, not just the last 12 mixed
-# tool events.  Without this, interleaving search with read_url could
-# keep fewer than _RESEARCH_TOOL_VOLUME_CAP searches in a 12-event tail
-# and evade the cap (the very search-heavy-with-reads shape it targets).
-# Only widens the count window (and the max trailing-run length for the
-# args/error patterns, which is harmless); Pattern C keeps its own
-# distinct_args_window.
-_RESEARCH_LOOP_WINDOW = 50
-
-# Pattern F: max dispatches of any single subagent by an orchestrating
-# agent.  1 = each subagent at most once — the budget both the general
-# agent ("call each sub-agent ONCE") and the research orchestrator
-# ("research once, critique once, fact-check once") already state in
-# prose.  Made deterministic because the soft prompt rule did not hold:
-# the model re-dispatched the research-agent ~3x (at the orchestrator)
-# and, on some runs, re-dispatched the research orchestrator at the
-# general-agent level — each multiplying the inner search volume.
-# Enabled on BOTH the general agent and the research orchestrator.
-_SUBAGENT_DISPATCH_CAP = 1
-
-
 def create_research_agent(model: BaseChatModel,
                           working_dir: str,
                           checkpointer=None,
@@ -464,15 +402,10 @@ def create_research_agent(model: BaseChatModel,
     # trap (multi-pass critique → "I have completed the research" → another
     # write_file).
     base_mw.append(WriteCollisionMiddleware())
-    # The orchestrator gets the per-subagent re-dispatch cap (Pattern F):
-    # each subagent (research / critique / fact-check) at most once,
-    # matching the prompt's stated budget and deterministically stopping
-    # the research-agent re-dispatch that multiplies inner search volume.
-    # No volume cap here — the orchestrator delegates searching and has no
-    # search_internet tool, so a volume cap would be inert.
-    base_mw.append(LoopDetectionMiddleware(
-        subagent_dispatch_threshold=_SUBAGENT_DISPATCH_CAP,
-    ))
+    # Exact-repeat loop detection only (A/B).  Sub-agent re-dispatch is no
+    # longer capped here — re-dispatching the research-agent a few times is
+    # tolerated; the runaway bound is the orchestrator's recursion_limit.
+    base_mw.append(LoopDetectionMiddleware())
     base_mw.append(ThreadQueueMiddleware())
     base_mw.append(EmptyResponseRecoveryMiddleware())
 
@@ -546,33 +479,18 @@ def create_research_agent(model: BaseChatModel,
     # left the fact-check-agent unbounded — it ran 200+ `read_url`
     # calls in a diag because nothing would short-circuit a model that
     # kept "thinking of more references to verify".
-    def _subagent_safety_mw(volume_threshold=_RESEARCH_TOOL_VOLUME_CAP,
-                            volume_tools=_RESEARCH_VOLUME_TOOLS):
+    def _subagent_safety_mw():
         return [_make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
-                # Pattern-E volume cap over a turn-wide window so interleaved
-                # reads can't dilute the count below the cap.  Defaults suit
-                # the research-agent (search + read, cap 6); the fact-check
-                # agent overrides with its own read_url-only, higher cap.
-                #
-                # ORDERING CONTRACT: LoopDetection must remain the LAST
-                # after_model middleware in this list (only middleware WITHOUT
-                # an after_model hook may follow it).  Its volume cap returns
-                # `jump_to:"model"` to give a capped research-agent one synthesis
-                # turn (see loop_detection finalize path); that jump is only
-                # safe-to-skip-nothing because LoopDetection is the final
-                # after_model link.  Inserting another after_model middleware
-                # after it would let the jump silently bypass that middleware.
-                # ThreadQueueMiddleware/EmptyResponseRecovery below are fine:
-                # ThreadQueue runs BEFORE LoopDetection in the after_model chain
-                # (factory reverses list order), EmptyResponseRecovery has no
-                # after_model hook.
-                LoopDetectionMiddleware(window=_RESEARCH_LOOP_WINDOW,
-                                        volume_threshold=volume_threshold,
-                                        volume_tools=volume_tools),
+                # Exact-repeat loop detection only (A/B): catches a sub-agent
+                # hammering the same read_url(URL)/query back-to-back.  No
+                # volume cap — a sub-agent doing many DISTINCT searches/reads
+                # is allowed to run to the recursion_limit rather than be cut
+                # off mid-research.
+                LoopDetectionMiddleware(),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
@@ -596,12 +514,7 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url],
-        # Own read_url-only cap (higher than the research-agent's) so a
-        # compliant multi-source fact-check isn't cut off — see
-        # _FACTCHECK_READ_URL_CAP.
-        "middleware": _subagent_safety_mw(
-            volume_threshold=_FACTCHECK_READ_URL_CAP,
-            volume_tools=frozenset({"read_url"})),
+        "middleware": _subagent_safety_mw(),
     }
 
     # The orchestrator DELEGATES searching to the research-agent (see its
@@ -622,8 +535,15 @@ def create_research_agent(model: BaseChatModel,
                    fact_check_sub_agent]
     )
 
-    # 300 graph steps ≈ 150 model calls — research is multi-step but bounded.
-    rollback_runnable = RollbackRunnable(agent, recursion_limit=300)
+    # 150 graph steps ≈ 75 model calls.  This is now the deliberate runaway
+    # backstop for the research flow: with the Pattern-E volume cap and
+    # Pattern-F re-dispatch cap removed, a research agent that keeps issuing
+    # DISTINCT-arg searches/reads is bounded only by this limit (the host-side
+    # search/read tools aren't covered by the sandbox exec timeout).  Lowered
+    # from 300 so a runaway is caught in a few minutes rather than ~12-75 min.
+    # GraphRecursionError is in RollbackRunnable's rollback_on, so hitting it
+    # rolls back rather than crashing the thread.
+    rollback_runnable = RollbackRunnable(agent, recursion_limit=150)
 
     # Wrap with the references-cleanup runnable so intermediate drafts
     # and sub-sub-agent scratch files get pruned after the research call
