@@ -1,0 +1,325 @@
+#+title: In-repo domain skills (agent-agnostic)
+#+date: <2026-06-06>
+State: Design (Phase 1). No code yet — this doc + its PR are for review BEFORE
+implementation, per the request.
+
+* Goal
+Let the **domain repos that threads clone/create** define their OWN skills,
+in-repo, discovered automatically by the agent — instead of skills living only
+in the assist project. The format must be **agent-agnostic**: the same skill
+files must be usable by other agents (notably Claude Code and the Claude Agent
+SDK), not just our deepagents-based agent.
+
+Concretely, a user's GTD/notes/projects repo (the "domain" a thread operates
+in) should be able to ship a =./.claude/skills/<name>/SKILL.md= that the assist
+agent picks up automatically, AND that Claude Code reads natively from the same
+path with the same bytes.
+
+* The on-disk contract
+Skills live at:
+
+#+begin_example
+<domain-repo-root>/.claude/skills/<skill-name>/SKILL.md   (+ optional scripts/ references/ assets/)
+#+end_example
+
+This is the **Agent Skills open standard** (agentskills.io), which deepagents
+0.6.1 implements directly (its own docstrings cite the spec and show
+=.claude/skills= sources verbatim) and which Claude Code / the Agent SDK
+auto-discover from =.claude/skills/=. =.claude/= here is the *cross-agent
+convention*, not a Claude-Code coupling.
+
+Frontmatter is restricted to the **open-standard core**: required =name= and
+=description=; optional =license=, =compatibility=, =metadata=, =allowed-tools=.
+Constraints (already enforced by the deepagents parser): =name= ≤64 chars,
+lowercase-alnum-and-single-hyphens, must equal the directory name; =description=
+≤1024 chars. No assist-specific keys — that is what keeps the file byte-identical
+across all three consumers. deepagents reads the same bytes Claude Code reads;
+the only glue deepagents needs is being pointed at the source path (it does not
+auto-walk to repo root the way Claude Code does).
+
+* The wiring change (minimal)
+Today (=assist/agent.py:226-235=):
+
+#+begin_src python
+skill_sources = [SKILLS_ROUTE]
+if extra_skill_sources:
+    skill_sources.extend(k for k in extra_skill_sources if k != SKILLS_ROUTE)
+skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
+#+end_src
+
+The composite backend's **default** backend already serves the thread
+=working_dir= (the cloned domain repo) at root "/" in BOTH local
+(=FilesystemBackend(root_dir=working_dir)=) and Docker-sandbox
+(=create_sandbox_composite_backend=, default = the sandbox backend) modes.
+Verified: a non-routed path like =/.claude/skills/= falls through the composite
+to that default backend (=CompositeBackend._route_for_path=). So **no new route
+and no new backend class is needed** — only the skills middleware needs to be
+told to scan =/.claude/skills/=.
+
+The change is therefore:
+
+1. Add a constant in =assist/backends.py= next to =SKILLS_ROUTE=:
+   =DOMAIN_SKILLS_PATH = "/.claude/skills/"=. Name it =_PATH=, *not* =_ROUTE= —
+   it is deliberately **not** registered in the composite =routes= map (it relies
+   on default-backend fall-through). Calling it =_ROUTE= would invite a future
+   reader to "fix the inconsistency" by registering it, which would shadow the
+   working_dir default backend and silently break the feature. A one-line comment
+   states the agentskills.io convention and the no-route dependency.
+
+2. In =create_agent=, **conditionally** prepend =DOMAIN_SKILLS_PATH= to
+   =skill_sources= when the cloned repo actually has it (see "Conditional
+   registration" below):
+
+   #+begin_src python
+   # Precedence (last-wins in the listing): domain < built-in < embedder-extras.
+   # Domain skills EXTEND the built-ins; they do not override a built-in of the
+   # same name (built-in safety skills like dev/git-conflict are the floor).
+   skill_sources = [SKILLS_ROUTE]
+   if extra_skill_sources:
+       skill_sources.extend(k for k in extra_skill_sources if k != SKILLS_ROUTE)
+   if _domain_skills_present(backend):           # backend.ls, see below
+       skill_sources.insert(0, DOMAIN_SKILLS_PATH)
+   #+end_src
+
+3. **No change to =Thread= / =ThreadManager= / the =manage/web= layer.**
+   =working_dir= already flows to =create_agent= and the clone already lands
+   there; the domain source is relative to the default backend root, which is
+   already =working_dir=.
+
+** Conditional registration (resolves a real sandbox footgun)
+Register the domain source **only when =.claude/skills/= is present**, gated on a
+single =backend.ls(DOMAIN_SKILLS_PATH)= at create time.
+
+Why conditional rather than unconditional: in **sandbox mode**,
+=DockerSandboxBackend.ls= on a *missing* directory returns an *error* (not an
+empty list), which the deepagents skills middleware then logs as a per-session
+warning AND records into =skills_load_errors= state. The common case (a domain
+repo with no =.claude/skills/=) would otherwise produce a spurious warning +
+polluted state on every sandbox thread's first turn. Gating on existence keeps
+the absent case completely silent: the source is never handed to the middleware,
+so the middleware never =ls='s a missing path.
+
+The check is mode-correct because it asks the *backend the agent will actually
+use* (filesystem / sandbox / embedder-supplied default), not the host. Timing is
+safe: on the production web path the domain repo is cloned **before**
+=create_agent= runs (=_initialize_thread= clones, then =_process_message= →
+=Thread.__init__= → =create_agent=), so the check sees the cloned tree. Entry
+points that never clone (CLI, direct =create_agent=) simply don't register the
+source — a no-op.
+
+** Precedence on name collision — the one decision to confirm
+deepagents resolves listing collisions **last-source-wins** (it builds a
+=dict[name] -> skill=). With ordering =[DOMAIN_SKILLS_PATH, SKILLS_ROUTE,
+*extras]= the precedence is:
+
+: domain  <  built-in (assist/skills/)  <  embedder-extras (e.g. emacsos)
+
+i.e. **built-ins win** over a same-named domain skill, and embedder-supplied
+extras keep their existing highest precedence (preserving the documented
+emacsos override contract; the existing =sources[0]==SKILLS_ROUTE= test changes
+to =sources[0]==DOMAIN_SKILLS_PATH=, =sources[1]==SKILLS_ROUTE= — an intentional,
+reviewed flip).
+
+*Recommendation: built-ins win.* Rationale, weighed by the design-review team:
+- Two of the five built-ins are **behavioral safety gates**, not formatting
+  helpers: =dev= ("MUST load before any tool call that writes/edits/runs code")
+  and =git-conflict= (drives rebase-state resolution). Silently swapping these
+  for repo-authored instructions is an agent-*behavior* hazard, not merely a
+  security one.
+- This hazard is **not hypothetical given the agent-agnostic goal**: Claude Code
+  users routinely commit a =./.claude/skills/dev/= to their repos. The moment
+  such a repo becomes a thread's domain, a domain-wins rule would replace
+  assist's hardened =dev= gate — and a Claude-Code-authored body references tools
+  the small Qwen model doesn't have (=Bash=, =Edit=, =WebFetch=), which the "MUST
+  apply" skills prompt would then treat as mandatory-but-unsatisfiable.
+- The consumer here is the **small model**, which cannot tell a hardened safety
+  skill from a domain override. The user reviews the repo; the model does not.
+- Cost is minimal: list ordering + the =load_skill= consistency fix that is
+  required anyway (next section). Domain skills still add *every non-colliding*
+  skill — the primary ask ("let my domain repos define skills") is fully served.
+
+*Alternative (documented, not recommended): domain-wins.* Append domain LAST
+(=[SKILLS_ROUTE, *extras, DOMAIN_SKILLS_PATH]=). Lets a repo intentionally
+specialize a built-in (e.g. a stack-specific =dev=). Rejected as the default
+because the shadowing is silent and the blast radius includes the safety gates.
+If we ever want it, gate it behind an explicit opt-in key in the repo (out of
+scope here). **This is the decision to confirm at review.** Flipping it later is
+a one-line ordering change plus the matching =load_skill= direction.
+
+** Reconcile =load_skill= resolution with the listing (required either way)
+=load_skill= (=skills_middleware.py:87-101=) currently iterates =sources= and
+returns the **first** match — first-source-wins. The deepagents listing is
+**last**-source-wins. These already disagree on any collision; the feature
+exposes it (today there are no cross-source collisions, so it has never bitten).
+
+Fix: make =load_skill= resolve with the *same* precedence as the listing
+(iterate =reversed(sources)=, last-wins). Then, with =[DOMAIN, SKILLS_ROUTE,
+*extras]=, both the description the model SEES and the body =load_skill= RETURNS
+agree: extras > built-in > domain. This is a small, isolated change to existing
+code and must ship with the feature regardless of the precedence direction
+chosen.
+
+** Collision visibility (cheap, no upstream fork)
+Detecting "a domain skill shadowed a built-in" cleanly inside deepagents'
+=before_agent= would require forking its load loop — not worth it. But the
+existence check already =ls='s =.claude/skills/=, so we get the domain skill
+*names* for free. Compare that set against the five built-in names
+(=dev=, =calculate=, =org-format=, =git-conflict=, =pdf=) and emit a single
+=info= log at create time if any collide. No per-turn cost, no fork, and it
+gives the user a way to understand why their domain =dev= skill "didn't take"
+under built-ins-win.
+
+* Sub-agent boundary
+Domain skills are **main-agent-only, by design.** =SmallModelSkillsMiddleware=
+is installed only on the main agent (=agent.py:298=). The research sub-agent is
+confined to =<working_dir>/references/= via =create_references_backend= (no
+=/.claude/skills/= route) and the context sub-agent runs without the skills
+middleware. The design must NOT "helpfully" propagate the domain source into
+sub-agents — research must not be driven by domain-repo skills, and the
+references backend wouldn't resolve the path anyway. (Pre-existing asymmetry, not
+introduced here: the =dev= gate is on the main agent, while the context
+sub-agent does code exploration without skills. Out of scope to change.)
+
+* Tests & evals
+The user emphasized end-to-end testing twice ("we need a good way to test
+end-to-end"; "including how to incorporate into tests/evals"). The bar is the
+repo's *existing* skill-test standard, which asserts both that a skill **loaded**
+AND that it **changed behavior** (=edd/eval/test_skill_loading.py= pairs
+=_skill_was_loaded= with =_assert_alpha_body_preserved=). Loaded-only is below
+that bar and is not acceptable here.
+
+** Unit tests (=tests/test_create_agent_extra_skill_sources.py=, extend)
+1. *Conditional registration — present.* With a real =FilesystemBackend= over a
+   tmpdir containing =.claude/skills/<name>/SKILL.md=, =create_agent= adds
+   =DOMAIN_SKILLS_PATH= to =mw.sources=.
+2. *Conditional registration — absent.* With a tmpdir lacking =.claude/=,
+   =DOMAIN_SKILLS_PATH= is NOT in =mw.sources= (and no warning is produced).
+3. *Real-backend round-trip (the assist wiring seam — not redundant with
+   deepagents' own loader tests).* Build the standard composite backend over a
+   tmpdir with a valid skill, assert the deepagents loader discovers it via the
+   composite (proving =/.claude/skills/= resolves through the default backend)
+   and =download_files= returns the body. This is the only test that proves the
+   default-routing path end-to-end without a model.
+4. *Precedence (built-ins win) — listing.* A domain skill named =dev= does NOT
+   override the built-in =dev= in the merged listing.
+5. *Precedence (built-ins win) — =load_skill=.* =load_skill("dev")= returns the
+   **built-in** body, matching the listing (guards the reconciled direction).
+6. *Embedder-extras still win* over both built-in and domain (existing emacsos
+   contract preserved); update the =sources[0]= assertion + comment.
+
+** Agent-agnostic conformance (no new dependency)
+A lightweight frontmatter assertion that the fixture skill uses ONLY the
+open-standard core keys (reject any assist-only key), satisfies the
+agentskills.io constraints (=name==dirname=, ≤64; =description= ≤1024), and is
+accepted by deepagents' own parser (reuse the vendored =yaml= + deepagents
+spec constants — zero new deps). This actively *guards* agent-agnosticism rather
+than asserting it: the test fails if a future fixture drifts to assist-specific
+frontmatter. The design commits that the fixture file is **byte-identical** to
+what Claude Code consumes from =.claude/skills/= — same path, same bytes — which
+is the concrete meaning of "Claude Code can leverage it." A heavyweight external
+Claude-Code validator is out of scope (would add a JS dep for little marginal
+proof).
+
+** E2E evals (new file, mirror =edd/eval/test_skill_loading.py=)
+A fixture domain repo containing a distinctive, NON-built-in skill whose body
+encodes an *observable* behavior — e.g. skill =invoice-ledger= whose body
+mandates a specific sentinel output shape the agent would not produce from
+general knowledge. Assert BOTH: =_skill_was_loaded(agent, "invoice-ledger")=
+AND that the sentinel transformation appears in the output (loaded ≠ used).
+
+- *Generalization guard (CLAUDE.md rule).* The fixture skill's =description=
+  must trigger on the *shape* of the task (topic / file-type), and the eval
+  prompt must share **no distinctive tokens** with the description — phrased as a
+  real user request (e.g. "the amounts in =billing-2026.csv= don't add up to the
+  total row — sort that out"; no "invoice", "ledger", "reconcile", "skill").
+  Provide ≥2 phrasings (one with a domain hint, one task-only) as the existing
+  implicitness-level tests do. This is a requirement on the *fixture*, not a
+  property of one prompt, so Phase 2 can't satisfy it by accident.
+- *No-sandbox variant* (fast, default signal): proves the small model discovers
+  and uses a domain skill via the local =FilesystemBackend= path.
+- *Sandbox variant* (the prod path; load-bearing, not a duplicate): the sandbox
+  backend prefixes every path with =work_dir= (=/workspace=), so
+  =/.claude/skills/<name>/SKILL.md= resolves to =/workspace/.claude/skills/...=.
+  The sandbox variant is the only thing that exercises that prefixing
+  end-to-end. Use the git-repo + Docker setup from
+  =test_git_push_blocker_agent.py= / =test_dev_agent.py= (incl. the alpine
+  chmod cleanup for root-owned files).
+
+* Out of scope (deliberately)
+- No skill sandboxing / signing / trust model.
+- No UI surface (no domain-skill listing/management in the web app).
+- No auto-walk-to-repo-root discovery (deepagents gets the explicit
+  =/.claude/skills/= source; we don't replicate Claude Code's ancestor walk).
+- No per-skill =allowed-tools= enforcement (parsed for compat, never gated on —
+  assist never enforced it; nothing regresses).
+- No mid-session hot-reload (see Known limitations).
+- No domain-vs-builtin precedence *config knob* — pick one default (built-ins
+  win, recommended) and ship it.
+- No new backend route or backend class.
+
+* Known limitations (call out at merge, not just in code comments)
+1. *Skills are listed once per session and cached in the checkpoint*
+   (=skills_metadata= PrivateStateAttr). Consequences:
+   - A skill added to the repo **after** a session's first turn won't appear in
+     the listing until a NEW chat (the =load_skill= tool reads bodies live, so a
+     just-created skill is loadable by *exact name* — but it's invisible in the
+     prompt listing, so the model never learns to call it). The dev-flow
+     "create a skill then use it this session" case is therefore only partially
+     served.
+   - On the same thread across sessions, a stale =skills_metadata= short-circuits
+     re-discovery, so a domain repo that *gains* skills later won't surface them
+     for that thread's life.
+   - *v1 decision:* accept and document (this is upstream deepagents behavior,
+     not introduced here). A cache-invalidation hook (drop =skills_metadata= when
+     a =*/SKILL.md= write lands under a skills source) is a clean follow-up —
+     deferred until the create-then-use flow is observed in practice, per the
+     repo's "no theoretical-only code" rule.
+2. *Claude-Code-authored skill bodies may reference tools the small model lacks*
+   (=Bash=/=Edit=/=WebFetch= vs assist's =execute=/=read_file=/=edit_file=).
+   Combined with the "MUST apply" skills prompt, such a body becomes a mandatory
+   instruction the model can't satisfy. Mitigation is authorship guidance (in
+   the PR description / domain author's awareness), not code: in-repo skills
+   should reference assist's tool vocabulary. Built-ins-win precedence also blunts
+   the worst case (a shadowing =dev=).
+3. *Symlinks under =.claude/skills/=*: =FilesystemBackend= guards per-child
+   OSErrors and =virtual_mode= blocks =..= escape on reads; a symlink pointing
+   outside the repo could in principle be downloaded, but the repo is
+   user-cloned (same trust as the working tree the agent already reads). Not
+   hardened in v1.
+
+* Risks & edge cases
+- *Malformed SKILL.md / bad YAML*: deepagents warns and skips; once-per-session,
+  no spam.
+- *=name= ≠ dirname*: deepagents warns but still loads under the frontmatter
+  name; Claude Code is stricter. Fixtures must comply; document the rule for
+  authors.
+- *Oversized description*: truncated to 1024, not rejected.
+- *Many domain skills*: the skills list is injected into the system prompt on
+  every model call. A domain shipping 20+ skills is a standing per-turn token
+  tax and dilutes the small model's match step. No code now; note the threshold —
+  if counts grow, a per-source cap or two-tier listing may be needed.
+- *Sandbox dotfile exclusion*: the feature relies on the sandbox bind-mounting
+  dotdirs (=.claude/=). Confirm during implementation — today =.git/= proves
+  dotdirs are mounted.
+
+* Eval cadence & rollout (per CLAUDE.md)
+- Branch =domain-in-repo-skills= off =main= (done).
+- *Baseline N=3*: =edd/eval/test_skill_loading.py= (built-in skills, unregressed
+  baseline) + the new domain eval (expected: no-skill before wiring).
+- Implement → *Post-impl N=3*: built-in suite unregressed (the precedence flip
+  must not break built-in loading) + domain eval passes.
+- Code-review team (incl. the skill-wording/eval-alignment check) → address →
+  *Post-review N=5*.
+- *Stability N=10* before push, both no-sandbox and sandbox variants. Respect
+  the nightly-cron window (avoid 23:00–03:00) and any stated deadline.
+- Phase 3: push, confirm CI, Copilot review loop.
+
+* Files to touch (Phase 2)
+- =assist/backends.py= — add =DOMAIN_SKILLS_PATH= constant + comment.
+- =assist/agent.py= — conditional prepend to =skill_sources=; existence helper;
+  collision log; docstring paragraph documenting the new auto-discovery +
+  precedence + the route/source distinction.
+- =assist/middleware/skills_middleware.py= — reconcile =load_skill= to last-wins.
+- =tests/test_create_agent_extra_skill_sources.py= — unit tests above; update the
+  =sources[0]= assertion.
+- =edd/eval/test_domain_skills.py= (new) — E2E no-sandbox + sandbox variants.
