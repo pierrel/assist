@@ -365,12 +365,31 @@ LangChain shipped a code-interpreter middleware for deepagents (=CodeInterpreter
 *Concrete next step.*  Spike: build an interpreter version of calculate covering the 3-5 most common eval-prompt shapes, run =test_calculate_skill.py= at N=3 on both versions side-by-side, compare token usage + pass rate.  Decide based on data.  Out of scope: rewriting *other* skills (research, context, dev) — calculate is the cleanest test case because its semantics are simple and its sandbox dependency is shallow.
 
 * Loop detection follow-ups
-Surfaced by the 2026-06-05 LoopDetection audit (see [[file:docs/2026-06-05-loop-detection-audit.org][docs/2026-06-05-loop-detection-audit.org]]): the six patterns split into two families — A–D "you're stuck" (ending the turn is correct) and E–F "you've gathered enough" (ending DESTROYS the answer → must finalize).  E finalize shipped and works (live James Blake smoke produced a real answer); F finalize is correct but the small model often re-dispatches through the prose nudge.
-** TODO Pattern F structural fix — withhold the =task= tool on the finalize turn
-F finalize (subagent-redispatch) is a prose nudge ("answer from the result you have, don't dispatch again") and the small model ignores it ~1–2/5 (re-dispatches → second-strike hard stop → give-up stub).  Per the audit's own lesson (a nudge binds only when the desired action is the only option), make it a *checkable* constraint: on the finalize turn, remove/withhold the =task= tool so the model MUST answer from the result it already has.  Needs design+review (intercepting the tool surface for one turn).
-** TODO =edit_file= sandbox error: "unexpected server response: Traceback"
-Seen in prod thread 20260606083812 — =edit_file= on a workspace file returned =unexpected server response: Traceback= twice (Pattern A caught it gracefully and surfaced the saved artifact).  This is a sandbox / edit-endpoint reliability bug, unrelated to loop detection.  Investigate the sandbox edit path (=DockerSandboxBackend.edit= / the edit server) for what raises the traceback and why.
-** TODO Full LoopDetection refactor — separate "detect" from "on-detect"; make the two families explicit
-The middleware now carries six patterns, two terminal behaviors (A–D break vs E–F finalize-via-jump_to), a per-turn stateless nudge scan, and a pile of thresholds/knobs.  Refactor so detection (which pattern + why) is cleanly separated from the response (break vs finalize), with the stuck-vs-enough families explicit in the structure rather than implied by =_FINALIZE_PATTERNS= membership.  Also fold the duplicated =model_copy=/strip/jump return-shaping.
-** TODO Explore converting LoopDetection to prompt guidance (or demoting it to a thin backstop)
-Per the project's "guidance over middleware" direction (AGENTS.md): how much of this deterministic middleware could be replaced by — or sit behind — prompt/skill guidance?  The audit gives real data: E's nudge holds (the agent's only non-search move is to answer), F's doesn't (re-dispatch is a tempting alternative).  Use that to map where guidance can carry the load vs where a structural guard is still required.  Likely outcome: prompts set the healthy path, a slimmer middleware holds the margin.
+The 2026-06-05 audit's six-pattern design (and the E/F finalize/=jump_to=
+machinery it motivated) was ROLLED BACK on 2026-06-06 (PR #128).  Loop
+detection now keeps only the two exact-repeat guards — A (same-tool-same-error)
+and B (same-tool-same-args) — and the runaway backstop is the per-agent
+=recursion_limit= (research 300→150), not per-tool caps.  A few extra research
+hops are preferred over an artificial mid-turn stop.  That supersedes most of
+the items below.
+** DONE Pattern F structural fix — withhold the =task= tool on the finalize turn
+Moot: Pattern F (subagent-redispatch) and the whole finalize/=jump_to=
+machinery were removed in the rollback (PR #128).  A few extra sub-agent
+dispatches are now tolerated; =recursion_limit= bounds a true meta-loop.
+** DONE =edit_file= sandbox error: "unexpected server response: Traceback"
+Shipped (PR #127): root cause was =write_file= uploading via =put_archive=,
+which the Docker daemon extracts as root, leaving files un-editable by the
+non-root sandbox.  Fixed by stamping the container's run uid/gid on uploads.
+Unrelated to loop detection.
+** DONE Full LoopDetection refactor — separate "detect" from "on-detect"
+Largely satisfied by the rollback (PR #128): the middleware is now a thin A/B
+detector with a single terminal behavior (strip-to-END).  The six-pattern /
+two-behavior tangle, the finalize-via-=jump_to= path, the per-turn nudge scan,
+and most thresholds/knobs are gone, so there's no longer a structure worth a
+dedicated refactor.
+** TODO Explore converting the remaining A/B detection to prompt guidance
+Reduced scope after the rollback (PR #128).  Per AGENTS.md "guidance over
+middleware": the only deterministic guard left is exact-repeat detection
+(A/B).  Open question is whether even that can move to prompt/skill guidance or
+stay as a thin backstop.  Lower priority now that the aggressive, misfiring
+patterns are gone.
