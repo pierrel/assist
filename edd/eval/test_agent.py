@@ -644,23 +644,18 @@ class TestResearchRunsToCompletion(AgentTestMixin, TestCase):
             n_searches, 1,
             "Expected the flow to search at least once (it answered without "
             f"searching).  MAIN dispatches: {self.subagent_calls(agent)}")
-        # The answer must be a real synthesis, not a loop-detection give-up
-        # stub — i.e. it ran to completion rather than being cut off.
+        # The answer must not be a loop-detection give-up stub — that's the
+        # completion signal: the turn synthesized instead of being cut off.
+        # (No length floor: a correct, concise answer — e.g. "tabata is 20s on
+        # / 10s off x8" — has run to completion just as much as a long one, and
+        # a length threshold only adds flakiness without adding signal beyond
+        # the stub check + "it actually searched".)
         low = res.lower()
         for stub in _LOOPDETECT_STUBS:
             self.assertNotIn(
                 stub, low,
                 f"Final answer is a loop-detection give-up stub (the turn was "
                 f"cut off before synthesis): matched {stub!r}.\nGot: {res[:600]}")
-        # Backstop for a non-canned terse evasion (the canned give-up stubs
-        # are caught by the string check above; they run ~140-165 chars).  A
-        # real answer to these queries clears 200 comfortably — but we do NOT
-        # demand a long synthesis: a correct, concise answer (e.g. "tabata is
-        # 20s on / 10s off x8") is "ran to completion", not a give-up.
-        self.assertGreater(
-            len(res), 200,
-            f"Final answer too short to be a real answer ({len(res)} chars) "
-            f"— likely a give-up or cut off.\nGot: {res[:600]}")
         # Loose sanity ceiling only — NOT the design bound (that's the
         # recursion_limit).  Catches a true pathological runaway, not the few
         # extra hops the rollback intentionally allows.

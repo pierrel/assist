@@ -180,11 +180,12 @@ class TestDetectLoop:
         assert _detect_loop(events, 2, 3) is None
 
     def test_pattern_a_breaks_on_intervening_success(self):
-        # Distinct args so Pattern B can't fire — isolates Pattern A's
-        # "intervening success breaks the trailing error run" behavior.
+        # All-distinct args so Pattern B can't fire (no same-args run at all) —
+        # isolates Pattern A's "intervening success breaks the trailing error
+        # run" behavior.
         events = [
             self._evt(args={"file_path": "/a"}, content="Cannot write to /a because it already exists.", is_error=True),
-            self._evt(args={"file_path": "/a"}, content="ok"),
+            self._evt(args={"file_path": "/c"}, content="ok"),
             self._evt(args={"file_path": "/b"}, content="Cannot write to /b because it already exists.", is_error=True),
         ]
         # Trailing run of errors is length 1 only — Pattern A must not fire
