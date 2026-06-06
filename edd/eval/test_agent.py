@@ -653,3 +653,126 @@ class TestResearchSearchBudget(AgentTestMixin, TestCase):
         agent, res, n = self._run_counting_searches(
             "How do tabata intervals work?")
         self._assert_bounded(agent, res, n)
+
+
+# Loop-detection terminal stubs the FINAL answer must never be (they mean the
+# cap killed the turn before synthesis).  Lowercased substrings; see
+# loop_detection.py:_compose_terminal_message.
+_LOOPDETECT_STUBS = (
+    "enough times to answer",
+    "stop gathering and write up what i have",
+    "already gathered that sub-agent",
+    "finalize with what i have rather than dispatching",
+    "won't retry that approach",
+    "i won't repeat it",
+    "i won't keep trying variations",
+)
+
+
+class TestResearchVolumeCapFinalizes(AgentTestMixin, TestCase):
+    """When the volume cap (Pattern E) fires, the research-agent must still
+    FINALIZE — produce a real synthesized answer from what it gathered — not
+    terminate on the canned 'I'll write up what I have now' stub.
+
+    This is the audit's discriminating eval (docs/2026-06-05-loop-detection-audit.org).
+    TestResearchSearchBudget only asserts res is non-empty + bounded — which
+    the BROKEN give-up stub satisfies, so it can't catch the bug.  Here we:
+      - force the cap to fire deterministically (patch the cap LOW around the
+        build — it's read into the subagent middleware at build time),
+      - return canned results carrying a SENTINEL the synthesis must echo,
+      - assert the final answer is a real synthesis (sentinel present) and is
+        NOT any loop-detection stub.
+    Must FAIL on main (cap kills output → res is the give-up stub) and PASS
+    after the finalize-not-kill fix.
+    """
+
+    FORCED_CAP = 2          # low, so the cap fires after a couple searches
+    SEARCH_CEILING = 12     # runaway bound must still hold (cap + headroom)
+
+    def setUp(self):
+        self.model = select_assistant_model(0.1)
+
+    def _run_forced_cap(self, prompt: str, canned: str):
+        import assist.tools as _tools
+        calls = {"search": 0}
+
+        @functools.wraps(_tools.search_internet)
+        def _counted_search(query, max_results=5):
+            calls["search"] += 1
+            return canned
+
+        @functools.wraps(_tools.read_url)
+        def _canned_fetch(url):
+            return ("Relevant page text with concrete, specific information. "
+                    "Vellichor Report details follow. " * 15)
+
+        # Patch the cap LOW around the build so Pattern E fires quickly.  The
+        # research subagent reads _RESEARCH_TOOL_VOLUME_CAP into its
+        # LoopDetectionMiddleware when the agent is constructed (inside the
+        # helper), so the patch must wrap that build.
+        with patch("assist.agent._RESEARCH_TOOL_VOLUME_CAP", self.FORCED_CAP):
+            agent, res = _run_general_agent_with_search_stubs(
+                self, self.model, prompt, _counted_search, _canned_fetch)
+        return agent, res, calls["search"]
+
+    # Canned, real-looking results so the model has usable material to
+    # synthesize.  Kept plausible (no implausible sentinel) — the small model
+    # ignores canned content it doesn't believe, so the discriminator is
+    # behavioral (not-a-stub + substantive), not "did it echo a magic token".
+    _CANNED = str([
+        {"title": "Source one",
+         "url": "https://example.com/a",
+         "content": "A directly relevant, specific paragraph with concrete "
+                    "figures, names, and dates answering the question."},
+        {"title": "Source two",
+         "url": "https://example.com/b",
+         "content": "A second corroborating source covering the topic from "
+                    "another angle with additional specifics."},
+    ])
+
+    def _assert_finalized(self, agent, res, n_searches):
+        self.assertTrue(res, "Agent returned an empty response")
+        low = res.lower()
+        # 1. NOT a loop-detection give-up stub — the CORE discriminator.  On
+        #    main, the cap kills the turn and res IS one of these stubs; the
+        #    finalize fix makes the agent synthesize instead.
+        for stub in _LOOPDETECT_STUBS:
+            self.assertNotIn(
+                stub, low,
+                f"Final answer is a loop-detection stub (cap killed the turn "
+                f"before synthesis): matched {stub!r}.\nGot: {res[:600]}")
+        # 2. Substantive synthesis, not a one-line give-up.  The broken
+        #    behavior yields a short give-up; a finalized research answer is
+        #    long-form.
+        self.assertGreater(
+            len(res), 400,
+            f"Final answer is too short to be a real synthesis ({len(res)} "
+            f"chars) — likely a give-up.\nGot: {res[:600]}")
+        # 3. The cap region was actually reached (we exercised Pattern E).  With
+        #    the cap forced to 2, a finalized run searches ~2-3 times; 0 would
+        #    mean the stub wasn't even wired.
+        self.assertGreaterEqual(
+            n_searches, self.FORCED_CAP,
+            f"Only {n_searches} searches (< forced cap {self.FORCED_CAP}) — "
+            f"the test isn't exercising Pattern E.")
+        # 4. Runaway bound preserved (one extra synthesis turn, no more).
+        self.assertLessEqual(
+            n_searches, self.SEARCH_CEILING,
+            f"{n_searches} searches exceeds the {self.SEARCH_CEILING} ceiling "
+            f"— the cap's runaway bound regressed.")
+
+    def test_finalize_prod_query(self):
+        # The exact two-subject prod query that returned no answer (threads
+        # 20260605072211 / 20260605200346).
+        agent, res, n = self._run_forced_cap(
+            "Tell me about James Blake's latest album and what it means to be "
+            "an independent record.", self._CANNED)
+        self._assert_finalized(agent, res, n)
+
+    def test_finalize_second_query(self):
+        # A differently-shaped, real two-part query (per the eval-alignment
+        # convention) so a pass means fixing the SHAPE, not one prod prompt.
+        agent, res, n = self._run_forced_cap(
+            "Compare PostgreSQL and MySQL for a high-write workload, and say "
+            "which you would choose and why.", self._CANNED)
+        self._assert_finalized(agent, res, n)

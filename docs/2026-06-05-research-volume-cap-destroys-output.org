@@ -1,0 +1,161 @@
+#+title: Research volume cap destroys the agent's output (no answer)
+#+date: <2026-06-05>
+State: Design (Phase 1). Implementation deferred to a later session.
+
+* Problem (observed in production, repeatedly)
+Threads =20260605072211= and =20260605200346= ("Tell me about James Blake's
+latest album and what it means to be an independent record") returned NO
+answer and wrote NO report — twice, on different search backends.  The
+self-hosted-SearXNG work (PR #126) made search *work* (results returned) but
+did NOT fix this symptom: the failure is downstream of search.
+
+* Root cause (from prod logs)
+The inner research-agent (=sub_research.txt.j2=) called =search_internet=
+6–8 times, hitting =LoopDetectionMiddleware= Pattern E
+(=_RESEARCH_TOOL_VOLUME_CAP=6=, agent.py).  Pattern E's =after_model= strips
+the latest AI message's tool calls and replaces its content with the canned
+terminal message:
+
+  "I've already used search_internet enough times to answer this. I'll stop
+   gathering and write up what I have now."
+
+…then the agent loop ENDS (no tool calls left).  But the promised write-up
+never happens — the strip-to-end terminates the turn before the model
+synthesizes.  So the inner research-agent's FINAL message (which is all the
+orchestrator receives — sub_research: "Only your FINAL answer will be passed
+on") is that canned stub, carrying none of the gathered findings.
+
+The orchestrator (=research_instructions.txt.j2=) then has no findings, can't
+write a report, looks for =references/*.md= (not there), and gives up with
+the Pattern-F stub "I've already gathered that sub-agent's result…".  Net:
+the user gets nothing.
+
+* Two intertwined faults
+1. *The cap destroys output.*  Pattern E (tool-volume) and Pattern F
+   (subagent-redispatch) are "you've done ENOUGH — now finish" situations,
+   NOT "you're broken — stop" situations (Patterns A–D, errors).  But all
+   patterns share the same mechanism: strip tool calls + canned message +
+   END.  For E/F that's wrong — it cuts the agent off before it can produce
+   the synthesis/report it was told to write.  The terminal message is a
+   false promise.
+2. *The cap may be too low for legitimate multi-part queries.*  The triggering
+   query has TWO subjects (the album AND the meaning of "independent
+   record").  ~6 searches across two subjects is plausibly normal research,
+   not a runaway (the runaway the cap was built for was 50–100).  So the cap
+   fires on healthy behavior, then fault #1 turns that into a no-answer.
+
+* Design goal
+A volume-/redispatch-capped research-agent must still PRODUCE its answer (a
+synthesis of what it gathered, or a written report), not die with a stub —
+while the cap still bounds genuine runaways.  Both prod cases must yield a
+real, cited answer.
+
+* Candidate directions (for the design team to weigh)
+1. *Let "enough" patterns finalize instead of ending.*  For Pattern E/F,
+   don't strip-to-dead-end; instead force ONE more model turn that says
+   "search budget reached — write your final answer NOW from what you have,
+   no more searches," and only hard-end if it searches again.  (Needs a way
+   to continue the loop for a synthesis turn — verify feasibility in
+   deepagents/langgraph after_model; the current mechanism ends when no tool
+   calls remain.)
+2. *Raise/retune the cap.*  6 may be too low for multi-part queries; a higher
+   bound (still ≪ runaway) lets normal research finish and write before the
+   cap ever fires.  Band-aid alone (fault #1 persists if it ever fires) but
+   cheap and may remove the common-case trigger.
+3. *Incremental write.*  Have the research-agent write findings to a file as
+   it goes, so a cap-terminated turn still leaves usable material the
+   orchestrator can pick up.  Larger change to the research contract.
+4. *Combination.*  Most likely: make E/F finalize-not-kill (1) AND sanity-check
+   the cap value (2); the eval decides.
+
+* Eval contract (Phase A, before fixing)
+Reproduce hermetically with mocked search returning canned, real-looking
+results (so the model has usable hits): a 2-part research query must (a)
+return a NON-EMPTY, cited answer, and (b) the inner research-agent must not
+terminate on the canned volume-cap stub.  Pin BOTH prod queries' shape.
+Baseline (current): expect FAIL (no answer / stub-terminated).  This eval
+must fail on =main= and pass after the fix — the same eval-first discipline
+as the SearXNG work.
+
+* Relationship
+- Follows the over-search work (docs/2026-06-03-...) which ADDED the volume
+  cap to stop runaways; this fixes the cap's collateral damage (killing
+  legitimate output).  Do NOT remove the runaway protection — fix how it
+  terminates.
+- Independent of the search backend (PR #126); reproduces on both ddgs and
+  SearXNG.
+
+* Finalized design (Phase 1 complete — architect + design-review folded in)
+The design team + both design reviewers (simplicity / agentic / intention /
+clean-interfaces) converged on a SMALLER plan than the first draft.  What
+ships:
+
+1. *Scope v1 to Pattern E only* (the inner, READ-ONLY research-agent).  E is
+   the load-bearing fault: its stub becomes the research-agent's final
+   message (=subagents.py:434= returns =messages[-1].text=), which is all the
+   orchestrator gets.  Pattern F (orchestrator re-dispatch) is mostly a
+   DOWNSTREAM symptom of E (the orchestrator only thrashed because it got a
+   stub) — and the orchestrator is write-capable, so forcing a free "finalize"
+   turn there is riskier.  Fix E; let the eval show whether F still misbehaves
+   before touching it.  Patterns A–D (error loops) keep strip-to-END unchanged.
+
+2. *Finalize-not-kill for E via =jump_to:"model"=.*  On an E firing: strip the
+   capped tool's calls from the AIMessage, ANSWER them with a =ToolMessage=
+   (NOT a HumanMessage — a HumanMessage would re-anchor =_current_turn_slice=
+   and break the runaway bound; a ToolMessage keeps the sequence well-formed
+   and the slice intact) whose content is the finalize nudge, and return
+   =jump_to:"model"= so the model takes ONE more turn to synthesize.
+   - *Nudge wording (load-bearing, per "fail loud not silent"):* "Search
+     budget reached. Do NOT search again. Write your final answer NOW *from
+     the results you have already gathered* (do not answer from memory)."  Must
+     not invite fabrication from training data.
+
+3. *No bespoke strike sentinel.*  Derive "already nudged this turn" from the
+   message tail (the prior cap-intervention / the volume count exceeding the
+   cap by a margin after the nudge), bounded to =_current_turn_slice=.  If the
+   model searches AGAIN after the nudge, the cap re-fires and falls through to
+   the existing hard strip-to-END — the runaway bound is preserved with NO new
+   state (keeps the middleware stateless / rollback-safe).
+
+4. *No cap bump.*  Ship the finalize-fix at =_RESEARCH_TOOL_VOLUME_CAP=6=.
+   Once firing no longer destroys output, 6-vs-8 only changes how much was
+   gathered, not whether the user gets an answer; bumping it is unbundled
+   scope creep and weakens the "should rarely fire" warning.  Revisit the cap
+   ONLY if the eval shows two-subject queries need >6 searches for a *good*
+   (not merely non-empty) answer — as a separate, evidence-backed change.
+
+5. *Docstring debt:* update =loop_detection.py= module + class docstrings —
+   they currently assert a single terminal behavior ("loop ends naturally");
+   after this, A–D "break" and E "finalizes."
+
+* BLOCKER to resolve before coding (B1)
+=jump_to:"model"= from =after_model= only takes effect if the hook DECLARES it
+(=@hook_config(can_jump_to=["model"])= / =__can_jump_to__=); a plain override's
+=jump_to= is silently ignored, AND the model edge is only wired when an
+after_model hook exists.  The two reviewers disagreed on whether it fires
+out-of-the-box here, so: *first do a ~5-line spike* against the real research
+sub-agent graph confirming =jump_to:"model"= re-enters the model with a
+tool-call-free trailing AIMessage.  If it does NOT fire, the approach changes
+(fallback: leave the capped tool call answered by the nudge ToolMessage so the
+loop proceeds to a normal model turn — verify no dangling tool_call_id).
+
+* Eval contract (revised — must be honest, fail on main, pass after)
+Mirror =TestResearchSearchBudget= (=test_agent.py:562=).  Assertions:
+1. Canned mock returns genuinely USABLE hits with sentinel facts/URLs; assert
+   the final answer CITES those canned sources — distinguishes "cap killed
+   output" from "no usable results" and from a memory-hallucinated answer.
+2. Final answer is NOT the canned volume-cap stub (=loop_detection.py:611-614=).
+3. Force the cap to fire (patch =_RESEARCH_TOOL_VOLUME_CAP= low, deterministic)
+   so the E branch actually executes.
+4. Two-strike / runaway bound: if the model searches again after the nudge,
+   hard-stop fires and total capped-tool calls stay ≤ cap + O(1).
+5. TWO structurally-different multi-part queries (the two prod threads are the
+   SAME James-Blake query on two backends = one shape) — add a second,
+   non-telegraphed compare-two-things query so a pass means fixing the SHAPE.
+
+* Status
+- Phase 1 design COMPLETE (architect + design-review converged; plan revised
+  down to E-only, jump_to-finalize, no sentinel, no cap bump).
+- Next session: resolve the B1 spike, write the eval (confirm it fails on
+  main), implement, code-review, eval cadence 3/5/10, then ship on PR #126
+  (or a follow-up branch).  Deferred tonight (started ~21:25; nightly cron 23:00).
