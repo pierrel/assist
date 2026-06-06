@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from assist.middleware.loop_detection import (
     LoopDetectionMiddleware,
     _FINALIZE_NUDGE,
+    _REDISPATCH_NUDGE,
     _compose_terminal_message,
     _detect_loop,
     _extract_events,
@@ -1305,7 +1306,10 @@ class TestPatternFRedispatch:
         ]
         assert mw.after_model({"messages": messages}, Mock()) is None
 
-    def test_strips_redispatch_of_same_subagent(self):
+    def test_redispatch_first_fire_finalizes_not_kills(self):
+        """First re-dispatch firing FINALIZES: strip the task call, leave the
+        redispatch nudge, and jump to the model to answer from the result it
+        already has — NOT a give-up stub."""
         mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
         last = _ai_with_call("c2", "task",
                              {"subagent_type": "research-agent", "description": "again"})
@@ -1318,7 +1322,29 @@ class TestPatternFRedispatch:
         ]
         result = mw.after_model({"messages": messages}, Mock())
         assert result is not None
+        assert result.get("jump_to") == "model"
         assert result["messages"][-1].tool_calls == []
+        assert result["messages"][-1].content == _REDISPATCH_NUDGE
+
+    def test_redispatch_second_fire_hard_stops(self):
+        """If the agent re-dispatches AGAIN after the redispatch nudge (second
+        strike this turn), fall through to the hard stop — no jump, give-up
+        stub — preserving the bound."""
+        mw = LoopDetectionMiddleware(subagent_dispatch_threshold=1)
+        messages = [
+            HumanMessage(content="go"),
+            _ai_with_call("c1", "task",
+                          {"subagent_type": "research-agent", "description": "first"}),
+            _tool_msg("c1", "research result"),
+            AIMessage(content=_REDISPATCH_NUDGE),   # already nudged this turn
+            _ai_with_call("c2", "task",
+                          {"subagent_type": "research-agent", "description": "again"}),
+        ]
+        result = mw.after_model({"messages": messages}, Mock())
+        assert result is not None
+        assert "jump_to" not in result
+        assert result["messages"][-1].tool_calls == []
+        assert result["messages"][-1].content != _REDISPATCH_NUDGE
         assert "gathered" in result["messages"][-1].content.lower()
 
     def test_in_message_batch_not_capped_known_limitation(self):
