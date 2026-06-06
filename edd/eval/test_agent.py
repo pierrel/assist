@@ -498,11 +498,11 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
 
         @functools.wraps(_tools.search_internet)
         def _blocked_search(query, max_results=5):
-            # Mirror the real failure: search_internet raises when the
-            # SearXNG backend is unavailable (no fallback).
-            raise RuntimeError(
-                "Web search backend (SearXNG) is unavailable: connection refused"
-            )
+            # Mirror the real failure: when the SearXNG backend is down,
+            # search_internet RETURNS the explicit unavailable message (logged
+            # ERROR) rather than raising — so the agent receives it as a tool
+            # result and relays it, instead of an exception crashing the turn.
+            return _tools._SEARCH_UNAVAILABLE_MESSAGE
 
         # read_url returns an unavailable-flavoured error too, so the whole
         # external surface speaks with one voice and the model can't read

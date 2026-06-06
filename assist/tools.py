@@ -31,6 +31,27 @@ logger = logging.getLogger(__name__)
 # `make searxng-up`).  search_internet REQUIRES this — there is no fallback.
 _SEARXNG_TIMEOUT_S = 10.0
 
+# Returned (not raised) when the search backend is broken/unreachable.  This is
+# "fail loud" done right: the agent RECEIVES this as the tool result, the
+# research prompts relay it ("couldn't look this up — search is unavailable"),
+# and the user is told plainly — instead of an exception crashing the research
+# turn.  The operator still gets a logger.error with the specific cause.  No
+# wait-time framing: a broken backend is an outage to fix, not a rate-limit to
+# wait out.
+_SEARCH_UNAVAILABLE_MESSAGE = (
+    "Web search is unavailable right now — the search backend could not be "
+    "reached or returned a malformed response. Do NOT answer from your own "
+    "knowledge: tell the user you couldn't look this up because web search is "
+    "currently unavailable, and stop."
+)
+
+
+def _search_unavailable(reason: str) -> str:
+    """Log the specific cause for the operator and return the uniform
+    model-facing unavailable message (loud, not raised)."""
+    logger.error("Web search unavailable: %s", reason)
+    return _SEARCH_UNAVAILABLE_MESSAGE
+
 # --- Per-host fetch throttle ---
 _host_lock = threading.Lock()
 _host_last_call: dict[str, float] = {}
@@ -101,14 +122,16 @@ def search_internet(
     ``ASSIST_SEARCH_URL`` (private, multi-engine, no key).
 
     There is deliberately NO fallback.  If SearXNG is unset, unreachable,
-    returns an error, or returns zero results while reporting any engine
-    failures (``unresponsive_engines``), this RAISES — a broken search backend
-    must fail loudly, not silently degrade.  A genuine empty result for a
+    errors, returns a malformed response, or returns zero results while
+    reporting any engine failures (``unresponsive_engines``), this RETURNS the
+    explicit ``_SEARCH_UNAVAILABLE_MESSAGE`` (logged at ERROR) — a broken
+    backend fails LOUDLY, but as a tool result the agent relays, not an
+    exception that crashes the research turn.  A genuine empty result for a
     healthy query (zero results, no engine errors) returns ``"[]"`` so the
     agent can treat it as "no results"."""
     base_url = os.getenv("ASSIST_SEARCH_URL")
     if not base_url:
-        raise RuntimeError(
+        return _search_unavailable(
             "ASSIST_SEARCH_URL is not set — a self-hosted SearXNG instance is "
             "required for web search (run `make searxng-up`)."
         )
@@ -121,63 +144,40 @@ def search_internet(
         resp.raise_for_status()
         payload = resp.json()
     except Exception as e:
-        logger.error("SearXNG search failed at %s: %s", base_url, e)
-        raise RuntimeError(
-            f"Web search backend (SearXNG at {base_url}) is unavailable: {e}"
-        ) from e
+        return _search_unavailable(f"SearXNG at {base_url} unreachable/errored: {e}")
 
+    # A valid SearXNG response is a dict carrying a `results` list (possibly
+    # empty).  Any deviation — non-dict body, missing key, non-list value (incl.
+    # falsy {}/"", so don't coerce with `or []`) — is a malformed/unhealthy
+    # backend, not a "no results" answer.
     if not isinstance(payload, dict):
-        # A 2xx with valid-but-unexpected JSON (list/string/…) is still a
-        # broken backend — fail loud and clear rather than with a bare
-        # AttributeError on the next line.
-        logger.error("SearXNG returned unexpected JSON shape: %s", type(payload).__name__)
-        raise RuntimeError(
-            f"Web search backend (SearXNG at {base_url}) returned an unexpected "
-            f"response shape ({type(payload).__name__}); the backend is unhealthy."
+        return _search_unavailable(
+            f"SearXNG at {base_url} returned unexpected JSON shape: "
+            f"{type(payload).__name__}"
         )
-
-    # A valid SearXNG response always carries a `results` list (possibly
-    # empty).  A missing key, or a non-list value (incl. falsy {}/"" — so
-    # don't coerce with `or []`), is a malformed/unhealthy backend, not a
-    # "no results" answer: fail loud.
     if "results" not in payload:
-        logger.error("SearXNG response missing 'results' field")
-        raise RuntimeError(
-            f"Web search backend (SearXNG at {base_url}) returned a response with no "
-            f"'results' field; the backend is unhealthy."
-        )
+        return _search_unavailable(f"SearXNG at {base_url} response missing 'results'")
     results = payload["results"]
     if not isinstance(results, list):
-        logger.error("SearXNG 'results' was not a list: %s", type(results).__name__)
-        raise RuntimeError(
-            f"Web search backend (SearXNG at {base_url}) returned a 'results' field "
-            f"of unexpected type ({type(results).__name__}); the backend is unhealthy."
+        return _search_unavailable(
+            f"SearXNG at {base_url} 'results' not a list: {type(results).__name__}"
         )
     if not results:
         # Distinguish "empty results while at least one engine reported a
         # failure" (a loud backend failure) from a genuine empty result set for
         # this query.  SearXNG always returns `unresponsive_engines` as a list
         # (failing engines, empty when all healthy); a missing key means "none"
-        # but a present non-list value is a malformed/unhealthy backend → fail
-        # loud rather than read it as "no failures".
+        # but a present non-list value is a malformed/unhealthy backend.
         unresponsive = payload.get("unresponsive_engines", [])
         if not isinstance(unresponsive, list):
-            logger.error(
-                "SearXNG 'unresponsive_engines' was not a list: %s",
-                type(unresponsive).__name__,
-            )
-            raise RuntimeError(
-                f"Web search backend (SearXNG at {base_url}) returned an "
-                f"'unresponsive_engines' field of unexpected type "
-                f"({type(unresponsive).__name__}); the backend is unhealthy."
+            return _search_unavailable(
+                f"SearXNG at {base_url} 'unresponsive_engines' not a list: "
+                f"{type(unresponsive).__name__}"
             )
         if unresponsive:
-            logger.error(
-                "SearXNG returned no results and engines failed: %s", unresponsive
-            )
-            raise RuntimeError(
-                "Web search returned nothing because the search engines failed "
-                f"({unresponsive}) — the search backend is unhealthy."
+            return _search_unavailable(
+                f"SearXNG at {base_url} returned no results and engines failed: "
+                f"{unresponsive}"
             )
         return "[]"
 
