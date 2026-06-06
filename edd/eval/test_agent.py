@@ -570,8 +570,9 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
 # an exact-repeat loop (Pattern A/B) cut the turn off before synthesis.
 # Lowercased substrings; see loop_detection.py:_compose_terminal_message.
 _LOOPDETECT_STUBS = (
-    "won't retry that approach",      # Pattern A
-    "i won't repeat it",              # Pattern B
+    "won't retry that approach",      # Pattern A (no artifact)
+    "i won't repeat it",              # Pattern B (no artifact)
+    "i've saved the output to",       # either pattern WITH a successful artifact
 )
 
 

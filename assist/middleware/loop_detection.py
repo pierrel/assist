@@ -15,13 +15,18 @@ message carries no tool calls.
 Two patterns are recognised — both are "you are repeating yourself
 verbatim", the only loops worth stopping deterministically:
 
-A. Same tool + same normalised error, repeated >=
+A. Same *mutating* tool + same normalised error, repeated >=
    ``error_repeat_threshold`` times in a row. Errors are normalised so
-   varying paths/IDs/numbers don't hide the repetition.
+   varying paths/IDs/numbers don't hide the repetition. Read-only tools
+   (``_READ_ONLY_TOOLS``) are transparent to this walk — a repeated
+   read-only error is NOT caught by A (reading the same thing and getting
+   the same error is left to B's same-args check), since a read-only call
+   between two failing writes is "let me check what's there", not a loop.
 
 B. Same tool + same args, repeated >= ``args_repeat_threshold`` times in
    a row. Catches the model calling the same tool with identical
-   arguments back-to-back regardless of result.
+   arguments back-to-back regardless of result. Applies to read-only tools
+   too (e.g. the same ``read_url(URL)`` hundreds of times).
 
 Everything else — distinct-arg exploration, http-failure streaks, sheer
 tool volume, sub-agent re-dispatch — is intentionally NOT caught here.
