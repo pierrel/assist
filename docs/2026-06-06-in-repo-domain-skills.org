@@ -86,18 +86,27 @@ The change is therefore:
    there; the domain source is relative to the default backend root, which is
    already =working_dir=.
 
-** Conditional registration (resolves a real sandbox footgun)
-Register the domain source **only when =.claude/skills/= is present**, gated on a
-single =backend.ls(DOMAIN_SKILLS_PATH)= at create time.
+** Conditional registration
+Register the domain source **only when =.claude/skills/= actually holds skill
+directories**, gated on a single =backend.ls(DOMAIN_SKILLS_PATH)= at create
+time. (The check also filters on =is_dir=, mirroring the deepagents loader: a
+stray file under =.claude/skills/= is not a skill and must not register the
+source.)
 
-Why conditional rather than unconditional: in **sandbox mode**,
-=DockerSandboxBackend.ls= on a *missing* directory returns an *error* (not an
-empty list), which the deepagents skills middleware then logs as a per-session
-warning AND records into =skills_load_errors= state. The common case (a domain
-repo with no =.claude/skills/=) would otherwise produce a spurious warning +
-polluted state on every sandbox thread's first turn. Gating on existence keeps
-the absent case completely silent: the source is never handed to the middleware,
-so the middleware never =ls='s a missing path.
+Why conditional rather than unconditional: when the dir is absent or holds no
+skills, registering the source would add a useless entry to the middleware's
+prompt listing and a redundant per-session scan that finds nothing. Gating
+avoids both.
+
+[Correction from code review, 2026-06-06] An earlier draft justified the gate by
+claiming a sandbox =ls= of a *missing* dir returns an *error* that pollutes
+=skills_load_errors=. That is wrong: deepagents' =SandboxBackend.ls= swallows
+=FileNotFoundError= and returns an empty list with no error (verified in
+=sandbox.py=), exactly like the local =FilesystemBackend=. So absence is
+naturally silent either way; the gate's real value is just keeping the sources
+list clean. The existence check uses no =try/except= — a genuine infrastructure
+error (e.g. a dead sandbox surfacing through =execute=) propagates, matching the
+repo's fail-fast preference rather than being swallowed.
 
 The check is mode-correct because it asks the *backend the agent will actually
 use* (filesystem / sandbox / embedder-supplied default), not the host. Timing is
@@ -159,15 +168,16 @@ agree: extras > built-in > domain. This is a small, isolated change to existing
 code and must ship with the feature regardless of the precedence direction
 chosen.
 
-** Collision visibility (cheap, no upstream fork)
-Detecting "a domain skill shadowed a built-in" cleanly inside deepagents'
-=before_agent= would require forking its load loop — not worth it. But the
-existence check already =ls='s =.claude/skills/=, so we get the domain skill
-*names* for free. Compare that set against the five built-in names
-(=dev=, =calculate=, =org-format=, =git-conflict=, =pdf=) and emit a single
-=info= log at create time if any collide. No per-turn cost, no fork, and it
-gives the user a way to understand why their domain =dev= skill "didn't take"
-under built-ins-win.
+** Collision visibility — DROPPED in code review (2026-06-06)
+The design originally added a one-time =info= log when a domain skill name
+collided with a built-in (computed for free from the existence-check =ls=).
+The code-review team flagged it as theoretical-value code (per the repo's "no
+code that serves only theoretical value" rule): it narrates a by-design,
+already-tested precedence outcome to operator logs that the domain-skill author
+won't read, and the precedence is pinned by unit tests regardless. It was cut,
+along with the import-time =_BUILTIN_SKILL_NAMES= set it required. Built-ins
+still win silently (the safety floor); if diagnosing a shadowed domain skill
+ever becomes a real need, the log is a trivial add-back at that point.
 
 * Sub-agent boundary
 Domain skills are **main-agent-only, by design.** =SmallModelSkillsMiddleware=
@@ -220,21 +230,30 @@ is the concrete meaning of "Claude Code can leverage it." A heavyweight external
 Claude-Code validator is out of scope (would add a JS dep for little marginal
 proof).
 
-** E2E evals (new file, mirror =edd/eval/test_skill_loading.py=)
-A fixture domain repo containing a distinctive, NON-built-in skill whose body
-encodes an *observable* behavior — e.g. skill =invoice-ledger= whose body
-mandates a specific sentinel output shape the agent would not produce from
-general knowledge. Assert BOTH: =_skill_was_loaded(agent, "invoice-ledger")=
-AND that the sentinel transformation appears in the output (loaded ≠ used).
+** E2E evals (=edd/eval/test_domain_skills.py=, mirrors =test_skill_loading.py=)
+A fixture domain repo containing a distinctive, NON-built-in skill
+(=ledger-audit=: reconcile a spreadsheet's parts to its stated bottom line).
+Each model test asserts BOTH =_skill_was_loaded(agent, "ledger-audit")= AND
+that the agent did the work the skill describes.
 
+- *The "used" signal — a derived figure, not a sentinel (changed in code
+  review).* The first draft had the skill body mandate a sentinel tag
+  (=[LEDGER-CHECK]=) and asserted the tag's presence. N=5 surfaced that the
+  small model reliably *did the reconciliation* but unreliably *emitted the
+  cosmetic tag* (~35% drop) — the AGENTS.md "guidance is unreliable for this
+  model" shape. The tag was dropped. Instead the fixture's entries sum to a
+  figure (=210.00=) that appears **nowhere** in the file (the file states a
+  *wrong* total), so asserting that figure is in the reply proves the agent
+  actually summed the entries — a stabler and more honest "used" check than an
+  arbitrary tag. (=_skill_was_loaded= remains the skill-attributable discovery
+  signal; the derived figure confirms non-stub engagement.)
 - *Generalization guard (CLAUDE.md rule).* The fixture skill's =description=
-  must trigger on the *shape* of the task (topic / file-type), and the eval
-  prompt must share **no distinctive tokens** with the description — phrased as a
-  real user request (e.g. "the amounts in =billing-2026.csv= don't add up to the
-  total row — sort that out"; no "invoice", "ledger", "reconcile", "skill").
-  Provide ≥2 phrasings (one with a domain hint, one task-only) as the existing
-  implicitness-level tests do. This is a requirement on the *fixture*, not a
-  property of one prompt, so Phase 2 can't satisfy it by accident.
+  triggers on the *shape* of the task; the prompts avoid the description's own
+  verbs ("reconcile", "sum", "total") and the skill's identity ("ledger",
+  "audit"). Two implicitness rungs (domain hint vs. a neutral reconciliation
+  question) plus an **anti-test** (a file-rename over the same =billing-2026.csv=
+  must NOT load the skill) pin the description against both under- and
+  over-triggering. This is a requirement on the *fixture*, not one prompt.
 - *No-sandbox variant* (fast, default signal): proves the small model discovers
   and uses a domain skill via the local =FilesystemBackend= path.
 - *Sandbox variant* (the prod path; load-bearing, not a duplicate): the sandbox

@@ -15,7 +15,7 @@ from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
 from assist.tools import read_url, search_internet
-from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE, SKILLS_DIR, DOMAIN_SKILLS_PATH
+from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE, DOMAIN_SKILLS_PATH
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
 from assist.sandbox import DockerSandboxBackend, SandboxContainerLostError
@@ -38,46 +38,26 @@ from assist.env import env_int
 
 logger = logging.getLogger(__name__)
 
-# Built-in skill names (the subdirs of assist/skills/), used to warn when a
-# domain skill shadows a built-in.  Read once at import; the package's own
-# skills dir is always present.
-_BUILTIN_SKILL_NAMES = frozenset(
-    name for name in os.listdir(SKILLS_DIR)
-    if os.path.isdir(os.path.join(SKILLS_DIR, name))
-)
+def _has_domain_skills(backend: BackendProtocol) -> bool:
+    """True iff the domain repo defines skills at ``/.claude/skills/``.
 
-
-def _domain_skill_names(backend: BackendProtocol) -> set[str]:
-    """Names of skill dirs under the domain repo's ``/.claude/skills/``.
-
-    A gated existence check (see docs/2026-06-06-in-repo-domain-skills.org):
-    it asks the agent's *own* backend — filesystem, sandbox, or an
-    embedder-supplied default — so it is mode-correct, and it returns an empty
-    set on a missing/empty dir WITHOUT handing the path to the skills
-    middleware.  That matters in sandbox mode, where an ``ls`` of a missing
-    directory returns an error that the middleware would otherwise log and
-    record into ``skills_load_errors`` on every session's first turn.  On the
+    A gated existence check (see docs/2026-06-06-in-repo-domain-skills.org): it
+    asks the agent's *own* backend — filesystem, sandbox, or an
+    embedder-supplied default — so it is mode-correct, and registers the source
+    only when there's something to list (an absent or skill-empty dir would
+    otherwise add a useless entry to the middleware's listing + a redundant
+    scan).  A missing dir yields an empty ``ls`` on every backend (the sandbox
+    swallows ``FileNotFoundError``), so absence is naturally silent; a real
+    infrastructure error (e.g. a dead sandbox) propagates, by design.  Requires
+    a skill *directory* — mirroring the deepagents loader, a stray file under
+    ``.claude/skills/`` is not a skill and must not register the source.  On the
     production web path the domain repo is cloned before ``create_agent`` runs,
     so this sees the cloned tree.
     """
-    try:
-        result = backend.ls(DOMAIN_SKILLS_PATH)
-    except Exception:
-        return set()
-    if getattr(result, "error", None) or not getattr(result, "entries", None):
-        return set()
-    names = set()
-    for entry in result.entries:
-        # Backend ls entries are dicts ({"path": ..., "is_dir": ...}); fall
-        # back to attribute access for any backend that returns objects.
-        if isinstance(entry, dict):
-            raw = entry.get("path") or entry.get("name") or ""
-        else:
-            raw = getattr(entry, "path", None) or getattr(entry, "name", "") or ""
-        name = os.path.basename(str(raw).rstrip("/"))
-        if name:
-            names.add(name)
-    return names
+    result = backend.ls(DOMAIN_SKILLS_PATH)
+    if result.error:
+        return False
+    return any(entry.get("is_dir") for entry in (result.entries or []))
 
 
 def _create_standard_backend(working_dir: str,
@@ -288,22 +268,16 @@ def create_agent(model: BaseChatModel,
     # Auto-discover skills the cloned domain repo defines at
     # <working_dir>/.claude/skills/ (served by the composite *default* backend;
     # no route needed — see DOMAIN_SKILLS_PATH).  Registered only when the dir
-    # exists so the absent case stays silent (sandbox `ls` of a missing dir
-    # errors).  Prepended so it sits FIRST: the deepagents listing is
-    # last-source-wins, so precedence is domain < built-in < embedder-extras —
-    # i.e. built-in safety skills (dev, git-conflict) are NOT overridable by a
-    # same-named domain skill.  See docs/2026-06-06-in-repo-domain-skills.org.
-    domain_skill_names = _domain_skill_names(backend)
-    if domain_skill_names and DOMAIN_SKILLS_PATH not in skill_sources:
+    # actually holds skills, so an absent/empty one adds no useless source.
+    # Prepended so it sits FIRST: the deepagents listing is last-source-wins, so
+    # precedence is domain < built-in < embedder-extras — built-in safety skills
+    # (dev, git-conflict) are NOT overridable by a same-named domain skill.  (An
+    # embedder that explicitly routes DOMAIN_SKILLS_PATH via extra_skill_sources
+    # has already placed it after SKILLS_ROUTE; the guard avoids a double-insert
+    # and leaves that deliberate override at its chosen precedence.)  See
+    # docs/2026-06-06-in-repo-domain-skills.org.
+    if _has_domain_skills(backend) and DOMAIN_SKILLS_PATH not in skill_sources:
         skill_sources.insert(0, DOMAIN_SKILLS_PATH)
-        shadowed = domain_skill_names & _BUILTIN_SKILL_NAMES
-        if shadowed:
-            logger.info(
-                "Domain skill(s) %s share a name with built-in skills; the "
-                "built-in takes precedence and the domain version is ignored. "
-                "Rename the domain skill if you intend it to be used.",
-                sorted(shadowed),
-            )
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 

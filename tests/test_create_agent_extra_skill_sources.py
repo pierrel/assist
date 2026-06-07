@@ -257,6 +257,18 @@ class TestCreateAgentDomainSkills:
         mw = self._mw(self._build_in(wd))
         assert DOMAIN_SKILLS_PATH not in mw.sources
 
+    def test_domain_source_absent_when_only_stray_files(self):
+        # A .claude/skills/ holding only stray files (no skill *directory*)
+        # must behave like absent — the deepagents loader keys off skill dirs,
+        # so registering the source would advertise zero loadable skills.
+        wd = self._tmpdir()
+        d = os.path.join(wd, ".claude", "skills")
+        os.makedirs(d)
+        with open(os.path.join(d, "README.md"), "w") as f:
+            f.write("not a skill\n")
+        mw = self._mw(self._build_in(wd))
+        assert DOMAIN_SKILLS_PATH not in mw.sources
+
     def test_domain_and_extras_precedence_ordering(self):
         wd = self._tmpdir()
         self._write_skill(wd, ".claude/skills/widget-maker", "widget-maker",
