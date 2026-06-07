@@ -12,15 +12,19 @@ routes that hold skill files outside the assist repo.  The contract:
      contributes skills.
 """
 
+import os
+import shutil
 import tempfile
 from unittest.mock import patch, MagicMock
 
 from assist.backends import (
     SKILLS_ROUTE,
+    DOMAIN_SKILLS_PATH,
     STATEFUL_PATHS,
     create_composite_backend,
     create_sandbox_composite_backend,
 )
+from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from deepagents.backends import FilesystemBackend
 
 
@@ -179,3 +183,140 @@ class TestCreateAgentExtraSkillSources:
         assert mw.sources.count(SKILLS_ROUTE) == 1, (
             f"SKILLS_ROUTE duplicated in middleware sources: {mw.sources}"
         )
+
+
+class TestCreateAgentDomainSkills:
+    """In-repo domain skills: skills the cloned domain repo defines at
+    ``<working_dir>/.claude/skills/`` are auto-discovered.  The source is
+    added ONLY when the dir exists (gated `ls`), prepended so precedence is
+    ``domain < built-in < embedder-extras`` (built-ins win a name collision),
+    and ``load_skill`` resolves last-source-wins to match the listing.
+
+    See docs/2026-06-06-in-repo-domain-skills.org.
+    """
+
+    def setup_method(self):
+        self._dirs = []
+
+    def teardown_method(self):
+        for d in self._dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _tmpdir(self):
+        d = tempfile.mkdtemp()
+        self._dirs.append(d)
+        return d
+
+    def _write_skill(self, root, reldir, name, description,
+                     body="Follow these domain rules."):
+        d = os.path.join(root, reldir)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "SKILL.md"), "w") as f:
+            f.write(f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n")
+
+    def _build_in(self, wd, **kwargs):
+        """Like TestCreateAgentExtraSkillSources._build, but over a caller-owned
+        working_dir (so we can place a ``.claude/skills/`` tree the gated
+        existence check will see)."""
+        from assist.agent import create_agent
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        with patch("assist.agent.create_deep_agent") as fake, \
+             patch("assist.agent.create_context_agent") as fake_ctx, \
+             patch("assist.agent.create_research_agent") as fake_res:
+            fake.return_value = MagicMock()
+            fake_ctx.return_value = MagicMock()
+            fake_res.return_value = MagicMock()
+            create_agent(MagicMock(), wd, checkpointer=InMemorySaver(),
+                         sandbox_backend=None, **kwargs)
+            return fake.call_args.kwargs
+
+    def _mw(self, kwargs):
+        return next(m for m in kwargs["middleware"]
+                    if isinstance(m, SmallModelSkillsMiddleware))
+
+    def test_domain_source_registered_first_when_present(self):
+        wd = self._tmpdir()
+        self._write_skill(wd, ".claude/skills/widget-maker", "widget-maker",
+                          "Builds widgets.")
+        mw = self._mw(self._build_in(wd))
+        # Prepended → index 0 (lowest precedence under last-wins), built-in next.
+        assert mw.sources[0] == DOMAIN_SKILLS_PATH
+        assert mw.sources[1] == SKILLS_ROUTE
+
+    def test_domain_source_absent_when_no_claude_dir(self):
+        wd = self._tmpdir()
+        mw = self._mw(self._build_in(wd))
+        # No .claude/skills/ → not registered → existing behavior unchanged.
+        assert DOMAIN_SKILLS_PATH not in mw.sources
+        assert mw.sources[0] == SKILLS_ROUTE
+
+    def test_domain_source_absent_when_claude_dir_empty(self):
+        wd = self._tmpdir()
+        os.makedirs(os.path.join(wd, ".claude", "skills"))  # exists but empty
+        mw = self._mw(self._build_in(wd))
+        assert DOMAIN_SKILLS_PATH not in mw.sources
+
+    def test_domain_and_extras_precedence_ordering(self):
+        wd = self._tmpdir()
+        self._write_skill(wd, ".claude/skills/widget-maker", "widget-maker",
+                          "Builds widgets.")
+        extra = _route_backend()
+        mw = self._mw(self._build_in(
+            wd, extra_skill_sources={"/emacsos-skills/": extra}))
+        # domain < built-in < embedder-extras.
+        assert mw.sources == [DOMAIN_SKILLS_PATH, SKILLS_ROUTE, "/emacsos-skills/"]
+
+    def test_domain_skill_discovered_through_default_backend(self):
+        """The assist wiring seam: ``/.claude/skills/`` is NOT a composite
+        route — it must resolve through the *default* backend (= working_dir).
+        Prove the deepagents loader actually discovers a skill there."""
+        from assist.agent import _create_standard_backend
+        from deepagents.middleware.skills import _list_skills_with_errors
+
+        wd = self._tmpdir()
+        self._write_skill(wd, ".claude/skills/widget-maker", "widget-maker",
+                          "Builds widgets.")
+        backend = _create_standard_backend(wd)
+        skills, error = _list_skills_with_errors(backend, DOMAIN_SKILLS_PATH)
+        assert error is None
+        assert "widget-maker" in {s["name"] for s in skills}
+
+    def test_builtin_wins_over_domain_in_listing(self):
+        """A domain skill named like a built-in (``dev``) must NOT win the
+        listing merge (deepagents last-source-wins; built-in source is last)."""
+        from assist.agent import _create_standard_backend
+        from deepagents.middleware.skills import _list_skills_with_errors
+
+        wd = self._tmpdir()
+        marker = "DOMAIN-OVERRIDE-MARKER-zzz"
+        self._write_skill(wd, ".claude/skills/dev", "dev", marker)
+        backend = _create_standard_backend(wd)
+
+        merged = {}
+        for source in [DOMAIN_SKILLS_PATH, SKILLS_ROUTE]:  # the order create_agent builds
+            found, _ = _list_skills_with_errors(backend, source)
+            for s in found:
+                merged[s["name"]] = s  # last-source-wins, mirroring before_agent
+        assert "dev" in merged
+        assert marker not in merged["dev"]["description"], (
+            "built-in dev must win the listing over a same-named domain skill"
+        )
+
+    def test_load_skill_returns_builtin_on_collision(self):
+        """load_skill must agree with the listing: return the built-in ``dev``
+        body, not the domain override (reversed-source resolution)."""
+        from assist.agent import _create_standard_backend
+
+        wd = self._tmpdir()
+        marker = "DOMAIN-OVERRIDE-BODY-zzz"
+        self._write_skill(wd, ".claude/skills/dev", "dev",
+                          "Domain dev skill.", body=marker)
+        backend = _create_standard_backend(wd)
+        mw = SmallModelSkillsMiddleware(
+            backend=backend, sources=[DOMAIN_SKILLS_PATH, SKILLS_ROUTE])
+        result = mw.tools[0].invoke({"name": "dev"})
+        assert marker not in result, (
+            "load_skill returned the domain dev body; built-in must win"
+        )
+        assert "not found" not in result.lower()

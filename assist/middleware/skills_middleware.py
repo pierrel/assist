@@ -84,7 +84,13 @@ def _make_load_skill_tool(backend, sources):
         Returns the full body of the skill, including the rules you
         must follow before continuing with the task.
         """
-        for source in sources:
+        # Resolve in REVERSE source order to match the deepagents listing,
+        # which is last-source-wins (it builds a name->skill dict, so a later
+        # source overwrites an earlier one).  Iterating forward here would make
+        # load_skill first-source-wins and disagree with the description the
+        # model just read on any name collision (e.g. a domain skill shadowing
+        # a built-in).  See docs/2026-06-06-in-repo-domain-skills.org.
+        for source in reversed(sources):
             path = f"{source.rstrip('/')}/{name}/SKILL.md"
             try:
                 responses = backend.download_files([path])

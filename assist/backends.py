@@ -77,6 +77,16 @@ STATEFUL_PATHS = [
 SKILLS_ROUTE = "/skills/"
 SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
 
+# Domain skills live in the cloned repo at <working_dir>/.claude/skills/ — the
+# agentskills.io open-standard path that Claude Code and the Agent SDK also read
+# (same bytes, no shim).  This is a SOURCE PATH for the skills middleware, NOT a
+# composite route: it is intentionally absent from `routes()` so it falls
+# through to the *default* backend (= the working_dir) and is reachable in both
+# local and sandbox modes without any per-feature route.  Do NOT register it as
+# a route — that would shadow the working_dir default backend and the feature
+# would silently go dark.  See docs/2026-06-06-in-repo-domain-skills.org.
+DOMAIN_SKILLS_PATH = "/.claude/skills/"
+
 
 def routes(stateful_paths: list[str]) -> dict:
     routes = {path: StateBackend() for path in stateful_paths}
