@@ -1,7 +1,6 @@
 import functools
 import os
 import re
-import subprocess
 import tempfile
 import shutil
 from textwrap import dedent
@@ -15,7 +14,7 @@ from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 
-from .utils import read_file, create_filesystem, AgentTestMixin
+from .utils import read_file, create_filesystem, AgentTestMixin, skill_was_loaded, cleanup_workspace
 
 class TestAgent(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
@@ -212,26 +211,6 @@ def _artifact_contents(workspace: str) -> list[str]:
     return out
 
 
-def _cleanup_workspace(path: str) -> None:
-    """Remove a workspace dir, using Docker for root-owned files.
-
-    Mirrors the cleanup helpers in test_dev_agent.py and
-    test_calculate_skill.py — sandbox commands write files as root, and
-    plain shutil.rmtree fails on those without an intermediate chmod.
-    """
-    try:
-        subprocess.run(
-            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup',
-             'alpine', 'sh', '-c',
-             'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-    shutil.rmtree(path, ignore_errors=True)
-
-
 class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
     """Integration evals that need a real sandbox.
 
@@ -256,7 +235,7 @@ class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        _cleanup_workspace(self.workspace)
+        cleanup_workspace(self.workspace)
 
     def _create_agent(self, filesystem: dict | None = None):
         if filesystem:
@@ -266,21 +245,6 @@ class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
             self.workspace,
             sandbox_backend=self.sandbox,
         ))
-
-    def _skill_was_loaded(self, agent, skill_name: str) -> bool:
-        path_needle = f"/skills/{skill_name}/"
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage) or not m.tool_calls:
-                continue
-            for tc in m.tool_calls:
-                args = tc.get("args") or {}
-                if (tc.get("name") == "load_skill"
-                        and args.get("name") == skill_name):
-                    return True
-                for v in args.values():
-                    if isinstance(v, str) and path_needle in v:
-                        return True
-        return False
 
     def _ran_python_via_execute(self, agent) -> bool:
         """True iff at least one `execute` tool call invoked Python.
@@ -363,7 +327,7 @@ class TestAgentSandboxIntegration(AgentTestMixin, TestCase):
 
         # 2. Calculate skill was loaded for the projection.
         self.assertTrue(
-            self._skill_was_loaded(agent, "calculate"),
+            skill_was_loaded(agent, "calculate"),
             "Should have loaded the calculate skill to project the user's "
             "balance forward.  A finance projection without running the "
             "math is exactly the failure mode this skill exists to prevent.",

@@ -14,7 +14,6 @@ import os
 import re
 import subprocess
 import tempfile
-import shutil
 from unittest import TestCase
 
 from langchain_core.messages import AIMessage
@@ -22,6 +21,8 @@ from langchain_core.messages import AIMessage
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
+
+from .utils import executed_commands, cleanup_workspace
 
 
 logger = logging.getLogger(__name__)
@@ -62,20 +63,6 @@ def _rsync_project(dest: str) -> None:
     ], check=True)
 
 
-def _cleanup_workspace(path: str) -> None:
-    """Remove workspace directory, using Docker to delete root-owned files."""
-    try:
-        subprocess.run(
-            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup',
-             'alpine', 'sh', '-c', 'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass  # best-effort
-    shutil.rmtree(path, ignore_errors=True)
-
-
 class TestDevAgentPlanningFlow(TestCase):
     """Eval for the planning-first TDD workflow with user-approval gates.
 
@@ -110,7 +97,7 @@ class TestDevAgentPlanningFlow(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        _cleanup_workspace(self.workspace)
+        cleanup_workspace(self.workspace)
 
     def _create_agent(self) -> AgentHarness:
         # General agent + dev skill (post-Phase-D).  The rsync'd workspace
@@ -129,13 +116,6 @@ class TestDevAgentPlanningFlow(TestCase):
                 for tc in (getattr(m, 'tool_calls', None) or []):
                     calls.append((tc.get('name', ''), tc.get('args', {})))
         return calls
-
-    def _executed_commands(self, agent: AgentHarness) -> list[str]:
-        return [
-            args.get('command', '')
-            for name, args in self._get_tool_calls(agent)
-            if name == 'execute'
-        ]
 
     def _written_paths(self, agent: AgentHarness) -> list[str]:
         return [
@@ -201,7 +181,7 @@ class TestDevAgentPlanningFlow(TestCase):
         self.assertIsNotNone(
             first_test_idx,
             "Agent should run at least one existing test before making changes. "
-            f"Executed commands: {self._executed_commands(agent)}",
+            f"Executed commands: {executed_commands(agent)}",
         )
         if first_impl_write_idx is not None:
             self.assertLess(
@@ -322,7 +302,7 @@ class TestDevAgentPlanningFlow(TestCase):
         )
 
         # Tests were run and the output was shown (tests must fail)
-        all_commands = self._executed_commands(agent)
+        all_commands = executed_commands(agent)
         test_run_commands = [
             c for c in all_commands
             if any(kw in c for kw in ('pytest', 'python -m pytest', 'python -m unittest'))

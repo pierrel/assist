@@ -41,19 +41,17 @@ What these evals pin:
    agentskills.io core schema, so it stays the same artifact Claude Code reads.
 """
 import shutil
-import subprocess
 import tempfile
 from textwrap import dedent
 from unittest import TestCase
 
 import yaml
-from langchain_core.messages import AIMessage
 
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import create_filesystem
+from .utils import create_filesystem, skill_was_loaded, cleanup_workspace
 
 
 _SKILL_NAME = "ledger-audit"          # NOT a built-in name (no collision)
@@ -106,45 +104,6 @@ def _fixture() -> dict:
     }
 
 
-def _skill_was_loaded(agent, skill_name: str) -> bool:
-    """True iff a tool call loaded the named skill's body.
-
-    Recognizes ``load_skill(name=skill_name)`` (the small-model tool) and the
-    upstream ``read_file`` path containing ``/skills/<name>/``.  Local to this
-    suite, mirroring the other skill evals so they can drift independently.
-    """
-    path_needle = f"/skills/{skill_name}/"
-    for m in agent.all_messages():
-        if not isinstance(m, AIMessage) or not m.tool_calls:
-            continue
-        for tc in m.tool_calls:
-            args = tc.get("args") or {}
-            if tc.get("name") == "load_skill" and args.get("name") == skill_name:
-                return True
-            for v in args.values():
-                if isinstance(v, str) and path_needle in v:
-                    return True
-    return False
-
-
-def _cleanup_workspace(path: str) -> None:
-    """Remove a sandbox workspace, using Docker to delete root-owned files.
-
-    Mirrors the helper in test_calculate_skill.py / test_dev_agent.py.
-    """
-    try:
-        subprocess.run(
-            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup',
-             'alpine', 'sh', '-c',
-             'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-    shutil.rmtree(path, ignore_errors=True)
-
-
 class TestDomainSkillFrontmatterIsAgentAgnostic(TestCase):
     """No model / no Docker — guards that the fixture skill stays a portable,
     open-standard artifact (the contract behind "Claude Code can leverage it").
@@ -192,7 +151,7 @@ class TestDomainSkillLoadingLocal(TestCase):
         derived figure (210.00, absent from the file), proving it summed the
         entries rather than echoing a stated number or returning a stub."""
         self.assertTrue(
-            _skill_was_loaded(agent, _SKILL_NAME),
+            skill_was_loaded(agent, _SKILL_NAME),
             "agent did not load the in-repo ledger-audit skill",
         )
         self.assertRegex(
@@ -231,7 +190,7 @@ class TestDomainSkillLoadingLocal(TestCase):
             "Rename `billing-2026.csv` to `invoices.csv` for me."
         )
         self.assertFalse(
-            _skill_was_loaded(agent, _SKILL_NAME),
+            skill_was_loaded(agent, _SKILL_NAME),
             "ledger-audit loaded on a pure file-rename task — its description "
             "is firing on the billing file rather than the reconciliation task",
         )
@@ -259,7 +218,7 @@ class TestDomainSkillLoadingSandbox(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        _cleanup_workspace(self.workspace)
+        cleanup_workspace(self.workspace)
 
     def test_loads_with_domain_hint_in_sandbox(self):
         create_filesystem(self.workspace, _fixture())
@@ -274,7 +233,7 @@ class TestDomainSkillLoadingSandbox(TestCase):
         # job is to prove /.claude/skills/ -> /workspace/.claude/skills/
         # resolution, so it shares the assertions rather than redefining them.
         self.assertTrue(
-            _skill_was_loaded(agent, _SKILL_NAME),
+            skill_was_loaded(agent, _SKILL_NAME),
             "agent did not load the in-repo ledger-audit skill inside the "
             "sandbox (path-prefix resolution may be broken)",
         )

@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 import unittest
 
@@ -33,25 +32,12 @@ from assist.agent import AgentHarness, create_agent
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
+from .utils import skill_was_loaded, cleanup_workspace
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 FIXTURE_DIR = os.path.join(REPO, "tests", "fixtures", "pdf")
-
-
-def _cleanup_workspace(path: str) -> None:
-    """Mirror of test_calculate_skill.py's helper — delete root-owned files."""
-    try:
-        subprocess.run(
-            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup',
-             'alpine', 'sh', '-c',
-             'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-    shutil.rmtree(path, ignore_errors=True)
 
 
 class TestPdfReading(TestCase):
@@ -76,7 +62,7 @@ class TestPdfReading(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        _cleanup_workspace(self.workspace)
+        cleanup_workspace(self.workspace)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -139,22 +125,6 @@ class TestPdfReading(TestCase):
                     return True
         return False
 
-    def _skill_was_loaded(self, agent, skill_name: str) -> bool:
-        """Mirrors ``test_calculate_skill._skill_was_loaded``."""
-        path_needle = f"/skills/{skill_name}/"
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage) or not m.tool_calls:
-                continue
-            for tc in m.tool_calls:
-                args = tc.get("args") or {}
-                if (tc.get("name") == "load_skill"
-                        and args.get("name") == skill_name):
-                    return True
-                for v in args.values():
-                    if isinstance(v, str) and path_needle in v:
-                        return True
-        return False
-
     # ------------------------------------------------------------------
     # Mode 1: orient
     # ------------------------------------------------------------------
@@ -170,7 +140,7 @@ class TestPdfReading(TestCase):
         res = agent.message("How many pages is sample.pdf?")
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "pdf"),
+            skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF question.",
         )
         self.assertFalse(
@@ -201,7 +171,7 @@ class TestPdfReading(TestCase):
         res = agent.message("What does sample.pdf say about dosage?")
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "pdf"),
+            skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF keyword question.",
         )
         self.assertFalse(
@@ -234,7 +204,7 @@ class TestPdfReading(TestCase):
         res = agent.message("What does page 2 of sample.pdf cover?")
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "pdf"),
+            skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF page-range question.",
         )
         self.assertFalse(
@@ -276,7 +246,7 @@ class TestPdfReading(TestCase):
         res = agent.message("Give me a one-paragraph overview of big.pdf.")
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "pdf"),
+            skill_was_loaded(agent, "pdf"),
             "Agent did not load the pdf skill on a PDF overview question.",
         )
         self.assertFalse(
