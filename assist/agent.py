@@ -47,9 +47,13 @@ def _has_domain_skills(backend: BackendProtocol) -> bool:
     only when there's something to list (an absent or skill-empty dir would
     otherwise add a useless entry to the middleware's listing + a redundant
     scan).  A missing dir yields an empty ``ls`` on every backend (the sandbox
-    swallows ``FileNotFoundError``), so absence is naturally silent; a real
-    infrastructure error (e.g. a dead sandbox) propagates, by design.  Requires
-    a skill *directory* — mirroring the deepagents loader, a stray file under
+    swallows ``FileNotFoundError``), so absence is naturally silent.  A genuine
+    infrastructure failure (e.g. a dead sandbox) surfaces as a raised exception
+    from the backend and propagates, by design — there is deliberately no
+    ``try/except`` here.  A soft ``result.error`` from the listing itself is
+    treated as "no domain skills" rather than raised, so a peripheral
+    listing hiccup does not abort agent construction.  Requires a skill
+    *directory* — mirroring the deepagents loader, a stray file under
     ``.claude/skills/`` is not a skill and must not register the source.  On the
     production web path the domain repo is cloned before ``create_agent`` runs,
     so this sees the cloned tree.
@@ -163,7 +167,7 @@ def create_agent(model: BaseChatModel,
     the absent case stays silent).  Precedence on a name collision is
     ``domain < built-in < embedder-extras`` — a same-named domain skill
     does NOT override a built-in (the safety skills ``dev`` /
-    ``git-conflict`` are the floor); a one-time info log notes any shadow.
+    ``git-conflict`` are the floor).
 
     ``extra_tools`` is a sequence of ``BaseTool | Callable | dict[str,
     Any]`` passed through to ``create_deep_agent(tools=...)`` — the

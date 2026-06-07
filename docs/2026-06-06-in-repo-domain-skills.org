@@ -1,7 +1,10 @@
 #+title: In-repo domain skills (agent-agnostic)
 #+date: <2026-06-06>
-State: Design (Phase 1). No code yet — this doc + its PR are for review BEFORE
-implementation, per the request.
+State: Implemented (PR #129). Started as a Phase-1 design doc for review before
+coding; the implementation landed on the same branch after the design (and the
+built-ins-win precedence) was approved. Sections below that say "the design
+recommends X" describe decisions now shipped; "Design changes from review"
+notes are folded inline where they apply.
 
 * Goal
 Let the **domain repos that threads clone/create** define their OWN skills,

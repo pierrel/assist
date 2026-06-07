@@ -92,6 +92,9 @@ _CSV = dedent("""\
     TOTAL,190.00
     """)
 _CORRECT_SUM = "210"  # entries reconcile to 210.00; the stated 190.00 is wrong
+# Digit-boundary match so a wrong larger number that contains "210" (e.g. 2100)
+# can't false-pass a plain substring check; tolerates "210"/"210.0"/"210.00".
+_CORRECT_SUM_RE = r"\b210(?:\.\d{1,2})?\b"
 
 
 def _fixture() -> dict:
@@ -167,7 +170,8 @@ class TestDomainSkillFrontmatterIsAgentAgnostic(TestCase):
 
 class TestDomainSkillLoadingLocal(TestCase):
     """No-sandbox rung: domain skill discovered via the local FilesystemBackend.
-    Asserts the skill loaded AND its mandated sentinel reached the output.
+    Asserts the skill loaded AND that the agent did the reconciliation (the
+    derived figure, absent from the file, reaches the output).
     """
 
     @classmethod
@@ -189,8 +193,8 @@ class TestDomainSkillLoadingLocal(TestCase):
             _skill_was_loaded(agent, _SKILL_NAME),
             "agent did not load the in-repo ledger-audit skill",
         )
-        self.assertIn(
-            _CORRECT_SUM, response,
+        self.assertRegex(
+            response, _CORRECT_SUM_RE,
             f"skill loaded but the reconciliation wasn't done — the derived "
             f"figure {_CORRECT_SUM}.00 is absent from the reply (loaded != used)",
         )
@@ -272,8 +276,8 @@ class TestDomainSkillLoadingSandbox(TestCase):
             "agent did not load the in-repo ledger-audit skill inside the "
             "sandbox (path-prefix resolution may be broken)",
         )
-        self.assertIn(
-            _CORRECT_SUM, response,
+        self.assertRegex(
+            response, _CORRECT_SUM_RE,
             f"skill loaded but reconciliation not done — derived figure "
             f"{_CORRECT_SUM}.00 absent (loaded != used)",
         )
