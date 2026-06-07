@@ -280,7 +280,9 @@ def create_agent(model: BaseChatModel,
     # has already placed it after SKILLS_ROUTE; the guard avoids a double-insert
     # and leaves that deliberate override at its chosen precedence.)  See
     # docs/2026-06-06-in-repo-domain-skills.org.
-    if _has_domain_skills(backend) and DOMAIN_SKILLS_PATH not in skill_sources:
+    # Cheap membership check first so the (possibly sandbox-exec'd) `ls` in
+    # _has_domain_skills is skipped when an embedder already supplied the path.
+    if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
         skill_sources.insert(0, DOMAIN_SKILLS_PATH)
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
