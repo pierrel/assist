@@ -14,6 +14,7 @@ is *behavioral*: the agent must actually run emacs to verify, which needs a real
 - ``test_does_not_load_on_python_task`` (no sandbox) — anti-test pinning the
   trigger: a Python task must not load the elisp skill.
 """
+import os
 import re
 import shutil
 import subprocess
@@ -120,6 +121,58 @@ class TestElispSkillSandbox(TestCase):
             self._ran_emacs_batch(agent),
             "elisp skill loaded but the agent never ran emacs to verify — it "
             "should byte-compile / run ERT, not just emit elisp and trust it",
+        )
+
+    def _sandbox_sh(self, script: str) -> subprocess.CompletedProcess:
+        """Run a shell snippet in a fresh sandbox container against the
+        workspace, capturing output — used to independently verify the elisp
+        the agent produced (not to drive the agent)."""
+        return subprocess.run(
+            ['docker', 'run', '--rm', '-v', f'{self.workspace}:/workspace',
+             '-w', '/workspace', 'assist-sandbox', 'bash', '-c', script],
+            capture_output=True, text=True, timeout=120)
+
+    def test_writes_wellformed_elisp(self):
+        """The skill's payoff: the agent produces elisp that is well-formed and
+        actually works. We pin the file/function names, then INDEPENDENTLY
+        byte-compile the artifact and run it — the eval verifies the output, not
+        just that the agent ran something."""
+        agent = AgentHarness(create_agent(
+            self.model, self.workspace, sandbox_backend=self.sandbox))
+        agent.message(
+            "Create an Emacs Lisp file `mathy.el` that provides a function "
+            "`mathy-factorial` taking one non-negative integer N and returning "
+            "N factorial — so (mathy-factorial 5) returns 120. Give the file a "
+            "proper Commentary section. Make sure it byte-compiles cleanly."
+        )
+        self.assertTrue(
+            _skill_was_loaded(agent, "elisp"),
+            "agent did not load the elisp skill for an Emacs-Lisp authoring task",
+        )
+        path = os.path.join(self.workspace, "mathy.el")
+        self.assertTrue(os.path.exists(path), "agent did not write mathy.el")
+
+        # Well-formed: lexical-binding cookie present.
+        src = open(path).read()
+        self.assertRegex(
+            src, r"lexical-binding:\s*t",
+            "mathy.el is missing the `lexical-binding: t` file-local cookie",
+        )
+
+        # Well-formed + working: byte-compiles with no error...
+        bc = self._sandbox_sh(
+            "emacs --batch -Q -f batch-byte-compile mathy.el 2>&1; echo EXIT:$?")
+        self.assertIn("EXIT:0", bc.stdout,
+                      f"mathy.el did not byte-compile cleanly:\n{bc.stdout}")
+        self.assertNotIn("Error", bc.stdout,
+                         f"byte-compile reported an error:\n{bc.stdout}")
+
+        # ...and computes the right answer.
+        run = self._sandbox_sh(
+            "emacs --batch -Q -l mathy.el --eval '(princ (mathy-factorial 5))'")
+        self.assertIn(
+            "120", run.stdout,
+            f"(mathy-factorial 5) did not return 120:\n{run.stdout}\n{run.stderr}",
         )
 
 
