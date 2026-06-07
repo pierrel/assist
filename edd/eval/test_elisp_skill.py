@@ -25,7 +25,7 @@ from langchain_core.messages import AIMessage
 
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
-from assist.sandbox_manager import SandboxManager
+from assist.sandbox_manager import SandboxManager, SANDBOX_IMAGE
 
 
 def _skill_was_loaded(agent, skill_name: str) -> bool:
@@ -95,16 +95,24 @@ class TestElispSkillSandbox(TestCase):
         SandboxManager.cleanup(self.workspace)
         _cleanup_workspace(self.workspace)
 
+    # Markers of an action that actually loads/compiles/checks a file, so
+    # `target` appearing merely as a positional file argument (which Emacs does
+    # not evaluate) doesn't count as verification.
+    _VERIFY_ACTIONS = ("batch-byte-compile", "byte-compile-file", "checkdoc",
+                       "ert-run-tests", "load-file", "-l ", "--load")
+
     def _verified_file_in_emacs(self, agent, target: str) -> bool:
-        """True iff the agent ran an ``emacs --batch`` command that references
-        ``target`` — the file it was asked to write — so it verified THAT code
-        (byte-compile / load / ERT loading it), not some unrelated file or a
-        no-op like ``emacs --batch --version``. The exact form (compile vs test
-        vs load-and-eval) is the model's choice."""
+        """True iff the agent ran an ``emacs --batch`` command that VERIFIES
+        ``target`` — the file it was asked to write — via a real load/compile/
+        check action (byte-compile / load / ERT / checkdoc), not some unrelated
+        file, a bare positional visit, or a no-op like ``--version``. The exact
+        form is the model's choice."""
         for cmd in _executed_commands(agent):
-            if (re.search(r"\bemacs\b", cmd)
+            if not (re.search(r"\bemacs\b", cmd)
                     and ("--batch" in cmd or "-batch" in cmd)
                     and target in cmd):
+                continue
+            if any(action in cmd for action in self._VERIFY_ACTIONS):
                 return True
         return False
 
@@ -133,7 +141,7 @@ class TestElispSkillSandbox(TestCase):
         the agent produced (not to drive the agent)."""
         return subprocess.run(
             ['docker', 'run', '--rm', '-v', f'{self.workspace}:/workspace',
-             '-w', '/workspace', 'assist-sandbox', 'bash', '-c', script],
+             '-w', '/workspace', SANDBOX_IMAGE, 'bash', '-c', script],
             capture_output=True, text=True, timeout=120)
 
     def test_writes_wellformed_elisp(self):
