@@ -38,8 +38,8 @@ especially headless (`emacs --batch`), which is how an agent invokes it.
 
 ## Lint (treat warnings as errors)
 
-- Byte-compile and read the warnings:
-  `emacs --batch -Q -f batch-byte-compile file.el`
+- Byte-compile, treating warnings as errors (non-zero exit on any warning):
+  `emacs --batch -Q --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile file.el`
 - Check docstrings and conventions:
   `emacs --batch -Q --eval '(checkdoc-file "file.el")'`
 

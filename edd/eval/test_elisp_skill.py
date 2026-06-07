@@ -96,12 +96,16 @@ class TestElispSkillSandbox(TestCase):
         _cleanup_workspace(self.workspace)
 
     def _ran_emacs_batch(self, agent) -> bool:
-        """True iff the agent exercised code in ``emacs --batch`` — byte-compile,
-        ERT, checkdoc, or load-and-eval all count. The contract is that the agent
-        *verified in emacs* rather than eyeballing; the exact form is the model's
-        choice."""
+        """True iff the agent VERIFIED the code in ``emacs --batch`` — the call
+        must actually touch elisp (a ``.el`` file, or a byte-compile / ERT /
+        checkdoc action), so a no-op like ``emacs --batch --version`` does not
+        count. The exact form is the model's choice."""
         for cmd in _executed_commands(agent):
-            if re.search(r"\bemacs\b", cmd) and ("--batch" in cmd or "-batch" in cmd):
+            if not (re.search(r"\bemacs\b", cmd)
+                    and ("--batch" in cmd or "-batch" in cmd)):
+                continue
+            if (".el" in cmd or "byte-compile" in cmd
+                    or "ert-run-tests" in cmd or "checkdoc" in cmd):
                 return True
         return False
 
@@ -165,11 +169,12 @@ class TestElispSkillSandbox(TestCase):
 
         # Well-formed + working: byte-compiles with no error...
         bc = self._sandbox_sh(
-            "emacs --batch -Q -f batch-byte-compile mathy.el 2>&1; echo EXIT:$?")
-        self.assertIn("EXIT:0", bc.stdout,
-                      f"mathy.el did not byte-compile cleanly:\n{bc.stdout}")
-        self.assertNotIn("Error", bc.stdout,
-                         f"byte-compile reported an error:\n{bc.stdout}")
+            "emacs --batch -Q --eval '(setq byte-compile-error-on-warn t)' "
+            "-f batch-byte-compile mathy.el 2>&1; echo EXIT:$?")
+        self.assertIn(
+            "EXIT:0", bc.stdout,
+            f"mathy.el did not byte-compile cleanly (warnings count as "
+            f"errors):\n{bc.stdout}")
 
         # ...and computes the right answer.
         run = self._sandbox_sh(
