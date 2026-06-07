@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 from unittest import TestCase
 from langchain_core.messages import ToolMessage, AIMessage
 
@@ -130,6 +132,65 @@ def read_file(path: str) -> str:
 def files_in_directory(path: str) -> list[str]:
     """Returns the files in path as a list"""
     return os.listdir(path)
+
+def skill_was_loaded(agent, skill_name: str) -> bool:
+    """True iff a tool call loaded the named skill's body.
+
+    Recognizes both routes the SkillsMiddleware exposes:
+
+    - ``load_skill(name=skill_name)`` — the small-model tool registered by
+      ``SmallModelSkillsMiddleware``.
+    - ``read_file`` / ``read`` with a path containing ``/skills/<name>/`` —
+      the upstream deepagents path.
+
+    Shared by the skill-loading evals; grep tool-call args rather than results,
+    since the model proves intent the moment it issues the call.
+    """
+    path_needle = f"/skills/{skill_name}/"
+    for m in agent.all_messages():
+        if not isinstance(m, AIMessage) or not m.tool_calls:
+            continue
+        for tc in m.tool_calls:
+            args = tc.get("args") or {}
+            if tc.get("name") == "load_skill" and args.get("name") == skill_name:
+                return True
+            for v in args.values():
+                if isinstance(v, str) and path_needle in v:
+                    return True
+    return False
+
+
+def executed_commands(agent) -> list[str]:
+    """Command strings from every ``execute`` tool call, in order."""
+    cmds = []
+    for m in agent.all_messages():
+        if not isinstance(m, AIMessage) or not m.tool_calls:
+            continue
+        for tc in m.tool_calls:
+            if tc.get("name") == "execute":
+                cmd = (tc.get("args") or {}).get("command", "")
+                if cmd:
+                    cmds.append(cmd)
+    return cmds
+
+
+def cleanup_workspace(path: str) -> None:
+    """Remove a sandbox workspace, using Docker to delete root-owned files.
+
+    Sandbox commands (pip, pytest, emacs, ...) write files as root inside the
+    bind mount; a plain ``shutil.rmtree`` fails on those without an
+    intermediate chmod, so run one in a throwaway alpine container first.
+    """
+    try:
+        subprocess.run(
+            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup', 'alpine',
+             'sh', '-c', 'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
+            check=False, timeout=60,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    shutil.rmtree(path, ignore_errors=True)
+
 
 def create_filesystem(root_dir: str,
                       structure: dict):

@@ -21,57 +21,11 @@ import subprocess
 import tempfile
 from unittest import TestCase
 
-from langchain_core.messages import AIMessage
-
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager, SANDBOX_IMAGE
 
-
-def _skill_was_loaded(agent, skill_name: str) -> bool:
-    """True iff a tool call loaded the named skill (load_skill or the
-    upstream /skills/<name>/ read path). Local to this suite, mirroring the
-    other skill evals so they can drift independently."""
-    path_needle = f"/skills/{skill_name}/"
-    for m in agent.all_messages():
-        if not isinstance(m, AIMessage) or not m.tool_calls:
-            continue
-        for tc in m.tool_calls:
-            args = tc.get("args") or {}
-            if tc.get("name") == "load_skill" and args.get("name") == skill_name:
-                return True
-            for v in args.values():
-                if isinstance(v, str) and path_needle in v:
-                    return True
-    return False
-
-
-def _executed_commands(agent) -> list[str]:
-    """Command strings from every ``execute`` tool call."""
-    cmds = []
-    for m in agent.all_messages():
-        if not isinstance(m, AIMessage) or not m.tool_calls:
-            continue
-        for tc in m.tool_calls:
-            if tc.get("name") == "execute":
-                cmd = (tc.get("args") or {}).get("command", "")
-                if cmd:
-                    cmds.append(cmd)
-    return cmds
-
-
-def _cleanup_workspace(path: str) -> None:
-    """Remove a sandbox workspace, using Docker to delete root-owned files.
-    Mirrors the helper in test_calculate_skill.py / test_dev_agent.py."""
-    try:
-        subprocess.run(
-            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup', 'alpine',
-             'sh', '-c', 'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-    shutil.rmtree(path, ignore_errors=True)
+from .utils import cleanup_workspace, executed_commands, skill_was_loaded
 
 
 class TestElispSkillSandbox(TestCase):
@@ -93,7 +47,7 @@ class TestElispSkillSandbox(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        _cleanup_workspace(self.workspace)
+        cleanup_workspace(self.workspace)
 
     # Markers of an action that actually loads/compiles/checks a file, so
     # `target` appearing merely as a positional file argument (which Emacs does
@@ -107,7 +61,7 @@ class TestElispSkillSandbox(TestCase):
         check action (byte-compile / load / ERT / checkdoc), not some unrelated
         file, a bare positional visit, or a no-op like ``--version``. The exact
         form is the model's choice."""
-        for cmd in _executed_commands(agent):
+        for cmd in executed_commands(agent):
             if not (re.search(r"\bemacs\b", cmd)
                     and ("--batch" in cmd or "-batch" in cmd)
                     and target in cmd):
@@ -125,7 +79,7 @@ class TestElispSkillSandbox(TestCase):
             "works."
         )
         self.assertTrue(
-            _skill_was_loaded(agent, "elisp"),
+            skill_was_loaded(agent, "elisp"),
             "agent did not load the elisp skill for an Emacs-Lisp authoring task",
         )
         self.assertTrue(
@@ -151,14 +105,17 @@ class TestElispSkillSandbox(TestCase):
         just that the agent ran something."""
         agent = AgentHarness(create_agent(
             self.model, self.workspace, sandbox_backend=self.sandbox))
+        # No quality directions in the prompt (no "byte-compile cleanly", no
+        # "add a Commentary section") — those must come from the SKILL. The
+        # assertions below independently verify the artifact is well-formed and
+        # working, so a pass means the skill induced that, not the prompt.
         agent.message(
             "Create an Emacs Lisp file `mathy.el` that provides a function "
             "`mathy-factorial` taking one non-negative integer N and returning "
-            "N factorial — so (mathy-factorial 5) returns 120. Give the file a "
-            "proper Commentary section. Make sure it byte-compiles cleanly."
+            "N factorial — so (mathy-factorial 5) returns 120."
         )
         self.assertTrue(
-            _skill_was_loaded(agent, "elisp"),
+            skill_was_loaded(agent, "elisp"),
             "agent did not load the elisp skill for an Emacs-Lisp authoring task",
         )
         path = os.path.join(self.workspace, "mathy.el")
@@ -217,6 +174,6 @@ class TestElispSkillAntiTrigger(TestCase):
             "numbers, and add a quick test for it."
         )
         self.assertFalse(
-            _skill_was_loaded(agent, "elisp"),
+            skill_was_loaded(agent, "elisp"),
             "elisp skill loaded on a pure Python task — its trigger is too broad",
         )
