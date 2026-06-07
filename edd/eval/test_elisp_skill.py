@@ -171,10 +171,14 @@ class TestElispSkillSandbox(TestCase):
         bc = self._sandbox_sh(
             "emacs --batch -Q --eval '(setq byte-compile-error-on-warn t)' "
             "-f batch-byte-compile mathy.el 2>&1; echo EXIT:$?")
+        self.assertEqual(
+            bc.returncode, 0,
+            f"sandbox byte-compile run failed to launch (docker/mount issue?):\n"
+            f"stdout:\n{bc.stdout}\nstderr:\n{bc.stderr}")
         self.assertIn(
             "EXIT:0", bc.stdout,
             f"mathy.el did not byte-compile cleanly (warnings count as "
-            f"errors):\n{bc.stdout}")
+            f"errors):\nstdout:\n{bc.stdout}\nstderr:\n{bc.stderr}")
 
         # ...and computes the right answer.
         run = self._sandbox_sh(
