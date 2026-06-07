@@ -152,12 +152,15 @@ class TestElispSkillSandbox(TestCase):
         path = os.path.join(self.workspace, "mathy.el")
         self.assertTrue(os.path.exists(path), "agent did not write mathy.el")
 
-        # Well-formed: lexical-binding cookie present.
+        # Well-formed: a real first-line `-*- lexical-binding: t; -*-` cookie
+        # (not merely the string appearing somewhere like a Commentary line).
         with open(path, encoding="utf-8") as f:
             src = f.read()
+        first_line = src.splitlines()[0] if src.splitlines() else ""
         self.assertRegex(
-            src, r"lexical-binding:\s*t",
-            "mathy.el is missing the `lexical-binding: t` file-local cookie",
+            first_line, r"-\*-.*lexical-binding:\s*t.*-\*-",
+            f"mathy.el's first line lacks a valid `-*- lexical-binding: t; -*-` "
+            f"file-local cookie; got: {first_line!r}",
         )
 
         # Well-formed + working: byte-compiles with no error...
@@ -171,6 +174,10 @@ class TestElispSkillSandbox(TestCase):
         # ...and computes the right answer.
         run = self._sandbox_sh(
             "emacs --batch -Q -l mathy.el --eval '(princ (mathy-factorial 5))'")
+        self.assertEqual(
+            run.returncode, 0,
+            f"loading/running mathy.el failed:\n{run.stdout}\n{run.stderr}",
+        )
         self.assertIn(
             "120", run.stdout,
             f"(mathy-factorial 5) did not return 120:\n{run.stdout}\n{run.stderr}",
