@@ -158,3 +158,10 @@ Host-specific values — absolute paths inside someone's home directory, deploy 
 3. **Examples / doc snippets.** Use angle-bracket placeholders (`<DEPLOY_PATH>`, `<ASSIST_THREADS_DIR>`) where a literal path would otherwise appear. Operators substitute their own values when they read the file.
 
 Before committing a script or example, grep your diff for your own `/home/<you>/...` and any production hostnames; if anything matches, lift it into env first.
+
+# Deploying after a merge
+Whenever something lands on `main` — merged by Claude **or** by the user — deploy the latest `main` to prod as the next step: `make deploy-code` then `make restart`. A merge alone changes nothing live; prod runs the rsync'd copy under `$DEPLOY_PATH`, so runtime changes (agent, middleware, skills, sandbox image) have no effect until deployed. After deploying, verify the running code actually contains the change (e.g. `grep` the deployed file for a new symbol) and that the service is healthy.
+
+Do not leave `main` ahead of prod silently: a "merged but not deployed" gap is invisible until a live thread hits the missing behavior. (This bit us: in-repo domain skills + the `elisp` skill were merged but undeployed, so a thread couldn't see a committed in-repo skill — prod had no discovery code.)
+
+Caveat for in-repo skills specifically: the skill list is cached per session in the thread's checkpoint, so an **existing** thread won't pick up a newly-discovered domain skill even after deploy — a new chat will. New threads work immediately.
