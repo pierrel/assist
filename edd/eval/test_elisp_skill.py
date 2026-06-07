@@ -153,7 +153,8 @@ class TestElispSkillSandbox(TestCase):
         self.assertTrue(os.path.exists(path), "agent did not write mathy.el")
 
         # Well-formed: lexical-binding cookie present.
-        src = open(path).read()
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
         self.assertRegex(
             src, r"lexical-binding:\s*t",
             "mathy.el is missing the `lexical-binding: t` file-local cookie",
