@@ -424,38 +424,38 @@ layer 2 to make a skill match, the description (layer 3) is wrong.
 
 The description is the only thing the model has to decide whether to
 load. It is matched against the user's latest message by the
-pre-action check (and by the model's general attention). Keep these
-constraints in mind:
+pre-action check (and by the model's general attention). Every built-in
+skill uses the same shape — **a one-line capability sentence, a few
+concrete `EXAMPLES`, and a `MUST load before` clause**:
 
-- **Front-load trigger keywords.** Empirically, the small model only
-  reliably matches a description when high-signal tokens appear early.
-  Putting natural prose first and a `TRIGGER WORDS — ...` list later
-  drops pass rate from ~95% to under 30%.
-- **Use a `TRIGGER WORDS — <comma-separated tokens>` segment** for
-  domain anchors: file extensions (`.org`), example filenames
-  (`projects.org`), and concrete topic words the user might say
-  (`asterisk heading`, `orphan`). These are the tokens that make
-  matching robust.
-- **Include a `MUST load before <conditions>` clause.** Without an
-  imperative-shaped condition, the model treats the description as
-  informational and skips loading. This is one of the few places
-  imperative wording earns its keep.
+- **Open with a one-line capability sentence** naming the domain in the
+  words a user would actually say (e.g. `Editing or creating org-mode
+  (\`.org\`) files without breaking heading structure.`). Leading with
+  those words keeps the high-signal tokens early.
+- **Give 2–3 `EXAMPLES — "..."; "..."` of real requests** as natural
+  phrasings, NOT a keyword list. Examples convey the *shape* of a
+  matching request, so the skill generalizes to new wording without you
+  having to keep extending a token list for every new use-case. Prefer
+  varied, realistic user phrasings over domain jargon — and don't let
+  them mirror your eval prompts, or the eval just measures lexical
+  proximity (see the project conventions in `CLAUDE.md`).
+- **End with a `MUST load before <conditions>` clause.** Without an
+  imperative-shaped condition the model treats the description as
+  informational and skips loading — the one place imperative wording
+  earns its keep.
 - **Do not describe the rules.** Anything the body explains belongs in
   the body, not the description. The agent only reads the description
   to decide *whether* to load — once it loads, the body is what it
   applies.
 - **Do not mention `read_file` or any tool name.** The middleware
   exposes `load_skill`; the description is content, not mechanism.
-- A short friendly opening (≤ 8 words, e.g. `Guidance for org-mode
-  (\`.org\`) files.`) before the trigger list reads naturally and does
-  not measurably hurt match rate.
 
 Example (the `org-format` skill):
 
 ```yaml
 ---
 name: org-format
-description: Guidance for org-mode (`.org`) files. TRIGGER WORDS — `.org`, org-mode, org file, headings, heading body, asterisk heading, orphan, projects.org. MUST load before any tool call that reads, edits, writes, or mentions a `.org` file.
+description: Editing or creating org-mode (`.org`) files without breaking heading structure. EXAMPLES — "add a new section to notes.org under the Q3 plans heading"; "tweak the second bullet under Inbox in todo.org". MUST load before any tool call that reads, edits, writes, or mentions a `.org` file.
 ---
 ```
 

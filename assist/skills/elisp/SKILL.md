@@ -1,6 +1,6 @@
 ---
 name: elisp
-description: Guidance for writing Emacs Lisp. TRIGGER WORDS — elisp, emacs lisp, `.el`, defun, defvar, defcustom, defmacro, byte-compile, checkdoc, ert, `emacs --batch`. MUST load before any tool call that writes, edits, lints, tests, or runs Emacs Lisp (`.el`) code.
+description: Writing and maintaining Emacs Lisp — structuring, byte-compiling, and testing `.el` code. EXAMPLES — "why does my use-package block throw a void-function error"; "add a defcustom for a directory path and byte-compile my init cleanly"; "make this command a testable pure function with an ERT test". MUST load before any tool call that writes, edits, lints, tests, or runs Emacs Lisp (`.el`) code.
 ---
 
 # Emacs Lisp guide
