@@ -95,17 +95,16 @@ class TestElispSkillSandbox(TestCase):
         SandboxManager.cleanup(self.workspace)
         _cleanup_workspace(self.workspace)
 
-    def _ran_emacs_batch(self, agent) -> bool:
-        """True iff the agent VERIFIED the code in ``emacs --batch`` — the call
-        must actually touch elisp (a ``.el`` file, or a byte-compile / ERT /
-        checkdoc action), so a no-op like ``emacs --batch --version`` does not
-        count. The exact form is the model's choice."""
+    def _verified_file_in_emacs(self, agent, target: str) -> bool:
+        """True iff the agent ran an ``emacs --batch`` command that references
+        ``target`` — the file it was asked to write — so it verified THAT code
+        (byte-compile / load / ERT loading it), not some unrelated file or a
+        no-op like ``emacs --batch --version``. The exact form (compile vs test
+        vs load-and-eval) is the model's choice."""
         for cmd in _executed_commands(agent):
-            if not (re.search(r"\bemacs\b", cmd)
-                    and ("--batch" in cmd or "-batch" in cmd)):
-                continue
-            if (".el" in cmd or "byte-compile" in cmd
-                    or "ert-run-tests" in cmd or "checkdoc" in cmd):
+            if (re.search(r"\bemacs\b", cmd)
+                    and ("--batch" in cmd or "-batch" in cmd)
+                    and target in cmd):
                 return True
         return False
 
@@ -122,9 +121,10 @@ class TestElispSkillSandbox(TestCase):
             "agent did not load the elisp skill for an Emacs-Lisp authoring task",
         )
         self.assertTrue(
-            self._ran_emacs_batch(agent),
-            "elisp skill loaded but the agent never ran emacs to verify — it "
-            "should byte-compile / run ERT, not just emit elisp and trust it",
+            self._verified_file_in_emacs(agent, "sum.el"),
+            "elisp skill loaded but the agent never verified sum.el in "
+            "emacs --batch (byte-compile / ERT / load) — it should not just "
+            "emit elisp and trust it",
         )
 
     def _sandbox_sh(self, script: str) -> subprocess.CompletedProcess:
