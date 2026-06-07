@@ -497,6 +497,106 @@ out of sync. If the body re-justified loading, the description would
 get longer for no reason. Each layer answering exactly one question
 keeps the surface area constant.
 
+### In-repo (domain) skills
+
+Skills don't have to live in this repo. A **domain repo** that a thread
+clones can ship its own skills, and the agent discovers them
+automatically — no assist change, no config. This is how you attach
+project-specific guidance (a house style, a data format, a build
+recipe) to the repo it belongs to.
+
+These skills follow the **agent-agnostic
+[Agent Skills](https://agentskills.io) open standard**, so the *same
+files* are read by assist, Claude Code, the Claude Agent SDK, and other
+tools that support it — author once, use everywhere.
+
+**Where they go** — in the domain repo:
+
+```
+<repo-root>/.claude/skills/<skill-name>/SKILL.md
+```
+
+assist serves `<repo>/.claude/skills/` through the working-directory
+backend in both local and sandbox modes; on the first turn of a chat the
+middleware lists every skill it finds there alongside the built-ins, and
+`load_skill(name="<skill-name>")` loads the body. (Skills are listed
+once per chat — add one and start a new chat to pick it up.)
+
+**Frontmatter — stay on the portable core.** Use only the open-standard
+keys, so the file works in every agent:
+
+```yaml
+---
+name: ledger-audit       # MUST equal the directory name; lowercase + hyphens, <= 64 chars
+description: ...         # when to load it; <= 1024 chars
+# optional: license, compatibility, metadata, allowed-tools
+---
+```
+
+Avoid Claude-Code-only frontmatter (`disable-model-invocation`,
+`context: fork`, `hooks`, `argument-hint`) and the `` !`cmd` `` /
+`$ARGUMENTS` body substitutions — other agents (assist included) treat
+them as literal text. The description- and body-writing guidance above
+applies unchanged; for assist's small model the `TRIGGER WORDS` /
+`MUST load before` shape still earns its keep.
+
+**Name collisions — built-ins win.** If a domain skill is named like one
+of assist's built-ins (`dev`, `calculate`, `org-format`, `git-conflict`,
+`pdf`), the built-in takes precedence and the domain version is ignored
+— the safety skills can't be shadowed. Pick a distinctive name.
+
+**Bundling custom Python and reference files.** A skill is a *directory*,
+not just a file, so put supporting files next to `SKILL.md` using the
+standard layout:
+
+```
+.claude/skills/ledger-audit/
+├── SKILL.md
+├── scripts/reconcile.py     # executable helpers
+├── references/format.md     # docs the agent reads on demand
+└── assets/template.csv      # data / templates
+```
+
+Refer to them from the body by their path **relative to the repo root**
+— e.g. `.claude/skills/ledger-audit/scripts/reconcile.py`. That form is
+portable: assist runs commands from the workspace (repo) root, and any
+agent operating from the repo root resolves it identically. (Claude Code
+also exposes `${CLAUDE_SKILL_DIR}` for absolute resolution if you prefer
+it, but keep the relative form primary so the skill stays cross-agent.)
+
+Keep bundled code generic and cross-platform:
+
+- **Runnable by a plain interpreter.** Invoke as `python3
+  .claude/skills/<name>/scripts/foo.py` — don't assume a particular
+  agent's tooling. Prefer the standard library; if you need a
+  dependency, have the script import it defensively or document it.
+- **Talk over stable interfaces.** Take inputs as CLI args or stdin and
+  write results to stdout (or a path the body names), so any agent can
+  wire the script up the same way.
+- **POSIX paths, forward slashes, `python3`** (not `python`); no
+  OS-specific shell builtins. The repo is cloned on the agent's host, so
+  assume only a POSIX shell and a Python 3 interpreter.
+- **Describe actions, not tools.** Write "run the reconcile script" /
+  "read `references/format.md`", not "use the Bash tool" or "use
+  `execute`" — each agent names its tools differently; neutral prose
+  lets every agent map it to its own surface.
+
+**Example body** (excerpt of `SKILL.md`):
+
+````markdown
+# Ledger audit
+
+When a spreadsheet's entries should reconcile to a stated total:
+
+1. Run the reconciler — it prints the computed sum, the stated total,
+   and the gap:
+   `python3 .claude/skills/ledger-audit/scripts/reconcile.py billing.csv`
+2. Report which entry is responsible and the size of the gap.
+````
+
+See `docs/2026-06-06-in-repo-domain-skills.org` for the design,
+discovery, and precedence details.
+
 ---
 
 ## Memory
