@@ -21,6 +21,8 @@ from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 
+from .utils import executed_commands
+
 
 logger = logging.getLogger(__name__)
 
@@ -141,13 +143,6 @@ class TestDevAgentRunsEval(TestCase):
                     calls.append((tc.get('name', ''), tc.get('args', {})))
         return calls
 
-    def _executed_commands(self, agent) -> list[str]:
-        return [
-            args.get('command', '')
-            for name, args in self._get_tool_calls(agent)
-            if name == 'execute'
-        ]
-
     def _tool_results(self, agent) -> list[str]:
         """Return the text content of all ToolMessage results."""
         results = []
@@ -181,7 +176,7 @@ class TestDevAgentRunsEval(TestCase):
         ))
 
         # Check 1: agent used execute to run pytest
-        commands = self._executed_commands(agent)
+        commands = executed_commands(agent)
         pytest_cmds = [c for c in commands if 'pytest' in c]
 
         # Check 2: tool results contain "passed"

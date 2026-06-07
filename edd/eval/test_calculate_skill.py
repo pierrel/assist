@@ -31,39 +31,17 @@ whole-tree cleanup check.
 """
 import os
 import re
-import subprocess
 import tempfile
-import shutil
 
 from unittest import TestCase
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import create_filesystem
-
-
-def _cleanup_workspace(path: str) -> None:
-    """Remove workspace directory, using Docker to delete root-owned files.
-
-    Mirrors the helper in test_dev_agent.py.  Sandbox commands (pip,
-    pytest, etc.) write files as root inside the bind mount; plain
-    shutil.rmtree fails on those without an intermediate chmod.
-    """
-    try:
-        subprocess.run(
-            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup',
-             'alpine', 'sh', '-c',
-             'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-    shutil.rmtree(path, ignore_errors=True)
+from .utils import create_filesystem, skill_was_loaded, executed_commands, cleanup_workspace
 
 
 class TestCalculateSkill(TestCase):
@@ -91,7 +69,7 @@ class TestCalculateSkill(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        _cleanup_workspace(self.workspace)
+        cleanup_workspace(self.workspace)
 
     # ------------------------------------------------------------------
     # Helpers — small subset of test_dev_agent.py's inspection helpers,
@@ -108,47 +86,6 @@ class TestCalculateSkill(TestCase):
             sandbox_backend=self.sandbox,
         ))
 
-    def _skill_was_loaded(self, agent, skill_name: str) -> bool:
-        """True iff a tool call loaded the named skill's body.
-
-        Recognizes both routes the SkillsMiddleware exposes:
-
-        - ``load_skill(name=skill_name)`` — the small-model tool we
-          register in ``SmallModelSkillsMiddleware``.
-        - ``read_file`` / ``read`` with a path containing
-          ``/skills/<skill_name>/`` — the upstream deepagents path.
-
-        Mirrors ``_skill_was_loaded`` in test_skill_loading.py — kept
-        local so the two suites can drift independently.
-        """
-        path_needle = f"/skills/{skill_name}/"
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage) or not m.tool_calls:
-                continue
-            for tc in m.tool_calls:
-                args = tc.get("args") or {}
-                if (tc.get("name") == "load_skill"
-                        and args.get("name") == skill_name):
-                    return True
-                for v in args.values():
-                    if isinstance(v, str) and path_needle in v:
-                        return True
-        return False
-
-    def _executed_commands(self, agent) -> list[str]:
-        """Command strings from every ``execute`` tool call."""
-        commands = []
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage) or not m.tool_calls:
-                continue
-            for tc in m.tool_calls:
-                if tc.get("name") == "execute":
-                    args = tc.get("args") or {}
-                    cmd = args.get("command", "")
-                    if cmd:
-                        commands.append(cmd)
-        return commands
-
     def _ran_python(self, agent) -> bool:
         """True iff at least one execute call ran Python.
 
@@ -157,7 +94,7 @@ class TestCalculateSkill(TestCase):
         writing a .py file — the calculate skill's contract is that the
         agent runs the code, not just authors it.
         """
-        for cmd in self._executed_commands(agent):
+        for cmd in executed_commands(agent):
             if re.search(r"\bpython3?\b", cmd):
                 return True
             if re.search(r"\b\w+\.py\b", cmd):
@@ -213,7 +150,7 @@ class TestCalculateSkill(TestCase):
         )
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "calculate"),
+            skill_was_loaded(agent, "calculate"),
             "Agent did not load the calculate skill for a compound-"
             "interest projection.",
         )
@@ -277,7 +214,7 @@ class TestCalculateSkill(TestCase):
         )
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "calculate"),
+            skill_was_loaded(agent, "calculate"),
             "Agent did not load the calculate skill for a stdev question.",
         )
         self.assertTrue(
@@ -333,7 +270,7 @@ class TestCalculateSkill(TestCase):
         agent.message("What is the capital of France?")
 
         self.assertFalse(
-            self._skill_was_loaded(agent, "calculate"),
+            skill_was_loaded(agent, "calculate"),
             "Calculate skill loaded on a non-math prompt — the "
             "description is too aggressive.  Tighten its trigger words "
             "so it stays scoped to computation, not general questions.",
@@ -360,7 +297,7 @@ class TestCalculateSkill(TestCase):
         )
 
         self.assertFalse(
-            self._skill_was_loaded(agent, "calculate"),
+            skill_was_loaded(agent, "calculate"),
             "Calculate skill loaded on a finance-adjacent planning prompt "
             "with no numeric question.  The MUST-load clause is keyed on "
             "'answer involves a number' precisely to keep this case "

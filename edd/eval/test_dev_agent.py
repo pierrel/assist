@@ -15,7 +15,6 @@ import logging
 import os
 import subprocess
 import tempfile
-import shutil
 import uuid
 from unittest import TestCase
 
@@ -24,6 +23,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
+
+from .utils import executed_commands, cleanup_workspace
 
 
 logger = logging.getLogger(__name__)
@@ -61,25 +62,6 @@ def _rsync_project(dest: str) -> None:
     ], check=True)
 
 
-def _cleanup_workspace(path: str) -> None:
-    """Remove workspace directory, using Docker to delete root-owned files.
-
-    When the sandbox runs commands (pip install, etc.) it creates files owned
-    by root inside the workspace volume.  shutil.rmtree fails on those.  We
-    use a throwaway alpine container to chmod and remove them first.
-    """
-    try:
-        subprocess.run(
-            ['docker', 'run', '--rm', '-v', f'{path}:/cleanup',
-             'alpine', 'sh', '-c', 'chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*'],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass  # best-effort
-    shutil.rmtree(path, ignore_errors=True)
-
-
 class TestDevAgent(TestCase):
     """Evals for the software development agent in a Docker sandbox.
 
@@ -101,7 +83,7 @@ class TestDevAgent(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        _cleanup_workspace(self.workspace)
+        cleanup_workspace(self.workspace)
 
     def _create_agent(self):
         # General agent + dev skill via load-on-demand.  The agent is
@@ -130,14 +112,6 @@ class TestDevAgent(TestCase):
                 for tc in (getattr(m, 'tool_calls', None) or []):
                     calls.append((tc.get('name', ''), tc.get('args', {})))
         return calls
-
-    def _executed_commands(self, agent) -> list[str]:
-        """Return command strings from all ``execute`` tool calls."""
-        return [
-            args.get('command', '')
-            for name, args in self._get_tool_calls(agent)
-            if name == 'execute'
-        ]
 
     def _written_paths(self, agent) -> list[str]:
         """Return file paths from all ``write_file`` / ``write`` calls."""
@@ -215,7 +189,7 @@ class TestDevAgent(TestCase):
         readme_edits = [p for p in all_modified if 'readme' in p.lower()]
 
         # Check 2: execute commands that modify README (echo, cat, sed, etc.)
-        commands = self._executed_commands(agent)
+        commands = executed_commands(agent)
         readme_cmds = [c for c in commands if 'readme' in c.lower() or 'README' in c]
 
         # Check 3: verify the file in the sandbox actually contains SandboxManager
@@ -239,7 +213,7 @@ class TestDevAgent(TestCase):
             "the dependencies so you can run code."
         )
 
-        commands = self._executed_commands(agent)
+        commands = executed_commands(agent)
         install_cmds = [
             c for c in commands
             if 'pip install' in c or 'pip3 install' in c
@@ -279,7 +253,7 @@ class TestDevAgent(TestCase):
         )
 
         # Assertion 2: the test was actually run.
-        commands = self._executed_commands(agent)
+        commands = executed_commands(agent)
         test_runs = [
             c for c in commands
             if any(kw in c for kw in ('pytest', 'python -m pytest', 'python -m unittest', 'python test_'))

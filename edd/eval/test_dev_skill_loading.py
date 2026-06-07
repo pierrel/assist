@@ -44,7 +44,7 @@ from langchain_core.tools import tool
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem
+from .utils import create_filesystem, skill_was_loaded
 
 
 _PYPROJECT_FIXTURE = dedent("""\
@@ -125,27 +125,6 @@ class TestDevSkillLoading(TestCase):
         })
         return AgentHarness(create_agent(self.model, root)), root
 
-    def _skill_was_loaded(self, agent, skill_name: str) -> bool:
-        """Return True iff any tool call attempted to load *skill_name*.
-
-        Inspects ``AIMessage.tool_calls`` so a ``load_skill(name="dev")``
-        invocation counts as the skill being chosen, regardless of what
-        the (stubbed) tool returned. Only the ``load_skill`` route is
-        recognized here — ``read_file('/skills/...')`` is no longer how
-        the agent loads skills, and a fallback that accepted it would
-        mask regressions where the model goes off-script.
-        """
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage) or not m.tool_calls:
-                continue
-            for tc in m.tool_calls:
-                if tc.get("name") != "load_skill":
-                    continue
-                args = tc.get("args") or {}
-                if args.get("name") == skill_name:
-                    return True
-        return False
-
     def _attempted_skills(self, agent) -> list[str]:
         """Return the list of names passed to ``load_skill`` (in order)."""
         names: list[str] = []
@@ -179,7 +158,7 @@ class TestDevSkillLoading(TestCase):
             )
 
             self.assertTrue(
-                self._skill_was_loaded(agent, "dev"),
+                skill_was_loaded(agent, "dev"),
                 f"Agent did not call load_skill(name='dev') despite the "
                 f"user explicitly naming the skill. "
                 f"Skills attempted: {self._attempted_skills(agent)}"
@@ -205,7 +184,7 @@ class TestDevSkillLoading(TestCase):
             )
 
             self.assertTrue(
-                self._skill_was_loaded(agent, "dev"),
+                skill_was_loaded(agent, "dev"),
                 f"Agent did not call load_skill(name='dev') despite "
                 f"coding-task language ('function', 'test', 'TDD') in "
                 f"the prompt — all of which are in the dev skill "
@@ -238,7 +217,7 @@ class TestDevSkillLoading(TestCase):
             )
 
             self.assertTrue(
-                self._skill_was_loaded(agent, "dev"),
+                skill_was_loaded(agent, "dev"),
                 f"Agent did not call load_skill(name='dev') despite the "
                 f"single soft trigger ('this code') in the prompt — "
                 f"'code' is in the dev skill description. "

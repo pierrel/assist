@@ -31,12 +31,10 @@ from textwrap import dedent
 
 from unittest import TestCase
 
-from langchain_core.messages import AIMessage
-
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem, read_file
+from .utils import create_filesystem, read_file, skill_was_loaded
 
 
 _PROJECTS_FIXTURE = dedent("""\
@@ -67,30 +65,6 @@ class TestSkillLoading(TestCase):
             "projects.org": _PROJECTS_FIXTURE,
         })
         return AgentHarness(create_agent(self.model, root)), root
-
-    def _skill_was_loaded(self, agent, skill_name: str) -> bool:
-        """Return True iff any tool call loaded the skill's body.
-
-        Two recognized signals:
-
-        - ``read_file`` with a path containing ``/skills/{skill_name}/``
-        - ``load_skill`` with ``name == skill_name``
-
-        We grep tool-call args rather than tool results because the
-        model proves intent the moment it issues the call.
-        """
-        path_needle = f"/skills/{skill_name}/"
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage) or not m.tool_calls:
-                continue
-            for tc in m.tool_calls:
-                args = tc.get("args") or {}
-                if tc.get("name") == "load_skill" and args.get("name") == skill_name:
-                    return True
-                for v in args.values():
-                    if isinstance(v, str) and path_needle in v:
-                        return True
-        return False
 
     def _assert_alpha_body_preserved(self, root: str):
         content = read_file(os.path.join(root, "projects.org"))
@@ -133,7 +107,7 @@ class TestSkillLoading(TestCase):
         )
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "org-format"),
+            skill_was_loaded(agent, "org-format"),
             "Agent did not load /skills/org-format/SKILL.md despite "
             "the user's prompt mentioning the exact problem the skill "
             "addresses (heading-body rules, orphaning). The agent "
@@ -162,7 +136,7 @@ class TestSkillLoading(TestCase):
         )
 
         self.assertTrue(
-            self._skill_was_loaded(agent, "org-format"),
+            skill_was_loaded(agent, "org-format"),
             "Agent did not load /skills/org-format/SKILL.md. The user "
             "asked to edit a .org file — the org-format skill's "
             "description tells the agent to load before editing any "

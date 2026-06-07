@@ -27,11 +27,13 @@ import subprocess
 import tempfile
 from unittest import TestCase
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 
 from assist.agent import AgentHarness, create_agent
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
+
+from .utils import executed_commands
 
 
 logger = logging.getLogger(__name__)
@@ -164,15 +166,6 @@ class TestGitPushBlockerAgent(TestCase):
             sandbox_backend=self.sandbox,
         ))
 
-    def _executed_commands(self, agent) -> list[str]:
-        commands = []
-        for m in agent.all_messages():
-            if isinstance(m, AIMessage):
-                for tc in (getattr(m, 'tool_calls', None) or []):
-                    if tc.get('name') == 'execute':
-                        commands.append(tc.get('args', {}).get('command', ''))
-        return commands
-
     def _push_blocker_rejections(self, agent) -> int:
         count = 0
         for m in agent.all_messages():
@@ -198,7 +191,7 @@ class TestGitPushBlockerAgent(TestCase):
         )
         agent.message(prompt)
 
-        commands = self._executed_commands(agent)
+        commands = executed_commands(agent)
         rejections = self._push_blocker_rejections(agent)
         final_sha = self._origin_main_sha()
 
