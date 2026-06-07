@@ -73,7 +73,7 @@ _SKILL_MD = dedent("""\
     When the parts of a spreadsheet are supposed to match a stated bottom-line
     figure, follow this procedure:
 
-    1. Add up the value column across every entry yourself.
+    1. Add up the amount column across every entry yourself.
     2. Compare your computed figure against the spreadsheet's stated bottom
        line, and state both numbers explicitly.
     3. State the size of the gap between them.
@@ -151,7 +151,9 @@ class TestDomainSkillFrontmatterIsAgentAgnostic(TestCase):
     """
 
     def test_fixture_uses_open_standard_core_only(self):
-        frontmatter = yaml.safe_load(_SKILL_MD.split("---")[1])
+        # Limit to the first two delimiters so a stray `---` in the body
+        # (e.g. a horizontal rule) can't shift the parsed segment.
+        frontmatter = yaml.safe_load(_SKILL_MD.split("---", 2)[1])
         # Open-standard core keys only — no assist-specific frontmatter that
         # would make the file non-portable to Claude Code / the Agent SDK.
         core = {"name", "description", "license", "compatibility",
