@@ -3,22 +3,27 @@ import subprocess
 import tempfile
 import unittest
 
+from unittest.mock import MagicMock, patch
+
 from assist.domain_manager import (
     DomainManager,
     MergeConflictError,
     OriginAdvancedError,
+    create_timestamped_branch,
+    current_branch,
+    ensure_thread_branch,
 )
 
 
-class TestDomainMerge(unittest.TestCase):
-    """Exercises the rebase-then-squash merge contract introduced by the
-    per-thread web git isolation work (see
-    ``docs/2026-05-07-per-thread-web-git-isolation.org``).
+class _DomainGitFixture(unittest.TestCase):
+    """Bare-remote + working-clone git fixture shared by the merge and
+    thread-branch-invariant suites.
 
-    Fixture layout: a bare ``remote.git`` plus two clones —
-    ``self.repo_path`` is the deploy-box working clone (under test);
-    ``self._external_clone()`` returns a separate clone that simulates
-    a different machine pushing to the shared remote.
+    Layout: a bare ``remote.git`` plus two clones — ``self.repo_path`` is
+    the deploy-box working clone (under test), seeded on a ``feature/test``
+    thread branch with one unmerged commit; ``self._external_clone()``
+    returns a separate clone that simulates a different machine pushing to
+    the shared remote.
     """
 
     def setUp(self):
@@ -85,6 +90,13 @@ class TestDomainMerge(unittest.TestCase):
             stdout=subprocess.PIPE, text=True, check=True,
         )
         return result.stdout.split()[0] if result.stdout else ""
+
+
+class TestDomainMerge(_DomainGitFixture):
+    """Exercises the rebase-then-squash merge contract introduced by the
+    per-thread web git isolation work (see
+    ``docs/2026-05-07-per-thread-web-git-isolation.org``).
+    """
 
     # --- Pre-existing contract regressions ----------------------------------
 
@@ -279,6 +291,141 @@ class TestDomainMerge(unittest.TestCase):
 
         with self.assertRaises(OriginAdvancedError):
             dm.push_main()
+
+
+class TestThreadBranchInvariant(_DomainGitFixture):
+    """The 'HEAD is always on a thread branch' invariant: per-turn
+    ``sync()`` must never let work accumulate on ``main`` (which makes it
+    invisible to the ``git diff main...HEAD`` review UI), and a merge that
+    fails mid-flight must not strand the thread on ``main``.
+    """
+
+    def _on_main(self) -> None:
+        subprocess.run(
+            ['git', '-C', self.repo_path, 'checkout', 'main'],
+            check=True, capture_output=True,
+        )
+
+    def test_sync_on_main_rebranches_and_keeps_work_reviewable(self):
+        """A thread stranded on ``main`` heals on its next ``sync()``: the
+        turn's edit lands on a fresh ``assist/*`` branch and shows up in
+        ``main_diff()`` so the user can review it.
+        """
+        self._on_main()
+        with open(os.path.join(self.repo_path, "turn.txt"), 'w') as f:
+            f.write("work produced while stranded on main\n")
+
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir,
+                           branch_suffix='abcd')
+        dm.sync("a turn's worth of work")
+
+        cur = current_branch(self.repo_path)
+        self.assertTrue(cur.startswith('assist/'), f"expected assist/* branch, got: {cur}")
+
+        # The work is committed on the thread branch and is reviewable
+        # (non-empty diff vs main) — the whole point of the invariant.
+        self.assertGreater(len(dm.main_diff()), 0)
+
+        # main itself did not gain the commit.
+        self.assertNotIn('turn.txt', subprocess.run(
+            ['git', '-C', self.repo_path, 'ls-tree', '--name-only', 'main'],
+            stdout=subprocess.PIPE, text=True, check=True,
+        ).stdout)
+
+    def test_sync_is_noop_on_an_existing_thread_branch(self):
+        """On a non-``main`` branch, ``sync()`` commits in place and does
+        not re-branch (it must not rename ``feature/test`` -> ``assist/*``).
+        """
+        before = current_branch(self.repo_path)
+        self.assertEqual(before, 'feature/test')
+        with open(os.path.join(self.repo_path, "more.txt"), 'w') as f:
+            f.write("more work\n")
+
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir,
+                           branch_suffix='abcd')
+        dm.sync("more work on the thread branch")
+
+        self.assertEqual(current_branch(self.repo_path), 'feature/test')
+
+    def test_ensure_thread_branch_heals_only_main(self):
+        """Direct unit check: re-branch off ``main``; no-op on any other
+        branch (returns the unchanged branch name)."""
+        # No-op on the feature branch.
+        self.assertEqual(
+            ensure_thread_branch(self.repo_path, suffix='abcd'), 'feature/test')
+
+        # Heals on main.
+        self._on_main()
+        healed = ensure_thread_branch(self.repo_path, suffix='abcd')
+        self.assertTrue(healed.startswith('assist/'))
+        self.assertEqual(current_branch(self.repo_path), healed)
+
+    def test_create_timestamped_branch_disambiguates_on_collision(self):
+        """Two branches cut in the same UTC second must not collide — the
+        second gets a counter suffix instead of aborting with ``checkout
+        -b`` failing on an existing name.
+        """
+        fixed = MagicMock()
+        fixed.strftime.return_value = "20260101-000000"
+        with patch('assist.domain_manager.datetime') as mock_dt:
+            mock_dt.now.return_value = fixed
+            first = create_timestamped_branch(self.repo_path, suffix='abcd')
+            second = create_timestamped_branch(self.repo_path, suffix='abcd')
+
+        self.assertEqual(first, 'assist/20260101-000000-abcd')
+        self.assertEqual(second, 'assist/20260101-000000-abcd-1')
+
+    def test_merge_summary_failure_does_not_strand_on_main(self):
+        """If the LLM summary call raises mid-merge (after checkout main,
+        before the squash commit), the thread must be restored to its
+        branch with its work intact — never left on ``main``.
+        """
+        class _RaisingModel:
+            def invoke(self, _messages):
+                raise RuntimeError("LLM unavailable")
+
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
+        with self.assertRaises(RuntimeError):
+            dm.merge_to_main(summary_model=_RaisingModel())
+
+        # Not stranded on main; back on the thread branch, work reviewable.
+        self.assertEqual(current_branch(self.repo_path), 'feature/test')
+        self.assertGreater(len(dm.main_diff()), 0)
+
+    def test_merge_rebranch_failure_keeps_squash_and_heals(self):
+        """If the post-merge re-branch fails *after* the squash committed,
+        the merge must stay on ``main`` and HEAD must still be moved off
+        ``main`` onto a fresh thread branch (not restored to the old one,
+        which would discard the just-landed merge).
+        """
+        import assist.domain_manager as dmod
+        real = dmod.create_timestamped_branch
+        state = {'calls': 0}
+
+        def flaky(repo_dir, suffix=None):
+            # Fail the first call (the happy-path re-branch at the end of
+            # merge_to_main); let the recovery's re-branch succeed.
+            state['calls'] += 1
+            if state['calls'] == 1:
+                raise RuntimeError("re-branch failed")
+            return real(repo_dir, suffix=suffix)
+
+        dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir,
+                           branch_suffix='abcd')
+        with patch('assist.domain_manager.create_timestamped_branch', side_effect=flaky):
+            with self.assertRaises(RuntimeError):
+                dm.merge_to_main(summary_model=None)
+
+        # HEAD healed off main onto a fresh thread branch.
+        cur = current_branch(self.repo_path)
+        self.assertTrue(cur.startswith('assist/'), f"expected assist/* branch, got: {cur}")
+
+        # The squash merge is preserved on local main (it just needs a push).
+        self.assertTrue(dm.has_unpushed_main())
+        subprocess.run(['git', '-C', self.repo_path, 'checkout', 'main'],
+                       check=True, capture_output=True)
+        with open(os.path.join(self.repo_path, "README.md")) as f:
+            self.assertIn('Feature 1', f.read())
 
 
 if __name__ == '__main__':

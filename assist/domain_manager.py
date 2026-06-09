@@ -38,6 +38,29 @@ class Change(BaseModel):
     diff: str
 
 
+def current_branch(repo_dir: str) -> str:
+    """Return the checked-out branch name.
+
+    ``git rev-parse --abbrev-ref HEAD`` returns the branch name, the
+    literal ``HEAD`` when detached, and we return '' when the ref can't
+    be read at all (e.g. not a git repo).  Callers compare against
+    ``'main'`` and treat everything else as "leave it alone".
+    """
+    result = subprocess.run(
+        ['git', '-C', repo_dir, 'rev-parse', '--abbrev-ref', 'HEAD'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ''
+
+
+def _branch_exists(repo_dir: str, name: str) -> bool:
+    """True if a local branch ``name`` already exists in ``repo_dir``."""
+    return subprocess.run(
+        ['git', '-C', repo_dir, 'show-ref', '--verify', '--quiet', f'refs/heads/{name}'],
+        check=False,
+    ).returncode == 0
+
+
 def create_timestamped_branch(repo_dir: str, suffix: str | None = None) -> str:
     """Create and checkout a new assist/[timestamp][-suffix] branch from main.
 
@@ -49,9 +72,48 @@ def create_timestamped_branch(repo_dir: str, suffix: str | None = None) -> str:
     """
     from datetime import timezone
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    branch_name = f'assist/{ts}-{suffix}' if suffix else f'assist/{ts}'
+    base = f'assist/{ts}-{suffix}' if suffix else f'assist/{ts}'
+    # Second-resolution timestamps plus a per-thread-constant suffix can
+    # still collide when two branches are cut within the same UTC second
+    # (e.g. a heal firing in the same second as a merge re-branch).
+    # ``checkout -b`` fails hard on an existing name, which would abort
+    # the turn and strand the work on whatever branch HEAD is on, so
+    # disambiguate with a counter rather than letting it raise.
+    branch_name = base
+    n = 1
+    while _branch_exists(repo_dir, branch_name):
+        branch_name = f'{base}-{n}'
+        n += 1
     subprocess.run(['git', '-C', repo_dir, 'checkout', '-b', branch_name, 'main'], check=True)
     return branch_name
+
+
+def ensure_thread_branch(repo_dir: str, suffix: str | None = None) -> str:
+    """Guarantee HEAD is on a thread branch so per-turn commits stay reviewable.
+
+    The web flow renders ``git diff main...HEAD`` and only shows the
+    Review / Merge buttons when that diff is non-empty.  If a thread is
+    left on ``main`` — a merge that failed between checking out ``main``
+    and re-branching, or an older flow that stranded it — every later
+    commit lands on ``main``, the diff is always empty, and the work can
+    never be reviewed.
+
+    When HEAD is on ``main``, re-branch onto a fresh ``assist/<ts>``
+    branch off ``main``.  ``git checkout -b`` carries the working tree's
+    uncommitted edits forward, so an in-flight turn lands on the new
+    branch.  Any other state — already on a thread branch, on some other
+    branch, or detached — is left untouched.  Returns the branch HEAD
+    ends up on.
+    """
+    branch = current_branch(repo_dir)
+    if branch != 'main':
+        return branch
+    new_branch = create_timestamped_branch(repo_dir, suffix=suffix)
+    logger.warning(
+        "Thread was stranded on main; re-branched to %s so its work stays reviewable",
+        new_branch,
+    )
+    return new_branch
 
 
 def clone_repo(repo_url: str, dest_dir: str, branch_suffix: str | None = None) -> None:
@@ -347,7 +409,13 @@ class DomainManager:
         return self.repo_path
 
     def sync(self, commit_message: str) -> None:
-        """Commit any pending work on the thread branch.  Does NOT push.
+        """Restore the thread-branch invariant, then commit pending work.
+
+        Before committing we ensure HEAD is on an ``assist/<ts>`` thread
+        branch (see :func:`ensure_thread_branch`): if a prior flow left
+        the thread on ``main``, the commit would otherwise land on
+        ``main`` and the work would never render in the review UI.  Does
+        NOT push.
 
         Pushes are gated to the user-initiated merge → push-main flow;
         the agent must not be able to publish to ``origin`` directly,
@@ -358,6 +426,7 @@ class DomainManager:
         """
         if not self.repo:
             return
+        ensure_thread_branch(self.repo_path, suffix=self.branch_suffix)
         git_commit(self.repo_path, commit_message)
 
     def merge_to_main(self, summary_model=None) -> str:
@@ -366,23 +435,29 @@ class DomainManager:
 
         Sequence:
 
-        1. Generate the merge commit summary from the diff (model
-           invocation, optional fallback).
-        2. ``git fetch origin``.
-        3. Refuse if local ``main`` has unpushed commits from a previous
+        1. ``git fetch origin``.
+        2. Refuse if local ``main`` has unpushed commits from a previous
            merge — the user must push to ``origin`` before another
            merge can land cleanly on top.
-        4. ``git rebase origin/main`` on the thread branch.  On
+        3. ``git rebase origin/main`` on the thread branch.  On
            conflict: abort the rebase and raise
            :class:`MergeConflictError` with the unmerged file list.
-        5. ``git checkout main`` and ``git reset --hard origin/main``
-           (safe — step 3 verified local ``main`` had no extra
+        4. ``git checkout main`` and ``git reset --hard origin/main``
+           (safe — step 2 verified local ``main`` had no extra
            commits).
-        6. ``git merge --squash <thread-branch>`` and commit with the
-           summary.
-        7. Re-create a fresh ``assist/<ts>-<suffix>`` thread branch off
+        5. ``git merge --squash <thread-branch>``, generate the AI
+           summary from the diff (model invocation, optional fallback —
+           done late so a failed merge never burns a model call), and
+           commit with that summary.
+        6. Re-create a fresh ``assist/<ts>-<suffix>`` thread branch off
            ``main`` so the user can keep chatting in the same thread
            after the merge.
+
+        Steps 4-6 are wrapped so a failure anywhere in that window never
+        leaves the thread stranded on ``main`` (the state that hides its
+        work from the review UI): if the squash already committed, the
+        thread is re-branched off ``main`` (the merge is preserved);
+        otherwise HEAD is restored to the thread branch.
 
         Does **not** push — that's the caller's job, via
         :meth:`push_main`, gated to a user-initiated UI action.
@@ -397,13 +472,9 @@ class DomainManager:
                 branch in a clean state.
             subprocess.CalledProcessError: any other git failure.
         """
-        cur = subprocess.run(
-            ['git', '-C', self.repo_path, 'rev-parse', '--abbrev-ref', 'HEAD'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
-        )
-        current_branch = cur.stdout.strip()
+        branch_name = current_branch(self.repo_path)
 
-        if current_branch == 'main':
+        if branch_name == 'main':
             raise ValueError("Already on main branch - nothing to merge")
 
         diffs = self.main_diff()
@@ -446,7 +517,7 @@ class DomainManager:
             conflicted = [l.strip() for l in unmerged.stdout.splitlines() if l.strip()]
             subprocess.run(['git', '-C', self.repo_path, 'rebase', '--abort'], check=False)
             if conflicted:
-                raise MergeConflictError(current_branch, conflicted)
+                raise MergeConflictError(branch_name, conflicted)
             # Non-conflict rebase failure (e.g. dirty working tree at
             # merge time, corrupt branch state).  Don't paper this
             # over as a "conflict" — the agent would chase a
@@ -460,26 +531,57 @@ class DomainManager:
             )
 
         # Switch to main and bring it level with origin/main before
-        # squashing the rebased thread branch on top.
-        subprocess.run(['git', '-C', self.repo_path, 'checkout', 'main'], check=True)
-        subprocess.run(['git', '-C', self.repo_path, 'reset', '--hard', 'origin/main'], check=True)
-        subprocess.run(
-            ['git', '-C', self.repo_path, 'merge', '--squash', current_branch],
-            check=True,
-        )
+        # squashing the rebased thread branch on top.  From the checkout
+        # below until the post-merge re-branch, HEAD sits on ``main``; if
+        # any step in between raises (squash, the LLM summary call, the
+        # commit, or the re-branch), we must not return with the thread
+        # stranded on ``main`` — that's the exact state that makes work
+        # unreviewable.  The ``squashed`` flag tells the recovery path
+        # whether a real merge landed on ``main`` (keep it, just put the
+        # thread on a fresh branch) or not (return to the thread branch
+        # so its work is preserved).
+        squashed = False
+        try:
+            subprocess.run(['git', '-C', self.repo_path, 'checkout', 'main'], check=True)
+            subprocess.run(['git', '-C', self.repo_path, 'reset', '--hard', 'origin/main'], check=True)
+            subprocess.run(
+                ['git', '-C', self.repo_path, 'merge', '--squash', branch_name],
+                check=True,
+            )
 
-        # Generate the AI summary as late as possible — directly
-        # before the commit it labels.  Every git step before this
-        # could fail (network on fetch, conflict on rebase, dirty
-        # state on checkout, etc.); spending an LLM round-trip only
-        # after they've all succeeded means a failed merge never
-        # burns a model call.
-        summary = self._summarize_merge(diffs, current_branch, summary_model)
-        subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', summary], check=True)
+            # Generate the AI summary as late as possible — directly
+            # before the commit it labels.  Every git step before this
+            # could fail (network on fetch, conflict on rebase, dirty
+            # state on checkout, etc.); spending an LLM round-trip only
+            # after they've all succeeded means a failed merge never
+            # burns a model call.
+            summary = self._summarize_merge(diffs, branch_name, summary_model)
+            subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', summary], check=True)
+            squashed = True
 
-        # Roll the thread forward onto a new branch off main so the
-        # user can keep chatting; preserves pre-feature UX.
-        create_timestamped_branch(self.repo_path, suffix=self.branch_suffix)
+            # Roll the thread forward onto a new branch off main so the
+            # user can keep chatting; preserves pre-feature UX.
+            create_timestamped_branch(self.repo_path, suffix=self.branch_suffix)
+        except Exception:
+            try:
+                if squashed:
+                    # The squash committed onto main (a real merge that
+                    # just needs pushing); only the re-branch failed.
+                    # Put the thread on a fresh branch off main.
+                    ensure_thread_branch(self.repo_path, suffix=self.branch_suffix)
+                else:
+                    # The merge never committed; main is back at
+                    # origin/main.  Force-return to the thread branch so
+                    # its (committed) work stays intact and reviewable —
+                    # ``-f`` discards the transient squash staging, which
+                    # is just a duplicate of that branch's own diff.
+                    subprocess.run(
+                        ['git', '-C', self.repo_path, 'checkout', '-f', branch_name],
+                        check=False,
+                    )
+            except Exception:
+                logger.exception("Failed to restore thread branch after merge error")
+            raise
 
         return summary
 
