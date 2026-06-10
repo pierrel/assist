@@ -367,3 +367,30 @@ class TestPostReviewRoute:
         assert scheduled[0][1].startswith("## Change review")
         assert "Looks good" in scheduled[0][1]
         assert "+x" in scheduled[0][1]
+
+    def test_review_marks_pending_status_synchronously(self, client, monkeypatch):
+        """The /review route must persist a busy+pending status before the
+        redirect (same race fix as /message), so the redirect render shows the
+        submission instead of losing it to the background task."""
+        from types import SimpleNamespace
+        from manage.web import threads
+        from manage.web.state import _get_status
+
+        monkeypatch.setattr("manage.web.threads._process_message", lambda tid, text: None)
+        monkeypatch.setattr("manage.web.review._get_domain_manager", lambda tid: None)
+        # Another thread holds the LLM slot -> expect "queued".
+        monkeypatch.setattr(
+            threads.THREAD_QUEUE, "current_handle",
+            lambda: SimpleNamespace(thread_id="other-thread"),
+        )
+
+        payload = {"overall": "Looks good", "lines": []}
+        r = client.post(
+            "/thread/thread-1/review",
+            data={"payload": json.dumps(payload)},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        st = _get_status("thread-1")
+        assert st.get("stage") == "queued", st
+        assert st.get("pending_message", "").startswith("## Change review"), st

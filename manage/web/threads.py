@@ -682,11 +682,47 @@ async def thread_status(tid: str):
     return JSONResponse(_get_status(tid))
 
 
+def _mark_pending(tid: str, text: str) -> None:
+    """Record an inbound message as busy+pending *synchronously*, before the
+    POST handler returns its redirect.
+
+    The thread page has no client-side polling: all in-flight feedback (the
+    pending-message bubble and the status banner) is gated on the thread's
+    status being a ``BUSY_STAGES`` value, and the page renders only once — on
+    the redirect-GET that follows the POST.  If the first status write is left
+    to the background ``_process_message`` task, that write races the redirect
+    render; under load (every queued thread parks a threadpool worker in
+    ``cond.wait``) the task loses the race, the page renders the stale
+    ``ready`` status, and the message silently vanishes from the UI with no
+    feedback.
+
+    Writing the status here — the way ``create_thread_with_message`` already
+    does for new threads — closes the race.  ``_process_message`` then refines
+    the stage as it runs.
+
+    The initial stage is "queued" when another thread currently holds the LLM
+    slot, else "processing".  Both are deliberately NON-``INIT_STAGES`` values:
+    an INIT stage (e.g. "starting_sandbox") would make ``get_thread`` render
+    this existing thread as ``is_init`` — hiding its history and disabling the
+    input — which is wrong for a thread that's just received a follow-up
+    message.
+
+    No-op when this thread is already busy, so a second message to a mid-turn
+    thread doesn't clobber the in-flight turn's status.
+    """
+    if _get_status(tid).get("stage") in BUSY_STAGES:
+        return
+    holder = THREAD_QUEUE.current_handle()
+    stage = "queued" if (holder is not None and holder.thread_id != tid) else "processing"
+    _set_status(tid, stage, pending_message=text)
+
+
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = Form(...)):
     tdir = os.path.join(MANAGER.root_dir, tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
+    _mark_pending(tid, text)
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 

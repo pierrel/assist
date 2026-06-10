@@ -393,5 +393,9 @@ async def post_review(tid: str, background_tasks: BackgroundTasks, payload: str 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Set a busy+pending status synchronously (same race fix as the
+    # /message route) so the redirect render shows the submission instead of
+    # losing it to the background task.
+    _threads._mark_pending(tid, message)
     background_tasks.add_task(_threads._process_message, tid, message)
     return RedirectResponse(url=f"/thread/{tid}?reviewed=1", status_code=303)

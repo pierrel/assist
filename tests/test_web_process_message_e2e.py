@@ -30,11 +30,14 @@ with real Docker + a real LLM):
 """
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from manage import web
+from manage.web import threads
+from manage.web.state import _get_status, _set_status
 
 
 @pytest.fixture
@@ -152,3 +155,70 @@ def test_post_message_runs_process_message_without_crashing(
         f"a missing import (NameError) or a stub that didn't match the "
         f"call shape."
     )
+
+
+# --- _mark_pending: synchronous feedback so a queued message isn't lost -------
+#
+# Regression: the thread page has no polling, so feedback is gated on the
+# status being a BUSY_STAGE at redirect-render time.  `post_message` left the
+# first status write to the background task, which races (and under load
+# loses to) the redirect render — the message vanished from the UI with no
+# "waiting in queue" feedback.  `_mark_pending` writes it synchronously.
+
+
+def test_mark_pending_sets_queued_when_another_thread_holds_slot(client, monkeypatch):
+    monkeypatch.setattr(
+        threads.THREAD_QUEUE, "current_handle",
+        lambda: SimpleNamespace(thread_id="other-thread"),
+    )
+    threads._mark_pending("thread-e2e", "hello there")
+    st = _get_status("thread-e2e")
+    assert st.get("stage") == "queued", st
+    assert st.get("pending_message") == "hello there", st
+
+
+def test_mark_pending_sets_processing_when_slot_free(client, monkeypatch):
+    # Free slot -> "processing" (a BUSY but NON-INIT stage): the existing
+    # thread's history and input must stay visible on the redirect render.
+    from manage.web.state import INIT_STAGES
+    monkeypatch.setattr(threads.THREAD_QUEUE, "current_handle", lambda: None)
+    threads._mark_pending("thread-e2e", "hello")
+    st = _get_status("thread-e2e")
+    assert st.get("stage") == "processing", st
+    assert st.get("stage") not in INIT_STAGES, st
+    assert st.get("pending_message") == "hello", st
+
+
+def test_mark_pending_noop_when_thread_already_busy(client, monkeypatch):
+    # An in-flight turn must not be clobbered by a second submission.
+    _set_status("thread-e2e", "processing", pending_message="first turn")
+    monkeypatch.setattr(
+        threads.THREAD_QUEUE, "current_handle",
+        lambda: SimpleNamespace(thread_id="other-thread"),
+    )
+    threads._mark_pending("thread-e2e", "second turn")
+    st = _get_status("thread-e2e")
+    assert st.get("stage") == "processing", st
+    assert st.get("pending_message") == "first turn", st
+
+
+def test_post_message_writes_busy_status_synchronously(client, monkeypatch):
+    """The POST handler must persist a BUSY_STAGE + pending_message before it
+    returns the redirect — so the redirect-GET renders feedback even when the
+    background task hasn't run yet.  Stub `_process_message` to a no-op so we
+    observe the endpoint's synchronous write, not a later overwrite."""
+    monkeypatch.setattr(
+        threads.THREAD_QUEUE, "current_handle",
+        lambda: SimpleNamespace(thread_id="other-thread"),
+    )
+    monkeypatch.setattr("manage.web.threads._process_message", lambda tid, text: None)
+
+    r = client.post(
+        "/thread/thread-e2e/message",
+        data={"text": "queued message"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    st = _get_status("thread-e2e")
+    assert st.get("stage") == "queued", st
+    assert st.get("pending_message") == "queued message", st
