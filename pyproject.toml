@@ -40,6 +40,14 @@ assist = "manage.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 
+# Bundle the package's non-.py data in the wheel: Jinja templates
+# (PackageLoader("assist") resolves them from the installed package)
+# and the built-in skills tree (served via SKILLS_ROUTE).  Without
+# this, a non-editable install crashes at prompt-render time — which
+# is why emacsos-server historically required an editable install.
+[tool.setuptools.package-data]
+assist = ["templates/**/*", "skills/**/*"]
+
 [tool.mypy]
 python_version = "3.14.2"
 plugins = ["pydantic.mypy"]
