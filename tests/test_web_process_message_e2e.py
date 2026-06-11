@@ -250,3 +250,29 @@ def test_pending_message_renders_at_top_as_latest(client, monkeypatch):
         "pending message rendered below the prior conversation — it should be "
         "the latest message at the top"
     )
+
+
+def test_pending_bubble_not_duplicated_when_already_persisted(client, monkeypatch):
+    """Once the agent persists the just-submitted message into the
+    conversation, the pending bubble must dedup against it — even when the
+    persisted text carries trailing whitespace the stripped `pending` does not
+    (review submissions end with a newline).  Otherwise the busy render shows
+    the message twice."""
+    persisted = "## Change review\n\nLooks solid to me\n"  # trailing newline, as _format_review_message emits
+    class _FakeChat:
+        def get_messages(self):
+            return [{"role": "user", "content": persisted}]
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda tid, sandbox_backend=None, on_queue_state=None: _FakeChat(),
+    )
+    monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
+
+    # _mark_pending stores the message unstripped; the thread is mid-turn.
+    _set_status("thread-e2e", "processing", pending_message=persisted)
+    html = client.get("/thread/thread-e2e").text
+
+    assert html.count("Looks solid to me") == 1, (
+        f"duplicate pending bubble: the message rendered "
+        f"{html.count('Looks solid to me')} times"
+    )

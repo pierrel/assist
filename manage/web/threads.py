@@ -216,7 +216,14 @@ def render_thread(
     # "..." placeholder — instead of stranding it at the very bottom under the
     # whole prior conversation.
     pending = (status.get("pending_message") or "").strip()
-    if busy and pending and not any(m.get("role") == "user" and m.get("content") == pending for m in msgs):
+    # Compare stripped on BOTH sides: the persisted message can carry trailing
+    # whitespace the stripped `pending` won't (review submissions from
+    # `_format_review_message` end with a newline), and an exact `==` would
+    # miss the match and render a duplicate bubble while the turn runs.
+    if busy and pending and not any(
+        m.get("role") == "user" and (m.get("content") or "").strip() == pending
+        for m in msgs
+    ):
         msgs.append({"role": "user", "content": pending})
 
     # Compute diff vs main (only when repo is ready) — rendered as its own
