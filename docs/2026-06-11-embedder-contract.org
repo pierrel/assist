@@ -290,6 +290,18 @@ No evals for paths no client exercises.  Avoid the 11p–3a nightly eval
 window.  Any pass-rate drop vs the prior stage is a regression —
 investigate before scaling.
 
+*Baseline recorded (2026-06-11, N=3, 900s per-test ceiling):* 17 of 19
+selected tests pass 3/3 (the regression bar: any drop on these is a
+regression).  Two =TestAgent= tests are noisy at baseline and tracked
+separately, not against the bar: =test_adds_item_correctly= (1/3 —
+runs 822s+ and twice clipped the ceiling) and
+=test_finds_and_updates_relevant_files_direct= (1/3 — a
+lexical-proximity assertion that fails on unlucky-but-correct model
+phrasing, plus one timeout).  Harness must stay identical across
+cadence stages for comparability.  Env note: eval runs require
+=ASSIST_SEARCH_URL= in =.dev.env= (SearXNG) — its absence produced
+multi-hour search-grind hangs that motivated the per-test ceiling.
+
 *Scope deviation (documented):* the four live-network tests in
 =test_agent.py= (=test_research_saved_to_references=,
 =test_generic_quesion=, =test_combines_context_and_research=,
