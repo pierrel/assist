@@ -714,11 +714,17 @@ def _mark_pending(tid: str, text: str) -> None:
 
     No-op when this thread is already busy, so a second message to a mid-turn
     thread doesn't clobber the in-flight turn's status.
+
+    Runs on the asyncio event-loop thread, so it must never block: it uses
+    ``THREAD_QUEUE.peek_holder()`` (a lock-free read), NOT ``current_handle()``
+    — taking the queue's condition lock here would couple the event loop to
+    the queue and freeze the whole server whenever that lock is held by a
+    long-running turn.
     """
     if _get_status(tid).get("stage") in BUSY_STAGES:
         return
-    holder = THREAD_QUEUE.current_handle()
-    stage = "queued" if (holder is not None and holder.thread_id != tid) else "processing"
+    holder_tid = THREAD_QUEUE.peek_holder()
+    stage = "queued" if (holder_tid is not None and holder_tid != tid) else "processing"
     _set_status(tid, stage, pending_message=text)
 
 

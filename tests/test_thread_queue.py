@@ -444,3 +444,44 @@ def test_watchdog_does_not_clobber_newly_promoted_holder():
     tb.join(timeout=2.0)
     assert not tb.is_alive(), "hold_b thread did not finish"
     assert q.current_handle() is None
+
+
+def test_peek_holder_is_lock_free():
+    """``peek_holder`` must not take ``self._cond`` — it runs on the asyncio
+    event-loop thread (via the message-POST status write), where blocking on
+    the queue lock freezes the whole server.  Hold the lock in another thread
+    and assert ``peek_holder`` still returns promptly.  Regression for the
+    2026-06-10 event-loop wedge."""
+    q = ThreadAffinityQueue()
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with q._cond:
+            holding.set()
+            release.wait(2.0)
+
+    t = threading.Thread(target=hold_lock)
+    t.start()
+    try:
+        assert holding.wait(1.0), "helper never acquired the lock"
+        start = time.time()
+        result = q.peek_holder()
+        elapsed = time.time() - start
+    finally:
+        release.set()
+        t.join()
+
+    assert result is None
+    assert elapsed < 0.5, (
+        f"peek_holder blocked {elapsed:.2f}s on the held lock — it is not "
+        f"lock-free and would wedge the event loop"
+    )
+
+
+def test_peek_holder_returns_holder_thread_id():
+    q = ThreadAffinityQueue()
+    assert q.peek_holder() is None
+    with q.acquire("research-thread"):
+        assert q.peek_holder() == "research-thread"
+    assert q.peek_holder() is None

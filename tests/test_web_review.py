@@ -372,7 +372,6 @@ class TestPostReviewRoute:
         """The /review route must persist a busy+pending status before the
         redirect (same race fix as /message), so the redirect render shows the
         submission instead of losing it to the background task."""
-        from types import SimpleNamespace
         from manage.web import threads
         from manage.web.state import _get_status
 
@@ -380,8 +379,7 @@ class TestPostReviewRoute:
         monkeypatch.setattr("manage.web.review._get_domain_manager", lambda tid: None)
         # Another thread holds the LLM slot -> expect "queued".
         monkeypatch.setattr(
-            threads.THREAD_QUEUE, "current_handle",
-            lambda: SimpleNamespace(thread_id="other-thread"),
+            threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
         )
 
         payload = {"overall": "Looks good", "lines": []}

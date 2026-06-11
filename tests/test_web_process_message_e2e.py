@@ -30,7 +30,6 @@ with real Docker + a real LLM):
 """
 import os
 import time
-from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -168,8 +167,7 @@ def test_post_message_runs_process_message_without_crashing(
 
 def test_mark_pending_sets_queued_when_another_thread_holds_slot(client, monkeypatch):
     monkeypatch.setattr(
-        threads.THREAD_QUEUE, "current_handle",
-        lambda: SimpleNamespace(thread_id="other-thread"),
+        threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
     )
     threads._mark_pending("thread-e2e", "hello there")
     st = _get_status("thread-e2e")
@@ -181,7 +179,7 @@ def test_mark_pending_sets_processing_when_slot_free(client, monkeypatch):
     # Free slot -> "processing" (a BUSY but NON-INIT stage): the existing
     # thread's history and input must stay visible on the redirect render.
     from manage.web.state import INIT_STAGES
-    monkeypatch.setattr(threads.THREAD_QUEUE, "current_handle", lambda: None)
+    monkeypatch.setattr(threads.THREAD_QUEUE, "peek_holder", lambda: None)
     threads._mark_pending("thread-e2e", "hello")
     st = _get_status("thread-e2e")
     assert st.get("stage") == "processing", st
@@ -193,8 +191,7 @@ def test_mark_pending_noop_when_thread_already_busy(client, monkeypatch):
     # An in-flight turn must not be clobbered by a second submission.
     _set_status("thread-e2e", "processing", pending_message="first turn")
     monkeypatch.setattr(
-        threads.THREAD_QUEUE, "current_handle",
-        lambda: SimpleNamespace(thread_id="other-thread"),
+        threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
     )
     threads._mark_pending("thread-e2e", "second turn")
     st = _get_status("thread-e2e")
@@ -208,8 +205,7 @@ def test_post_message_writes_busy_status_synchronously(client, monkeypatch):
     background task hasn't run yet.  Stub `_process_message` to a no-op so we
     observe the endpoint's synchronous write, not a later overwrite."""
     monkeypatch.setattr(
-        threads.THREAD_QUEUE, "current_handle",
-        lambda: SimpleNamespace(thread_id="other-thread"),
+        threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
     )
     monkeypatch.setattr("manage.web.threads._process_message", lambda tid, text: None)
 

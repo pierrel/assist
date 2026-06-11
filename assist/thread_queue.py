@@ -236,6 +236,23 @@ class ThreadAffinityQueue:
         with self._cond:
             return self._holder
 
+    def peek_holder(self) -> str | None:
+        """Lock-free, best-effort read of the current holder's thread id.
+
+        Unlike :meth:`current_handle`, this does **not** take ``self._cond``.
+        It exists so callers on the asyncio event-loop thread can check who
+        holds the slot WITHOUT risking a blocking lock acquire there — a
+        single contended/held queue lock on the event loop freezes the whole
+        web server (observed 2026-06-10: a synchronous ``current_handle()``
+        in the message-POST path wedged the event loop under a long research
+        turn).  The reference read is atomic under the GIL, and ``_Handle``'s
+        ``thread_id`` is immutable, so the worst case is a momentarily stale
+        value — fine for its only use: picking an initial UI status label
+        that the background task then refines.
+        """
+        holder = self._holder  # atomic ref read; deliberately no lock
+        return holder.thread_id if holder is not None else None
+
     def waiter_count(self) -> int:
         with self._cond:
             return len(self._waiters)
