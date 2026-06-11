@@ -206,8 +206,10 @@ def render_thread(
     # During the initial setup stages there is no agent state worth showing yet.
     msgs: list[dict] = [] if is_init or chat is None else chat.get_messages()
 
-    # If the agent state has no user message yet but we have a pending one,
-    # show it as a user bubble so the new message is visible after redirect.
+    # While busy, surface the pending (just-submitted) message as a user
+    # bubble so it's visible right after the redirect — unless the agent has
+    # already persisted an identical user message into the conversation (the
+    # `not any(...)` dedup guard below), in which case it's already shown.
     # Append (not insert-at-0): get_messages() is chronological and the page
     # renders reversed (newest-at-top), so appending places the pending
     # message at the TOP — as the latest message, right below the in-progress
