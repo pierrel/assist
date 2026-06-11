@@ -79,7 +79,7 @@ See [[file:docs/2026-05-04-threads-db-layer-2-checkpoint-pruning.org][docs/2026-
 *** TODO Layer 3 — Tool-result eviction at write time (snapshot-aware)
 See [[file:docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org][docs/2026-05-04-threads-db-layer-3-tool-result-eviction.org]] (original design) and [[file:docs/2026-05-16-deltachannel-spike.org][docs/2026-05-16-deltachannel-spike.org]] (revised plan post-DeltaChannel).  Extend =ContextAwareToolEvictionMiddleware= to evict large =ToolMessage= contents to =/workspace/large_tool_results/<id>= before the checkpoint write, leaving a stub in the message list.  *Held pending PR #89 rewrite:* under DeltaChannel, =checkpoint["channel_values"]["messages"]= is =None= on most rows and =langgraph.channels.delta._DeltaSnapshot(value=[...])= on snapshot rows.  PR #89's current =EvictionSaver= iterates the field as a list and would silently no-op on delta rows + raise on snapshot rows.  Concrete fix: =isinstance(messages, _DeltaSnapshot)= branch — unwrap → evict → rewrap; =None= → no-op (already evicted upstream); =list= → existing path (writes-call shape).  Plus an eval that asserts eviction fires on a K-aligned step.  Eval-side equivalent already shipped (commit f9df751).
 ** TODO Explore the effect of having reasoning turned on for the first turn of each agent (and subagent) and each turn following a subagents response
-** TODO Explore a real Search API to replace the scraped DDG endpoints
+** DONE Explore a real Search API to replace the scraped DDG endpoints
 *Why.*  The current =search_internet= scrapes DuckDuckGo's anonymous
 HTML/lite endpoints via the =ddgs= library.  DDG publishes no
 rate-limit documentation for those (they aren't officially supported as

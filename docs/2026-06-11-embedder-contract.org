@@ -1,0 +1,341 @@
+#+title: The embedder contract — AgentSpec and the core/app boundary
+#+date: 2026-06-11
+
+Implementation design for the framework refactor framed in
+[[file:2026-05-23-assist-as-a-framework.org][2026-05-23-assist-as-a-framework.org]].  Picks a direction, defines the
+contract, and lays out the incremental migration.  The first external
+client to migrate is emacsos (sibling repo), which imports assist
+in-process and is the real first use-case.
+
+* Decision
+
+*Option 1 (spec object) plus a light dose of option 4 (module-level
+boundary), nothing more.*
+
+A single frozen =AgentSpec= dataclass replaces the accreted embedder
+kwargs (=extra_tools=, =extra_skill_sources=, =default_backend=, and the
+already-dead =loop_exploration_tools=).  assist keeps owning the
+hardened middleware stack, the prompts, and subagent construction; the
+spec is /what an embedder declares/, not /how the agent is assembled/.
+The core/app boundary is made real by (a) the spec itself, (b) a named
+=_hardening_middleware()= builder inside =assist/agent.py=, and (c) one
+file move (=ThreadManager= out of =assist/thread.py=).  No package
+split, no new distribution.
+
+Rejected alternatives (from the framing doc):
+- *Composable middleware export* — both real clients want the identical
+  hardened stack; middleware ordering is load-bearing
+  ([[file:2026-05-16-context-management-overhaul.org][context-management overhaul]]) and exporting it as client-assembled
+  rope serves only theoretical flexibility.
+- *Builder* — a fluent wrapper around the spec with no additional
+  capability; ceremony for two clients.
+- *Full package split* (=assist.core= / =assist.app= distributions) —
+  two distributions for one repo and one sibling consumer is
+  disproportionate.  The unused-deps problem it would solve (emacsos
+  inheriting fastapi/uvicorn/docker) is real but cheap to tolerate;
+  noted as a possible follow-up (optional-dependency extras).
+
+* The contract
+
+New module =assist/spec.py=:
+
+#+begin_src python
+@dataclass(frozen=True, slots=True)
+class AgentSpec:
+    """What an embedder declares about its agent.
+
+    Lifecycle: an AgentSpec describes ONE Thread/agent construction.
+    Fields may close over per-request state (emacsos's EmacsBackend
+    closes over the phone identity), so a spec is NOT cacheable across
+    requests as a module constant.  Frozen = the declaration doesn't
+    mutate after construction, normalized to immutable forms.
+
+    Admission rule: a field requires a real, existing client need.
+    """
+    # ADDITIVE to assist's built-in tool surface (filesystem, execute,
+    # task, ...) — () means "no extra tools", not "no tools".
+    tools: tuple[BaseTool | Callable | dict[str, Any], ...] = ()
+    # ADDITIVE to built-in + domain skills.  Precedence:
+    # domain < built-in < embedder sources (last source wins).
+    skill_sources: Mapping[str, BackendProtocol] = field(default_factory=dict)
+    # The composite backend's DEFAULT ROUTE target — where non-routed
+    # paths go.  Mutually exclusive with sandbox_backend (a Thread/
+    # create_agent param), validated at create_agent time.
+    default_backend: BackendProtocol | None = None
+#+end_src
+
+=__post_init__= normalizes =tools= to a tuple and =skill_sources= to
+=MappingProxyType= over a copy (via =object.__setattr__=, the class is
+frozen) so "frozen" is accurate, not shallow-frozen-by-accident.
+Validation is *pure CPU only* — no backend listing, no probing, no
+locks (an =EmacsBackend= list is a network round trip to the phone; a
+=FilesystemBackend= list is disk I/O; both are banned here).
+
+Every field maps to a live client need:
+
+| Field             | Client need                                        |
+|-------------------+----------------------------------------------------|
+| =tools=           | emacsos legacy chat: eval_elisp / apply_config / get_config |
+| =skill_sources=   | emacsos config-apply skill served at its own route |
+| =default_backend= | emacsos file-backed chat: EmacsBackend             |
+
+** Target signatures
+
+#+begin_src python
+create_agent(model, working_dir, checkpointer=None, sandbox_backend=None,
+             *, spec: AgentSpec | None = None)
+
+Thread(working_dir, *,
+       spec: AgentSpec | None = None,
+       configurable: Mapping[str, Any] | None = None,
+       thread_id=None, checkpointer=None, model=None,
+       max_concurrency=5, sandbox_backend=None, on_queue_state=None)
+#+end_src
+
+=spec= is keyword-only in both (an out-of-tree positional call must not
+silently bind a string to it).  =spec=None= means =AgentSpec()= —
+exactly today's defaults; manage.web and the eval harness pass no spec.
+
+*The split rule* (articulable, by design): /spec = the agent's shape,
+consumed by =create_agent=; Thread kwargs = per-instance and per-run
+wiring/ (identity, persistence, model, concurrency, status callback,
+per-request context).  One documented exception: =sandbox_backend=
+stays a param despite being agent-shape-adjacent, because ~15 eval
+files use it positionally and it is per-turn runtime isolation in the
+web app; folding it into the spec is possible later if the boundary
+ever needs it.
+
+** =configurable= is NOT in the spec
+
+emacsos's phone identity varies *per request*; a frozen per-agent spec
+holding per-request data invites caching the first request's identity
+(and auth contents) into all later turns.  It is also the one field
+=create_agent= would have to ignore — a spec consumed partially by two
+layers is two specs in a trenchcoat.  So per-request context stays a
+=Thread= kwarg: =configurable=, the narrowed replacement for
+=extra_config=.
+
+Narrowing (verified: no client passes top-level runconfig keys):
+- one-level merge into =runconfig["configurable"]= (the old two-level
+  merge with top-level passthrough is removed);
+- reserved langgraph keys — =thread_id=, =checkpoint_ns=,
+  =checkpoint_id= — *raise* instead of being silently dropped.
+
+** Dropped from v1 (deferrals, each with the trigger that revives it)
+
+- =subagents= selection — *user decision 2026-06-11: dropped.*  No
+  client uses a non-default value (emacsos keeps all three subagents;
+  research is routine phone traffic, reversing the framing doc's
+  assumption).  Adding the field later is a backward-compatible
+  one-field change the day a client actually deviates.  When it comes
+  back, settle: naming (spec names vs the registered
+  =*-agent= names), the empty-set semantics against deepagents'
+  auto-injected general-purpose subagent + =task= tool, and prompt
+  sections that advertise subagents (=general_instructions.md.j2=
+  references the research workflow — a gated subagent set must gate
+  the prompt too).  Container should be =tuple[str, ...]= (ordered,
+  extensible to client-supplied subagent specs), not =frozenset=.
+- =system_prompt= / persona — no client supplies one; the dev prompt
+  ships as the app-layer default (see boundary below).
+- middleware tuning — the only live knob is env-driven
+  (=ASSIST_LLM_MAX_RETRIES=).
+- =model= — runtime infra, stays a constructor param.
+- persistence/keying — stays =thread_id=/=checkpointer= params; no
+  =PersistencePolicy= abstraction (two clients, two policies, zero
+  shared code worth extracting).
+- =context_schema= / =Runtime.context= — langgraph's newer typed
+  channel for exactly what =configurable= carries.  Keeping
+  =configurable= is the no-behavior-change call (emacsos tools read
+  =config["configurable"]["phone_context"]=), but the spec does not
+  endorse the legacy channel as the end state; migrate when langchain
+  1.x context plumbing stabilizes in deepagents.
+
+The admission rule (a field requires a real client need) is written
+into the spec docstring so the spec doesn't become the new accretion
+point for deepagents kwargs.
+
+* Core/app boundary
+
+*Core (small-model hardening, what emacsos consumes):* =assist/spec.py=
+(new), =assist/agent.py=, =assist/thread.py= (=Thread= only),
+=assist/thread_queue.py= + =ThreadQueueMiddleware= (emacsos shares the
+same single-slot llama.cpp, so the queue is core — resolving the
+framing doc's open question), =assist/backends.py=,
+=assist/checkpoint_rollback.py=, =assist/stream_chunks.py=,
+=assist/model_manager.py=, =assist/promptable.py=.
+
+Hardening middleware (core): ModelRetry, BadRequestRetry,
+JsonValidation, ToolNameSanitization, OutputSanitization,
+LoopDetection, EmptyResponseRecovery, SmallModelSkills,
+SmallModelMemory, ModelLogging, WriteCollision.
+
+*App (dev/web):* =manage/*=, =ThreadManager= (moving to
+=assist/thread_manager.py=) + =assist/retention.py=,
+=assist/domain_manager.py=, =assist/sandbox*.py=, GitPushBlocker,
+ReadOnlyEnforcer.  *Dev prompts and templates are app-layer CONTENT
+shipped as the core's default* (the roadmap names "dev prompts" among
+the app pieces; the mechanism — =promptable.py= — is core, the
+shipped =general_instructions.md.j2= persona is app content).
+
+*Honesty notes* (the boundary is named, not yet physically enforced):
+- =GitPushBlockerMiddleware= is app policy but is wired mid-stack in
+  core's =create_agent= and ships to every embedder (inert where no
+  git/execute path exists).  The framing doc had listed it inside the
+  reusable enumeration; reclassified here as app policy shipped by
+  default.  Membership changes are behavior-affecting, eval-gated, and
+  out of scope.
+- =assist.agent= imports =assist.sandbox= (docker) — importing "core"
+  still pulls app deps.  Known violation, acceptable at module-level
+  boundary strength; a package split would fix it and is explicitly
+  deferred.
+- The middleware *instance-sharing topology* is an invariant, not just
+  the order: retry/json-validation/tool-name instances built once in
+  =create_agent= are shared into the context and research subagents,
+  while critique gets fresh instances.  =_hardening_middleware()= must
+  preserve this identity graph (or first verify the per-instance state
+  is logging-only) — "stack order preserved" alone is not the whole
+  contract.
+
+*ThreadManager move:* =assist/thread.py:346-587= →
+=assist/thread_manager.py=.  No re-export shim — assist has no external
+=ThreadManager= consumers (emacsos imports only =Thread=); all in-repo
+import sites (manage/cli.py, manage/web/state.py, assist/retention.py,
+tests, edd files) update in the same commit.  It stays inside the
+=assist= package (not =manage/=) because the eval harness imports it
+independently of the web app.  The move must preserve import-time
+semantics exactly: =sqlite3.connect= stays in =__init__= (startup-time,
+not first-request), and the lazy =model= property under =_model_lock=
+stays lazy (the web server must still boot before the LLM endpoint is
+reachable).  *Layout refactor ⇒ real prod smoke after deploy* (the
+manage.web package split crash-looped systemd; unit tests don't catch
+entry-point regressions).
+
+*Dead middleware deleted:* =local_context_middleware.py=,
+=thread_logging_middleware.py= (zero references).
+=subagent_type_inference.py= stays (Ministral-only, referenced by
+tests; out of scope).
+
+** Deepagents-upstream decision (classification only; upstreaming out of scope)
+
+- /Upstream candidates/ (generic, no assist deps): JsonValidation,
+  ToolNameSanitization, OutputSanitization, EmptyResponseRecovery,
+  LoopDetection, BadRequestRetry, WriteCollision (rewrites deepagents'
+  own =write_file= collision error — generic to its filesystem tools).
+- /Stays assist-core/: SmallModelSkills, SmallModelMemory (assist's
+  skill-sources and AGENTS.md conventions), ModelLogging,
+  ThreadQueueMiddleware (binds to assist's queue singleton).
+- /Stays app-specific/: GitPushBlocker, ReadOnlyEnforcer.
+
+* Migration sequence (each step leaves the tree green)
+
+1. This doc + branch =embedder-contract=.  Baseline evals N=3 on the
+   affected suites *before any code changes*.
+2. =assist/spec.py= + =tests/test_agent_spec.py= (defaults, frozenness,
+   normalization, validation).
+3. =create_agent= learns =spec== (dual path): legacy kwargs
+   (=extra_tools=, =extra_skill_sources=, =default_backend=,
+   =loop_exploration_tools=) normalized into an =AgentSpec= up front;
+   passing both =spec= and any legacy kwarg is a =TypeError= whose
+   message names the offending kwarg and its replacement field
+   (=extra_tools → AgentSpec.tools=, …) — that message is the migration
+   documentation for emacsos.  Single spec-driven code path through the
+   *same* skill-source assembly block (precedence pinned by existing
+   tests).  Add spec-equivalence tests + the missing
+   checkpointer/sandbox_backend forwarding tests.
+4. =Thread= learns =spec== + =configurable== (dual path, mutually
+   exclusive with legacy kwargs).  Narrow the merge now: rewrite the
+   one test pinning top-level extra_config passthrough
+   (tests/test_create_agent_extra_tools.py) rather than carrying two
+   merge implementations until removal.
+5. Internal reorg, zero behavior change: =_hardening_middleware()=
+   extraction (instance-sharing topology preserved), ThreadManager
+   move, dead-middleware deletion.  Post-impl evals N=3.
+6. Wheel fix: =[tool.setuptools.package-data]= for =templates/**= and
+   =skills/**=; verify with a clean-venv non-editable install that
+   templates resolve and skills load.  Closes the emacsos TODO
+   (editable-install requirement).  Template loading stays lazy.
+7. Code-review team on the diff; fix BLOCKER/IMPORTANT; evals N=5.
+8. Port emacsos (sibling repo): =_build_thread= constructs
+   =AgentSpec(skill_sources=…, tools=…/default_backend=…)= +
+   =Thread(working_dir=…, spec=spec, thread_id=…, checkpointer=…,
+   configurable={phone_context: …})=; *drop the no-op
+   =loop_exploration_tools=*; delete its constant if unreferenced.
+   Construction stays inside =_build_thread= on the pump executor
+   thread — nothing moves into async handler bodies (see guardrails).
+   Verify: emacsos pytest + manual phone round-trip (legacy chat,
+   file-backed chat, /clear, client disconnect mid-stream).
+9. Remove the legacy kwargs from =Thread= + =create_agent= (and the
+   dual-path normalization) — *only after the emacsos port is merged
+   and deployed* (emacsos installs assist editable from the sibling
+   checkout; this ordering is the one hard cross-repo dependency).
+   Re-grep both repos for the legacy names first.  manage.web needs no
+   port (it passes none of the accreted kwargs — verify, then adopt
+   keyword layout in ThreadManager.get/new).  Rewrite the three
+   forwarding tests spec-only; the spec-equivalence tests become the
+   canonical pins.
+10. Final stability evals N=10.  Update the roadmap entry and the
+    framing doc to point here.
+
+* Eval cadence (per the repo standard — this refactor touches
+  =assist/agent.py= and =assist/middleware/=, full rigor applies)
+
+| Stage                         | Trials | Suites                                                  |
+|-------------------------------+--------+---------------------------------------------------------|
+| Baseline (before code)        | N=3    | edd/eval/test_agent.py, test_skill_loading.py, test_memory.py, one skill-sources-sensitive suite |
+| Post-implementation           | N=3    | same                                                    |
+| Post-code-review              | N=5    | same                                                    |
+| Stability (before push)       | N=10   | same                                                    |
+
+No evals for paths no client exercises.  Avoid the 11p–3a nightly eval
+window.  Any pass-rate drop vs the prior stage is a regression —
+investigate before scaling.
+
+* Event-loop guardrails for the coding phase (inherited from design review)
+
+- Do NOT move =AgentSpec=/=Thread=/=EmacsBackend=/skill-source
+  construction out of emacsos's =_build_thread=/=_start_stream_iter=
+  into any async handler body.  =Thread.__init__= does a blocking HTTP
+  model probe (when =model=None=) and file I/O via =create_agent=.
+- Do NOT add I/O, backend listing, lock acquisition, or probing to
+  =AgentSpec.__post_init__= or the legacy-kwarg normalization — pure
+  CPU only.
+- Do NOT change ThreadManager's import-time sqlite connect or its lazy
+  =model= property semantics in the file move.
+- Do NOT hoist emacsos's lazy =_skill_sources()= / =_checkpointer()=
+  out from under the =_STREAM_LOCK=-serialized executor path.
+- Run web tests / smoke with =PYTHONASYNCIODEBUG=1=.
+- Known limitation (pre-existing, out of scope, goes in the PR
+  description): several manage/web async handlers construct Threads
+  inline on the event loop (create/get/capture/merge paths; worst case
+  a cache-miss thread description runs a synchronous LLM call on the
+  loop).  This refactor must not add cycles to construction — and does
+  not fix these sites.
+
+* Design-review outcomes (advisors, not gates)
+
+Accepted: drop =subagents= (user decision); move =configurable= out of
+the spec; mutable-default/normalization fixes; kill the dual-merge
+early; no ThreadManager shim; eval cadence aligned to 3/5/10 with
+baseline + N=10; dev prompts classified app content; GitPushBlocker and
+sandbox-import honesty notes; instance-sharing invariant; keyword-only
+=spec=; additive-semantics docstrings; reserved-key raise extended to
+=checkpoint_ns=/=checkpoint_id=; =tools= typed against deepagents'
+union; dual-path TypeError message as migration doc.
+
+Rejected: moving ThreadManager into =manage/= (the eval harness imports
+it independently of the web app); splitting the wheel fix into its own
+PR (two lines, sequenced right before the emacsos port that needs it);
+making emacsos shed GitPushBlocker or any middleware (membership
+changes are eval-gated behavior changes, out of scope).
+
+* Out of scope
+
+- Upstreaming any middleware to deepagents (classification recorded
+  above).
+- Changing emacsos's subagent set or any middleware membership.
+- =PersistencePolicy= or any third-client generality.
+- Package split / optional-dependency extras.
+- =system_prompt= / middleware-tuning spec fields; =context_schema=
+  migration.
+- Switching emacsos to non-editable installs.
+- Fixing manage/web's pre-existing on-loop construction sites.
