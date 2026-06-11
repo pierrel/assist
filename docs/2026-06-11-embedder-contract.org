@@ -121,6 +121,14 @@ Narrowing (verified: no client passes top-level runconfig keys):
 - reserved langgraph keys — =thread_id=, =checkpoint_ns=,
   =checkpoint_id= — *raise* instead of being silently dropped.
 
+One deliberate divergence on the deprecated adapter (recorded from
+code review): legacy =extra_config= keeps =thread_id='s *historical
+silent-drop* (pinned by a pre-existing test; raising there could break
+an un-ported embedder mid-window), while =checkpoint_ns= /
+=checkpoint_id= raise even via =extra_config= (no client ever passed
+them).  The new =configurable= kwarg raises on all three.  The
+asymmetry dies with the adapter at the legacy-kwarg removal step.
+
 ** Dropped from v1 (deferrals, each with the trigger that revives it)
 
 - =subagents= selection — *user decision 2026-06-11: dropped.*  No
@@ -301,6 +309,27 @@ phrasing, plus one timeout).  Harness must stay identical across
 cadence stages for comparability.  Env note: eval runs require
 =ASSIST_SEARCH_URL= in =.dev.env= (SearXNG) — its absence produced
 multi-hour search-grind hangs that motivated the per-test ceiling.
+
+*Post-implementation result (N=3 attempted, 2 clean trials kept):*
+stable-17 green in both clean trials (17/17 twice); the noisy pair
+failed within its baseline envelope.  Trial 3 was discarded as
+contaminated (see harness note below).  One stable-test blip —
+=test_writes_memory_implicit= failed once in trial 2 (memory file came
+back empty after a 14s turn) — was investigated with a targeted
+isolated N=5 before scaling, per the investigate-before-scaling rule.
+
+*Harness limitation discovered (timeout zombies):* =pytest-timeout='s
+signal method fails the TEST but cannot kill the timed-out agent's
+worker threads — the orphaned agent keeps consuming the single LLM
+slot and the THREAD_QUEUE, starving every later test in the trial
+(observed: a post-timeout test ground a 96k-token context for 85+
+minutes).  Consequences: (a) per-trial wall-clock varies wildly after
+any timeout; (b) results of tests that run AFTER a timeout in the same
+trial are suspect.  Mitigation for this refactor: identical harness
+across stages keeps numbers comparable, and any stable-test failure
+that occurs after a timeout gets an isolated re-run before being
+called a regression.  Real fix is the roadmap's cassette item (mock
+tool calls) plus per-test process isolation — out of scope here.
 
 *Scope deviation (documented):* the four live-network tests in
 =test_agent.py= (=test_research_saved_to_references=,
