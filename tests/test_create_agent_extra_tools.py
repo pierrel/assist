@@ -197,23 +197,19 @@ class TestThreadExtraConfig:
         # Runconfig agrees — embedder's attempt was silently dropped.
         assert t.runconfig["configurable"]["thread_id"] == "ctor-set"
 
-    def test_extra_top_level_max_concurrency_protected(self):
-        """Same rationale as thread_id: `self.max_concurrency` is the
-        public attribute; if an embedder overrode just the runconfig
-        copy, callers reading `self.max_concurrency` would see a
-        different value than langgraph does."""
-        t = self._build(max_concurrency=7, extra_config={
-            "max_concurrency": 99,
-        })
-        assert t.max_concurrency == 7
-        assert t.runconfig["max_concurrency"] == 7
-
-    def test_extra_top_level_non_protected_keys_pass_through(self):
-        """Top-level keys other than `configurable` / `max_concurrency`
-        flow through unchanged — embedder freely adds new langgraph
-        config knobs."""
-        t = self._build(extra_config={"recursion_limit": 42})
-        assert t.runconfig["recursion_limit"] == 42
+    def test_extra_top_level_keys_now_raise(self):
+        """The merge was narrowed with the AgentSpec migration
+        (docs/2026-06-11-embedder-contract.org): no client ever used
+        top-level passthrough (verified across manage.web,
+        emacsos-server, edd), so top-level keys other than
+        `configurable` raise instead of silently merging into the
+        runconfig.  This replaces the old pass-through/protected-key
+        pinning tests."""
+        import pytest as _pytest
+        with _pytest.raises(TypeError, match="top-level keys are no longer"):
+            self._build(extra_config={"recursion_limit": 42})
+        with _pytest.raises(TypeError, match="top-level keys are no longer"):
+            self._build(max_concurrency=7, extra_config={"max_concurrency": 99})
 
     def test_extra_config_does_not_leak_across_threads(self):
         """Two Threads built with different extra_config must not share

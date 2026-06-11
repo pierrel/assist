@@ -14,6 +14,7 @@ from langchain.agents.middleware import ModelRetryMiddleware
 from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
+from assist.spec import AgentSpec
 from assist.tools import read_url, search_internet
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE, DOMAIN_SKILLS_PATH
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
@@ -134,6 +135,19 @@ class AgentHarness:
 _MEMORY_FILE = "AGENTS.md"
 
 
+# Legacy embedder kwargs and their AgentSpec replacements.  The error
+# message below is the migration documentation an embedder sees: it
+# names the offending kwarg and the spec field that replaces it.
+_LEGACY_KWARG_REPLACEMENTS = {
+    "extra_tools": "AgentSpec.tools",
+    "extra_skill_sources": "AgentSpec.skill_sources",
+    "default_backend": "AgentSpec.default_backend",
+    "loop_exploration_tools":
+        "nothing — it has been a no-op since the loop-detection rollback; "
+        "drop the kwarg",
+}
+
+
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
@@ -142,8 +156,19 @@ def create_agent(model: BaseChatModel,
                  extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
                  loop_exploration_tools: frozenset[str] | None = None,
                  default_backend: BackendProtocol | None = None,
+                 *,
+                 spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
     """Build the general-purpose agent.
+
+    ``spec`` is the embedder contract (see ``assist.spec.AgentSpec``
+    and docs/2026-06-11-embedder-contract.org): one declaration object
+    carrying the embedder-supplied tools, skill sources, and default
+    backend.  ``spec=None`` means ``AgentSpec()`` — today's defaults.
+    Mutually exclusive with the legacy per-need kwargs below, which
+    remain accepted during the migration window and are normalized
+    into an ``AgentSpec`` internally; they will be removed once the
+    known embedders (manage.web, emacsos-server) are ported.
 
     ``extra_skill_sources`` is a mapping of additional virtual-path
     routes to backends that hold ``SKILL.md`` files.  Embedders (e.g.
@@ -197,7 +222,33 @@ def create_agent(model: BaseChatModel,
     from ``working_dir`` (+ ``sandbox_backend``) as before.  Default ``None``
     preserves the FilesystemBackend default.
     """
-    if sandbox_backend is not None and default_backend is not None:
+    # Normalize the embedder surface to a single AgentSpec up front, so
+    # everything below is one spec-driven code path (no legacy/spec
+    # branching in the body).  Pure dict/tuple work — no I/O (this can
+    # run adjacent to an event loop; see the embedder-contract doc's
+    # guardrails).
+    legacy_kwargs = {"extra_tools": extra_tools,
+                     "extra_skill_sources": extra_skill_sources,
+                     "default_backend": default_backend,
+                     "loop_exploration_tools": loop_exploration_tools}
+    if spec is not None:
+        passed = [k for k, v in legacy_kwargs.items() if v is not None]
+        if passed:
+            raise TypeError(
+                f"create_agent: pass spec= OR the legacy kwargs, not both — "
+                f"got {passed[0]!r}; its replacement is "
+                f"{_LEGACY_KWARG_REPLACEMENTS[passed[0]]}")
+    else:
+        # loop_exploration_tools has no spec equivalent: it has been a
+        # no-op since the loop-detection rollback (PR #128) and is
+        # accepted here only so un-ported embedders don't break.
+        spec = AgentSpec(
+            tools=tuple(extra_tools) if extra_tools is not None else (),
+            skill_sources=extra_skill_sources or {},
+            default_backend=default_backend,
+        )
+
+    if sandbox_backend is not None and spec.default_backend is not None:
         raise ValueError(
             "create_agent: pass sandbox_backend OR default_backend, not both")
     # Core middleware: retry, tool call limiting, JSON validation, and logging.
@@ -252,22 +303,26 @@ def create_agent(model: BaseChatModel,
 
     memories_path = os.path.join(workspace_dir, _MEMORY_FILE)
 
+    # `dict(...) or None` collapses an empty mapping to None so the
+    # composite-backend default path is identical whether the embedder
+    # passed nothing or an empty spec.
+    extra_routes = dict(spec.skill_sources) or None
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend,
-                                                   extra_routes=extra_skill_sources)
+                                                   extra_routes=extra_routes)
     else:
         backend = _create_standard_backend(working_dir,
-                                           extra_routes=extra_skill_sources,
-                                           default_backend=default_backend)
+                                           extra_routes=extra_routes,
+                                           default_backend=spec.default_backend)
 
     skill_sources = [SKILLS_ROUTE]
-    if extra_skill_sources:
+    if spec.skill_sources:
         # De-dupe: an embedder that re-passes SKILLS_ROUTE as a key
         # has overridden the built-in *backend* (the route map
         # update wins), but shouldn't make the middleware scan the
         # same prefix twice.
         skill_sources.extend(
-            k for k in extra_skill_sources if k != SKILLS_ROUTE
+            k for k in spec.skill_sources if k != SKILLS_ROUTE
         )
     # Auto-discover skills the cloned domain repo defines at
     # <working_dir>/.claude/skills/ (served by the composite *default* backend;
@@ -295,7 +350,7 @@ def create_agent(model: BaseChatModel,
                                       checkpointer,
                                       [retry_middle, json_validation_mw, tool_name_mw],
                                       sandbox_backend=sandbox_backend,
-                                      default_backend=default_backend)
+                                      default_backend=spec.default_backend)
     )
 
     # NOTE: research-agent is confined to <working_dir>/references/ via
@@ -350,7 +405,7 @@ def create_agent(model: BaseChatModel,
         middleware=mw + [skills_mw, memory_mw, logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
-        tools=list(extra_tools) if extra_tools else [],
+        tools=list(spec.tools),
     )
 
     return agent

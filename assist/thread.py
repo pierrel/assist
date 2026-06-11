@@ -7,7 +7,7 @@ import threading
 import time
 import tempfile
 from datetime import datetime
-from typing import Literal, Dict, Any, Callable, List, Iterator, Sequence
+from typing import Literal, Dict, Any, Callable, List, Iterator, Mapping, Sequence
 
 import sqlite3
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
@@ -20,6 +20,7 @@ from deepagents.backends.protocol import BackendProtocol
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_assistant_model
 from assist.agent import create_research_agent, create_agent
+from assist.spec import AgentSpec
 from assist.checkpoint_rollback import invoke_with_rollback
 from assist.sandbox_manager import SandboxManager
 from assist.thread_queue import THREAD_QUEUE
@@ -109,8 +110,27 @@ class Thread:
                  loop_exploration_tools: frozenset[str] | None = None,
                  extra_skill_sources: dict[str, BackendProtocol] | None = None,
                  extra_config: dict[str, Any] | None = None,
-                 default_backend: BackendProtocol | None = None):
-        """`extra_tools` is forwarded to ``create_agent(extra_tools=...)``
+                 default_backend: BackendProtocol | None = None,
+                 *,
+                 spec: AgentSpec | None = None,
+                 configurable: Mapping[str, Any] | None = None):
+        """`spec` is the embedder contract (``assist.spec.AgentSpec``):
+        one declaration object carrying embedder-supplied tools, skill
+        sources, and default backend.  Forwarded to
+        ``create_agent(spec=...)``, which validates that it isn't
+        combined with the legacy per-need kwargs below.  ``None``
+        means "no embedder additions" — today's defaults.
+
+        `configurable` is the narrowed replacement for ``extra_config``:
+        a mapping merged (shallow, one level) into
+        ``self.runconfig["configurable"]`` so per-request embedder
+        context (e.g. emacsos's phone identity) reaches every
+        invocation.  The reserved langgraph keys ``thread_id`` /
+        ``checkpoint_ns`` / ``checkpoint_id`` raise ``ValueError`` —
+        pass identity via the ``thread_id=`` constructor param.
+        Mutually exclusive with ``extra_config``.
+
+        `extra_tools` is forwarded to ``create_agent(extra_tools=...)``
         — embedder-supplied tools the main agent can call.  See
         ``assist.agent.create_agent`` docstring for the subagent
         scope.
@@ -135,30 +155,16 @@ class Thread:
         ``SandboxBackendProtocol`` the ``execute`` tool is enabled for the
         main agent.  Default ``None``.
 
-        `extra_config` is merged into ``self.runconfig`` so per-Thread
-        embedder context (eg. langgraph ``configurable`` values that
-        tools read via the ``config: RunnableConfig`` parameter) reaches
-        every invocation without the embedder having to call
-        ``.with_config(...)`` at every entry point.  Default ``None``
-        preserves prior behavior.
-
-        *Merge semantics:* two-level, not recursive.  The nested
-        ``configurable`` dict gets a shallow `.update()` from the
-        embedder's ``configurable`` (so adding a key alongside
-        ``thread_id`` works as expected; passing a key whose value
-        is itself a dict overwrites any existing dict at that key
-        wholesale — no deep merge).  Top-level keys other than
-        ``configurable`` are overridden wholesale.
-
-        Constructor-owned keys (``configurable.thread_id``,
-        ``max_concurrency``) are NOT overridable via ``extra_config``
-        — `self.thread_id` / `self.max_concurrency` would diverge
-        from what the runconfig says, and downstream code
-        (THREAD_QUEUE affinity, ``message()``'s log lines) reads the
-        attribute not the config.  Pass those via the dedicated
-        ``thread_id=`` / ``max_concurrency=`` constructor params
-        instead; the merge silently drops the protected keys to keep
-        the attribute and runconfig in sync.
+        `extra_config` is the DEPRECATED predecessor of
+        ``configurable``: only its ``{"configurable": {...}}`` shape
+        was ever used by a client (verified across manage.web,
+        emacsos-server, and the eval harness), so it is now a thin
+        adapter over the same narrowed merge.  Top-level keys other
+        than ``configurable`` raise (they used to pass through to the
+        runconfig; no client did that).  ``configurable.thread_id``
+        keeps its historical silent-drop (the constructor param owns
+        it).  Mutually exclusive with ``configurable``; removed once
+        the known embedders are ported to the new kwarg.
         """
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -174,14 +180,15 @@ class Thread:
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency
         }
+        if configurable is not None and extra_config is not None:
+            raise TypeError(
+                "Thread: pass configurable= OR the deprecated extra_config=, "
+                "not both — extra_config's replacement is configurable")
         if extra_config is not None:
-            # `is not None` (vs `if extra_config:`) so a falsy-but-
-            # wrong-type value like `[]` or `""` still trips the
-            # isinstance check below instead of silently skipping the
-            # whole merge.  An explicit `{}` no-ops harmlessly either
-            # way.  Validate up front so an embedder gets a clear
-            # error instead of a downstream AttributeError on
-            # `.items()`.
+            # DEPRECATED adapter: normalize the legacy shape onto the
+            # narrowed merge below.  `is not None` (vs `if extra_config:`)
+            # so a falsy-but-wrong-type value like `[]` or `""` still
+            # trips the isinstance check instead of silently skipping.
             if not isinstance(extra_config, dict):
                 raise TypeError(
                     f"extra_config must be a dict, got {type(extra_config).__name__}"
@@ -192,30 +199,39 @@ class Thread:
                     f"extra_config['configurable'] must be a dict, "
                     f"got {type(inner).__name__}"
                 )
-            # Two-level merge (NOT recursive): the inner `configurable`
-            # dict gets a shallow `.update()` from the embedder's
-            # `configurable`; top-level keys are overridden wholesale.
-            # Protected keys (`thread_id` inside `configurable`, and
-            # top-level `max_concurrency`) are silently dropped from
-            # the embedder's input to keep `self.thread_id` /
-            # `self.max_concurrency` in sync with the runconfig —
-            # see docstring.
-            #
-            # The dict-comprehension below also serves as a defensive
-            # shallow copy of `extra_config["configurable"]` — if the
-            # embedder mutates its own dict later, our `runconfig`
-            # isn't affected.  Nested values themselves are not
-            # deep-copied (consistent with the documented "two-level,
-            # not recursive" merge semantics).
-            extra_configurable = {
-                k: v for k, v in (inner or {}).items()
-                if k != "thread_id"
+            stray = [k for k in extra_config if k != "configurable"]
+            if stray:
+                raise TypeError(
+                    f"extra_config top-level keys are no longer merged into "
+                    f"the runconfig (got {stray[0]!r}); only the "
+                    f"'configurable' key is supported — and its replacement "
+                    f"is the configurable= kwarg")
+            # Historical silent-drop of thread_id is preserved for the
+            # deprecated kwarg (the new `configurable=` raises instead).
+            configurable = {
+                k: v for k, v in (inner or {}).items() if k != "thread_id"
             }
-            self.runconfig["configurable"].update(extra_configurable)
-            for k, v in extra_config.items():
-                if k in ("configurable", "max_concurrency"):
-                    continue
-                self.runconfig[k] = v
+
+        if configurable is not None:
+            if not isinstance(configurable, Mapping):
+                raise TypeError(
+                    f"configurable must be a mapping, got "
+                    f"{type(configurable).__name__}"
+                )
+            # Reserved langgraph checkpoint-addressing keys: letting an
+            # embedder set these would silently retarget checkpoint
+            # resolution (thread_id additionally diverging from
+            # self.thread_id, which THREAD_QUEUE affinity reads).
+            reserved = {"thread_id", "checkpoint_ns", "checkpoint_id"} \
+                & set(configurable)
+            if reserved:
+                raise ValueError(
+                    f"configurable must not set reserved langgraph keys "
+                    f"{sorted(reserved)}; pass identity via the thread_id= "
+                    f"constructor param")
+            # Shallow copy: an embedder mutating its own mapping after
+            # construction must not change this Thread's runconfig.
+            self.runconfig["configurable"].update(dict(configurable))
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
@@ -224,7 +240,8 @@ class Thread:
                                   default_backend=default_backend,
                                   extra_tools=extra_tools,
                                   loop_exploration_tools=loop_exploration_tools,
-                                  extra_skill_sources=extra_skill_sources)
+                                  extra_skill_sources=extra_skill_sources,
+                                  spec=spec)
 
     def message(self, text: str) -> str:
         """Continue the thread and return the last response.
