@@ -290,6 +290,18 @@ No evals for paths no client exercises.  Avoid the 11p–3a nightly eval
 window.  Any pass-rate drop vs the prior stage is a regression —
 investigate before scaling.
 
+*Scope deviation (documented):* the four live-network tests in
+=test_agent.py= (=test_research_saved_to_references=,
+=test_generic_quesion=, =test_combines_context_and_research=,
+=test_finance_strategy_projection=) are deselected from this
+refactor's cadence.  They run real internet research — the baseline
+attempt hung >1h on a dead outbound connection — and they measure
+search reliability, not the construction surface this refactor
+touches.  The *stubbed* research tests (relays-unavailable,
+research-completes) stay in scope: they exercise subagent dispatch,
+which is construction-sensitive.  Full sweeps remain the nightly
+cron's job.
+
 * Event-loop guardrails for the coding phase (inherited from design review)
 
 - Do NOT move =AgentSpec=/=Thread=/=EmacsBackend=/skill-source
