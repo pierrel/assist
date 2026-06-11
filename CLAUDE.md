@@ -6,9 +6,11 @@ Guidance for Claude Code working in this repository.
 
 Non-trivial changes to this repo follow a **design phase**, a **coding phase**, and a **review phase**. Each phase has a named subagent team. The point is to (1) separate "what should we build" from "build it" so the design has a chance to be wrong cheaply, (2) give the implementation a clear contract to satisfy, and (3) surface anything reviewers (including automated ones like Copilot) flag once the diff is real.
 
-This applies to: new middleware, agent-architecture changes, skill migrations, eval suite changes, prompt-engineering work where the small model's behavior matters, and anything that touches `assist/agent.py` or `assist/middleware/`.
+This applies to: new middleware, agent-architecture changes, skill migrations, eval suite changes, prompt-engineering work where the small model's behavior matters, anything that touches `assist/agent.py` or `assist/middleware/`, the concurrency primitives (`assist/thread_queue.py`, locks, anything that runs on the asyncio event loop), or the request hot path (`manage/web/` message-submit / render).
 
 It does NOT apply to: trivial fixes, doc edits, single-file refactors with no behavior change.
+
+**Blast radius, not line count, sets the rigor.** A six-line change to a lock, the queue, the event loop, or the message-submit path gets the FULL three-phase treatment — design + design-review team + code-review team — even when it looks tiny, and *especially* when it's a fast fix for a regression (the rush is exactly when a subtle concurrency / hot-path change slips a light review). A 2-agent "focused review" is not enough for these. Bit us 2026-06-10: a small queue-feedback fix shipped with a light review introduced an event-loop deadlock that took the whole web server down.
 
 ### Phase 1 — Design
 
@@ -30,6 +32,7 @@ Spawn the design team via the `Agent` tool **before writing any code**.
 | **Agentic best practices** | Does the design align with current LangChain / LangGraph / `deepagents` patterns (middleware composition, state shape, sub-agent boundaries, tool surface, checkpointing)? Anything that fights the framework rather than working with it? |
 | **User guidance & intention** | Does the plan match what the user actually asked for (and the spirit behind it)? Does it respect prior corrections from `auto-memory feedback` and session context? Does it introduce work the user didn't ask for? |
 | **Clean interfaces** | Are the new module/function/tool boundaries cohesive? Are responsibilities well-separated? Is the public surface small and obvious? Are names accurate? |
+| **Event-loop liveness** *(when the change touches `manage/web/` or anything reachable from an `async def` handler)* | Does any code that runs on the asyncio event-loop thread (a route handler, or a sync helper it calls inline) acquire a lock, do blocking file/network I/O, run a subprocess, or sleep? On single-worker uvicorn that's a FULL outage, not a slow request. Such work must be lock-free or pushed off the loop (`run_in_threadpool`). |
 
 The architect (or the main Claude when revising the plan directly) treats the reviewers as advisors, not gates: address what's right, justify what isn't. Document any rejected suggestions briefly in the plan so the rationale survives into Phase 2.
 
@@ -48,6 +51,7 @@ The main Claude (you) writes the code, runs the evals, and ships. The code-revie
 | --- | --- |
 | **Simplicity** | Is the implementation as small as it can be while still satisfying the design? Dead branches? Premature abstractions? Knobs nobody asked for? |
 | **Clean code** | Naming, function size, layering, error handling. Bugs, missing edge cases, leaks, race conditions. |
+| **Event-loop liveness** *(when the diff touches `manage/web/` or anything reachable from an `async def` handler)* | Does any code on the asyncio event-loop thread (a route handler, or a sync helper it calls inline) acquire a lock, do blocking file/network I/O, run a subprocess, or sleep? On single-worker uvicorn that's a FULL outage, not a slow request. Demand a lock-free path or `run_in_threadpool`, and a test that holds the contended resource and asserts the call returns promptly. |
 | **Readability** | Can someone reading this fresh in three months understand what it does and why? Where are the load-bearing comments missing? Where are comments restating obvious code? |
 | **Existing patterns** | Does this follow conventions already established elsewhere in the repo (middleware shape, skill loading, eval style, threading model)? Is it reinventing something we already have? |
 | **Design adherence** | Does the diff implement what the Phase-1 plan committed to? Are deviations called out and justified, or did they slip in unannounced? |
@@ -117,6 +121,15 @@ gh api graphql -f query='
 - **Stability** (final, before push): N=10 per test. Pin the contract.
 
 Treat any drop in pass rate compared to the prior step as a regression; investigate before scaling further.
+
+### Testing & verification — catch the bug the review misses
+
+These rules exist because the 2026-06-10 queue-feedback fix passed its unit tests and two reviews yet shipped two critical bugs (a message rendered in the wrong place, then an event-loop deadlock that took the server down). Both slipped because the tests checked proxies and mocked the exact risk.
+
+- **Test the symptom, not the proxy.** When the bug is user-visible, the test must reproduce the user's actual symptom and assert it's gone — for a render bug, render the page and assert against the HTML (the element is present *and* in the right position), not an intermediate status field. Asserting `status == "queued"` is not the same as asserting the message appears where the user looks.
+- **Don't mock away the risk.** Name the risky interaction a change introduces (a lock, a shared resource, a concurrency edge) and exercise it **un-mocked** in at least one test. Mocking the very thing whose timing/contention is the hazard gives false confidence — mocking the queue handle hid the lock that deadlocked the loop. For an event-loop concern, hold the contended resource in another thread and assert the call still returns promptly.
+- **Verify under the failure condition, not idle.** Smoke (or `/verify`) a fix under the condition that triggered the bug, not a healthy idle path. "HTTP 200 on an idle box" can't surface a load-only deadlock; "a second prompt while a real long turn holds the queue" can. State the trigger and reproduce it.
+- *(Mechanical backstop for event-loop work.)* Run the web tests or a smoke with `PYTHONASYNCIODEBUG=1` — asyncio debug mode logs any callback that blocks the loop past `loop.slow_callback_duration`, so a stall trips a warning instead of waiting to be spotted by eye.
 
 ### When the user gives a deadline
 
