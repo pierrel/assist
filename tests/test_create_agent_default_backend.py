@@ -1,5 +1,11 @@
 """Tests for the `default_backend` injection seam.
 
+The create_agent/Thread-kwarg tests here pin the DEPRECATED legacy
+surface and are deleted with the AgentSpec migration window
+(superseded by test_create_agent_spec.py); the backend-factory and
+create_context_agent `default_backend` params are NOT legacy and those
+tests stay.
+
 An embedder (emacsos-server) supplies the composite backend's *default* —
 the target for every non-routed path — so the agent operates against a
 custom backend (e.g. a remote/emacs backend) instead of a FilesystemBackend

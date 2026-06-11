@@ -1,5 +1,9 @@
-"""Tests for the `extra_skill_sources` parameter on `create_agent`
-and the underlying `extra_routes` parameter on the backend factories.
+"""Tests for the DEPRECATED `extra_skill_sources` parameter on
+`create_agent` and the underlying `extra_routes` parameter on the
+backend factories.  The kwarg tests are deleted with the AgentSpec
+migration window (superseded by test_create_agent_spec.py); the
+`extra_routes` backend-factory tests stay — that parameter is not a
+legacy kwarg.
 
 Embedders (notably emacsos-server) inject additional virtual-path
 routes that hold skill files outside the assist repo.  The contract:

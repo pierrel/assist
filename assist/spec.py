@@ -15,9 +15,10 @@ add fields for needs no client has yet — deferred candidates
 recorded in the design doc with the trigger that revives them.
 """
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from langchain_core.tools import BaseTool
 from deepagents.backends.protocol import BackendProtocol
@@ -39,6 +40,10 @@ class AgentSpec:
     Callers may build a spec anywhere, including code adjacent to an
     asyncio event loop (the expensive work happens later, in
     ``create_agent``, which must stay off the loop).
+
+    Not hashable or picklable: ``skill_sources`` is a mappingproxy and
+    fields may hold closures — don't use specs as dict/set keys or
+    send them across processes.
     """
 
     # ADDITIVE to assist's built-in tool surface (filesystem, execute,
@@ -65,14 +70,10 @@ class AgentSpec:
     def __post_init__(self) -> None:
         # The class is frozen; normalization goes through
         # object.__setattr__ by design.  Everything here is pure CPU.
-        if isinstance(self.tools, (str, bytes)):
-            # tuple("ab") silently becomes ("a", "b") — catch the
-            # certainly-wrong scalar instead of producing nonsense.
-            raise TypeError(
-                f"AgentSpec.tools must be a sequence of tools, got "
-                f"{type(self.tools).__name__}"
-            )
-        if not isinstance(self.tools, Sequence):
+        # The str/bytes half catches the certainly-wrong scalar that
+        # tuple() would silently shred into characters.
+        if isinstance(self.tools, (str, bytes)) \
+                or not isinstance(self.tools, Sequence):
             raise TypeError(
                 f"AgentSpec.tools must be a sequence of tools, got "
                 f"{type(self.tools).__name__}"

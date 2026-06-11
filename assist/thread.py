@@ -105,57 +105,40 @@ class Thread:
                  *,
                  spec: AgentSpec | None = None,
                  configurable: Mapping[str, Any] | None = None):
-        """`spec` is the embedder contract (``assist.spec.AgentSpec``):
-        one declaration object carrying embedder-supplied tools, skill
-        sources, and default backend.  Forwarded to
-        ``create_agent(spec=...)``, which validates that it isn't
-        combined with the legacy per-need kwargs below.  ``None``
-        means "no embedder additions" — today's defaults.
+        """CURRENT embedder surface — two keyword-only params:
 
-        `configurable` is the narrowed replacement for ``extra_config``:
-        a mapping merged (shallow, one level) into
-        ``self.runconfig["configurable"]`` so per-request embedder
-        context (e.g. emacsos's phone identity) reaches every
+        `spec` — the embedder contract (``assist.spec.AgentSpec``): one
+        declaration object carrying embedder-supplied tools, skill
+        sources, and default backend (canonical semantics live on the
+        spec's field docs).  Forwarded to ``create_agent(spec=...)``,
+        which validates that it isn't combined with the legacy kwargs.
+        ``None`` means "no embedder additions" — today's defaults.
+
+        `configurable` — per-request context: a mapping merged
+        (shallow, one level) into ``self.runconfig["configurable"]`` so
+        embedder context (e.g. emacsos's phone identity) reaches every
         invocation.  The reserved langgraph keys ``thread_id`` /
-        ``checkpoint_ns`` / ``checkpoint_id`` raise ``ValueError`` —
-        pass identity via the ``thread_id=`` constructor param.
-        Mutually exclusive with ``extra_config``.
+        ``checkpoint_ns`` / ``checkpoint_id`` raise ``ValueError``
+        (thread identity belongs to the ``thread_id=`` param; the
+        checkpoint keys are not settable at all).  Mutually exclusive
+        with ``extra_config``.
 
-        `extra_tools` is forwarded to ``create_agent(extra_tools=...)``
-        — embedder-supplied tools the main agent can call.  See
-        ``assist.agent.create_agent`` docstring for the subagent
-        scope.
+        LEGACY surface (migration window only — mutually exclusive with
+        ``spec``, removed once manage.web and emacsos-server are
+        ported; each maps to the named replacement):
 
-        `loop_exploration_tools` is DEPRECATED and now a no-op (it fed the
-        since-removed Pattern-C distinct-args breadth threshold).  Still
-        forwarded to ``create_agent`` and accepted there so embedders that
-        pass it don't break, but ignored — loop detection now catches only
-        exact-repeat loops (A/B), which apply uniformly to every tool.
-        Default ``None``.
-
-        `extra_skill_sources` is forwarded to
-        ``create_agent(extra_skill_sources=...)`` — a mapping of additional
-        virtual-path routes to backends that hold ``SKILL.md`` files, so an
-        embedder can ship skills that live outside the assist repo (see
-        ``assist.agent.create_agent``).  Default ``None``.
-
-        `default_backend` is forwarded to ``create_agent(default_backend=...)``
-        — the composite backend's default (the target for non-routed paths),
-        instead of a FilesystemBackend rooted at ``working_dir``.  Mutually
-        exclusive with ``sandbox_backend``; if it implements
-        ``SandboxBackendProtocol`` the ``execute`` tool is enabled for the
-        main agent.  Default ``None``.
-
-        `extra_config` is the DEPRECATED predecessor of
-        ``configurable``: only its ``{"configurable": {...}}`` shape
-        was ever used by a client (verified across manage.web,
-        emacsos-server, and the eval harness), so it is now a thin
-        adapter over the same narrowed merge.  Top-level keys other
-        than ``configurable`` raise (they used to pass through to the
-        runconfig; no client did that).  ``configurable.thread_id``
-        keeps its historical silent-drop (the constructor param owns
-        it).  Mutually exclusive with ``configurable``; removed once
-        the known embedders are ported to the new kwarg.
+        - `extra_tools` → ``AgentSpec.tools``
+        - `extra_skill_sources` → ``AgentSpec.skill_sources``
+        - `default_backend` → ``AgentSpec.default_backend``
+        - `loop_exploration_tools` → nothing (a no-op since the
+          loop-detection rollback; accepted so un-ported embedders
+          don't break, ignored)
+        - `extra_config` → ``configurable=``.  Only its
+          ``{"configurable": {...}}`` shape was ever used by a client,
+          so it is a thin adapter over the same narrowed merge:
+          top-level keys other than ``configurable`` raise, and
+          ``configurable.thread_id`` keeps its historical silent-drop
+          (the new kwarg raises instead).
         """
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -218,11 +201,13 @@ class Thread:
             if reserved:
                 raise ValueError(
                     f"configurable must not set reserved langgraph keys "
-                    f"{sorted(reserved)}; pass identity via the thread_id= "
-                    f"constructor param")
-            # Shallow copy: an embedder mutating its own mapping after
-            # construction must not change this Thread's runconfig.
-            self.runconfig["configurable"].update(dict(configurable))
+                    f"{sorted(reserved)} — thread identity belongs to the "
+                    f"thread_id= constructor param; checkpoint_ns/"
+                    f"checkpoint_id are not settable")
+            # .update() copies the entries into runconfig's own dict, so
+            # an embedder mutating its mapping later can't change this
+            # Thread's runconfig (nested values stay shared, as ever).
+            self.runconfig["configurable"].update(configurable)
 
         self.agent = create_agent(self.model,
                                   working_dir=working_dir,
@@ -323,8 +308,8 @@ class Thread:
         """Return a short (<=5 words) description of the conversation so far.
 
         Uses the underlying chat model directly. Raises ValueError if there
-        are no messages yet.
-        If description.txt exists in the thread directory, return it; otherwise compute and cache.
+        are no messages yet.  Caching is the caller's concern — the web
+        app caches descriptions app-side (manage/web/state.py).
         """
         msgs = self.get_messages()
         if not msgs:

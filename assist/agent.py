@@ -154,11 +154,13 @@ def _hardening_middleware():
 
     Returns ``(stack, (retry, json_validation, tool_name))``.  The
     second element is the trio of instances ``create_agent`` *shares*
-    into the context/research subagent factories — sharing them (vs
-    constructing fresh ones per subagent, as the critique dict-spec
-    does) is part of the topology this function must preserve: their
-    per-instance state is diagnostic-only counters, and the identity
-    graph predates this extraction.
+    into the context/research subagent factories.  Which subagents
+    share which middleware *instances* is pre-existing behavior this
+    extraction must not change — the trio's per-instance state is
+    diagnostic-only counters, so sharing is safe; the critique
+    dict-spec (and ``bad_request_mw``, which the subagent factories
+    construct fresh themselves) deliberately get new instances, as
+    they always did.
     """
     # Core middleware: retry, tool call limiting, JSON validation.
     # See `_make_retry_middleware` for the retry-on tuple rationale.
@@ -299,11 +301,14 @@ def create_agent(model: BaseChatModel,
     # branching in the body).  Pure dict/tuple work — no I/O (this can
     # run adjacent to an event loop; see the embedder-contract doc's
     # guardrails).
-    legacy_kwargs = {"extra_tools": extra_tools,
-                     "extra_skill_sources": extra_skill_sources,
-                     "default_backend": default_backend,
-                     "loop_exploration_tools": loop_exploration_tools}
     if spec is not None:
+        # TypeError (not ValueError, unlike the sandbox/default check
+        # below): this is kwarg misuse — two surfaces for the same
+        # argument — not a bad value.
+        legacy_kwargs = {"extra_tools": extra_tools,
+                         "extra_skill_sources": extra_skill_sources,
+                         "default_backend": default_backend,
+                         "loop_exploration_tools": loop_exploration_tools}
         passed = [k for k, v in legacy_kwargs.items() if v is not None]
         if passed:
             raise TypeError(
@@ -314,8 +319,9 @@ def create_agent(model: BaseChatModel,
         # loop_exploration_tools has no spec equivalent: it has been a
         # no-op since the loop-detection rollback (PR #128) and is
         # accepted here only so un-ported embedders don't break.
+        # __post_init__ normalizes the sequence/mapping shapes.
         spec = AgentSpec(
-            tools=tuple(extra_tools) if extra_tools is not None else (),
+            tools=extra_tools or (),
             skill_sources=extra_skill_sources or {},
             default_backend=default_backend,
         )
@@ -333,10 +339,9 @@ def create_agent(model: BaseChatModel,
 
     memories_path = os.path.join(workspace_dir, _MEMORY_FILE)
 
-    # `dict(...) or None` collapses an empty mapping to None so the
-    # composite-backend default path is identical whether the embedder
-    # passed nothing or an empty spec.
-    extra_routes = dict(spec.skill_sources) or None
+    # Plain dict copy of the spec's read-only mapping; the backend
+    # factories treat an empty mapping and None identically.
+    extra_routes = dict(spec.skill_sources)
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend,
                                                    extra_routes=extra_routes)

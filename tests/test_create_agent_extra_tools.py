@@ -1,26 +1,30 @@
-"""Tests for the `extra_tools` parameter on `create_agent` and the
-`extra_tools` / `extra_config` parameters on `Thread.__init__`.
+"""Tests for the DEPRECATED legacy embedder kwargs: `extra_tools` /
+`loop_exploration_tools` on `create_agent`, and `extra_tools` /
+`extra_config` on `Thread.__init__`.
 
-Embedders (notably emacsos-server) inject per-request tools the agent
-can call back into the embedder for — eg. emacsos-server registers an
-`eval_elisp` tool that drives `emacsclient` against the phone.  The
+These pin the legacy surface through the AgentSpec migration window
+(docs/2026-06-11-embedder-contract.org) and are deleted with the
+kwargs themselves; the spec-equivalence tests in
+test_create_agent_spec.py are the canonical pins going forward.  The
 contract:
 
   1. `extra_tools` reaches `create_deep_agent(tools=...)` so the bound
      tools end up on the model.
   2. `Thread.__init__(extra_tools=...)` forwards to `create_agent`.
-  3. `Thread.__init__(extra_config=...)` two-level-merges into
-     `self.runconfig` — the inner `configurable` dict gets a shallow
-     `.update()` from the embedder's `configurable` (adds alongside
-     built-in `thread_id`), top-level keys are overridden wholesale.
-     Not a recursive deep merge — a key whose value is itself a dict
-     replaces any existing dict at that key.
+  3. `Thread.__init__(extra_config=...)` accepts only the
+     `{"configurable": {...}}` shape, shallow-merged into
+     `runconfig["configurable"]` (adds alongside built-in `thread_id`,
+     which keeps its historical silent-drop).  Top-level keys other
+     than `configurable` raise — narrowed with the AgentSpec
+     migration; no client ever used the old passthrough.
   4. Defaults preserve the pre-2026-05-19 behavior (no tools added, no
      extra configurable keys).
 """
 
 import tempfile
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 
 class TestCreateAgentExtraTools:
@@ -153,7 +157,9 @@ class TestThreadExtraTools:
 class TestThreadExtraConfig:
     """`Thread.__init__(extra_config=...)` merges into `self.runconfig`.
     Built-in `configurable.thread_id` must survive a merge that doesn't
-    name it; embedder keys must win over built-ins on collision."""
+    name it; embedder keys win over built-ins on collision — except
+    `thread_id`, which is silently dropped (the constructor param owns
+    it)."""
 
     def _build(self, **kwargs):
         from assist.thread import Thread
@@ -205,11 +211,23 @@ class TestThreadExtraConfig:
         `configurable` raise instead of silently merging into the
         runconfig.  This replaces the old pass-through/protected-key
         pinning tests."""
-        import pytest as _pytest
-        with _pytest.raises(TypeError, match="top-level keys are no longer"):
+        with pytest.raises(TypeError, match="top-level keys are no longer"):
             self._build(extra_config={"recursion_limit": 42})
-        with _pytest.raises(TypeError, match="top-level keys are no longer"):
+        with pytest.raises(TypeError, match="top-level keys are no longer"):
             self._build(max_concurrency=7, extra_config={"max_concurrency": 99})
+
+    def test_extra_config_composes_with_spec(self):
+        """spec= excludes the legacy AGENT-SHAPE kwargs (tools/skills/
+        backend); extra_config is per-run wiring whose own replacement
+        is configurable=.  The two are orthogonal by design, so during
+        the migration window spec + extra_config together is ALLOWED —
+        pinned here so a future cleanup doesn't 'fix' it into a
+        mutual exclusion."""
+        from assist.spec import AgentSpec
+        t = self._build(spec=AgentSpec(), extra_config={
+            "configurable": {"phone_context": "ctx"}
+        })
+        assert t.runconfig["configurable"]["phone_context"] == "ctx"
 
     def test_extra_config_does_not_leak_across_threads(self):
         """Two Threads built with different extra_config must not share

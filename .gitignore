@@ -24,3 +24,6 @@ config.yml
 /assist.egg-info/
 # Per-host SearXNG runtime dir (generated secret + rendered settings).
 /.searxng/
+dist/
+build/lib/
+build/bdist.*/

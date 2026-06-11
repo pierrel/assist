@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadManager:
-    """Manage DeepAgentsThread instances persisted under a directory tree.
+    """Manage ``Thread`` instances persisted under a directory tree.
 
     At the root directory, a sqlite DB named 'threads.db' is used for LangGraph
     checkpointing via SqliteSaver.

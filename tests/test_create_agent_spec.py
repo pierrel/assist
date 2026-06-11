@@ -101,13 +101,35 @@ class TestSpecLegacyMutualExclusion(_CreateAgentHarness):
 
 
 class TestForwardingGaps(_CreateAgentHarness):
-    """checkpointer/sandbox_backend forwarding, previously unpinned."""
+    """create_agent-level forwarding that was previously unpinned:
+    checkpointer to create_deep_agent, sandbox_backend into the
+    subagent factories.  (Thread-level forwarding of both is pinned in
+    TestThreadSpecForwarding.)"""
 
     def test_checkpointer_forwarded_to_create_deep_agent(self):
         from langgraph.checkpoint.memory import InMemorySaver
         saver = InMemorySaver()
         kwargs = self._build(checkpointer=saver)
         assert kwargs["checkpointer"] is saver
+
+    def test_sandbox_backend_forwarded_to_subagent_factories(self):
+        from assist.agent import create_agent
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        sandbox = MagicMock()
+        sandbox.work_dir = "/workspace"
+        with patch("assist.agent.create_deep_agent") as fake, \
+             patch("assist.agent.create_context_agent") as fake_ctx, \
+             patch("assist.agent.create_research_agent") as fake_res, \
+             patch("assist.agent.create_sandbox_composite_backend"):
+            fake.return_value = MagicMock()
+            fake_ctx.return_value = MagicMock()
+            fake_res.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                create_agent(MagicMock(), wd, checkpointer=InMemorySaver(),
+                             sandbox_backend=sandbox)
+        assert fake_ctx.call_args.kwargs["sandbox_backend"] is sandbox
+        assert fake_res.call_args.kwargs["sandbox_backend"] is sandbox
 
 
 class _ThreadHarness:
