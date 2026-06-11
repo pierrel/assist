@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from assist.domain_manager import DomainManager
 from assist.env import load_dev_env
 from assist.sandbox_manager import SandboxManager
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 
 
 def _configure_logging() -> None:

@@ -14,7 +14,8 @@ from unittest.mock import patch
 
 from langchain.messages import AIMessage
 
-from assist.thread import Thread, ThreadManager
+from assist.thread import Thread
+from assist.thread_manager import ThreadManager
 from assist.thread_queue import THREAD_QUEUE
 
 

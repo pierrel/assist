@@ -14,7 +14,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from assist import retention
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 
 
 def _make_thread_dir(root: str, tid: str, mtime: float) -> str:
@@ -42,7 +42,7 @@ class TestPruneKeepsMostRecent(TestCase):
                     _make_thread_dir(mgr.root_dir, tid, base + i * 60)
                     tids.append(tid)
 
-                with patch("assist.thread.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"):
                     deleted = retention.prune_to_n_threads(
                         mgr.root_dir, n, mgr
                     )
@@ -72,7 +72,7 @@ class TestPruneKeepsMostRecent(TestCase):
                 for i in range(3):
                     _make_thread_dir(mgr.root_dir, f"t-{i}", base + i * 60)
 
-                with patch("assist.thread.SandboxManager.cleanup") as mc:
+                with patch("assist.thread_manager.SandboxManager.cleanup") as mc:
                     deleted = retention.prune_to_n_threads(
                         mgr.root_dir, 100, mgr
                     )
@@ -124,7 +124,7 @@ class TestPruneKeepsMostRecent(TestCase):
                         raise RuntimeError("boom")
                     return original(tid, on_delete=on_delete)
 
-                with patch("assist.thread.SandboxManager.cleanup"), \
+                with patch("assist.thread_manager.SandboxManager.cleanup"), \
                      patch.object(mgr, "hard_delete", side_effect=flaky):
                     deleted = retention.prune_to_n_threads(
                         mgr.root_dir, n, mgr

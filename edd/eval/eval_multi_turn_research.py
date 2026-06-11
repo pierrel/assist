@@ -19,7 +19,8 @@ from pathlib import Path
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, AIMessage
 
-from assist.thread import Thread, ThreadManager
+from assist.thread import Thread
+from assist.thread_manager import ThreadManager
 from assist.model_manager import select_chat_model
 
 

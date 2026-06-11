@@ -12,7 +12,7 @@ import time
 
 from unittest import TestCase
 
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 from assist.thread_queue import THREAD_QUEUE
 
 

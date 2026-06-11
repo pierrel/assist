@@ -5,7 +5,7 @@ import shutil
 from unittest import TestCase
 from langchain_core.messages import ToolMessage
 
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 from assist.domain_manager import DomainManager
 
 def create_structure(root: str):

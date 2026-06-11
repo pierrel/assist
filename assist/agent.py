@@ -135,6 +135,78 @@ class AgentHarness:
 _MEMORY_FILE = "AGENTS.md"
 
 
+def _hardening_middleware():
+    """The main agent's hardened middleware stack, in load-bearing order.
+
+    This names the CORE/APP boundary from the embedder-contract doc
+    (docs/2026-06-11-embedder-contract.org) in code.  Most of the stack
+    is the reusable small-model-hardening layer — assist's value-add
+    over raw deepagents — but two APP-layer policies ship inside it by
+    default and every embedder currently inherits them:
+
+    - ``WriteCollisionMiddleware`` (dev write-recovery; inert where the
+      model never collides on ``write_file``),
+    - ``GitPushBlockerMiddleware`` (web-app push policy; inert where no
+      git/execute path exists).
+
+    Removing either for a specific embedder is a behavior change and
+    therefore eval-gated — deliberately NOT a spec knob today.
+
+    Returns ``(stack, (retry, json_validation, tool_name))``.  The
+    second element is the trio of instances ``create_agent`` *shares*
+    into the context/research subagent factories — sharing them (vs
+    constructing fresh ones per subagent, as the critique dict-spec
+    does) is part of the topology this function must preserve: their
+    per-instance state is diagnostic-only counters, and the identity
+    graph predates this extraction.
+    """
+    # Core middleware: retry, tool call limiting, JSON validation.
+    # See `_make_retry_middleware` for the retry-on tuple rationale.
+    retry_middle = _make_retry_middleware()
+    # Catch BadRequestError (e.g. context overflow), sanitize & truncate, retry.
+    bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
+    # Validate and fix JSON in tool call arguments
+    json_validation_mw = JsonValidationMiddleware(strict=False)
+    # Strip tool calls with invalid names (e.g. '[]' hallucinated by small models)
+    tool_name_mw = ToolNameSanitizationMiddleware()
+
+    # Rewrite write_file collision errors so the small model is redirected to
+    # edit_file instead of inventing a new filename.  Must run before
+    # loop_detection_mw so the rewritten error is what the loop detector sees.
+    write_collision_mw = WriteCollisionMiddleware()
+    # Reject `git push` invocations from the agent's `execute` tool —
+    # the agent must not be able to publish to origin; pushes go
+    # through the web UI's "Push to origin" button only.  Sits ahead
+    # of `loop_detection_mw` so the rejection is what the loop
+    # detector sees if the model retries.
+    git_push_blocker_mw = GitPushBlockerMiddleware()
+    # Loop detection catches only exact-repeat loops (same-tool-same-error /
+    # same-tool-same-args).  Distinct-arg exploration and sub-agent
+    # re-dispatch are deliberately NOT capped here — a few extra hops are
+    # fine; the runaway bound is the per-agent recursion_limit.  See the
+    # rollback note in loop_detection.py.
+    loop_detection_mw = LoopDetectionMiddleware()
+    # Innermost wrap_model_call middleware — recovers from empty terminal
+    # AIMessages after every outer retry/sanitization layer has had its turn.
+    empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
+
+    # Note: context-aware compaction is delegated to deepagents 0.6.1's
+    # built-in SummarizationMiddleware (trigger fraction=0.85, offloads
+    # to /conversation_history/{thread_id}.md).  Per-result tool-output
+    # eviction is delegated to deepagents' FilesystemMiddleware
+    # (default 20k-token cap).  Our previous ContextAwareToolEvictionMiddleware
+    # was redundant with both and was deleted on 2026-05-16 — see
+    # docs/2026-05-16-context-management-overhaul.org.  We kept its
+    # ANSI/control-char sanitization in OutputSanitizationMiddleware
+    # (proactive, before content lands in state).
+    stack = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
+             OutputSanitizationMiddleware(),
+             write_collision_mw, git_push_blocker_mw,
+             loop_detection_mw, ThreadQueueMiddleware(),
+             empty_response_recovery_mw]
+    return stack, (retry_middle, json_validation_mw, tool_name_mw)
+
+
 # Legacy embedder kwargs and their AgentSpec replacements.  The error
 # message below is the migration documentation an embedder sees: it
 # names the offending kwarg and the spec field that replaces it.
@@ -251,50 +323,8 @@ def create_agent(model: BaseChatModel,
     if sandbox_backend is not None and spec.default_backend is not None:
         raise ValueError(
             "create_agent: pass sandbox_backend OR default_backend, not both")
-    # Core middleware: retry, tool call limiting, JSON validation, and logging.
-    # See `_make_retry_middleware` for the retry-on tuple rationale.
-    retry_middle = _make_retry_middleware()
-    # Catch BadRequestError (e.g. context overflow), sanitize & truncate, retry.
-    bad_request_mw = BadRequestRetryMiddleware(max_retries=3)
-    # Validate and fix JSON in tool call arguments
-    json_validation_mw = JsonValidationMiddleware(strict=False)
-    # Strip tool calls with invalid names (e.g. '[]' hallucinated by small models)
-    tool_name_mw = ToolNameSanitizationMiddleware()
+    mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
     logging_mw = ModelLoggingMiddleware("general-agent")
-
-    # Rewrite write_file collision errors so the small model is redirected to
-    # edit_file instead of inventing a new filename.  Must run before
-    # loop_detection_mw so the rewritten error is what the loop detector sees.
-    write_collision_mw = WriteCollisionMiddleware()
-    # Reject `git push` invocations from the agent's `execute` tool —
-    # the agent must not be able to publish to origin; pushes go
-    # through the web UI's "Push to origin" button only.  Sits ahead
-    # of `loop_detection_mw` so the rejection is what the loop
-    # detector sees if the model retries.
-    git_push_blocker_mw = GitPushBlockerMiddleware()
-    # Loop detection catches only exact-repeat loops (same-tool-same-error /
-    # same-tool-same-args).  Distinct-arg exploration and sub-agent
-    # re-dispatch are deliberately NOT capped here — a few extra hops are
-    # fine; the runaway bound is the per-agent recursion_limit.  See the
-    # rollback note in loop_detection.py.
-    loop_detection_mw = LoopDetectionMiddleware()
-    # Innermost wrap_model_call middleware — recovers from empty terminal
-    # AIMessages after every outer retry/sanitization layer has had its turn.
-    empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
-
-    # Note: context-aware compaction is delegated to deepagents 0.6.1's
-    # built-in SummarizationMiddleware (trigger fraction=0.85, offloads
-    # to /conversation_history/{thread_id}.md).  Per-result tool-output
-    # eviction is delegated to deepagents' FilesystemMiddleware
-    # (default 20k-token cap).  Our previous ContextAwareToolEvictionMiddleware
-    # was redundant with both and was deleted on 2026-05-16 — see
-    # docs/2026-05-16-context-management-overhaul.org.  We kept its
-    # ANSI/control-char sanitization in OutputSanitizationMiddleware
-    # (proactive, before content lands in state).
-    mw = [retry_middle, bad_request_mw, json_validation_mw, tool_name_mw,
-          OutputSanitizationMiddleware(),
-          write_collision_mw, git_push_blocker_mw,
-          loop_detection_mw, ThreadQueueMiddleware(), empty_response_recovery_mw]
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
     # Single-slashed path that's safe to interpolate without producing

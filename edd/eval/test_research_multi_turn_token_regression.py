@@ -55,7 +55,7 @@ from unittest import TestCase
 
 from openai import BadRequestError
 
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)

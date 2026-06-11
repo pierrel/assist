@@ -15,7 +15,7 @@ import tempfile
 from unittest import TestCase
 from unittest.mock import patch
 
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 
 
 def _seed_thread(manager: ThreadManager, tid: str) -> str:
@@ -89,7 +89,7 @@ class TestHardDeleteRemovesAllThree(TestCase):
                 self.assertEqual(_count_rows(mgr, "checkpoints", tid), 1)
 
                 with patch(
-                    "assist.thread.SandboxManager.cleanup"
+                    "assist.thread_manager.SandboxManager.cleanup"
                 ) as mock_cleanup:
                     mgr.hard_delete(tid)
 
@@ -116,7 +116,7 @@ class TestHardDeleteOnDeleteCallback(TestCase):
                 def cb(t: str) -> None:
                     received.append(t)
 
-                with patch("assist.thread.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"):
                     mgr.hard_delete(tid, on_delete=[cb])
 
                 self.assertEqual(received, [tid])
@@ -136,7 +136,7 @@ class TestHardDeleteOnDeleteCallback(TestCase):
                     lambda t: hits.append(f"b:{t}"),
                     lambda t: hits.append(f"c:{t}"),
                 ]
-                with patch("assist.thread.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"):
                     mgr.hard_delete(tid, on_delete=cbs)
 
                 self.assertEqual(
@@ -163,7 +163,7 @@ class TestHardDeleteIdempotent(TestCase):
                 self.assertFalse(os.path.exists(tdir))
                 self.assertEqual(_count_rows(mgr, "checkpoints", tid), 1)
 
-                with patch("assist.thread.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"):
                     # Should complete without raising.
                     mgr.hard_delete(tid)
 
@@ -180,7 +180,7 @@ class TestHardDeleteIdempotent(TestCase):
                 tid = "20260504000004-eeeeeeee"
                 _seed_thread(mgr, tid)
 
-                with patch("assist.thread.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"):
                     mgr.hard_delete(tid)
                     # Second call: pure no-op path, must not raise.
                     mgr.hard_delete(tid)
@@ -206,7 +206,7 @@ class TestHardDeleteCallbackIsolation(TestCase):
                 def good(t: str) -> None:
                     hits.append(t)
 
-                with patch("assist.thread.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"):
                     # boom raises but good must still run.
                     mgr.hard_delete(tid, on_delete=[boom, good])
 
@@ -227,7 +227,7 @@ class TestHardDeleteCallbackIsolation(TestCase):
                 def boom(t: str) -> None:
                     raise RuntimeError("nope")
 
-                with patch("assist.thread.SandboxManager.cleanup"):
+                with patch("assist.thread_manager.SandboxManager.cleanup"):
                     mgr.hard_delete(tid, on_delete=[boom])
 
                 # Cleanup completed before callbacks ran.
@@ -255,10 +255,10 @@ class TestHardDeletePermissionFallback(TestCase):
                 tid = "20260504000000-permission"
                 tdir = _seed_thread(mgr, tid)
 
-                with patch("assist.thread.SandboxManager.cleanup"), \
-                     patch("assist.thread.shutil.rmtree",
+                with patch("assist.thread_manager.SandboxManager.cleanup"), \
+                     patch("assist.thread_manager.shutil.rmtree",
                            side_effect=PermissionError("[Errno 13]")), \
-                     patch("assist.thread.subprocess.run") as mock_run:
+                     patch("assist.thread_manager.subprocess.run") as mock_run:
                     mock_run.return_value.returncode = 0
                     mgr.hard_delete(tid)
 
@@ -286,10 +286,10 @@ class TestHardDeletePermissionFallback(TestCase):
                 tid = "20260504000000-nodocker"
                 _seed_thread(mgr, tid)
 
-                with patch("assist.thread.SandboxManager.cleanup"), \
-                     patch("assist.thread.shutil.rmtree",
+                with patch("assist.thread_manager.SandboxManager.cleanup"), \
+                     patch("assist.thread_manager.shutil.rmtree",
                            side_effect=PermissionError("[Errno 13]")), \
-                     patch("assist.thread.subprocess.run",
+                     patch("assist.thread_manager.subprocess.run",
                            side_effect=FileNotFoundError("docker not installed")):
                     mgr.hard_delete(tid)
 

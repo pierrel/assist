@@ -7,7 +7,8 @@ from datetime import datetime
 from langchain_core.messages import AIMessage, AIMessageChunk
 
 from assist.env import load_dev_env
-from assist.thread import ThreadManager, Thread, render_tool_calls
+from assist.thread import Thread, render_tool_calls
+from assist.thread_manager import ThreadManager
 from assist.stream_chunks import unwrap_messages
 
 # Setup logging to file

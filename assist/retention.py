@@ -22,7 +22,7 @@ import subprocess
 import sys
 from typing import List
 
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 
 logger = logging.getLogger(__name__)
 

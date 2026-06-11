@@ -21,7 +21,7 @@ import shutil
 
 from unittest import TestCase
 
-from assist.thread import ThreadManager
+from assist.thread_manager import ThreadManager
 from assist.sandbox_manager import SandboxManager
 
 

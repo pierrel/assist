@@ -5,7 +5,8 @@ import shutil
 from unittest import TestCase
 from langchain_core.messages import HumanMessage, AIMessage
 
-from assist.thread import ThreadManager, Thread
+from assist.thread import Thread
+from assist.thread_manager import ThreadManager
 
 
 class TestThreadE2E(TestCase):

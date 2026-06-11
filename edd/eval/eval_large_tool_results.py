@@ -17,7 +17,8 @@ import logging
 from pathlib import Path
 from unittest.mock import patch
 
-from assist.thread import Thread, ThreadManager
+from assist.thread import Thread
+from assist.thread_manager import ThreadManager
 from assist.model_manager import select_chat_model
 
 
