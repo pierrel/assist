@@ -207,10 +207,15 @@ def render_thread(
     msgs: list[dict] = [] if is_init or chat is None else chat.get_messages()
 
     # If the agent state has no user message yet but we have a pending one,
-    # show it as a user bubble so the page does not appear empty after redirect.
+    # show it as a user bubble so the new message is visible after redirect.
+    # Append (not insert-at-0): get_messages() is chronological and the page
+    # renders reversed (newest-at-top), so appending places the pending
+    # message at the TOP — as the latest message, right below the in-progress
+    # "..." placeholder — instead of stranding it at the very bottom under the
+    # whole prior conversation.
     pending = (status.get("pending_message") or "").strip()
     if busy and pending and not any(m.get("role") == "user" and m.get("content") == pending for m in msgs):
-        msgs.insert(0, {"role": "user", "content": pending})
+        msgs.append({"role": "user", "content": pending})
 
     # Compute diff vs main (only when repo is ready) — rendered as its own
     # top-of-page block, separate from the message bubbles, so the per-file

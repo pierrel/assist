@@ -222,3 +222,35 @@ def test_post_message_writes_busy_status_synchronously(client, monkeypatch):
     st = _get_status("thread-e2e")
     assert st.get("stage") == "queued", st
     assert st.get("pending_message") == "queued message", st
+
+
+def test_pending_message_renders_at_top_as_latest(client, monkeypatch):
+    """The just-submitted (pending) message must render at the TOP — as the
+    latest message, right under the in-progress "..." placeholder — not
+    stranded at the bottom under the prior conversation.  The page is
+    newest-at-top and get_messages() is chronological, so the pending bubble
+    must be appended (rendered first after the reverse), not inserted at 0."""
+    class _FakeChat:
+        def get_messages(self):
+            return [
+                {"role": "user", "content": "OLD question"},
+                {"role": "assistant", "content": "OLD answer"},
+            ]
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda tid, sandbox_backend=None, on_queue_state=None: _FakeChat(),
+    )
+    monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
+
+    _set_status("thread-e2e", "queued", pending_message="NEW pending message")
+    html = client.get("/thread/thread-e2e").text
+
+    pos_new = html.find("NEW pending message")
+    pos_old = html.find("OLD question")
+    assert pos_new != -1, "pending message not rendered at all"
+    assert pos_old != -1, "prior conversation not rendered"
+    # newest-at-top: the just-sent message must appear ABOVE the old one.
+    assert pos_new < pos_old, (
+        "pending message rendered below the prior conversation — it should be "
+        "the latest message at the top"
+    )
