@@ -163,3 +163,9 @@ class TestThreadConfigurable(_ThreadHarness):
         shared["new_key"] = "added"
         assert t.runconfig["configurable"]["phone_context"] == "original"
         assert "new_key" not in t.runconfig["configurable"]
+
+
+class TestSpecTypeValidation(_CreateAgentHarness):
+    def test_non_spec_raises_clear_typeerror(self):
+        with pytest.raises(TypeError, match="spec must be an AgentSpec, got dict"):
+            self._build(spec={"tools": ()})

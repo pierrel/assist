@@ -237,6 +237,13 @@ def create_agent(model: BaseChatModel,
     """
     if spec is None:
         spec = AgentSpec()
+    elif not isinstance(spec, AgentSpec):
+        # Validate at the public boundary so an embedder gets a clear
+        # error instead of a downstream AttributeError (same rationale
+        # as the old extra_config validation).
+        raise TypeError(
+            f"create_agent: spec must be an AgentSpec, got "
+            f"{type(spec).__name__}")
 
     if sandbox_backend is not None and spec.default_backend is not None:
         raise ValueError(
