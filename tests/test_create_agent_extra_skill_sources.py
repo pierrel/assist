@@ -1,9 +1,8 @@
-"""Tests for the DEPRECATED `extra_skill_sources` parameter on
-`create_agent` and the underlying `extra_routes` parameter on the
-backend factories.  The kwarg tests are deleted with the AgentSpec
-migration window (superseded by test_create_agent_spec.py); the
-`extra_routes` backend-factory tests stay — that parameter is not a
-legacy kwarg.
+"""Tests for `AgentSpec.skill_sources` wiring through `create_agent`
+and the underlying `extra_routes` parameter on the backend factories.
+These pin the load-bearing skill-source contract: backend routing,
+middleware sources, SKILLS_ROUTE override de-dupe, and the
+domain < built-in < embedder precedence.
 
 Embedders (notably emacsos-server) inject additional virtual-path
 routes that hold skill files outside the assist repo.  The contract:
@@ -29,6 +28,7 @@ from assist.backends import (
     create_sandbox_composite_backend,
 )
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+from assist.spec import AgentSpec
 from deepagents.backends import FilesystemBackend
 
 
@@ -120,7 +120,7 @@ class TestCreateAgentExtraSkillSources:
 
     def test_extra_skill_sources_added_to_backend_routes(self):
         extra = _route_backend()
-        kwargs = self._build(extra_skill_sources={"/emacsos-skills/": extra})
+        kwargs = self._build(spec=AgentSpec(skill_sources={"/emacsos-skills/": extra}))
         backend = kwargs["backend"]
         assert "/emacsos-skills/" in backend.routes
         assert backend.routes["/emacsos-skills/"] is extra
@@ -135,7 +135,7 @@ class TestCreateAgentExtraSkillSources:
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
         extra = _route_backend()
-        kwargs = self._build(extra_skill_sources={"/emacsos-skills/": extra})
+        kwargs = self._build(spec=AgentSpec(skill_sources={"/emacsos-skills/": extra}))
         skills_mws = [m for m in kwargs["middleware"]
                       if isinstance(m, SmallModelSkillsMiddleware)]
         assert len(skills_mws) == 1
@@ -159,7 +159,7 @@ class TestCreateAgentExtraSkillSources:
             "/emacsos-skills/": _route_backend(),
             "/user-skills/": _route_backend(),
         }
-        kwargs = self._build(extra_skill_sources=extras)
+        kwargs = self._build(spec=AgentSpec(skill_sources=extras))
         backend = kwargs["backend"]
         for path in extras:
             assert path in backend.routes
@@ -175,7 +175,7 @@ class TestCreateAgentExtraSkillSources:
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
         replacement = _route_backend()
-        kwargs = self._build(extra_skill_sources={SKILLS_ROUTE: replacement})
+        kwargs = self._build(spec=AgentSpec(skill_sources={SKILLS_ROUTE: replacement}))
 
         # Backend route is the replacement (override).
         backend = kwargs["backend"]
@@ -279,7 +279,7 @@ class TestCreateAgentDomainSkills:
                           "Builds widgets.")
         extra = _route_backend()
         mw = self._mw(self._build_in(
-            wd, extra_skill_sources={"/emacsos-skills/": extra}))
+            wd, spec=AgentSpec(skill_sources={"/emacsos-skills/": extra})))
         # domain < built-in < embedder-extras.
         assert mw.sources == [DOMAIN_SKILLS_PATH, SKILLS_ROUTE, "/emacsos-skills/"]
 

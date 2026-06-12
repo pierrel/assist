@@ -1,10 +1,8 @@
 import os
 import uuid
 import logging
-from typing import Any, Callable, Sequence
 
 from deepagents import create_deep_agent, CompiledSubAgent
-from langchain_core.tools import BaseTool
 from deepagents.backends.protocol import BackendProtocol
 from langchain.messages import AIMessage, AnyMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -209,27 +207,10 @@ def _hardening_middleware():
     return stack, (retry_middle, json_validation_mw, tool_name_mw)
 
 
-# Legacy embedder kwargs and their AgentSpec replacements.  The error
-# message below is the migration documentation an embedder sees: it
-# names the offending kwarg and the spec field that replaces it.
-_LEGACY_KWARG_REPLACEMENTS = {
-    "extra_tools": "AgentSpec.tools",
-    "extra_skill_sources": "AgentSpec.skill_sources",
-    "default_backend": "AgentSpec.default_backend",
-    "loop_exploration_tools":
-        "nothing — it has been a no-op since the loop-detection rollback; "
-        "drop the kwarg",
-}
-
-
 def create_agent(model: BaseChatModel,
                  working_dir: str,
                  checkpointer=None,
                  sandbox_backend=None,
-                 extra_skill_sources: dict[str, BackendProtocol] | None = None,
-                 extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
-                 loop_exploration_tools: frozenset[str] | None = None,
-                 default_backend: BackendProtocol | None = None,
                  *,
                  spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
@@ -238,28 +219,14 @@ def create_agent(model: BaseChatModel,
     ``spec`` is the embedder contract (see ``assist.spec.AgentSpec``
     and docs/2026-06-11-embedder-contract.org): one declaration object
     carrying the embedder-supplied tools, skill sources, and default
-    backend.  ``spec=None`` means ``AgentSpec()`` — today's defaults.
-    Mutually exclusive with the legacy per-need kwargs below, which
-    remain accepted during the migration window and are normalized
-    into an ``AgentSpec`` internally; they will be removed once the
-    known embedders (manage.web, emacsos-server) are ported.
-
-    ``extra_skill_sources`` is a mapping of additional virtual-path
-    routes to backends that hold ``SKILL.md`` files.  Embedders (e.g.
-    emacsos-server) use this to register skills that live outside the
-    assist repo.  Each route is registered with the composite backend
-    AND added to ``SmallModelSkillsMiddleware``'s sources list, so the
-    routed files are reachable AND the middleware knows to list them
-    as available skills.  Default ``None`` preserves the current
-    behavior of loading skills only from ``SKILLS_ROUTE``.  An
-    embedder that explicitly re-passes ``SKILLS_ROUTE`` as a key gets
-    its backend swapped in (intentional override mechanism); the
-    sources list de-duplicates so the middleware doesn't scan twice.
+    backend — canonical field semantics live on the spec.  ``spec=None``
+    means ``AgentSpec()`` — the defaults.  ``spec.default_backend`` is
+    mutually exclusive with ``sandbox_backend``.
 
     **Domain skills are auto-discovered** from
     ``<working_dir>/.claude/skills/`` (the agent-agnostic agentskills.io
     path, also read by Claude Code) when that directory exists in the
-    cloned repo.  Unlike ``extra_skill_sources``, this adds NO composite
+    cloned repo.  Unlike ``spec.skill_sources``, this adds NO composite
     route — ``DOMAIN_SKILLS_PATH`` falls through to the default backend
     (= ``working_dir``), so the same files are reachable in both local and
     sandbox modes.  It is registered only when present (a gated ``ls``;
@@ -267,69 +234,13 @@ def create_agent(model: BaseChatModel,
     ``domain < built-in < embedder-extras`` — a same-named domain skill
     does NOT override a built-in (the safety skills ``dev`` /
     ``git-conflict`` are the floor).
-
-    ``extra_tools`` is a sequence of ``BaseTool | Callable | dict[str,
-    Any]`` passed through to ``create_deep_agent(tools=...)`` — the
-    additive surface for embedder-supplied tools the main agent can
-    call.  Reaches the main agent and the auto-injected
-    general-purpose subagent; the bespoke ``context`` / ``research`` /
-    ``critique`` subagents are built separately and do not see these
-    tools (correctly, given their roles).  Default ``None`` is empty.
-
-    ``loop_exploration_tools`` is DEPRECATED and now a no-op.  It used to
-    feed the (since-removed) Pattern-C distinct-args breadth threshold; loop
-    detection now catches only exact-repeat loops (Patterns A/B), which apply
-    uniformly to every tool, so there is nothing to tune per exploration
-    tool.  The param is still accepted (so embedders like emacsos-server that
-    pass it don't break) but ignored — drop the kwarg at the call site and
-    this param can be removed.
-
-    ``default_backend`` lets an embedder supply the composite backend's
-    *default* — the target for every non-routed path — instead of the
-    ``FilesystemBackend`` rooted at ``working_dir``.  assist still wraps it
-    with the standard STATEFUL_PATHS -> ``StateBackend`` routing (so
-    summarization/scratch stay ephemeral) and any ``extra_skill_sources``.
-    Mutually exclusive with ``sandbox_backend``.  If the supplied backend
-    implements ``SandboxBackendProtocol``, deepagents' ``supports_execution``
-    enables the ``execute`` tool for it automatically.  This affects only
-    the MAIN agent; the context/research subagents build their own backends
-    from ``working_dir`` (+ ``sandbox_backend``) as before.  Default ``None``
-    preserves the FilesystemBackend default.
     """
-    # Normalize the embedder surface to a single AgentSpec up front, so
-    # everything below is one spec-driven code path (no legacy/spec
-    # branching in the body).  Pure dict/tuple work — no I/O (this can
-    # run adjacent to an event loop; see the embedder-contract doc's
-    # guardrails).
-    if spec is not None:
-        # TypeError (not ValueError, unlike the sandbox/default check
-        # below): this is kwarg misuse — two surfaces for the same
-        # argument — not a bad value.
-        legacy_kwargs = {"extra_tools": extra_tools,
-                         "extra_skill_sources": extra_skill_sources,
-                         "default_backend": default_backend,
-                         "loop_exploration_tools": loop_exploration_tools}
-        passed = [k for k, v in legacy_kwargs.items() if v is not None]
-        if passed:
-            raise TypeError(
-                f"create_agent: pass spec= OR the legacy kwargs, not both — "
-                f"got {passed[0]!r}; its replacement is "
-                f"{_LEGACY_KWARG_REPLACEMENTS[passed[0]]}")
-    else:
-        # loop_exploration_tools has no spec equivalent: it has been a
-        # no-op since the loop-detection rollback (PR #128) and is
-        # accepted here only so un-ported embedders don't break.
-        # __post_init__ normalizes the sequence/mapping shapes.
-        spec = AgentSpec(
-            tools=extra_tools or (),
-            skill_sources=extra_skill_sources or {},
-            default_backend=default_backend,
-        )
+    if spec is None:
+        spec = AgentSpec()
 
     if sandbox_backend is not None and spec.default_backend is not None:
         raise ValueError(
-            "create_agent: pass sandbox_backend OR a default backend "
-            "(AgentSpec.default_backend / legacy default_backend kwarg), "
+            "create_agent: pass sandbox_backend OR AgentSpec.default_backend, "
             "not both")
     mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
     logging_mw = ModelLoggingMiddleware("general-agent")

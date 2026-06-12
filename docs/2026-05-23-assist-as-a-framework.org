@@ -161,3 +161,12 @@ defaults + glue) and clients lean more directly on deepagents.
   current way until the refactor is prioritized; this doc is the marker
   that we should *stop accreting and design* before the embedder surface
   grows much further.
+
+* Resolution (2026-06-12)
+
+The design phase this doc called for ran on 2026-06-11/12: see
+[[file:2026-06-11-embedder-contract.org][2026-06-11-embedder-contract.org]] for the chosen direction (spec
+object + light module boundary), the contract, the core/app
+classification, and the deferrals.  Shipped as the =AgentSpec=
+refactor (assist PR #134 + the legacy-kwarg removal follow-up);
+emacsos ported as the first external client.

@@ -1,18 +1,7 @@
-"""Wiring tests for the AgentSpec embedder contract.
-
-Pins three things (docs/2026-06-11-embedder-contract.org):
-
-  1. *Equivalence*: `create_agent(spec=AgentSpec(...))` produces the
-     same `create_deep_agent` call as the legacy kwargs it replaces.
-     These become the canonical surface pins once the legacy kwargs
-     are removed.
-  2. *Mutual exclusion*: spec + any legacy kwarg is a TypeError whose
-     message names the replacement field (the migration doc for
-     embedders).
-  3. *Forwarding gaps*: checkpointer / sandbox_backend forwarding,
-     previously unpinned.
-
-`Thread`-level `spec=` / `configurable=` wiring is here too.
+"""Wiring tests for the AgentSpec embedder contract — the canonical
+surface pins (docs/2026-06-11-embedder-contract.org): spec fields
+reaching `create_deep_agent`, checkpointer/sandbox_backend forwarding,
+and `Thread`-level `spec=` / `configurable=` wiring.
 """
 
 import tempfile
@@ -50,49 +39,34 @@ class _CreateAgentHarness:
                 return fake.call_args.kwargs
 
 
-class TestSpecEquivalence(_CreateAgentHarness):
-    """spec path and legacy path produce identical deepagents wiring."""
+class TestSpecWiring(_CreateAgentHarness):
+    """The spec's fields reach create_deep_agent."""
 
-    def test_default_spec_equals_no_kwargs(self):
-        legacy = self._build()
-        spec = self._build(spec=AgentSpec())
-        assert spec["tools"] == legacy["tools"] == []
+    def test_default_spec_means_no_extra_tools(self):
+        assert self._build()["tools"] == []
+        assert self._build(spec=AgentSpec())["tools"] == []
 
-    def test_spec_tools_match_legacy_extra_tools(self):
-        legacy = self._build(extra_tools=[_tool_a, _tool_b])
-        spec = self._build(spec=AgentSpec(tools=(_tool_a, _tool_b)))
-        assert spec["tools"] == legacy["tools"] == [_tool_a, _tool_b]
+    def test_spec_tools_reach_create_deep_agent(self):
+        kwargs = self._build(spec=AgentSpec(tools=(_tool_a, _tool_b)))
+        assert kwargs["tools"] == [_tool_a, _tool_b]
 
-    def test_spec_skill_sources_match_legacy(self):
+    def test_spec_skill_sources_reach_middleware(self):
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
-
-        def _sources(kwargs):
-            mw = next(m for m in kwargs["middleware"]
-                      if isinstance(m, SmallModelSkillsMiddleware))
-            return mw.sources
-
         backend = MagicMock()
-        legacy = self._build(extra_skill_sources={"/client-skills/": backend})
-        spec = self._build(
+        kwargs = self._build(
             spec=AgentSpec(skill_sources={"/client-skills/": backend}))
-        assert _sources(spec) == _sources(legacy)
-        assert "/client-skills/" in _sources(spec)
+        mw = next(m for m in kwargs["middleware"]
+                  if isinstance(m, SmallModelSkillsMiddleware))
+        assert "/client-skills/" in mw.sources
 
-
-class TestSpecLegacyMutualExclusion(_CreateAgentHarness):
-    def test_spec_plus_extra_tools_raises_with_replacement(self):
-        with pytest.raises(TypeError, match=r"AgentSpec\.tools"):
-            self._build(spec=AgentSpec(), extra_tools=[_tool_a])
-
-    def test_spec_plus_skill_sources_raises_with_replacement(self):
-        with pytest.raises(TypeError, match=r"AgentSpec\.skill_sources"):
-            self._build(spec=AgentSpec(),
-                        extra_skill_sources={"/x/": MagicMock()})
-
-    def test_spec_plus_deprecated_loop_kwarg_raises_drop_hint(self):
-        with pytest.raises(TypeError, match="drop the kwarg"):
-            self._build(spec=AgentSpec(),
-                        loop_exploration_tools=frozenset({"eval_elisp"}))
+    def test_loop_detection_present_by_default(self):
+        """The hardened stack ships with the plain A/B loop detector and
+        no per-tool exploration knob (the rollback contract; moved here
+        from the deleted legacy-kwarg test file)."""
+        from assist.middleware.loop_detection import LoopDetectionMiddleware
+        mws = self._build()["middleware"]
+        mw = next(m for m in mws if isinstance(m, LoopDetectionMiddleware))
+        assert not hasattr(mw, "exploration_tools")
 
     def test_spec_default_backend_excludes_sandbox_backend(self):
         with pytest.raises(ValueError, match="not both"):
@@ -181,11 +155,6 @@ class TestThreadConfigurable(_ThreadHarness):
     def test_non_mapping_raises(self):
         with pytest.raises(TypeError, match="configurable must be a mapping"):
             self._build(configurable=["not", "a", "mapping"])
-
-    def test_mutually_exclusive_with_extra_config(self):
-        with pytest.raises(TypeError, match="not both"):
-            self._build(configurable={"a": 1},
-                        extra_config={"configurable": {"b": 2}})
 
     def test_embedder_mutation_after_construction_is_isolated(self):
         shared = {"phone_context": "original"}

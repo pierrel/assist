@@ -6,7 +6,15 @@ Make it expandable from the main web ui. Not always expanded.
 * Vision
 ** TODO Test a single vision experiment
 * Architecture
-** TODO Refactor assist into a framework (deepagents / assist / client boundary)
+** DONE Refactor assist into a framework (deepagents / assist / client boundary)
+Shipped 2026-06-12: the =AgentSpec= embedder contract
+([[file:docs/2026-06-11-embedder-contract.org][docs/2026-06-11-embedder-contract.org]], assist PR #134 + the
+legacy-kwarg removal PR; emacsos ported in its PR #24).  The accreted
+kwargs are gone — =Thread= / =create_agent= take =spec= +
+=configurable= only.  The deepagents-upstream classification is
+recorded in the design doc (decision only; upstreaming not planned).
+Deferred with named triggers: =subagents= selection, =system_prompt=,
+middleware tuning, package split.
 We've been "opening up" assist to emacsos's needs by *accretion* — a new
 keyword threaded through =Thread= → =create_agent= each time a client
 needs to influence the agent (=extra_tools=, =extra_config=,

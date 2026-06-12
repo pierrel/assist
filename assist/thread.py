@@ -1,13 +1,10 @@
 import contextvars
 import logging
 from datetime import datetime
-from typing import Literal, Dict, Any, Callable, List, Iterator, Mapping, Sequence
+from typing import Any, Callable, List, Iterator, Mapping
 
 from langchain.messages import HumanMessage, AIMessage, AnyMessage
-from langchain_core.tools import BaseTool
 from langchain_core.language_models.chat_models import BaseChatModel
-
-from deepagents.backends.protocol import BackendProtocol
 
 from assist.promptable import base_prompt_for
 from assist.model_manager import select_assistant_model
@@ -91,28 +88,22 @@ class Thread:
 
     def __init__(self,
                  working_dir: str,
+                 *,
+                 spec: AgentSpec | None = None,
+                 configurable: Mapping[str, Any] | None = None,
                  thread_id: str | None = None,
                  checkpointer=None,
                  model: BaseChatModel | None = None,
                  max_concurrency: int = 5,
                  sandbox_backend=None,
-                 on_queue_state: Callable[[str], None] | None = None,
-                 extra_tools: Sequence[BaseTool | Callable | dict[str, Any]] | None = None,
-                 loop_exploration_tools: frozenset[str] | None = None,
-                 extra_skill_sources: dict[str, BackendProtocol] | None = None,
-                 extra_config: dict[str, Any] | None = None,
-                 default_backend: BackendProtocol | None = None,
-                 *,
-                 spec: AgentSpec | None = None,
-                 configurable: Mapping[str, Any] | None = None):
-        """CURRENT embedder surface — two keyword-only params:
+                 on_queue_state: Callable[[str], None] | None = None):
+        """The embedder surface (docs/2026-06-11-embedder-contract.org):
 
         `spec` — the embedder contract (``assist.spec.AgentSpec``): one
         declaration object carrying embedder-supplied tools, skill
         sources, and default backend (canonical semantics live on the
-        spec's field docs).  Forwarded to ``create_agent(spec=...)``,
-        which validates that it isn't combined with the legacy kwargs.
-        ``None`` means "no embedder additions" — today's defaults.
+        spec's field docs).  Forwarded to ``create_agent(spec=...)``.
+        ``None`` means "no embedder additions" — the defaults.
 
         `configurable` — per-request context: a mapping merged
         (shallow, one level) into ``self.runconfig["configurable"]`` so
@@ -120,25 +111,12 @@ class Thread:
         invocation.  The reserved langgraph keys ``thread_id`` /
         ``checkpoint_ns`` / ``checkpoint_id`` raise ``ValueError``
         (thread identity belongs to the ``thread_id=`` param; the
-        checkpoint keys are not settable at all).  Mutually exclusive
-        with ``extra_config``.
+        checkpoint keys are not settable at all).
 
-        LEGACY surface (migration window only — mutually exclusive with
-        ``spec``, removed once manage.web and emacsos-server are
-        ported; each maps to the named replacement):
-
-        - `extra_tools` → ``AgentSpec.tools``
-        - `extra_skill_sources` → ``AgentSpec.skill_sources``
-        - `default_backend` → ``AgentSpec.default_backend``
-        - `loop_exploration_tools` → nothing (a no-op since the
-          loop-detection rollback; accepted so un-ported embedders
-          don't break, ignored)
-        - `extra_config` → ``configurable=``.  Only its
-          ``{"configurable": {...}}`` shape was ever used by a client,
-          so it is a thin adapter over the same narrowed merge:
-          top-level keys other than ``configurable`` raise, and
-          ``configurable.thread_id`` keeps its historical silent-drop
-          (the new kwarg raises instead).
+        The remaining params are per-instance/run wiring: identity
+        (``thread_id``), persistence (``checkpointer``), model,
+        concurrency, sandbox, and the queue-state callback.  The split
+        rule: *spec = the agent's shape; kwargs = instance wiring*.
         """
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -154,38 +132,6 @@ class Thread:
             "configurable": {"thread_id": self.thread_id},
             "max_concurrency": self.max_concurrency
         }
-        if configurable is not None and extra_config is not None:
-            raise TypeError(
-                "Thread: pass configurable= OR the deprecated extra_config=, "
-                "not both — extra_config's replacement is configurable")
-        if extra_config is not None:
-            # DEPRECATED adapter: normalize the legacy shape onto the
-            # narrowed merge below.  `is not None` (vs `if extra_config:`)
-            # so a falsy-but-wrong-type value like `[]` or `""` still
-            # trips the isinstance check instead of silently skipping.
-            if not isinstance(extra_config, dict):
-                raise TypeError(
-                    f"extra_config must be a dict, got {type(extra_config).__name__}"
-                )
-            inner = extra_config.get("configurable")
-            if inner is not None and not isinstance(inner, dict):
-                raise TypeError(
-                    f"extra_config['configurable'] must be a dict, "
-                    f"got {type(inner).__name__}"
-                )
-            stray = [k for k in extra_config if k != "configurable"]
-            if stray:
-                raise TypeError(
-                    f"extra_config top-level keys are no longer merged into "
-                    f"the runconfig (got {stray[0]!r}); only the "
-                    f"'configurable' key is supported — and its replacement "
-                    f"is the configurable= kwarg")
-            # Historical silent-drop of thread_id is preserved for the
-            # deprecated kwarg (the new `configurable=` raises instead).
-            configurable = {
-                k: v for k, v in (inner or {}).items() if k != "thread_id"
-            }
-
         if configurable is not None:
             if not isinstance(configurable, Mapping):
                 raise TypeError(
@@ -213,10 +159,6 @@ class Thread:
                                   working_dir=working_dir,
                                   checkpointer=checkpointer,
                                   sandbox_backend=sandbox_backend,
-                                  default_backend=default_backend,
-                                  extra_tools=extra_tools,
-                                  loop_exploration_tools=loop_exploration_tools,
-                                  extra_skill_sources=extra_skill_sources,
                                   spec=spec)
 
     def message(self, text: str) -> str:

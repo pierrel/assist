@@ -1,10 +1,9 @@
 """Tests for the `default_backend` injection seam.
 
-The create_agent/Thread-kwarg tests here pin the DEPRECATED legacy
-surface and are deleted with the AgentSpec migration window
-(superseded by test_create_agent_spec.py); the backend-factory and
-create_context_agent `default_backend` params are NOT legacy and those
-tests stay.
+Pins the `AgentSpec.default_backend` wiring through create_agent and
+Thread, plus the backend-factory and create_context_agent
+`default_backend` params (which are direct parameters, not part of
+the embedder spec).
 
 An embedder (emacsos-server) supplies the composite backend's *default* —
 the target for every non-routed path — so the agent operates against a
@@ -26,6 +25,7 @@ from assist.backends import (
     STATEFUL_PATHS,
     create_composite_backend,
 )
+from assist.spec import AgentSpec
 from deepagents.backends import FilesystemBackend, StateBackend
 from deepagents.backends.protocol import SandboxBackendProtocol
 from deepagents.middleware.filesystem import supports_execution
@@ -85,18 +85,18 @@ class TestCreateAgentDefaultBackend:
 
     def test_injected_default_reaches_deep_agent(self):
         inj = _fs()
-        backend = self._build(default_backend=inj)["backend"]
+        backend = self._build(spec=AgentSpec(default_backend=inj))["backend"]
         assert backend.default is inj
 
     def test_sandbox_default_enables_execute(self):
         inj = _FakeSandboxBackend(root_dir=tempfile.mkdtemp(), virtual_mode=True)
-        backend = self._build(default_backend=inj)["backend"]
+        backend = self._build(spec=AgentSpec(default_backend=inj))["backend"]
         assert backend.default is inj
         # The hinge: a SandboxBackendProtocol default => execute tool enabled.
         assert supports_execution(backend) is True
 
     def test_non_sandbox_default_does_not_enable_execute(self):
-        backend = self._build(default_backend=_fs())["backend"]
+        backend = self._build(spec=AgentSpec(default_backend=_fs()))["backend"]
         assert supports_execution(backend) is False
 
     def test_no_default_preserves_filesystem_backend(self):
@@ -106,7 +106,7 @@ class TestCreateAgentDefaultBackend:
 
     def test_default_and_sandbox_are_mutually_exclusive(self):
         with pytest.raises(ValueError):
-            self._build(default_backend=_fs(), sandbox_backend=MagicMock())
+            self._build(spec=AgentSpec(default_backend=_fs()), sandbox_backend=MagicMock())
 
 
 class TestSubagentDefaultBackendInheritance:
@@ -138,7 +138,7 @@ class TestSubagentDefaultBackendInheritance:
 
     def test_default_backend_reaches_context_agent(self):
         inj = _fs()
-        kwargs = self._build(default_backend=inj)
+        kwargs = self._build(spec=AgentSpec(default_backend=inj))
         assert kwargs.get("default_backend") is inj
 
     def test_no_default_backend_passes_none_to_context_agent(self):
@@ -161,9 +161,9 @@ class TestSubagentDefaultBackendInheritance:
 
 
 class TestThreadDefaultBackend:
-    """`Thread.__init__` forwards `default_backend` to `create_agent` —
-    mirrors the extra_tools / loop_exploration_tools / extra_skill_sources
-    forwarding tests in test_create_agent_extra_tools.py."""
+    """`Thread.__init__` forwards the spec (carrying default_backend)
+    to `create_agent`; the mutual exclusion with sandbox_backend is
+    create_agent's check."""
 
     def _build(self, **kwargs):
         from assist.thread import Thread
@@ -176,12 +176,13 @@ class TestThreadDefaultBackend:
                 Thread(working_dir=wd, **kwargs)
                 return fake_ca.call_args.kwargs
 
-    def test_default_backend_none_passed_through(self):
-        assert self._build()["default_backend"] is None
+    def test_default_spec_none_passed_through(self):
+        assert self._build()["spec"] is None
 
-    def test_default_backend_forwarded_to_create_agent(self):
+    def test_default_backend_forwarded_via_spec(self):
         inj = _fs()
-        assert self._build(default_backend=inj)["default_backend"] is inj
+        spec = AgentSpec(default_backend=inj)
+        assert self._build(spec=spec)["spec"].default_backend is inj
 
     def test_thread_both_backends_raise(self):
         # create_agent is intentionally NOT patched so its mutual-exclusion
@@ -194,4 +195,4 @@ class TestThreadDefaultBackend:
                 with pytest.raises(ValueError):
                     Thread(working_dir=wd,
                            sandbox_backend=MagicMock(),
-                           default_backend=_fs())
+                           spec=AgentSpec(default_backend=_fs()))
