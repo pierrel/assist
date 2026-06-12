@@ -318,6 +318,23 @@ contaminated (see harness note below).  One stable-test blip —
 back empty after a 14s turn) — was investigated with a targeted
 isolated N=5 before scaling, per the investigate-before-scaling rule.
 
+*Post-review result (N=5, full suite, post-polish):* stable-17 green
+in 4/5 trials; 16/17 in one trial (=test_writes_memory_implicit=).
+Noisy pair failed within its baseline envelope throughout.
+
+*=test_writes_memory_implicit= A/B (isolated runs, branch vs main):*
+branch 4/10 (+4/5 pre-polish targeted), *main 7/10* — main is
+substantially flaky on unchanged code, the branch-vs-main difference
+is not statistically significant (Fisher p≈0.37), and the spec
+equivalence tests pin byte-identical =create_deep_agent= construction
+for the eval path.  Verdict: inherent model-whim flake on an implicit
+memory-write task, latent at baseline (3/3 on a ~70% test happens
+~1 in 3) — NOT a regression.  Caveat recorded: branch pooled ≈60% vs
+main pooled ≈77% at low n; the N=10 stability sweep adds in-suite
+samples to keep watching.  This test is a strong candidate for the
+eval-quality pass (the assertion is also the kind of lexical pin the
+repo's eval-alignment rule warns about).
+
 *Harness limitation discovered (timeout zombies):* =pytest-timeout='s
 signal method fails the TEST but cannot kill the timed-out agent's
 worker threads — the orphaned agent keeps consuming the single LLM
