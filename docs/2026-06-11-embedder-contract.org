@@ -335,6 +335,15 @@ samples to keep watching.  This test is a strong candidate for the
 eval-quality pass (the assertion is also the kind of lexical pin the
 repo's eval-alignment rule warns about).
 
+*Stability result (N=10, final, 2026-06-12):* stable-17 green in 9/10
+trials; the single exception (trial 1, =test_writes_memory_explicit_feedback=,
+its first failure in 11 prior trials) occurred directly after an
+in-trial timeout and re-ran *5/5 in isolation* — zombie contamination,
+not a regression.  =test_writes_memory_implicit= (the earlier A/B
+subject) went *10/10 in-suite* across the sweep.  The noisy pair
+stayed in its baseline envelope.  Contract pinned; merge gate
+satisfied.
+
 *Harness limitation discovered (timeout zombies):* =pytest-timeout='s
 signal method fails the TEST but cannot kill the timed-out agent's
 worker threads — the orphaned agent keeps consuming the single LLM
