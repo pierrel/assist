@@ -328,7 +328,9 @@ def create_agent(model: BaseChatModel,
 
     if sandbox_backend is not None and spec.default_backend is not None:
         raise ValueError(
-            "create_agent: pass sandbox_backend OR default_backend, not both")
+            "create_agent: pass sandbox_backend OR a default backend "
+            "(AgentSpec.default_backend / legacy default_backend kwarg), "
+            "not both")
     mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
     logging_mw = ModelLoggingMiddleware("general-agent")
 
