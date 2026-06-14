@@ -33,6 +33,16 @@ PER_TEST_TIMEOUT="${PER_TEST_TIMEOUT:-1200}"
 KILL_GRACE="${KILL_GRACE:-30s}"
 TS="$(date +%Y%m%d-%H%M)"
 
+# The SIGKILL escalation is the whole point — require GNU coreutils
+# `timeout` with --kill-after.  Without it (missing, or BusyBox/BSD), the
+# kill can't fire and every test would report HARNESS-ERROR; fail fast
+# with a clear message instead.  `true` exits 0 immediately, so rc==0
+# iff --kill-after is accepted.
+if ! timeout --kill-after=1 1 true >/dev/null 2>&1; then
+    echo "ERROR: GNU \`timeout --kill-after\` is required (coreutils) but not available" >&2
+    exit 5
+fi
+
 # All eval-time tempfile activity (test workspaces, langgraph SqliteSaver
 # threads.db, sandbox bind mounts) goes to a dedicated scratch dir that
 # is wiped at the START of every run. Reproducible state, bounded disk

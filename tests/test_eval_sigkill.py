@@ -17,11 +17,24 @@ import time
 
 import pytest
 
-# The harness's kill mechanic is GNU coreutils `timeout`; skip cleanly
-# where it isn't on PATH rather than failing with a confusing rc=127.
+# The harness's kill mechanic is GNU coreutils `timeout --kill-after`.
+# Skip cleanly where it (or `--kill-after` support — BusyBox/BSD `timeout`
+# lacks it) isn't available, rather than failing with a confusing rc.
+def _has_gnu_timeout_kill_after() -> bool:
+    if shutil.which("timeout") is None:
+        return False
+    try:
+        # `true` exits 0 immediately; rc==0 iff --kill-after is accepted.
+        return subprocess.run(
+            ["timeout", "--kill-after=1", "1", "true"], capture_output=True
+        ).returncode == 0
+    except Exception:
+        return False
+
+
 pytestmark = pytest.mark.skipif(
-    shutil.which("timeout") is None,
-    reason="GNU coreutils `timeout` not available",
+    not _has_gnu_timeout_kill_after(),
+    reason="GNU coreutils `timeout --kill-after` not available",
 )
 
 
@@ -53,7 +66,7 @@ def test_sigterm_ignoring_process_is_sigkilled():
     # The --kill-after SIGKILL fired.  coreutils `timeout` re-raises the
     # kill on itself to propagate it, so the bash harness sees rc=137
     # (128+9) while Python's subprocess reports the signal death as -9 —
-    # both mean SIGKILL.  The harness's `[ rc -ge 124 ]` covers 137.
+    # both mean SIGKILL.  The harness classifies 137 (and 124) as a timeout.
     assert rc in (-9, 137), f"expected SIGKILL (-9 or 137), got {rc}"
     # Killed at deadline(1) + grace(1) ≈ 2s, with generous slack — NOT 10000s.
     assert elapsed < 10, f"took {elapsed:.1f}s — SIGKILL did not free it promptly"
