@@ -1,0 +1,136 @@
+#+title: Eval harness: per-test OS-level SIGKILL (timeout-zombie fix)
+#+date: 2026-06-14
+
+Replaces the eval harness's per-FILE loop + in-process pytest-timeout
+with a per-TEST loop where coreutils =timeout --kill-after= guarantees an
+OS-level SIGKILL of any runaway test.  Design + design-review (3 lenses,
+empirically verified) done 2026-06-14.
+
+* Problem
+
+A timed-out eval leaves agent *worker threads* blocked in C-level socket
+reads against llama.cpp's single =--parallel 1= inference slot.
+=pytest-timeout --timeout-method=thread= raises in the *main* thread
+only; it can't unwind a thread parked in a syscall, and SIGTERM is
+deferred for the same reason (Python services signals at bytecode
+boundaries, which a blocked-in-C thread never reaches).  So the orphan
+keeps the slot pinned and *starves every later test in the trial*
+(observed: the N=10 trial-1 failure landed directly after an in-trial
+timeout; and cancelling tonight's nightly cron left two zombie pytest
+children clamped on the slot + the flock until =kill -9=).  Only SIGKILL
+— applied by the OS, no Python cooperation — frees it.
+
+* Decision: per-test loop, =timeout --kill-after= as the sole cap
+
+Each test runs as:
+
+#+begin_src sh
+timeout --kill-after="$KILL_GRACE" -s TERM "$PER_TEST_TIMEOUT" \
+    "$PYTEST" --junit-xml="$xml" "$nodeid"
+#+end_src
+
+=timeout= sends SIGTERM at the deadline; if the process is still alive
+=KILL_GRACE= later (it will be — the threads can't service TERM), it
+sends *SIGKILL*, which kills the pytest process and *all its threads*
+with it, freeing the slot.  Verified empirically (design review): a
+TERM-ignoring child is killed at deadline+grace with rc=137, and SIGKILL
+reaps a process blocked in a C syscall.
+
+** What the design review CUT (this is a REPLACE, not an ADD)
+
+The old harness had three mechanisms all compensating for the absence of
+a real kill; the OS SIGKILL makes them redundant:
+
+- *=--timeout-method=thread= (and pytest-timeout entirely): DROPPED.*
+  The in-process timeout can't unblock a C-socket thread, and if it
+  fires it returns rc=1 — masking the timeout and looking like a test
+  failure.  Keeping a "soft inner =--timeout=" would re-introduce the
+  *signal* method (pytest-timeout's default) — the very method the old
+  header says "does not work" here.  That is the "fix on top of a fix"
+  to avoid.  The outer =timeout= is the single authority.
+- *Per-FILE loop + =PER_FILE_TIMEOUT=: DROPPED.*  Per-test isolation
+  bounds blast radius to one test (the old per-file bound still lost the
+  rest of a file after a hang — the actual observed pain is intra-file).
+- *Empty-XML detection workaround: DROPPED.*  It existed only because
+  the thread-method KeyboardInterrupt broke pytest's =session_finish= so
+  no XML was written.  With pytest-timeout gone and one nodeid per
+  process, a SIGKILLed test simply has no XML for *that one test*,
+  recorded directly as =rc>=124= in the summary.
+
+Also rejected (over-engineering for an unobserved case): =setsid= +
+process-group kill.  The zombies are *threads* (die with the process);
+docker grandchildren are daemon-reparented so a group-kill wouldn't
+reach them anyway, and =setsid= reintroduces a cron-orphan risk.  The
+design-review caught a real BLOCKER in the group-kill draft (=setsid X &
+; kill -KILL -$!= is broken — setsid forks, =$!= is the exited wrapper),
+which confirms: don't go there.  Sandbox-container orphans from a
+SIGKILLed test are a documented known limitation + follow-up (below),
+not v1 scope.
+
+* Preserved unchanged (the harness preamble, lines ~31-81)
+
+flock single-writer lock, the eval-scratch realpath guard + wipe,
+=export TMPDIR=, the partial-progress summary file, =.dev.env= autoload
+(via =make eval=).  Only the =for= loop body changes.
+
+* Observability / the one prod-adjacent consumer
+
+Per-test JUnit XML at =edd/history/<sanitized-nodeid>-<TS>.xml=, with
+=<TS>= computed *once* per run (shared across all tests) and the nodeid
+sanitized exactly like the cassette conftest (=::= → =__=, =/= → =_=).
+This keeps the =<prefix>-<YYYYMMDD-HHMM>.xml= shape that
+=manage/eval_history.py='s =_RUN_ID_RE= parses — the live =/evals= web
+page (read-time only, NOT the request path) groups by the run-id
+timestamp and is unaffected (74 single-test XMLs vs 21 multi-test ones,
+same run-id).  Test ids contain no hyphens, so the only =-<date>= is the
+shared TS.  =make pull-eval-history= (rsync) scales to the larger file
+count fine.  A SIGKILLed test is greppable in the summary as =rc>=124=.
+
+* Cost
+
+74 tests × ~2.5s pytest import startup ≈ 3 min added across the suite —
+noise against the 360-min nightly budget.  The model probe is ~100ms on
+a healthy local llama (the 10s is just a defensive httpx timeout), so no
+probe-amortization scheme is needed.  THREAD_QUEUE is a per-process
+singleton, so per-test processes each get a fresh empty queue — a bonus,
+not a hazard.
+
+* Binding constraint: eval-harness only
+
+Touches =scripts/run-evals.sh= (and a model-free verification test).
+*Does NOT touch the prod request/response path* —
+=assist/agent.py=, =assist/thread.py=, =assist/thread_queue.py=,
+=manage/web/= are untouched.  The fix is out-of-process (a bash loop +
+OS signal); there is no mechanism by which it would need a prod change.
+The only prod-adjacent surface is =manage/eval_history.py= (read-time
+XML parsing for the =/evals= page), preserved by the XML-naming scheme
+above.
+
+* Verification
+
+=tests/test_eval_sigkill.py= (model-free, runs in the unit suite): a
+synthetic SIGTERM-ignoring sleep test driven through the exact =timeout
+--kill-after= incantation; asserts rc=137 (SIGKILL fired), wall ≈
+deadline+grace (NOT the sleep duration), and the process is gone — i.e.
+the harness can kill a zombie-shaped process and free the resource.
+Plus a full live sweep before merge to confirm no spurious SIGKILLs and
+74 XMLs land.
+
+* Known limitation / follow-up
+
+A SIGKILLed *sandbox* test (the handful using =SandboxManager=) skips its
+=tearDown=, so its docker container could orphan (the graceful path is
+handled by =tearDown= → =SandboxManager.cleanup=).  Daemon-reparented,
+so neither the SIGKILL nor a group-kill reaches it.  Deferred per "no
+code for an unobserved need": if the nightly starts leaving orphaned
+=assist-*= containers, add a cheap startup sweep (=docker rm -f= of
+leftover eval containers) at the script top — which also cleans orphans
+from a prior killed run.  Not v1.
+
+* Out of scope
+
+- Prod request path (binding constraint).
+- =setsid= / process-group kill (rejected above).
+- pytest-xdist / pytest-forked (fork hazards; not installed).
+- Container-orphan reaping (follow-up, above).
+- The paused cassette work (independent companion).

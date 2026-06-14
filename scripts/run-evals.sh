@@ -1,39 +1,35 @@
 #!/usr/bin/env bash
 #
-# Run the eval suite per-file so one runaway test cannot kill the rest.
+# Run the eval suite one TEST per process, with an OS-level SIGKILL cap so
+# a runaway test cannot pin llama's single inference slot and starve the
+# rest of the suite.  See docs/2026-06-14-eval-per-test-sigkill.org.
 #
-# Background:
-# `pytest --timeout=600 --timeout-method=thread` reliably caps a runaway
-# test on Qwen3.6 + llama.cpp (signal method does not).  But the
-# KeyboardInterrupt the thread method raises propagates into langgraph's
-# `concurrent.futures.wait`, which prevents pytest from running its
-# session_finish hook — so no JUnit XML is written for the whole pytest
-# session.  Running pytest one file at a time bounds the blast radius:
-# we lose at most one file's XML, not the entire night.
+# Why per-test + SIGKILL (not the old per-file + pytest-timeout):
+# A timed-out eval leaves agent worker THREADS blocked in C-level socket
+# reads to llama.cpp's `--parallel 1` slot.  pytest's in-process timeout
+# (and SIGTERM) can't unwind a thread parked in a syscall — Python only
+# services signals at bytecode boundaries, which a blocked-in-C thread
+# never reaches.  Only SIGKILL frees the slot.  `timeout --kill-after`
+# sends SIGTERM at the deadline, then SIGKILL after a grace window; the
+# SIGKILL kills the pytest process and all its threads, freeing the slot
+# for the next test.  Per-test (not per-file) bounds the blast radius to
+# one test — the observed pain is a hung test starving its file-mates.
 #
-# Each file gets:
-#   - per-test cap: 1200s (pytest-timeout, thread method)
-#   - per-file cap: 3600s (outer `timeout`)
-#   - own JUnit XML at edd/history/<base>-<ts>.xml
+# Each test gets:
+#   - cap: 1200s (outer `timeout`, SIGTERM then SIGKILL after KILL_GRACE)
+#   - own JUnit XML at edd/history/<sanitized-nodeid>-<ts>.xml
+# No `pytest --timeout`: the in-process timeout can't unblock those
+# threads and would return rc=1, masking the timeout.  rc>=124 from
+# `timeout` (124=TERM honored, 137=SIGKILL fired) is the timeout signal.
 #
-# One timeout for every file, deliberately generous.  A few files
-# (test_agent, test_dev_agent, test_research_multi_turn) legitimately
-# run for many minutes — many sequential LLM calls / simulated turns on
-# the slow local model — and the 2026-06-03 slot-trace investigation
-# confirmed the model generates normally throughout (busy ~88% of the
-# window, no frozen decode, no runaway), so the long runs are real work,
-# not hangs.  Rather than special-case those files, every file gets the
-# same headroom: simpler, and per-file isolation still bounds the blast
-# radius if one ever does hang.
-#
-# A summary line lands in edd/history/eval-summary-<ts>.txt as each file
+# A summary line lands in edd/history/eval-summary-<ts>.txt as each test
 # completes, so partial progress is visible during long runs.
 set -u
 
 PYTEST="${PYTEST:-.venv/bin/pytest}"
 HISTORY_DIR="edd/history"
 PER_TEST_TIMEOUT="${PER_TEST_TIMEOUT:-1200}"
-PER_FILE_TIMEOUT="${PER_FILE_TIMEOUT:-3600}"
+KILL_GRACE="${KILL_GRACE:-30s}"
 TS="$(date +%Y%m%d-%H%M)"
 
 # All eval-time tempfile activity (test workspaces, langgraph SqliteSaver
@@ -77,32 +73,49 @@ mkdir -p "$HISTORY_DIR"
 SUMMARY="$HISTORY_DIR/eval-summary-$TS.txt"
 
 echo "=== eval suite starting at $(date -Iseconds) ===" | tee -a "$SUMMARY"
-echo "  per-test timeout: ${PER_TEST_TIMEOUT}s, per-file timeout: ${PER_FILE_TIMEOUT}s" | tee -a "$SUMMARY"
+echo "  per-test timeout: ${PER_TEST_TIMEOUT}s (SIGTERM, then SIGKILL after ${KILL_GRACE})" | tee -a "$SUMMARY"
 echo "  TMPDIR: $TMPDIR (wiped, $(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"}'))" | tee -a "$SUMMARY"
 
-for f in edd/eval/test_*.py; do
-    base="$(basename "$f" .py)"
-    xml="$HISTORY_DIR/${base}-${TS}.xml"
-    log="$HISTORY_DIR/${base}-${TS}.log"
+# Collect test nodeids once (one import of the eval modules; cheap).
+mapfile -t NODEIDS < <("$PYTEST" --collect-only -q edd/eval/ 2>/dev/null | grep '::')
+if [ "${#NODEIDS[@]}" -eq 0 ]; then
+    echo "ERROR: collected 0 eval tests — refusing to run" | tee -a "$SUMMARY" >&2
+    exit 4
+fi
+echo "  collected ${#NODEIDS[@]} tests" | tee -a "$SUMMARY"
 
-    echo "===> $base" | tee -a "$SUMMARY"
+for nodeid in "${NODEIDS[@]}"; do
+    # Sanitize the nodeid into an XML filename whose prefix matches
+    # manage/eval_history.py's _RUN_ID_RE = ^(.+?)-(\d{8}-\d{4})\.xml$
+    # (the live /evals page parses it).  Same scheme as the cassette
+    # conftest: '::' -> '__', '/' -> '_'.  Test ids have no hyphens, so
+    # the only '-<date>' is the shared TS.
+    safe="${nodeid//::/__}"
+    safe="${safe//\//_}"
+    xml="$HISTORY_DIR/${safe}-${TS}.xml"
+    log="$HISTORY_DIR/${safe}-${TS}.log"
+
+    echo "===> $nodeid" | tee -a "$SUMMARY"
     start=$(date +%s)
-    timeout "$PER_FILE_TIMEOUT" "$PYTEST" \
-        --timeout="$PER_TEST_TIMEOUT" \
-        --timeout-method=thread \
-        --junit-xml="$xml" \
-        "$f" \
+    # OS-level cap: SIGTERM at the deadline, SIGKILL ${KILL_GRACE} later.
+    # The SIGKILL is load-bearing — a test whose worker threads are
+    # blocked in a C socket read to llama's slot can't service SIGTERM, so
+    # only SIGKILL frees the slot for the next test.
+    timeout --kill-after="$KILL_GRACE" -s TERM "$PER_TEST_TIMEOUT" \
+        "$PYTEST" --junit-xml="$xml" "$nodeid" \
         > "$log" 2>&1
     rc=$?
     end=$(date +%s)
     wall=$((end - start))
 
-    if [ -s "$xml" ]; then
-        xml_status="xml-ok"
+    if [ "$rc" -ge 124 ]; then
+        status="TIMED-OUT(rc=$rc)"      # 124=SIGTERM honored, 137=SIGKILL fired
+    elif [ -s "$xml" ]; then
+        status="xml-ok"
     else
-        xml_status="NO-XML"
+        status="NO-XML"
     fi
-    echo "<==  $base : ${wall}s rc=$rc $xml_status" | tee -a "$SUMMARY"
+    echo "<==  $nodeid : ${wall}s rc=$rc $status" | tee -a "$SUMMARY"
 done
 
 echo "=== eval suite finished at $(date -Iseconds) ===" | tee -a "$SUMMARY"
