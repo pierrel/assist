@@ -19,8 +19,9 @@
 #   - cap: 1200s (outer `timeout`, SIGTERM then SIGKILL after KILL_GRACE)
 #   - own JUnit XML at edd/history/<sanitized-nodeid>-<ts>.xml
 # No `pytest --timeout`: the in-process timeout can't unblock those
-# threads and would return rc=1, masking the timeout.  rc>=124 from
-# `timeout` (124=TERM honored, 137=SIGKILL fired) is the timeout signal.
+# threads and would return rc=1, masking the timeout.  rc 124 (TERM
+# honored) and 137 (SIGKILL after --kill-after) mark a timeout; 125-127
+# are `timeout`'s own errors, surfaced distinctly (not as a timeout).
 #
 # A summary line lands in edd/history/eval-summary-<ts>.txt as each test
 # completes, so partial progress is visible during long runs.
