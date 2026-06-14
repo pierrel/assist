@@ -75,6 +75,23 @@ if ! flock -n 9; then
     exit 3
 fi
 
+# Reap orphaned EVAL sandbox containers left by a prior run's TERM/SIGKILL
+# of a sandbox test (the kill skips pytest's tearDown -> SandboxManager
+# cleanup never runs).  Observed 2026-06-14 (test_finance_strategy_
+# projection timed out -> a running assist-sandbox container orphaned).
+# SAFE for prod: only containers whose /workspace bind-mount is under the
+# eval scratch dir are removed; the prod web app's sandboxes mount under
+# $ASSIST_THREADS_DIR (.../threads), never here.  This bounds the leak to
+# one run — a within-run orphan is reaped by the next run's startup.
+if command -v docker >/dev/null 2>&1; then
+    for c in $(docker ps -q --filter label=assist.sandbox=true 2>/dev/null); do
+        if docker inspect "$c" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null \
+                | grep -q "^${EVAL_SCRATCH_DIR}/"; then
+            docker rm -f "$c" >/dev/null 2>&1
+        fi
+    done
+fi
+
 # Wipe + recreate. Only runs after the realpath guard above.
 rm -rf "$EVAL_SCRATCH_DIR"
 mkdir -p "$EVAL_SCRATCH_DIR"

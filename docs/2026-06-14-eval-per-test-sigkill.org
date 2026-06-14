@@ -117,16 +117,25 @@ the harness can kill a zombie-shaped process and free the resource.
 Plus a full live sweep before merge to confirm no spurious SIGKILLs and
 74 XMLs land.
 
-* Known limitation / follow-up
+* Sandbox-container orphans (observed → reaped at startup)
 
-A SIGKILLed *sandbox* test (the handful using =SandboxManager=) skips its
-=tearDown=, so its docker container could orphan (the graceful path is
-handled by =tearDown= → =SandboxManager.cleanup=).  Daemon-reparented,
-so neither the SIGKILL nor a group-kill reaches it.  Deferred per "no
-code for an unobserved need": if the nightly starts leaving orphaned
-=assist-*= containers, add a cheap startup sweep (=docker rm -f= of
-leftover eval containers) at the script top — which also cleans orphans
-from a prior killed run.  Not v1.
+A TERM/SIGKILLed *sandbox* test (the handful using =SandboxManager=)
+skips its =tearDown=, so its docker container orphans — *observed
+2026-06-14*: =test_finance_strategy_projection= timed out (rc=124) and
+left a running =assist-sandbox= container.  The fix's core job is
+unaffected (the slot freed, the next test passed) — an orphaned
+container holds workspace resources, not the LLM slot — but it leaks.
+
+Now that it's observed (not theoretical), the harness reaps these at
+*startup*: any =assist.sandbox=-labelled container whose =/workspace=
+bind-mount is under =$EVAL_SCRATCH_DIR= is =docker rm -f='d before the
+scratch wipe.  *Prod-safe by construction*: the prod web app's
+sandboxes mount under =$ASSIST_THREADS_DIR= (=.../threads=), never the
+eval scratch dir, so they are never matched — honoring the
+eval-harness-only constraint.  This bounds the leak to one run (a
+within-run orphan is reaped by the next run's startup); a per-test or
+EXIT-trap reap was rejected as more complexity than the bounded leak
+warrants.
 
 * Out of scope
 
