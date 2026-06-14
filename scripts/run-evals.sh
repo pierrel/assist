@@ -77,19 +77,24 @@ echo "  per-test timeout: ${PER_TEST_TIMEOUT}s (SIGTERM, then SIGKILL after ${KI
 echo "  TMPDIR: $TMPDIR (wiped, $(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"}'))" | tee -a "$SUMMARY"
 
 # Collect test nodeids once (one import of the eval modules; cheap).
-mapfile -t NODEIDS < <("$PYTEST" --collect-only -q edd/eval/ 2>/dev/null | grep '::')
+# Keep collection stderr — a syntax error / bad $PYTEST surfaces here as a
+# real message, not just a silent "collected 0".
+collect_err="$HISTORY_DIR/collect-$TS.err"
+mapfile -t NODEIDS < <("$PYTEST" --collect-only -q edd/eval/ 2>"$collect_err" | grep '::')
 if [ "${#NODEIDS[@]}" -eq 0 ]; then
-    echo "ERROR: collected 0 eval tests — refusing to run" | tee -a "$SUMMARY" >&2
+    echo "ERROR: collected 0 eval tests — refusing to run. Collection stderr:" | tee -a "$SUMMARY" >&2
+    cat "$collect_err" | tee -a "$SUMMARY" >&2
     exit 4
 fi
 echo "  collected ${#NODEIDS[@]} tests" | tee -a "$SUMMARY"
 
 for nodeid in "${NODEIDS[@]}"; do
-    # Sanitize the nodeid into an XML filename whose prefix matches
+    # Sanitize the nodeid into an XML filename that still matches
     # manage/eval_history.py's _RUN_ID_RE = ^(.+?)-(\d{8}-\d{4})\.xml$
-    # (the live /evals page parses it).  Same scheme as the cassette
-    # conftest: '::' -> '__', '/' -> '_'.  Test ids have no hyphens, so
-    # the only '-<date>' is the shared TS.
+    # (the live /evals page parses it): '::' -> '__', '/' -> '_'.  The
+    # load-bearing invariant is only that the name ends with the shared
+    # '-<YYYYMMDD-HHMM>.xml' run-id suffix; the prefix may contain other
+    # characters (the regex's non-greedy prefix handles them).
     safe="${nodeid//::/__}"
     safe="${safe//\//_}"
     xml="$HISTORY_DIR/${safe}-${TS}.xml"
@@ -108,8 +113,15 @@ for nodeid in "${NODEIDS[@]}"; do
     end=$(date +%s)
     wall=$((end - start))
 
-    if [ "$rc" -ge 124 ]; then
-        status="TIMED-OUT(rc=$rc)"      # 124=SIGTERM honored, 137=SIGKILL fired
+    # `timeout` exit codes: 124 = deadline hit, initial SIGTERM killed the
+    # test; 137 = 128+SIGKILL, the --kill-after escalation fired (the
+    # zombie case).  125/126/127 are `timeout`'s OWN errors (bad args /
+    # command not runnable / not found) — NOT a test timeout, so surface
+    # them distinctly instead of masking them as TIMED-OUT.
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        status="TIMED-OUT(rc=$rc)"
+    elif [ "$rc" -ge 125 ] && [ "$rc" -le 127 ]; then
+        status="HARNESS-ERROR(rc=$rc)"  # `timeout` couldn't run pytest
     elif [ -s "$xml" ]; then
         status="xml-ok"
     else

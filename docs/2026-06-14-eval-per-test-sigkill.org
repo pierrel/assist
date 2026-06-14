@@ -55,7 +55,7 @@ a real kill; the OS SIGKILL makes them redundant:
   the thread-method KeyboardInterrupt broke pytest's =session_finish= so
   no XML was written.  With pytest-timeout gone and one nodeid per
   process, a SIGKILLed test simply has no XML for *that one test*,
-  recorded directly as =rc>=124= in the summary.
+  recorded distinctly (=rc=124=/=137=) in the summary.
 
 Also rejected (over-engineering for an unobserved case): =setsid= +
 process-group kill.  The zombies are *threads* (die with the process);
@@ -77,14 +77,15 @@ flock single-writer lock, the eval-scratch realpath guard + wipe,
 
 Per-test JUnit XML at =edd/history/<sanitized-nodeid>-<TS>.xml=, with
 =<TS>= computed *once* per run (shared across all tests) and the nodeid
-sanitized exactly like the cassette conftest (=::= → =__=, =/= → =_=).
-This keeps the =<prefix>-<YYYYMMDD-HHMM>.xml= shape that
-=manage/eval_history.py='s =_RUN_ID_RE= parses — the live =/evals= web
-page (read-time only, NOT the request path) groups by the run-id
-timestamp and is unaffected (74 single-test XMLs vs 21 multi-test ones,
-same run-id).  Test ids contain no hyphens, so the only =-<date>= is the
-shared TS.  =make pull-eval-history= (rsync) scales to the larger file
-count fine.  A SIGKILLed test is greppable in the summary as =rc>=124=.
+sanitized (=::= → =__=, =/= → =_=).  This keeps the
+=<prefix>-<YYYYMMDD-HHMM>.xml= shape that =manage/eval_history.py='s
+=_RUN_ID_RE= parses — the live =/evals= web page (read-time only, NOT
+the request path) groups by the run-id timestamp and is unaffected (74
+single-test XMLs vs 21 multi-test ones, same run-id).  The only
+load-bearing invariant is the shared =-<date>= suffix; the regex's
+non-greedy prefix tolerates hyphens in the prefix (test ids don't have
+any, but parametrized ids could).  =make pull-eval-history= (rsync) scales to the larger file
+count fine.  A SIGKILLed test is greppable in the summary as =rc=137= (or =124= for a TERM-honored timeout).
 
 * Cost
 

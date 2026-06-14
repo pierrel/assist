@@ -9,12 +9,20 @@ socket read to llama's slot) is still killed at the OS level by the
 SIGKILL escalation, so the slot frees for the next test.  Here we model
 that with a SIGTERM-ignoring sleeper and assert the escalation fires.
 """
+import shutil
 import subprocess
 import sys
 import textwrap
 import time
 
 import pytest
+
+# The harness's kill mechanic is GNU coreutils `timeout`; skip cleanly
+# where it isn't on PATH rather than failing with a confusing rc=127.
+pytestmark = pytest.mark.skipif(
+    shutil.which("timeout") is None,
+    reason="GNU coreutils `timeout` not available",
+)
 
 
 def _run(deadline, grace, body):
@@ -59,19 +67,21 @@ def test_well_behaved_process_exits_before_deadline():
     assert elapsed < 5
 
 
-def test_rc_ge_124_distinguishes_timeout_from_failure():
-    """rc>=124 is the harness's timeout/kill signal; a real test failure
-    (exit 1) is < 124, so the summary never miscounts a red test as a
-    timeout."""
+def test_timeout_codes_distinguish_from_failure():
+    """The harness treats ONLY rc 124 (TERM) and 137 (SIGKILL) as timeouts.
+    A real test failure (exit 1) is neither, so the summary never miscounts
+    a red test as a timeout — and `timeout`'s own 125-127 errors stay
+    distinct (not folded into the timeout bucket)."""
     rc_fail, _ = _run(deadline=10, grace=5, body="import sys; sys.exit(1)")
-    assert rc_fail == 1 and rc_fail < 124
+    assert rc_fail == 1
+    assert rc_fail not in (124, 137)  # a failure is not a timeout
 
     rc_term, _ = _run(
         deadline=1, grace=5,
         body="import time; time.sleep(10000)",  # honors TERM (no handler)
     )
     # No SIGTERM handler -> default-terminate at the deadline -> rc=124.
-    assert rc_term == 124 and rc_term >= 124
+    assert rc_term == 124
 
 
 def test_nodeid_xml_name_matches_eval_history_regex():
@@ -87,6 +97,7 @@ def test_nodeid_xml_name_matches_eval_history_regex():
 
     m = run_id_re.match(filename)
     assert m is not None, f"{filename!r} does not match eval_history _RUN_ID_RE"
-    assert m.group(2) == "20260614-0030"  # the shared run-id timestamp
-    # The sanitized nodeid prefix carries no spurious '-<date>' substring.
-    assert "-" not in m.group(1)
+    # The load-bearing invariant: the run-id timestamp is parsed correctly.
+    # (The prefix may contain hyphens in general; the only real hazard is a
+    # prefix ending in its OWN '-<YYYYMMDD-HHMM>' — which test ids don't.)
+    assert m.group(2) == "20260614-0030"
