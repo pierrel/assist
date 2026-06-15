@@ -54,6 +54,29 @@ Consider:
 1. URLs that do not work (404, etc)
 2. URLs that do not corroborate the information in the final report
 3. Better ways to search
+** TODO Clean main-content extraction for =read_url= (signal-per-token)
+Today =read_url= (=assist/tools.py=) strips =<script>=/=<style>=, then strips
+ALL tags, collapses whitespace, and truncates to =text[:4000]=.  It does NO
+main-content extraction, so leading boilerplate (nav menus, cookie/consent
+banners, headers, footers, ad slots) can crowd the actual article body out of
+the 4000-char budget — wasting context on noise and degrading research quality.
+This compounds the context-explosion pressure the subagent-summarization fix
+(PR #137, =docs/2026-06-14-research-subagent-summarization.org=) bounds: cleaner
+reads mean less bloat per page, fewer summarization triggers, better answers.
+
+Idea (from 2026-06-15):
+- Extract the MAIN content (readability/article-extraction style — e.g.
+  =trafilatura= / =readability-lxml= / =resiliparse=) so the returned text is
+  mostly the article body, not chrome.  Leave as little as possible while still
+  representing the content.
+- Consider a separate =read_url_content= tool that returns this minimal clean
+  extraction, with prompt guidance to TRY IT FIRST and fall back to the raw
+  =read_url= only when the expected content isn't present (extraction missed it,
+  JS-rendered page, unusual structure).  Keeps a raw escape hatch while making
+  the clean path the default.
+- Watch the trade-off: over-aggressive extraction can drop tables/code/lists the
+  research actually needs; the fallback exists for exactly that.  Validate with
+  research evals (report still cites the right facts/URLs) before defaulting.
 * Reliability
 ** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
