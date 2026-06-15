@@ -1,0 +1,106 @@
+#+title: Research-agent hang: summarize the subagents EARLY
+#+date: 2026-06-14
+
+The research-agent "hang" is a context explosion inside the research
+*subagents*, not the orchestrator.  Fix: make deepagents' auto-installed
+subagent summarizer fire at ~51k instead of ~111k, by handing the
+subagents a model that *reports* a smaller effective window.  Design +
+design-review (2 lenses) + code-review (2 lenses, both "ship it") done
+2026-06-14.
+
+* Problem (corrected root cause)
+
+The first diagnosis ("subagents have NO summarization") was *wrong*.
+=create_deep_agent= PRE-populates every dict-spec subagent's middleware
+with the full context stack — =TodoList=, =Filesystem=,
+=create_summarization_middleware(subagent_model, backend)=,
+=PatchToolCalls= (=deepagents/graph.py:547-556=) — and *then* appends our
+=_subagent_safety_mw()=.  So the research/critique/fact-check subagents
+*already* have a summarizer.
+
+The real defect is the *trigger height*.  =compute_summarization_defaults=
+returns a FIXED =("fraction", 0.85)= trigger when the model profile has
+=max_input_tokens= (=summarization.py:171-208=).  At the orchestrator's
+real ~131k window that fires at ~111k — but the local Qwen3-27B-Q4 bogs
+down at ~30k, so a subagent's context sails through the slow zone
+(30k→111k) before compaction ever fires.  That is the hang.
+
+* Decision: report a smaller window to JUST the research subagents
+
+The =SubAgent= dict-spec has a first-class =model= field that deepagents
+feeds straight into =create_summarization_middleware= (=graph.py:537-554=).
+The summarizer's trigger is a pure function of that model's
+=profile["max_input_tokens"]= — and =max_input_tokens= is read *only* by
+the summarizer in the current middleware stack (no Filesystem/truncation
+coupling — that eviction is a fixed 20k constant).
+
+So we give the three research subagents a =model_copy()= of the
+orchestrator model whose =profile= reports =RESEARCH_SUBAGENT_WINDOW =
+60_000=.  The same auto-installed summarizer now fires at 0.85*60k≈51k,
+bounding the subagent working set under the slow zone.  =model_copy()= is
+a shallow copy that shares the HTTP client (same llama endpoint);
+reassigning =.profile= on the copy leaves the orchestrator's full-window
+profile untouched, so the *main* agent is unaffected (it works fine at
+0.85 — it only reads URLs).
+
+Net diff: +26 lines in =assist/agent.py= (one documented constant, a
+2-line =model_copy()=+profile build, a =model:= key on each of the 3
+subagent dicts).  No signature changes, no prompt changes.
+
+** Options the design-review team REJECTED (smaller-is-better)
+
+- *Convert the subagents to =CompiledSubAgent= and hand-own the full
+  middleware stack.*  Largest option: re-adds 4 deepagents middleware
+  that were automatic, and the subagents would then silently miss any
+  middleware a future deepagents adds to the auto-stack.  Only needed if
+  the profile route were blocked — it isn't.
+- *Append a 2nd =SummarizationMiddleware= at 0.4 to =spec["middleware"]=.*
+  REAL hazard: it would co-exist with the auto-installed 0.85 instance;
+  both =wrap_model_call= and both read/write the shared
+  =_summarization_event= state key with different cutoffs → double-
+  summarize / conflicting =Command= updates.
+- *Register a custom =HarnessProfile= with =excluded_middleware= +
+  =extra_middleware=.*  Too broad: profiles are keyed on *model
+  identity*, so it would change the MAIN chat agent's trigger too — a
+  prod-request-path behavior change we do not want.
+- *Prompt cap ("AT MOST 8 read_url") and a =summarize=False= critique
+  flag.*  CUT as redundant/unobserved scope — a second mechanism for the
+  same symptom (the trigger fix is the one lever), and critique never
+  approaches even the lowered trigger.
+
+* Why 60_000 (and why a fixed absolute)
+
+The slow zone (~30k) is a property of the *model's throughput*, not its
+declared context, so the right subagent window does NOT scale with n_ctx
+— a fixed absolute is the *more* correct choice than a fraction of the
+orchestrator window.  The trigger lands at ~51k, which is above the ~30k
+bog point: this converts a *hard hang* at ~111k into *tolerable
+slowness*, which is the goal.  The value is *eval-tuned*; if research
+evals still stall, the next lever is lowering toward ~35-40k (trigger
+~30-34k), never raising.
+
+* Verification
+
+=tests/test_research_subagent_summarization.py= (model-free, unit suite):
+spies on =deepagents.graph.create_summarization_middleware= (the seam the
+auto-stack calls) while building a real =create_research_agent=, using a
+real =ChatOpenAI= so =model_copy=/=.profile= behave exactly as in prod
+(=create_deep_agent= only compiles the graph — no LLM call).  Asserts:
+the 3 subagents' summarizers are built at 60k; the orchestrator's at the
+full window; the passed-in orchestrator profile is NOT mutated (the
+isolation hazard, un-mocked); and the effective trigger fires strictly
+earlier than the orchestrator's and stays bounded under the slow zone.
+
+End-to-end research evals (does a long research turn that previously
+hung at ~111k now finish, with report quality intact) are *deferred*:
+SearXNG is rate-limited (self-inflicted by today's eval traffic) and
+needs hours to recover.  Run when search is back; tune the window down
+if stalls persist.
+
+* Binding constraint check
+
+Touches =assist/agent.py= =create_research_agent= only.  The two added
+lines (=model_copy()= + dict assignment) are pure CPU — no I/O, no lock,
+no subprocess, no sleep — so the path is event-loop-safe even though
+=create_research_agent= is reachable from the async web handler
+(confirmed by the code-review liveness lens).
