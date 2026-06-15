@@ -88,17 +88,18 @@ def test_orchestrator_model_profile_not_mutated():
     assert orchestrator.profile == {"max_input_tokens": ORCHESTRATOR_WINDOW}
 
 
-def test_reduced_trigger_fires_earlier_and_stays_bounded():
-    """The effective trigger (0.85 × the reduced window) must fire strictly
-    earlier than the orchestrator's AND stay bounded under the slow zone that
-    caused the hang.  Pins the design intent without over-fixing the exact
-    eval-tuned value: the window may be tuned within this band, but a careless
-    bump back toward the orchestrator's window is caught."""
+def test_reduced_window_fires_earlier_and_is_not_raised():
+    """The reduced window must fire strictly earlier than the orchestrator's
+    AND must not be raised back toward it.  Eval-tuning the window DOWN (toward
+    ~40k if stalls persist) is expected; raising it above the 60k design
+    ceiling — creeping the summarization trigger back toward the ~111k that
+    hung — is the regression this guards."""
     subagent_trigger = int(0.85 * RESEARCH_SUBAGENT_WINDOW)
     orchestrator_trigger = int(0.85 * ORCHESTRATOR_WINDOW)
     assert subagent_trigger < orchestrator_trigger, "must fire earlier than orchestrator"
-    # ~111k hung; keep the subagent ceiling well under that.  60k window ->
-    # ~51k trigger today; allow eval-tuning headroom but never above 60k.
-    assert subagent_trigger <= 60_000, (
-        f"subagent trigger {subagent_trigger} is not bounded under the slow zone"
+    # Assert on the WINDOW itself, not the derived trigger: a trigger bound
+    # (e.g. <= 60_000) would let the window creep to ~70k since 0.85*70k≈59.5k.
+    assert RESEARCH_SUBAGENT_WINDOW <= 60_000, (
+        f"RESEARCH_SUBAGENT_WINDOW {RESEARCH_SUBAGENT_WINDOW} raised above the "
+        "60k ceiling — that creeps the summarization trigger back toward the hang"
     )
