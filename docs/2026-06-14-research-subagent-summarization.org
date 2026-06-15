@@ -104,3 +104,88 @@ lines (=model_copy()= + dict assignment) are pure CPU — no I/O, no lock,
 no subprocess, no sleep — so the path is event-loop-safe even though
 =create_research_agent= is reachable from the async web handler
 (confirmed by the code-review liveness lens).
+
+* SESSION PAUSE — pickup context (2026-06-15)
+
+*Status: PR #137 is REVIEW-COMPLETE but DELIBERATELY NOT MERGED.*  Paused
+by the user 2026-06-15 to investigate the search-down grind (below) from
+=main= first.  Branch =research-subagent-summarization=, head =50857e3=
+at pause (the roadmap read_url note is a SEPARATE commit =bb6b881= already
+on =main=, not part of this PR).
+
+** What is DONE and validated
+
+- Design + design-review (2 lenses) + code-review (2 lenses, both "ship
+  it") + *3 Copilot rounds, converged* (round 1: 1 real fix [test bound] +
+  1 declined false positive [model_copy/MagicMock]; round 2 clean; round 3:
+  1 declined false positive ["Binding"→"Bounding" doc typo claim]).  All
+  review threads resolved.
+- *Wiring validated* — =tests/test_research_subagent_summarization.py=
+  spies on the summarization factory: the 3 subagents are built at the 60k
+  window, orchestrator at full, orchestrator profile un-mutated.
+- *Bounding validated (search-free, deterministic)* — same file: real bulk
+  read_url-style content grown to ~56k is fed to the un-mocked
+  =_should_summarize=; the 60k config FIRES (threshold 51k) while the
+  pre-fix 131k config does NOT (threshold 111k).  7 tests total, full unit
+  suite 597 passed.
+
+** Live validation findings — THE IMPORTANT REFRAME
+
+Three live runs (=/tmp/repro_research_hang.py= tramp/ssh question, and
+=/tmp/repro_heavy.py= an instrumented heavy 4-part question) under
+*healthy* SearXNG showed:
+
+- *Normal operation never approaches 51k.*  Even the demanding 4-part
+  question peaked at *subagent total_tokens = 20,546* (orchestrator 10,310)
+  across 114 trigger checks — *0 summarization fires*.  Each subagent
+  DISPATCH is fresh and bounded (~4 searches + reads, returns); the
+  orchestrator delegates across several fresh dispatches rather than one
+  giant one.  So the summarizer — at 51k OR 111k — does not engage in
+  normal use.
+- *Therefore #137 is a SAFETY BOUND for genuine runaways* (a subagent that
+  reads 50+ pages in ONE dispatch, e.g. the historical fact-checker
+  "200+ read_url" case), proven by the bounding unit test — *not* the thing
+  that makes normal research turns complete.  Do not oversell it.
+- *The original "hang" was very likely the SEARCH-DOWN GRIND, not a context
+  explosion.*  Both live attempts that "hung" did so because SearXNG
+  rate-limited and the agent ground on failed-search retries / re-reads
+  (last night → 30-min cap; 2026-06-15 12:18 → watcher killed at the 2nd
+  failure, 14 min, peak only 20.5k).  That grind is a SEPARATE issue #137
+  does not address — see the new investigation (search-down fail-fast),
+  which the user pivoted to from =main=.
+
+** How the live runs were instrumented (reuse for the pickup)
+
+- =/tmp/repro_heavy.py= monkeypatches
+  =_DeepAgentsSummarizationMiddleware._should_summarize= to log, per call,
+  =window= (=_get_profile_limits()=), =total_tokens=, =threshold=, =FIRED=,
+  and running peaks — tagged 60000 (subagent, the fix) vs 131072
+  (orchestrator).  This is the definitive "did it fire" signal.
+- Run them behind a *rate-limit watcher*: a bash loop tailing the log for
+  =Web search unavailable|too many requests|CAPTCHA|Suspended:= that
+  TERM→KILLs the python at >=2 hits (so a rate-limited backend ends in
+  ~5s instead of grinding) plus a wall-clock cap.  Pattern worked well;
+  reuse it for any future live research run.
+
+** What's LEFT to obtain a live summarizer-fire (the one gap)
+
+A live demonstration of the summarizer actually firing needs a subagent to
+cross 51k in one dispatch, which normal operation doesn't reach and which
+*forcing* (many reads in one dispatch) requires sustained search the
+backend can't give.  Options when picking back up: (a) accept the unit
+bounding test as sufficient proof of the mechanism (recommended — it is
+faithful and deterministic); (b) build a search-independent INTEGRATION
+test that injects bulk =read_url= content through the real subagent loop
+with a stub search tool, forcing >51k, and assert a fire + bounded
+completion; (c) wait for the authenticated search API (roadmap) and re-run
+=/tmp/repro_heavy.py=.
+
+** Merge decision when resuming
+
+#137 is correct, safe (can only summarize EARLIER; orchestrator + main
+agent provably untouched), and well-tested.  Merge it as a runaway safety
+bound — but FIRST land this honest scope in the PR description /
+"Known limitations": "validates and bounds a runaway; normal operation
+stays well under the trigger; does NOT address the search-down grind
+(tracked separately)."  Then the search-grind work is the higher-impact
+follow-up.
