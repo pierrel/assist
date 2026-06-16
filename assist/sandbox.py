@@ -74,7 +74,7 @@ class SandboxContainerLostError(RuntimeError):
     Raised from ``DockerSandboxBackend.execute`` when ``container.exec_run``
     sees a 404 from the Docker API — meaning the container was stopped or
     removed (manually, by an OOM kill, by a daemon restart, by the
-    container's own 3h backstop ``sleep`` TTL expiring) while the agent was
+    container's own backstop ``sleep`` TTL expiring) while the agent was
     still running.
 
     Distinct from a regular per-command exec failure: a dead container

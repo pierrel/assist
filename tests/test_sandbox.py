@@ -518,7 +518,7 @@ class TestSandboxManager(TestCase):
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_get_sandbox_backend_does_not_reuse_reaps_stale(self, mock_backend_cls):
         """Per-turn lifecycle: a container left registered from a prior turn is
-        NOT reused — it is killed (kill=True, fast path) and a fresh one is
+        NOT reused — it is killed (SIGKILL, via cleanup) and a fresh one is
         created.  Reusing it would let a container outlive its turn, which is
         the whole thing the per-turn design forbids."""
         test_path = os.path.join(self.temp_dir, "domain")
