@@ -41,11 +41,11 @@ _SEARXNG_TIMEOUT_S = 10.0
 # wait-time framing: a broken backend is an outage to fix, not a rate-limit to
 # wait out.
 _SEARCH_UNAVAILABLE_MESSAGE = (
-    "Web search is unavailable — the search backend is down. STOP: do not "
-    "search again, and do not retry with a different query — it is down and "
-    "every retry will fail the same way. Do NOT answer from your own "
-    "knowledge. Your final message must tell the user you couldn't look this "
-    "up because web search is currently unavailable."
+    "Web search is unavailable — the search backend could not be reached or "
+    "returned an unusable response. STOP: do not search again, and do not "
+    "retry with a different query — it will keep failing the same way. Do NOT "
+    "answer from your own knowledge. Your final message must tell the user you "
+    "couldn't look this up because web search is currently unavailable."
 )
 
 
