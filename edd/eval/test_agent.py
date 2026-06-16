@@ -724,9 +724,9 @@ class TestSearchDownMidflightDoesNotGrind(AgentTestMixin, TestCase):
         self.assertTrue(res, "Agent returned an empty response")
         self.assertLessEqual(
             n, self.MAX_SEARCHES,
-            f"Ran {n} searches after the backend went down (cap "
-            f"{self.MAX_SEARCHES}) — the grind is not bounded.  MAIN "
-            f"dispatches: {self.subagent_calls(agent)}.")
+            f"Ran {n} total searches (1 priming + the rest against a down "
+            f"backend; cap {self.MAX_SEARCHES}) — the grind is not bounded.  "
+            f"MAIN dispatches: {self.subagent_calls(agent)}.")
         self.assertRegex(
             res,
             r"(?i)unavailable|couldn'?t search|could not search|search.{0,20}"

@@ -87,8 +87,8 @@ def _compose_terminal_message() -> str:
     (research_instructions.txt.j2)."""
     return (
         "I couldn't complete this research because web search is currently "
-        "unavailable — the search backend could not be reached after repeated "
-        "attempts, so I couldn't look this up."
+        "unavailable — the search backend could not be reached, so I couldn't "
+        "look this up."
     )
 
 
