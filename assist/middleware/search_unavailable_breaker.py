@@ -38,7 +38,7 @@ import logging
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 # Import the EXACT constant (single source of truth) so a wording change in
@@ -46,26 +46,34 @@ from langgraph.runtime import Runtime
 # imported — never tools.py's blocking helpers (this hook runs inline on the
 # event-loop thread; it must stay pure CPU).
 from assist.tools import _SEARCH_UNAVAILABLE_MESSAGE
-# Reuse loop detection's per-turn event extraction (same precedent as
-# empty_response_recovery importing `_last_successful_artifact`).
-from assist.middleware.loop_detection import _extract_events
+# Reuse loop detection's per-turn slice (same precedent as empty_response_
+# recovery importing `_last_successful_artifact`).
+from assist.middleware.loop_detection import _current_turn_slice
 
 logger = logging.getLogger(__name__)
 
 _SEARCH_TOOL = "search_internet"
 
 
-def _count_search_unavailable(events: list[dict]) -> int:
-    """Completed ``search_internet`` calls whose result is EXACTLY the
-    unavailable constant, in the current turn.  Cumulative within the turn (a
-    backend being down is turn-global state) and exact-equality (the constant is
-    returned verbatim from a single code path) — a genuine empty result (``[]``)
-    or any other content is NOT counted."""
+def _count_search_unavailable(messages: list) -> int:
+    """Count completed ``search_internet`` calls whose result is EXACTLY the
+    unavailable constant, across the WHOLE current turn.
+
+    Counts directly over the turn slice (NO recency window — a backend being
+    down is turn-global state; a windowed count could let heavy read_url
+    interleaving push earlier unavailable searches out of view and undercount).
+    Exact-equality: the constant is returned verbatim from one code path, so a
+    genuine empty result (``[]``) or any other content is NOT counted.  Pending
+    calls (no ToolMessage yet) are not counted (results.get -> None)."""
+    turn = _current_turn_slice(messages)
+    results = {m.tool_call_id: str(m.content) for m in turn
+               if isinstance(m, ToolMessage) and m.tool_call_id}
     return sum(
-        1 for e in events
-        if e["completed"]
-        and e["tool_name"] == _SEARCH_TOOL
-        and e["result_content"] == _SEARCH_UNAVAILABLE_MESSAGE
+        1
+        for m in turn if isinstance(m, AIMessage)
+        for tc in (getattr(m, "tool_calls", None) or [])
+        if tc.get("name") == _SEARCH_TOOL
+        and results.get(tc.get("id")) == _SEARCH_UNAVAILABLE_MESSAGE
     )
 
 
@@ -106,12 +114,15 @@ class SearchUnavailableBreakerMiddleware(AgentMiddleware):
             should make the model stop on its own well before this; the breaker
             is the HARD backstop for when the small model ignores the prompt.
             Tunable via ``ASSIST_SEARCH_UNAVAILABLE_THRESHOLD`` at the install
-            site.
+            site.  Clamped to a minimum of 1 so a misconfigured 0/negative knob
+            can't terminate every (even healthy) search request.
     """
 
     def __init__(self, threshold: int = 4):
         super().__init__()
-        self.threshold = threshold
+        # Floor at 1: with threshold <= 0, `count < threshold` is never true and
+        # the breaker would strip EVERY search request, even on a healthy backend.
+        self.threshold = max(1, threshold)
         self.tools = []
         self._intervention_count = 0
 
@@ -132,15 +143,7 @@ class SearchUnavailableBreakerMiddleware(AgentMiddleware):
         if _SEARCH_TOOL not in last_call_names:
             return None
 
-        # Count unavailable searches across the WHOLE current turn, not a
-        # recency window: `_extract_events` truncates to the last `window`
-        # events, so pass len(messages) (>= the event count) to disable that
-        # truncation.  A fixed window would let heavy read_url interleaving push
-        # earlier unavailable searches out of view and the breaker would
-        # undercount and never trip (the search-down-plus-fetch-fail grind is
-        # exactly that interleaving).
-        events = _extract_events(messages, window=len(messages))
-        count = _count_search_unavailable(events)
+        count = _count_search_unavailable(messages)
         if count < self.threshold:
             return None
 

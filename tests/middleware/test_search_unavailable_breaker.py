@@ -171,6 +171,36 @@ def test_counts_cumulatively_across_heavy_read_interleaving():
     assert result["messages"][0].tool_calls == []
 
 
+def test_counts_completed_when_last_message_batches_many_pending_calls():
+    """The count is over the whole turn, independent of message/event ratio: a
+    last AIMessage batching many PENDING search calls must not push the earlier
+    COMPLETED unavailable results out of the count (a window keyed on message
+    length could — events can exceed messages when an AIMessage holds many
+    tool_calls)."""
+    msgs = [HumanMessage(content="research X")]
+    for i in range(4):  # 4 completed unavailable searches, one per AIMessage
+        msgs.append(_ai_search(f"q{i}", f"c{i}"))
+        msgs.append(_tool(_SEARCH_UNAVAILABLE_MESSAGE, f"c{i}"))
+    # last AIMessage batches 10 pending search calls (events >> messages here)
+    msgs.append(AIMessage(content="", tool_calls=[
+        {"name": "search_internet", "args": {"query": f"b{j}"}, "id": f"b{j}"}
+        for j in range(10)]))
+    mw = SearchUnavailableBreakerMiddleware()  # default threshold 4
+    result = mw.after_model({"messages": msgs}, None)
+    assert result is not None, "4 completed unavailable must trip despite batched pending"
+    assert result["messages"][0].tool_calls == []
+
+
+def test_threshold_floored_at_one():
+    """A misconfigured 0/negative threshold is clamped to 1 — it must never
+    strip a healthy (zero-failure) search request."""
+    assert SearchUnavailableBreakerMiddleware(threshold=0).threshold == 1
+    assert SearchUnavailableBreakerMiddleware(threshold=-5).threshold == 1
+    healthy = [HumanMessage(content="x"), _ai_search("q", "c")]  # 0 unavailable
+    assert SearchUnavailableBreakerMiddleware(threshold=0).after_model(
+        {"messages": healthy}, None) is None
+
+
 def test_production_default_threshold_is_backstop_value():
     """The shipped default (4) is a HARD backstop set ABOVE where the prompt
     should make the model stop on its own — raise/lower deliberately, the live
