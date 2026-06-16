@@ -141,7 +141,7 @@ def _current_turn_slice(messages: list) -> list:
     return messages
 
 
-def _extract_events(messages: list, window: int) -> list[dict]:
+def _extract_events(messages: list, window: int | None = None) -> list[dict]:
     """Collect recent (AIMessage tool_call, matching ToolMessage) pairs.
 
     Each event is ``{tool_name, args_sig, result_content, is_error,
@@ -150,6 +150,9 @@ def _extract_events(messages: list, window: int) -> list[dict]:
     the tool node has run).
 
     Bounded to the current user turn — see ``_current_turn_slice``.
+    ``window`` keeps only the last N events (loop detection wants recency for
+    trailing-run patterns); ``window=None`` returns ALL turn events (the
+    search-unavailable breaker wants the cumulative full-turn count).
     """
     messages = _current_turn_slice(messages)
     tool_msgs: dict[str, ToolMessage] = {}
@@ -187,7 +190,33 @@ def _extract_events(messages: list, window: int) -> list[dict]:
                     "completed": False,
                 })
 
-    return events[-window:]
+    return events if window is None else events[-window:]
+
+
+def strip_tool_calls_to_end_turn(last: AIMessage, content: str) -> dict[str, Any]:
+    """Return a ``{"messages": [...]}`` update that ENDS the agent turn: a copy
+    of ``last`` with its tool calls stripped and content replaced with
+    ``content``.  The loop ends because no tool calls remain to dispatch.
+
+    Shared by the deterministic turn-terminators in this stack
+    (``LoopDetectionMiddleware`` and ``SearchUnavailableBreakerMiddleware``).
+    Centralizes the two load-bearing subtleties: ``.id`` is preserved (via
+    ``model_copy``) so the ``messages`` reducer replaces the message IN PLACE
+    rather than appending a duplicate, and raw OpenAI-format ``tool_calls`` in
+    ``additional_kwargs`` are cleared so the checkpointer sees consistent state.
+    Returning only the one message (not ``messages[:-1]`` too) avoids
+    re-appending id-less history as duplicates — see
+    docs/2026-06-05-middleware-message-duplication.org.
+    """
+    new_last = last.model_copy() if hasattr(last, "model_copy") else last.copy()
+    new_last.tool_calls = []
+    new_last.content = content
+    if hasattr(new_last, "additional_kwargs"):
+        ak = dict(getattr(new_last, "additional_kwargs", {}) or {})
+        if ak.get("tool_calls"):
+            ak["tool_calls"] = []
+        new_last.additional_kwargs = ak
+    return {"messages": [new_last]}
 
 
 def _detect_loop(
@@ -513,23 +542,4 @@ class LoopDetectionMiddleware(AgentMiddleware):
             preview,
         )
 
-        new_last = last.model_copy() if hasattr(last, "model_copy") else last.copy()
-        new_last.tool_calls = []
-        new_last.content = terminal_content
-
-        # Strip any raw OpenAI-format tool calls so the checkpointer sees
-        # consistent state.
-        if hasattr(new_last, "additional_kwargs"):
-            ak = dict(getattr(new_last, "additional_kwargs", {}) or {})
-            if ak.get("tool_calls"):
-                ak["tool_calls"] = []
-            new_last.additional_kwargs = ak
-
-        # Return ONLY the modified last message, not the whole list.  The
-        # `messages` channel reducer (`add_messages`) replaces by `.id`, and
-        # `new_last` keeps the model's id (model_copy preserves it), so this
-        # replaces the last AIMessage in place.  Returning `messages[:-1]`
-        # too would re-append every id-less HumanMessage/ToolMessage (the
-        # checkpointer deserializes them with id=None) as duplicates — see
-        # docs/2026-06-05-middleware-message-duplication.org.
-        return {"messages": [new_last]}
+        return strip_tool_calls_to_end_turn(last, terminal_content)

@@ -38,7 +38,7 @@ import logging
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
 
 # Import the EXACT constant (single source of truth) so a wording change in
@@ -46,9 +46,10 @@ from langgraph.runtime import Runtime
 # imported — never tools.py's blocking helpers (this hook runs inline on the
 # event-loop thread; it must stay pure CPU).
 from assist.tools import _SEARCH_UNAVAILABLE_MESSAGE
-# Reuse loop detection's per-turn slice (same precedent as empty_response_
-# recovery importing `_last_successful_artifact`).
-from assist.middleware.loop_detection import _current_turn_slice
+# Share loop detection's per-turn event extraction (windowless here — we want
+# the cumulative full-turn count) and its turn-terminator.  Same import
+# precedent as empty_response_recovery importing `_last_successful_artifact`.
+from assist.middleware.loop_detection import _extract_events, strip_tool_calls_to_end_turn
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +60,17 @@ def _count_search_unavailable(messages: list) -> int:
     """Count completed ``search_internet`` calls whose result is EXACTLY the
     unavailable constant, across the WHOLE current turn.
 
-    Counts directly over the turn slice (NO recency window — a backend being
-    down is turn-global state; a windowed count could let heavy read_url
-    interleaving push earlier unavailable searches out of view and undercount).
-    Exact-equality: the constant is returned verbatim from one code path, so a
-    genuine empty result (``[]``) or any other content is NOT counted.  Pending
-    calls (no ToolMessage yet) are not counted (results.get -> None)."""
-    turn = _current_turn_slice(messages)
-    results = {m.tool_call_id: str(m.content) for m in turn
-               if isinstance(m, ToolMessage) and m.tool_call_id}
+    ``window=None`` -> NO recency window (a backend being down is turn-global
+    state; a windowed count could let heavy read_url interleaving push earlier
+    unavailable searches out of view and undercount).  Exact-equality: the
+    constant is returned verbatim from one code path, so a genuine empty result
+    (``[]``) or any other content is NOT counted.  Pending calls (no result
+    yet) have ``completed=False`` and are not counted."""
     return sum(
-        1
-        for m in turn if isinstance(m, AIMessage)
-        for tc in (getattr(m, "tool_calls", None) or [])
-        if tc.get("name") == _SEARCH_TOOL
-        and results.get(tc.get("id")) == _SEARCH_UNAVAILABLE_MESSAGE
+        1 for e in _extract_events(messages, window=None)
+        if e["completed"]
+        and e["tool_name"] == _SEARCH_TOOL
+        and e["result_content"] == _SEARCH_UNAVAILABLE_MESSAGE
     )
 
 
@@ -84,7 +81,12 @@ def _compose_terminal_message() -> str:
     second-person model-directive that reads wrong across the agent boundary).
     Worded to lexically match the orchestrator's existing "research-agent
     reports that search is unavailable -> relay and stop" prompt branch
-    (research_instructions.txt.j2)."""
+    (research_instructions.txt.j2:21).  The USER-facing message + what to tell
+    the user is owned by the prompts, NOT this middleware: the main agent
+    relays it per general_instructions.md.j2:72-87 ("tell the user plainly ...
+    web search is currently unavailable, and end the turn").  Deliberately no
+    "try again in N minutes" framing — a down backend is an outage to fix, not
+    a rate-limit to wait out (see assist/tools.py)."""
     return (
         "I couldn't complete this research because web search is currently "
         "unavailable — the search backend could not be reached, so I couldn't "
@@ -158,18 +160,4 @@ class SearchUnavailableBreakerMiddleware(AgentMiddleware):
             self.threshold,
         )
 
-        new_last = last.model_copy() if hasattr(last, "model_copy") else last.copy()
-        new_last.tool_calls = []
-        new_last.content = terminal_content
-        # Strip raw OpenAI-format tool calls so the checkpointer sees consistent
-        # state (mirrors LoopDetectionMiddleware).
-        if hasattr(new_last, "additional_kwargs"):
-            ak = dict(getattr(new_last, "additional_kwargs", {}) or {})
-            if ak.get("tool_calls"):
-                ak["tool_calls"] = []
-            new_last.additional_kwargs = ak
-
-        # Return ONLY the replaced last message — the `messages` reducer
-        # replaces by `.id` (model_copy preserves it), so this swaps it in
-        # place without re-appending id-less history as duplicates.
-        return {"messages": [new_last]}
+        return strip_tool_calls_to_end_turn(last, terminal_content)
