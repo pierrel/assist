@@ -149,6 +149,28 @@ def test_no_tool_calls_or_empty_returns_none():
     assert _run([HumanMessage(content="hi"), AIMessage(content="done, no tools")]) is None
 
 
+def test_counts_cumulatively_across_heavy_read_interleaving():
+    """The count is cumulative over the WHOLE turn, not a recency window: many
+    read_url calls interleaved between failed searches (far exceeding the old
+    12-event window) must NOT push earlier unavailable searches out of view.
+    This is the search-down-plus-fetch-fail grind shape."""
+    msgs = [HumanMessage(content="research X")]
+    cid = 0
+    for s in range(4):  # 4 unavailable searches...
+        msgs.append(_ai_search(f"q{s}", f"s{cid}"))
+        msgs.append(_tool(_SEARCH_UNAVAILABLE_MESSAGE, f"s{cid}"))
+        cid += 1
+        for r in range(5):  # ...each followed by 5 failed reads (24 events total)
+            msgs.append(_ai_read(f"https://x/{s}/{r}", f"r{cid}"))
+            msgs.append(_tool("Error fetching URL: down", f"r{cid}"))
+            cid += 1
+    msgs.append(_ai_search("q_final", "s_final"))  # the 5th search request
+    mw = SearchUnavailableBreakerMiddleware()  # default threshold 4
+    result = mw.after_model({"messages": msgs}, None)
+    assert result is not None, "cumulative count must trip despite interleaving"
+    assert result["messages"][0].tool_calls == []
+
+
 def test_production_default_threshold_is_backstop_value():
     """The shipped default (4) is a HARD backstop set ABOVE where the prompt
     should make the model stop on its own — raise/lower deliberately, the live

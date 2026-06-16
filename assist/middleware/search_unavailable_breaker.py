@@ -53,9 +53,6 @@ from assist.middleware.loop_detection import _extract_events
 logger = logging.getLogger(__name__)
 
 _SEARCH_TOOL = "search_internet"
-# Events to consider — generous; the grind is within one turn and
-# `_extract_events` already bounds to the current turn slice.
-_WINDOW = 12
 
 
 def _count_search_unavailable(events: list[dict]) -> int:
@@ -135,7 +132,14 @@ class SearchUnavailableBreakerMiddleware(AgentMiddleware):
         if _SEARCH_TOOL not in last_call_names:
             return None
 
-        events = _extract_events(messages, window=_WINDOW)
+        # Count unavailable searches across the WHOLE current turn, not a
+        # recency window: `_extract_events` truncates to the last `window`
+        # events, so pass len(messages) (>= the event count) to disable that
+        # truncation.  A fixed window would let heavy read_url interleaving push
+        # earlier unavailable searches out of view and the breaker would
+        # undercount and never trip (the search-down-plus-fetch-fail grind is
+        # exactly that interleaving).
+        events = _extract_events(messages, window=len(messages))
         count = _count_search_unavailable(events)
         if count < self.threshold:
             return None
