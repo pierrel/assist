@@ -515,20 +515,36 @@ class TestSandboxManager(TestCase):
         self.assertIn("owned by root", msg)
         self.assertIn("chown", msg)
 
-    def test_get_sandbox_backend_reuses_container(self):
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_get_sandbox_backend_does_not_reuse_reaps_stale(self, mock_backend_cls):
+        """Per-turn lifecycle: a container left registered from a prior turn is
+        NOT reused — it is killed (kill=True, fast path) and a fresh one is
+        created.  Reusing it would let a container outlive its turn, which is
+        the whole thing the per-turn design forbids."""
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
-        mock_container = MagicMock()
-        mock_container.id = "test123456ab"
-        mock_container.status = "running"
-        SandboxManager._containers[test_path] = mock_container
+        stale = MagicMock()
+        stale.id = "stale1234567"
+        stale.status = "running"
+        SandboxManager._containers[test_path] = stale
 
-        sandbox = SandboxManager.get_sandbox_backend(test_path)
+        mock_client = MagicMock()
+        fresh = MagicMock()
+        fresh.id = "fresh1234567"
+        fresh.status = "running"
+        fresh.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_client.containers.run.return_value = fresh
+
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            sandbox = SandboxManager.get_sandbox_backend(test_path)
 
         self.assertIsNotNone(sandbox)
-        # Container should have been reloaded to check status
-        mock_container.reload.assert_called_once()
+        # The stale container was SIGKILLed, not reused (never reload()'d).
+        stale.kill.assert_called_once()
+        stale.reload.assert_not_called()
+        # A fresh container replaced it in the registry.
+        self.assertIs(SandboxManager._containers[test_path], fresh)
 
     def test_get_sandbox_backend_returns_none_on_docker_error(self):
         """Docker daemon unavailable / transient API error should
@@ -551,7 +567,7 @@ class TestSandboxManager(TestCase):
 
         self.assertIsNone(sandbox)
 
-    def test_cleanup_stops_and_removes_container(self):
+    def test_cleanup_kills_and_removes_container(self):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
 
@@ -560,7 +576,10 @@ class TestSandboxManager(TestCase):
 
         SandboxManager.cleanup(test_path)
 
-        mock_container.stop.assert_called_once_with(timeout=5)
+        # SIGKILL, not a graceful stop: a sandbox has nothing to flush and its
+        # bare-`sleep` PID 1 ignores SIGTERM, so stop() only burns the timeout.
+        mock_container.kill.assert_called_once_with()
+        mock_container.stop.assert_not_called()
         self.assertNotIn(test_path, SandboxManager._containers)
 
     def test_cleanup_all(self):
@@ -570,8 +589,8 @@ class TestSandboxManager(TestCase):
 
         SandboxManager.cleanup_all()
 
-        mock_c1.stop.assert_called_once()
-        mock_c2.stop.assert_called_once()
+        mock_c1.kill.assert_called_once()
+        mock_c2.kill.assert_called_once()
         self.assertEqual(len(SandboxManager._containers), 0)
 
     def test_domain_manager_without_git(self):

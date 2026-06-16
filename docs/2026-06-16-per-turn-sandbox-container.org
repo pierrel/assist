@@ -1,0 +1,114 @@
+#+title: One sandbox container per turn (created on request, killed on response)
+#+date: <2026-06-16>
+
+* Problem
+
+The Docker sandbox container's PID 1 was =sleep 3600=
+(=dockerfiles/Dockerfile.sandbox=).  A container is *reused across a thread's
+turns*, so its wall-clock age is decoupled from any single turn: a long
+research turn legitimately needing >60 min was reaped mid-flight at
+sandbox-start + 1h (=SandboxContainerLostError=; observed 2026-05-16,
+winged-horse-flag thread).
+
+The earlier fix attempt (LRU cap + a longer 4h backstop) only made the
+mid-flight kill *rarer* — any wall-clock-from-birth TTL on a *reused* container
+can eventually fire mid-turn (a container warm for ~4h that then starts a long
+turn).  That caveat is the bug, so "rarer" is not "fixed".
+
+* Decision
+
+*One container per turn.*  Each request/response gets a *fresh* container,
+created when the turn starts and killed when the turn's response is produced.
+
+The key property: because a container is never reused, *its age equals its
+turn's age*, and a turn is hard-capped at the LLM-queue hold timeout
+(=ASSIST_THREAD_HOLD_TIMEOUT_S= = 2h).  So a wall-clock backstop set *above* 2h
+can *never* fire during a legitimate in-progress turn.  The mid-flight-reap
+caveat is closed *by construction*, not by tuning a probability.
+
+- PID 1 stays =sleep= but the value goes =3600= → =10800= (3h).  It is now
+  purely a *backstop* for the rare case where per-turn teardown never runs (the
+  web worker died mid-turn): the orphan self-destructs, =--rm= removes it.
+- =get_sandbox_backend= no longer reuses: it reaps any container still
+  registered for the work_dir (a prior turn's teardown didn't run) and creates
+  a fresh one.
+- =_process_message= (the turn worker for both =/message= and =/review=) kills
+  the container in a =finally=, while still holding the LLM queue, so it runs on
+  success, error, and the early-return path — and the next turn always starts
+  fresh.
+
+* Why this is simpler, not just different
+
+It *deletes* machinery rather than adding it: no LRU cap, no =_last_seen=, no
+activity-refresh heartbeat, no background reaper thread.  It also strips the
+reuse branch from =get_sandbox_backend=.  "A container is a turn" is the whole
+model.
+
+* Cost (measured, this box, docker SDK — the app's real path)
+
+| phase                         | time      |
+|-------------------------------+-----------|
+| create + start               | ~0.10s    |
+| first exec (first tool call) | ~0.02s    |
+| kill teardown                | ~0.10s    |
+
+Per-turn added latency ≈ *0.1–0.4s* (with the surrounding stat/egress-check/
+references-mkdir), negligible against multi-second-to-minute local-model turns.
+
+Teardown uses =container.kill()= (SIGKILL), not =stop(timeout=5)=: PID 1 is a
+bare =sleep= with no SIGTERM handler (PID 1 gets no default handlers), so
+=stop()= always blocks the full 5s before the daemon SIGKILLs anyway.  SIGKILL
+is safe: the container is =--rm= and all durable work is already flushed to the
+host =/workspace= bind mount.  (=--rm= removal is *async* — =kill()= returns
+before the container disappears; the registry is popped synchronously so this
+doesn't matter.)
+
+=SandboxManager.cleanup= / =cleanup_all= now *always* SIGKILL (the =kill= was
+made unconditional rather than an opt-in flag): a sandbox never needs a graceful
+stop, so the per-turn teardown, thread-delete (=hard_delete=), and lifespan
+shutdown share one behavior.  This also removes a pre-existing 5s on-event-loop
+block: =delete_thread= is =async def= and calls =hard_delete= →
+=SandboxManager.cleanup= inline, which used to =stop(timeout=5)= on the loop.
+
+* Event-loop safety
+
+=_process_message= runs as a sync FastAPI =BackgroundTask= (threadpool), never
+on the asyncio loop, so the teardown's =kill()= docker call is off-loop.  It
+runs *inside* the =THREAD_QUEUE.acquire= block (before releasing the queue), and
+only one thread holds the queue at a time, so teardown can never race the next
+turn's creation.  No lock is added.
+
+* Trade-off (named, accepted)
+
+Cross-turn *ephemeral container state* is lost: =pip install --user= from a
+prior turn, =/tmp= scratch, background processes.  Durable work in =/workspace=
+(the host bind mount) persists untouched.  For this agent — where the durable
+artifact is always in =/workspace= and =MANAGER.get= already builds a fresh
+=Thread= per turn with no cross-turn caching — that's acceptable.
+
+* Files
+
+- =dockerfiles/Dockerfile.sandbox= — =sleep 3600= → =sleep 10800= (+ comment).
+  *Requires rebuilding the =assist-sandbox= image on deploy.*
+- =assist/sandbox_manager.py= — =cleanup= / =cleanup_all= now SIGKILL
+  unconditionally; =get_sandbox_backend= drops reuse, reaps any stale container
+  first.
+- =manage/web/threads.py= — =_process_message= kills the turn's container in a
+  =finally=; the =SandboxContainerLostError= branch's now-redundant =cleanup=
+  removed; stale =sleep 3600= comment updated.
+- =assist/sandbox.py= — =SandboxContainerLostError= docstring: 1h→3h backstop.
+- =tests/test_sandbox_per_turn.py= — kill-vs-stop, no-reuse, the backstop>hold-cap
+  invariant, and a real-Docker test that a killed container is actually gone.
+- =tests/test_web_process_message_e2e.py= — teardown wiring on success + error.
+- =tests/test_sandbox.py= — the old "reuses container" test rewritten to pin the
+  new no-reuse contract.
+
+* Verification
+
+- Full =tests/= suite green (612); the touched suites + the real-Docker teardown
+  test green.
+- =TestBackstopExceedsHoldCap= pins =sleep= > =DEFAULT_HOLD_TIMEOUT_S=, so a
+  careless lowering back toward 1h fails CI.
+- Deploy smoke (post image rebuild): send a couple of turns, confirm each
+  thread's =assist.sandbox= container appears during the turn and is gone within
+  ~1s of the response; confirm =docker ps= doesn't accumulate sandboxes.

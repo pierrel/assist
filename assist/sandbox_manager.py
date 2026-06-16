@@ -194,15 +194,16 @@ class SandboxManager:
 
         Returns None if Docker is not available.
         """
+        # Per-turn lifecycle: never reuse a container across turns.  The web
+        # layer tears each container down at the end of its turn
+        # (manage/web/threads.py), so a registry entry surviving to here means
+        # a prior turn's teardown didn't run (the worker died mid-turn).  Reap
+        # that stale container before creating a fresh one — the registry is
+        # keyed by work_dir, so creating without reaping would overwrite the
+        # reference and orphan it (the 3h backstop TTL would eventually catch
+        # it, but reaping now is immediate).
         if work_dir in cls._containers:
-            container = cls._containers[work_dir]
-            try:
-                container.reload()
-                if container.status == "running":
-                    from assist.sandbox import DockerSandboxBackend
-                    return DockerSandboxBackend(container)
-            except Exception:
-                cls._containers.pop(work_dir, None)
+            cls.cleanup(work_dir)
 
         # Run the container as the host bind-mount's owner, not as
         # root.  Two reasons:
@@ -319,21 +320,35 @@ class SandboxManager:
 
     @classmethod
     def cleanup(cls, work_dir: str) -> None:
-        """Stop the container for a given work_dir. Removal is automatic (--rm)."""
+        """Tear down the container for a work_dir. Removal is automatic (--rm).
+
+        SIGKILL, not a graceful ``stop()``.  A sandbox has nothing to shut
+        down gracefully — it is ``--rm`` and all durable work is already
+        flushed to the host bind mount — and its PID 1 is a bare ``sleep``
+        with no SIGTERM handler (PID 1 gets no default handlers), so a
+        ``stop()`` would just block the full 5s timeout before the daemon
+        SIGKILLs anyway.  Killing keeps the per-turn teardown off that 5s
+        path (and the same applies to thread-delete and shutdown).
+        """
         container = cls._containers.pop(work_dir, None)
         if container:
             try:
-                container.stop(timeout=5)
+                container.kill()
                 logger.info("Cleaned up container for %s", work_dir)
             except Exception as e:
                 logger.warning("Container cleanup failed: %s", e)
 
     @classmethod
     def cleanup_all(cls) -> None:
-        """Stop all tracked sandbox containers. Removal is automatic (--rm)."""
+        """Kill all tracked sandbox containers. Removal is automatic (--rm).
+
+        SIGKILL for the same reason as ``cleanup`` (nothing to flush; PID 1
+        ignores SIGTERM) — and at lifespan shutdown a fast teardown is
+        strictly better than burning 5s per container on the event loop.
+        """
         for path, container in list(cls._containers.items()):
             try:
-                container.stop(timeout=5)
+                container.kill()
                 logger.info("Cleaned up container for %s", path)
             except Exception as e:
                 logger.warning("Container cleanup failed for %s: %s", path, e)

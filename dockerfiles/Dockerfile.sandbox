@@ -67,5 +67,18 @@ WORKDIR /workspace
 # when the host bind-mount uid differs.
 USER sandbox
 
-# Container self-destructs after 1 hour; --rm in containers.run() handles removal
-CMD ["sleep", "3600"]
+# Backstop TTL only.  Each container lives for exactly one turn — the web
+# layer (manage/web/threads.py:_process_message) kills it when the turn's
+# response is produced.  This 3h sleep is just a safety net for the rare case
+# where that teardown never runs (the web worker died mid-turn): the orphan
+# self-destructs and --rm removes it.  3h sits ABOVE the 2h LLM-queue hold cap
+# (ASSIST_THREAD_HOLD_TIMEOUT_S=7200); because a container now lives only as
+# long as its single turn, this backstop can never fire during a legitimate
+# in-progress turn — closing the mid-flight-reap caveat the old 1h TTL caused
+# (a >60min research turn reaped at sandbox-start+1h, 2026-05-16).
+#
+# INVARIANT: this sleep must stay ABOVE the queue hold cap.  If you raise
+# ASSIST_THREAD_HOLD_TIMEOUT_S past 10800s (3h), raise this value to match —
+# otherwise a turn could outlive the backstop and be reaped mid-flight again.
+# tests/test_sandbox_per_turn.py::TestBackstopExceedsHoldCap pins the coupling.
+CMD ["sleep", "10800"]

@@ -156,6 +156,70 @@ def test_post_message_runs_process_message_without_crashing(
     )
 
 
+# --- per-turn container teardown ------------------------------------------------
+#
+# One container per turn: _process_message must tear down the turn's sandbox in
+# a `finally`, so it runs on the success path AND every error path.  These pin
+# the wiring (the symptom — a real container being reaped — is covered un-mocked
+# by tests/test_sandbox_per_turn.py's real-Docker test).
+
+
+def _stub_happy_path(monkeypatch, chat):
+    """Stub the sandbox lookup, MANAGER.get, and the post-message hooks so
+    _process_message runs end-to-end against `chat`."""
+    monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid: None)
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda tid, sandbox_backend=None, on_queue_state=None: chat,
+    )
+    monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads.get_cached_description", lambda tid: "stub")
+
+
+def _spy_cleanup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        threads.SandboxManager, "cleanup",
+        classmethod(lambda cls, work_dir: calls.append(work_dir)),
+    )
+    return calls
+
+
+def test_process_message_kills_container_at_turn_end_on_success(client, monkeypatch):
+    class _Chat:
+        def message(self, text):
+            return "ok"
+    _stub_happy_path(monkeypatch, _Chat())
+    calls = _spy_cleanup(monkeypatch)
+
+    r = client.post("/thread/thread-e2e/message", data={"text": "hi"},
+                    follow_redirects=False)
+    assert r.status_code == 303, r.text
+    assert _wait_for_terminal_status("thread-e2e").get("stage") == "ready"
+
+    assert len(calls) == 1, f"expected exactly one per-turn teardown, got {calls}"
+    assert calls[0].endswith("thread-e2e"), f"teardown targeted the wrong work_dir: {calls}"
+
+
+def test_process_message_kills_container_even_when_turn_errors(client, monkeypatch):
+    """The teardown is in a `finally`, so a crash mid-turn still reaps the
+    container — otherwise an erroring turn would leak its sandbox."""
+    class _BoomChat:
+        def message(self, text):
+            raise RuntimeError("boom mid-turn")
+    _stub_happy_path(monkeypatch, _BoomChat())
+    calls = _spy_cleanup(monkeypatch)
+
+    r = client.post("/thread/thread-e2e/message", data={"text": "hi"},
+                    follow_redirects=False)
+    assert r.status_code == 303, r.text
+    assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
+
+    assert len(calls) == 1, f"erroring turn must still tear down its container, got {calls}"
+
+
 # --- _mark_pending: synchronous feedback so a queued message isn't lost -------
 #
 # Regression: the thread page has no polling, so feedback is gated on the

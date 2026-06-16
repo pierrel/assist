@@ -535,15 +535,14 @@ def _process_message(tid: str, text: str) -> None:
             _set_status(tid, "queued", **pending_kwargs)
 
     try:
-        # Acquire the queue BEFORE starting the sandbox.  The sandbox
-        # container has a 1h TTL (sleep 3600 in Dockerfile.sandbox); if
-        # we created it at message-receipt time but then waited hours
-        # for the queue (a holder past its hold_timeout_s, or many
-        # backlogged threads), the container would age out before the
-        # agent ever used it — `SandboxContainerLostError` on first
-        # exec.  Observed on 2026-05-30 thread 20260530160651-fee1ddc5
-        # whose sandbox started at 16:06:52, sat queued behind a
-        # 2-hour-wedged thread, then 404'd at 17:52:15 (1h 45m later).
+        # Acquire the queue BEFORE starting the sandbox.  We create a fresh
+        # container per turn and tear it down when the turn ends; creating it
+        # only after acquiring the queue means it never ages against the 3h
+        # backstop TTL (sleep 10800 in Dockerfile.sandbox) while waiting in
+        # line (behind a holder past its hold_timeout_s, or many backlogged
+        # threads).  Observed pre-defer on 2026-05-30 thread
+        # 20260530160651-fee1ddc5: sandbox started at 16:06:52, sat queued
+        # behind a 2-hour-wedged thread, then 404'd 1h45m later.
         #
         # `chat.message()` below tries to acquire the queue again
         # internally; the reentrant fast path (same thread_id + same
@@ -553,15 +552,26 @@ def _process_message(tid: str, text: str) -> None:
             _set_status(tid, "starting_sandbox", **pending_kwargs)
             sandbox = _get_sandbox_backend(tid)
             try:
-                # on_queue_state=None: the outer acquire above already
-                # owns the callback; the inner acquire is the reentrant
-                # no-op fast path (no state callback fires from it).
-                chat = MANAGER.get(tid, sandbox_backend=sandbox,
-                                   on_queue_state=None)
-            except FileNotFoundError:
-                return
-            _set_status(tid, "processing", **pending_kwargs)
-            resp = chat.message(text)
+                try:
+                    # on_queue_state=None: the outer acquire above already
+                    # owns the callback; the inner acquire is the reentrant
+                    # no-op fast path (no state callback fires from it).
+                    chat = MANAGER.get(tid, sandbox_backend=sandbox,
+                                       on_queue_state=None)
+                except FileNotFoundError:
+                    return
+                _set_status(tid, "processing", **pending_kwargs)
+                resp = chat.message(text)
+            finally:
+                # One container per turn: kill it as soon as this turn's agent
+                # run finishes — success, error, or the early return above —
+                # while we still hold the queue, so the next turn always starts
+                # in a fresh sandbox and no container outlives its turn.  This,
+                # plus the >2h backstop TTL, is what makes the mid-flight reap
+                # impossible: container age == turn age, capped by the queue.
+                # cleanup() SIGKILLs (the response is already committed to the
+                # checkpoint here, and the sandbox has nothing to flush).
+                SandboxManager.cleanup(MANAGER.thread_default_working_dir(tid))
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -583,10 +593,10 @@ def _process_message(tid: str, text: str) -> None:
         # previous turn's work didn't land.  Without this branch the
         # generic except below shows a raw exception repr to the user.
         logging.error("Sandbox lost for thread %s: %s", tid, e)
-        # Drop the cached backend so the next message spins up a new
-        # container instead of poking at the corpse of the old one.
+        # The per-turn teardown (the `finally` above) already reaped this
+        # turn's container; just drop the cached domain manager so a retry
+        # re-checks cleanly instead of poking at the corpse of the old one.
         DOMAIN_MANAGERS.pop(tid, None)
-        SandboxManager.cleanup(MANAGER.thread_default_working_dir(tid))
         _set_status(
             tid, "error",
             error=("The sandbox container for this thread was lost mid-run. "
