@@ -117,7 +117,8 @@ class TestBackstopExceedsHoldCap(TestCase):
 
 class TestPerTurnTeardownRealDocker(unittest.TestCase):
     """Real Docker (no skip, mirroring test_sandbox_egress_integration.py): a
-    container reaped with kill=True is actually gone — the un-mocked symptom.
+    container reaped via cleanup() (SIGKILL) is actually gone — the un-mocked
+    symptom.
     """
 
     def test_kill_actually_destroys_the_container(self):
