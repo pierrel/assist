@@ -220,27 +220,44 @@ def test_process_message_kills_container_even_when_turn_errors(client, monkeypat
     assert len(calls) == 1, f"erroring turn must still tear down its container, got {calls}"
 
 
-def test_process_message_kills_container_when_sandbox_creation_raises(client, monkeypatch):
-    """Sandbox creation is inside the try, so a failure AFTER a container is
-    registered (e.g. an error mid-creation) still hits the teardown `finally`
-    — otherwise that container would leak until the backstop TTL.  (Copilot
-    review, PR #139.)"""
-    def _boom(tid):
-        raise RuntimeError("sandbox creation blew up after registering a container")
-    monkeypatch.setattr("manage.web.state._get_sandbox_backend", _boom)
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", _boom)
+def test_process_message_reaps_registered_container_when_creation_then_raises(
+        client, monkeypatch, tmp_path):
+    """The exact round-1 gap: sandbox creation registers a container and THEN
+    raises.  Because the creation is inside the try, the teardown `finally`
+    runs, and because cleanup keys on work_dir (not the `sandbox` handle that
+    was never returned), the registered container is reaped — no leak until the
+    backstop TTL.  (Copilot review, PR #139.)
+
+    Exercised un-mocked: cleanup is NOT stubbed.  A real container handle is put
+    in the registry to stand in for "creation registered it", then creation
+    raises; we assert the turn actually removed it (SIGKILL + dropped)."""
+    from unittest.mock import MagicMock
+    from assist.sandbox_manager import SandboxManager
+
+    work_dir = str(tmp_path / "thread-e2e")  # == MANAGER.thread_default_working_dir
+    registered = MagicMock()
+    SandboxManager._containers[work_dir] = registered
+
+    def _register_then_boom(tid):
+        # The container is already in the registry (as get_sandbox_backend
+        # leaves it); creation now fails before returning a usable backend.
+        raise RuntimeError("sandbox creation failed after registering a container")
+    monkeypatch.setattr("manage.web.state._get_sandbox_backend", _register_then_boom)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", _register_then_boom)
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
     monkeypatch.setattr("manage.web.threads.get_cached_description", lambda tid: "stub")
-    calls = _spy_cleanup(monkeypatch)
 
-    r = client.post("/thread/thread-e2e/message", data={"text": "hi"},
-                    follow_redirects=False)
-    assert r.status_code == 303, r.text
-    assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
+    try:
+        r = client.post("/thread/thread-e2e/message", data={"text": "hi"},
+                        follow_redirects=False)
+        assert r.status_code == 303, r.text
+        assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
 
-    assert len(calls) == 1, (
-        f"a sandbox-creation failure must still tear down (no leak), got {calls}")
+        registered.kill.assert_called_once()  # reaped (SIGKILL), not leaked
+        assert work_dir not in SandboxManager._containers
+    finally:
+        SandboxManager._containers.pop(work_dir, None)
 
 
 # --- _mark_pending: synchronous feedback so a queued message isn't lost -------
