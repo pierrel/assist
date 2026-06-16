@@ -25,6 +25,7 @@ from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddlew
 from assist.middleware.output_sanitization import OutputSanitizationMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
+from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
@@ -346,6 +347,11 @@ def create_agent(model: BaseChatModel,
                        BadRequestRetryMiddleware(max_retries=3),
                        OutputSanitizationMiddleware(),
                        LoopDetectionMiddleware(),
+                       # Inert here (no search_internet), included to keep the
+                       # dict-subagent safety stack uniform — same rationale as
+                       # the LoopDetection/retry layers above.
+                       SearchUnavailableBreakerMiddleware(
+                           threshold=env_int("ASSIST_SEARCH_UNAVAILABLE_THRESHOLD", 4)),
                        EmptyResponseRecoveryMiddleware()],
     }
 
@@ -553,6 +559,15 @@ def create_research_agent(model: BaseChatModel,
                 # is allowed to run to the recursion_limit rather than be cut
                 # off mid-research.
                 LoopDetectionMiddleware(),
+                # Fail-fast when the search BACKEND is down: loop detection
+                # above catches exact-repeats, but the slow model retries a
+                # dead search with DISTINCT queries, grinding for minutes.
+                # This terminates the turn after a few exact "search
+                # unavailable" results (the prompt is the first line of
+                # defense; this is the hard backstop — see the middleware
+                # docstring).  Threshold env-tunable for A/B + operator tuning.
+                SearchUnavailableBreakerMiddleware(
+                    threshold=env_int("ASSIST_SEARCH_UNAVAILABLE_THRESHOLD", 4)),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 

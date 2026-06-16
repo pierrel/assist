@@ -1,0 +1,124 @@
+#+title: Fail fast when the search backend is down (no more grind)
+#+date: 2026-06-15
+
+When SearXNG is down/rate-limited the research flow could GRIND for
+14–30 min: ``search_internet`` returns a string telling the model to
+stop, the slow Qwen3 ignores it and retries with DISTINCT queries, and
+nothing programmatic halts it.  Fix is two-pronged, defense-in-depth:
+a PROMPT change (first line) + a deterministic circuit-breaker
+middleware (hard backstop).  Design + design-review (3 lenses) +
+code-review (2 lenses, both "ship it") done 2026-06-15.
+
+* Problem (diagnosed, observed-real)
+
+``search_internet`` RETURNS ``_SEARCH_UNAVAILABLE_MESSAGE`` (a string),
+not an exception, on every backend-failure branch (=tools.py=) — by
+design (a broken backend should fail loud as a relayed tool result, not
+crash the turn).  The message said "and stop", but the slow local model
+issues ANOTHER search with a different query.  Nothing caught it:
+
+- =LoopDetectionMiddleware= catches only EXACT repeats (same tool + same
+  args, or same error on a mutating tool).  ``search_internet`` is
+  read-only and the queries are DISTINCT, so both its patterns are
+  transparent to this — the gap is deliberate (distinct-arg exploration
+  is normally legitimate).
+- No failure counter / circuit breaker existed.
+- Recursion bounds are high (research subagent 150 ≈ 75 model calls).
+
+So search-down → distinct failed retries → grind to the recursion limit.
+Observed live twice (2026-06-14 ~30 min; 2026-06-15 ~14 min).  Violates
+the saved principle "threads should die on infrastructure failure rather
+than heal-and-retry."
+
+* Fix part 1 — prompt (first line of defense)
+
+The old =_SEARCH_UNAVAILABLE_MESSAGE= and =sub_research.txt.j2= already
+said "stop" — and the model still ground.  Strengthened both to forbid
+the SPECIFIC behavior: "do not retry with a different query — it is down
+and every retry will fail the same way."  Front-loaded the imperative for
+the small model.
+
+* Fix part 2 — =SearchUnavailableBreakerMiddleware= (hard backstop)
+
+New middleware (=assist/middleware/search_unavailable_breaker.py=).  In
+``after_model`` (mirroring =LoopDetectionMiddleware= — the established
+clean turn-ender; ``Command(goto=END)`` is not allowed outside
+before/after_model), when ``search_internet`` has returned the EXACT
+``_SEARCH_UNAVAILABLE_MESSAGE`` >= threshold times in the current turn AND
+the latest AIMessage requests another search, it strips the tool calls +
+replaces content with a composed first-person status report; the loop
+ends (no tool calls to dispatch).
+
+Key design decisions (design-review team):
+- *Dedicated middleware keyed on the EXACT constant*, NOT broadening
+  loop_detection.  Keying on one known infra-failure constant is a
+  "coarse real bound"; broadening loop_detection's read-only-same-error
+  path would re-introduce the ambiguous heuristic PR #128 deliberately
+  rolled back.
+- *Sync ``after_model`` only* (no ``aafter_model``) — the factory calls
+  the sync hook inline on the async path (=_runnable.py=); loop_detection
+  (sync-only) already fires on the async research subagent.  No middleware
+  in the repo implements ``aafter_model``.
+- *Subagent scope.*  Installed in the research subagents' safety stack
+  (=_subagent_safety_mw=) — the only agents with ``search_internet``.  The
+  orchestrator has no ``search_internet`` and its prompt already relays a
+  subagent's "search unavailable" report (=research_instructions.txt.j2:21=)
+  and dispatches ONCE — so orchestrator-level termination would be
+  theoretical-value code.  Also added (inert) to the main-agent critique
+  dict for safety-stack uniformity.
+- *Threshold = 4, env-tunable* (=ASSIST_SEARCH_UNAVAILABLE_THRESHOLD=).
+  Raised from an initial 2 so the PROMPT is the first line and the breaker
+  is the HARD backstop — it should rarely fire.  The env knob also gives a
+  clean A/B (huge value ≈ disabled).
+- *Terminal message is a COMPOSED first-person report*, not the raw
+  ``_SEARCH_UNAVAILABLE_MESSAGE`` (a 2nd-person directive that reads wrong
+  as the subagent's report to the orchestrator); worded to trip the
+  orchestrator's existing relay branch.
+- read_url-error streaks OUT of scope (distinct error strings, no clean
+  equality; the deliberately-tolerated exploration case).
+
+Stateless (decisions read from the message tail) → checkpoint/rollback
+safe.  Pure-CPU hook (imports only the string constant, never tools.py's
+blocking helpers) → event-loop safe.
+
+* The eval gap this also closes
+
+=TestResearchSearchUnavailableHandoff= existed and PASSED — but it tested
+the PROXY (final response relays "unavailable" + dispatch count ≤ 3), NOT
+the SYMPTOM (bounded steps).  A 30-min grind that eventually relays
+satisfies it.  This is the exact "test the symptom not the proxy" gap.
+Strengthened it to COUNT ``search_internet`` calls and assert a bound,
+and added =TestSearchDownMidflightDoesNotGrind= (primes a retry with one
+unsatisfying result, then the backend goes down) — with an
+``ASSIST_SEARCH_UNAVAILABLE_THRESHOLD`` A/B knob.
+
+* Validation findings (honest)
+
+Model-free unit tests pin the breaker mechanically (distinct-arg streak →
+terminal message with stripped tool_calls; genuine ``[]`` not counted;
+prior-turn not counted; in-place id replacement; default threshold 4).
+
+Live A/B (mocked search, real local LLM), 4 samples per arm:
+- *Breaker OFF (prompt only): 3, 2, 2, 2 searches; relayed 4/4; never
+  fabricated.*  The strengthened prompt ALONE stops the model — it does
+  not grind in the eval.
+- *Breaker ON (threshold 4): 2, 2, 2, 2 searches; 0 interventions.*  The
+  prompt stops the model before the breaker's threshold.
+
+So: the PROMPT fix is the eval-demonstrable defense; the BREAKER never
+fires in-eval because the model complies under controlled conditions —
+the same pattern as the #137 summarization fix.  The breaker's value is
+the production tail (real rate-limit timing / intermittency, where the
+model DID ignore the old prompt twice) which the instant-mock eval cannot
+reproduce.  Defense-in-depth: prompt handles the common case, breaker
+guarantees the worst case.  Unit tests prove the breaker; the eval proves
+the prompt.
+
+* Files
+- =assist/middleware/search_unavailable_breaker.py= (new)
+- =assist/agent.py= (install in =_subagent_safety_mw= + critique; env threshold)
+- =assist/tools.py= (strengthened =_SEARCH_UNAVAILABLE_MESSAGE=)
+- =assist/templates/deepagents/sub_research.txt.j2= (strengthened relay-and-stop)
+- =tests/middleware/test_search_unavailable_breaker.py= (new, model-free)
+- =tests/test_subagent_safety_middleware.py= (REQUIRED-set contract)
+- =edd/eval/test_agent.py= (strengthened handoff eval + new grind eval)

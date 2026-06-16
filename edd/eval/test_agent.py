@@ -456,10 +456,22 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
     def setUp(self):
         self.model = select_assistant_model(0.1)
 
+    # The search-down circuit breaker (SearchUnavailableBreakerMiddleware)
+    # caps a single research-subagent dispatch at ~threshold completed
+    # searches before it terminates the turn — so even with a stray extra
+    # orchestrator dispatch, total searches stay small.  WITHOUT the breaker
+    # the slow model grinds through distinct failed queries to the
+    # recursion_limit (observed ~75-100 searches / 14-30 min).  This bound is
+    # the SYMPTOM assertion the old version of this eval was missing — it
+    # pinned only "relays unavailable", which a 30-min grind also satisfies.
+    MAX_SEARCHES_WHEN_DOWN = 10
+
     def _run_with_blocked_search(self, prompt: str):
         """Build the general agent with search forced to fail loudly (as a
-        down SearXNG backend does), send ``prompt``, return ``(agent, res)``."""
+        down SearXNG backend does), send ``prompt``, return
+        ``(agent, res, n_searches)``."""
         import assist.tools as _tools
+        calls = {"search": 0}
 
         @functools.wraps(_tools.search_internet)
         def _blocked_search(query, max_results=5):
@@ -467,6 +479,7 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
             # search_internet RETURNS the explicit unavailable message (logged
             # ERROR) rather than raising — so the agent receives it as a tool
             # result and relays it, instead of an exception crashing the turn.
+            calls["search"] += 1
             return _tools._SEARCH_UNAVAILABLE_MESSAGE
 
         # read_url returns an unavailable-flavoured error too, so the whole
@@ -478,10 +491,11 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
         def _blocked_fetch(url):
             return "Error fetching URL: web search/fetch is unavailable right now."
 
-        return _run_general_agent_with_search_stubs(
+        agent, res = _run_general_agent_with_search_stubs(
             self, self.model, prompt, _blocked_search, _blocked_fetch)
+        return agent, res, calls["search"]
 
-    def _assert_relays_unavailable(self, agent, res):
+    def _assert_relays_unavailable(self, agent, res, n_searches):
         # Belt-and-suspenders: a recursion-killed / empty turn fails here
         # with a clearer message than the regexes' "didn't match".
         self.assertTrue(res, "Agent returned an empty response")
@@ -515,19 +529,31 @@ class TestResearchSearchUnavailableHandoff(AgentTestMixin, TestCase):
             r"(down|failed|unavailable|not available)|rate.?limit|temporarily",
             f"Response should tell the user search is unavailable.  Got: {res[:600]}")
 
+        # 3. SYMPTOM (the assertion this eval used to lack): the search-down
+        #    circuit breaker kept total searches BOUNDED — the agent did not
+        #    grind through distinct failed queries.  A 30-min grind also
+        #    "relays unavailable" eventually, so #1/#2 alone passed while the
+        #    grind shipped; this is what actually catches it.
+        self.assertLessEqual(
+            n_searches, self.MAX_SEARCHES_WHEN_DOWN,
+            f"Ran {n_searches} searches against a DOWN backend (cap "
+            f"{self.MAX_SEARCHES_WHEN_DOWN}).  A high count is the grind the "
+            f"breaker fixes — the model retrying distinct failed queries instead "
+            f"of stopping.  MAIN dispatches: {self.subagent_calls(agent)}.")
+
     def test_relays_unavailable_tech_lookup(self):
-        agent, res = self._run_with_blocked_search(
+        agent, res, n = self._run_with_blocked_search(
             "What's the latest LangGraph release and what changed?")
-        self._assert_relays_unavailable(agent, res)
+        self._assert_relays_unavailable(agent, res, n)
 
     def test_relays_unavailable_news_lookup(self):
         # A differently-shaped, non-technical lookup.  Same contract — if
         # the agent heeds the blocked signal here too, it's reading the
         # signal, not pattern-matching one LangGraph-shaped prompt.
-        agent, res = self._run_with_blocked_search(
+        agent, res, n = self._run_with_blocked_search(
             "What were the headlines from the Federal Reserve's most "
             "recent interest-rate decision?")
-        self._assert_relays_unavailable(agent, res)
+        self._assert_relays_unavailable(agent, res, n)
 
 
 # Loop-detection terminal stubs the FINAL answer must never be — they mean
@@ -641,3 +667,73 @@ class TestResearchRunsToCompletion(AgentTestMixin, TestCase):
         agent, res, n = self._run_counting_searches(
             "How do tabata intervals work?")
         self._assert_completes(agent, res, n)
+
+
+class TestSearchDownMidflightDoesNotGrind(AgentTestMixin, TestCase):
+    """A search backend that goes DOWN mid-research must STOP the turn, not
+    grind through distinct retry queries.
+
+    This is the eval the handoff test lacked.  It PRIMES the model into
+    retry-mode with one unsatisfying-but-valid result (so it has already
+    "learned" to retry), THEN the backend goes down — every subsequent search
+    returns ``_SEARCH_UNAVAILABLE_MESSAGE``.  The strengthened prompt ("stop,
+    do not retry with a different query") is the first line of defense; the
+    ``SearchUnavailableBreakerMiddleware`` is the hard backstop.  Together,
+    total searches must stay bounded.  WITHOUT either, the slow model grinds
+    distinct queries to the recursion_limit (observed ~75-100 searches /
+    14-30 min in prod).
+
+    A/B the breaker end-to-end via ``ASSIST_SEARCH_UNAVAILABLE_THRESHOLD`` — a
+    very large value effectively disables it, isolating the prompt's effect.
+    """
+
+    # Bound that catches a grind (prod hit ~75-100) while passing a healthy
+    # stop.  With the breaker at the default threshold (4) and a stray extra
+    # dispatch, completed searches stay well under this.
+    MAX_SEARCHES = 15
+
+    def setUp(self):
+        self.model = select_assistant_model(0.1)
+
+    def _run_primed_then_down(self, prompt: str):
+        """One unsatisfying-but-valid result (primes a retry), then the backend
+        goes down for every subsequent search.  Returns (agent, res, n)."""
+        import assist.tools as _tools
+        calls = {"search": 0}
+        _unsat = str([{"title": "Unrelated background",
+                       "url": "https://example.com/z",
+                       "content": "A page about an unrelated topic that does "
+                                  "not address the question at all."}])
+
+        @functools.wraps(_tools.search_internet)
+        def _priming_search(query, max_results=5):
+            calls["search"] += 1
+            if calls["search"] <= 1:
+                return _unsat                          # prime a retry
+            return _tools._SEARCH_UNAVAILABLE_MESSAGE   # backend goes down
+
+        @functools.wraps(_tools.read_url)
+        def _blocked_fetch(url):
+            return "Error fetching URL: web search/fetch is unavailable right now."
+
+        agent, res = _run_general_agent_with_search_stubs(
+            self, self.model, prompt, _priming_search, _blocked_fetch)
+        return agent, res, calls["search"]
+
+    def _assert_bounded_and_relays(self, agent, res, n):
+        self.assertTrue(res, "Agent returned an empty response")
+        self.assertLessEqual(
+            n, self.MAX_SEARCHES,
+            f"Ran {n} searches after the backend went down (cap "
+            f"{self.MAX_SEARCHES}) — the grind is not bounded.  MAIN "
+            f"dispatches: {self.subagent_calls(agent)}.")
+        self.assertRegex(
+            res,
+            r"(?i)unavailable|couldn'?t search|could not search|search.{0,20}"
+            r"(down|failed|unavailable|not available)|rate.?limit|temporarily",
+            f"Response should relay that search is unavailable.  Got: {res[:600]}")
+
+    def test_search_down_midflight_does_not_grind(self):
+        agent, res, n = self._run_primed_then_down(
+            "What's the latest LangGraph release and what changed?")
+        self._assert_bounded_and_relays(agent, res, n)

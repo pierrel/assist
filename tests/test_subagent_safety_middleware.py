@@ -20,6 +20,7 @@ from assist.middleware.empty_response_recovery import (
     EmptyResponseRecoveryMiddleware,
 )
 from assist.middleware.loop_detection import LoopDetectionMiddleware
+from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
 
 
 def _safety_mw_types_in(spec: dict) -> set[type]:
@@ -49,6 +50,7 @@ class TestSubagentSafetyMiddleware(TestCase):
         ModelRetryMiddleware,
         BadRequestRetryMiddleware,
         LoopDetectionMiddleware,
+        SearchUnavailableBreakerMiddleware,
         EmptyResponseRecoveryMiddleware,
     }
 
