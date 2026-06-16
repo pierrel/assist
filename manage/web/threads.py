@@ -550,8 +550,11 @@ def _process_message(tid: str, text: str) -> None:
         # double-callback.
         with THREAD_QUEUE.acquire(tid, on_state_change=on_queue_wait):
             _set_status(tid, "starting_sandbox", **pending_kwargs)
-            sandbox = _get_sandbox_backend(tid)
             try:
+                # Inside the try so the `finally` reaps even if sandbox
+                # creation registers a container and then raises — cleanup
+                # keys on work_dir, not on the `sandbox` handle.
+                sandbox = _get_sandbox_backend(tid)
                 try:
                     # on_queue_state=None: the outer acquire above already
                     # owns the callback; the inner acquire is the reentrant

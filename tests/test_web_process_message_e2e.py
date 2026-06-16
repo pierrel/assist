@@ -220,6 +220,29 @@ def test_process_message_kills_container_even_when_turn_errors(client, monkeypat
     assert len(calls) == 1, f"erroring turn must still tear down its container, got {calls}"
 
 
+def test_process_message_kills_container_when_sandbox_creation_raises(client, monkeypatch):
+    """Sandbox creation is inside the try, so a failure AFTER a container is
+    registered (e.g. an error mid-creation) still hits the teardown `finally`
+    — otherwise that container would leak until the backstop TTL.  (Copilot
+    review, PR #139.)"""
+    def _boom(tid):
+        raise RuntimeError("sandbox creation blew up after registering a container")
+    monkeypatch.setattr("manage.web.state._get_sandbox_backend", _boom)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", _boom)
+    monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads.get_cached_description", lambda tid: "stub")
+    calls = _spy_cleanup(monkeypatch)
+
+    r = client.post("/thread/thread-e2e/message", data={"text": "hi"},
+                    follow_redirects=False)
+    assert r.status_code == 303, r.text
+    assert _wait_for_terminal_status("thread-e2e").get("stage") == "error"
+
+    assert len(calls) == 1, (
+        f"a sandbox-creation failure must still tear down (no leak), got {calls}")
+
+
 # --- _mark_pending: synchronous feedback so a queued message isn't lost -------
 #
 # Regression: the thread page has no polling, so feedback is gated on the
