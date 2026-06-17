@@ -81,8 +81,10 @@ sandbox-shell:
 
 # === Deployment Targets ===
 
-deploy: deploy-code deploy-sandbox-build deploy-searxng deploy-install deploy-service restart
-	@echo "✓ Deployment complete!"
+deploy: deploy-code deploy-sandbox-build deploy-searxng deploy-install restart
+	@echo "✓ Deployed everything EXCEPT the systemd service."
+	@echo "  The service unit is left untouched (installing it needs interactive sudo)."
+	@echo "  To apply service/unit changes, run: make deploy-service"
 	@echo "Check status with: make status"
 	@echo "View logs with: make logs"
 
