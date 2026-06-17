@@ -24,7 +24,6 @@ dependencies = [
     # langgraph.types.Overwrite chunk shape (assist.stream_chunks) require it.
     "langgraph>=1.2",
     "langgraph-checkpoint-sqlite",
-    "loguru",
     "Markdown",
     "openai",
     "pydantic",
