@@ -1,6 +1,11 @@
 # CLAUDE.md
 
-Guidance for Claude Code working in this repository.
+Guidance for Claude Code working in this repository.  The repo's design-method
+guide (exploration habits, Löwy "Righting Software" volatility decomposition,
+clean-code rules) lives in `AGENTS.md`, imported here so it loads alongside
+this file:
+
+@AGENTS.md
 
 ## Three-phase development workflow
 
