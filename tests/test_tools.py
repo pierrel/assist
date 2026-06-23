@@ -314,6 +314,17 @@ class TestReadUrlExtraction:
         out = self._read(html)
         assert "kept" in out and "leak" not in out
 
+    def test_adjacent_tags_keep_word_boundary(self):
+        # Round-2 BLOCKER: text nodes must not fuse across tags. The old strip
+        # put a space at every tag; the parser must too.
+        assert "one two" in self._read("<p>one</p><p>two</p>")
+        assert "a b c" in self._read("<div>a<b>b</b>c</div>")
+
+    def test_flushes_dangling_trailing_token(self):
+        # feed() buffers an incomplete trailing token; close() must flush it,
+        # else a doc ending mid-token (here a bare entity) returns empty.
+        assert "tail text" in tools._extract_main_content("<article>tail text &amp")
+
     def test_truncates_to_4000(self):
         assert len(self._read("<article><p>" + ("x" * 9000) + "</p></article>")) == 4000
 

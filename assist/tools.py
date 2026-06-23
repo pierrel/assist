@@ -127,12 +127,25 @@ class _MainContentExtractor(HTMLParser):
             self._noise += 1
         elif tag in _MAIN_TAGS:
             self._main += 1
+        self._boundary()
 
     def handle_endtag(self, tag):
         if tag in _NOISE_TAGS and self._noise:
             self._noise -= 1
         elif tag in _MAIN_TAGS and self._main:
             self._main -= 1
+        self._boundary()
+
+    def _boundary(self):
+        # A tag transition is a word boundary: adjacent elements' text must not
+        # fuse ("<p>one</p><p>two</p>" -> "one two", not "onetwo"). Mirrors the
+        # old strip's "every tag -> space"; the final whitespace-collapse in
+        # text() absorbs the extra spaces.
+        if self._noise:
+            return
+        self._body_text.append(" ")
+        if self._main:
+            self._main_text.append(" ")
 
     def handle_data(self, data):
         if self._noise:
@@ -152,6 +165,7 @@ def _extract_main_content(html: str) -> str:
     whole-page text with scripts/styles removed. See ``_MainContentExtractor``."""
     parser = _MainContentExtractor()
     parser.feed(html)
+    parser.close()  # flush any token left dangling at end-of-document
     return parser.text()
 
 
