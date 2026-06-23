@@ -23,6 +23,7 @@ import os
 import re
 import time
 import threading
+from html.parser import HTMLParser
 from urllib.parse import urlparse
 
 import requests
@@ -91,8 +92,76 @@ def _host_throttle(host: str) -> None:
                     del _host_last_call[h]
 
 
+# Tags whose TEXT is never readable content. Kept minimal and matched to the
+# prior whole-page strip (script/style only) so the no-article path cannot
+# regress. We deliberately KEEP <noscript>: read_url runs no JS, so a page's
+# no-JS fallback content is exactly what we want (a real fetch of a JS-gated
+# forum returned only its <noscript> text — dropping it returned nothing).
+_NOISE_TAGS = {"script", "style"}
+# Page regions that mark the main article body when present.
+_MAIN_TAGS = {"article", "main"}
+
+
+class _MainContentExtractor(HTMLParser):
+    """One-pass HTML → text that prefers the marked main article.
+
+    Collects two text streams while parsing: ``main`` (text inside
+    ``<article>``/``<main>``, kept WITH that region's own heading/byline/footer)
+    and ``body`` (all page text minus ``_NOISE_TAGS``). ``text()`` returns the
+    main stream when the page marked one, else the body stream — so a page with
+    no ``<article>`` degrades to the same whole-page strip as before, never less.
+
+    Using the stdlib parser (not regex) handles nesting, quoted attributes
+    containing ``>``, comments, and entities by construction — the failure
+    classes a regex tag-stripper gets wrong."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._noise = 0
+        self._main = 0
+        self._main_text: list[str] = []
+        self._body_text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _NOISE_TAGS:
+            self._noise += 1
+        elif tag in _MAIN_TAGS:
+            self._main += 1
+
+    def handle_endtag(self, tag):
+        if tag in _NOISE_TAGS and self._noise:
+            self._noise -= 1
+        elif tag in _MAIN_TAGS and self._main:
+            self._main -= 1
+
+    def handle_data(self, data):
+        if self._noise:
+            return
+        self._body_text.append(data)
+        if self._main:
+            self._main_text.append(data)
+
+    def text(self) -> str:
+        chosen = (self._main_text if any(s.strip() for s in self._main_text)
+                  else self._body_text)
+        return re.sub(r"\s+", " ", "".join(chosen)).strip()
+
+
+def _extract_main_content(html: str) -> str:
+    """Article text where the page marks one (``<article>``/``<main>``), else the
+    whole-page text with scripts/styles removed. See ``_MainContentExtractor``."""
+    parser = _MainContentExtractor()
+    parser.feed(html)
+    return parser.text()
+
+
 def read_url(url: str) -> str:
-    """Extract the content from the given url.
+    """Extract the readable content from the given url.
+
+    Returns the page's main article text where the page marks one
+    (``<article>``/``<main>``) so the char budget holds signal, not nav/footer
+    chrome; degrades to a whole-page text strip (scripts/styles removed) when
+    the page marks no article. Capped at 4000 chars.
 
     Per-host throttled (~1s between calls to the same host) so a burst of
     fetches to different sites isn't artificially serialised, but a tight
@@ -108,11 +177,7 @@ def read_url(url: str) -> str:
             timeout=15,
         )
         resp.raise_for_status()
-        text = resp.text
-        text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text[:4000]
+        return _extract_main_content(resp.text)[:4000]
     except Exception as e:
         return f"Error fetching URL: {e}"
 

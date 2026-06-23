@@ -36,6 +36,14 @@ def _resp(json_payload):
     return r
 
 
+def _html_resp(html):
+    """A fake requests.Response carrying HTML in ``.text`` (for read_url)."""
+    r = MagicMock()
+    r.text = html
+    r.raise_for_status.return_value = None
+    return r
+
+
 # -------------------- _host_throttle (read_url) -------------------------
 
 class TestHostThrottle:
@@ -213,3 +221,110 @@ class TestSearchInternet:
         with patch.object(tools, "requests") as req:
             req.get.return_value = bad
             assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
+
+
+
+# -------------------- read_url main-content extraction -------------------
+
+class TestReadUrlExtraction:
+    """read_url returns the marked <article>/<main> body (WITH its own
+    heading/byline/footer) and drops outside chrome; a page with no article
+    degrades to whole-page text minus scripts (no regression). Parser-based, so
+    nested tags / attributes-containing-'>' / comments / entities are handled."""
+
+    ARTICLE_PAGE = (
+        "<html><head><title>T</title>"
+        "<style>.x{color:red}</style><script>track('noise')</script></head>"
+        "<body>"
+        "<nav>Home About Contact</nav>"
+        "<article><header><h1>Real Title</h1><span>By Sam</span></header>"
+        "<p>The actual article body has the facts.</p>"
+        "<ul><li>point one</li><li>point two</li></ul>"
+        "<footer>Citations example.org</footer></article>"
+        "<aside>Related links ad slot</aside>"
+        "<footer>Site copyright</footer></body></html>"
+    )
+
+    def _read(self, html):
+        with patch.object(tools, "requests") as rq, \
+                patch.object(tools, "_host_throttle"):
+            rq.get.return_value = _html_resp(html)
+            return tools.read_url("https://example.com/x")
+
+    def test_returns_article_body(self):
+        out = self._read(self.ARTICLE_PAGE)
+        assert "The actual article body has the facts." in out
+        assert "point one" in out and "point two" in out
+
+    def test_keeps_article_own_header_and_footer(self):
+        # The BLOCKER the review caught: title/byline/citations live in the
+        # article's OWN <header>/<footer> and must survive extraction.
+        out = self._read(self.ARTICLE_PAGE)
+        assert "Real Title" in out and "By Sam" in out
+        assert "Citations example.org" in out
+
+    def test_drops_outside_chrome(self):
+        out = self._read(self.ARTICLE_PAGE)
+        for chrome in ("Home About Contact", "Related links", "Site copyright",
+                       "track(", "color:red"):
+            assert chrome not in out
+
+    def test_concatenates_multiple_articles(self):
+        # Multi-article pages: keep all regions, not just the largest.
+        html = ("<body><article>" + ("filler " * 50) + "</article>"
+                "<article>the real answer is 42</article></body>")
+        assert "the real answer is 42" in self._read(html)
+
+    def test_no_article_degrades_to_whole_page_minus_scripts(self):
+        # No <article>: same as the old whole-page strip (no regression),
+        # chrome text included — but scripts/styles still removed.
+        html = ("<body><nav>menu items</nav>"
+                "<script>var leak='secret'</script>"
+                "<div><p>Body paragraph content.</p></div></body>")
+        out = self._read(html)
+        assert "Body paragraph content." in out
+        assert "menu items" in out                 # no article -> nothing dropped
+        assert "leak" not in out and "var leak" not in out  # script gone
+
+    def test_attribute_with_gt_does_not_corrupt(self):
+        # The regex tag-stripper leaked `b">` here; the parser handles it.
+        html = '<article><p data-x="a>b">hello world facts</p></article>'
+        out = self._read(html)
+        assert "hello world facts" in out
+        assert 'b">' not in out and "a>b" not in out
+
+    def test_html_comment_dropped(self):
+        html = "<article><!-- tracker > pixel --><p>visible text</p></article>"
+        out = self._read(html)
+        assert "visible text" in out
+        assert "tracker" not in out and "pixel" not in out
+
+    def test_entities_decoded(self):
+        assert self._read("<article><p>a &amp; b &lt; c</p></article>") == "a & b < c"
+
+    def test_noscript_fallback_kept(self):
+        # read_url runs no JS, so <noscript> is the page's no-JS fallback —
+        # the relevant content for us. A real fetch of a JS-gated forum showed
+        # dropping it returned empty; keep it.
+        out = self._read("<body><noscript>real fallback content</noscript></body>")
+        assert "real fallback content" in out
+
+    def test_script_inside_article_dropped(self):
+        html = "<article><script>var s='leak'</script><p>kept</p></article>"
+        out = self._read(html)
+        assert "kept" in out and "leak" not in out
+
+    def test_truncates_to_4000(self):
+        assert len(self._read("<article><p>" + ("x" * 9000) + "</p></article>")) == 4000
+
+    def test_error_path_unchanged(self):
+        with patch.object(tools, "requests") as rq, \
+                patch.object(tools, "_host_throttle"):
+            rq.get.side_effect = RuntimeError("boom")
+            out = tools.read_url("https://example.com/err")
+        assert out.startswith("Error fetching URL:")
+
+    def test_extract_main_content_helper(self):
+        assert tools._extract_main_content(
+            "<article><p>just this</p></article><footer>not this</footer>"
+        ) == "just this"
