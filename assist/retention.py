@@ -29,6 +29,44 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_THREADS = 100
 
+# Deleting a thread's rows in one transaction is unbounded for a huge orphan
+# (2026-06-24: a 101GB / 24k-checkpoint thread thrashed a single delete for
+# 75 min / 488GB read). Bound each transaction to this many rows.
+_DELETE_BATCH = 2000
+
+
+def _thread_dirs(threads_root: str) -> set[str]:
+    """The on-disk thread directory names — the set of LIVE thread ids.
+
+    One definition shared by ``prune_to_n_threads`` (which ranks these by
+    mtime) and ``purge_orphaned_checkpoints`` (which treats any checkpoint
+    thread_id NOT in this set as deletable); they must agree on what 'live'
+    means."""
+    if not os.path.isdir(threads_root):
+        return set()
+    return {
+        name for name in os.listdir(threads_root)
+        if name != "__pycache__"
+        and os.path.isdir(os.path.join(threads_root, name))
+    }
+
+
+def _delete_thread_in_batches(conn, tid: str, batch: int = _DELETE_BATCH) -> None:
+    """Delete a thread's ``checkpoints`` + ``writes`` rows in separately
+    committed batches, so one giant orphan can't hold a single multi-GB
+    transaction. ``thread_id`` leads both tables' primary key, so the LIMIT
+    subquery is an index range scan."""
+    for table in ("checkpoints", "writes"):
+        while True:
+            cur = conn.execute(
+                f"DELETE FROM {table} WHERE rowid IN "
+                f"(SELECT rowid FROM {table} WHERE thread_id = ? LIMIT ?)",
+                (tid, batch),
+            )
+            conn.commit()
+            if cur.rowcount < batch:
+                break
+
 
 def prune_to_n_threads(
     threads_root: str,
@@ -56,14 +94,11 @@ def prune_to_n_threads(
         return []
 
     candidates: list[tuple[str, float]] = []
-    for name in os.listdir(threads_root):
-        dpath = os.path.join(threads_root, name)
-        if not os.path.isdir(dpath) or name == "__pycache__":
-            continue
+    for name in _thread_dirs(threads_root):
         try:
-            mtime = os.path.getmtime(dpath)
+            mtime = os.path.getmtime(os.path.join(threads_root, name))
         except OSError as e:
-            logger.warning("Skipping %s: stat failed: %s", dpath, e)
+            logger.warning("Skipping %s: stat failed: %s", name, e)
             continue
         candidates.append((name, mtime))
 
@@ -95,51 +130,56 @@ def purge_orphaned_checkpoints(
     threads_root: str,
     manager: ThreadManager,
 ) -> List[str]:
-    """Delete checkpoint rows whose ``thread_id`` has no live thread dir.
+    """Delete checkpoint+writes rows whose ``thread_id`` has no live thread dir.
 
-    The web app's thread_id IS its directory name, and ``hard_delete``
-    purges checkpoints by that id.  But sub-agent runs checkpoint under
-    their own (UUID) thread_ids in the SAME db — no directory tracks
-    them and ``hard_delete`` never deletes them, so they orphan and
-    accumulate.  This was the real threads.db growth driver (found
-    2026-06-24: one runaway sub-agent thread held 101 GB across 24k
-    checkpoints, ~60% of the DB; 166 of 262 checkpoint thread_ids had
-    no dir).  Thread-count retention can't see them.
+    The web app derives a thread's directory name AND its checkpoint
+    ``thread_id`` from one id (``ThreadManager.get`` / ``new``), so every LIVE
+    web thread has a matching dir and is never touched here. Orphans are
+    checkpoint thread_ids with no dir: leftovers from threads deleted before
+    checkpoint-purging existed, plus non-web invocations that share this db
+    under their own ids (e.g. an ``AgentHarness`` run that defaults
+    ``thread_id`` to a ``uuid``). These accumulate unseen by thread-count
+    retention — the 2026-06-24 incident found 166 of 262 checkpoint thread_ids
+    had no dir, one holding 101 GB across 24k checkpoints.
 
-    Sweeps every checkpoint thread_id with no matching directory via
-    the same atomic ``checkpointer.delete_thread`` hard_delete uses.
-    The caller must have stopped concurrent writers (same contract as
-    ``prune_to_n_threads``); with the writer stopped a sub-agent thread
-    is never mid-run, and its intermediate checkpoints are not needed to
-    resume its parent's next turn.
+    (Sub-agent runs are NOT orphans: deepagents reuses the parent's
+    ``thread_id`` with a derived ``checkpoint_ns``, so their rows carry the
+    live parent's dir name and are kept. Enumeration is keyed on the
+    ``checkpoints`` table; a thread_id present only in ``writes`` — not an
+    observed state — is not swept.)
 
-    Returns the purged thread_ids.
+    Caller must have stopped concurrent writers (same contract as
+    ``prune_to_n_threads``: ``main`` runs after the cron stops assist-web and
+    behind the lsof foreign-writer guard). Deletes run in bounded batches so
+    one giant orphan can't hold a multi-GB transaction. Returns the purged
+    thread_ids.
     """
-    if not os.path.isdir(threads_root):
-        return []
-
-    live = {
-        name for name in os.listdir(threads_root)
-        if os.path.isdir(os.path.join(threads_root, name))
-        and name != "__pycache__"
-    }
+    live = _thread_dirs(threads_root)
     try:
         rows = manager.conn.execute(
             "SELECT DISTINCT thread_id FROM checkpoints"
         ).fetchall()
     except sqlite3.OperationalError:
-        # No checkpoints table yet (a fresh db that has never been written
-        # to) — nothing to purge.
+        # Fresh db whose checkpoints table doesn't exist yet (a deploy's first
+        # sweep before any thread) — nothing to purge.
         return []
-    ckpt_threads = {row[0] for row in rows}
-    orphans = sorted(ckpt_threads - live)
+    orphans = sorted({row[0] for row in rows} - live)
     purged: list[str] = []
     for tid in orphans:
         try:
-            manager.checkpointer.delete_thread(tid)
+            n, nbytes = manager.conn.execute(
+                "SELECT count(*), coalesce(sum(length(checkpoint)), 0) "
+                "FROM checkpoints WHERE thread_id = ?", (tid,)
+            ).fetchone()
+            if n > 1000 or nbytes > 1_000_000_000:
+                logger.warning(
+                    "Purging large orphan %s: %d checkpoints, %.1f GB "
+                    "(batched delete)", tid, n, nbytes / 1e9,
+                )
+            _delete_thread_in_batches(manager.conn, tid)
             purged.append(tid)
         except Exception as e:
-            logger.warning("delete_thread failed for orphan %s: %s", tid, e)
+            logger.warning("purge failed for orphan %s: %s", tid, e)
     logger.info(
         "Purged %d/%d orphaned checkpoint-threads (no live dir)",
         len(purged), len(orphans),

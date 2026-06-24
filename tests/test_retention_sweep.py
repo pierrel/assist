@@ -253,3 +253,79 @@ class TestPurgeOrphanedCheckpoints(TestCase):
                 self.assertEqual(ck, {"only-live"})
             finally:
                 mgr.close()
+
+    def test_keeps_all_live_threads_with_many_orphans(self):
+        # Load-bearing safety property: NO live thread is purged, regardless of
+        # how many orphans surround it.
+        with tempfile.TemporaryDirectory() as tmp:
+            live = [f"live-{i}" for i in range(5)]
+            orphans = [f"orphan-{i}" for i in range(5)]
+            for t in live:
+                os.makedirs(os.path.join(tmp, t, "domain"), exist_ok=True)
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                mgr.checkpointer.setup()
+                for t in live + orphans:
+                    self._seed(mgr, t)
+                mgr.conn.commit()
+                purged = retention.purge_orphaned_checkpoints(tmp, mgr)
+                self.assertEqual(set(purged), set(orphans))
+                ck = {r[0] for r in mgr.conn.execute(
+                    "SELECT DISTINCT thread_id FROM checkpoints")}
+                self.assertEqual(ck, set(live))
+            finally:
+                mgr.close()
+
+    def test_returns_empty_when_no_checkpoints_table(self):
+        # Fresh db (checkpointer never set up) has no checkpoints table; the
+        # sweep must no-op, not raise.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "live", "domain"), exist_ok=True)
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                self.assertEqual(retention.purge_orphaned_checkpoints(tmp, mgr), [])
+            finally:
+                mgr.close()
+
+    def test_ignores_non_directory_entries(self):
+        # A plain file in threads_root (the db itself, a lock) must not be
+        # treated as a live thread or break the sweep.
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "live", "domain"), exist_ok=True)
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                mgr.checkpointer.setup()
+                open(os.path.join(tmp, "stray.txt"), "w").close()
+                for t in ("live", "orphan"):
+                    self._seed(mgr, t)
+                mgr.conn.commit()
+                self.assertEqual(
+                    retention.purge_orphaned_checkpoints(tmp, mgr), ["orphan"])
+                ck = {r[0] for r in mgr.conn.execute(
+                    "SELECT DISTINCT thread_id FROM checkpoints")}
+                self.assertEqual(ck, {"live"})
+            finally:
+                mgr.close()
+
+    def test_batched_delete_removes_all_rows_of_a_large_orphan(self):
+        # The batch loop must terminate and delete every row of an orphan that
+        # exceeds _DELETE_BATCH (the 101GB-incident shape, in miniature).
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                mgr.checkpointer.setup()
+                n = retention._DELETE_BATCH + 37
+                mgr.conn.executemany(
+                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, "
+                    "checkpoint_id, type, checkpoint, metadata) "
+                    "VALUES ('big', '', ?, '', ?, ?)",
+                    [(f"c{i}", b"{}", b"{}") for i in range(n)])
+                mgr.conn.commit()
+                self.assertEqual(
+                    retention.purge_orphaned_checkpoints(tmp, mgr), ["big"])
+                left = mgr.conn.execute(
+                    "SELECT count(*) FROM checkpoints WHERE thread_id='big'"
+                ).fetchone()[0]
+                self.assertEqual(left, 0)
+            finally:
+                mgr.close()
