@@ -103,7 +103,8 @@ def prune_to_n_threads(
         try:
             mtime = os.path.getmtime(os.path.join(threads_root, name))
         except OSError as e:
-            logger.warning("Skipping %s: stat failed: %s", name, e)
+            logger.warning("Skipping %s: stat failed: %s",
+                           os.path.join(threads_root, name), e)
             continue
         candidates.append((name, mtime))
 
