@@ -172,17 +172,20 @@ def purge_orphaned_checkpoints(
     purged: list[str] = []
     for tid in orphans:
         try:
-            n, nbytes = manager.conn.execute(
-                "SELECT count(*), coalesce(sum(length(checkpoint)), 0) "
-                "FROM checkpoints WHERE thread_id = ?", (tid,)
-            ).fetchone()
-            if n > 1000 or nbytes > 1_000_000_000:
+            # count(*) is an index-range count (thread_id leads the PK) — the
+            # size signal without scanning the rows we're about to delete.
+            n = manager.conn.execute(
+                "SELECT count(*) FROM checkpoints WHERE thread_id = ?", (tid,)
+            ).fetchone()[0]
+            if n > 1000:
                 logger.warning(
-                    "Purging large orphan %s: %d checkpoints, %.1f GB "
-                    "(batched delete)", tid, n, nbytes / 1e9,
+                    "Purging large orphan %s: %d checkpoints (batched delete)",
+                    tid, n,
                 )
             _delete_thread_in_batches(manager.conn, tid)
             purged.append(tid)
+        except sqlite3.Error:
+            raise  # a DB fault (locked/corrupt) must surface, not be masked
         except Exception as e:
             logger.warning("purge failed for orphan %s: %s", tid, e)
     logger.info(

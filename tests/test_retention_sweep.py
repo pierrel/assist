@@ -324,6 +324,22 @@ class TestPurgeOrphanedCheckpoints(TestCase):
             finally:
                 mgr.close()
 
+    def test_db_error_during_orphan_delete_propagates(self):
+        # The per-orphan loop must NOT swallow a DB fault (locked/corrupt) — it
+        # would report a clean sweep while skipping orphans (Copilot #142 rd2).
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                mgr.checkpointer.setup()
+                self._seed(mgr, "orphan")
+                mgr.conn.commit()
+                with patch.object(retention, "_delete_thread_in_batches",
+                                  side_effect=sqlite3.OperationalError("database is locked")):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        retention.purge_orphaned_checkpoints(tmp, mgr)
+            finally:
+                mgr.close()
+
     def test_batched_delete_removes_all_rows_of_a_large_orphan(self):
         # The batch loop must terminate and delete every row of an orphan that
         # exceeds _DELETE_BATCH (the 101GB-incident shape, in miniature).
