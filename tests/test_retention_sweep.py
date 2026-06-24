@@ -208,20 +208,37 @@ class TestForeignWriterGuard(TestCase):
         self.assertEqual(rc, 0)
 
 
+def _insert_checkpoint(conn, tid, ckpt_id="c1"):
+    """Insert one checkpoints row, introspecting columns via PRAGMA so the seed
+    survives upstream SqliteSaver schema changes (repo convention — see
+    test_thread_manager_hard_delete._seed_thread)."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(checkpoints)")]
+    vals = [tid if c == "thread_id" else (ckpt_id if c == "checkpoint_id" else "")
+            for c in cols]
+    conn.execute(
+        f"INSERT INTO checkpoints ({', '.join(cols)}) "
+        f"VALUES ({', '.join('?' * len(cols))})", vals)
+
+
+def _insert_write(conn, tid, ckpt_id="c1"):
+    """Insert one writes row (schema-introspected; see _insert_checkpoint)."""
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(writes)")]
+    vals = [tid if c == "thread_id"
+            else (ckpt_id if c == "checkpoint_id" else (0 if c == "idx" else ""))
+            for c in cols]
+    conn.execute(
+        f"INSERT INTO writes ({', '.join(cols)}) "
+        f"VALUES ({', '.join('?' * len(cols))})", vals)
+
+
 class TestPurgeOrphanedCheckpoints(TestCase):
     """purge_orphaned_checkpoints deletes checkpoint-threads that have no
     on-disk dir (deleted threads' leftovers + sub-agent UUID checkpoints),
     and leaves live (dir-having) threads untouched."""
 
     def _seed(self, mgr, tid):
-        mgr.conn.execute(
-            "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
-            "type, checkpoint, metadata) VALUES (?, '', 'c1', '', ?, ?)",
-            (tid, b"{}", b"{}"))
-        mgr.conn.execute(
-            "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, "
-            "task_id, idx, channel, type, value) VALUES (?, '', 'c1', 't', 0, 'ch', '', ?)",
-            (tid, b"{}"))
+        _insert_checkpoint(mgr.conn, tid)
+        _insert_write(mgr.conn, tid)
 
     def test_purges_threads_without_a_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,11 +365,8 @@ class TestPurgeOrphanedCheckpoints(TestCase):
             try:
                 mgr.checkpointer.setup()
                 n = retention._DELETE_BATCH + 37
-                mgr.conn.executemany(
-                    "INSERT INTO checkpoints (thread_id, checkpoint_ns, "
-                    "checkpoint_id, type, checkpoint, metadata) "
-                    "VALUES ('big', '', ?, '', ?, ?)",
-                    [(f"c{i}", b"{}", b"{}") for i in range(n)])
+                for i in range(n):
+                    _insert_checkpoint(mgr.conn, "big", ckpt_id=f"c{i}")
                 mgr.conn.commit()
                 self.assertEqual(
                     retention.purge_orphaned_checkpoints(tmp, mgr), ["big"])

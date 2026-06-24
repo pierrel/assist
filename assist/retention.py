@@ -55,8 +55,13 @@ def _delete_thread_in_batches(conn, tid: str, batch: int = _DELETE_BATCH) -> Non
     """Delete a thread's ``checkpoints`` + ``writes`` rows in separately
     committed batches, so one giant orphan can't hold a single multi-GB
     transaction. ``thread_id`` leads both tables' primary key, so the LIMIT
-    subquery is an index range scan."""
-    for table in ("checkpoints", "writes"):
+    subquery is an index range scan.
+
+    Deletes ``writes`` before ``checkpoints``: if interrupted mid-thread, the
+    thread is still present in ``checkpoints`` (the orphan-enumeration key), so
+    the next sweep rediscovers and finishes it — never stranding a writes-only
+    orphan that enumeration could no longer see."""
+    for table in ("writes", "checkpoints"):
         while True:
             cur = conn.execute(
                 f"DELETE FROM {table} WHERE rowid IN "
