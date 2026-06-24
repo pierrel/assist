@@ -102,7 +102,10 @@ def prune_to_n_threads(
             continue
         candidates.append((name, mtime))
 
-    candidates.sort(key=lambda x: x[1], reverse=True)
+    # Tiebreak by name: candidates come from a set (unstable iteration order),
+    # so equal-mtime dirs must sort deterministically or the prune boundary
+    # could keep different threads across runs.
+    candidates.sort(key=lambda x: (x[1], x[0]), reverse=True)
 
     if len(candidates) <= min_threads:
         logger.info(
@@ -159,10 +162,12 @@ def purge_orphaned_checkpoints(
         rows = manager.conn.execute(
             "SELECT DISTINCT thread_id FROM checkpoints"
         ).fetchall()
-    except sqlite3.OperationalError:
-        # Fresh db whose checkpoints table doesn't exist yet (a deploy's first
-        # sweep before any thread) — nothing to purge.
-        return []
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            # Fresh db whose checkpoints table doesn't exist yet (a deploy's
+            # first sweep before any thread) — nothing to purge.
+            return []
+        raise  # a real fault (locked/corrupt) must surface, not look like success
     orphans = sorted({row[0] for row in rows} - live)
     purged: list[str] = []
     for tid in orphans:

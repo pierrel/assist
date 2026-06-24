@@ -9,9 +9,10 @@ import os
 import shutil
 import subprocess
 import sys
+import sqlite3
 import tempfile
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from assist import retention
 from assist.thread_manager import ThreadManager
@@ -236,7 +237,7 @@ class TestPurgeOrphanedCheckpoints(TestCase):
                 ck = {r[0] for r in mgr.conn.execute("SELECT DISTINCT thread_id FROM checkpoints")}
                 wr = {r[0] for r in mgr.conn.execute("SELECT DISTINCT thread_id FROM writes")}
                 self.assertEqual(ck, {"live-thread"})
-                self.assertEqual(wr, {"live-thread"})  # delete_thread covers writes too
+                self.assertEqual(wr, {"live-thread"})  # batched delete removes writes rows too
             finally:
                 mgr.close()
 
@@ -304,6 +305,22 @@ class TestPurgeOrphanedCheckpoints(TestCase):
                 ck = {r[0] for r in mgr.conn.execute(
                     "SELECT DISTINCT thread_id FROM checkpoints")}
                 self.assertEqual(ck, {"live"})
+            finally:
+                mgr.close()
+
+    def test_real_db_error_is_not_swallowed(self):
+        # A non-"no such table" OperationalError (locked/corrupt) must surface,
+        # not be reported as a clean no-op sweep (Copilot PR #142 review).
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "live", "domain"), exist_ok=True)
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                mgr.checkpointer.setup()
+                fake = MagicMock()
+                fake.execute.side_effect = sqlite3.OperationalError("database is locked")
+                with patch.object(mgr, "conn", fake):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        retention.purge_orphaned_checkpoints(tmp, mgr)
             finally:
                 mgr.close()
 
