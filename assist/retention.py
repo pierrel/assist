@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 from typing import List
@@ -88,6 +89,62 @@ def prune_to_n_threads(
         len(deleted), len(candidates), min_threads,
     )
     return deleted
+
+
+def purge_orphaned_checkpoints(
+    threads_root: str,
+    manager: ThreadManager,
+) -> List[str]:
+    """Delete checkpoint rows whose ``thread_id`` has no live thread dir.
+
+    The web app's thread_id IS its directory name, and ``hard_delete``
+    purges checkpoints by that id.  But sub-agent runs checkpoint under
+    their own (UUID) thread_ids in the SAME db — no directory tracks
+    them and ``hard_delete`` never deletes them, so they orphan and
+    accumulate.  This was the real threads.db growth driver (found
+    2026-06-24: one runaway sub-agent thread held 101 GB across 24k
+    checkpoints, ~60% of the DB; 166 of 262 checkpoint thread_ids had
+    no dir).  Thread-count retention can't see them.
+
+    Sweeps every checkpoint thread_id with no matching directory via
+    the same atomic ``checkpointer.delete_thread`` hard_delete uses.
+    The caller must have stopped concurrent writers (same contract as
+    ``prune_to_n_threads``); with the writer stopped a sub-agent thread
+    is never mid-run, and its intermediate checkpoints are not needed to
+    resume its parent's next turn.
+
+    Returns the purged thread_ids.
+    """
+    if not os.path.isdir(threads_root):
+        return []
+
+    live = {
+        name for name in os.listdir(threads_root)
+        if os.path.isdir(os.path.join(threads_root, name))
+        and name != "__pycache__"
+    }
+    try:
+        rows = manager.conn.execute(
+            "SELECT DISTINCT thread_id FROM checkpoints"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # No checkpoints table yet (a fresh db that has never been written
+        # to) — nothing to purge.
+        return []
+    ckpt_threads = {row[0] for row in rows}
+    orphans = sorted(ckpt_threads - live)
+    purged: list[str] = []
+    for tid in orphans:
+        try:
+            manager.checkpointer.delete_thread(tid)
+            purged.append(tid)
+        except Exception as e:
+            logger.warning("delete_thread failed for orphan %s: %s", tid, e)
+    logger.info(
+        "Purged %d/%d orphaned checkpoint-threads (no live dir)",
+        len(purged), len(orphans),
+    )
+    return purged
 
 
 def _check_no_foreign_writers(db_path: str) -> None:
@@ -225,11 +282,13 @@ def main() -> int:
     manager = ThreadManager(threads_root)
     try:
         deleted = prune_to_n_threads(threads_root, min_threads, manager)
+        purged = purge_orphaned_checkpoints(threads_root, manager)
     finally:
         manager.close()
 
     print(
         f"[retention] pruned {len(deleted)} threads; "
+        f"purged {len(purged)} orphaned checkpoint-threads; "
         f"kept most-recent {min_threads}"
     )
     return 0

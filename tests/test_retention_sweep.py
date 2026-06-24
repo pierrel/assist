@@ -205,3 +205,51 @@ class TestForeignWriterGuard(TestCase):
         # lsof returns 1 when no process holds the file.
         rc, _ = self._run_cli({}, "", lsof_rc=1)
         self.assertEqual(rc, 0)
+
+
+class TestPurgeOrphanedCheckpoints(TestCase):
+    """purge_orphaned_checkpoints deletes checkpoint-threads that have no
+    on-disk dir (deleted threads' leftovers + sub-agent UUID checkpoints),
+    and leaves live (dir-having) threads untouched."""
+
+    def _seed(self, mgr, tid):
+        mgr.conn.execute(
+            "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, "
+            "type, checkpoint, metadata) VALUES (?, '', 'c1', '', ?, ?)",
+            (tid, b"{}", b"{}"))
+        mgr.conn.execute(
+            "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, "
+            "task_id, idx, channel, type, value) VALUES (?, '', 'c1', 't', 0, 'ch', '', ?)",
+            (tid, b"{}"))
+
+    def test_purges_threads_without_a_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "live-thread", "domain"), exist_ok=True)
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                mgr.checkpointer.setup()
+                for tid in ("live-thread", "orphan-subagent-uuid", "deleted-thread"):
+                    self._seed(mgr, tid)
+                mgr.conn.commit()
+                purged = retention.purge_orphaned_checkpoints(tmp, mgr)
+                self.assertEqual(set(purged), {"orphan-subagent-uuid", "deleted-thread"})
+                ck = {r[0] for r in mgr.conn.execute("SELECT DISTINCT thread_id FROM checkpoints")}
+                wr = {r[0] for r in mgr.conn.execute("SELECT DISTINCT thread_id FROM writes")}
+                self.assertEqual(ck, {"live-thread"})
+                self.assertEqual(wr, {"live-thread"})  # delete_thread covers writes too
+            finally:
+                mgr.close()
+
+    def test_no_orphans_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "only-live", "domain"), exist_ok=True)
+            mgr = ThreadManager(root_dir=tmp)
+            try:
+                mgr.checkpointer.setup()
+                self._seed(mgr, "only-live")
+                mgr.conn.commit()
+                self.assertEqual(retention.purge_orphaned_checkpoints(tmp, mgr), [])
+                ck = {r[0] for r in mgr.conn.execute("SELECT DISTINCT thread_id FROM checkpoints")}
+                self.assertEqual(ck, {"only-live"})
+            finally:
+                mgr.close()
