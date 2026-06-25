@@ -4,7 +4,6 @@ import os
 import shutil
 import subprocess
 from unittest.mock import patch
-from urllib.parse import urlsplit, urlunsplit
 from unittest import TestCase
 from langchain_core.messages import ToolMessage, AIMessage
 
@@ -223,18 +222,9 @@ def create_filesystem(root_dir: str,
 
 # -------------------- research URL-provenance spy --------------------
 
-def normalize_url(u: str) -> str:
-    """Canonical form for provenance comparison: lowercase scheme+host, drop
-    fragment and a single trailing slash. Tolerates junk (returns it stripped)."""
-    try:
-        p = urlsplit(u.strip())
-        if not p.scheme:
-            return u.strip().rstrip("/")
-        host = (p.hostname or "").lower()
-        netloc = host + (f":{p.port}" if p.port else "")
-        return urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/"), p.query, ""))
-    except Exception:
-        return u.strip().rstrip("/")
+# One source of truth for "the same URL" — the prod guard defines it, the eval
+# imports it, so the spy's provenance accounting can't drift from the guard's.
+from assist.middleware.url_provenance import normalize_url
 
 
 def _urls_in_search_result(result_str: str) -> list[str]:
