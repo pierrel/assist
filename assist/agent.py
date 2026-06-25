@@ -29,6 +29,7 @@ from assist.middleware.search_unavailable_breaker import SearchUnavailableBreake
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
+from assist.middleware.url_provenance import UrlProvenanceMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
@@ -576,7 +577,10 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url],
-        "middleware": _subagent_safety_mw(),
+        # Provenance guard ONLY here (the searcher owns search_internet): refuse
+        # read_url on a URL that appears nowhere prior (a fabrication). Not on
+        # the fact-checker — it re-fetches cited URLs with no search of its own.
+        "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware()],
     }
 
     critique_sub_agent = {
