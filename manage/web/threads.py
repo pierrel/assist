@@ -29,6 +29,14 @@ from assist.thread import Thread
 from assist.thread_queue import THREAD_QUEUE
 
 from manage.web.app import app
+from assist.thread_manager import InvalidThreadId
+
+
+@app.exception_handler(InvalidThreadId)
+async def _invalid_thread_id(request, exc):
+    # A crafted tid (traversal/separator) reaching any tid-based route surfaces
+    # here from ThreadManager.thread_dir — map it to a clean 404 everywhere.
+    return HTMLResponse("Thread not found", status_code=404)
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from manage.web.state import (
     BUSY_STAGES,
@@ -819,12 +827,10 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
 
 
 def _existing_thread_dir(tid: str) -> str:
-    """Return the thread's dir, or raise 404. Rejects a traversal/separator tid
-    (e.g. an encoded ``..``) BY CONSTRUCTION so a crafted id can't escape the
-    threads root in a filesystem op (rename writes, delete rmtree's)."""
-    if tid in ("", ".", "..") or "/" in tid or "\\" in tid or "\0" in tid:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    tdir = os.path.join(MANAGER.root_dir, tid)
+    """Return the thread's dir, or 404 if it doesn't exist. ``MANAGER.thread_dir``
+    validates the tid (a traversal/separator id raises InvalidThreadId, mapped to
+    404 by the handler above), so this only adds the existence check."""
+    tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
     return tdir

@@ -39,6 +39,13 @@ from assist.thread import Thread
 logger = logging.getLogger(__name__)
 
 
+class InvalidThreadId(ValueError):
+    """A thread id that isn't a single safe path segment (traversal/separator).
+
+    Raised by ``ThreadManager.thread_dir`` so every tid->path method rejects a
+    crafted id by construction; the web layer maps it to 404."""
+
+
 class ThreadManager:
     """Manage ``Thread`` instances persisted under a directory tree.
 
@@ -91,7 +98,7 @@ class ThreadManager:
 
     def soft_delete(self, thread_id: str) -> None:
         """Mark a thread as deleted by writing a .deleted marker file."""
-        tdir = os.path.join(self.root_dir, thread_id)
+        tdir = self.thread_dir(thread_id)
         if os.path.isdir(tdir):
             marker = os.path.join(tdir, ".deleted")
             with open(marker, "w") as f:
@@ -126,7 +133,7 @@ class ThreadManager:
            in-process domain/description caches; the retention CLI
            passes none.
         """
-        tdir = os.path.join(self.root_dir, tid)
+        tdir = self.thread_dir(tid)
         work_dir = self.thread_default_working_dir(tid)
 
         # 1. Stop the sandbox container before yanking its bind mount.
@@ -196,7 +203,7 @@ class ThreadManager:
 
     def touch(self, thread_id: str) -> None:
         """Update mtime of thread dir so it sorts to the top of list()."""
-        tdir = os.path.join(self.root_dir, thread_id)
+        tdir = self.thread_dir(thread_id)
         if os.path.isdir(tdir):
             os.utime(tdir, None)
 
@@ -205,7 +212,7 @@ class ThreadManager:
             working_dir: str | None = None,
             sandbox_backend=None,
             on_queue_state: Callable[[str], None] | None = None) -> Thread:
-        tdir = os.path.join(self.root_dir, thread_id)
+        tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
         if not working_dir:
@@ -219,7 +226,7 @@ class ThreadManager:
                       on_queue_state=on_queue_state)
 
     def remove(self, thread_id: str) -> None:
-        tdir = os.path.join(self.root_dir, thread_id)
+        tdir = self.thread_dir(thread_id)
         if os.path.isdir(tdir):
             # Best-effort delete
             for root, dirs, files in os.walk(tdir, topdown=False):
@@ -259,10 +266,15 @@ class ThreadManager:
             pass
 
     def thread_dir(self, tid: str) -> str:
+        # Validate by construction: a thread id is a single path segment, so a
+        # crafted id ("..", "a/b", a NUL) can't escape root_dir in any caller's
+        # filesystem op. Every tid->path method below routes through here.
+        if tid in ("", ".", "..") or "/" in tid or "\\" in tid or "\0" in tid:
+            raise InvalidThreadId(f"invalid thread id: {tid!r}")
         return os.path.join(self.root_dir, tid)
 
     def thread_default_working_dir(self, tid: str) -> str:
-        return os.path.join(os.path.join(self.root_dir, tid),
+        return os.path.join(self.thread_dir(tid),
                             self.DEFAULT_THREAD_WORKING_DIRECTORY)
 
     def make_default_working_dir(self, tdir: str) -> str:

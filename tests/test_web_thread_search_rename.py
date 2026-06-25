@@ -16,7 +16,7 @@ from manage.web.threads import render_index
 @pytest.fixture
 def threads_root(tmp_path, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
-    monkeypatch.setattr(web.MANAGER, "thread_dir", lambda tid: str(tmp_path / tid))
+    # Use the REAL thread_dir (root_dir-based) so its tid validation is exercised.
     # render_index reaches _has_unmerged_changes (git I/O) for idle threads.
     monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: False)
     state.DESCRIPTION_CACHE.clear()
@@ -115,21 +115,33 @@ class TestRenameRoute:
 
 
 class TestTidValidation:
-    """The rename/delete routes must reject a traversal/separator tid by
-    construction so a crafted id can't escape the threads root."""
+    """tid traversal is rejected BY CONSTRUCTION at the source (ThreadManager),
+    so every tid-based route is covered, not just rename/delete."""
 
-    def test_existing_thread_dir_accepts_valid(self, threads_root):
-        from manage.web.threads import _existing_thread_dir
-        os.makedirs(threads_root / "good", exist_ok=True)
-        assert _existing_thread_dir("good") == str(threads_root / "good")
+    def test_thread_dir_accepts_valid(self, threads_root):
+        assert web.MANAGER.thread_dir("good") == os.path.join(str(threads_root), "good")
 
     @pytest.mark.parametrize("bad", ["..", ".", "", "../etc", "a/b", "a\\b", "x\x00y"])
-    def test_existing_thread_dir_rejects_traversal(self, threads_root, bad):
+    def test_thread_dir_rejects_traversal(self, threads_root, bad):
+        from assist.thread_manager import InvalidThreadId
+        with pytest.raises(InvalidThreadId):
+            web.MANAGER.thread_dir(bad)
+
+    def test_existing_thread_dir_404_for_missing(self, threads_root):
         from fastapi import HTTPException
         from manage.web.threads import _existing_thread_dir
         with pytest.raises(HTTPException) as ei:
-            _existing_thread_dir(bad)
+            _existing_thread_dir("does-not-exist")
         assert ei.value.status_code == 404
+
+    def test_traversal_tid_on_a_route_404s_and_writes_nothing(self, threads_root):
+        # The InvalidThreadId handler maps a crafted tid to 404 on ANY route
+        # (here rename), and nothing is written outside the threads root.
+        client = TestClient(web.app, raise_server_exceptions=False)
+        r = client.post("/thread/%2e%2e/rename", data={"description": "pwn"},
+                        follow_redirects=False)
+        assert r.status_code == 404
+        assert not (threads_root.parent / "description.txt").exists()
 
 
 class TestRenameVisibility:
