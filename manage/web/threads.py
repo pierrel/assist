@@ -26,17 +26,10 @@ from assist.domain_manager import (
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
+from assist.thread_manager import InvalidThreadId
 from assist.thread_queue import THREAD_QUEUE
 
 from manage.web.app import app
-from assist.thread_manager import InvalidThreadId
-
-
-@app.exception_handler(InvalidThreadId)
-async def _invalid_thread_id(request, exc):
-    # A crafted tid (traversal/separator) reaching any tid-based route surfaces
-    # here from ThreadManager.thread_dir — map it to a clean 404 everywhere.
-    return HTMLResponse("Thread not found", status_code=404)
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from manage.web.state import (
     BUSY_STAGES,
@@ -62,6 +55,13 @@ from manage.web.state import (
     get_cached_description,
     set_description,
 )
+
+
+@app.exception_handler(InvalidThreadId)
+async def _invalid_thread_id(request, exc):
+    # A crafted tid (traversal/separator) reaching any tid-based route surfaces
+    # here from ThreadManager.thread_dir — map it to a clean 404 everywhere.
+    return HTMLResponse("Thread not found", status_code=404)
 
 
 def render_index(query: str = "") -> str:
