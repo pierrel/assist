@@ -241,16 +241,20 @@ def render_thread(
         'style="background:none; border:none; color:#999; cursor:pointer; '
         'font-size:1rem; padding:.2rem .4rem; line-height:1;">&#x270e;</button>'
     ) if can_rename else ""
+    # Stacked: full-width input on its own line, Save/Cancel on the line below
+    # (showRename() flips display to flex; flex-direction:column does the stack).
     rename_form = (
         f'<form id="titleEdit" action="/thread/{tid}/rename" method="post" '
-        f'style="display:none; gap:.4rem; align-items:center; margin:.2rem 0;">'
+        f'style="display:none; flex-direction:column; gap:.5rem; margin:.3rem 0;">'
         f'<input type="text" name="description" value="{html.escape(title)}" '
         f'maxlength="120" required aria-label="Thread name" '
-        f'style="flex:1; min-width:0; box-sizing:border-box; padding:.5rem .6rem; '
+        f'style="width:100%; box-sizing:border-box; padding:.6rem .7rem; '
         f'font-size:16px; border:1px solid #ccc; border-radius:6px;" />'
-        f'<button class="btn" type="submit" style="min-height:auto; padding:.5rem .8rem;">Save</button>'
+        f'<div style="display:flex; gap:.5rem;">'
+        f'<button class="btn" type="submit" style="min-height:auto; padding:.5rem 1rem;">Save</button>'
         f'<button class="btn btn-secondary" type="button" onclick="hideRename()" '
-        f'style="min-height:auto; padding:.5rem .8rem;">Cancel</button>'
+        f'style="min-height:auto; padding:.5rem 1rem;">Cancel</button>'
+        f'</div>'
         f'</form>'
     ) if can_rename else ""
 
