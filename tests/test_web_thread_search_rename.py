@@ -67,6 +67,31 @@ class TestSetDescription:
         assert (threads_root / "t1" / "description.txt").read_text() == "My renamed thread"
         assert state.DESCRIPTION_CACHE["t1"] == "My renamed thread"
 
+    def test_concurrent_set_description_no_corruption(self, threads_root):
+        # Un-mocked concurrency: many writers for the same thread must never
+        # produce a torn/empty description.txt (Copilot #143 r4 — a shared temp
+        # path would let one writer truncate another's). The final value is
+        # always one complete write, and no temp files leak.
+        import threading as _t
+        os.makedirs(threads_root / "t1", exist_ok=True)
+        values = [f"description-number-{i:03d}" for i in range(50)]
+        barrier = _t.Barrier(len(values))
+
+        def writer(v):
+            barrier.wait()  # maximize overlap
+            state.set_description("t1", v)
+
+        threads = [_t.Thread(target=writer, args=(v,)) for v in values]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        final = (threads_root / "t1" / "description.txt").read_text()
+        assert final in values, f"torn/corrupt write: {final!r}"
+        leftover = [f for f in os.listdir(threads_root / "t1") if f.endswith(".tmp")]
+        assert leftover == [], f"temp files leaked: {leftover}"
+
     def test_rename_sticks_without_regeneration(self, threads_root, monkeypatch):
         # The load-bearing contract: once description.txt exists, the title is
         # READ from disk, never regenerated via the model.

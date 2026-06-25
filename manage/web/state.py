@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -205,18 +206,32 @@ def _get_conflict(tid: str) -> dict | None:
         return None
 
 
-def _set_conflict(tid: str, branch: str, files: list[str]) -> None:
-    path = _conflict_path(tid)
+def _atomic_write(path: str, data: str) -> None:
+    """Write ``data`` to ``path`` atomically: a uniquely-named temp file in the
+    same directory + os.replace. The unique temp name means concurrent writers
+    for the same path can't clobber a shared temp or leave a half-written file."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                               prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _set_conflict(tid: str, branch: str, files: list[str]) -> None:
     data = {
         "branch": branch,
         "files": files,
         "raised_at": datetime.now().isoformat(timespec="seconds"),
     }
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    _atomic_write(_conflict_path(tid), json.dumps(data))
 
 
 def _clear_conflict(tid: str) -> None:
@@ -274,13 +289,7 @@ def _get_status(tid: str) -> dict:
 
 
 def _set_status(tid: str, stage: str, **kwargs) -> None:
-    path = _status_path(tid)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    data = {"stage": stage, **kwargs}
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    _atomic_write(_status_path(tid), json.dumps({"stage": stage, **kwargs}))
 
 
 def _thread_title(tid: str) -> str:
@@ -319,12 +328,7 @@ def set_description(tid: str, description: str) -> None:
     the cache. Because ``get_cached_description`` only generates when
     description.txt is ABSENT, a value written here is never auto-regenerated —
     the rename sticks across later turns."""
-    description_file = os.path.join(MANAGER.thread_dir(tid), "description.txt")
-    os.makedirs(os.path.dirname(description_file), exist_ok=True)
-    tmp = description_file + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(description)
-    os.replace(tmp, description_file)  # atomic — never leave a half-written title
+    _atomic_write(os.path.join(MANAGER.thread_dir(tid), "description.txt"), description)
     DESCRIPTION_CACHE[tid] = description
 
 
