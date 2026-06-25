@@ -818,9 +818,7 @@ def _mark_pending(tid: str, text: str) -> None:
 
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = Form(...)):
-    tdir = os.path.join(MANAGER.root_dir, tid)
-    if not os.path.isdir(tdir):
-        raise HTTPException(status_code=404, detail="Thread not found")
+    _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     _mark_pending(tid, text)
     background_tasks.add_task(_process_message, tid, text)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)

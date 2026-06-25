@@ -134,13 +134,22 @@ class TestTidValidation:
             _existing_thread_dir("does-not-exist")
         assert ei.value.status_code == 404
 
-    def test_traversal_tid_on_a_route_404s_and_writes_nothing(self, threads_root):
-        # The InvalidThreadId handler maps a crafted tid to 404 on ANY route
-        # (here rename), and nothing is written outside the threads root.
+    @pytest.mark.parametrize("method,path,data", [
+        ("post", "/thread/%2e%2e/rename", {"description": "pwn"}),
+        ("post", "/thread/%2e%2e/message", {"text": "pwn"}),
+        ("post", "/thread/%2e%2e/delete", None),
+        ("get", "/thread/%2e%2e/status", None),
+        ("get", "/thread/%2e%2e", None),
+    ])
+    def test_traversal_tid_404s_on_every_route(self, threads_root, method, path, data):
+        # The InvalidThreadId handler maps a crafted tid to a clean 404 (never a
+        # 500) on EVERY tid route — not just rename/delete (Copilot #143).
         client = TestClient(web.app, raise_server_exceptions=False)
-        r = client.post("/thread/%2e%2e/rename", data={"description": "pwn"},
-                        follow_redirects=False)
-        assert r.status_code == 404
+        kwargs = {"follow_redirects": False}
+        if data is not None:
+            kwargs["data"] = data
+        r = getattr(client, method)(path, **kwargs)
+        assert r.status_code == 404, f"{method} {path} -> {r.status_code}"
         assert not (threads_root.parent / "description.txt").exists()
 
 
