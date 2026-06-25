@@ -52,59 +52,74 @@ from manage.web.state import (
     _thread_domain_html,
     _thread_title,
     get_cached_description,
+    set_description,
 )
 
 
-def render_index() -> str:
+def render_index(query: str = "") -> str:
+    q = (query or "").strip()
+    ql = q.lower()
     items = []
-    tids = MANAGER.list()
-    if not tids:
-        items.append("<li><em>No threads yet</em></li>")
-    else:
-        for tid in tids:
-            title = _thread_title(tid)
-            status = _get_status(tid)
-            stage = status.get("stage", "ready")
-            badge = ""
-            if stage == "queued":
-                # Distinguish "queued" visually from other busy stages so
-                # the user can tell their message is held behind another
-                # thread (vs. actively running).
-                badge = (
-                    f'<span style="font-size:.7rem; color:#1e3a5f; background:#e1ecf4;'
-                    f' border:1px solid #b6d4ef; padding:.1rem .4rem; border-radius:10px;'
-                    f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
-                )
-            elif stage in BUSY_STAGES:
-                badge = (
-                    f'<span style="font-size:.7rem; color:#555; background:#fff3cd;'
-                    f' border:1px solid #ffeeba; padding:.1rem .4rem; border-radius:10px;'
-                    f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
-                )
-            elif stage == "error":
-                badge = (
-                    '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
-                    ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
-                    ' margin-right:.4rem;">error</span>'
-                )
-            elif _has_unmerged_changes(tid):
-                # Soft amber, distinct from yellow (busy) and red (error).
-                # Strictly secondary to the process-state badges above —
-                # only shows when the thread is otherwise idle.
-                badge = (
-                    '<span style="font-size:.7rem; color:#7c4a1d; background:#fef0e0;'
-                    ' border:1px solid #fbcfa0; padding:.1rem .4rem; border-radius:10px;'
-                    ' margin-right:.4rem;">unmerged</span>'
-                )
-            items.append(
-                f'<li>'
-                f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
-                f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
-                f'<button type="submit" class="del-btn" aria-label="Delete thread" '
-                f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
-                f'</form></li>'
+    for tid in MANAGER.list():
+        title = _thread_title(tid)
+        # Search matches the displayed title (== the thread's description),
+        # case-insensitive substring — the text the user actually sees and types.
+        if ql and ql not in title.lower():
+            continue
+        status = _get_status(tid)
+        stage = status.get("stage", "ready")
+        badge = ""
+        if stage == "queued":
+            # Distinguish "queued" visually from other busy stages so
+            # the user can tell their message is held behind another
+            # thread (vs. actively running).
+            badge = (
+                f'<span style="font-size:.7rem; color:#1e3a5f; background:#e1ecf4;'
+                f' border:1px solid #b6d4ef; padding:.1rem .4rem; border-radius:10px;'
+                f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
             )
+        elif stage in BUSY_STAGES:
+            badge = (
+                f'<span style="font-size:.7rem; color:#555; background:#fff3cd;'
+                f' border:1px solid #ffeeba; padding:.1rem .4rem; border-radius:10px;'
+                f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
+            )
+        elif stage == "error":
+            badge = (
+                '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
+                ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
+                ' margin-right:.4rem;">error</span>'
+            )
+        elif _has_unmerged_changes(tid):
+            # Soft amber, distinct from yellow (busy) and red (error).
+            # Strictly secondary to the process-state badges above —
+            # only shows when the thread is otherwise idle.
+            badge = (
+                '<span style="font-size:.7rem; color:#7c4a1d; background:#fef0e0;'
+                ' border:1px solid #fbcfa0; padding:.1rem .4rem; border-radius:10px;'
+                ' margin-right:.4rem;">unmerged</span>'
+            )
+        items.append(
+            f'<li>'
+            f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
+            f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
+            f'<button type="submit" class="del-btn" aria-label="Delete thread" '
+            f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
+            f'</form></li>'
+        )
+    matched = len(items)
+    if not items:
+        items.append(
+            f'<li><em>No threads match &ldquo;{html.escape(q)}&rdquo;.</em> '
+            f'<a href="/">clear</a></li>'
+            if ql else "<li><em>No threads yet</em></li>"
+        )
     items_html = "\n".join(items)
+    search_status = (
+        f'<p style="font-size:.85rem; color:#666; margin:.2rem 0 .6rem;">'
+        f'{matched} match{"" if matched == 1 else "es"} for '
+        f'&ldquo;{html.escape(q)}&rdquo; &middot; <a href="/">clear</a></p>'
+    ) if q else ""
     return f"""
     <html>
       <head>
@@ -165,6 +180,12 @@ def render_index() -> str:
           </div>
 
           <h2 style="font-size:1.2rem">Threads</h2>
+          <form method="get" action="/" style="margin:0 0 .6rem;">
+            <input type="search" name="q" value="{html.escape(q)}"
+                   placeholder="Search threads..." aria-label="Search threads"
+                   style="width:100%; box-sizing:border-box; padding:.7rem .8rem; font-size:16px; border:1px solid #ccc; border-radius:6px;" />
+          </form>
+          {search_status}
           <ul>
             {items_html}
           </ul>
@@ -202,6 +223,28 @@ def render_thread(
     busy = stage in BUSY_STAGES
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
+
+    # Rename is only offered when idle: while busy/initializing the displayed
+    # title is the pending-message snippet, not the description, so editing it
+    # then would bake that snippet (with its "...") in as the permanent title.
+    can_rename = not (busy or is_init)
+    rename_button = (
+        '<button type="button" onclick="showRename()" aria-label="Rename thread" '
+        'style="background:none; border:none; color:#999; cursor:pointer; '
+        'font-size:1rem; padding:.2rem .4rem; line-height:1;">&#x270e;</button>'
+    ) if can_rename else ""
+    rename_form = (
+        f'<form id="titleEdit" action="/thread/{tid}/rename" method="post" '
+        f'style="display:none; gap:.4rem; align-items:center; margin:.2rem 0;">'
+        f'<input type="text" name="description" value="{html.escape(title)}" '
+        f'maxlength="120" required aria-label="Thread name" '
+        f'style="flex:1; min-width:0; box-sizing:border-box; padding:.5rem .6rem; '
+        f'font-size:16px; border:1px solid #ccc; border-radius:6px;" />'
+        f'<button class="btn" type="submit" style="min-height:auto; padding:.5rem .8rem;">Save</button>'
+        f'<button class="btn btn-secondary" type="button" onclick="hideRename()" '
+        f'style="min-height:auto; padding:.5rem .8rem;">Cancel</button>'
+        f'</form>'
+    ) if can_rename else ""
 
     # During the initial setup stages there is no agent state worth showing yet.
     msgs: list[dict] = [] if is_init or chat is None else chat.get_messages()
@@ -435,7 +478,11 @@ def render_thread(
       <body>
         <div class="container">
           <div class="nav"><a href="/">← All threads</a></div>
-          <h2 style="font-size:1.2rem">{html.escape(title)}</h2>
+          <div id="titleView" style="display:flex; align-items:center; gap:.3rem;">
+            <h2 style="font-size:1.2rem; margin:0">{html.escape(title)}</h2>
+            {rename_button}
+          </div>
+          {rename_form}
           {_thread_domain_html(tid)}
           {status_banner}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
@@ -471,6 +518,17 @@ def render_thread(
           </div>
 
           <script>
+            function showRename() {{
+              document.getElementById('titleView').style.display = 'none';
+              const f = document.getElementById('titleEdit');
+              f.style.display = 'flex';
+              const inp = f.querySelector('input[name=description]');
+              inp.focus(); inp.select();
+            }}
+            function hideRename() {{
+              document.getElementById('titleEdit').style.display = 'none';
+              document.getElementById('titleView').style.display = 'flex';
+            }}
             function showCaptureModal() {{
               document.getElementById('captureModal').style.display = 'block';
             }}
@@ -636,8 +694,8 @@ def _capture_conversation(tid: str, reason: str) -> None:
 # --- Routes -------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return render_index()
+async def index(q: str = "") -> str:
+    return render_index(q)
 
 
 @app.post("/threads")
@@ -760,13 +818,32 @@ async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = 
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
-@app.post("/thread/{tid}/delete")
-async def delete_thread(tid: str):
+def _existing_thread_dir(tid: str) -> str:
+    """Return the thread's dir, or raise 404. Rejects a traversal/separator tid
+    (e.g. an encoded ``..``) BY CONSTRUCTION so a crafted id can't escape the
+    threads root in a filesystem op (rename writes, delete rmtree's)."""
+    if tid in ("", ".", "..") or "/" in tid or "\\" in tid or "\0" in tid:
+        raise HTTPException(status_code=404, detail="Thread not found")
     tdir = os.path.join(MANAGER.root_dir, tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
+    return tdir
+
+
+@app.post("/thread/{tid}/delete")
+async def delete_thread(tid: str):
+    _existing_thread_dir(tid)
     MANAGER.hard_delete(tid, on_delete=[_evict_caches])
     return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/thread/{tid}/rename")
+async def rename_thread(tid: str, description: str = Form("")):
+    _existing_thread_dir(tid)
+    new = description.strip()[:120]
+    if new:  # ignore an empty rename — keep the existing title
+        set_description(tid, new)
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 @app.post("/thread/{tid}/capture")

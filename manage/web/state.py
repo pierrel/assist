@@ -300,23 +300,32 @@ def get_cached_description(tid: str) -> str:
     if tid in DESCRIPTION_CACHE:
         return DESCRIPTION_CACHE[tid]
 
-    # Cache miss - read from FS or thread and cache
+    # Cache miss - read the saved description, else generate one (which also
+    # writes + caches it via set_description, so the two write paths stay one).
     try:
-        chat = MANAGER.get(tid)
-        thread_dir = MANAGER.thread_dir(tid)
-        description_file = os.path.join(thread_dir, "description.txt")
+        description_file = os.path.join(MANAGER.thread_dir(tid), "description.txt")
         if os.path.isfile(description_file):
             with open(description_file, 'r') as f:
-                description = f.read()
+                DESCRIPTION_CACHE[tid] = f.read()
         else:
-            description = chat.description()
-            os.makedirs(os.path.dirname(description_file), exist_ok=True)
-            with open(description_file, 'w') as f:
-                f.write(description)
-        DESCRIPTION_CACHE[tid] = description
-        return description
+            set_description(tid, MANAGER.get(tid).description())
+        return DESCRIPTION_CACHE[tid]
     except Exception:
         return tid
+
+
+def set_description(tid: str, description: str) -> None:
+    """Persist a user-set thread description (the displayed title) and refresh
+    the cache. Because ``get_cached_description`` only generates when
+    description.txt is ABSENT, a value written here is never auto-regenerated —
+    the rename sticks across later turns."""
+    description_file = os.path.join(MANAGER.thread_dir(tid), "description.txt")
+    os.makedirs(os.path.dirname(description_file), exist_ok=True)
+    tmp = description_file + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(description)
+    os.replace(tmp, description_file)  # atomic — never leave a half-written title
+    DESCRIPTION_CACHE[tid] = description
 
 
 @asynccontextmanager
