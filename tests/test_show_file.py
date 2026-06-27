@@ -116,6 +116,19 @@ class TestShowRoute:
         assert "default-src 'none'" in csp and "script-src" not in csp
         assert r.headers.get("x-content-type-options") == "nosniff"
 
+    def test_route_renders_every_showable_ext(self, workspace):
+        # Drift guard: _SHOWABLE_EXTS is the single allow-list for the tool, the
+        # show-directive gate, AND this route. If the set ever lists an extension
+        # the route's dispatch doesn't handle, that ext would 415 inside the
+        # embedded viewer — so assert the route renders (never 415s) each member.
+        from assist.tools import _SHOWABLE_EXTS
+        for ext in _SHOWABLE_EXTS:
+            name = f"drift{ext}"
+            (workspace / name).write_text("# hi\n" if ext != ".pdf" else "%PDF-1.4 x")
+            r = TestClient(web.app, raise_server_exceptions=False).get(
+                "/thread/t1/show", params={"path": name})
+            assert r.status_code != 415, f"{ext} -> {r.status_code}"
+
     def test_unsupported_extension_415(self, workspace):
         (workspace / "x.txt").write_text("plain")
         r = TestClient(web.app, raise_server_exceptions=False).get(

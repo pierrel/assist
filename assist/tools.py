@@ -271,8 +271,12 @@ def search_internet(
     return str(normalized)
 
 
-# Extensions show_file accepts (the tool's gate).  The web /show route dispatches
-# each of these (md/org/pdf); keep the two lists in sync by hand.
+# Extensions show_file accepts — the SINGLE source for the tool's gate, the web
+# UI's show-directive gate (thread._showable_path), and the /show route's
+# renderable set.  The route dispatches per type (md/org/pdf) and 415s anything
+# else, so it can't silently mis-render; test_route_renders_every_showable_ext
+# pins that the route renders every ext here, so the sets can't drift into a
+# directive the route would 415.
 _SHOWABLE_EXTS = (".org", ".md", ".pdf")
 
 
