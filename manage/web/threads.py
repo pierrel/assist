@@ -905,7 +905,10 @@ def _safe_workspace_file(tid: str, path: str) -> str | None:
 # this function's own tags, so no markup (or eval) in the file can take effect.
 # Covers the common constructs (headings, lists, tables, src/example blocks,
 # inline emphasis, links); richer org degrades to readable text.
-_ORG_LIST_RE = re.compile(r"\s*([-+]|\d+[.)])\s+(.*)")
+# Bullets -, +, * (org's three) and numbered.  '*' is safe here because the
+# heading check runs first and consumes a column-0 '*'; only an INDENTED '* '
+# (a real list bullet, never a heading) reaches this.
+_ORG_LIST_RE = re.compile(r"\s*([-+*]|\d+[.)])\s+(.*)")
 _ORG_HEADING_RE = re.compile(r"(\*+)\s+(.*)")
 # One combined inline pattern, applied in a SINGLE left-to-right pass so a
 # substitution's output (e.g. the "/" in an inserted "</b>") is never re-scanned

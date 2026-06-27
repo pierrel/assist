@@ -24,6 +24,12 @@ class TestShowFileTool:
         assert "can't display" in out
         assert ".org, .md, and .pdf" in out
 
+    @pytest.mark.parametrize("bad", [None, ["a.md"], {"path": "a.md"}, ""])
+    def test_non_string_or_empty_path_returns_guidance(self, bad):
+        # untrusted model args: must not raise (os.path.splitext TypeError).
+        out = show_file(bad)
+        assert "needs a single file path" in out
+
 
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
@@ -128,6 +134,13 @@ class TestOrgRender:
         assert "<h1>Heading</h1>" in r.text
         assert "<b>bold</b>" in r.text and "<i>italic</i>" in r.text
         assert "<li>a</li>" in r.text
+
+    def test_org_star_bullets(self, workspace):
+        # Indented '* ' is an org list bullet (column-0 '*' stays a heading).
+        (workspace / "s.org").write_text("* Top\n\n  * one\n  * two\n")
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "s.org"})
+        assert "<h1>Top</h1>" in r.text            # column-0 * -> heading
+        assert "<li>one</li>" in r.text and "<li>two</li>" in r.text  # indented * -> list
 
     def test_org_macro_eval_does_not_execute(self, workspace):
         # The reason org is NOT rendered via emacs: org export would eval a

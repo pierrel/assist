@@ -288,6 +288,11 @@ def show_file(path: str) -> str:
     The file appears embedded in the conversation.  Returns a short confirmation,
     or a note when the extension isn't one this can display.
     """
+    # args are untrusted model output: a non-string/empty path would raise in
+    # os.path.splitext — return guidance so the model can self-correct instead.
+    if not isinstance(path, str) or not path:
+        return ("show_file needs a single file path as a string — pass the path "
+                "to a .org, .md, or .pdf file in your workspace.")
     ext = os.path.splitext(path)[1].lower()
     if ext not in _SHOWABLE_EXTS:
         return (f"show_file can't display '{path}': only .org, .md, and .pdf are "
