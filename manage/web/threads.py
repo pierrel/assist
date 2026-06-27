@@ -12,10 +12,17 @@ import json
 import logging
 import os
 import subprocess
+import urllib.parse
 
 import markdown
 from fastapi import BackgroundTasks, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+)
 
 from assist.domain_manager import (
     Change,
@@ -374,6 +381,9 @@ def render_thread(
 
     rendered = []
     for m in reversed(msgs):
+        if m.get("role") == "show_file":
+            rendered.append(_render_show_file(tid, m.get("path", "")))
+            continue
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
         if role == "assistant" or role == "tools":
@@ -443,6 +453,10 @@ def render_thread(
           .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
           .msg.user {{ background: #e6f3ff; border: 1px solid #b5dbff; }}
           .msg.assistant {{ background: #f6f6f6; border: 1px solid #ddd; }}
+          .msg.show {{ background: #fff; border: 1px solid #ddd; }}
+          /* Embedded shown file (org/md rendered page, or pdf viewer). */
+          .show-file {{ width: 100%; height: 65vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
+          .show-cap {{ font-size: .85rem; margin-top: .3rem; }}
           .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
           /* font-size: 16px on every editable form input — prevents iOS
              Safari from auto-zooming into the field on focus.  Anything
@@ -836,6 +850,106 @@ def _existing_thread_dir(tid: str) -> str:
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
     return tdir
+
+
+# ---- show_file: render a workspace file (org/md/pdf) in the web UI ----
+
+_SHOW_PAGE_CSS = (
+    "body{font-family:sans-serif;max-width:780px;margin:1rem auto;padding:0 1rem;"
+    "line-height:1.55;color:#222}pre,code{background:#f5f5f5;border-radius:4px}"
+    "pre{padding:.6rem;overflow:auto}table{border-collapse:collapse}"
+    "td,th{border:1px solid #ccc;padding:.3rem .5rem}img{max-width:100%}"
+)
+
+
+def _safe_workspace_file(tid: str, path: str) -> str | None:
+    """Resolve PATH against the thread's agent working dir, traversal-safe.
+    Returns the absolute host path, or None if it would escape the workspace.
+    (Same realpath-child check as the tid guard — a crafted ``../`` can't read
+    outside the agent's own files.)"""
+    base = os.path.realpath(MANAGER.thread_default_working_dir(tid))
+    target = os.path.realpath(os.path.join(base, path))
+    if target != base and not target.startswith(base + os.sep):
+        return None
+    return target
+
+
+def _org_to_html(fpath: str) -> str:
+    """Export an org file to body HTML via emacs (the only org engine available;
+    no Python org lib).  Off the event loop — emacs is a ~1-2s subprocess.
+    Babel is disabled and ``#+INCLUDE:`` lines are stripped so exporting an
+    agent-written org file can't execute code or read arbitrary host files."""
+    try:
+        src = open(fpath, encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        return f"<p><em>Could not read file: {html.escape(str(e))}</em></p>"
+    # Strip include directives before handing the string to org (defense in
+    # depth against #+INCLUDE: /etc/passwd in agent-generated content).
+    src = "\n".join(
+        ln for ln in src.splitlines()
+        if not ln.lstrip().lower().startswith("#+include:"))
+    elisp = (
+        '(progn (require (quote ox-html)) (setq org-export-use-babel nil)'
+        ' (princ (org-export-string-as (getenv "ORG_SRC") (quote html) t)))'
+    )
+    try:
+        r = subprocess.run(
+            ["emacs", "-Q", "--batch", "--eval", elisp],
+            env={**os.environ, "ORG_SRC": src},
+            capture_output=True, text=True, timeout=20,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return f"<p><em>Could not render org ({type(e).__name__}).</em></p>"
+    if r.returncode != 0:
+        return f"<pre>{html.escape((r.stderr or 'org export failed')[-2000:])}</pre>"
+    return r.stdout
+
+
+def _render_show_file(tid: str, path: str) -> str:
+    """The transcript bubble for a show_file call: the file embedded inline
+    (pdf in the browser viewer, md/org as a rendered HTML page in an iframe),
+    plus a caption link that opens it in its own tab."""
+    if not path:
+        return ""
+    src = f"/thread/{tid}/show?path={urllib.parse.quote(path)}"
+    ext = os.path.splitext(path)[1].lower()
+    label = html.escape(path)
+    if ext == ".pdf":
+        viewer = f'<embed class="show-file" type="application/pdf" src="{src}" />'
+    else:
+        viewer = f'<iframe class="show-file" src="{src}" loading="lazy"></iframe>'
+    return (
+        '<div class="msg show"><div class="role">shown</div>'
+        f'<div class="content">{viewer}'
+        f'<div class="show-cap"><a href="{src}" target="_blank" rel="noopener">'
+        f'{label} ↗</a></div></div></div>'
+    )
+
+
+@app.get("/thread/{tid}/show")
+async def show_file_view(tid: str, path: str):
+    """Render a file from the thread's agent workspace for embedding: pdf as
+    bytes (browser viewer), md/org as a styled HTML page.  The org export runs
+    in a threadpool so its emacs subprocess never blocks the event loop."""
+    _existing_thread_dir(tid)  # 404 on a bad/missing tid (traversal-safe)
+    fpath = _safe_workspace_file(tid, path)
+    if fpath is None or not os.path.isfile(fpath):
+        raise HTTPException(status_code=404, detail="file not found")
+    ext = os.path.splitext(fpath)[1].lower()
+    if ext == ".pdf":
+        return FileResponse(fpath, media_type="application/pdf")
+    if ext in (".md", ".markdown"):
+        with open(fpath, encoding="utf-8", errors="replace") as f:
+            body = markdown.markdown(f.read(), extensions=["fenced_code", "tables"])
+    elif ext == ".org":
+        body = await run_in_threadpool(_org_to_html, fpath)
+    else:
+        raise HTTPException(status_code=415,
+                            detail="show supports .org, .md, .pdf")
+    return HTMLResponse(
+        f"<!doctype html><html><head><meta charset=utf-8>"
+        f'<meta name=viewport content="width=device-width, initial-scale=1">'
+        f"<style>{_SHOW_PAGE_CSS}</style></head><body>{body}</body></html>")
 
 
 @app.post("/thread/{tid}/delete")

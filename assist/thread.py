@@ -26,6 +26,45 @@ def render_tool_calls(message: AIMessage) -> str:
     return ""
 
 
+def _messages_to_dicts(raw: list) -> list[dict]:
+    """Convert checkpointer messages to the role/content dicts the web UI renders.
+
+    Pure (no agent/state access) so it's unit-testable. AIMessages with a
+    ``show_file`` tool call yield a structured ``{"role": "show_file", "path": …}``
+    directive (the web UI embeds the file); any other calls stay as the
+    ``"tools"`` text line, and plain content is an ``"assistant"`` message."""
+    msgs: list[dict] = []
+    for m in raw:
+        if isinstance(m, HumanMessage):
+            msgs.append({"role": "user", "content": m.content})
+        elif isinstance(m, AIMessage):
+            calls = getattr(m, "tool_calls", None)
+            if calls:
+                non_show = [c for c in calls if c.get("name") != "show_file"]
+                if non_show or m.content:
+                    msgs.append({"role": "tools",
+                                 "content": _render_calls(non_show, m.content)})
+                for c in calls:
+                    if c.get("name") == "show_file":
+                        path = (c.get("args") or {}).get("path", "")
+                        if path:
+                            msgs.append({"role": "show_file", "path": path})
+            elif m.content:
+                msgs.append({"role": "assistant", "content": m.content})
+    return msgs
+
+
+def _render_calls(calls: list, content) -> str:
+    """The tool-call text line for a subset of an AIMessage's calls (+ optional
+    prose).  Same shape as ``render_tool_calls`` but over an explicit call list,
+    so ``get_messages`` can render the non-show_file calls separately from the
+    show_file render directives."""
+    s = " -- ".join(render_tool_call(c) for c in calls)
+    if content:
+        return f"{s} \n> {content}" if s else str(content)
+    return s
+
+
 def render_tool_call(call: dict) -> str:
     name = call.get("name", "none")
     args = call.get("args", {})
@@ -227,18 +266,7 @@ class Thread:
     def get_messages(self) -> list[dict]:
         """Return user/assistant messages from checkpointer state as role/content dicts."""
         state = self.agent.get_state(self.runconfig)
-        msgs = []
-        for m in state.values.get("messages", []):
-            if isinstance(m, HumanMessage):
-                msgs.append({"role": "user", "content": m.content})
-            elif isinstance(m, AIMessage):
-                calls = getattr(m, "tool_calls", None)
-                if calls:
-                    msgs.append({"role": "tools",
-                                 "content": render_tool_calls(m)})
-                elif m.content:
-                    msgs.append({"role": "assistant", "content": m.content})
-        return msgs
+        return _messages_to_dicts(state.values.get("messages", []))
 
 
     def get_raw_messages(self) -> List[AnyMessage]:

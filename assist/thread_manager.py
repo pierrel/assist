@@ -34,9 +34,18 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
+from assist.spec import AgentSpec
 from assist.thread import Thread
+from assist.tools import show_file
 
 logger = logging.getLogger(__name__)
+
+# The web app's main agent gets show_file (render a file in the web UI).  Scoped
+# here BY DESIGN: ThreadManager is the web app's agent builder (emacsos builds
+# its own Thread/spec; the eval harness uses create_agent directly), so the
+# web-only show_file tool rides the web-only builder rather than a universal
+# default that would also reach surfaces with no web view.
+_WEB_SPEC = AgentSpec(tools=(show_file,))
 
 
 class InvalidThreadId(ValueError):
@@ -223,7 +232,8 @@ class ThreadManager:
                       checkpointer=self.checkpointer,
                       model=self.model,
                       sandbox_backend=sandbox_backend,
-                      on_queue_state=on_queue_state)
+                      on_queue_state=on_queue_state,
+                      spec=_WEB_SPEC)
 
     def remove(self, thread_id: str) -> None:
         tdir = self.thread_dir(thread_id)
@@ -256,7 +266,7 @@ class ThreadManager:
 
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
                       model=self.model, sandbox_backend=sandbox_backend,
-                      on_queue_state=on_queue_state)
+                      on_queue_state=on_queue_state, spec=_WEB_SPEC)
 
     def close(self) -> None:
         try:

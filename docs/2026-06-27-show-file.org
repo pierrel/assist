@@ -1,0 +1,57 @@
+#+TITLE: show_file — render a workspace file (org/md/pdf) in the web UI
+#+DATE: <2026-06-27>
+#+STATUS: built (CPU-tested; live agent-invocation deferred — GPU down)
+
+* Goal
+A ~show_file(path)~ agent tool that displays a file in the assist web UI,
+rendered well for the web — org and markdown as formatted HTML, PDF in the
+browser's viewer — instead of pasting raw contents into the chat.
+
+* Design (as built)
+- *Tool* (=assist/tools.py=): ~show_file(path)~ validates the extension
+  (.org/.md/.markdown/.pdf) and returns a confirmation string; unsupported types
+  get a "read and summarize instead" note. It does NOT read the file — the web
+  layer renders it (the tool has no thread/working-dir handle).
+- *Registration* (=assist/thread_manager.py=): added to ~_WEB_SPEC =
+  AgentSpec(tools=(show_file,))~, passed to both ~ThreadManager.get/new~.
+  Scoped here BY DESIGN — ThreadManager is the *web app's* agent builder
+  (emacsos builds its own Thread/spec; the eval harness uses ~create_agent~
+  directly), so a web-only tool doesn't leak onto surfaces with no web view nor
+  onto the eval agents.
+- *Surface* (=assist/thread.py=): ~get_messages~ (via the new pure
+  ~_messages_to_dicts~) turns a ~show_file~ tool call into a structured
+  ~{"role":"show_file","path":…}~ directive; other calls stay as the "tools"
+  text line. (No event channel in assist's web UI; the tool *call* persists in
+  the message, and the server re-renders from it.)
+- *Render* (=manage/web/threads.py=): ~render_thread~ emits an inline embed for
+  a show_file directive — ~<embed>~ (pdf) / ~<iframe>~ (md/org) pointing at a
+  viewer route, plus a caption link. CSS ~.show-file~ gives it a sane height.
+- *Viewer route* ~GET /thread/{tid}/show?path=…~: pdf → ~FileResponse~ (browser
+  viewer); md → ~markdown~ lib → styled HTML page; org → emacs export (below).
+  Path resolved traversal-safe within the thread's agent working dir
+  (~_safe_workspace_file~, realpath-child check — same lesson as the tid guard).
+
+* Decisions / trade-offs
+- *org → HTML via emacs* (=_org_to_html=): no Python org lib / no pandoc on the
+  host; emacs is present (same engine as larochelle.io). Run in a *threadpool*
+  (~run_in_threadpool~) so the ~1-2 s emacs subprocess never blocks the
+  single-worker event loop. Security: ~org-export-use-babel nil~ (no code eval
+  on export) and ~#+INCLUDE:~ lines stripped before export (so agent-written org
+  can't read arbitrary host files into the output). ~-Q~ for a clean emacs.
+- *Inline embed* (user's pick) over a link-only card: the file shows where the
+  agent called it; the slow org conversion stays off the page-render path (it's
+  in the iframe's own async route request).
+- *Tool doesn't validate existence* (no working-dir handle): a missing file
+  surfaces as the route's 404 in the embed, not a tool error. Acceptable v1.
+
+* Validation
+- 20 unit tests (tool gating, traversal-safety, render embed, the /show route for
+  md/pdf/missing/traversal/unsupported, real org export + #+INCLUDE stripping,
+  _messages_to_dicts). 682 unit tests green. All CPU — no model.
+- Deferred (needs the model, GPU down): the live agent-driven flow (user asks →
+  agent calls show_file → embed renders). Covered structurally by the unit tests.
+
+* Critical files
+- =assist/tools.py= (show_file), =assist/thread_manager.py= (_WEB_SPEC),
+  =assist/thread.py= (_messages_to_dicts), =manage/web/threads.py= (route +
+  render + org export), =tests/test_show_file.py=.
