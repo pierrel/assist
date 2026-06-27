@@ -9,11 +9,12 @@ browser's viewer — instead of pasting raw contents into the chat.
 
 * Design (as built)
 - *Tool* (=assist/tools.py=): ~show_file(path)~ validates the extension
-  (.org/.md/.markdown/.pdf) and returns a confirmation string; unsupported types
+  (.org/.md/.pdf) and returns a confirmation string; unsupported types
   get a "read and summarize instead" note. It does NOT read the file — the web
   layer renders it (the tool has no thread/working-dir handle).
-- *Registration* (=assist/thread_manager.py=): added to ~_WEB_SPEC =
-  AgentSpec(tools=(show_file,))~, passed to both ~ThreadManager.get/new~.
+- *Registration* (=assist/thread_manager.py=): an ~AgentSpec(tools=_WEB_TOOLS)~
+  (=_WEB_TOOLS = (show_file,)=) constructed per-call and passed to both
+  ~ThreadManager.get/new~.
   Scoped here BY DESIGN — ThreadManager is the *web app's* agent builder
   (emacsos builds its own Thread/spec; the eval harness uses ~create_agent~
   directly), so a web-only tool doesn't leak onto surfaces with no web view nor
@@ -48,6 +49,11 @@ browser's viewer — instead of pasting raw contents into the chat.
 - *Inline embed* (user's pick) over a link-only card: the file shows where the
   agent called it; the slow org conversion stays off the page-render path (it's
   in the iframe's own async route request).
+- *md/org iframe is ~sandbox="allow-popups"~* (no ~allow-scripts~): the embedded
+  page is static, so no JS runs even if agent-generated content carries a
+  ~<script>~/~onerror~. Defence-in-depth over the org renderer's escaping, and
+  it covers the md path too (the markdown lib passes raw HTML through). The
+  ~allow-popups~ token keeps ~target=_blank~ links in the content clickable.
 - *Tool doesn't validate existence* (no working-dir handle): a missing file
   surfaces as the route's 404 in the embed, not a tool error. Acceptable v1.
 
@@ -60,6 +66,6 @@ browser's viewer — instead of pasting raw contents into the chat.
   agent calls show_file → embed renders). Covered structurally by the unit tests.
 
 * Critical files
-- =assist/tools.py= (show_file), =assist/thread_manager.py= (_WEB_SPEC),
+- =assist/tools.py= (show_file), =assist/thread_manager.py= (_WEB_TOOLS),
   =assist/thread.py= (_messages_to_dicts), =manage/web/threads.py= (route +
   render + org export), =tests/test_show_file.py=.

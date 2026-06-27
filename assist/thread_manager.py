@@ -44,8 +44,10 @@ logger = logging.getLogger(__name__)
 # here BY DESIGN: ThreadManager is the web app's agent builder (emacsos builds
 # its own Thread/spec; the eval harness uses create_agent directly), so the
 # web-only show_file tool rides the web-only builder rather than a universal
-# default that would also reach surfaces with no web view.
-_WEB_SPEC = AgentSpec(tools=(show_file,))
+# default that would also reach surfaces with no web view.  The AgentSpec is
+# constructed per-call (in get/new) — its docstring cautions against caching a
+# spec as a module constant — though this one closes over no per-request state.
+_WEB_TOOLS = (show_file,)
 
 
 class InvalidThreadId(ValueError):
@@ -233,7 +235,7 @@ class ThreadManager:
                       model=self.model,
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
-                      spec=_WEB_SPEC)
+                      spec=AgentSpec(tools=_WEB_TOOLS))
 
     def remove(self, thread_id: str) -> None:
         tdir = self.thread_dir(thread_id)
@@ -266,7 +268,7 @@ class ThreadManager:
 
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
                       model=self.model, sandbox_backend=sandbox_backend,
-                      on_queue_state=on_queue_state, spec=_WEB_SPEC)
+                      on_queue_state=on_queue_state, spec=AgentSpec(tools=_WEB_TOOLS))
 
     def close(self) -> None:
         try:

@@ -44,6 +44,11 @@ class TestSafeWorkspaceFile:
         # ../ escapes the workspace -> None; an absolute path resolves outside too.
         assert _safe_workspace_file("t1", path) is None
 
+    def test_embedded_nul_is_none_not_error(self, workspace):
+        # An embedded NUL makes realpath raise ValueError; it must resolve to
+        # None -> 404, never bubble a 500.
+        assert _safe_workspace_file("t1", "a\x00.md") is None
+
 
 class TestRenderShowFile:
     def test_pdf_uses_embed(self):
@@ -55,6 +60,12 @@ class TestRenderShowFile:
         h = _render_show_file("t1", "notes.md")
         assert "<iframe" in h
         assert "/thread/t1/show?path=notes.md" in h
+
+    def test_iframe_is_sandboxed_no_scripts(self):
+        # The md/org iframe must carry a sandbox WITHOUT allow-scripts so
+        # agent-generated content can't run JS in it (the md path emits raw HTML).
+        h = _render_show_file("t1", "notes.md")
+        assert "sandbox=" in h and "allow-scripts" not in h
 
     def test_path_is_url_quoted(self):
         h = _render_show_file("t1", "my report.org")

@@ -1005,7 +1005,13 @@ def _render_show_file(tid: str, path: str) -> str:
     if ext == ".pdf":
         viewer = f'<embed class="show-file" type="application/pdf" src="{src}" />'
     else:
-        viewer = f'<iframe class="show-file" src="{src}" loading="lazy"></iframe>'
+        # sandbox WITHOUT allow-scripts: the embedded md/org page is static, so
+        # any <script>/onerror in agent-generated content can't execute (defence
+        # in depth over the org renderer's escaping — and it covers the md path,
+        # whose markdown lib passes raw HTML through).  allow-popups keeps
+        # target=_blank links in the content working.
+        viewer = (f'<iframe class="show-file" src="{src}" loading="lazy" '
+                  f'sandbox="allow-popups"></iframe>')
     return (
         '<div class="msg show"><div class="role">shown</div>'
         f'<div class="content">{viewer}'
@@ -1026,7 +1032,8 @@ async def show_file_view(tid: str, path: str):
     ext = os.path.splitext(fpath)[1].lower()
     if ext == ".pdf":
         return FileResponse(fpath, media_type="application/pdf")
-    src = open(fpath, encoding="utf-8", errors="replace").read()
+    with open(fpath, encoding="utf-8", errors="replace") as f:
+        src = f.read()
     if ext == ".md":
         body = markdown.markdown(src, extensions=_MD_EXTENSIONS)
     elif ext == ".org":
