@@ -49,11 +49,16 @@ browser's viewer — instead of pasting raw contents into the chat.
 - *Inline embed* (user's pick) over a link-only card: the file shows where the
   agent called it; the slow org conversion stays off the page-render path (it's
   in the iframe's own async route request).
-- *md/org iframe is ~sandbox="allow-popups"~* (no ~allow-scripts~): the embedded
-  page is static, so no JS runs even if agent-generated content carries a
-  ~<script>~/~onerror~. Defence-in-depth over the org renderer's escaping, and
-  it covers the md path too (the markdown lib passes raw HTML through). The
-  ~allow-popups~ token keeps ~target=_blank~ links in the content clickable.
+- *Script execution is unreachable on the /show route, by CSP.* The md path
+  (python-markdown) passes raw HTML through, so agent-generated md could carry
+  ~<script>~/~onerror~/~javascript:~. The route response sets
+  ~Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
+  img-src 'self' data: https:; object-src 'none'; base-uri 'none'~ (+ ~nosniff~):
+  no script source => nothing executes, for BOTH the inline embed AND the
+  caption link that opens the same route as a top-level document (the
+  iframe ~sandbox~ only covers the embed — Copilot rd2 caught that the
+  standalone open was still in the app origin). The md/org iframe also keeps
+  ~sandbox="allow-popups"~ as layered defence.
 - *Tool doesn't validate existence* (no working-dir handle): a missing file
   surfaces as the route's 404 in the embed, not a tool error. Acceptable v1.
 

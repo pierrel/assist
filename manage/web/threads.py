@@ -864,6 +864,23 @@ _SHOW_PAGE_CSS = (
     "td,th{border:1px solid #ccc;padding:.3rem .5rem}img{max-width:100%}"
 )
 
+# The /show page renders AGENT-generated md/org.  The md path (python-markdown)
+# passes raw HTML through, so a malicious .md could carry <script>/onerror/
+# javascript:.  The inline embed is a sandboxed iframe, but the caption link
+# opens this same route as a TOP-LEVEL document in the app origin — so harden
+# the response itself: a CSP with no script source makes script execution
+# unreachable for BOTH entry points (embedded and standalone), regardless of
+# content.  default-src 'none' => scripts/objects/frames blocked; we only allow
+# our own inline <style> and content images.  nosniff stops MIME-confusion.
+_SHOW_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data: https:; "
+    "object-src 'none'; base-uri 'none'"
+)
+_SHOW_SECURITY_HEADERS = {
+    "Content-Security-Policy": _SHOW_CSP,
+    "X-Content-Type-Options": "nosniff",
+}
+
 
 def _safe_workspace_file(tid: str, path: str) -> str | None:
     """Resolve PATH against the thread's agent working dir, traversal-safe.
@@ -1031,7 +1048,8 @@ async def show_file_view(tid: str, path: str):
         raise HTTPException(status_code=404, detail="file not found")
     ext = os.path.splitext(fpath)[1].lower()
     if ext == ".pdf":
-        return FileResponse(fpath, media_type="application/pdf")
+        return FileResponse(fpath, media_type="application/pdf",
+                            headers={"X-Content-Type-Options": "nosniff"})
     with open(fpath, encoding="utf-8", errors="replace") as f:
         src = f.read()
     if ext == ".md":
@@ -1044,7 +1062,8 @@ async def show_file_view(tid: str, path: str):
     return HTMLResponse(
         f"<!doctype html><html><head><meta charset=utf-8>"
         f'<meta name=viewport content="width=device-width, initial-scale=1">'
-        f"<style>{_SHOW_PAGE_CSS}</style></head><body>{body}</body></html>")
+        f"<style>{_SHOW_PAGE_CSS}</style></head><body>{body}</body></html>",
+        headers=_SHOW_SECURITY_HEADERS)
 
 
 @app.post("/thread/{tid}/delete")

@@ -98,6 +98,16 @@ class TestShowRoute:
             "/thread/t1/show", params={"path": "../../secret.md"})
         assert r.status_code == 404
 
+    def test_md_response_has_script_blocking_csp(self, workspace):
+        # The caption link opens this route as a top-level doc in the app origin;
+        # the md path passes raw HTML through, so the response must carry a CSP
+        # with no script source so scripts can't run even standalone.
+        (workspace / "x.md").write_text("# hi\n<script>alert(1)</script>\n")
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "x.md"})
+        csp = r.headers.get("content-security-policy", "")
+        assert "default-src 'none'" in csp and "script-src" not in csp
+        assert r.headers.get("x-content-type-options") == "nosniff"
+
     def test_unsupported_extension_415(self, workspace):
         (workspace / "x.txt").write_text("plain")
         r = TestClient(web.app, raise_server_exceptions=False).get(
