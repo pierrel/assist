@@ -1,11 +1,10 @@
 """Tests for the show_file tool + the /thread/{tid}/show viewer route.
 
 CPU/no-model: the tool returns a string; the route renders md (markdown lib),
-pdf (FileResponse bytes), and org (emacs, skipped if emacs is absent). The
+pdf (FileResponse bytes), and org (a pure-Python renderer — no emacs/eval). The
 agent-driven end-to-end (agent calls show_file) needs the model — out of scope.
 """
 import os
-import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,7 +16,7 @@ from manage.web.threads import _render_show_file, _safe_workspace_file
 
 class TestShowFileTool:
     def test_supported_extensions_confirm(self):
-        for p in ("report.org", "notes.md", "a.markdown", "doc.pdf"):
+        for p in ("report.org", "notes.md", "doc.pdf"):
             assert show_file(p).startswith("Showing")
 
     def test_unsupported_extension_explains(self):
@@ -95,24 +94,42 @@ class TestShowRoute:
         assert r.status_code == 415
 
 
-@pytest.mark.skipif(not shutil.which("emacs"), reason="emacs not available for org export")
 class TestOrgRender:
-    def test_org_exports_to_html(self, workspace):
-        (workspace / "r.org").write_text("* Heading\n\nSome *bold* text.\n")
+    """Pure-Python org renderer (no emacs — see the security note in threads.py)."""
+
+    def test_org_headings_emphasis_lists(self, workspace):
+        (workspace / "r.org").write_text(
+            "* Heading\n\nSome *bold* and /italic/ text.\n\n- a\n- b\n")
         r = TestClient(web.app).get("/thread/t1/show", params={"path": "r.org"})
         assert r.status_code == 200
-        assert "Heading" in r.text
-        assert "<b>bold</b>" in r.text or "bold" in r.text  # org emphasis -> bold
+        assert "<h1>Heading</h1>" in r.text
+        assert "<b>bold</b>" in r.text and "<i>italic</i>" in r.text
+        assert "<li>a</li>" in r.text
 
-    def test_org_include_directive_is_stripped(self, workspace):
-        # A #+INCLUDE pointing at a host file must NOT be expanded into the output.
-        secret = workspace.parent.parent / "secret.txt"
-        secret.write_text("TOPSECRET")
+    def test_org_macro_eval_does_not_execute(self, workspace):
+        # The reason org is NOT rendered via emacs: org export would eval a
+        # macro's (eval ...) form (host RCE).  The pure renderer must not run it.
         (workspace / "evil.org").write_text(
-            f"* Doc\n#+INCLUDE: \"{secret}\"\n")
+            '#+MACRO: pwn (eval (shell-command-to-string "id"))\n{{{pwn}}}\n')
         r = TestClient(web.app).get("/thread/t1/show", params={"path": "evil.org"})
         assert r.status_code == 200
+        assert "uid=" not in r.text          # the `id` command never ran
+        assert "shell-command-to-string" not in r.text  # #+MACRO line dropped
+
+    def test_org_include_directive_not_expanded(self, workspace):
+        # A #+INCLUDE pointing at a host file must NOT pull its contents in.
+        secret = workspace.parent.parent / "secret.txt"
+        secret.write_text("TOPSECRET")
+        (workspace / "inc.org").write_text(f"* Doc\n#+INCLUDE: \"{secret}\"\n")
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "inc.org"})
+        assert r.status_code == 200
         assert "TOPSECRET" not in r.text
+
+    def test_org_content_is_escaped(self, workspace):
+        (workspace / "x.org").write_text("Plain <script>alert(1)</script> text\n")
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "x.org"})
+        assert "<script>alert(1)</script>" not in r.text
+        assert "&lt;script&gt;" in r.text
 
 
 class TestMessagesToDicts:

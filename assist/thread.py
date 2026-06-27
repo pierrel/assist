@@ -16,14 +16,8 @@ from assist.thread_queue import THREAD_QUEUE
 logger = logging.getLogger(__name__)
 
 def render_tool_calls(message: AIMessage) -> str:
-    calls = getattr(message, "tool_calls", None)
-    if calls:
-        calls_str = " -- ".join(map(lambda c: render_tool_call(c), calls))
-        if getattr(message, "content", None):
-            return f"{calls_str} \n> {message.content}"
-
-        return calls_str
-    return ""
+    return _render_calls(getattr(message, "tool_calls", None) or [],
+                         getattr(message, "content", None))
 
 
 def _messages_to_dicts(raw: list) -> list[dict]:

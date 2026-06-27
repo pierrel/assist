@@ -271,9 +271,9 @@ def search_internet(
     return str(normalized)
 
 
-# Extensions show_file can render in the web UI.  Kept here as the single source
-# of truth; the web layer (manage/web) renders each.
-_SHOWABLE_EXTS = (".org", ".md", ".markdown", ".pdf")
+# Extensions show_file accepts (the tool's gate).  The web /show route dispatches
+# each of these (md/org/pdf); keep the two lists in sync by hand.
+_SHOWABLE_EXTS = (".org", ".md", ".pdf")
 
 
 def show_file(path: str) -> str:

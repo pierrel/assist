@@ -27,17 +27,24 @@ browser's viewer — instead of pasting raw contents into the chat.
   a show_file directive — ~<embed>~ (pdf) / ~<iframe>~ (md/org) pointing at a
   viewer route, plus a caption link. CSS ~.show-file~ gives it a sane height.
 - *Viewer route* ~GET /thread/{tid}/show?path=…~: pdf → ~FileResponse~ (browser
-  viewer); md → ~markdown~ lib → styled HTML page; org → emacs export (below).
-  Path resolved traversal-safe within the thread's agent working dir
-  (~_safe_workspace_file~, realpath-child check — same lesson as the tid guard).
+  viewer); md → ~markdown~ lib → styled HTML page; org → a pure-Python renderer
+  (below). Path resolved traversal-safe within the thread's agent working dir
+  (~_safe_workspace_file~, realpath-child check — same lesson as the tid guard;
+  a malformed path / embedded NUL returns None → 404, not a 500).
 
 * Decisions / trade-offs
-- *org → HTML via emacs* (=_org_to_html=): no Python org lib / no pandoc on the
-  host; emacs is present (same engine as larochelle.io). Run in a *threadpool*
-  (~run_in_threadpool~) so the ~1-2 s emacs subprocess never blocks the
-  single-worker event loop. Security: ~org-export-use-babel nil~ (no code eval
-  on export) and ~#+INCLUDE:~ lines stripped before export (so agent-written org
-  can't read arbitrary host files into the output). ~-Q~ for a clean emacs.
+- *org → HTML via a pure, escape-first Python renderer* (=_org_to_html=), NOT
+  emacs. Code review (rightly) flagged that ~org-export-string-as~ EXECUTES
+  elisp during export even with babel disabled — ~#+MACRO: x (eval …)~ + ~{{{x}}}~
+  runs arbitrary shell on the host (verified), and a deny-list of org's eval
+  surfaces (macros, ~#+CALL:~, table formulas, ~#+BIND:~) leaks. Since org files
+  are agent-generated (possibly from fetched web content), that's a
+  prompt-injection→RCE chain. The by-construction fix: don't run emacs at all —
+  a small renderer that html-escapes every character first and only emits its
+  own tags (headings, lists, tables, src/example blocks, inline emphasis,
+  links). No eval, no subprocess, no XSS; richer org degrades to readable text.
+  Bonus: removes the threadpool/timeout/babel/include complexity (it's pure +
+  fast, so it runs inline like the markdown path).
 - *Inline embed* (user's pick) over a link-only card: the file shows where the
   agent called it; the slow org conversion stays off the page-render path (it's
   in the iframe's own async route request).
@@ -45,9 +52,10 @@ browser's viewer — instead of pasting raw contents into the chat.
   surfaces as the route's 404 in the embed, not a tool error. Acceptable v1.
 
 * Validation
-- 20 unit tests (tool gating, traversal-safety, render embed, the /show route for
-  md/pdf/missing/traversal/unsupported, real org export + #+INCLUDE stripping,
-  _messages_to_dicts). 682 unit tests green. All CPU — no model.
+- 22 unit tests (tool gating, traversal-safety incl. NUL, render embed, the /show
+  route for md/pdf/missing/traversal/unsupported, the org renderer incl.
+  macro-(eval)-does-not-execute / #+INCLUDE-not-expanded / content-escaped,
+  _messages_to_dicts). 684 unit tests green. All CPU — no model.
 - Deferred (needs the model, GPU down): the live agent-driven flow (user asks →
   agent calls show_file → embed renders). Covered structurally by the unit tests.
 

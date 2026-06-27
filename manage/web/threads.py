@@ -11,12 +11,12 @@ import html
 import json
 import logging
 import os
+import re
 import subprocess
 import urllib.parse
 
 import markdown
 from fastapi import BackgroundTasks, Form, HTTPException
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -69,6 +69,9 @@ async def _invalid_thread_id(request, exc):
     # A crafted tid (traversal/separator) reaching any tid-based route surfaces
     # here from ThreadManager.thread_dir — map it to a clean 404 everywhere.
     return HTMLResponse("Thread not found", status_code=404)
+
+
+_MD_EXTENSIONS = ["fenced_code", "tables"]
 
 
 def render_index(query: str = "") -> str:
@@ -388,12 +391,12 @@ def render_thread(
         raw = str(m.get("content", ""))
         if role == "assistant" or role == "tools":
             # Render assistant and tool content as Markdown to HTML
-            content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
+            content_html = markdown.markdown(raw, extensions=_MD_EXTENSIONS)
         elif role == "user" and raw.startswith(_REVIEW_HEADER):
             # Review submissions are markdown-formatted (headers, fenced
             # blocks).  Render them as such so the user sees the same
             # structure the agent receives, instead of escaped backticks.
-            content_html = markdown.markdown(raw, extensions=["fenced_code", "tables"])
+            content_html = markdown.markdown(raw, extensions=_MD_EXTENSIONS)
         else:
             # Human/user content is plain text with basic escaping
             content_html = html.escape(raw).replace("\n", "<br/>")
@@ -864,45 +867,130 @@ _SHOW_PAGE_CSS = (
 
 def _safe_workspace_file(tid: str, path: str) -> str | None:
     """Resolve PATH against the thread's agent working dir, traversal-safe.
-    Returns the absolute host path, or None if it would escape the workspace.
-    (Same realpath-child check as the tid guard — a crafted ``../`` can't read
-    outside the agent's own files.)"""
+    Returns the absolute host path, or None if it would escape the workspace
+    (or is malformed, e.g. an embedded NUL).  Same realpath-child check as the
+    tid guard — a crafted ``../`` can't read outside the agent's own files."""
     base = os.path.realpath(MANAGER.thread_default_working_dir(tid))
-    target = os.path.realpath(os.path.join(base, path))
+    try:
+        target = os.path.realpath(os.path.join(base, path))
+    except ValueError:  # embedded NUL etc. -> treat as not-found, not a 500
+        return None
     if target != base and not target.startswith(base + os.sep):
         return None
     return target
 
 
-def _org_to_html(fpath: str) -> str:
-    """Export an org file to body HTML via emacs (the only org engine available;
-    no Python org lib).  Off the event loop — emacs is a ~1-2s subprocess.
-    Babel is disabled and ``#+INCLUDE:`` lines are stripped so exporting an
-    agent-written org file can't execute code or read arbitrary host files."""
-    try:
-        src = open(fpath, encoding="utf-8", errors="replace").read()
-    except OSError as e:
-        return f"<p><em>Could not read file: {html.escape(str(e))}</em></p>"
-    # Strip include directives before handing the string to org (defense in
-    # depth against #+INCLUDE: /etc/passwd in agent-generated content).
-    src = "\n".join(
-        ln for ln in src.splitlines()
-        if not ln.lstrip().lower().startswith("#+include:"))
-    elisp = (
-        '(progn (require (quote ox-html)) (setq org-export-use-babel nil)'
-        ' (princ (org-export-string-as (getenv "ORG_SRC") (quote html) t)))'
-    )
-    try:
-        r = subprocess.run(
-            ["emacs", "-Q", "--batch", "--eval", elisp],
-            env={**os.environ, "ORG_SRC": src},
-            capture_output=True, text=True, timeout=20,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return f"<p><em>Could not render org ({type(e).__name__}).</em></p>"
-    if r.returncode != 0:
-        return f"<pre>{html.escape((r.stderr or 'org export failed')[-2000:])}</pre>"
-    return r.stdout
+# Org files are AGENT-generated (possibly from fetched web content), so they are
+# rendered by this pure, escape-first converter — NEVER by emacs/org-export,
+# which executes elisp during export (babel, AND #+MACRO: (eval ...), #+CALL:,
+# table formulas) and is therefore a host-RCE vector on untrusted org.  Here
+# every character of the file is html-escaped first; the only HTML emitted is
+# this function's own tags, so no markup (or eval) in the file can take effect.
+# Covers the common constructs (headings, lists, tables, src/example blocks,
+# inline emphasis, links); richer org degrades to readable text.
+_ORG_LIST_RE = re.compile(r"\s*([-+]|\d+[.)])\s+(.*)")
+_ORG_HEADING_RE = re.compile(r"(\*+)\s+(.*)")
+# One combined inline pattern, applied in a SINGLE left-to-right pass so a
+# substitution's output (e.g. the "/" in an inserted "</b>") is never re-scanned
+# by a later rule.  Order in the alternation = match priority.
+_ORG_INLINE_RE = re.compile(
+    r"\[\[(?P<lt>[^\]]+?)\](?:\[(?P<ll>[^\]]*?)\])?\]"      # [[link]] / [[link][label]]
+    r"|(?<![\w*])\*(?P<b>\S(?:.*?\S)?)\*(?![\w*])"           # *bold*
+    r"|(?<![\w/])/(?P<i>\S(?:.*?\S)?)/(?![\w/])"             # /italic/
+    r"|(?<![\w=])=(?P<c>\S(?:.*?\S)?)=(?![\w=])"             # =code=
+    r"|(?<![\w~])~(?P<v>\S(?:.*?\S)?)~(?![\w~])"             # ~verbatim~
+)
+
+
+def _org_inline_sub(m: re.Match) -> str:
+    if m.group("lt") is not None:
+        target = m.group("lt")
+        label = m.group("ll") if m.group("ll") else target
+        scheme_ok = re.match(r"(https?:|mailto:|/|\.|#)", html.unescape(target))
+        href = target if scheme_ok else "#"
+        return f'<a href="{href}" target="_blank" rel="noopener">{label}</a>'
+    if m.group("b") is not None:
+        return f"<b>{m.group('b')}</b>"
+    if m.group("i") is not None:
+        return f"<i>{m.group('i')}</i>"
+    code = m.group("c") if m.group("c") is not None else m.group("v")
+    return f"<code>{code}</code>"
+
+
+def _org_inline(text: str) -> str:
+    """Escape TEXT (so file content can't inject HTML), then apply org inline
+    markup in one pass over the escaped string."""
+    return _ORG_INLINE_RE.sub(_org_inline_sub, html.escape(text))
+
+
+def _org_table(rows: list[str]) -> str:
+    out = ["<table>"]
+    for r in rows:
+        if set(r) <= set("|-+ "):   # separator row
+            continue
+        cells = [c.strip() for c in r.strip().strip("|").split("|")]
+        out.append("<tr>" + "".join(f"<td>{_org_inline(c)}</td>" for c in cells) + "</tr>")
+    out.append("</table>")
+    return "\n".join(out)
+
+
+def _org_to_html(src: str) -> str:
+    """Render an org SOURCE STRING to body HTML, safely (see the note above)."""
+    lines = src.splitlines()
+    parts: list[str] = []
+    para: list[str] = []
+    open_list: str | None = None
+
+    def flush_para():
+        if para:
+            parts.append("<p>" + _org_inline(" ".join(para)) + "</p>")
+            para.clear()
+
+    def close_list():
+        nonlocal open_list
+        if open_list:
+            parts.append(f"</{open_list}>")
+            open_list = None
+
+    i = 0
+    while i < len(lines):
+        line, stripped = lines[i], lines[i].strip()
+        if re.match(r"#\+BEGIN_(SRC|EXAMPLE)", stripped, re.I):
+            flush_para(); close_list()
+            block, i = [], i + 1
+            while i < len(lines) and not re.match(r"#\+END_", lines[i].strip(), re.I):
+                block.append(lines[i]); i += 1
+            i += 1  # skip the END line
+            parts.append("<pre><code>" + html.escape("\n".join(block)) + "</code></pre>")
+            continue
+        if stripped.startswith("#+") or stripped.startswith("# "):
+            flush_para(); i += 1; continue  # keyword/comment line: drop (never eval)
+        hm = _ORG_HEADING_RE.match(line)
+        if hm:
+            flush_para(); close_list()
+            lvl = min(len(hm.group(1)), 6)
+            parts.append(f"<h{lvl}>{_org_inline(hm.group(2).strip())}</h{lvl}>")
+            i += 1; continue
+        if stripped.startswith("|"):
+            flush_para(); close_list()
+            rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                rows.append(lines[i]); i += 1
+            parts.append(_org_table(rows))
+            continue
+        lm = _ORG_LIST_RE.fullmatch(line)
+        if lm:
+            flush_para()
+            tag = "ol" if lm.group(1)[0].isdigit() else "ul"
+            if open_list != tag:
+                close_list(); parts.append(f"<{tag}>"); open_list = tag
+            parts.append(f"<li>{_org_inline(lm.group(2).strip())}</li>")
+            i += 1; continue
+        if not stripped:
+            flush_para(); close_list(); i += 1; continue
+        para.append(stripped); i += 1
+    flush_para(); close_list()
+    return "\n".join(parts)
 
 
 def _render_show_file(tid: str, path: str) -> str:
@@ -929,8 +1017,8 @@ def _render_show_file(tid: str, path: str) -> str:
 @app.get("/thread/{tid}/show")
 async def show_file_view(tid: str, path: str):
     """Render a file from the thread's agent workspace for embedding: pdf as
-    bytes (browser viewer), md/org as a styled HTML page.  The org export runs
-    in a threadpool so its emacs subprocess never blocks the event loop."""
+    bytes (browser viewer), md/org as a styled HTML page.  Pure renderers (no
+    subprocess), so safe to run inline on the event loop."""
     _existing_thread_dir(tid)  # 404 on a bad/missing tid (traversal-safe)
     fpath = _safe_workspace_file(tid, path)
     if fpath is None or not os.path.isfile(fpath):
@@ -938,11 +1026,11 @@ async def show_file_view(tid: str, path: str):
     ext = os.path.splitext(fpath)[1].lower()
     if ext == ".pdf":
         return FileResponse(fpath, media_type="application/pdf")
-    if ext in (".md", ".markdown"):
-        with open(fpath, encoding="utf-8", errors="replace") as f:
-            body = markdown.markdown(f.read(), extensions=["fenced_code", "tables"])
+    src = open(fpath, encoding="utf-8", errors="replace").read()
+    if ext == ".md":
+        body = markdown.markdown(src, extensions=_MD_EXTENSIONS)
     elif ext == ".org":
-        body = await run_in_threadpool(_org_to_html, fpath)
+        body = _org_to_html(src)
     else:
         raise HTTPException(status_code=415,
                             detail="show supports .org, .md, .pdf")
