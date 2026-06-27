@@ -1,5 +1,6 @@
 import contextvars
 import logging
+import os
 from datetime import datetime
 from typing import Any, Callable, List, Iterator, Mapping
 
@@ -10,6 +11,7 @@ from assist.promptable import base_prompt_for
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent
 from assist.spec import AgentSpec
+from assist.tools import _SHOWABLE_EXTS
 from assist.checkpoint_rollback import invoke_with_rollback
 from assist.thread_queue import THREAD_QUEUE
 
@@ -26,13 +28,30 @@ def render_tool_calls(message: AIMessage) -> str:
     return _render_calls(calls, getattr(message, "content", None))
 
 
+def _showable_path(call: dict) -> str | None:
+    """The path a ``show_file`` CALL should render inline, or ``None`` when the
+    call can't (wrong tool, or — args are untrusted model output — a path that
+    isn't a non-empty string with a showable extension).  A show_file call that
+    returns None here falls back to the normal tool-call text line, so an
+    out-of-spec call never embeds the viewer route (which would render a 415)."""
+    if call.get("name") != "show_file":
+        return None
+    path = (call.get("args") or {}).get("path")
+    if (isinstance(path, str) and path
+            and os.path.splitext(path)[1].lower() in _SHOWABLE_EXTS):
+        return path
+    return None
+
+
 def _messages_to_dicts(raw: list) -> list[dict]:
     """Convert checkpointer messages to the role/content dicts the web UI renders.
 
-    Pure (no agent/state access) so it's unit-testable. AIMessages with a
-    ``show_file`` tool call yield a structured ``{"role": "show_file", "path": …}``
-    directive (the web UI embeds the file); any other calls stay as the
-    ``"tools"`` text line, and plain content is an ``"assistant"`` message."""
+    Pure (no agent/state access) so it's unit-testable. A ``show_file`` call with
+    a renderable path yields a ``{"role": "show_file", "path": …}`` directive (the
+    web UI embeds the file); every other tool call — including a show_file call
+    that can't render — becomes the ``"tools"`` text line, which also carries the
+    message's own content when it has calls. A message with content and no tool
+    calls is an ``"assistant"`` message; a HumanMessage is ``"user"``."""
     msgs: list[dict] = []
     for m in raw:
         if isinstance(m, HumanMessage):
@@ -40,17 +59,15 @@ def _messages_to_dicts(raw: list) -> list[dict]:
         elif isinstance(m, AIMessage):
             calls = getattr(m, "tool_calls", None)
             if calls:
-                non_show = [c for c in calls if c.get("name") != "show_file"]
-                if non_show or m.content:
-                    msgs.append({"role": "tools",
-                                 "content": _render_calls(non_show, m.content)})
+                shown, other = [], []
                 for c in calls:
-                    if c.get("name") == "show_file":
-                        # args are untrusted model output: a non-string path
-                        # (list/dict) would crash the renderer's urllib.quote.
-                        path = (c.get("args") or {}).get("path", "")
-                        if path and isinstance(path, str):
-                            msgs.append({"role": "show_file", "path": path})
+                    path = _showable_path(c)
+                    (shown if path else other).append(path or c)
+                if other or m.content:
+                    msgs.append({"role": "tools",
+                                 "content": _render_calls(other, m.content)})
+                for path in shown:
+                    msgs.append({"role": "show_file", "path": path})
             elif m.content:
                 msgs.append({"role": "assistant", "content": m.content})
     return msgs

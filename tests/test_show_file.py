@@ -198,17 +198,26 @@ class TestMessagesToDicts:
         assert out == [{"role": "user", "content": "hi"},
                        {"role": "assistant", "content": "hello"}]
 
-    def test_show_file_empty_path_skipped(self):
+    def _no_directive(self, args):
         from assist.thread import _messages_to_dicts
-        assert _messages_to_dicts([self._ai(tool_calls=[
-            {"name": "show_file", "args": {}, "id": "1"}])]) == []
+        out = _messages_to_dicts([self._ai(tool_calls=[
+            {"name": "show_file", "args": args, "id": "1"}])])
+        assert not any(d["role"] == "show_file" for d in out)
+        return out
 
-    def test_show_file_non_string_path_skipped(self):
-        # args are untrusted model output; a non-string path must not become a
-        # directive (it would crash the renderer's urllib.quote).
-        from assist.thread import _messages_to_dicts
-        assert _messages_to_dicts([self._ai(tool_calls=[
-            {"name": "show_file", "args": {"path": ["a", "b"]}, "id": "1"}])]) == []
+    def test_show_file_empty_path_no_directive(self):
+        self._no_directive({})
+
+    def test_show_file_non_string_path_no_directive(self):
+        # untrusted model output; a non-string path must not become a directive
+        # (it would crash the renderer's urllib.quote).
+        self._no_directive({"path": ["a", "b"]})
+
+    def test_show_file_unsupported_ext_falls_back_to_tools_line(self):
+        # An out-of-spec show_file (e.g. .txt) must NOT embed the viewer route
+        # (which would render a 415) — it shows as a normal tool-call line.
+        out = self._no_directive({"path": "notes.txt"})
+        assert any(d["role"] == "tools" and "show_file" in d["content"] for d in out)
 
     def test_render_tool_calls_empty_when_no_calls(self):
         # The CLI prints this per AIMessage; a plain assistant message must
