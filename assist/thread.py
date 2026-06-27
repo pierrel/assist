@@ -16,8 +16,14 @@ from assist.thread_queue import THREAD_QUEUE
 logger = logging.getLogger(__name__)
 
 def render_tool_calls(message: AIMessage) -> str:
-    return _render_calls(getattr(message, "tool_calls", None) or [],
-                         getattr(message, "content", None))
+    """The tool-call text line for a message's calls, or "" when it has none.
+    The CLI prints this for every AIMessage, so a message with no tool calls
+    must render empty — otherwise its plain content (already streamed/printed
+    separately) would be duplicated."""
+    calls = getattr(message, "tool_calls", None)
+    if not calls:
+        return ""
+    return _render_calls(calls, getattr(message, "content", None))
 
 
 def _messages_to_dicts(raw: list) -> list[dict]:
@@ -40,8 +46,10 @@ def _messages_to_dicts(raw: list) -> list[dict]:
                                  "content": _render_calls(non_show, m.content)})
                 for c in calls:
                     if c.get("name") == "show_file":
+                        # args are untrusted model output: a non-string path
+                        # (list/dict) would crash the renderer's urllib.quote.
                         path = (c.get("args") or {}).get("path", "")
-                        if path:
+                        if path and isinstance(path, str):
                             msgs.append({"role": "show_file", "path": path})
             elif m.content:
                 msgs.append({"role": "assistant", "content": m.content})

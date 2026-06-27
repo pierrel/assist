@@ -28,7 +28,9 @@ class TestShowFileTool:
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
-    wd = tmp_path / "t1" / "domain"   # == thread_default_working_dir("t1")
+    # == thread_default_working_dir("t1"); use the constant so the test tracks
+    # the default working-dir name if it ever changes.
+    wd = tmp_path / "t1" / web.MANAGER.DEFAULT_THREAD_WORKING_DIRECTORY
     wd.mkdir(parents=True)
     return wd
 
@@ -187,3 +189,16 @@ class TestMessagesToDicts:
         from assist.thread import _messages_to_dicts
         assert _messages_to_dicts([self._ai(tool_calls=[
             {"name": "show_file", "args": {}, "id": "1"}])]) == []
+
+    def test_show_file_non_string_path_skipped(self):
+        # args are untrusted model output; a non-string path must not become a
+        # directive (it would crash the renderer's urllib.quote).
+        from assist.thread import _messages_to_dicts
+        assert _messages_to_dicts([self._ai(tool_calls=[
+            {"name": "show_file", "args": {"path": ["a", "b"]}, "id": "1"}])]) == []
+
+    def test_render_tool_calls_empty_when_no_calls(self):
+        # The CLI prints this per AIMessage; a plain assistant message must
+        # render empty so its content isn't duplicated.
+        from assist.thread import render_tool_calls
+        assert render_tool_calls(self._ai(content="hello, no tools")) == ""

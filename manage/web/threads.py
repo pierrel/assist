@@ -1038,10 +1038,14 @@ def _render_show_file(tid: str, path: str) -> str:
 
 
 @app.get("/thread/{tid}/show")
-async def show_file_view(tid: str, path: str):
+def show_file_view(tid: str, path: str):
     """Render a file from the thread's agent workspace for embedding: pdf as
-    bytes (browser viewer), md/org as a styled HTML page.  Pure renderers (no
-    subprocess), so safe to run inline on the event loop."""
+    bytes (browser viewer), md/org as a styled HTML page.
+
+    Declared SYNC (not ``async def``) on purpose: the file read and the
+    markdown/org conversion are blocking CPU/IO and a shown file can be large,
+    so FastAPI runs this in its threadpool, keeping the single-worker event
+    loop free (the repo's event-loop-liveness rule)."""
     _existing_thread_dir(tid)  # 404 on a bad/missing tid (traversal-safe)
     fpath = _safe_workspace_file(tid, path)
     if fpath is None or not os.path.isfile(fpath):
