@@ -19,6 +19,11 @@ the user said them** ("home", "the Ferry Building", "123 Main St", "the airport"
   you choose which to highlight when you reply.
 - If the user gives only one place ("how far is the airport"), the other is
   usually "home" or the place from context — if it's unclear, ask.
+- For a short or ambiguous place name, include the city/area from context (pass
+  "Ferry Building San Francisco", not just "the Ferry Building") so the geocoder
+  picks the right place. The result echoes the resolved place names — if one
+  looks wrong, retry with a more specific name or tell the user, and don't trust
+  those numbers.
 
 ## Presenting the result
 
