@@ -269,3 +269,146 @@ def search_internet(
         for r in results[:max_results]
     ]
     return str(normalized)
+
+
+# --- Local travel (real-world time/distance across car/bike/walk/transit) ---
+#
+# Same shape as search_internet: read self-hosted service URLs from env, call
+# them, normalize to a model-facing string, FAIL LOUD-BUT-RETURNED (never raise
+# into the agent loop).  Geocoding (Nominatim) + car/bike/walk routing (Valhalla)
+# are LOCAL/private; transit is a HOSTED API (Navitia) fed COORDS ONLY (never
+# place names) — see docs/2026-06-28-local-travel-skill.org.
+_TRAVEL_TIMEOUT_S = 12.0
+# Valhalla costing per user-facing mode (transit is not Valhalla — it's Navitia).
+_VALHALLA_COSTING = (("Car", "auto"), ("Bike", "bicycle"), ("Walk", "pedestrian"))
+
+_TRAVEL_UNAVAILABLE_MESSAGE = (
+    "Travel routing is unavailable — the routing service could not be reached. "
+    "Tell the user you couldn't look up travel times right now. Do NOT estimate "
+    "the distance or time from your own knowledge — give no numbers."
+)
+
+
+def _travel_unavailable(reason: str) -> str:
+    logger.error("Travel unavailable: %s", reason)
+    return _TRAVEL_UNAVAILABLE_MESSAGE
+
+
+def _fmt_duration(seconds: float) -> str:
+    m = int(round(seconds / 60.0))
+    if m < 60:
+        return f"{m} min"
+    return f"{m // 60} h {m % 60:02d} min"
+
+
+def _fmt_distance_m(meters: float) -> str:
+    km = meters / 1000.0
+    return f"{km:.1f} km" if km >= 0.1 else f"{int(round(meters))} m"
+
+
+def _geocode(geo_url: str, place: str) -> dict | None:
+    """Resolve a place NAME to coords via the self-hosted Nominatim (local, so no
+    leak).  Returns {lat, lon, name} (top hit, with the resolved display name so
+    the agent can tell the user what it routed to), or None if nothing matched."""
+    try:
+        resp = requests.get(
+            geo_url.rstrip("/") + "/search",
+            params={"q": place, "format": "json", "limit": 1},
+            headers={"User-Agent": "assist-travel"},
+            timeout=_TRAVEL_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        hits = resp.json()
+    except Exception as e:
+        logger.error("Geocoder %s failed for %r: %s", geo_url, place, e)
+        return None
+    if not isinstance(hits, list) or not hits:
+        return None
+    h = hits[0]
+    try:
+        return {"lat": float(h["lat"]), "lon": float(h["lon"]),
+                "name": h.get("display_name", place)}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _valhalla_route(route_url: str, o: dict, d: dict, costing: str) -> dict | None:
+    """One car/bike/walk route via the self-hosted Valhalla.  Returns
+    {duration_s, distance_m} or None (service down / no route)."""
+    try:
+        resp = requests.post(
+            route_url.rstrip("/") + "/route",
+            json={"locations": [{"lat": o["lat"], "lon": o["lon"]},
+                                {"lat": d["lat"], "lon": d["lon"]}],
+                  "costing": costing, "units": "kilometers"},
+            timeout=_TRAVEL_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        summary = resp.json()["trip"]["summary"]
+        return {"duration_s": float(summary["time"]),
+                "distance_m": float(summary["length"]) * 1000.0}
+    except Exception as e:
+        logger.warning("Valhalla %s (%s) failed: %s", route_url, costing, e)
+        return None
+
+
+def _navitia_journey(o: dict, d: dict) -> dict | None:
+    """Transit journey via the HOSTED Navitia API, COORDS ONLY (never names).
+    Returns {duration_s} or None.  Transit distance is omitted (multimodal legs
+    don't give a clean single road-distance — see the design doc)."""
+    base = os.getenv("ASSIST_TRANSIT_URL")
+    token = os.getenv("ASSIST_TRANSIT_TOKEN")
+    if not base or not token:
+        return None
+    try:
+        resp = requests.get(
+            base.rstrip("/") + "/journeys",
+            params={"from": f"{o['lon']};{o['lat']}", "to": f"{d['lon']};{d['lat']}"},
+            headers={"Authorization": token},
+            timeout=_TRAVEL_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        journeys = resp.json().get("journeys") or []
+    except Exception as e:
+        logger.warning("Navitia transit failed: %s", e)
+        return None
+    public = [j for j in journeys if j.get("duration")]
+    if not public:
+        return None
+    return {"duration_s": float(min(j["duration"] for j in public))}
+
+
+def travel(origin: str, destination: str) -> str:
+    """Real-world travel time and distance between two places, by car, bike,
+    walking, and public transit.
+
+    Use this for any "how long / how far from A to B", "how do I get to X", or
+    "is it faster to bike or take the train" question.  Pass plain place
+    NAMES/addresses as the user said them (e.g. "the Ferry Building", "123 Main
+    St") — do NOT pass coordinates.  Returns a short per-mode summary of times and
+    distances computed by the routing service; relay those numbers, never invent
+    your own.  Covers a metro area and nearby cities.
+    """
+    geo_url = os.getenv("ASSIST_GEOCODER_URL")
+    if not geo_url:
+        return _travel_unavailable("ASSIST_GEOCODER_URL is not set")
+    o = _geocode(geo_url, origin)
+    if o is None:
+        return (f"I couldn't find a place matching '{origin}'. Ask the user to "
+                "clarify or give a more specific location.")
+    d = _geocode(geo_url, destination)
+    if d is None:
+        return (f"I couldn't find a place matching '{destination}'. Ask the user "
+                "to clarify or give a more specific location.")
+
+    route_url = os.getenv("ASSIST_ROUTING_URL")
+    lines = [f'Travel from "{o["name"]}" to "{d["name"]}":']
+    for label, costing in _VALHALLA_COSTING:
+        r = _valhalla_route(route_url, o, d, costing) if route_url else None
+        lines.append(
+            f"- {label}: {_fmt_duration(r['duration_s'])}, {_fmt_distance_m(r['distance_m'])}"
+            if r else f"- {label}: unavailable")
+    t = _navitia_journey(o, d)
+    lines.append(f"- Transit: {_fmt_duration(t['duration_s'])}" if t
+                 else "- Transit: unavailable")
+    return "\n".join(lines)

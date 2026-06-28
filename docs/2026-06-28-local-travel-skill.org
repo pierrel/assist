@@ -111,7 +111,33 @@ comparison across modes (what Pierre asked for).
 - Any hosted call (see fork) gets **coordinates only, never place names**, and the
   coord-leak is its acknowledged privacy cost.
 
-* Open forks — PAUSE, bring to Pierre (only the two genuinely his)
+* Forks — RESOLVED (Pierre, 2026-06-28)
+1. *Transit = hosted API, coords-only.* Self-host car/bike/walk (Valhalla, fully
+   private from a static OSM extract); transit via a HOSTED transit API fed only
+   coordinates (never place names). Delivers all 4 modes, no GTFS upkeep. Privacy
+   cost: the transit call leaks origin/dest coords to the transit provider —
+   acknowledged and bounded (coords only). *Recommended provider:* **Navitia**
+   (navitia.io — open-source transit engine, free dev API key, coords-in/journeys,
+   GTFS-backed) — best fit for "hosted but private-leaning + coords-only";
+   swappable via ``ASSIST_TRANSIT_URL``. Confirm coverage for the chosen region.
+2. *Stand up the infra now.* Provision Valhalla (car/bike/walk) + Nominatim
+   (geocoding) + the region OSM extract. **Blockers from Pierre to actually run it:**
+   (a) the **region/metro** (which Geofabrik OSM extract — set in ``.dev.env``, not
+   committed); (b) a **Navitia API token** (``ASSIST_TRANSIT_TOKEN``). NOTE: the
+   Nominatim OSM import is heavy (PostgreSQL import, lots of disk + time, region-
+   dependent) and Valhalla tile-build is CPU/disk-heavy — both one-time, no GPU.
+
+* Resolved backend/env contract
+- ``ASSIST_GEOCODER_URL`` — self-hosted **Nominatim** (name → coords; LOCAL, so
+  geocoding never leaks; only the transit call sees coords).
+- ``ASSIST_ROUTING_URL`` — self-hosted **Valhalla** (car / bike / walk).
+- ``ASSIST_TRANSIT_URL`` + ``ASSIST_TRANSIT_TOKEN`` — hosted **Navitia** (transit,
+  coords-only).
+The ``travel`` tool: geocode both endpoints once (Nominatim), query Valhalla per
+static mode + Navitia for transit, normalize to one per-mode summary, return a
+model-facing string (fail-loud-returned per backend, like ``search_internet``).
+
+* (historical) Open forks — were brought to Pierre
 1. *Transit (the cost/privacy fork).* Car/bike/walk self-host cleanly from a
    static OSM extract — cheap + fully private. Transit is the expensive corner:
    GTFS feeds go stale and need constant refresh, and stale transit data gives

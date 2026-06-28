@@ -13,7 +13,7 @@ from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
 from assist.spec import AgentSpec
-from assist.tools import read_url, search_internet
+from assist.tools import read_url, search_internet, travel
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE, DOMAIN_SKILLS_PATH
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
@@ -366,7 +366,10 @@ def create_agent(model: BaseChatModel,
         middleware=mw + [skills_mw, memory_mw, logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
-        tools=list(spec.tools),
+        # `travel` is a built-in: a direct deterministic A->B time/distance lookup
+        # the main agent answers inline (gated by the travel skill), like a
+        # calculation — not web research, so not on the research sub-agent.
+        tools=list(spec.tools) + [travel],
     )
 
     return agent
