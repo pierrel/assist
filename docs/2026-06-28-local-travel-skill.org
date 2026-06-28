@@ -1,6 +1,26 @@
 #+TITLE: local travel skill — real-world time/distance across transit, walk, bike, car
 #+DATE: <2026-06-28>
-#+STATUS: design (Phase 1) — paused for Pierre's forks before implementation
+#+STATUS: built + MOTIS live (Bay Area, BART transit); pending 511 token + review/PR
+
+* Provisioned + verified (2026-06-28)
+MOTIS is stood up and LIVE at ``http://127.0.0.1:8088`` (Docker ``motis-travel``,
+``--restart unless-stopped``), infra at ``/home/pierre/motis-travel/`` (NorCal OSM
++ BART open GTFS bootstrap; ``data/`` = built graph). Live-verified: geocode ✓;
+car/bike/walk routing ✓ (Civic Center→Mission car 2 min; →Oakland City Hall car
+16 min); **transit ✓ via BART** (→Oakland City Hall transit 23 min, cross-bay).
+Tool rewritten against the live MOTIS API (one service: ``/api/v1/geocode`` +
+``/api/v1/plan``); 8 mocked tests + 726 unit tests green; ``ASSIST_ROUTING_URL``
+in ``.dev.env``.
+Known live edges: (1) a POI whose geocode hit is off the street/transit network
+(e.g. the Ferry *ferry-terminal* on the pier) returns "unavailable" for car/transit
+while bike/walk reach it — honest, minor; (2) transit coverage = loaded feeds
+(BART now), so e.g. San Jose transit is NA until the **511 regional GTFS** is added
+(needs Pierre's free 511 token) — adding it = drop the feed in MOTIS config +
+re-import, NO code change.
+Remaining: 511 token (full Bay Area transit), code-review loop, live eval, PR,
+deploy (set ASSIST_ROUTING_URL in .deploy.env + sandbox egress allowlist). NOT
+merged/deployed.
+
 
 * Goal
 A travel skill for assist: real-world **travel time AND distance** between places,
@@ -111,7 +131,37 @@ comparison across modes (what Pierre asked for).
 - Any hosted call (see fork) gets **coordinates only, never place names**, and the
   coord-leak is its acknowledged privacy cost.
 
-* Forks — RESOLVED (Pierre, 2026-06-28)
+* REVISED after Pierre (2026-06-28, round 2): MOTIS single-service, self-host, regional+expandable
+Pierre is in San Francisco; pushed back (rightly) that self-host for ONE metro is
+~"a cron + a local service" — true, because the Bay Area has a *single consolidated
+regional GTFS* (511.org / MTC). The "treadmill" only applies to *worldwide
+multi-agency* self-hosting; worldwide turnkey transit ≈ Google only.
+
+**Decisions:**
+- *Engine = MOTIS* (one Docker service): ingests OSM + GTFS and does geocoding +
+  multimodal routing (car / bike / walk / transit) in ONE service. Drops the
+  earlier Navitia(hosted) + Valhalla + Nominatim three-service split entirely.
+- *Self-host, fully private* (no hosted fallback). Out-of-region queries return an
+  honest "no coverage for that area yet" — never a guess, never a third-party call.
+- *Regional now, expandable BY DESIGN.* v1 loads the **Bay Area** (511 regional
+  GTFS + a NorCal OSM extract); MOTIS takes multiple OSM + GTFS datasets in one
+  config, so **adding a region = drop in its extract+feed + rebuild — NO code
+  change** (the tool just talks to the one MOTIS endpoint). Expectation: grow the
+  loaded regions over time.
+- *Env contract collapses to one:* ``ASSIST_ROUTING_URL`` (MOTIS). No
+  ``ASSIST_GEOCODER_URL`` / ``ASSIST_TRANSIT_*`` — MOTIS does geocode + all modes.
+- *Code:* the ``travel`` tool will be (re)written against the **live MOTIS API**
+  (``/api/v1/geocode`` + ``/api/v1/plan``) so response shapes are verified, not
+  guessed — replacing the placeholder Navitia/Valhalla code on this branch.
+- *Provisioning (the infra):* pull the MOTIS image, fetch a Bay Area/NorCal OSM
+  extract + GTFS (the 511 regional combined feed needs a free 511 token; open
+  agency feeds like BART/Muni can bootstrap transit without it), ``motis import``
+  to build the graph (metro = minutes, ~GB; CPU/disk, no GPU), run the server, add
+  a cron/systemd-timer to refresh GTFS + rebuild. **Blocker from Pierre:** a free
+  **511 API token** for the full Bay Area regional feed (or OK to bootstrap with
+  open agency feeds first).
+
+* (superseded) Forks — RESOLVED (Pierre, 2026-06-28)
 1. *Transit = hosted API, coords-only.* Self-host car/bike/walk (Valhalla, fully
    private from a static OSM extract); transit via a HOSTED transit API fed only
    coordinates (never place names). Delivers all 4 modes, no GTFS upkeep. Privacy
