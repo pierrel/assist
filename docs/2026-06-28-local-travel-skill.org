@@ -17,9 +17,19 @@ while bike/walk reach it — honest, minor; (2) transit coverage = loaded feeds
 (BART now), so e.g. San Jose transit is NA until the **511 regional GTFS** is added
 (needs Pierre's free 511 token) — adding it = drop the feed in MOTIS config +
 re-import, NO code change.
-Remaining: 511 token (full Bay Area transit), code-review loop, live eval, PR,
-deploy (set ASSIST_ROUTING_URL in .deploy.env + sandbox egress allowlist). NOT
-merged/deployed.
+Code review (2 lenses) DONE: one finding fixed — `_plan_direct`/`_plan_transit`
+read ``it["duration"]`` unguarded, which could raise into the agent loop on a
+malformed MOTIS itinerary (the module's contract is fail-loud-but-RETURNED);
+wrapped both + a test. 727 unit green.
+Focal invocation eval DONE (live MOTIS): the agent loads the travel skill + calls
+``travel()`` for distance / mode-comparison questions — 3/3 + 3/3. An instrumented
+run exposed a geocoder-ranking weakness (bare "the Ferry Building" mis-resolved);
+the agent caught the resolved-name mismatch and refused to trust it. Mitigated by
+a skill nudge to include the city/area for ambiguous names; deeper fix (Nominatim
+or MOTIS geocoder tuning) is a possible later improvement.
+Remaining (held for Pierre): 511 token (full Bay Area transit beyond BART), PR +
+Copilot, deploy (ASSIST_ROUTING_URL in .deploy.env + sandbox egress allowlist +
+MOTIS reachable from the sandbox). NOT merged/deployed.
 
 
 * Goal
