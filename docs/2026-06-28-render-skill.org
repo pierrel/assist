@@ -166,6 +166,17 @@ is ready for it WITHOUT format change:
   bundled afterthought (the 2026-06-10 incident was exactly a rushed hot-path
   event-loop change).  Tracked as a follow-up.
 
+- *Accepted: a ```render fence NESTED inside a longer outer code fence is still
+  lifted.* The parser is a line-anchored regex, so a ```render example shown
+  INSIDE an outer ```` fence (to display render syntax AS code) becomes an embed
+  instead of a code sample (Copilot rd3). Declined the fence-nesting-scanner fix:
+  the skill emits BARE top-level blocks and only loads on show/view requests (not
+  "explain the render feature"), so a nested example doesn't arise in normal use;
+  there's no security/data impact (the path still goes through _safe_workspace_file
+  → a bad example path just 404s); and a fence-state scanner is real complexity in
+  a hot render path for a corner the feature never hits. Clean follow-up (a linear
+  fence-aware scan) IF it's ever observed.
+
 * Open questions / risks
 - *Block-emission reliability* (the crux — measure with the focal eval).
 - *Streaming:* during a streamed turn the block arrives as text; decide whether
