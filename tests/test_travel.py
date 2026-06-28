@@ -99,6 +99,20 @@ class TestTravel:
             out = tools.travel("civic center", "ferry building")
         assert "- Car: unavailable" in out and "- Bike: 48 min" in out
 
+    def test_malformed_itinerary_does_not_raise(self, routing_env):
+        # Module contract: never raise into the agent loop. A direct itinerary
+        # missing `duration` / a transit itinerary missing it -> "unavailable".
+        def malformed(url, params=None, **kw):
+            if "/api/v1/plan" in url:
+                if "directModes" in params:
+                    return _Resp({"direct": [{"legs": [{"distance": 100.0}]}]})  # no duration
+                if "transitModes" in params:
+                    return _Resp({"itineraries": [{}]})  # no duration
+            return _fake_get(url, params=params, **kw)
+        with patch.object(tools.requests, "get", malformed):
+            out = tools.travel("civic center", "ferry building")  # must not raise
+        assert "- Car: unavailable" in out and "- Transit: unavailable" in out
+
     def test_transit_no_coverage_is_unavailable(self, routing_env):
         def no_transit(url, params=None, **kw):
             if "/api/v1/plan" in url and "transitModes" in params:

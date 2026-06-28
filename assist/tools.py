@@ -349,9 +349,12 @@ def _plan_direct(o: dict, d: dict, mode: str) -> dict | None:
     direct = (data or {}).get("direct") or []
     if not direct:
         return None
-    it = direct[0]
-    dist = sum(leg.get("distance", 0) or 0 for leg in it.get("legs", []))
-    return {"duration_s": float(it["duration"]), "distance_m": float(dist)}
+    try:  # never raise into the agent loop on a malformed itinerary (module contract)
+        it = direct[0]
+        dist = sum(leg.get("distance", 0) or 0 for leg in it.get("legs", []))
+        return {"duration_s": float(it["duration"]), "distance_m": float(dist)}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _plan_transit(o: dict, d: dict) -> dict | None:
@@ -364,7 +367,10 @@ def _plan_transit(o: dict, d: dict) -> dict | None:
     its = (data or {}).get("itineraries") or []
     if not its:
         return None
-    return {"duration_s": float(min(it["duration"] for it in its))}
+    try:  # never raise into the agent loop on a malformed itinerary (module contract)
+        return {"duration_s": float(min(it["duration"] for it in its))}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def travel(origin: str, destination: str) -> str:
