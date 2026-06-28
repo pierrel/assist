@@ -1,0 +1,140 @@
+#+TITLE: local travel skill — real-world time/distance across transit, walk, bike, car
+#+DATE: <2026-06-28>
+#+STATUS: design (Phase 1) — paused for Pierre's forks before implementation
+
+* Goal
+A travel skill for assist: real-world **travel time AND distance** between places,
+**within a city and to nearby cities**, across **public transit, walking, biking,
+and car**. **Private / self-hosted preferred** (Pierre: "private or local if
+possible") — same philosophy as the self-hosted SearXNG search backend: on
+hardware we control, no third-party leak of where the user is going.
+
+* Requirements
+- Input is usually place *names/descriptions* ("from home to the Ferry Building",
+  "downtown to the airport"), not coordinates → need **geocoding** (name → lat/lon).
+- Output: per-mode **duration + distance** (and enough to compare modes). Possibly
+  a short human summary the agent relays.
+- Modes: transit, walk, bike, car — ideally one call can compare them.
+- Scope: intra-city + nearby cities (a metro region), not cross-country.
+
+* Candidate self-hosted stack (the core design research)
+All are OSM-based, Dockerized, return time+distance.
+
+** Routing engine (the main fork)
+- *Valhalla* — auto / bicycle / pedestrian **and multimodal transit** (OSM + GTFS).
+  Best single-engine coverage of all four modes; isochrones; tile-based.
+- *GraphHopper* — car / bike / foot, **+ public transit via GTFS**. Mature, JVM.
+- *OSRM* — very fast car/bike/foot, **NO transit**. Would need a second engine
+  for transit → more moving parts.
+- *OpenTripPlanner (OTP)* — **best-in-class transit** (GTFS + OSM), multimodal;
+  heaviest (JVM, more memory).
+- *Tentative:* **Valhalla** — one engine for car/bike/walk + transit; confirm its
+  transit quality vs OTP at build time.
+
+** Geocoding (name → coordinates)
+- *Nominatim* (self-hosted OSM) or *Photon* (fast OSM autocomplete). Needed because
+  the user names places. Self-hosted to keep it private.
+
+** Data
+- *OSM extracts* (Geofabrik) for the metro region(s) of interest.
+- *GTFS feeds* for transit (per-agency; transit.land / the Mobility Database
+  aggregate them). Transit quality is entirely down to having current GTFS.
+
+* Architecture (Löwy: isolate the volatile resource)
+- The **routing engine is a Resource**; a thin **ResourceAccess** wrapper (the
+  assist tool) isolates the engine choice so Valhalla↔OTP↔hosted can be swapped
+  without touching the skill or the agent. The engine URL is config/env, not
+  hard-coded.
+- The **skill is guidance** (when/how to call the tool, how to present options);
+  the small-model behavior lives there.
+- Tool shape (sketch, to firm up after the forks): something like
+  ``travel(origin, destination, modes=[...])`` → per-mode ``{duration, distance}``,
+  with geocoding done inside the tool (name → coords) so the agent passes plain
+  place names. Lives in ``assist/tools.py`` + a ``assist/skills/travel/SKILL.md``.
+- **Sandbox egress:** the tool calls the routing/geocoding host from inside the
+  per-turn sandbox, so that host must be on the sandbox **egress allowlist** —
+  verify in-sandbox, not on the dev box (memory: skill-network-access-via-sandbox-egress).
+
+* Privacy / data hygiene
+- Self-hosted = destinations never leave our hardware (the whole point of "private").
+- **No real locale/addresses in tracked files** (region extracts, home address,
+  test fixtures) — flow locale through env/config, synthetic places in tests
+  (the repo's no-real-PII / no-real-paths rules).
+- If a hosted-API fallback is ever allowed (see forks), it would leak the query to
+  a third party — so it must be opt-in and never the default for private queries.
+
+* Design-review outcomes (4 lenses — folded in)
+Decisions taken (the env-URL seam makes the engine choice cheap/reversible, so
+these are design-phase calls, not Pierre forks):
+- *One ``travel(origin, destination)`` tool in ``assist/tools.py``*, shaped exactly
+  like ``search_internet``: read ``ASSIST_ROUTING_URL`` / ``ASSIST_GEOCODER_URL``
+  from env, call the engine, **normalize at the boundary** to a fixed
+  engine-independent return shape. **NO ResourceAccess class hierarchy** (premature
+  for one engine — both simplicity + clean-interfaces flagged it). Split to
+  ``assist/travel.py`` only if a real second engine ever lands.
+- *Names in, geocoding hidden* in a private ``_geocode`` (the model passes plain
+  place names — coords-in would make it hallucinate coordinates that fail
+  silently). *Always return all four modes* — no ``modes`` arg (a list-of-enums is
+  the least checkable arg for the small model); mode emphasis is a SKILL
+  *presentation* concern. *Plain tool, NOT a sub-agent* (one deterministic call;
+  a sub-agent invites spurious delegation).
+- *Return shape (pinned, engine-independent):* per mode either
+  ``{mode, duration_s:int, distance_m:int, summary:str}`` or
+  ``{mode, unavailable:reason}``; plus the *resolved* origin/destination names so
+  the agent can say what it routed to (ambiguity → relay candidates, don't
+  silently pick). Fixed units (seconds/meters) + a preformatted human ``summary``
+  string the small model can relay verbatim.
+- *Fail loud-but-returned* like ``_search_unavailable``: service unset/unreachable
+  → a model-facing message the agent relays, with an explicit "do NOT estimate
+  times/distances from your own knowledge" (a small model will happily fabricate
+  "~20 min" — the whole point is *accurate* numbers).
+- *Engine: Valhalla* for car/bike/walk (one engine, OSM extract, behind the URL).
+- *Config = plain env* (``ASSIST_*`` namespace), not ``AgentSpec`` (infra config,
+  no embedder need). *Built-in tool* (registered in ``agent.py`` like
+  ``search_internet``) — generic capability; emacsos inherits it.
+- *Transit "distance" asymmetry:* Valhalla transit yields duration + legs, not a
+  clean single road-distance like car/bike/walk. Report total leg distance or omit
+  with a reason — don't imply uniform ``{duration, distance}`` across all four.
+
+* Non-goals (v1)
+No isochrones, no turn-by-turn directions, no map images. Just time+distance
+comparison across modes (what Pierre asked for).
+
+* Privacy guardrails (must hold)
+- Region OSM/GTFS extracts are **never committed** — out-of-repo infra dir, like
+  the SearXNG container data.
+- Test/eval fixtures use **synthetic origin/destination pairs in a region Pierre
+  does NOT live in** (two public landmarks in some other city), so assertions are
+  stable without encoding where he lives. "Synthetic" ≠ "fake names near home".
+- Locale + service URLs live in ``.dev.env`` / ``.deploy.env`` with ``.example``
+  placeholders. Routing host on the sandbox **egress allowlist**.
+- Any hosted call (see fork) gets **coordinates only, never place names**, and the
+  coord-leak is its acknowledged privacy cost.
+
+* Open forks — PAUSE, bring to Pierre (only the two genuinely his)
+1. *Transit (the cost/privacy fork).* Car/bike/walk self-host cleanly from a
+   static OSM extract — cheap + fully private. Transit is the expensive corner:
+   GTFS feeds go stale and need constant refresh, and stale transit data gives
+   *confidently wrong* times. Options: (a) ship car/bike/walk now, defer transit;
+   (b) self-host transit too (own the GTFS upkeep); (c) hosted transit API fed
+   COORDS-ONLY (never names) for the transit mode, self-host the rest.
+2. *Provision the infra now, or build the code first?* The tool/skill build against
+   ``ASSIST_ROUTING_URL`` regardless. Do we stand up the Valhalla(+geocoder) Docker
+   stack + load the region in THIS work, or build the code now and provision the
+   service as a separate step?
+   - (*Region/locale* is needed as config either way; Pierre supplies it via
+     ``.dev.env`` when we provision — kept out of tracked files, not asked in chat.)
+
+* Validation (later)
+- No real-LLM eval until the routing service exists. Validate the tool against the
+  live local service (a known origin/destination → sane time/distance per mode),
+  then a focal skill eval (does the agent call ``travel`` for "how long to X?").
+- assist's normal three-phase flow once the forks are settled.
+
+* Critical files (anticipated)
+- New: ``assist/skills/travel/SKILL.md``, this doc, travel tool(s) in
+  ``assist/tools.py`` (or a new ``assist/travel.py`` ResourceAccess module).
+- Config: a ``$TRAVEL_ROUTING_URL`` / ``$TRAVEL_GEOCODER_URL`` env contract; the
+  sandbox egress allowlist entry.
+- Infra (separate from the assist code): the routing/geocoder Docker services +
+  OSM/GTFS data (likely outside this repo, like searxng/llamacpp).
