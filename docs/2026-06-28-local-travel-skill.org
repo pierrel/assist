@@ -3,8 +3,8 @@
 #+STATUS: built + MOTIS live (Bay Area, BART transit); pending 511 token + review/PR
 
 * Provisioned + verified (2026-06-28)
-MOTIS is stood up and LIVE at ``http://127.0.0.1:8088`` (Docker ``motis-travel``,
-``--restart unless-stopped``), infra at ``/home/pierre/motis-travel/`` (NorCal OSM
+MOTIS is stood up and LIVE at ``$ASSIST_ROUTING_URL`` (Docker ``motis-travel``,
+``--restart unless-stopped``), infra at ``~/motis-travel/`` (NorCal OSM
 + BART open GTFS bootstrap; ``data/`` = built graph). Live-verified: geocode ✓;
 car/bike/walk routing ✓ (Civic Center→Mission car 2 min; →Oakland City Hall car
 16 min); **transit ✓ via BART** (→Oakland City Hall transit 23 min, cross-bay).
@@ -33,9 +33,10 @@ MOTIS reachable from the sandbox). NOT merged/deployed.
 
 
 * Goal
-A travel skill for assist: real-world **travel time AND distance** between places,
-**within a city and to nearby cities**, across **public transit, walking, biking,
-and car**. **Private / self-hosted preferred** (Pierre: "private or local if
+A travel skill for assist: real-world **travel time** (and **distance** for
+car/bike/walk; transit returns time only — multimodal legs have no clean single
+road-distance) between places, **within a city and to nearby cities**, across
+**public transit, walking, biking, and car**. **Private / self-hosted preferred** (Pierre: "private or local if
 possible") — same philosophy as the self-hosted SearXNG search backend: on
 hardware we control, no third-party leak of where the user is going.
 

@@ -84,6 +84,15 @@ class TestTravel:
         monkeypatch.delenv("ASSIST_ROUTING_URL", raising=False)
         assert "unavailable" in tools.travel("a", "b").lower()
 
+    def test_service_down_is_unavailable_not_not_found(self, routing_env):
+        # A geocoder/service outage must yield the "unavailable" message, NOT a
+        # misleading "couldn't find that place" (service-down != no-match).
+        def boom(url, params=None, **kw):
+            raise ConnectionError("MOTIS down")
+        with patch.object(tools.requests, "get", boom):
+            out = tools.travel("civic center", "ferry building")
+        assert "unavailable" in out.lower() and "couldn't find" not in out.lower()
+
     def test_place_not_found_asks_to_clarify(self, routing_env):
         with patch.object(tools.requests, "get", _fake_get):
             out = tools.travel("nowhere-xyz", "ferry building")

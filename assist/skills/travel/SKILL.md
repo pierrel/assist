@@ -1,6 +1,6 @@
 ---
 name: travel
-description: Real-world travel time and distance between places by car, bike, walking, and public transit (a metro area and nearby cities). EXAMPLES — "how long from home to the Ferry Building"; "is it faster to bike or take the train downtown"; "drive time to the airport"; "how far is the office"; "can I walk to the park". MUST load before answering any question about travel time, distance, directions, or how to get from one place to another.
+description: Real-world travel time between places by car, bike, walking, and public transit (with distance for car/bike/walk), across a metro area and nearby cities. EXAMPLES — "how long from home to the Ferry Building"; "is it faster to bike or take the train downtown"; "drive time to the airport"; "how far is the office"; "can I walk to the park". MUST load before answering any question about travel time, distance, directions, or how to get from one place to another.
 ---
 
 # Travel — real-world time and distance between places
@@ -27,8 +27,8 @@ the user said them** ("home", "the Ferry Building", "123 Main St", "the airport"
 
 ## Presenting the result
 
-The tool returns a per-mode summary (time and distance) plus the resolved place
-names it routed between. When you reply:
+The tool returns a per-mode summary (time and distance for car/bike/walk; time
+only for transit) plus the resolved place names it routed between. When you reply:
 
 - Lead with the mode the user asked about ("driving is ~25 min"); if they didn't
   name one, give a short comparison across modes.

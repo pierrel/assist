@@ -368,8 +368,9 @@ def create_agent(model: BaseChatModel,
         subagents=[context_sub, research_sub, critique_sub_agent],
         # `travel` is a built-in: a direct deterministic A->B time/distance lookup
         # the main agent answers inline (gated by the travel skill), like a
-        # calculation — not web research, so not on the research sub-agent.
-        tools=list(spec.tools) + [travel],
+        # calculation — not web research, so not on the research sub-agent.  Skip
+        # if a spec already supplies it, so it's never double-registered.
+        tools=list(spec.tools) + ([travel] if travel not in spec.tools else []),
     )
 
     return agent

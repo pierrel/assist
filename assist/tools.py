@@ -310,25 +310,33 @@ def _fmt_distance_m(meters: float) -> str:
     return f"{km:.1f} km" if km >= 0.1 else f"{int(round(meters))} m"
 
 
-def _motis_get(path: str, params: dict) -> dict | None:
-    """GET a MOTIS API path; parsed JSON, or None (service unset/unreachable)."""
+class _TravelBackendError(Exception):
+    """The routing service is unset / unreachable / errored — distinct from a
+    successful response that simply has no match or no route, so travel() can say
+    "unavailable" rather than misleadingly "couldn't find that place"."""
+
+
+def _motis_get(path: str, params: dict) -> dict:
+    """GET a MOTIS API path -> parsed JSON.  Raises _TravelBackendError when the
+    service is unset/unreachable/errors (callers turn that into the unavailable
+    message); a successful-but-empty response is the caller's "no result"."""
     base = os.getenv("ASSIST_ROUTING_URL")
     if not base:
-        return None
+        raise _TravelBackendError("ASSIST_ROUTING_URL is not set")
     try:
         resp = requests.get(base.rstrip("/") + path, params=params,
                             timeout=_TRAVEL_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        logger.warning("MOTIS %s failed: %s", path, e)
-        return None
+        raise _TravelBackendError(f"MOTIS {path} failed: {e}") from e
 
 
 def _geocode(place: str) -> dict | None:
     """Resolve a place NAME to coords via MOTIS geocoding (self-hosted).  Returns
     {lat, lon, name} (top match, with the resolved name so the agent can say what
-    it routed to), or None if nothing matched / the service is down."""
+    it routed to), or None if nothing matched.  Raises _TravelBackendError if the
+    service is down (so the caller distinguishes that from a genuine no-match)."""
     hits = _motis_get("/api/v1/geocode", {"text": place})
     if not isinstance(hits, list) or not hits:
         return None
@@ -343,9 +351,12 @@ def _geocode(place: str) -> dict | None:
 def _plan_direct(o: dict, d: dict, mode: str) -> dict | None:
     """A car/bike/walk (street) route via MOTIS /plan.  Returns
     {duration_s, distance_m} or None (service down / no route)."""
-    data = _motis_get("/api/v1/plan", {
-        "fromPlace": f"{o['lat']},{o['lon']}", "toPlace": f"{d['lat']},{d['lon']}",
-        "directModes": mode, "maxDirectTime": _TRAVEL_MAX_DIRECT_S})
+    try:
+        data = _motis_get("/api/v1/plan", {
+            "fromPlace": f"{o['lat']},{o['lon']}", "toPlace": f"{d['lat']},{d['lon']}",
+            "directModes": mode, "maxDirectTime": _TRAVEL_MAX_DIRECT_S})
+    except _TravelBackendError:
+        return None  # a transient per-mode failure -> that mode shows "unavailable"
     direct = (data or {}).get("direct") or []
     if not direct:
         return None
@@ -361,9 +372,12 @@ def _plan_transit(o: dict, d: dict) -> dict | None:
     """The fastest public-transit journey via MOTIS /plan.  Returns {duration_s}
     or None (no transit coverage / no journey).  Distance is omitted -- multimodal
     legs don't give a clean single road-distance (see the design doc)."""
-    data = _motis_get("/api/v1/plan", {
-        "fromPlace": f"{o['lat']},{o['lon']}", "toPlace": f"{d['lat']},{d['lon']}",
-        "transitModes": "TRANSIT"})
+    try:
+        data = _motis_get("/api/v1/plan", {
+            "fromPlace": f"{o['lat']},{o['lon']}", "toPlace": f"{d['lat']},{d['lon']}",
+            "transitModes": "TRANSIT"})
+    except _TravelBackendError:
+        return None
     its = (data or {}).get("itineraries") or []
     if not its:
         return None
@@ -380,18 +394,20 @@ def travel(origin: str, destination: str) -> str:
     Use this for any "how long / how far from A to B", "how do I get to X", or
     "is it faster to bike or take the train" question.  Pass plain place
     NAMES/addresses as the user said them (e.g. "the Ferry Building", "123 Main
-    St") -- do NOT pass coordinates.  Returns a short per-mode summary of times
-    and distances computed by the routing service; relay those numbers, never
-    invent your own.  Covers the loaded metro area(s); a place outside them comes
-    back as no route, not a guess.
+    St") -- do NOT pass coordinates.  Returns a short per-mode summary computed by
+    the routing service -- time and distance for car/bike/walk, time for transit
+    (transit distance isn't reported); relay those numbers, never invent your own.
+    Covers the loaded metro area(s); a place outside them comes back as no route,
+    not a guess.
     """
-    if not os.getenv("ASSIST_ROUTING_URL"):
-        return _travel_unavailable("ASSIST_ROUTING_URL is not set")
-    o = _geocode(origin)
+    try:
+        o = _geocode(origin)
+        d = _geocode(destination)
+    except _TravelBackendError as e:
+        return _travel_unavailable(str(e))  # service down -> "unavailable", not "not found"
     if o is None:
         return (f"I couldn't find a place matching '{origin}'. Ask the user to "
                 "clarify or give a more specific location.")
-    d = _geocode(destination)
     if d is None:
         return (f"I couldn't find a place matching '{destination}'. Ask the user "
                 "to clarify or give a more specific location.")
