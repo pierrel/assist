@@ -61,7 +61,9 @@ path: /workspace/notes.org
 lines: 10-40
 ```
 #+end_example
-- ``lines: N-M`` for org/md; ``pages: N-M`` for pdf. A bare ``N`` means ``N-N``.
+- ``lines: N-M`` for org/md; ``pages: N-M`` for pdf — always a range; for a
+  single line/page the skill repeats the number (e.g. ``pages: 3-3``). (A bare
+  ``N`` happens to parse as ``N-N`` but is not a relied-on contract.)
 - The wrong-mode key is ignored (``lines`` on a pdf / ``pages`` on org/md).
 - Range is untrusted model output → parsed defensively (ints only; malformed →
   ignored → whole file). No new injection surface (the path is still the only

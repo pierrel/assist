@@ -113,10 +113,8 @@ class TestRenderAgent(TestCase):
 
     def test_emits_page_range(self):
         """Section by page: 'show page N of <pdf>' carries a pages: range."""
-        import tempfile, os
-        from edd.eval.utils import create_filesystem
         from pypdf import PdfWriter
-        root = tempfile.mkdtemp()
+        root = tempfile.mkdtemp()  # throwaway, same as create_agent's pattern
         create_filesystem(root, _personal_workspace())
         w = PdfWriter()
         for _ in range(6):
