@@ -279,7 +279,11 @@ def search_internet(
 # Fully private (self-hosted); coverage = the regions loaded into MOTIS, so an
 # out-of-region place comes back as no route, never a guess.  See
 # docs/2026-06-28-local-travel-skill.org.
-_TRAVEL_TIMEOUT_S = 12.0
+# Per-call timeout to the (local) MOTIS service.  Kept tight: travel() makes up
+# to 6 sequential calls, but if MOTIS is down the FIRST geocode call raises here
+# and travel() aborts to "unavailable" (~one timeout), so the realistic worst
+# case is bounded; a full slow-but-up MOTIS is the only path to several timeouts.
+_TRAVEL_TIMEOUT_S = 8.0
 # MOTIS direct (street) modes -> user label.  Transit is queried separately.
 _TRAVEL_DIRECT_MODES = (("Car", "CAR"), ("Bike", "BIKE"), ("Walk", "WALK"))
 # Generous cap on a single direct leg so a long intra-metro walk/bike still
@@ -316,8 +320,9 @@ class _TravelBackendError(Exception):
     "unavailable" rather than misleadingly "couldn't find that place"."""
 
 
-def _motis_get(path: str, params: dict) -> dict:
-    """GET a MOTIS API path -> parsed JSON.  Raises _TravelBackendError when the
+def _motis_get(path: str, params: dict) -> dict | list:
+    """GET a MOTIS API path -> parsed JSON (a list for /geocode, a dict for
+    /plan).  Raises _TravelBackendError when the
     service is unset/unreachable/errors (callers turn that into the unavailable
     message); a successful-but-empty response is the caller's "no result"."""
     base = os.getenv("ASSIST_ROUTING_URL")
@@ -343,7 +348,7 @@ def _geocode(place: str) -> dict | None:
     h = hits[0]
     try:
         return {"lat": float(h["lat"]), "lon": float(h["lon"]),
-                "name": h.get("name", place)}
+                "name": h.get("name") or place}  # never propagate a blank name
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -391,8 +396,9 @@ def travel(origin: str, destination: str) -> str:
     """Real-world travel time and distance between two places, by car, bike,
     walking, and public transit.
 
-    Use this for any "how long / how far from A to B", "how do I get to X", or
-    "is it faster to bike or take the train" question.  Pass plain place
+    Use this for any "how long / how far from A to B" or "is it faster to bike or
+    take the train" question.  It gives times + distances, NOT turn-by-turn
+    directions.  Pass plain place
     NAMES/addresses as the user said them (e.g. "the Ferry Building", "123 Main
     St") -- do NOT pass coordinates.  Returns a short per-mode summary computed by
     the routing service -- time and distance for car/bike/walk, time for transit

@@ -9,7 +9,7 @@ MOTIS is stood up and LIVE at ``$ASSIST_ROUTING_URL`` (Docker ``motis-travel``,
 car/bike/walk routing ✓ (Civic Center→Mission car 2 min; →Oakland City Hall car
 16 min); **transit ✓ via BART** (→Oakland City Hall transit 23 min, cross-bay).
 Tool rewritten against the live MOTIS API (one service: ``/api/v1/geocode`` +
-``/api/v1/plan``); 8 mocked tests + 726 unit tests green; ``ASSIST_ROUTING_URL``
+``/api/v1/plan``); mocked unit tests + the full suite green; ``ASSIST_ROUTING_URL``
 in ``.dev.env``.
 Known live edges: (1) a POI whose geocode hit is off the street/transit network
 (e.g. the Ferry *ferry-terminal* on the pier) returns "unavailable" for car/transit
@@ -20,7 +20,7 @@ re-import, NO code change.
 Code review (2 lenses) DONE: one finding fixed — `_plan_direct`/`_plan_transit`
 read ``it["duration"]`` unguarded, which could raise into the agent loop on a
 malformed MOTIS itinerary (the module's contract is fail-loud-but-RETURNED);
-wrapped both + a test. 727 unit green.
+wrapped both + a test.
 Focal invocation eval DONE (live MOTIS): the agent loads the travel skill + calls
 ``travel()`` for distance / mode-comparison questions — 3/3 + 3/3. An instrumented
 run exposed a geocoder-ranking weakness (bare "the Ferry Building" mis-resolved);
@@ -134,17 +134,18 @@ comparison across modes (what Pierre asked for).
 * Privacy guardrails (must hold)
 - Region OSM/GTFS extracts are **never committed** — out-of-repo infra dir, like
   the SearXNG container data.
-- Test/eval fixtures use **synthetic origin/destination pairs in a region Pierre
-  does NOT live in** (two public landmarks in some other city), so assertions are
-  stable without encoding where he lives. "Synthetic" ≠ "fake names near home".
+- Test/eval fixtures use **public landmarks, never the operator's private
+  addresses** (home/work). Fixtures use Bay Area public landmarks (e.g. the Ferry
+  Building) because that's the loaded region — the deployment region is non-secret
+  infra, not a personal detail; what must never appear is a private address.
 - Locale + service URLs live in ``.dev.env`` / ``.deploy.env`` with ``.example``
   placeholders. Routing host on the sandbox **egress allowlist**.
 - Any hosted call (see fork) gets **coordinates only, never place names**, and the
   coord-leak is its acknowledged privacy cost.
 
 * REVISED after Pierre (2026-06-28, round 2): MOTIS single-service, self-host, regional+expandable
-Pierre is in San Francisco; pushed back (rightly) that self-host for ONE metro is
-~"a cron + a local service" — true, because the Bay Area has a *single consolidated
+The target metro is the Bay Area; the (right) pushback was that self-host for ONE
+metro is ~"a cron + a local service" — true, because the Bay Area has a *single consolidated
 regional GTFS* (511.org / MTC). The "treadmill" only applies to *worldwide
 multi-agency* self-hosting; worldwide turnkey transit ≈ Google only.
 
