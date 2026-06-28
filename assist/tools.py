@@ -343,7 +343,9 @@ def _geocode(place: str) -> dict | None:
     it routed to), or None if nothing matched.  Raises _TravelBackendError if the
     service is down (so the caller distinguishes that from a genuine no-match)."""
     hits = _motis_get("/api/v1/geocode", {"text": place})
-    if not isinstance(hits, list) or not hits:
+    if not isinstance(hits, list):  # wrong shape = a backend problem, not "no match"
+        raise _TravelBackendError(f"unexpected geocode response: {type(hits).__name__}")
+    if not hits:
         return None
     h = hits[0]
     try:
@@ -362,7 +364,9 @@ def _plan_direct(o: dict, d: dict, mode: str) -> dict | None:
             "directModes": mode, "maxDirectTime": _TRAVEL_MAX_DIRECT_S})
     except _TravelBackendError:
         return None  # a transient per-mode failure -> that mode shows "unavailable"
-    direct = (data or {}).get("direct") or []
+    # A non-dict 200 body (proxy/error page) would make .get raise -> contract says
+    # never raise into the agent loop, so treat any non-dict as "no route".
+    direct = data.get("direct") or [] if isinstance(data, dict) else []
     if not direct:
         return None
     try:  # never raise into the agent loop on a malformed itinerary (module contract)
@@ -383,7 +387,7 @@ def _plan_transit(o: dict, d: dict) -> dict | None:
             "transitModes": "TRANSIT"})
     except _TravelBackendError:
         return None
-    its = (data or {}).get("itineraries") or []
+    its = data.get("itineraries") or [] if isinstance(data, dict) else []
     if not its:
         return None
     try:  # never raise into the agent loop on a malformed itinerary (module contract)

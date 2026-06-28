@@ -108,6 +108,22 @@ class TestTravel:
             out = tools.travel("civic center", "ferry building")
         assert "- Car: unavailable" in out and "- Bike: 48 min" in out
 
+    def test_wrong_shape_response_does_not_raise(self, routing_env):
+        # A 200 with an unexpected JSON shape must not crash: a non-list geocode
+        # -> "unavailable" (backend problem, not "couldn't find"); a non-dict plan
+        # -> that mode "unavailable". Never an AttributeError into the agent loop.
+        with patch.object(tools.requests, "get",
+                          lambda *a, **k: _Resp({"error": "boom"})):  # geocode not a list
+            assert "unavailable" in tools.travel("civic", "ferry").lower()
+
+        def wrong_plan(url, params=None, **kw):
+            if "/api/v1/plan" in url:
+                return _Resp(["not", "a", "dict"])
+            return _fake_get(url, params=params, **kw)
+        with patch.object(tools.requests, "get", wrong_plan):
+            out = tools.travel("civic center", "ferry building")  # must not raise
+        assert "- Car: unavailable" in out
+
     def test_malformed_itinerary_does_not_raise(self, routing_env):
         # Module contract: never raise into the agent loop. A direct itinerary
         # missing `duration` / a transit itinerary missing it -> "unavailable".

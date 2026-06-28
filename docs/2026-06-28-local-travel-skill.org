@@ -82,9 +82,11 @@ All are OSM-based, Dockerized, return time+distance.
   ``travel(origin, destination, modes=[...])`` → per-mode ``{duration, distance}``,
   with geocoding done inside the tool (name → coords) so the agent passes plain
   place names. Lives in ``assist/tools.py`` + a ``assist/skills/travel/SKILL.md``.
-- **Sandbox egress:** the tool calls the routing/geocoding host from inside the
-  per-turn sandbox, so that host must be on the sandbox **egress allowlist** —
-  verify in-sandbox, not on the dev box (memory: skill-network-access-via-sandbox-egress).
+- **Network boundary:** the ``travel`` tool runs in the **assist host process**
+  (a registered Python tool, like ``search_internet``), NOT inside the per-turn
+  sandbox — so it is NOT a sandbox-egress concern. MOTIS just has to be reachable
+  from the assist host/service (on the deploy box, ``ASSIST_ROUTING_URL`` is the
+  local MOTIS).
 
 * Privacy / data hygiene
 - Self-hosted = destinations never leave our hardware (the whole point of "private").
@@ -139,7 +141,8 @@ comparison across modes (what Pierre asked for).
   Building) because that's the loaded region — the deployment region is non-secret
   infra, not a personal detail; what must never appear is a private address.
 - Locale + service URLs live in ``.dev.env`` / ``.deploy.env`` with ``.example``
-  placeholders. Routing host on the sandbox **egress allowlist**.
+  placeholders. (The tool reaches MOTIS from the assist host process — not the
+  sandbox — so no sandbox egress allowlist entry is needed.)
 - Any hosted call (see fork) gets **coordinates only, never place names**, and the
   coord-leak is its acknowledged privacy cost.
 
