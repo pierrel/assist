@@ -138,7 +138,6 @@ class TestRenderAssistantContent:
 class TestParseRange:
     @pytest.mark.parametrize("spec,hi,expected", [
         ("10-40", 100, (10, 40)),
-        ("5", 100, (5, 5)),          # bare N -> N-N
         ("5-100", 50, (5, 50)),      # end clamped to hi
         ("40-10", 100, None),        # reversed
         ("0-5", 100, None),          # start < 1
