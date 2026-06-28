@@ -1076,8 +1076,10 @@ _RENDER_DISPATCH = {"file": _render_file_block}
 # adversarial input (a model repetition-loop emitting thousands of ```render
 # lines): each bogus start fails at the next line instead of scanning to EOF,
 # avoiding the O(n^2) blow-up a plain ``.*?`` would cause on the event-loop thread.
+# ``\r?`` on every line break tolerates CRLF as well as LF (key/value trailing
+# ``\r`` is stripped by _parse_render_block).
 _RENDER_BLOCK_RE = re.compile(
-    r"(?m)^```render[ \t]*\n((?:(?!```)[^\n]*\n)*?)```[ \t]*$")
+    r"(?m)^```render[ \t]*\r?\n((?:(?!```)[^\n]*\n)*?)```[ \t]*\r?$")
 
 
 def _parse_render_block(body: str) -> dict:

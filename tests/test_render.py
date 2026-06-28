@@ -84,6 +84,13 @@ class TestRenderAssistantContent:
         assert "Here&#39;s your file" in out or "Here's your file" in out
         assert "```render" not in out  # the block was lifted, not shown as code
 
+    def test_crlf_block_becomes_embed(self):
+        # Assistant content with CRLF line endings must still lift the block.
+        raw = "Here:\r\n\r\n```render\r\ntype: file\r\npath: /workspace/r.org\r\n```\r\n"
+        out = _render_assistant_content("t1", raw)
+        assert "show-embed" in out and "/thread/t1/show?path=" in out
+        assert "```render" not in out
+
     def test_unknown_type_left_as_code(self):
         raw = "```render\ntype: bogus\npath: x\n```"
         out = _render_assistant_content("t1", raw)
