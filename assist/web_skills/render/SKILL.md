@@ -19,25 +19,35 @@ example `path: /workspace/fitness.org`).
 
 ## Showing only part of a file
 
-When the user asks for a specific part — "lines 10-40 of notes.org", "page 3 of
-the report", "the second page of receipt.pdf" — add a range to the block:
+The user often asks for part of a file. They may say it **explicitly** ("lines
+10-40 of notes.org", "page 3 of the report") OR **by description** ("show me the
+section about backups", "the part on swimming drills", "the chapter on dosage").
+Either way the render block must carry a concrete numeric range — `lines: N-M`
+for org/md, `pages: N-M` for pdf. So **resolve a description into a range first**.
 
-- **org / md → by line:** add `lines: N-M` (a 1-based inclusive line range):
-  ```render
-  type: file
-  path: /workspace/notes.org
-  lines: 10-40
-  ```
-- **pdf → by page:** add `pages: N-M` (a 1-based inclusive page range):
-  ```render
-  type: file
-  path: /workspace/report.pdf
-  pages: 2-5
-  ```
+**Explicit range — use it directly:**
+```render
+type: file
+path: /workspace/notes.org
+lines: 10-40
+```
+
+**Described section — find it in the file, THEN emit the range:**
+
+- *org / md:* `read_file` the file, find the heading (or text) for the topic the
+  user named, and use the line range that section spans — from its heading line
+  through the line just before the next heading at the same or a higher level
+  (end of file if it's the last). Emit `lines: START-END`.
+  - e.g. user: "show the section about backups in notes.org" → you read it, see
+    `* Backups` starts at line 42 and the next `*`/`**` heading is line 58 → emit
+    `path: /workspace/notes.org` with `lines: 42-57`.
+- *pdf:* load the `pdf` skill and use its tools to read the pdf's text and find
+  which page(s) cover the topic, then emit `pages: N-M` for those pages.
 
 Use `lines:` for org/md and `pages:` for pdf. Always write a range as `N-M` (for
-a single line or page use the same number twice, e.g. `pages: 3-3`). Omit the
-range to show the whole file.
+a single line or page use the same number twice, e.g. `pages: 3-3`). The range in
+the block must be numbers you resolved — never put a description like
+`lines: the backups section` in the block. Omit the range to show the whole file.
 
 ## Rules
 

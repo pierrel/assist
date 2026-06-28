@@ -111,6 +111,24 @@ class TestRenderAgent(TestCase):
             f"expected a render block for log.org with a lines: range; blocks: {blocks}",
         )
 
+    def test_resolves_described_section_to_line_range(self):
+        """The common case: 'show me the section about X' (no explicit numbers) —
+        the agent must read the file, locate the section, and emit a lines: range
+        (description resolved to numbers, not left as prose)."""
+        fs = dict(_personal_workspace())
+        fs["config.org"] = (
+            "* Intro\nsome intro text\nmore intro\n"
+            "* Backups\nback up to the NAS nightly\nkeep three copies offsite\n"
+            "* Networking\nwifi is on channel 6\nrouter in the closet\n")
+        agent = self.create_agent(fs)
+        agent.message("Show me the section about backups in config.org")
+        blocks = self._render_block_paths(agent)
+        self.assertTrue(
+            any("config.org" in b and "lines:" in b.lower() for b in blocks),
+            f"expected a render block for config.org with a resolved lines: range; "
+            f"blocks: {blocks}",
+        )
+
     def test_emits_page_range(self):
         """Section by page: 'show page N of <pdf>' carries a pages: range."""
         from pypdf import PdfWriter

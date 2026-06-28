@@ -70,9 +70,17 @@ lines: 10-40
   string that reaches the filesystem, via the unchanged ``_safe_workspace_file``).
 
 ** Skill (assist/web_skills/render/SKILL.md)
-Add: when the user asks for a specific part — "lines 10-40 of X", "page 3 of the
-report" — include the range in the block (``lines:`` for org/md, ``pages:`` for
-pdf). Keep it generalizable (don't overfit to one phrasing).
+The skill handles BOTH ways a user asks for part of a file (Pierre: he usually
+asks for a *section*, not numbers):
+- *Explicit range* — "lines 10-40 of X", "page 3 of the report" → use it directly.
+- *Described section* — "the section about backups", "the part on swimming" → the
+  agent RESOLVES the description into a concrete range first: for org/md it
+  ``read_file``s and uses the named heading's line span (heading line → just
+  before the next same-or-higher heading); for pdf it loads the ``pdf`` skill to
+  find the page(s). The block always carries numbers, never a description.
+Keep it generalizable (don't overfit to one phrasing). The route is unchanged —
+it always receives a concrete ``N-M``; resolution lives in the agent (guidance,
+not code), which is the right lever for this small-model behavior.
 
 ** /show route (manage/web/threads.py)
 Gains query params ``lines`` / ``pages`` (e.g. ``?path=…&lines=10-40``):
