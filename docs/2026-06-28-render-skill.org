@@ -1,0 +1,168 @@
+#+TITLE: render skill — replace the show_file tool with a web-only render block
+#+DATE: <2026-06-28>
+#+STATUS: built (CPU-tested + focal emission eval 3/3; live web render pending deploy)
+
+* Decision + design-review outcome (2026-06-28)
+Reviewed by the design-review team (simplicity, agentic/framework-fit,
+user-intention, clean-interfaces). The split was block-from-skill vs keeping a
+structured tool: two lenses warned that a block-in-prose is less reliable than a
+tool call for this small model (assist's own "structure beats prose" lesson).
+**Pierre's call: try the block-from-skill; if the emission eval fails, fall back
+to keeping show_file with the steering moved to a web skill.** The gate was run —
+**focal render-block emission eval = 3/3** (the model loads the render skill,
+globs the file, emits a well-formed block), so the block approach stands; no
+fallback needed.
+
+Review fixes folded in (as built):
+- Parse blocks **web-only** in =render_thread= (=manage/web/threads.py=), NOT in
+  the shared =_messages_to_dicts= — which now just stops special-casing show_file.
+  Keeps emacsos/eval transcripts clean. (clean-interfaces IMPORTANT)
+- ```` ```render ```` is intercepted **only** when the info-string is exactly
+  ~render~ AND the body's ~type~ is in =_RENDER_DISPATCH=; otherwise the fence is
+  left to render as a normal code block (handles the "show a render fence as
+  code" collision + malformed blocks). (clean-interfaces IMPORTANT)
+- ~type~+~path~ "always a workspace file" is a **deliberate kept constraint** —
+  no inline-payload escape hatch, so the security boundary stays singular.
+- =_RENDER_DISPATCH= is the single source of truth for known types.
+- =_SHOWABLE_EXTS= moved to =manage/web/threads.py= (its only remaining consumers).
+- Factual correction: show_file was *already* web-scoped via ~_WEB_TOOLS~; only
+  the *prompt steering* leaked into the shared template — that's the real wart,
+  now fixed by the web-only skill. The web app token-stream concern is moot (the
+  web path is blocking + re-renders from history), so streaming is a non-issue.
+- Extensibility example trimmed to **graphs only** (the growth path Pierre named).
+
+* Goal
+Generalize the ~show_file~ tool (PR #144/#145) into a **web-only render skill**.
+Instead of a tool call, the agent emits a **render block** in its reply — a
+small, structured marker carrying what the UI needs — and the web layer parses
+it and renders via the *existing* secure ~/show~ route. Lean on the model
+(guidance) over a fake tool, scope it to the web, and leave room to grow new
+render types (images, later graphs/visualizations) without reworking the format.
+
+This is NOT a rendering framework that competes with markdown. The chat
+transcript already renders the agent's reply as markdown
+(~markdown.markdown(raw, extensions=["fenced_code","tables"])~,
+=manage/web/threads.py:392-399=), so **tables, fenced code, lists, headings,
+bold/italic, blockquotes, links, and images-by-URL already render**. The render
+block exists ONLY for what markdown-in-chat genuinely *can't* do: **embed a
+workspace file** (~.org~ — markdown can't render org at all; ~.pdf~ — needs the
+browser viewer; a large file you'd rather embed than paste).
+
+* Why (vs the current tool)
+- *Philosophy fit.* ~show_file~ is a fake tool — it does nothing but gate an
+  extension and return a string; the real work is the web render layer. A skill
+  + a marker in the reply is more honest: the model signals intent, the UI
+  renders. (assist's stated bias: guidance first, tools/middleware last.)
+- *Fixes a scoping wart PR #145 shipped.* The "call show_file" steering went into
+  the SHARED =general_instructions.md.j2=, which emacsos and the eval agents also
+  load — though they have no ~show_file~. A web-only skill scopes the instruction
+  correctly and lazy-loads it (only on "show me…" requests), so it stops
+  polluting the always-on prompt and other embedders' context.
+- *Generalizes.* One block mechanism extends to more render types via a
+  ~type → renderer~ registry, instead of a new tool per type. The *renderer* can
+  also be per-embedder later (web emits HTML; emacsos could render the same block
+  type on the phone).
+- *Removes wiring.* Drops ~show_file~, ~_WEB_TOOLS~ / the web ~AgentSpec~ tools,
+  ~_showable_path~, and the ~_messages_to_dicts~ tool-call special-casing —
+  replaced by parsing a block out of the message content.
+
+* Design (as proposed)
+** The render block
+A fenced code block the UI intercepts, body is forgiving ~key: value~ lines:
+#+begin_example
+```render
+type: file
+path: /workspace/fitness.org
+```
+#+end_example
+- *Why fenced + key:value* (not JSON): the small model emits it more reliably and
+  a malformed block degrades to a harmless normal code block (it just shows the
+  text). JSON adds silent-failure surface (unescaped quotes, trailing commas).
+- *Stable shape: ~type~ + ~path~.* The block always names a render type and a
+  workspace file path. This is the generalization hinge — see *Extensibility*.
+
+** The render skill (web-only)
+A ~SKILL.md~ under the web embedder's skill sources. It instructs the agent:
+- To SHOW/embed a workspace file the chat can't display inline (org, pdf), emit a
+  ~render~ block with ~type: file~ and the file ~path~. Do NOT read+summarize.
+- For everything markdown already renders — tables, lists, code, formatting,
+  links — just write markdown in your reply. Don't wrap those in a render block.
+Scoped via the web ~AgentSpec~'s ~skill_sources~ (NOT the shared prompt), so it
+lazy-loads on matching requests and never reaches emacsos/eval agents.
+
+** Parse + render (web layer)
+- =_messages_to_dicts= / =render_thread= extract ~render~ fenced blocks from
+  assistant content and turn each into a render directive, rendering the rest of
+  the content as markdown as today.
+- A ~_RENDER_DISPATCH = {"file": _render_file_block, ...}~ registry maps ~type~ →
+  renderer. v1 registers only ~file~, which reuses the existing secure path:
+  ~_safe_workspace_file~ (traversal confinement + /workspace mapping) → the
+  ~/thread/{tid}/show~ route (pdf embed, org/md HTML) with its CSP + sandboxed
+  iframe. *All security properties carry over unchanged* — the block only carries
+  a type+path; file content still flows through the vetted route.
+- Unknown ~type~ or malformed block → render the fenced block as a normal code
+  block (graceful, harmless).
+
+** What's removed / moved / reused
+- *Removed:* ~show_file~ (=assist/tools.py=), ~_WEB_TOOLS~ + web ~AgentSpec(tools=)~
+  (=assist/thread_manager.py=), ~_showable_path~ + the show_file tool-call branch
+  in ~_messages_to_dicts~ (=assist/thread.py=).
+- *Moved:* the show/open/view steering — out of the shared =general_instructions.md.j2=
+  and into the web render ~SKILL.md~.
+- *Reused unchanged:* ~/thread/{tid}/show~, ~_safe_workspace_file~, ~_org_to_html~,
+  the CSP + sandbox iframe, ~_SHOWABLE_EXTS~.
+
+* Extensibility (out of scope now — build ready for it)
+The growth path Pierre named is **rendering visualizations / graphs**. The design
+is ready for it WITHOUT format change:
+- The block stays ~type~ + ~path~. A future ~type: chart~ points ~path~ at a
+  workspace spec file (e.g. a vega-lite JSON the agent wrote); a ~chart~ renderer
+  in ~_RENDER_DISPATCH~ reads that file and renders the visualization. Same for
+  ~type: image~ (serve a workspace png through the /show route).
+- So adding a render type = one entry in the dispatch registry + one renderer +
+  its own security review (each new content type is a new surface — e.g. a chart
+  spec is untrusted model/agent output; render it in the sandboxed iframe / via a
+  vetted lib, never eval it — same lesson as the org-RCE fix).
+- *Not built now* (no speculative code): images, charts/graphs. v1 is file-embed
+  (org/md/pdf) only.
+
+* Decisions / trade-offs
+- *Skill (guidance) vs tool (structured).* The risk: a tool call's args are a
+  deterministically-parsed structured payload; a render block in prose relies on
+  the model emitting well-formed syntax — and assist's own lesson is "the model
+  follows a checkable tool-arg constraint better than prose." Mitigation: a
+  dead-simple forgiving format, lenient parser, harmless fallback, and the SAME
+  focal n=3 emission eval we used for show_file. If emission proves unreliable,
+  reconsider (e.g. a single generic ~render(type, path)~ tool) — but try
+  skill+block first, per Pierre's "lean on the model".
+- *Files only for v1; markdown for the rest.* Don't reimplement tables/code/lists
+  — markdown already renders them. (Pierre, 2026-06-28.)
+- *Fenced key:value over JSON or inline tags* (reliability + graceful fallback;
+  inline tags also collide with the HTML-escaping the renderer already does).
+
+* Validation plan
+- *Unit (CPU):* block parser (well-formed, malformed→codeblock, unknown type),
+  the ~type → renderer~ dispatch, and that all the existing /show security tests
+  still hold (traversal, CSP, /workspace mapping). Port =tests/test_show_file.py=.
+- *Behavioral (light, fans-limited):* a focal n=3 eval mirroring the example
+  thread — realistic workspace, "show me <file>" → assert a ~render~ block (not a
+  tool call) appears, on the >2/3 gate. (Update =edd/eval/test_show_file_agent.py=.)
+- Full N=5/10 cadence deferred until the GPU fans are replaced.
+
+* Open questions / risks
+- *Block-emission reliability* (the crux — measure with the focal eval).
+- *Streaming:* during a streamed turn the block arrives as text; decide whether
+  to render live (detect+replace) or only on turn completion (the transcript
+  re-renders from history either way, which already handles the non-streaming
+  view).
+- *Skill-trigger wording* generality (don't overfit to "show me fitness.org" —
+  the same alignment caution as the assist skill conventions).
+
+* Critical files
+- New: =assist/.../skills/render/SKILL.md= (web skill), =assist/docs/2026-06-28-render-skill.org=.
+- Edit: =manage/web/threads.py= (parse render blocks + ~_RENDER_DISPATCH~),
+  =assist/thread.py= (~_messages_to_dicts~ — drop show_file branch, add block
+  extraction), =assist/thread_manager.py= (drop ~_WEB_TOOLS~; add the web skill
+  source), =assist/tools.py= (remove ~show_file~), =general_instructions.md.j2=
+  (remove the show-file steering).
+- Reused: the ~/show~ route, ~_safe_workspace_file~, ~_org_to_html~, CSP/sandbox.

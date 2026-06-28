@@ -36,18 +36,32 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread import Thread
-from assist.tools import show_file
 
 logger = logging.getLogger(__name__)
 
-# The web app's main agent gets show_file (render a file in the web UI).  Scoped
-# here BY DESIGN: ThreadManager is the web app's agent builder (emacsos builds
-# its own Thread/spec; the eval harness uses create_agent directly), so the
-# web-only show_file tool rides the web-only builder rather than a universal
-# default that would also reach surfaces with no web view.  The AgentSpec is
-# constructed per-call (in get/new) — its docstring cautions against caching a
-# spec as a module constant — though this one closes over no per-request state.
-_WEB_TOOLS = (show_file,)
+# The web app's main agent gets a web-only "render" skill: it tells the model to
+# embed a workspace file in the web view by emitting a ```render block (parsed by
+# manage/web/threads.py).  Scoped here BY DESIGN: ThreadManager is the web app's
+# agent builder (emacsos builds its own Thread/spec; the eval harness uses
+# create_agent directly), so the web-only render skill rides the web-only builder
+# and never reaches surfaces with no web view (nor the eval agents).
+_RENDER_SKILL_ROUTE = "/render-skill/"
+_RENDER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "web_skills")
+_render_skill_sources = None
+
+
+def _web_skill_sources() -> dict:
+    """Route -> backend for the web AgentSpec's render skill.  Built lazily so the
+    FilesystemBackend import defers deepagents' transitive imports off module load
+    (same pattern as emacsos-server's _skill_sources)."""
+    global _render_skill_sources
+    if _render_skill_sources is None:
+        from deepagents.backends import FilesystemBackend
+        _render_skill_sources = {
+            _RENDER_SKILL_ROUTE: FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
+                                                   virtual_mode=True)
+        }
+    return _render_skill_sources
 
 
 class InvalidThreadId(ValueError):
@@ -235,7 +249,7 @@ class ThreadManager:
                       model=self.model,
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
-                      spec=AgentSpec(tools=_WEB_TOOLS))
+                      spec=AgentSpec(skill_sources=_web_skill_sources()))
 
     def remove(self, thread_id: str) -> None:
         tdir = self.thread_dir(thread_id)
@@ -268,7 +282,7 @@ class ThreadManager:
 
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
                       model=self.model, sandbox_backend=sandbox_backend,
-                      on_queue_state=on_queue_state, spec=AgentSpec(tools=_WEB_TOOLS))
+                      on_queue_state=on_queue_state, spec=AgentSpec(skill_sources=_web_skill_sources()))
 
     def close(self) -> None:
         try:

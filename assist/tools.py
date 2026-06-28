@@ -269,37 +269,3 @@ def search_internet(
         for r in results[:max_results]
     ]
     return str(normalized)
-
-
-# Extensions show_file accepts — the SINGLE source for the tool's gate, the web
-# UI's show-directive gate (thread._showable_path), and the /show route's
-# renderable set.  The route dispatches per type (md/org/pdf) and 415s anything
-# else, so it can't silently mis-render; test_route_renders_every_showable_ext
-# pins that the route renders every ext here, so the sets can't drift into a
-# directive the route would 415.
-_SHOWABLE_EXTS = (".org", ".md", ".pdf")
-
-
-def show_file(path: str) -> str:
-    """Show a file to the user in their web view, rendered well-formatted.
-
-    Call this whenever the user asks to SHOW, OPEN, VIEW, DISPLAY, or "pull up" a
-    file (e.g. "show me fitness.org", "open my notes") — render it for them
-    instead of reading it and summarizing its contents in the chat.  Pass the
-    path to the file in your workspace.  Supported: ``.org`` and ``.md``
-    (rendered as formatted HTML) and ``.pdf`` (shown in the browser's PDF
-    viewer); other types aren't shown — read and summarize those instead.
-
-    The file appears embedded in the conversation.  Returns a short confirmation,
-    or a note when the extension isn't one this can display.
-    """
-    # args are untrusted model output: a non-string/empty path would raise in
-    # os.path.splitext — return guidance so the model can self-correct instead.
-    if not isinstance(path, str) or not path:
-        return ("show_file needs a single file path as a string — pass the path "
-                "to a .org, .md, or .pdf file in your workspace.")
-    ext = os.path.splitext(path)[1].lower()
-    if ext not in _SHOWABLE_EXTS:
-        return (f"show_file can't display '{path}': only .org, .md, and .pdf are "
-                "supported. For other files, read and summarize them instead.")
-    return f"Showing {path} in the web view."

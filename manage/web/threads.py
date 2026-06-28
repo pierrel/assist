@@ -73,6 +73,11 @@ async def _invalid_thread_id(request, exc):
 
 _MD_EXTENSIONS = ["fenced_code", "tables"]
 
+# Extensions the /show route + the render-block file embed can display.  Single
+# source of truth (the route dispatches md/org/pdf; _render_file_block gates on
+# this; test_route_renders_every_showable_ext pins route coverage).
+_SHOWABLE_EXTS = (".org", ".md", ".pdf")
+
 
 def render_index(query: str = "") -> str:
     q = (query or "").strip()
@@ -384,13 +389,12 @@ def render_thread(
 
     rendered = []
     for m in reversed(msgs):
-        if m.get("role") == "show_file":
-            rendered.append(_render_show_file(tid, m.get("path", "")))
-            continue
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
-        if role == "assistant" or role == "tools":
-            # Render assistant and tool content as Markdown to HTML
+        if role == "assistant":
+            # Markdown, with any ```render blocks lifted into inline file embeds.
+            content_html = _render_assistant_content(tid, raw)
+        elif role == "tools":
             content_html = markdown.markdown(raw, extensions=_MD_EXTENSIONS)
         elif role == "user" and raw.startswith(_REVIEW_HEADER):
             # Review submissions are markdown-formatted (headers, fenced
@@ -456,8 +460,9 @@ def render_thread(
           .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
           .msg.user {{ background: #e6f3ff; border: 1px solid #b5dbff; }}
           .msg.assistant {{ background: #f6f6f6; border: 1px solid #ddd; }}
-          .msg.show {{ background: #fff; border: 1px solid #ddd; }}
-          /* Embedded shown file (org/md rendered page, or pdf viewer). */
+          /* A file embed lifted from a ```render block, shown inline in the
+             assistant bubble (org/md rendered page, or pdf viewer). */
+          .show-embed {{ margin: .5rem 0; }}
           .show-file {{ width: 100%; height: 65vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
           .show-cap {{ font-size: .85rem; margin-top: .3rem; }}
           .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
@@ -855,7 +860,7 @@ def _existing_thread_dir(tid: str) -> str:
     return tdir
 
 
-# ---- show_file: render a workspace file (org/md/pdf) in the web UI ----
+# ---- render skill: embed a workspace file (org/md/pdf) in the web UI ----
 
 _SHOW_PAGE_CSS = (
     "body{font-family:sans-serif;max-width:780px;margin:1rem auto;padding:0 1rem;"
@@ -884,7 +889,7 @@ _SHOW_SECURITY_HEADERS = {
 
 # The sandbox bind-mounts the thread's host working dir at /workspace
 # (sandbox_manager.py: volumes {work_dir: "/workspace"}, working_dir="/workspace"),
-# so the AGENT addresses files in that space — show_file is called with paths like
+# so the AGENT addresses files in that space — a render block carries paths like
 # "/workspace/fitness.org", "/fitness.org", or "fitness.org".  All three name the
 # same host file under the working dir; map them before resolving.
 _SANDBOX_MOUNT = "/workspace"
@@ -1025,16 +1030,12 @@ def _org_to_html(src: str) -> str:
     return "\n".join(parts)
 
 
-def _render_show_file(tid: str, path: str) -> str:
-    """The transcript bubble for a show_file call: the file embedded inline
-    (pdf in the browser viewer, md/org as a rendered HTML page in an iframe),
-    plus a caption link that opens it in its own tab."""
-    if not path:
-        return ""
+def _file_embed_html(tid: str, path: str) -> str:
+    """Inline embed for a workspace file: pdf in the browser viewer, md/org as a
+    sandboxed iframe over the /show route, plus a caption link to open it."""
     src = f"/thread/{tid}/show?path={urllib.parse.quote(path)}"
-    ext = os.path.splitext(path)[1].lower()
     label = html.escape(path)
-    if ext == ".pdf":
+    if os.path.splitext(path)[1].lower() == ".pdf":
         viewer = f'<embed class="show-file" type="application/pdf" src="{src}" />'
     else:
         # sandbox WITHOUT allow-scripts: the embedded md/org page is static, so
@@ -1044,12 +1045,59 @@ def _render_show_file(tid: str, path: str) -> str:
         # target=_blank links in the content working.
         viewer = (f'<iframe class="show-file" src="{src}" loading="lazy" '
                   f'sandbox="allow-popups"></iframe>')
-    return (
-        '<div class="msg show"><div class="role">shown</div>'
-        f'<div class="content">{viewer}'
-        f'<div class="show-cap"><a href="{src}" target="_blank" rel="noopener">'
-        f'{label} ↗</a></div></div></div>'
-    )
+    return (f'<div class="show-embed">{viewer}'
+            f'<div class="show-cap"><a href="{src}" target="_blank" rel="noopener">'
+            f'{label} ↗</a></div></div>')
+
+
+def _render_file_block(tid: str, block: dict) -> str | None:
+    """``type: file`` renderer.  Embeds a showable workspace file, or None when
+    the path is missing / not a renderable extension (the block is then left to
+    show as a normal code block)."""
+    path = block.get("path", "")
+    if not path or os.path.splitext(path)[1].lower() not in _SHOWABLE_EXTS:
+        return None
+    return _file_embed_html(tid, path)
+
+
+# type -> renderer(tid, block).  The SINGLE source of truth for the render-block
+# types the web UI understands; a block whose type isn't here is left as a normal
+# code block.  Extending to a new type (e.g. a chart from a workspace spec file)
+# is one entry here + its renderer + its own security review.
+_RENDER_DISPATCH = {"file": _render_file_block}
+
+# A ```render fenced block (info-string EXACTLY "render"), body parsed as
+# key: value lines.  It is lifted into an embed ONLY when its `type` is known and
+# renderable — so a stray ```render fence the agent wrote to SHOW as code, or a
+# malformed block, stays put and renders as a code block.
+_RENDER_BLOCK_RE = re.compile(r"(?ms)^```render[ \t]*\r?\n(.*?)\r?\n```[ \t]*$")
+
+
+def _parse_render_block(body: str) -> dict:
+    out = {}
+    for line in body.splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            out[key.strip().lower()] = value.strip()
+    return out
+
+
+def _render_assistant_content(tid: str, raw: str) -> str:
+    """Render an assistant message: known ```render blocks become inline embeds,
+    everything else is markdown.  An unknown/unrenderable block stays in the
+    markdown stream (shown as a code block)."""
+    out, last = [], 0
+    for m in _RENDER_BLOCK_RE.finditer(raw):
+        block = _parse_render_block(m.group(1))
+        renderer = _RENDER_DISPATCH.get(block.get("type", ""))
+        embed = renderer(tid, block) if renderer else None
+        if embed is None:
+            continue  # leave the fence in place -> markdown renders it as code
+        out.append(markdown.markdown(raw[last:m.start()], extensions=_MD_EXTENSIONS))
+        out.append(embed)
+        last = m.end()
+    out.append(markdown.markdown(raw[last:], extensions=_MD_EXTENSIONS))
+    return "".join(out)
 
 
 @app.get("/thread/{tid}/show")
