@@ -47,10 +47,17 @@ class TestSafeWorkspaceFile:
         got = _safe_workspace_file("t1", "a.md")
         assert got == os.path.realpath(str(workspace / "a.md"))
 
-    @pytest.mark.parametrize("path", ["../../etc/passwd", "../secret", "/etc/passwd"])
+    @pytest.mark.parametrize("path", ["../../etc/passwd", "../secret", "../../secret.md"])
     def test_rejects_traversal(self, workspace, path):
-        # ../ escapes the workspace -> None; an absolute path resolves outside too.
+        # ../ escapes the workspace -> None.
         assert _safe_workspace_file("t1", path) is None
+
+    @pytest.mark.parametrize("path", ["a.md", "/a.md", "/workspace/a.md"])
+    def test_maps_agent_workspace_paths(self, workspace, path):
+        # The agent addresses files in /workspace space; all three forms name the
+        # same host file under the working dir.
+        (workspace / "a.md").write_text("hi")
+        assert _safe_workspace_file("t1", path) == os.path.realpath(str(workspace / "a.md"))
 
     def test_embedded_nul_is_none_not_error(self, workspace):
         # An embedded NUL makes realpath raise ValueError; it must resolve to
@@ -87,6 +94,14 @@ class TestShowRoute:
         assert r.status_code == 200
         assert "<h1>Title</h1>" in r.text
         assert "<li>a</li>" in r.text
+
+    def test_workspace_prefixed_path_renders(self, workspace):
+        # End-to-end: the agent calls show_file("/workspace/n.md"); the route must
+        # map it to the host file and render, not 404.
+        (workspace / "n.md").write_text("# Title\n")
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "/workspace/n.md"})
+        assert r.status_code == 200
+        assert "<h1>Title</h1>" in r.text
 
     def test_pdf_served_as_bytes(self, workspace):
         (workspace / "d.pdf").write_bytes(b"%PDF-1.4 fake bytes")

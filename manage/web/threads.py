@@ -882,14 +882,26 @@ _SHOW_SECURITY_HEADERS = {
 }
 
 
+# The sandbox bind-mounts the thread's host working dir at /workspace
+# (sandbox_manager.py: volumes {work_dir: "/workspace"}, working_dir="/workspace"),
+# so the AGENT addresses files in that space — show_file is called with paths like
+# "/workspace/fitness.org", "/fitness.org", or "fitness.org".  All three name the
+# same host file under the working dir; map them before resolving.
+_SANDBOX_MOUNT = "/workspace"
+
+
 def _safe_workspace_file(tid: str, path: str) -> str | None:
-    """Resolve PATH against the thread's agent working dir, traversal-safe.
-    Returns the absolute host path, or None if it would escape the workspace
-    (or is malformed, e.g. an embedded NUL).  Same realpath-child check as the
-    tid guard — a crafted ``../`` can't read outside the agent's own files."""
+    """Resolve an AGENT path (in /workspace space) against the thread's host
+    agent working dir, traversal-safe.  Accepts ``/workspace/x``, ``/x`` and
+    ``x`` (all → ``<workdir>/x``).  Returns the host path, or None if it would
+    escape the workspace (a crafted ``../``) or is malformed (embedded NUL)."""
     base = os.path.realpath(MANAGER.thread_default_working_dir(tid))
+    rel = path
+    if rel == _SANDBOX_MOUNT or rel.startswith(_SANDBOX_MOUNT + "/"):
+        rel = rel[len(_SANDBOX_MOUNT):]
+    rel = rel.lstrip("/")  # treat as relative to the workspace root
     try:
-        target = os.path.realpath(os.path.join(base, path))
+        target = os.path.realpath(os.path.join(base, rel))
     except ValueError:  # embedded NUL etc. -> treat as not-found, not a 500
         return None
     if target != base and not target.startswith(base + os.sep):

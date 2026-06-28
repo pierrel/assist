@@ -62,13 +62,33 @@ browser's viewer — instead of pasting raw contents into the chat.
 - *Tool doesn't validate existence* (no working-dir handle): a missing file
   surfaces as the route's 404 in the embed, not a tool error. Acceptable v1.
 
+* Follow-up — make it work end-to-end (2026-06-27, after a live test)
+A live thread ("Show me the one named fitness.org") exposed two gaps the
+unit-tested merge missed:
+- *The model didn't call show_file at all* — it read_file'd and summarized. The
+  general prompt never mentioned show_file and steered "questions answerable from
+  local files" toward summarizing. *Fix (guidance-first):* a "show/open/view a
+  file" action pattern + a rule in =general_instructions.md.j2=, and SHOW/OPEN/
+  VIEW trigger words in show_file's description. A single live turn now calls
+  ~show_file~ directly (no read+summarize).
+- *Path-space mismatch* — the agent addresses files in the sandbox's /workspace
+  space (~/workspace/fitness.org~), but =_safe_workspace_file= resolved against
+  the HOST working dir and rejected absolutes as traversal → the embed would
+  404. The unit tests only used relative paths, so they missed it. *Fix:*
+  =_safe_workspace_file= maps ~/workspace/x~, ~/x~ and ~x~ to ~<workdir>/x~
+  (still realpath-child-confined; ~../~ escapes still → None).
+Lesson: a tool whose path argument comes from the agent must be tested in the
+agent's path space, not just with tidy relative fixtures.
+
 * Validation
-- 22 unit tests (tool gating, traversal-safety incl. NUL, render embed, the /show
-  route for md/pdf/missing/traversal/unsupported, the org renderer incl.
-  macro-(eval)-does-not-execute / #+INCLUDE-not-expanded / content-escaped,
-  _messages_to_dicts). 684 unit tests green. All CPU — no model.
-- Deferred (needs the model, GPU down): the live agent-driven flow (user asks →
-  agent calls show_file → embed renders). Covered structurally by the unit tests.
+- 38 show_file tests (tool gating + non-string guard, traversal incl. NUL,
+  /workspace-path mapping, render embed + iframe sandbox, the /show route for
+  md/pdf/missing/traversal/unsupported/CSP, the org renderer incl.
+  macro-(eval)-does-not-execute / #+INCLUDE-not-expanded / content-escaped /
+  *-bullets, _messages_to_dicts directive gating, the _SHOWABLE_EXTS drift
+  guard). 700 unit tests green. All CPU.
+- Live (light, fans-limited): one turn confirmed the agent now calls show_file
+  for a "show me <file>" request. Full N-trial eval validation deferred to fans-up.
 
 * Critical files
 - =assist/tools.py= (show_file), =assist/thread_manager.py= (_WEB_TOOLS),

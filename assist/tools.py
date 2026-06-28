@@ -281,13 +281,14 @@ _SHOWABLE_EXTS = (".org", ".md", ".pdf")
 
 
 def show_file(path: str) -> str:
-    """Render a file in the user's web view so they can read it well-formatted.
+    """Show a file to the user in their web view, rendered well-formatted.
 
-    Use this to SHOW the user a file you produced or found — a report, notes, a
-    PDF — instead of pasting its raw contents into the chat.  Pass the path to
-    the file in your workspace.  Supported: ``.org`` and ``.md`` (rendered as
-    formatted HTML) and ``.pdf`` (shown in the browser's PDF viewer); other
-    types aren't shown — read and summarize those instead.
+    Call this whenever the user asks to SHOW, OPEN, VIEW, DISPLAY, or "pull up" a
+    file (e.g. "show me fitness.org", "open my notes") — render it for them
+    instead of reading it and summarizing its contents in the chat.  Pass the
+    path to the file in your workspace.  Supported: ``.org`` and ``.md``
+    (rendered as formatted HTML) and ``.pdf`` (shown in the browser's PDF
+    viewer); other types aren't shown — read and summarize those instead.
 
     The file appears embedded in the conversation.  Returns a short confirmation,
     or a note when the extension isn't one this can display.
