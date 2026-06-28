@@ -17,6 +17,28 @@ path: /workspace/PATH-TO-THE-FILE
 Replace `PATH-TO-THE-FILE` with the real file in the user's workspace (for
 example `path: /workspace/fitness.org`).
 
+## Showing only part of a file
+
+When the user asks for a specific part — "lines 10-40 of notes.org", "page 3 of
+the report", "the second page of receipt.pdf" — add a range to the block:
+
+- **org / md → by line:** add `lines: N-M` (a 1-based inclusive line range):
+  ```render
+  type: file
+  path: /workspace/notes.org
+  lines: 10-40
+  ```
+- **pdf → by page:** add `pages: N-M` (a 1-based inclusive page range):
+  ```render
+  type: file
+  path: /workspace/report.pdf
+  pages: 2-5
+  ```
+
+Use `lines:` for org/md and `pages:` for pdf. Always write a range as `N-M` (for
+a single line or page use the same number twice, e.g. `pages: 3-3`). Omit the
+range to show the whole file.
+
 ## Rules
 
 - Emit the render block **instead of** reading the file and summarizing or

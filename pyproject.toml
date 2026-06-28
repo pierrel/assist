@@ -27,6 +27,9 @@ dependencies = [
     "Markdown",
     "openai",
     "pydantic",
+    # Host-side PDF page extraction for the render skill's `pages:` range
+    # (manage/web/threads.py `_extract_pdf_pages`). Pure-Python, no system deps.
+    "pypdf",
     "python-dotenv",
     "python-multipart",
     "requests",

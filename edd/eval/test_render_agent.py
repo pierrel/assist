@@ -67,9 +67,13 @@ class TestRenderAgent(TestCase):
                                          spec=AgentSpec(skill_sources=skills)))
 
     def _render_block_paths(self, agent) -> list:
-        """Bodies of render blocks the agent emitted in its message content."""
+        """Bodies of render blocks the AGENT emitted — only AIMessage content, so
+        the loaded skill's own example blocks (a ToolMessage) don't count."""
+        from langchain_core.messages import AIMessage
         bodies = []
         for m in agent.all_messages():
+            if not isinstance(m, AIMessage):
+                continue
             content = m.content if isinstance(m.content, str) else ""
             bodies.extend(b for b in _RENDER_BLOCK.findall(content) if "type:" in b.lower())
         return bodies
@@ -93,4 +97,39 @@ class TestRenderAgent(TestCase):
         self.assertTrue(
             any("recipes.org" in b for b in blocks),
             f"expected a render block for recipes.org; render blocks: {blocks}",
+        )
+
+    def test_emits_line_range(self):
+        """Section by line: 'show me lines X-Y of <file>' carries a lines: range."""
+        fs = dict(_personal_workspace())
+        fs["log.org"] = "* Log\n" + "".join(f"- entry {i}\n" for i in range(1, 60))
+        agent = self.create_agent(fs)
+        agent.message("Show me lines 10 to 20 of log.org")
+        blocks = self._render_block_paths(agent)
+        self.assertTrue(
+            any("log.org" in b and "lines:" in b.lower() for b in blocks),
+            f"expected a render block for log.org with a lines: range; blocks: {blocks}",
+        )
+
+    def test_emits_page_range(self):
+        """Section by page: 'show page N of <pdf>' carries a pages: range."""
+        import tempfile, os
+        from edd.eval.utils import create_filesystem
+        from pypdf import PdfWriter
+        root = tempfile.mkdtemp()
+        create_filesystem(root, _personal_workspace())
+        w = PdfWriter()
+        for _ in range(6):
+            w.add_blank_page(width=200, height=200)
+        with open(os.path.join(root, "report.pdf"), "wb") as f:
+            w.write(f)
+        skills = {"/render-skill/": FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
+                                                      virtual_mode=True)}
+        agent = AgentHarness(create_agent(self.model, root,
+                                          spec=AgentSpec(skill_sources=skills)))
+        agent.message("Show me page 3 of report.pdf")
+        blocks = self._render_block_paths(agent)
+        self.assertTrue(
+            any("report.pdf" in b and "pages:" in b.lower() for b in blocks),
+            f"expected a render block for report.pdf with a pages: range; blocks: {blocks}",
         )

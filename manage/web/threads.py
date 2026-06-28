@@ -8,6 +8,7 @@ Owns ``_process_message`` (the synchronous worker spawned as a
 from __future__ import annotations
 
 import html
+import io
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
 )
 
 from assist.domain_manager import (
@@ -1030,10 +1032,25 @@ def _org_to_html(src: str) -> str:
     return "\n".join(parts)
 
 
-def _file_embed_html(tid: str, path: str) -> str:
+def _show_src(tid: str, path: str, lines: str = "", pages: str = "") -> str:
+    """The /show URL for a file, with an optional section range.  Built ONCE so
+    the inline embed and the caption full-page link can't diverge.  Only the
+    range key matching the file type is carried (.pdf → pages, else lines); the
+    range is the raw block value — the route parses it authoritatively."""
+    params = {"path": path}
+    is_pdf = os.path.splitext(path)[1].lower() == ".pdf"
+    rng = pages if is_pdf else lines
+    if rng:
+        params["pages" if is_pdf else "lines"] = rng
+    return f"/thread/{tid}/show?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}"
+
+
+def _file_embed_html(tid: str, path: str, lines: str = "", pages: str = "") -> str:
     """Inline embed for a workspace file: pdf in the browser viewer, md/org as a
-    sandboxed iframe over the /show route, plus a caption link to open it."""
-    src = f"/thread/{tid}/show?path={urllib.parse.quote(path)}"
+    sandboxed iframe over the /show route, plus a caption link to open it on its
+    own page.  An optional line/page range is carried into BOTH the embed src and
+    the caption link, so inline and full-page show the same section."""
+    src = _show_src(tid, path, lines, pages)
     label = html.escape(path)
     if os.path.splitext(path)[1].lower() == ".pdf":
         viewer = f'<embed class="show-file" type="application/pdf" src="{src}" />'
@@ -1053,11 +1070,12 @@ def _file_embed_html(tid: str, path: str) -> str:
 def _render_file_block(tid: str, block: dict) -> str | None:
     """``type: file`` renderer.  Embeds a showable workspace file, or None when
     the path is missing / not a renderable extension (the block is then left to
-    show as a normal code block)."""
+    show as a normal code block).  An optional ``lines:``/``pages:`` range is
+    carried into the embed."""
     path = block.get("path", "")
     if not path or os.path.splitext(path)[1].lower() not in _SHOWABLE_EXTS:
         return None
-    return _file_embed_html(tid, path)
+    return _file_embed_html(tid, path, block.get("lines", ""), block.get("pages", ""))
 
 
 # type -> renderer(tid, block).  The SINGLE source of truth for the render-block
@@ -1109,14 +1127,69 @@ def _render_assistant_content(tid: str, raw: str) -> str:
     return "".join(out)
 
 
-@app.get("/thread/{tid}/show")
-def show_file_view(tid: str, path: str):
-    """Render a file from the thread's agent workspace for embedding: pdf as
-    bytes (browser viewer), md/org as a styled HTML page.
+# Bounds for PDF page extraction.  Extraction (pypdf PdfWriter) materializes the
+# selected pages in memory, and the source pdf is untrusted (agent/web-sourced),
+# so extraction runs ONLY within these coarse real bounds; outside them we serve
+# the whole file via the streamed FileResponse (the existing safe path).
+_MAX_PDF_EXTRACT_BYTES = 25 * 1024 * 1024  # don't load a giant pdf into memory
+_MAX_PAGE_SPAN = 25                          # a section, not a whole book
 
-    Declared SYNC (not ``async def``) on purpose: the file read and the
-    markdown/org conversion are blocking CPU/IO and a shown file can be large,
-    so FastAPI runs this in its threadpool, keeping the single-worker event
+
+def _parse_range(spec: str, hi: int) -> tuple[int, int] | None:
+    """Parse a 1-based inclusive ``N-M`` range (untrusted) against upper bound
+    ``hi`` (line or page count).  Returns clamped ``(start, end)``, or None for
+    empty / malformed / reversed / out-of-range — the caller then shows the whole
+    file.  (A bare ``N`` works as ``N-N``; not a relied-on contract.)"""
+    if not spec:
+        return None
+    a, _, b = spec.strip().partition("-")
+    b = b or a
+    try:
+        start, end = int(a), int(b)
+    except ValueError:
+        return None
+    if start < 1 or end < start or start > hi:
+        return None
+    return start, min(end, hi)
+
+
+def _extract_pdf_pages(fpath: str, pages: str) -> bytes | None:
+    """A page range from a workspace PDF as new PDF bytes, or None to fall back to
+    serving the whole file (oversize input, oversize span, bad range, or a
+    corrupt/encrypted pdf).  Bounded by construction so pypdf can't be driven to
+    materialize an unbounded amount of memory on the event-loop threadpool."""
+    try:
+        if os.path.getsize(fpath) > _MAX_PDF_EXTRACT_BYTES:
+            return None
+        from pypdf import PdfReader, PdfWriter
+        reader = PdfReader(fpath)
+        rng = _parse_range(pages, len(reader.pages))
+        if rng is None:
+            return None
+        start, end = rng
+        if end - start + 1 > _MAX_PAGE_SPAN:
+            return None
+        writer = PdfWriter()
+        for i in range(start - 1, end):
+            writer.add_page(reader.pages[i])
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+    except Exception as e:
+        logging.warning("pdf page extraction failed for %s: %s", fpath, e)
+        return None
+
+
+@app.get("/thread/{tid}/show")
+def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
+    """Render a file from the thread's agent workspace for embedding: pdf as
+    bytes (browser viewer), md/org as a styled HTML page.  Optional section range
+    — ``lines=N-M`` (md/org) or ``pages=N-M`` (pdf, extracted); the key not
+    matching the file type is simply unread, a malformed range shows the whole file.
+
+    Declared SYNC (not ``async def``) on purpose: the file read, the markdown/org
+    conversion, and pdf extraction are blocking CPU/IO and a shown file can be
+    large, so FastAPI runs this in its threadpool, keeping the single-worker event
     loop free (the repo's event-loop-liveness rule)."""
     _existing_thread_dir(tid)  # 404 on a bad/missing tid (traversal-safe)
     fpath = _safe_workspace_file(tid, path)
@@ -1124,10 +1197,20 @@ def show_file_view(tid: str, path: str):
         raise HTTPException(status_code=404, detail="file not found")
     ext = os.path.splitext(fpath)[1].lower()
     if ext == ".pdf":
-        return FileResponse(fpath, media_type="application/pdf",
-                            headers={"X-Content-Type-Options": "nosniff"})
+        pdf_headers = {"X-Content-Type-Options": "nosniff"}
+        if pages:
+            extracted = _extract_pdf_pages(fpath, pages)
+            if extracted is not None:
+                return Response(content=extracted, media_type="application/pdf",
+                                headers=pdf_headers)
+        return FileResponse(fpath, media_type="application/pdf", headers=pdf_headers)
     with open(fpath, encoding="utf-8", errors="replace") as f:
         src = f.read()
+    if lines:
+        all_lines = src.splitlines()
+        rng = _parse_range(lines, len(all_lines))
+        if rng:
+            src = "\n".join(all_lines[rng[0] - 1:rng[1]])
     if ext == ".md":
         body = markdown.markdown(src, extensions=_MD_EXTENSIONS)
     elif ext == ".org":

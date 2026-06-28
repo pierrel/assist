@@ -15,9 +15,27 @@ from manage.web.threads import (
     _file_embed_html,
     _render_file_block,
     _render_assistant_content,
+    _parse_range,
+    _show_src,
+    _extract_pdf_pages,
     _RENDER_DISPATCH,
     _SHOWABLE_EXTS,
 )
+
+
+def _make_pdf(path, n_pages):
+    from pypdf import PdfWriter
+    w = PdfWriter()
+    for _ in range(n_pages):
+        w.add_blank_page(width=200, height=200)
+    with open(path, "wb") as f:
+        w.write(f)
+
+
+def _pdf_page_count(data: bytes) -> int:
+    import io
+    from pypdf import PdfReader
+    return len(PdfReader(io.BytesIO(data)).pages)
 
 
 @pytest.fixture
@@ -75,6 +93,13 @@ class TestFileEmbed:
     def test_render_file_block_renders_showable(self):
         assert "<iframe" in _render_file_block("t1", {"path": "/workspace/r.org"})
 
+    @pytest.mark.parametrize("name", ["a.org", "a.md", "a.pdf"])
+    def test_every_embed_has_a_fullpage_link(self, name):
+        # The full-page "view on its own page" affordance: every embed branch
+        # (md/org iframe + pdf embed) must carry a caption href to the /show page.
+        h = _file_embed_html("t1", name)
+        assert 'class="show-cap"' in h and "<a href=" in h
+
 
 class TestRenderAssistantContent:
     def test_render_block_becomes_embed(self):
@@ -108,6 +133,76 @@ class TestRenderAssistantContent:
 
     def test_dispatch_is_single_source_of_truth(self):
         assert set(_RENDER_DISPATCH) == {"file"}
+
+
+class TestParseRange:
+    @pytest.mark.parametrize("spec,hi,expected", [
+        ("10-40", 100, (10, 40)),
+        ("5", 100, (5, 5)),          # bare N -> N-N
+        ("5-100", 50, (5, 50)),      # end clamped to hi
+        ("40-10", 100, None),        # reversed
+        ("0-5", 100, None),          # start < 1
+        ("100-200", 50, None),       # start > hi (out of range)
+        ("abc", 100, None),          # malformed
+        ("", 100, None),             # empty
+    ])
+    def test_parse(self, spec, hi, expected):
+        assert _parse_range(spec, hi) == expected
+
+
+class TestShowSrc:
+    def test_carries_lines_for_text(self):
+        assert "lines=10-40" in _show_src("t1", "/workspace/n.md", lines="10-40")
+
+    def test_carries_pages_for_pdf(self):
+        assert "pages=2-5" in _show_src("t1", "/workspace/r.pdf", pages="2-5")
+
+    def test_ignores_wrong_mode_key(self):
+        # lines on a pdf / pages on org are unread by construction.
+        assert "lines" not in _show_src("t1", "/workspace/r.pdf", lines="10-40")
+        assert "pages" not in _show_src("t1", "/workspace/n.org", pages="2-5")
+
+    def test_embed_and_caption_share_the_range(self):
+        h = _file_embed_html("t1", "n.md", lines="10-40")
+        # the range appears in both the iframe src and the caption href
+        assert h.count("lines=10-40") == 2
+
+
+class TestSectionRender:
+    def test_md_line_slice(self, workspace):
+        (workspace / "n.md").write_text("# A\n# B\n# C\n# D\n# E\n")
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "n.md", "lines": "2-3"})
+        assert r.status_code == 200
+        assert "<h1>B</h1>" in r.text and "<h1>C</h1>" in r.text
+        assert "<h1>A</h1>" not in r.text and "<h1>E</h1>" not in r.text
+
+    def test_md_malformed_range_shows_whole(self, workspace):
+        (workspace / "n.md").write_text("# A\n# B\n# C\n")
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "n.md", "lines": "9-3"})
+        assert "<h1>A</h1>" in r.text and "<h1>C</h1>" in r.text  # whole file
+
+    def test_pdf_page_extraction(self, workspace):
+        _make_pdf(workspace / "r.pdf", 5)
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "r.pdf", "pages": "2-3"})
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/pdf"
+        assert r.headers["x-content-type-options"] == "nosniff"   # nosniff on bytes path
+        assert _pdf_page_count(r.content) == 2
+
+    def test_pdf_no_pages_serves_whole(self, workspace):
+        _make_pdf(workspace / "r.pdf", 4)
+        r = TestClient(web.app).get("/thread/t1/show", params={"path": "r.pdf"})
+        assert r.status_code == 200 and _pdf_page_count(r.content) == 4
+
+    def test_pdf_oversize_span_falls_back_to_whole(self, workspace):
+        # span > _MAX_PAGE_SPAN -> extraction skipped -> whole file served.
+        _make_pdf(workspace / "big.pdf", 30)
+        out = _extract_pdf_pages(str(workspace / "big.pdf"), "1-30")
+        assert out is None
+
+    def test_pdf_corrupt_falls_back(self, workspace):
+        (workspace / "bad.pdf").write_bytes(b"%PDF-1.4 not really a pdf")
+        assert _extract_pdf_pages(str(workspace / "bad.pdf"), "1-2") is None
 
 
 class TestShowRoute:

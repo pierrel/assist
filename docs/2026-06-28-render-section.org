@@ -1,0 +1,123 @@
+#+TITLE: render a SECTION of a file + a per-embed full-page link
+#+DATE: <2026-06-28>
+#+STATUS: design+build (Phase 1 review done; implementing)
+
+* Design-review outcomes (folded in)
+Four-lens design review (simplicity, security/correctness, intention, clean
+interfaces). Decisions:
+- *PDF extraction is bounded BY CONSTRUCTION* (security B1/B2). Extraction only
+  runs when the input file is ≤ ~25 MB AND the clamped page-span is ≤ 25 pages;
+  otherwise serve the WHOLE file via ~FileResponse~ (streamed, bounded — the
+  existing safe path). pypdf ~PdfWriter~ materializes selected pages in memory, so
+  "catch → fall back" is NOT enough for the non-raising resource-exhaustion case;
+  coarse real bounds make the bad state unreachable. The extracted-bytes response
+  is a ~Response(..., media_type="application/pdf", headers={nosniff})~ — must
+  carry ``X-Content-Type-Options: nosniff`` like the whole-file ~FileResponse~
+  branch (tested on that branch). A corrupt/encrypted pdf → pypdf raises → caught
+  → serve the whole file (no new 404 path).
+- *Both-keys resolution by construction:* the route picks the range key by file
+  extension (.pdf → ``pages``, else ``lines``); the other key is simply unread.
+  No "ignore wrong key" branch/test — it's the absence of code.
+- *Drop the documented single-value knob:* the skill always emits ``N-M``; a bare
+  ``N`` may fall out of the parser for free but is not a specified/tested contract.
+- *Build the query suffix ONCE* (a ``_show_src(tid, path, lines, pages)`` helper)
+  and feed BOTH the embed ``src`` and the caption ``href`` — so they can't diverge
+  and ``_file_embed_html`` doesn't grow a long parameter list. URL-encode via
+  ``urllib.parse.urlencode``.
+- *``_parse_range(s, hi)`` encodes its own out-of-range contract:* reversed /
+  malformed / ``start > hi`` → None → whole file.
+- *org/md line slice DoS:* the existing whole-file /show already reads the whole
+  file, so slicing is no worse for text — no new bound needed there (the page case
+  is where the span cap is mandatory).
+- *Doc accuracy:* ``pypdf`` goes into the runtime ``dependencies`` (it was only a
+  dev/fixture dep); ``_parse_render_block`` + ``_RENDER_BLOCK_RE`` are UNCHANGED
+  (the new keys flow through the existing key:value parser for free).
+- *Test the link guarantee:* assert EVERY embed branch (pdf + md/org) emits a
+  ``show-cap`` href, so a future refactor can't silently drop the full-page link.
+
+* Goal
+Extend the render skill (docs/2026-06-28-render-skill.org, PR #146) two ways:
+
+1. **Render a SECTION of a file**, not just the whole file:
+   - **org / md → by line:** ``lines: 10-40`` (literal 1-based inclusive line range).
+   - **pdf → by page:** ``pages: 2-5`` (1-based inclusive page range), **extracted**
+     server-side (pypdf) so only those pages are served.
+2. **A per-embed full-page link (UI-only, NOT agent-driven):** every rendered
+   embed already carries a caption link to the standalone /show page; make it a
+   clear "view on its own page" affordance and **carry the section range into that
+   link** so a ``pages: 2-5`` embed opens full-page at pages 2-5.
+
+Pierre's calls: PDF "by page" = **extract the range** (not a ``#page=N`` jump);
+line range is **literal**; full-page is **UI-only** (the render layer decorates
+every embed; the agent does nothing for it).
+
+* Design
+** The render block (extends the existing format)
+Keeps the kept invariant ``type: file`` + ``path:``; gains an OPTIONAL range key:
+#+begin_example
+```render
+type: file
+path: /workspace/notes.org
+lines: 10-40
+```
+#+end_example
+- ``lines: N-M`` for org/md; ``pages: N-M`` for pdf. A bare ``N`` means ``N-N``.
+- The wrong-mode key is ignored (``lines`` on a pdf / ``pages`` on org/md).
+- Range is untrusted model output → parsed defensively (ints only; malformed →
+  ignored → whole file). No new injection surface (the path is still the only
+  string that reaches the filesystem, via the unchanged ``_safe_workspace_file``).
+
+** Skill (assist/web_skills/render/SKILL.md)
+Add: when the user asks for a specific part — "lines 10-40 of X", "page 3 of the
+report" — include the range in the block (``lines:`` for org/md, ``pages:`` for
+pdf). Keep it generalizable (don't overfit to one phrasing).
+
+** /show route (manage/web/threads.py)
+Gains query params ``lines`` / ``pages`` (e.g. ``?path=…&lines=10-40``):
+- A pure ``_parse_range(s, hi)`` → ``(start, end)`` clamped to ``[1, hi]`` or None
+  (empty/malformed/reversed → None → whole file). Unit-tested in isolation.
+- **org/md + lines:** read the file, slice ``lines[start-1:end]``, render that
+  slice through the existing md / pure-org renderer (unchanged).
+- **pdf + pages:** ``pypdf`` reads the file, a ``PdfWriter`` collects pages
+  ``start..end`` into a ``BytesIO``, served as ``application/pdf`` bytes (+
+  ``nosniff``). No temp file. Whole-pdf path unchanged when no ``pages``.
+- The route stays sync ``def`` (FastAPI threadpool) — pypdf extraction + the
+  slice are blocking CPU/IO and must not run on the event loop.
+
+** Embed + full-page link (manage/web/threads.py)
+- ``_render_file_block`` passes the block's ``lines``/``pages`` into the embed.
+- ``_file_embed_html`` appends the range to BOTH the iframe/embed ``src`` AND the
+  caption link's href, so the inline embed AND the full-page link show the same
+  section. The caption link is the per-embed "view on its own page" affordance
+  (already present; now range-aware). UI-only — no agent/skill surface for it.
+
+* Dependency
+- **Add ``pypdf``** to pyproject (pure-Python; no system packages). Host currently
+  has no pypdf/qpdf/pdfseparate/pdftk. **Deploy needs ``make deploy-install``** (venv
+  rebuild), not just deploy-code.
+
+* Security / edge cases
+- Range parse: ints only, clamp to file bounds, malformed/reversed/out-of-range →
+  whole file (benign). No path/format change — traversal confinement, CSP, sandbox
+  iframe all unchanged and reused.
+- pypdf on a confined path; a corrupt/huge pdf → pypdf raises → caught → fall back
+  to whole file (or 404 if unreadable). Clamp pages to the reader's page count.
+- Line slice on org: a literal slice can cut a heading's subtree — accepted (user
+  asked "by line"); the org renderer degrades gracefully.
+
+* Validation
+- *Unit (CPU):* ``_parse_range`` (range/single/malformed/reversed/clamp); the route
+  for an org/md line slice (only those lines rendered) and a pdf page extraction
+  (served pdf has the right page count — build a multi-page fixture with pypdf);
+  the embed/caption carry the range; existing /show security tests still hold.
+- *Behavioral (light, fans-limited):* focal n=3 — "show me lines 10-40 of X" and
+  "show page 3 of report.pdf" → assert the render block carries ``lines:``/``pages:``.
+- Full N cadence deferred (GPU fans).
+
+* Critical files
+- Edit: ``manage/web/threads.py`` (``_parse_range``, route range params, slice +
+  pypdf extraction, embed/link range), ``assist/web_skills/render/SKILL.md`` (range
+  guidance), ``pyproject.toml`` (pypdf), ``tests/test_render.py`` (+range tests),
+  ``edd/eval/test_render_agent.py`` (+section emission).
+- Reused unchanged: ``_safe_workspace_file``, the md / pure-org renderers, CSP,
+  sandbox iframe, ``_RENDER_DISPATCH`` (still ``{"file": …}``).
