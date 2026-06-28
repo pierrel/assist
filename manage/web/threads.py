@@ -1070,7 +1070,14 @@ _RENDER_DISPATCH = {"file": _render_file_block}
 # key: value lines.  It is lifted into an embed ONLY when its `type` is known and
 # renderable — so a stray ```render fence the agent wrote to SHOW as code, or a
 # malformed block, stays put and renders as a code block.
-_RENDER_BLOCK_RE = re.compile(r"(?ms)^```render[ \t]*\r?\n(.*?)\r?\n```[ \t]*$")
+#
+# The body is a "tempered" line match — ``(?!```)`` rejects any line that opens a
+# fence — so a closing ``` can't be consumed as body AND the scan stays LINEAR on
+# adversarial input (a model repetition-loop emitting thousands of ```render
+# lines): each bogus start fails at the next line instead of scanning to EOF,
+# avoiding the O(n^2) blow-up a plain ``.*?`` would cause on the event-loop thread.
+_RENDER_BLOCK_RE = re.compile(
+    r"(?m)^```render[ \t]*\n((?:(?!```)[^\n]*\n)*?)```[ \t]*$")
 
 
 def _parse_render_block(body: str) -> dict:

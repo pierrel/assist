@@ -149,6 +149,21 @@ is ready for it WITHOUT format change:
   tool call) appears, on the >2/3 gate. (Update =edd/eval/test_show_file_agent.py=.)
 - Full N=5/10 cadence deferred until the GPU fans are replaced.
 
+* Known limitations / follow-ups
+- *Pre-existing: render_thread runs on the event loop.* ~get_thread~ (async)
+  calls ~render_thread~ inline, which does blocking sqlite (~get_messages~) and
+  ~markdown.markdown~ — and python-markdown is O(n^2) on pathological fence-heavy
+  input (~8000 ```` ``` ```` lines ≈ 10s). This predates this PR (assistant content
+  always rendered via markdown on the loop on ~main~); the render-block regex
+  added here is LINEAR (tempered ``(?!```)``, verified ~0.001s at n=8000), so this
+  diff adds no new blow-up. The trigger (a model emitting thousands of identical
+  ```` ```render ```` lines) is verbatim repetition, which ~loop_detection~
+  terminates before it's saved.  Proper fix — push ~render_thread~ off the loop
+  via ~run_in_threadpool~ — is a hot-path threading change that warrants its own
+  focused PR + a "hold-the-resource, assert-prompt-return" liveness test, not a
+  bundled afterthought (the 2026-06-10 incident was exactly a rushed hot-path
+  event-loop change).  Tracked as a follow-up.
+
 * Open questions / risks
 - *Block-emission reliability* (the crux — measure with the focal eval).
 - *Streaming:* during a streamed turn the block arrives as text; decide whether
