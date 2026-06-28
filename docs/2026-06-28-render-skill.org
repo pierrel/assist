@@ -140,13 +140,15 @@ is ready for it WITHOUT format change:
 - *Fenced key:value over JSON or inline tags* (reliability + graceful fallback;
   inline tags also collide with the HTML-escaping the renderer already does).
 
-* Validation plan
+* Validation plan (as built)
 - *Unit (CPU):* block parser (well-formed, malformed→codeblock, unknown type),
   the ~type → renderer~ dispatch, and that all the existing /show security tests
-  still hold (traversal, CSP, /workspace mapping). Port =tests/test_show_file.py=.
+  still hold (traversal, CSP, /workspace mapping). In =tests/test_render.py=
+  (ported from the old test_show_file.py).
 - *Behavioral (light, fans-limited):* a focal n=3 eval mirroring the example
   thread — realistic workspace, "show me <file>" → assert a ~render~ block (not a
-  tool call) appears, on the >2/3 gate. (Update =edd/eval/test_show_file_agent.py=.)
+  tool call) appears, on the >2/3 gate. In =edd/eval/test_render_agent.py=
+  (replaces the old test_show_file_agent.py). Result: focal 3/3.
 - Full N=5/10 cadence deferred until the GPU fans are replaced.
 
 * Known limitations / follow-ups
@@ -173,11 +175,14 @@ is ready for it WITHOUT format change:
 - *Skill-trigger wording* generality (don't overfit to "show me fitness.org" —
   the same alignment caution as the assist skill conventions).
 
-* Critical files
-- New: =assist/.../skills/render/SKILL.md= (web skill), =assist/docs/2026-06-28-render-skill.org=.
-- Edit: =manage/web/threads.py= (parse render blocks + ~_RENDER_DISPATCH~),
-  =assist/thread.py= (~_messages_to_dicts~ — drop show_file branch, add block
-  extraction), =assist/thread_manager.py= (drop ~_WEB_TOOLS~; add the web skill
-  source), =assist/tools.py= (remove ~show_file~), =general_instructions.md.j2=
-  (remove the show-file steering).
+* Critical files (as built)
+- New: =assist/web_skills/render/SKILL.md= (web skill), =docs/2026-06-28-render-skill.org=,
+  =edd/eval/test_render_agent.py=.
+- Edit: =manage/web/threads.py= (parse render blocks + ~_RENDER_DISPATCH~ +
+  ~_render_assistant_content~ + the file embed; ~_SHOWABLE_EXTS~ moved here),
+  =assist/thread.py= (~_messages_to_dicts~ — drop the show_file branch; no block
+  parsing here, that's web-only in render_thread), =assist/thread_manager.py=
+  (drop ~_WEB_TOOLS~; register the web skill via ~skill_sources~), =assist/tools.py=
+  (remove ~show_file~ + ~_SHOWABLE_EXTS~), =assist/templates/deepagents/general_instructions.md.j2=
+  (remove the show-file steering), =tests/test_render.py= (renamed from test_show_file.py).
 - Reused: the ~/show~ route, ~_safe_workspace_file~, ~_org_to_html~, CSP/sandbox.
