@@ -1,6 +1,6 @@
 #+TITLE: local travel skill — real-world time/distance across transit, walk, bike, car
 #+DATE: <2026-06-28>
-#+STATUS: built + MOTIS live (Bay Area, FULL 511 regional transit); pending review/PR merge+deploy
+#+STATUS: LIVE IN PROD (PR #148 merged + deployed 2026-06-28; MOTIS Bay Area, FULL 511 regional transit). Follow-ups: Nominatim geocoder, 511 refresh cron.
 
 * Provisioned + verified (2026-06-28)
 MOTIS is stood up and LIVE at ``$ASSIST_ROUTING_URL`` (Docker ``motis-travel``,
