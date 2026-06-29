@@ -23,7 +23,8 @@ def _sandbox_timezone() -> str:
     if tz:
         return tz
     try:  # Debian-likes: /etc/timezone is a plain zone name
-        name = open("/etc/timezone").read().strip()
+        with open("/etc/timezone") as f:
+            name = f.read().strip()
         if name:
             return name
     except OSError:

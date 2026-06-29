@@ -16,7 +16,7 @@ from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import create_filesystem, skill_was_loaded, executed_commands, cleanup_workspace
+from .utils import skill_was_loaded, executed_commands, cleanup_workspace
 
 
 class TestTimeAgent(TestCase):
@@ -45,34 +45,44 @@ class TestTimeAgent(TestCase):
         return any(re.search(r"(?:^|[\s;&|()])date\b", cmd)
                    for cmd in executed_commands(agent))
 
-    def _weekday(self, expr: str) -> str:
-        """The weekday `date -d <expr>` resolves to IN THE SANDBOX — same clock and
-        TZ the agent uses. Fail fast on empty output (else assertIn('', reply) would
-        vacuously pass and hide a broken `date`)."""
-        out = (self.sandbox.execute(f"date -d '{expr}' +%A").output or "").strip()
-        self.assertTrue(out, f"sandbox `date -d {expr}` produced no output")
-        return out
+    def _date_parts(self, expr: str):
+        """(weekday, month, day) that `date -d <expr>` resolves to IN THE SANDBOX —
+        same clock/TZ the agent uses. Fail fast on empty (an assertIn against an
+        empty string would vacuously pass)."""
+        out = (self.sandbox.execute(f"date -d '{expr}' '+%A|%B|%-d'").output or "").strip()
+        self.assertIn("|", out, f"sandbox `date -d {expr}` produced no usable output")
+        wk, mon, day = out.split("|")
+        return wk.lower(), mon.lower(), day
+
+    def _asserts_full_date(self, reply, expr):
+        """Reply names the resolved weekday AND month AND day — i.e. an actual
+        date, not just a weekday (the prompt asks for the date)."""
+        wk, mon, day = self._date_parts(expr)
+        self.assertIn(wk, reply)
+        self.assertIn(mon, reply)
+        self.assertRegex(reply, rf"\b{day}\b")   # day number, word-bounded (not '2' in '2026')
 
     def test_weekday_of_a_date(self):
         agent = self._agent()
         reply = str(agent.message("What day of the week does the 5th of July land on?") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
-        self.assertIn(self._weekday("7/5").lower(), reply)
+        self.assertIn(self._date_parts("7/5")[0], reply)   # the prompt asks for the weekday
 
     def test_relative_date(self):
         agent = self._agent()
         reply = str(agent.message("What's the date on the upcoming Thursday?") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
-        self.assertIn("thursday", reply)   # next Thursday is a Thursday
+        self.assertIn("thursday", reply)              # next Thursday is a Thursday
+        self._asserts_full_date(reply, "next Thursday")  # ...and the actual date
 
     def test_today(self):
         agent = self._agent()
         reply = str(agent.message("Remind me what the date is right now.") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
-        self.assertIn(self._weekday("today").lower(), reply)
+        self._asserts_full_date(reply, "today")
 
     def test_does_not_load_on_non_date_prompt(self):
         # Anti-test: an off-topic prompt must not trip the time skill.
