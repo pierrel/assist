@@ -2,9 +2,13 @@
 WHERE the user's message was sent.
 
 Distinct from ``AgentSpec`` (per-agent, static): the rider changes every message, so
-it rides the per-turn ``configurable`` channel (the same mechanism emacsos uses for
-``PhoneContext``), NOT the spec.  A client passes it via
-``Thread(configurable={CONTEXT_RIDER_KEY: rider})``.  Two consumers, one source:
+it rides the per-INVOCATION ``configurable`` run config (the same mechanism emacsos
+uses for ``PhoneContext``), NOT the spec.  The web path passes it per turn via
+``ThreadManager.get(..., configurable={CONTEXT_RIDER_KEY: rider})``, which builds a
+fresh ``Thread`` each turn — so the rider is always current.  A *reused*, long-lived
+``Thread`` merges ``configurable`` into its persistent ``runconfig`` at construction,
+so such a client must refresh the rider every turn (not set it once) or later turns
+see a stale one.  Two consumers, one source:
 
 - the model gets a rendered prose line (``ContextRiderMiddleware``, injected
   ephemerally per turn — never checkpointed) so it can reason "you asked this
@@ -64,7 +68,8 @@ class ContextRider:
         if self.sent_at is None:
             return None
         dt = self.sent_at.astimezone(ZoneInfo(self.tz)) if self.tz else self.sent_at
-        stamp = dt.strftime("%A, %B %-d, %Y at %-I:%M %p")
+        hour12 = dt.hour % 12 or 12   # avoid %-d/%-I (glibc-only strftime flags)
+        stamp = f"{dt:%A, %B} {dt.day}, {dt.year} at {hour12}:{dt.minute:02d} {dt:%p}"
         return f"{stamp} ({self.tz})" if self.tz else stamp
 
     def _where(self) -> str | None:

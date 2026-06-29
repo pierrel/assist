@@ -866,7 +866,7 @@ def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks,
                        text: str = Form(...),
-                       sent_at: str = Form(None), tz: str = Form(None)):
+                       sent_at: str | None = Form(None), tz: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     _mark_pending(tid, text)
     background_tasks.add_task(_process_message, tid, text, _build_rider(sent_at, tz))
