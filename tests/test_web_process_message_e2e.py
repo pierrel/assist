@@ -95,10 +95,10 @@ def test_post_message_runs_process_message_without_crashing(
     # AND the threads-module's already-imported reference; _process_message
     # calls the latter.
     monkeypatch.setattr(
-        "manage.web.state._get_sandbox_backend", lambda tid: None,
+        "manage.web.state._get_sandbox_backend", lambda tid, tz=None: None,
     )
     monkeypatch.setattr(
-        "manage.web.threads._get_sandbox_backend", lambda tid: None,
+        "manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None,
     )
 
     # Stub MANAGER.get to return a minimal fake chat whose `.message()`
@@ -117,7 +117,7 @@ def test_post_message_runs_process_message_without_crashing(
 
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: _FakeChat(),
     )
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
 
@@ -167,11 +167,11 @@ def test_post_message_runs_process_message_without_crashing(
 def _stub_happy_path(monkeypatch, chat):
     """Stub the sandbox lookup, MANAGER.get, and the post-message hooks so
     _process_message runs end-to-end against `chat`."""
-    monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid: None)
-    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid: None)
+    monkeypatch.setattr("manage.web.state._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None: chat,
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: chat,
     )
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
@@ -238,7 +238,7 @@ def test_process_message_reaps_registered_container_when_creation_then_raises(
     registered = MagicMock()
     SandboxManager._containers[work_dir] = registered
 
-    def _register_then_boom(tid):
+    def _register_then_boom(tid, tz=None):
         # The container is already in the registry (as get_sandbox_backend
         # leaves it); creation now fails before returning a usable backend.
         raise RuntimeError("sandbox creation failed after registering a container")
@@ -311,7 +311,8 @@ def test_post_message_writes_busy_status_synchronously(client, monkeypatch):
     monkeypatch.setattr(
         threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
     )
-    monkeypatch.setattr("manage.web.threads._process_message", lambda tid, text: None)
+    monkeypatch.setattr("manage.web.threads._process_message",
+                        lambda tid, text, rider=None: None)
 
     r = client.post(
         "/thread/thread-e2e/message",
@@ -338,7 +339,7 @@ def test_pending_message_renders_at_top_as_latest(client, monkeypatch):
             ]
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: _FakeChat(),
     )
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
 
@@ -368,7 +369,7 @@ def test_pending_bubble_not_duplicated_when_already_persisted(client, monkeypatc
             return [{"role": "user", "content": persisted}]
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: _FakeChat(),
     )
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
 
@@ -380,3 +381,42 @@ def test_pending_bubble_not_duplicated_when_already_persisted(client, monkeypatc
         f"duplicate pending bubble: the message rendered "
         f"{html.count('Looks solid to me')} times"
     )
+
+
+def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
+    """Symptom test: a POST carrying sent_at+tz reaches BOTH rider consumers —
+    the sandbox TZ (so `date` is the user's local time) and the turn's
+    `configurable` (so the middleware can render the model line)."""
+    from assist.context_rider import CONTEXT_RIDER_KEY
+    captured = {}
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend",
+                        lambda tid, tz=None: captured.update(tz=tz) or None)
+
+    class _FakeChat:
+        def message(self, text):
+            return "ok"
+        def get_messages(self):
+            return [{"role": "user", "content": "hi"}]
+
+    def _get(tid, sandbox_backend=None, on_queue_state=None, configurable=None):
+        captured["configurable"] = configurable
+        return _FakeChat()
+
+    monkeypatch.setattr(web.MANAGER, "get", _get)
+    monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads.get_cached_description", lambda tid: "stub")
+
+    r = client.post(
+        "/thread/thread-e2e/message",
+        data={"text": "what's today?",
+              "sent_at": "2026-06-29T21:05:00+00:00",
+              "tz": "America/Los_Angeles"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    _wait_for_terminal_status("thread-e2e", deadline_s=5.0)
+
+    assert captured.get("tz") == "America/Los_Angeles"
+    rider = (captured.get("configurable") or {}).get(CONTEXT_RIDER_KEY)
+    assert rider is not None and rider.tz == "America/Los_Angeles"

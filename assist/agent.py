@@ -33,6 +33,7 @@ from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
 from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
+from assist.middleware.context_rider_middleware import ContextRiderMiddleware
 from assist.env import env_int
 
 
@@ -363,7 +364,7 @@ def create_agent(model: BaseChatModel,
             workspace_dir=workspace_dir,
             references_dir=references_dir,
         ),
-        middleware=mw + [skills_mw, memory_mw, logging_mw],
+        middleware=mw + [skills_mw, memory_mw, ContextRiderMiddleware(), logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
         # `travel` (time/distance) and `directions` (turn-by-turn steps) are

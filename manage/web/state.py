@@ -154,10 +154,13 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
         return None
 
 
-def _get_sandbox_backend(tid: str):
-    """Get sandbox backend for a thread, or None if Docker is unavailable."""
+def _get_sandbox_backend(tid: str, tz: str | None = None):
+    """Get sandbox backend for a thread, or None if Docker is unavailable.
+
+    ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
+    runs in the user's local time (else the host/server zone)."""
     work_dir = MANAGER.thread_default_working_dir(tid)
-    return SandboxManager.get_sandbox_backend(work_dir)
+    return SandboxManager.get_sandbox_backend(work_dir, tz=tz)
 
 
 def _has_unmerged_changes(tid: str) -> bool:

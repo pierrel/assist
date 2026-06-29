@@ -1,0 +1,69 @@
+#+title: Context rider — per-message time (+ geo) for the agent
+#+date: 2026-06-29
+
+* Goal
+Deliver to the agent, with each message, WHEN (and later WHERE) the message was
+sent. A "rider" = per-MESSAGE context on the turn — distinct from ~AgentSpec~
+(per-agent, static). Roadmap #3; unblocks per-user timezone for the ~time~ skill
+and the directions transit departure-times follow-up.
+
+Pierre's calls (2026-06-29): (1) simplest first, iterate; (2) coarse persisted
+location; (3) v1 *does* send the actual time (the model sees ~sent_at~ + the
+sandbox ~date~ runs in the user's zone) — exact ~date~-clock anchoring to
+~sent_at~ is the only deferred bit, a no-op for live chat; (4) full dataclass
+now, stage the consumers; (5) no stale-location line.
+
+* Design (as built)
+The architect's finding: reuse the two seams already in the codebase, don't add
+mechanism, don't touch ~AgentSpec~.
+
+- *Source of truth*: a frozen ~ContextRider~ dataclass (~assist/context_rider.py~:
+  ~sent_at, tz, lat, lon, place_label~; all optional; validated at construction).
+  Rides the per-turn ~configurable~ channel under ~CONTEXT_RIDER_KEY~ — the same
+  mechanism emacsos uses for ~PhoneContext~. No rider / empty rider == prior
+  behavior (server TZ, no location).
+- *Model rendering*: ~ContextRiderMiddleware~ (~wrap_model_call~) injects the
+  rider's ~prose_line()~ as an EPHEMERAL system message via ~request.override~ —
+  so it is NOT checkpointed (location isn't persisted; a later riderless turn
+  carries no stale context). Installed on the MAIN agent only — never on the
+  web-egress sub-agents, so a location line can't ride out in a search query.
+- *Deterministic consumer (TZ)*: ~_sandbox_timezone(override)~ +
+  ~get_sandbox_backend(tz=)~ — the per-turn rider tz sets the sandbox container's
+  ~TZ~, so this turn's ~date~ runs in the user's local time. Explicit parameter,
+  not an ~os.environ~ mutation (no cross-turn race).
+- *Web wiring*: ~POST /thread/{tid}/message~ gains optional ~sent_at~ + ~tz~ form
+  fields (browser stamps ~new Date().toISOString()~ + ~Intl…timeZone~ on submit —
+  no permission prompt). ~_build_rider~ (pure CPU, on the loop thread; returns
+  ~None~ on bad/missing input so a malformed rider never blocks a message) →
+  ~_process_message~ → sandbox tz + ~MANAGER.get(configurable=…)~.
+
+* v1 scope (this PR)
+TIME end-to-end, web-sourced: browser → rider → model prose line + sandbox TZ.
+Geo fields exist on the contract but are NOT wired to a client in v1 (geo needs a
+browser geolocation permission / the phone). ~prose_line()~ already renders geo
+(coarse, ≈city-block) for when a client supplies it.
+
+* Deferred (gated on this)
+- Geo "from here" for travel/directions (browser-geo permission or the phone) +
+  the travel skill's coords-origin guidance.
+- Transit *departure times* in directions (reads ~rider.sent_at~).
+- Per-user TZ from the phone (emacsos passes the rider on its ~configurable~,
+  exactly as it passes ~PhoneContext~).
+- Exact ~date~-clock anchoring to ~sent_at~ (only matters for long-queued turns).
+- The new-thread first-message form (~/threads/with-message~) — v1 wires the
+  in-thread message form; the first message of a brand-new thread is a fast-follow.
+
+* Privacy
+~configurable~ is per-invocation, not checkpointed → precise coords stay
+ephemeral; only the coarse prose line could ever persist, and even that is
+ephemeral (override, not state). Middleware is main-agent-only (no geo to the
+research sub-agent's egress).
+
+* Validation
+- Unit (~tests/test_context_rider.py~): contract/validation, prose (zone render +
+  coarse geo), the TZ-seam override, the middleware (injects / inert), and the
+  ~_build_rider~ web boundary.
+- Web symptom (~tests/test_web_process_message_e2e.py~): a POST with ~sent_at~+~tz~
+  reaches BOTH consumers (sandbox tz + ~configurable~).
+- Event-loop: ~post_message~ only builds the rider (pure CPU) + hands to the
+  background task — no lock/IO/subprocess on the loop thread.

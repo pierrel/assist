@@ -13,13 +13,18 @@ def _rewrite_localhost(value: str) -> str:
     return re.sub(r'localhost|127\.0\.0\.1', 'host.docker.internal', value)
 
 
-def _sandbox_timezone() -> str:
+def _sandbox_timezone(override: str | None = None) -> str:
     """A timezone setting for the sandbox (an IANA zone name like
     "America/Los_Angeles", or whatever ``TZ`` value is configured) so ``date`` /
     file timestamps reflect LOCAL time, not the container's default UTC — without it
     the `time` skill answers "what's today" in UTC (wrong for an evening PT user).
     Order: ASSIST_TIMEZONE override (operator config; the context-rider milestone
-    will set per-user later), else ``TZ``, else the host's zone, else UTC."""
+    will set per-user later), else ``TZ``, else the host's zone, else UTC.
+
+    ``override`` is the per-turn context-rider timezone (the user's actual zone);
+    when given it wins, so this turn's ``date`` runs in the user's local time."""
+    if override:
+        return override
     tz = os.environ.get("ASSIST_TIMEZONE") or os.environ.get("TZ")
     if tz:
         return tz
@@ -216,7 +221,7 @@ class SandboxManager:
         )
 
     @classmethod
-    def get_sandbox_backend(cls, work_dir: str):
+    def get_sandbox_backend(cls, work_dir: str, tz: str | None = None):
         """Return a DockerSandboxBackend for work_dir, creating a container if needed.
 
         Returns None if Docker is not available.
@@ -318,7 +323,7 @@ class SandboxManager:
                 "HTTP_PROXY": proxy_url,
                 "https_proxy": proxy_url,
                 "http_proxy": proxy_url,
-                "TZ": _sandbox_timezone(),  # local time, not UTC (the `time` skill)
+                "TZ": _sandbox_timezone(tz),  # local time (rider tz > host), not UTC
             }
             sandbox_env.update({
                 k: _rewrite_localhost(v)

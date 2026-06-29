@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import urllib.parse
+from datetime import datetime
 
 import markdown
 from fastapi import BackgroundTasks, Form, HTTPException
@@ -32,6 +33,7 @@ from assist.domain_manager import (
     MergeConflictError,
     OriginAdvancedError,
 )
+from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
@@ -527,9 +529,11 @@ def render_thread(
           {"<div class='success-msg'>Pushed local main to origin/main.</div>" if pushed else ""}
           {conflict_banner_html}
           {f'<script>try {{ localStorage.removeItem("assist:review:" + {json.dumps(tid)}); }} catch (_) {{}}</script>' if reviewed else ""}
-          <form action="/thread/{tid}/message" method="post">
+          <form action="/thread/{tid}/message" method="post" onsubmit="try{{this.sent_at.value=new Date().toISOString();this.tz.value=Intl.DateTimeFormat().resolvedOptions().timeZone;}}catch(e){{}}">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..." {form_disabled}></textarea><br/>
+            <input type="hidden" name="sent_at"/>
+            <input type="hidden" name="tz"/>
             <div class="button-group">
               <button class="btn" type="submit" {form_disabled}>Send</button>
               <button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>
@@ -613,7 +617,7 @@ def _initialize_thread(tid: str, text: str, domain: str | None) -> None:
         _set_status(tid, "error", error=str(e), pending_message=text)
 
 
-def _process_message(tid: str, text: str) -> None:
+def _process_message(tid: str, text: str, rider: ContextRider | None = None) -> None:
     # Carry the pending message in the status so the thread page can show
     # it as a placeholder bubble while processing (cleared once status==ready).
     pending_kwargs = {"pending_message": text}
@@ -648,13 +652,15 @@ def _process_message(tid: str, text: str) -> None:
                 # Inside the try so the `finally` reaps even if sandbox
                 # creation registers a container and then raises — cleanup
                 # keys on work_dir, not on the `sandbox` handle.
-                sandbox = _get_sandbox_backend(tid)
+                sandbox = _get_sandbox_backend(tid, tz=rider.tz if rider else None)
                 try:
                     # on_queue_state=None: the outer acquire above already
                     # owns the callback; the inner acquire is the reentrant
                     # no-op fast path (no state callback fires from it).
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,
-                                       on_queue_state=None)
+                                       on_queue_state=None,
+                                       configurable=({CONTEXT_RIDER_KEY: rider}
+                                                     if rider else None))
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
@@ -844,11 +850,26 @@ def _mark_pending(tid: str, text: str) -> None:
     _set_status(tid, stage, pending_message=text)
 
 
+def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
+    """Build the per-turn rider from the client's send-time + timezone. Pure CPU
+    (safe on the event-loop thread); returns None on missing/bad data so a malformed
+    rider never blocks the message submit."""
+    if not sent_at and not tz:
+        return None
+    try:
+        dt = datetime.fromisoformat(sent_at) if sent_at else None
+        return ContextRider(sent_at=dt, tz=tz or None)
+    except Exception:
+        return None
+
+
 @app.post("/thread/{tid}/message")
-async def post_message(tid: str, background_tasks: BackgroundTasks, text: str = Form(...)):
+async def post_message(tid: str, background_tasks: BackgroundTasks,
+                       text: str = Form(...),
+                       sent_at: str = Form(None), tz: str = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     _mark_pending(tid, text)
-    background_tasks.add_task(_process_message, tid, text)
+    background_tasks.add_task(_process_message, tid, text, _build_rider(sent_at, tz))
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 

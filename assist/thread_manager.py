@@ -236,7 +236,8 @@ class ThreadManager:
             thread_id: str,
             working_dir: str | None = None,
             sandbox_backend=None,
-            on_queue_state: Callable[[str], None] | None = None) -> Thread:
+            on_queue_state: Callable[[str], None] | None = None,
+            configurable: dict | None = None) -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
@@ -249,6 +250,7 @@ class ThreadManager:
                       model=self.model,
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
+                      configurable=configurable,
                       spec=AgentSpec(skill_sources=_web_skill_sources()))
 
     def remove(self, thread_id: str) -> None:
