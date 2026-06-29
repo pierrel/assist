@@ -73,12 +73,13 @@ refresh_gtfs() {
 
     local out="$tmpdir/$GTFS_FILE"
     log "downloading 511 GTFS (operator=$GTFS_511_OPERATOR)..."
-    curl -fsS --max-time 300 -o "$out" \
-        "https://api.511.org/transit/datafeeds?api_key=${token}&operator_id=${GTFS_511_OPERATOR}" \
+    # Pass the URL (with the secret token) via a stdin curl config, NOT argv, so the
+    # token isn't exposed in `ps` / /proc to other local users during the download.
+    printf 'url = "https://api.511.org/transit/datafeeds?api_key=%s&operator_id=%s"\n' \
+        "$token" "$GTFS_511_OPERATOR" \
+        | curl -fsS --max-time 300 -o "$out" -K - \
         || { log "511 download failed — keeping current GTFS"; return 1; }
 
-    # Validate: a real GTFS zip with stops.txt (the 511 zip can be a format `unzip`
-    # chokes on, so use Python's zipfile).
     # Validate: a real GTFS zip with the core files (the 511 zip can be a format
     # `unzip` chokes on, so use Python's zipfile).  Explicit sys.exit, NOT assert,
     # so PYTHONOPTIMIZE can't silently disable the check in a cron.
@@ -142,7 +143,16 @@ reimport_motis() {
 }
 
 reimport_nominatim() {
+    # The mediagis image only imports into an EMPTY DB, so re-import must wipe the
+    # volume — the old instance is gone before the new one finishes building. A
+    # rebuild failure therefore degrades geocoding to MOTIS's built-in fallback
+    # (travel still ROUTES — not an outage) until the next run re-imports from the
+    # on-disk OSM. (A clean container-swap isn't practical here: empty-volume import
+    # + Docker can't rename volumes.) Catch the most likely failure — image
+    # unavailable — BEFORE destroying the working instance.
     log "re-importing Nominatim (OSM changed)..."
+    docker image inspect "$NOMINATIM_IMAGE" >/dev/null 2>&1 || docker pull "$NOMINATIM_IMAGE" >/dev/null \
+        || { log "Nominatim image unavailable — keeping the current geocoder"; return 1; }
     docker rm -f "$NOMINATIM_CONTAINER" >/dev/null 2>&1 || true
     docker volume rm "$NOMINATIM_VOLUME" >/dev/null 2>&1 || true
     docker run -d --name "$NOMINATIM_CONTAINER" \

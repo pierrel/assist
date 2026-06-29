@@ -11,7 +11,8 @@ an aging map. This is the last travel follow-up after routing (#148) + geocoder 
 * What — scripts/refresh-travel-data.sh
 One script, run weekly by an unattended user cron (no sudo). Deps: ``docker``,
 ``curl``, ``python3`` (GTFS zip validation), and standard util-linux/coreutils
-(``flock``, ``stat``, ``du``, ``cmp``, ``mktemp``):
+(``flock``, ``stat``, ``du``, ``cmp``, ``mktemp``, ``sed``, ``grep``, ``head``,
+``cut``):
 - **511 GTFS — every run.** Download the regional feed (token from
   ``~/motis-travel/.511-token``, untracked), validate it's a real GTFS zip
   (Python ``zipfile`` — the 511 zip's format trips ``unzip``), then atomically swap.
@@ -25,7 +26,12 @@ One script, run weekly by an unattended user cron (no sudo). Deps: ``docker``,
   OSM-unchanged run only rebuilds the timetable and reuses the street graph — the
   weekly GTFS refresh is a **~5-second** restart, not a minutes-long rebuild.
 - **Nominatim re-import — only when OSM changed** (its full import is heavy; not
-  worth running weekly). During it, geocoding falls back to MOTIS's built-in.
+  worth running weekly). The mediagis image only imports into an empty DB, so the
+  re-import wipes the volume — a rebuild failure degrades geocoding to MOTIS's
+  built-in fallback (travel still ROUTES — not an outage) until the next run
+  re-imports from the on-disk OSM. The most likely failure (image unavailable) is
+  caught BEFORE the old instance is destroyed. (A clean create-then-swap isn't
+  practical: empty-volume import + Docker can't rename volumes.)
 
 Safety: a ``flock`` so runs can't overlap; **validate-before-swap on the downloads**
 so a bad/partial fetch never replaces good GTFS/OSM (keep-current on any failure — a
