@@ -1,0 +1,181 @@
+#+TITLE: turn-by-turn directions — design (for review; no code yet)
+#+DATE: <2026-06-29>
+#+STATUS: DESIGN — internal design-review done; awaiting Pierre's call on the open questions before any code
+
+* Goal
+Extend the travel capability from "how long / which mode" (the shipped ~travel~
+tool) to actual route STEPS — "how do I get from A to B", "which bus do I take",
+"directions to X". Next item on Pierre's roadmap after travel (routing + 511
+transit + Nominatim geocoder, all shipped).
+
+This doc is the Phase-1 design: an architect plan + a 4-lens internal design
+review, grounded in live MOTIS probes. It ends with **open questions for Pierre**.
+No code is written until those are settled.
+
+* Measured findings (live MOTIS, http://$ASSIST_ROUTING_URL — measure, don't guess)
+The travel-tool lesson was to verify response shapes, not guess. What MOTIS
+~/api/v1/plan~ actually returns:
+
+- *Transit legs are clean + rich.* A real itinerary = WALK → BUS (~routeShortName~
+  e.g. "9R", ~headsign~, ~agencyName~, ~intermediateStops~) → WALK → SUBWAY (BART
+  "Yellow-N", 2 intermediate stops) → WALK. ~from.name~/~to.name~ are stop names.
+  Transfers = multiple transit legs. So a "walk to X, take the 9R to Y, transfer
+  to BART to Z, walk to dest" narrative is construction-correct from the fields.
+  Edge: one degenerate FUNICULAR leg had ~duration:0~ + identical from/to — must
+  be filtered.
+- *Street legs give raw geometry, not turns.* A CAR leg = a ~steps[]~ array, each
+  step = {~relativeDirection~, ~streetName~, ~distance~, ~polyline~, ~osmWay~, …}.
+  CRITICAL: ~relativeDirection~ is **uniformly "CONTINUE"** — 163/163 (Civic→Ferry
+  car), 423/423 (Sunset→Embarcadero car), 165/166 walk. MOTIS emits one step per
+  OSM way-segment and does NOT classify turns. So usable directions need
+  post-processing.
+- *Street-name consolidation works.* Collapsing consecutive same-~streetName~ steps
+  turned 423 raw steps → **18 clean street runs** ("951 m Noriega Street, 1248 m
+  19th Avenue, …"). Genuinely useful as a "follow these streets" list.
+- *Turn direction IS recoverable from geometry.* Decoding each step ~polyline~
+  (Google-encoded, read ~precision~ from the field) and taking the bearing delta
+  across street-change boundaries classified turns correctly (29th→Noriega +90°
+  right, Noriega→19th −90° left, 19th→Crossover ~0° straight; 15/15 sensible).
+  Deltas cluster sharply at ±90° / ~0°, so a threshold classifier is reliable on
+  ordinary surface streets — but roundabouts / freeway merges / forks will
+  misclassify (a gentle highway curve can read as a turn).
+- *Bike routing is genuinely bike-aware* (Pierre's question). Same OD
+  (Panhandle→Ferry): CAR took Masonic / Turk Blvd / Golden Gate Ave (arterials);
+  BIKE took Ashbury → **Page Street** (the Wiggle — SF's low-traffic bike
+  boulevard) → Market Street (bike lanes). MOTIS's BIKE street profile follows OSM
+  cycling infrastructure, so bike directions ride real bike-friendly streets, not
+  the car path. Caveat: quality tracks OSM bike-tag completeness (excellent in SF);
+  explicit hill-avoidance is unconfirmed (the flat-Wiggle choice is encouraging).
+
+* Design (resolved after the 4-lens internal review)
+The internal review (simplicity, agentic/small-model fit, user-intention, clean
+interfaces) converged on these; the genuine forks are in *Open questions*.
+
+** A new ~directions(origin, destination, mode)~ tool, built-in on the main agent
+- Separate tool, not a ~travel(detail=…)~ knob. Honest framing: this is a
+  *small-model routing* concession, not a code-design necessity — ~travel~ and
+  ~directions~ share origin/destination + ~_geocode~ + the MOTIS call, so by pure
+  code design it's a parameter. But Qwen3.6 picks behavior by tool/skill, not by a
+  ~detail=~ flag it would ignore (the repo's "structure is the floor, prose is a
+  nudge" lesson) — a separate tool + skill is the harder lever for "user wants
+  steps, not a time". Registered like ~travel~:
+  ~tools=list(spec.tools) + ([directions] if directions not in spec.tools else [])~.
+- *~mode~ is REQUIRED, no silent default.* The review's strongest point: a silent
+  ~default="transit"~ would return transit steps when the user wanted to drive — a
+  silent wrong-mode answer, exactly the no-guessing property ~travel~ was built
+  around (travel takes NO mode and returns all four; directions needs one, so make
+  the model supply it). The SKILL gives a **checkable synonym→enum table** (the
+  arg-shape lever this model obeys): bus/train/subway/metro/light-rail → ~transit~;
+  drive/car/driving → ~car~; walk/on foot/walking → ~walk~; bike/cycle/cycling →
+  ~bike~. ~mode~ is one short string the model copies — checkable, unlike travel's
+  rejected list-of-enums.
+
+** Per-mode output — one preformatted numbered list the model relays verbatim
+Same philosophy as travel's summary string (lean on the chat's markdown; no map in
+v1 — that's separate render-skill territory). ~mode~ dispatches at the top into ONE
+of two builders (not four mode paths; car/bike/walk share the street builder):
+
+- *Transit* (~_transit_narrative~): walk-to-stop / board-line / transfer /
+  alight / walk-to-dest, from the min-duration itinerary. Filter zero-duration /
+  same-stop legs. Example:
+  #+begin_example
+  Transit directions from "Civic Center" to "Embarcadero" (~21 min):
+  1. Walk to Grove St & Van Ness Ave (3 min)
+  2. Take the 6 bus toward Civic Center Station to Hyde St & Grove St (1 stop)
+  3. Walk to Civic Center BART (2 min)
+  4. Take BART Yellow-N toward Pittsburg/Bay Point to Embarcadero (2 stops)
+  5. Walk to Embarcadero (6 min)
+  #+end_example
+- *Street — car / bike / walk* (~_street_narrative~ over consolidated runs):
+  consolidate same-street steps into runs (sum distance), and emit a turn verb
+  **only when the geometry bearing delta is UNAMBIGUOUS**; otherwise the neutral
+  "Continue onto X". This is the by-construction safety the review demanded: a
+  *confident wrong turn is unreachable* — ambiguous transitions (roundabouts,
+  merges, forks, gentle curves) degrade to "Continue", they don't guess "turn
+  left". Bike rides the bike-aware route (Page St etc.). Example:
+  #+begin_example
+  Bike directions from "the Panhandle" to "the Ferry Building" (~3.7 mi):
+  1. Head onto Ashbury Street (0.1 mi)
+  2. Continue onto Page Street (1.5 mi)        # the Wiggle
+  3. Turn right onto Market Street (2.0 mi)
+  4. Arrive at the Ferry Building
+  #+end_example
+  The ~directions~ skill tells the agent street turns are approximate, so it can
+  hedge when relaying.
+
+** Reuse + the never-raise contract (a stated requirement, not a note)
+- Reuses ~_geocode~ (Nominatim → coords), the ~_TravelBackendError~ → "unavailable"
+  vs ~None~ → "couldn't find that place" pattern, ~_fmt_duration~, and the single
+  ~/plan~ call shape. ~directions~ makes ONE ~/plan~ call (one mode) — cheaper than
+  travel's up-to-six.
+- The NEW code (polyline decode + bearing math + leg/step extraction) adds raise
+  sites (malformed/empty/one-point polyline, non-numeric coords, missing steps).
+  REQUIREMENT: every narrative-build path is wrapped so a malformed leg/polyline
+  **degrades** (skip the turn → "Continue"; or a bare street name; or "couldn't
+  find a route") and NEVER raises into the agent loop — mirroring
+  ~_plan_direct~/~_plan_transit~'s ~try/except (KeyError,TypeError,ValueError,
+  AttributeError)~. The malformed-data fallback and the ambiguous-turn fallback
+  share ONE degradation path (both → "Continue onto X").
+
+** Helpers (kept minimal) + skill
+- ~_consolidate_street_steps~ (group consecutive same-street steps), ~_street_narrative~,
+  ~_transit_narrative~, a ~mode~ normalizer, and — only if geometry turns are in v1 —
+  ~_decode_polyline~ + ~_bearing_delta~. No ~_plan_for_directions~ wrapper (inline the
+  ~_motis_get~ call). Group-runs and classify-turn stay separate (one concern each);
+  ~mode~ dispatches at the top, never threaded into the geometry helpers.
+- New ~assist/skills/directions/SKILL.md~ (separate from travel's — the model selects
+  skills lexically, and a sharp partition is what routes the right tool). Triggers:
+  "directions to / how do I get to / step by step / which bus|train|line / route to".
+  ~travel~'s skill + docstring get a *strengthened* pointer (leading, not a
+  parenthetical): "For step-by-step directions or which line/bus, use ~directions~."
+  YAML: no ~: ~ colon-space in the description; run the ~yaml.safe_load~ check.
+
+** Files to touch (at code time)
+~assist/tools.py~ (the new tool + helpers), ~assist/agent.py~ (register the built-in +
+import + comment), ~assist/skills/directions/SKILL.md~ (new), ~assist/skills/travel/SKILL.md~
+(pointer), ~tests/test_directions.py~ (mocked MOTIS shapes), ~edd/eval/test_directions_agent.py~
+(new — see Validation), ~README.md~ (Skills entry).
+
+* Validation plan
+- Unit (mocked MOTIS shapes, like ~tests/test_travel.py~): transit narrative from a
+  multi-leg itinerary; street consolidation + the confidence-gated turn classifier
+  (incl. ambiguous → "Continue"); the contract (backend-down → "unavailable",
+  malformed polyline → no raise, no route → "couldn't find").
+- Eval — invocation IS NOT ENOUGH (two lexically-overlapping skills). A
+  **discrimination eval** (both directions): directions-shaped prompt → ~directions~
+  called AND ~travel~ NOT; travel-shaped prompt → ~travel~ called AND ~directions~
+  NOT (guards the new skill from stealing travel's traffic — a regression the
+  travel suite alone won't catch); + ~mode~-passing ("which bus to X" → ~mode=transit~).
+  Re-run ~test_travel_agent.py~ for regression (N=3 post-impl, scaling per CLAUDE.md).
+
+* Open questions — Pierre's call (the genuine forks; reviewers split or deferred)
+1. *Street turn detail in v1.* The reviewers split: simplicity says the geometry
+   turn-classifier is "probabilistic" (cut it; ship the bare correct street-run
+   list); user-intention says a street list without turns isn't "directions". The
+   synthesis that satisfies both is the **confidence-gated turn** above — emit
+   left/right ONLY when unambiguous, else "Continue" — which makes a confident
+   wrong turn unreachable by construction (not merely rare). RECOMMEND: ship
+   confidence-gated turns in v1. Alternatives: (a) bare street-run list only
+   (simplest, unimpeachably correct, but thinner); (b) transit-only directions in
+   v1, street deferred. Your call.
+2. *Units for street directions.* RECOMMEND **miles** for car/bike/walk steps (a
+   US/SF user reads driving directions against a mile-signed network + odometer —
+   it's operational, not the at-a-glance "~5 km" travel gives). Cost: a cross-tool
+   unit split (travel stays km, or we move both to miles). Alternative: keep metric
+   for consistency. Your call.
+3. *Confirm: ~mode~ required* (recommended, no silent wrong-mode) vs a default.
+4. Minor (recommended defaults, say if you disagree): new ~directions~ skill (not a
+   combined travel+directions skill); ~origin~ defaults to "home" for one-place
+   asks (matches the travel skill); map render DEFERRED.
+
+* Internal review outcomes (folded in)
+- simplicity: cut to ~3 core helpers, one street + one transit path (not 4 modes),
+  inline the plan wrapper; flagged the turn-classifier as the probabilistic risk →
+  resolved by confidence-gating (Q1).
+- agentic/small-model: kill the silent ~mode~ default → required + synonym table;
+  add the discrimination eval; verified MOTIS returns step/leg granularity (it does).
+- user-intention: turns ARE the deliverable (don't ship a bare list AS "directions");
+  miles for US driving; surface the turn-limit honestly (skill says "approximate").
+- clean-interfaces: two cohesive tools over the shared ~_geocode~/~_motis_get~
+  Resource layer; small surface; the never-raise contract elevated to a requirement
+  with one shared degradation path.
