@@ -851,15 +851,18 @@ def _mark_pending(tid: str, text: str) -> None:
 
 
 def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
-    """Build the per-turn rider from the client's send-time + timezone. Pure CPU
-    (safe on the event-loop thread); returns None on missing/bad data so a malformed
-    rider never blocks the message submit."""
+    """Build the per-turn rider from the client's send-time + timezone. Event-loop
+    safe (no network/subprocess/lock; the only I/O is ZoneInfo's one-time cached
+    tzdata read); returns None on missing/bad data so a malformed rider never blocks
+    the message submit."""
     if not sent_at and not tz:
         return None
     dt = None
     if sent_at:
-        try:  # best-effort: a malformed timestamp must not discard a valid tz
+        try:  # best-effort: a malformed OR naive timestamp must not discard a valid tz
             dt = datetime.fromisoformat(sent_at)
+            if dt.tzinfo is None:   # naive → unusable (ContextRider needs tz-aware)
+                dt = None
         except ValueError:
             dt = None
     try:

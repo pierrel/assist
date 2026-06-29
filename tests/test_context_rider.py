@@ -164,5 +164,8 @@ def test_build_rider_bad_sent_at_keeps_valid_tz():
     # a malformed timestamp must NOT discard a valid tz (tz alone sets the sandbox TZ)
     r = _build_rider("not-a-date", "America/Los_Angeles")
     assert r is not None and r.tz == "America/Los_Angeles" and r.sent_at is None
+    # a syntactically-valid but NAIVE timestamp is also unusable → keep the tz
+    r2 = _build_rider("2026-06-29T21:05:00", "America/Los_Angeles")
+    assert r2 is not None and r2.tz == "America/Los_Angeles" and r2.sent_at is None
     # a bad tz → no rider (tz is the consumer; can't be validated)
     assert _build_rider("2026-06-29T21:05:00.000Z", "Not/AZone") is None
