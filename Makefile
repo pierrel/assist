@@ -129,6 +129,7 @@ deploy-service:
 		ASSIST_MODEL_URL='$(ASSIST_MODEL_URL)' \
 		ASSIST_DOMAINS='$(ASSIST_DOMAINS)' \
 		ASSIST_SEARCH_URL='$(ASSIST_SEARCH_URL)' \
+		ASSIST_ROUTING_URL='$(ASSIST_ROUTING_URL)' \
 		'bash -s' < scripts/install-service.sh
 	@echo "✓ Service installed"
 
