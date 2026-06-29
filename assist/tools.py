@@ -345,14 +345,13 @@ def _geocode(place: str) -> dict | None:
     hits = _motis_get("/api/v1/geocode", {"text": place})
     if not isinstance(hits, list):  # wrong shape = a backend problem, not "no match"
         raise _TravelBackendError(f"unexpected geocode response: {type(hits).__name__}")
-    if not hits:
-        return None
-    h = hits[0]
-    try:
-        return {"lat": float(h["lat"]), "lon": float(h["lon"]),
-                "name": h.get("name") or place}  # never propagate a blank name
-    except (KeyError, TypeError, ValueError):
-        return None
+    for h in hits:  # take the first USABLE hit; skip a malformed one (no false not-found)
+        try:
+            return {"lat": float(h["lat"]), "lon": float(h["lon"]),
+                    "name": h.get("name") or place}  # never propagate a blank name
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+    return None
 
 
 def _plan_direct(o: dict, d: dict, mode: str) -> dict | None:
@@ -373,7 +372,7 @@ def _plan_direct(o: dict, d: dict, mode: str) -> dict | None:
         it = direct[0]
         dist = sum(leg.get("distance", 0) or 0 for leg in it.get("legs", []))
         return {"duration_s": float(it["duration"]), "distance_m": float(dist)}
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
 
@@ -392,7 +391,7 @@ def _plan_transit(o: dict, d: dict) -> dict | None:
         return None
     try:  # never raise into the agent loop on a malformed itinerary (module contract)
         return {"duration_s": float(min(it["duration"] for it in its))}
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
 
