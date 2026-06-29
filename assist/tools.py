@@ -1,5 +1,6 @@
-"""Web tools the agent exposes: a self-hosted SearXNG metasearch and a
-per-host throttled URL fetch.
+"""Tools the agent exposes: a self-hosted SearXNG metasearch, a per-host
+throttled URL fetch, and a self-hosted MOTIS-backed ``travel`` tool (real-world
+time/distance by car/bike/walk/transit — see the travel() section below).
 
 Search goes through a self-hosted SearXNG instance (``ASSIST_SEARCH_URL``) —
 private, on hardware we control, multi-engine, no API key.  There is NO
