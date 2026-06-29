@@ -70,8 +70,11 @@ trap 'rm -rf "$tmpdir"' EXIT
 refresh_gtfs() {
     [ -f "$TOKEN_FILE" ] || { log "no token file ($TOKEN_FILE) — skipping GTFS refresh"; return 1; }
     # Parse the assignment rather than sourcing the file (don't execute config).
-    local token; token="$(sed -n 's/^ASSIST_511_TOKEN=//p' "$TOKEN_FILE")"
+    # First line only + strip whitespace, then require the 511 token's charset
+    # (alnum/hyphen) so it can't inject directives into the curl -K config below.
+    local token; token="$(sed -n 's/^ASSIST_511_TOKEN=//p' "$TOKEN_FILE" | head -n1 | tr -d '[:space:]')"
     [ -n "$token" ] || { log "token file has no ASSIST_511_TOKEN — skipping GTFS refresh"; return 1; }
+    case "$token" in *[!0-9A-Za-z-]*) log "511 token has unexpected characters — refusing"; return 1;; esac
 
     local out="$tmpdir/$GTFS_FILE"
     log "downloading 511 GTFS (operator=$GTFS_511_OPERATOR)..."
