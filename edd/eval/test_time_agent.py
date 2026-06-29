@@ -9,6 +9,7 @@ derived from `date` itself (not hard-coded) so the eval is year-independent.
 Prompts deliberately avoid the SKILL.md EXAMPLES verbatim (probe generalization).
 """
 import re
+import shlex
 import tempfile
 from unittest import TestCase
 
@@ -40,8 +41,9 @@ class TestTimeAgent(TestCase):
                                          sandbox_backend=self.sandbox))
 
     def _ran_date(self, agent) -> bool:
-        # `date` at command position — NOT `datetime.date` (the . is a \b, which the
-        # calculate-skill Python habit could otherwise sneak past this proxy).
+        # `date` at command position — NOT `datetime.date`: the prefix class
+        # [\s;&|()] excludes '.', so the `.date` in a Python `datetime.date` call
+        # (the calculate-skill habit) can't satisfy this unix-`date` proxy.
         return any(re.search(r"(?:^|[\s;&|()])date\b", cmd)
                    for cmd in executed_commands(agent))
 
@@ -49,7 +51,7 @@ class TestTimeAgent(TestCase):
         """(weekday, month, day) that `date -d <expr>` resolves to IN THE SANDBOX —
         same clock/TZ the agent uses. Fail fast on empty (an assertIn against an
         empty string would vacuously pass)."""
-        out = (self.sandbox.execute(f"date -d '{expr}' '+%A|%B|%-d'").output or "").strip()
+        out = (self.sandbox.execute(f"date -d {shlex.quote(expr)} '+%A|%B|%-d'").output or "").strip()
         self.assertIn("|", out, f"sandbox `date -d {expr}` produced no usable output")
         wk, mon, day = out.split("|")
         return wk.lower(), mon.lower(), day
