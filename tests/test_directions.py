@@ -87,6 +87,12 @@ class TestHelpers:
     def test_decode_polyline_bad_input_returns_empty(self):
         assert tools._decode_polyline(None, 7) == []
         assert tools._decode_polyline(123, 7) == []
+        assert tools._decode_polyline("abc", None) == []      # bad precision type -> []
+
+    def test_decode_polyline_extreme_precision_does_not_raise(self):
+        # A malformed-backend precision must not crash (10**-400 -> 0.0 -> div-by-zero).
+        assert isinstance(tools._decode_polyline("_p~iF~ps|U", -400), list)
+        assert isinstance(tools._decode_polyline("_p~iF~ps|U", 10 ** 6), list)
 
     def test_turn_phrase_confidence_gated(self):
         assert tools._turn_phrase(0, 90) == "Turn right onto"

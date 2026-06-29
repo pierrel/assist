@@ -524,7 +524,9 @@ def _decode_polyline(points, precision) -> list:
     if not isinstance(points, str):
         return []
     try:
-        factor = 10 ** int(precision)
+        # Clamp the (untrusted backend) precision so factor is never 0 or absurd:
+        # a very negative precision would underflow 10**p to 0.0 -> ZeroDivisionError.
+        factor = 10 ** max(0, min(int(precision), 15))
         out = []
         lat = lon = 0
         i = 0
