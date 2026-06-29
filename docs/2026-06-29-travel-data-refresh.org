@@ -16,16 +16,20 @@ One script, run weekly by an unattended user cron (no sudo; docker + curl only):
 - **OSM — only when stale.** If ``input/<osm>`` is older than ``OSM_MAX_AGE_DAYS``
   (default 30), download a fresh Geofabrik NorCal extract, validate (PBF magic +
   size), swap. So OSM refreshes ~monthly without a second timer.
-- **MOTIS re-import — when anything changed.** stop -> ``motis import`` -> start.
-  Because MOTIS keys its artifacts by content hash, an OSM-unchanged run only
-  rebuilds the timetable and reuses the street graph — the weekly GTFS refresh is a
-  **~5-second** downtime, not minutes.
+- **MOTIS re-import — when anything changed.** Imports IN-PLACE while the container
+  keeps serving its loaded data, then ``docker restart`` only on success — so a
+  failed/killed import never takes routing down and never restarts onto a
+  half-written graph. Because MOTIS keys its artifacts by content hash, an
+  OSM-unchanged run only rebuilds the timetable and reuses the street graph — the
+  weekly GTFS refresh is a **~5-second** restart, not a minutes-long rebuild.
 - **Nominatim re-import — only when OSM changed** (its full import is heavy; not
   worth running weekly). During it, geocoding falls back to MOTIS's built-in.
 
-Safety: a ``flock`` so runs can't overlap; **validate-before-swap** so a bad/partial
-download never replaces good data (keep-current on any failure — a transient 511 500
-just logs and retries next week); the token is read from a file and never printed.
+Safety: a ``flock`` so runs can't overlap; **validate-before-swap on the downloads**
+so a bad/partial fetch never replaces good GTFS/OSM (keep-current on any failure — a
+transient 511 500 just logs and retries next week); the MOTIS rebuild restarts only
+on a clean import (never stops the container); the token is read from a file and
+never printed.
 
 * Config (env, defaults suit the single-box deploy)
 ``TRAVEL_INFRA_DIR`` (``~/motis-travel``), ``OSM_MAX_AGE_DAYS`` (30), ``OSM_URL``

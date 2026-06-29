@@ -118,12 +118,17 @@ refresh_osm() {
 
 # --- engine rebuilds -----------------------------------------------------------
 reimport_motis() {
-    log "re-importing MOTIS (stop -> import -> start)..."
-    docker stop "$MOTIS_CONTAINER" >/dev/null 2>&1 || true
+    # Import IN-PLACE while the running container keeps serving its already-loaded
+    # data, then restart ONLY on success.  The container is never stopped, so a
+    # failed/killed import (reboot/OOM/timeout) can never leave routing down, and a
+    # restart never lands on a half-written graph (it happens only after import
+    # exits 0).  MOTIS keys artifacts by content hash, so an OSM-unchanged run only
+    # rebuilds the timetable -> ~seconds.
+    log "re-importing MOTIS (in-place; restart on success)..."
     docker run --rm --user "$(id -u):$(id -g)" -v "$TRAVEL_INFRA_DIR:/work" -w /work \
         --entrypoint /motis "$MOTIS_IMAGE" import \
-        || { log "MOTIS import FAILED — starting old container back up"; docker start "$MOTIS_CONTAINER" >/dev/null || true; return 1; }
-    docker start "$MOTIS_CONTAINER" >/dev/null
+        || { log "MOTIS import FAILED — keeping the running engine on its current data"; return 1; }
+    docker restart "$MOTIS_CONTAINER" >/dev/null || die "MOTIS restart failed after import"
     log "MOTIS restarted"
 }
 
