@@ -80,53 +80,59 @@ def test_sandbox_timezone_falls_back_without_override():
 # the deployed web app.
 
 class _FakeRequest:
-    def __init__(self, messages):
-        self.messages = messages
+    def __init__(self, system_message=None, messages=None):
+        self.system_message = system_message
+        self.messages = messages if messages is not None else ["base"]
 
-    def override(self, messages):
-        return _FakeRequest(messages)
+    def override(self, **kw):
+        return _FakeRequest(kw.get("system_message", self.system_message),
+                            kw.get("messages", self.messages))
 
 
-def _run_mw(configurable, monkeypatch):
+def _run_mw(configurable, monkeypatch, base_system="BASE PROMPT"):
+    from langchain_core.messages import SystemMessage
     from assist.middleware import context_rider_middleware as mod
     monkeypatch.setattr(mod, "get_config",
                         lambda: ({"configurable": configurable}
                                  if configurable is not None else None))
-    req = _FakeRequest(messages=["base"])
+    req = _FakeRequest(system_message=SystemMessage(content=base_system))
     seen = {}
 
     def handler(r):
+        seen["sys"] = r.system_message
         seen["messages"] = r.messages
         return "resp"
 
     out = mod.ContextRiderMiddleware().wrap_model_call(req, handler)
-    return out, seen["messages"]
+    return out, seen
 
 
-def test_middleware_injects_the_rider_line(monkeypatch):
-    from langchain_core.messages import SystemMessage
+def test_middleware_folds_rider_into_the_system_message(monkeypatch):
+    # The line must land in the SYSTEM message (at the start), NOT as a trailing
+    # message — Qwen's template rejects a non-leading system message.
     rider = ContextRider(sent_at=datetime(2026, 6, 29, 21, 5, tzinfo=timezone.utc),
                          tz="America/Los_Angeles")
-    out, messages = _run_mw({CONTEXT_RIDER_KEY: rider}, monkeypatch)
+    out, seen = _run_mw({CONTEXT_RIDER_KEY: rider}, monkeypatch)
     assert out == "resp"
-    assert len(messages) == 2 and isinstance(messages[-1], SystemMessage)
-    assert "June 29, 2026 at 2:05 PM" in messages[-1].content
+    assert "BASE PROMPT" in seen["sys"].content                 # base preserved
+    assert "June 29, 2026 at 2:05 PM" in seen["sys"].content    # rider folded in
+    assert seen["messages"] == ["base"]                         # no trailing message added
 
 
 def test_middleware_noop_without_a_rider(monkeypatch):
-    _, messages = _run_mw({}, monkeypatch)
-    assert messages == ["base"]
+    _, seen = _run_mw({}, monkeypatch)
+    assert seen["sys"].content == "BASE PROMPT" and seen["messages"] == ["base"]
 
 
 def test_middleware_noop_for_empty_rider(monkeypatch):
-    _, messages = _run_mw({CONTEXT_RIDER_KEY: ContextRider()}, monkeypatch)
-    assert messages == ["base"]
+    _, seen = _run_mw({CONTEXT_RIDER_KEY: ContextRider()}, monkeypatch)
+    assert seen["sys"].content == "BASE PROMPT"
 
 
 def test_middleware_noop_when_no_run_config(monkeypatch):
     # Outside a run get_config() returns None — must not crash, must not inject.
-    _, messages = _run_mw(None, monkeypatch)
-    assert messages == ["base"]
+    _, seen = _run_mw(None, monkeypatch)
+    assert seen["sys"].content == "BASE PROMPT"
 
 
 # --- the web boundary: _build_rider -------------------------------------------

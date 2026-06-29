@@ -42,6 +42,10 @@ class ContextRiderMiddleware(AgentMiddleware):
             logger.debug("ContextRiderMiddleware: skipped (%s)", e)
             line = None
         if line:
-            request = request.override(
-                messages=list(request.messages) + [SystemMessage(content=line)])
+            # Fold the context into the SYSTEM message, not a trailing message —
+            # the Qwen chat template rejects a system message anywhere but the
+            # start ("System message must be at the beginning").
+            base = request.system_message
+            merged = f"{base.content}\n\n{line}" if base is not None else line
+            request = request.override(system_message=SystemMessage(content=merged))
         return handler(request)
