@@ -12,6 +12,25 @@ def _rewrite_localhost(value: str) -> str:
     """Replace localhost/127.0.0.1 references with host.docker.internal."""
     return re.sub(r'localhost|127\.0\.0\.1', 'host.docker.internal', value)
 
+
+def _sandbox_timezone() -> str:
+    """IANA timezone for the sandbox so ``date`` / file timestamps reflect LOCAL
+    time, not the container's default UTC — without it the `time` skill answers
+    "what's today" in UTC (wrong for an evening PT user).  Order: ASSIST_TIMEZONE
+    override (operator config; the context-rider milestone will set per-user later),
+    else the host's zone, else UTC."""
+    tz = os.environ.get("ASSIST_TIMEZONE")
+    if tz:
+        return tz
+    try:
+        link = os.readlink("/etc/localtime")
+        if "zoneinfo/" in link:
+            return link.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return "UTC"
+
+
 SANDBOX_IMAGE = "assist-sandbox"
 
 # Egress allowlist layer.  See docs/2026-05-08-sandbox-network-allowlist.org
@@ -291,6 +310,7 @@ class SandboxManager:
                 "HTTP_PROXY": proxy_url,
                 "https_proxy": proxy_url,
                 "http_proxy": proxy_url,
+                "TZ": _sandbox_timezone(),  # local time, not UTC (the `time` skill)
             }
             sandbox_env.update({
                 k: _rewrite_localhost(v)
