@@ -548,8 +548,8 @@ def _decode_polyline(points, precision) -> list:
                     lon += delta
             out.append((lat / factor, lon / factor))
         return out
-    except (IndexError, TypeError, ValueError):
-        return []
+    except (IndexError, TypeError, ValueError, OverflowError):
+        return []  # OverflowError: int(Infinity) from a malformed precision field
 
 
 def _bearing(a, b) -> float:
