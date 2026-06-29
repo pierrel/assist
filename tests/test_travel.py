@@ -31,7 +31,11 @@ _DIRECT = {"CAR": (1320, 14000.0), "BIKE": (2880, 13000.0), "WALK": (9600, 13000
 
 def _fake_get(url, params=None, timeout=None, **kw):
     params = params or {}
-    if "/api/v1/geocode" in url:
+    if "/search" in url:  # Nominatim geocoder (the default path)
+        q = params["q"].lower()
+        key = "civic" if "civic" in q else ("ferry" if "ferry" in q else None)
+        return _Resp([_GEO[key]] if key else [])
+    if "/api/v1/geocode" in url:  # MOTIS built-in geocoder (fallback path)
         t = params["text"].lower()
         key = "civic" if "civic" in t else ("ferry" if "ferry" in t else None)
         return _Resp([_GEO[key]] if key else [])
@@ -46,7 +50,9 @@ def _fake_get(url, params=None, timeout=None, **kw):
 
 @pytest.fixture
 def routing_env(monkeypatch):
+    # Production default: Nominatim geocodes, MOTIS routes.
     monkeypatch.setenv("ASSIST_ROUTING_URL", "http://motis")
+    monkeypatch.setenv("ASSIST_GEOCODER_URL", "http://nominatim")
 
 
 class TestFormat:
@@ -82,7 +88,31 @@ class TestTravel:
 
     def test_routing_unset_is_unavailable(self, monkeypatch):
         monkeypatch.delenv("ASSIST_ROUTING_URL", raising=False)
+        monkeypatch.delenv("ASSIST_GEOCODER_URL", raising=False)
         assert "unavailable" in tools.travel("a", "b").lower()
+
+    def test_geocode_uses_nominatim_when_set(self, routing_env):
+        seen = []
+        def cap(url, params=None, **kw):
+            seen.append(url)
+            return _fake_get(url, params=params, **kw)
+        with patch.object(tools.requests, "get", cap):
+            tools.travel("civic center", "ferry building")
+        assert any("/search" in u for u in seen)          # geocoded via Nominatim
+        assert not any("/api/v1/geocode" in u for u in seen)  # not MOTIS's geocoder
+
+    def test_geocode_falls_back_to_motis_when_unset(self, monkeypatch):
+        monkeypatch.setenv("ASSIST_ROUTING_URL", "http://motis")
+        monkeypatch.delenv("ASSIST_GEOCODER_URL", raising=False)
+        seen = []
+        def cap(url, params=None, **kw):
+            seen.append(url)
+            return _fake_get(url, params=params, **kw)
+        with patch.object(tools.requests, "get", cap):
+            out = tools.travel("civic center", "ferry building")
+        assert any("/api/v1/geocode" in u for u in seen)   # MOTIS geocoder fallback
+        assert not any("/search" in u for u in seen)
+        assert "- Car: 22 min, 14.0 km" in out            # full summary still works
 
     def test_service_down_is_unavailable_not_not_found(self, routing_env):
         # A geocoder/service outage must yield the "unavailable" message, NOT a

@@ -1,6 +1,7 @@
 """Tools the agent exposes: a self-hosted SearXNG metasearch, a per-host
 throttled URL fetch, and a self-hosted MOTIS-backed ``travel`` tool (real-world
-time/distance by car/bike/walk/transit — see the travel() section below).
+time/distance by car/bike/walk/transit — see the travel() section below;
+geocoding goes through an optional self-hosted Nominatim via ``ASSIST_GEOCODER_URL``).
 
 Search goes through a self-hosted SearXNG instance (``ASSIST_SEARCH_URL``) —
 private, on hardware we control, multi-engine, no API key.  There is NO
@@ -338,21 +339,48 @@ def _motis_get(path: str, params: dict) -> dict | list:
         raise _TravelBackendError(f"MOTIS {path} failed: {e}") from e
 
 
-def _geocode(place: str) -> dict | None:
-    """Resolve a place NAME to coords via MOTIS geocoding (self-hosted).  Returns
-    {lat, lon, name} (top match, with the resolved name so the agent can say what
-    it routed to), or None if nothing matched.  Raises _TravelBackendError if the
-    service is down (so the caller distinguishes that from a genuine no-match)."""
-    hits = _motis_get("/api/v1/geocode", {"text": place})
-    if not isinstance(hits, list):  # wrong shape = a backend problem, not "no match"
-        raise _TravelBackendError(f"unexpected geocode response: {type(hits).__name__}")
-    for h in hits:  # take the first USABLE hit; skip a malformed one (no false not-found)
+def _first_usable_hit(hits, place: str) -> dict | None:
+    """First geocoder hit with parseable coords -> {lat, lon, name}; skip a
+    malformed one (no false not-found); None if none usable.  A non-list `hits`
+    is a wrong-shape 200 = backend problem, so raise _TravelBackendError (the
+    caller turns that into "unavailable", not "couldn't find").  Works for both
+    backends: MOTIS hits carry `name`; Nominatim carries `name`/`display_name`."""
+    if not isinstance(hits, list):
+        raise _TravelBackendError(f"unexpected geocoder response: {type(hits).__name__}")
+    for h in hits:
         try:
             return {"lat": float(h["lat"]), "lon": float(h["lon"]),
-                    "name": h.get("name") or place}  # never propagate a blank name
+                    "name": h.get("name") or h.get("display_name") or place}
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
     return None
+
+
+def _nominatim_geocode(place: str) -> dict | None:
+    """Geocode a place NAME via the self-hosted Nominatim search API.  The loaded
+    OSM extract IS the region, so no country/viewbox filter is needed.  Raises
+    _TravelBackendError if Nominatim is unreachable/errors (callers -> unavailable)."""
+    base = os.getenv("ASSIST_GEOCODER_URL")
+    try:
+        resp = requests.get(base.rstrip("/") + "/search",
+                            params={"q": place, "format": "jsonv2", "limit": 5},
+                            timeout=_TRAVEL_TIMEOUT_S)
+        resp.raise_for_status()
+        hits = resp.json()
+    except Exception as e:
+        raise _TravelBackendError(f"Nominatim /search failed: {e}") from e
+    return _first_usable_hit(hits, place)
+
+
+def _geocode(place: str) -> dict | None:
+    """Resolve a place NAME to {lat, lon, name} (top match, with the resolved name
+    so the agent can say what it routed to), or None if nothing matched.  Uses the
+    self-hosted Nominatim geocoder when ASSIST_GEOCODER_URL is set (far better at
+    real addresses/POIs than MOTIS's built-in geocoder), else falls back to MOTIS
+    /api/v1/geocode.  Raises _TravelBackendError if the chosen backend is down."""
+    if os.getenv("ASSIST_GEOCODER_URL"):
+        return _nominatim_geocode(place)
+    return _first_usable_hit(_motis_get("/api/v1/geocode", {"text": place}), place)
 
 
 def _plan_direct(o: dict, d: dict, mode: str) -> dict | None:

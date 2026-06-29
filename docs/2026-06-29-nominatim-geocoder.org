@@ -1,0 +1,60 @@
+#+TITLE: travel geocoder — self-hosted Nominatim (name → coords)
+#+DATE: <2026-06-29>
+#+STATUS: built; Nominatim NorCal import running; pending live-verify + review/PR + deploy
+
+* Why
+MOTIS's built-in geocoder is too weak for real addresses/POIs — Pierre's first
+real query mis-resolved BOTH endpoints ("Connecticut Yankee" → "Connecticut
+Street"; "222 2nd St" → "Francisco Street"). Routing is fine; geocoding is the
+weak link. Fix: a proper self-hosted geocoder (Nominatim) for name→coords; MOTIS
+keeps doing the routing (coords→all-modes). Follow-up to the travel skill
+(docs/2026-06-28-local-travel-skill.org).
+
+* Decisions
+- *Engine = Nominatim* (``mediagis/nominatim:4.5``, self-hosted), not Photon —
+  Nominatim handles both structured addresses AND POIs in one service; Photon
+  would add Elasticsearch + a build-from-Nominatim step. Simplicity wins.
+- *New env ``ASSIST_GEOCODER_URL``*. Set → ``_geocode`` uses Nominatim ``/search``;
+  unset → falls back to MOTIS ``/api/v1/geocode`` (so dev/tests/un-provisioned
+  deploys still work, and the code can ship before the slow import finishes).
+- *The OSM extract IS the region* — Nominatim loads only the NorCal extract, so
+  every result is already regional; NO ``countrycodes``/``viewbox`` filter needed
+  (dropped from the initial plan). Expanding regions = load a bigger extract +
+  re-import, NO code change (same knob as MOTIS).
+- *Shared hit-parsing* — ``_first_usable_hit(hits, place)`` is used by both the
+  Nominatim and MOTIS paths: first hit with parseable coords → ``{lat, lon,
+  name}``, skip malformed, non-list → ``_TravelBackendError``, blank name →
+  ``display_name`` → ``place``. Same FAIL-LOUD-BUT-RETURNED contract for both.
+- *Same units/contract* — ``travel()`` and the ``_plan_*`` calls are unchanged
+  (they take coords); only the geocode source changes.
+
+* Code (branch nominatim-geocoder)
+- ``assist/tools.py``: ``_first_usable_hit`` (shared), ``_nominatim_geocode``
+  (``GET {ASSIST_GEOCODER_URL}/search?q=&format=jsonv2&limit=5``), ``_geocode``
+  dispatches on ``ASSIST_GEOCODER_URL``.
+- ``tests/test_travel.py``: ``routing_env`` now sets both URLs (Nominatim is the
+  default path); ``_fake_get`` learns the ``/search`` shape; new tests pin the
+  Nominatim-vs-MOTIS dispatch + the fallback; all prior contract tests preserved.
+- Deploy wiring (mirror ``ASSIST_ROUTING_URL``): ``scripts/install-service.sh`` +
+  ``Makefile`` deploy-service + ``.deploy.env.example`` / ``.dev.env.example``.
+
+* Infra
+``mediagis/nominatim:4.5`` container ``nominatim-geocoder`` on ``127.0.0.1:8089``,
+NorCal extract (``~/motis-travel/input/norcal.osm.pbf``), PG data in named volume
+``nominatim-geocoder-data``, ``--restart unless-stopped``. The PBF is mounted at
+``/data`` (OUTSIDE ``/nominatim``) because the entrypoint does ``chown -R
+/nominatim`` under ``set -e`` and a read-only mount under it crash-loops the import.
+
+* Verify live (after the import finishes)
+1. ``curl 127.0.0.1:8089/status`` → DB loaded.
+2. ``/search?q=Connecticut Yankee San Francisco`` → the Potrero Hill bar (~37.76,
+   -122.40), and ``222 2nd St San Francisco`` → the SoMa address — i.e. the two
+   queries that MOTIS's geocoder got wrong.
+3. Real ``travel("Connecticut Yankee San Francisco","222 2nd St San Francisco")``
+   → correct resolved names + plausible times (incl. Muni transit).
+4. Then set ``ASSIST_GEOCODER_URL`` in prod ``.deploy.env`` + redeploy-service +
+   restart; confirm prod ``travel`` geocodes via Nominatim.
+
+* Follow-ups
+- A ``deploy-nominatim`` / refresh target (like ``searxng.sh``) for reproducible
+  provisioning + periodic OSM re-import (paired with the 511 GTFS refresh cron).

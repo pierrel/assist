@@ -36,6 +36,7 @@ ENV_VARS=""
 [ -n "$ASSIST_DOMAINS" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_DOMAINS=$ASSIST_DOMAINS\"\n"
 [ -n "$ASSIST_SEARCH_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SEARCH_URL=$ASSIST_SEARCH_URL\"\n"
 [ -n "$ASSIST_ROUTING_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_ROUTING_URL=$ASSIST_ROUTING_URL\"\n"
+[ -n "$ASSIST_GEOCODER_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_GEOCODER_URL=$ASSIST_GEOCODER_URL\"\n"
 
 # Generate service file from template and install it
 cat "$DEPLOY_PATH/scripts/assist-web.service.template" | \
