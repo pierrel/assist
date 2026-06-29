@@ -38,8 +38,9 @@ class ContextRider:
     place_label: str | None = None    # optional coarse human label ("downtown SF")
 
     def __post_init__(self):
-        # Validate at the boundary (pure CPU, no I/O) — a bad value should fail
-        # here, not silently mislead a consumer deep in a turn.
+        # Validate at the boundary (no network/subprocess/lock — ZoneInfo may do a
+        # one-time cached tzdata read) — a bad value should fail here, not silently
+        # mislead a consumer deep in a turn.
         if self.tz is not None:
             ZoneInfo(self.tz)  # raises on an unknown zone
         if self.sent_at is not None and self.sent_at.tzinfo is None:

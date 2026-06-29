@@ -169,3 +169,5 @@ def test_build_rider_bad_sent_at_keeps_valid_tz():
     assert r2 is not None and r2.tz == "America/Los_Angeles" and r2.sent_at is None
     # a bad tz → no rider (tz is the consumer; can't be validated)
     assert _build_rider("2026-06-29T21:05:00.000Z", "Not/AZone") is None
+    # bad sent_at AND no tz → None, not an empty rider threaded through configurable
+    assert _build_rider("not-a-date", None) is None

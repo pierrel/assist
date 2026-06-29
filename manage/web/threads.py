@@ -865,6 +865,8 @@ def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
                 dt = None
         except ValueError:
             dt = None
+    if dt is None and not tz:
+        return None   # bad/naive sent_at with no tz → effectively no rider
     try:
         return ContextRider(sent_at=dt, tz=tz or None)
     except Exception:
