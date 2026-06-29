@@ -159,7 +159,10 @@ def test_build_rider_none_when_absent():
     assert _build_rider("", "") is None
 
 
-def test_build_rider_swallows_bad_input():
+def test_build_rider_bad_sent_at_keeps_valid_tz():
     from manage.web.threads import _build_rider
-    assert _build_rider("not-a-date", "America/Los_Angeles") is None  # never blocks a message
-    assert _build_rider("2026-06-29T21:05:00+00:00", "Not/AZone") is None
+    # a malformed timestamp must NOT discard a valid tz (tz alone sets the sandbox TZ)
+    r = _build_rider("not-a-date", "America/Los_Angeles")
+    assert r is not None and r.tz == "America/Los_Angeles" and r.sent_at is None
+    # a bad tz → no rider (tz is the consumer; can't be validated)
+    assert _build_rider("2026-06-29T21:05:00.000Z", "Not/AZone") is None

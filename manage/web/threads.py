@@ -856,8 +856,13 @@ def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
     rider never blocks the message submit."""
     if not sent_at and not tz:
         return None
+    dt = None
+    if sent_at:
+        try:  # best-effort: a malformed timestamp must not discard a valid tz
+            dt = datetime.fromisoformat(sent_at)
+        except ValueError:
+            dt = None
     try:
-        dt = datetime.fromisoformat(sent_at) if sent_at else None
         return ContextRider(sent_at=dt, tz=tz or None)
     except Exception:
         return None
