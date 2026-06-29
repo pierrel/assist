@@ -14,11 +14,12 @@ def _rewrite_localhost(value: str) -> str:
 
 
 def _sandbox_timezone() -> str:
-    """IANA timezone for the sandbox so ``date`` / file timestamps reflect LOCAL
-    time, not the container's default UTC — without it the `time` skill answers
-    "what's today" in UTC (wrong for an evening PT user).  Order: ASSIST_TIMEZONE
-    override (operator config; the context-rider milestone will set per-user later),
-    else the host's zone, else UTC."""
+    """A timezone setting for the sandbox (an IANA zone name like
+    "America/Los_Angeles", or whatever ``TZ`` value is configured) so ``date`` /
+    file timestamps reflect LOCAL time, not the container's default UTC — without it
+    the `time` skill answers "what's today" in UTC (wrong for an evening PT user).
+    Order: ASSIST_TIMEZONE override (operator config; the context-rider milestone
+    will set per-user later), else ``TZ``, else the host's zone, else UTC."""
     tz = os.environ.get("ASSIST_TIMEZONE") or os.environ.get("TZ")
     if tz:
         return tz
