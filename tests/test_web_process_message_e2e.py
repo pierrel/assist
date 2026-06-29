@@ -410,7 +410,7 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
     r = client.post(
         "/thread/thread-e2e/message",
         data={"text": "what's today?",
-              "sent_at": "2026-06-29T21:05:00+00:00",
+              "sent_at": "2026-06-29T21:05:00.000Z",  # real browser toISOString() format
               "tz": "America/Los_Angeles"},
         follow_redirects=False,
     )

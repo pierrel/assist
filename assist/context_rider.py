@@ -74,7 +74,10 @@ class ContextRider:
 
     def _where(self) -> str | None:
         if self.place_label:
-            return self.place_label
+            # place_label is the one free-text field and gets folded into the
+            # SYSTEM message — collapse whitespace/newlines and cap the length so a
+            # client can't smuggle instruction-like text or bloat the prompt.
+            return " ".join(self.place_label.split())[:60]
         if self.lat is not None and self.lon is not None:
             return f"~{self.lat:.2f}, {self.lon:.2f}"  # ≈city-block; precise coords stay off the prose
         return None
