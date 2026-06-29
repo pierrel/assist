@@ -1,6 +1,6 @@
 #+TITLE: travel geocoder — self-hosted Nominatim (name → coords)
 #+DATE: <2026-06-29>
-#+STATUS: built; Nominatim NorCal import running; pending live-verify + review/PR + deploy
+#+STATUS: built + LIVE-VERIFIED (Nominatim NorCal up; "222 2nd St"/Ferry Building/Coit Tower/Oracle Park resolve; OSM gaps like "Connecticut Yankee" honestly reported); in review (PR #149); pending merge+deploy
 
 * Why
 MOTIS's built-in geocoder is too weak for real addresses/POIs — Pierre's first
