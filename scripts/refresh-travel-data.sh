@@ -12,8 +12,8 @@
 # file outside the repo and never printed.
 #
 # Config via env (defaults suit the standard single-box deploy):
-#   TRAVEL_INFRA_DIR     dir with input/ + the MOTIS config.yml + data/ graph
-#                        (default: $HOME/motis-travel)
+#   TRAVEL_INFRA_DIR     REQUIRED — dir with input/ + the MOTIS config.yml + data/
+#                        graph (no host-specific default; the cron passes it)
 #   MOTIS_CONTAINER      default: motis-travel
 #   MOTIS_IMAGE          default: ghcr.io/motis-project/motis:latest
 #   NOMINATIM_CONTAINER  default: nominatim-geocoder
@@ -32,7 +32,9 @@
 #
 set -euo pipefail
 
-TRAVEL_INFRA_DIR="${TRAVEL_INFRA_DIR:-$HOME/motis-travel}"
+# Required (no host-specific default) — the repo convention for ops scripts; the
+# cron passes it explicitly. Holds input/, config.yml, and the MOTIS data/ graph.
+: "${TRAVEL_INFRA_DIR:?set TRAVEL_INFRA_DIR to the travel infra dir (input/, config.yml, data/)}"
 MOTIS_CONTAINER="${MOTIS_CONTAINER:-motis-travel}"
 MOTIS_IMAGE="${MOTIS_IMAGE:-ghcr.io/motis-project/motis:latest}"
 NOMINATIM_CONTAINER="${NOMINATIM_CONTAINER:-nominatim-geocoder}"
@@ -121,6 +123,14 @@ refresh_osm() {
     grep -qa "OSMHeader" <(head -c 64 "$out") || { log "OSM file not a PBF — keeping current"; return 1; }
     log "OSM valid ($(du -h "$out" | cut -f1))"
     if [ "$CHECK_ONLY" = 1 ]; then log "--check: validated, not swapping OSM"; return 0; fi
+    if [ -f "$INPUT_DIR/$OSM_FILE" ] && cmp -s "$out" "$INPUT_DIR/$OSM_FILE"; then
+        # Stale by age but byte-identical (Geofabrik didn't change it): don't mark
+        # "changed" — that would trigger the heavy Nominatim re-import for nothing.
+        # Touch to reset the age clock so we don't re-download it again next week.
+        log "OSM re-download is byte-identical — touching mtime, skipping re-import"
+        touch "$INPUT_DIR/$OSM_FILE"
+        return 1
+    fi
     mv -f "$out" "$INPUT_DIR/$OSM_FILE"
     log "OSM swapped in"
     return 0
