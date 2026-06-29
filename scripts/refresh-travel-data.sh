@@ -25,7 +25,7 @@
 #   OSM_MAX_AGE_DAYS     refresh OSM only if older than this (default: 30)
 #   GTFS_FILE            basename under input/ (default: 511-regional-gtfs.zip)
 #   GTFS_511_OPERATOR    511 operator id (default: RG = regional combined)
-#   TOKEN_FILE           file containing `511_TOKEN=...` (default: $TRAVEL_INFRA_DIR/.511-token)
+#   TOKEN_FILE           file containing `ASSIST_511_TOKEN=...` (default: $TRAVEL_INFRA_DIR/.511-token)
 #
 # Flags:
 #   --check   download + validate into temp files only; do NOT swap, import, or restart
@@ -59,14 +59,16 @@ die() { log "ERROR: $*"; exit 1; }
 exec 9>"$TRAVEL_INFRA_DIR/.refresh.lock"
 flock -n 9 || die "another refresh is already running"
 
-tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/travel-refresh.XXXXXX")"
+# Temp dir on the SAME filesystem as INPUT_DIR so the swaps below are atomic
+# renames, not a cross-device copy+truncate that could leave a partial file.
+tmpdir="$(mktemp -d "$TRAVEL_INFRA_DIR/.refresh-tmp.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
 
 # --- 511 GTFS (always) ---------------------------------------------------------
 refresh_gtfs() {
     [ -f "$TOKEN_FILE" ] || { log "no token file ($TOKEN_FILE) — skipping GTFS refresh"; return 1; }
-    # shellcheck disable=SC1090
-    local token; token="$(. "$TOKEN_FILE"; echo "${ASSIST_511_TOKEN:-}")"
+    # Parse the assignment rather than sourcing the file (don't execute config).
+    local token; token="$(sed -n 's/^ASSIST_511_TOKEN=//p' "$TOKEN_FILE")"
     [ -n "$token" ] || { log "token file has no ASSIST_511_TOKEN — skipping GTFS refresh"; return 1; }
 
     local out="$tmpdir/$GTFS_FILE"
@@ -77,14 +79,21 @@ refresh_gtfs() {
 
     # Validate: a real GTFS zip with stops.txt (the 511 zip can be a format `unzip`
     # chokes on, so use Python's zipfile).
+    # Validate: a real GTFS zip with the core files (the 511 zip can be a format
+    # `unzip` chokes on, so use Python's zipfile).  Explicit sys.exit, NOT assert,
+    # so PYTHONOPTIMIZE can't silently disable the check in a cron.
     python3 - "$out" <<'PY' || { log "downloaded GTFS failed validation — keeping current"; return 1; }
 import sys, zipfile
-z = zipfile.ZipFile(sys.argv[1])
-names = z.namelist()
-assert "stops.txt" in names and "routes.txt" in names and "trips.txt" in names, "missing core GTFS files"
+names = set(zipfile.ZipFile(sys.argv[1]).namelist())
+if not {"stops.txt", "routes.txt", "trips.txt"} <= names:
+    sys.exit("missing core GTFS files")
 PY
     log "GTFS valid ($(du -h "$out" | cut -f1))"
     if [ "$CHECK_ONLY" = 1 ]; then log "--check: validated, not swapping GTFS"; return 0; fi
+    if [ -f "$INPUT_DIR/$GTFS_FILE" ] && cmp -s "$out" "$INPUT_DIR/$GTFS_FILE"; then
+        log "GTFS unchanged since last refresh — skipping swap/re-import"
+        return 1
+    fi
     mv -f "$out" "$INPUT_DIR/$GTFS_FILE"
     log "GTFS swapped in"
     return 0
@@ -141,7 +150,8 @@ reimport_nominatim() {
         -v "$INPUT_DIR/$OSM_FILE:/data/$OSM_FILE:ro" \
         -v "$NOMINATIM_VOLUME:/var/lib/postgresql/16/main" \
         -p "127.0.0.1:$NOMINATIM_PORT:8080" --restart unless-stopped --shm-size=1g \
-        "$NOMINATIM_IMAGE" >/dev/null
+        "$NOMINATIM_IMAGE" >/dev/null \
+        || { log "Nominatim re-create FAILED — geocoding stays on the MOTIS fallback"; return 1; }
     log "Nominatim re-import started (serves once /status is 200; geocoding uses MOTIS fallback meanwhile)"
 }
 

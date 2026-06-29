@@ -9,7 +9,9 @@ The travel engines are built from data that goes stale: the **511 regional GTFS*
 an aging map. This is the last travel follow-up after routing (#148) + geocoder (#149).
 
 * What — scripts/refresh-travel-data.sh
-One script, run weekly by an unattended user cron (no sudo; docker + curl only):
+One script, run weekly by an unattended user cron (no sudo). Deps: ``docker``,
+``curl``, ``python3`` (GTFS zip validation), and standard util-linux/coreutils
+(``flock``, ``stat``, ``du``, ``cmp``, ``mktemp``):
 - **511 GTFS — every run.** Download the regional feed (token from
   ``~/motis-travel/.511-token``, untracked), validate it's a real GTFS zip
   (Python ``zipfile`` — the 511 zip's format trips ``unzip``), then atomically swap.
