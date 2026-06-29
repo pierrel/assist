@@ -1,22 +1,24 @@
 #+TITLE: local travel skill — real-world time/distance across transit, walk, bike, car
 #+DATE: <2026-06-28>
-#+STATUS: built + MOTIS live (Bay Area, BART transit); pending 511 token + review/PR
+#+STATUS: built + MOTIS live (Bay Area, FULL 511 regional transit); pending review/PR merge+deploy
 
 * Provisioned + verified (2026-06-28)
 MOTIS is stood up and LIVE at ``$ASSIST_ROUTING_URL`` (Docker ``motis-travel``,
 ``--restart unless-stopped``), infra at ``~/motis-travel/`` (NorCal OSM
-+ BART open GTFS bootstrap; ``data/`` = built graph). Live-verified: geocode ✓;
++ the **511 regional GTFS** — Muni/Caltrain/AC Transit/VTA/ferries/BART + dozens
+of smaller operators; ``data/`` = built graph). Live-verified: geocode ✓;
 car/bike/walk routing ✓ (Civic Center→Mission car 2 min; →Oakland City Hall car
-16 min); **transit ✓ via BART** (→Oakland City Hall transit 23 min, cross-bay).
+16 min); **transit ✓ full regional** (Civic Center→Ferry 17 min via Muni 9;
+Potrero→SoMa 25 min via Muni 55+15; Berkeley→Palo Alto via AC Transit+Caltrain+VTA).
 Tool rewritten against the live MOTIS API (one service: ``/api/v1/geocode`` +
 ``/api/v1/plan``); mocked unit tests + the full suite green; ``ASSIST_ROUTING_URL``
 in ``.dev.env``.
 Known live edges: (1) a POI whose geocode hit is off the street/transit network
 (e.g. the Ferry *ferry-terminal* on the pier) returns "unavailable" for car/transit
-while bike/walk reach it — honest, minor; (2) transit coverage = loaded feeds
-(BART now), so e.g. San Jose transit is NA until the **511 regional GTFS** is added
-(needs Pierre's free 511 token) — adding it = drop the feed in MOTIS config +
-re-import, NO code change.
+while bike/walk reach it — honest, minor; (2) MOTIS's built-in geocoder is weak for
+real addresses/POIs (mis-resolves "Connecticut Yankee" / "222 2nd St") — Nominatim
+geocoder is a queued follow-up; (3) the 511 feed goes stale — a refresh cron (token
+in ``~/motis-travel/.511-token``, untracked) is a follow-up; re-import = NO code change.
 Code review (2 lenses) DONE: one finding fixed — `_plan_direct`/`_plan_transit`
 read ``it["duration"]`` unguarded, which could raise into the agent loop on a
 malformed MOTIS itinerary (the module's contract is fail-loud-but-RETURNED);
