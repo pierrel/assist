@@ -1,0 +1,50 @@
+#+TITLE: travel data refresh — keep the 511 GTFS + OSM current
+#+DATE: <2026-06-29>
+#+STATUS: shipped (scripts/refresh-travel-data.sh + weekly user cron)
+
+* Why
+The travel engines are built from data that goes stale: the **511 regional GTFS**
+(transit schedules — change often) and the **NorCal OSM extract** (roads/addresses
+— change slowly). Without a refresh, MOTIS serves an aging timetable and Nominatim
+an aging map. This is the last travel follow-up after routing (#148) + geocoder (#149).
+
+* What — scripts/refresh-travel-data.sh
+One script, run weekly by an unattended user cron (no sudo; docker + curl only):
+- **511 GTFS — every run.** Download the regional feed (token from
+  ``~/motis-travel/.511-token``, untracked), validate it's a real GTFS zip
+  (Python ``zipfile`` — the 511 zip's format trips ``unzip``), then atomically swap.
+- **OSM — only when stale.** If ``input/<osm>`` is older than ``OSM_MAX_AGE_DAYS``
+  (default 30), download a fresh Geofabrik NorCal extract, validate (PBF magic +
+  size), swap. So OSM refreshes ~monthly without a second timer.
+- **MOTIS re-import — when anything changed.** stop -> ``motis import`` -> start.
+  Because MOTIS keys its artifacts by content hash, an OSM-unchanged run only
+  rebuilds the timetable and reuses the street graph — the weekly GTFS refresh is a
+  **~5-second** downtime, not minutes.
+- **Nominatim re-import — only when OSM changed** (its full import is heavy; not
+  worth running weekly). During it, geocoding falls back to MOTIS's built-in.
+
+Safety: a ``flock`` so runs can't overlap; **validate-before-swap** so a bad/partial
+download never replaces good data (keep-current on any failure — a transient 511 500
+just logs and retries next week); the token is read from a file and never printed.
+
+* Config (env, defaults suit the single-box deploy)
+``TRAVEL_INFRA_DIR`` (``~/motis-travel``), ``OSM_MAX_AGE_DAYS`` (30), ``OSM_URL``
+(Geofabrik NorCal), ``GTFS_511_OPERATOR`` (RG), container/volume/port names, and
+``TOKEN_FILE`` (``$TRAVEL_INFRA_DIR/.511-token`` holding ``ASSIST_511_TOKEN=...``).
+``--check`` downloads + validates only (no swap/import) for safe testing.
+
+* Cron
+``0 4 * * 0`` (Sunday 04:00) running the DEPLOYED copy
+(``$DEPLOY_PATH/scripts/refresh-travel-data.sh``), logging to
+``~/motis-travel/refresh.log``. User crontab — no sudo, no LLM.
+
+* Verified
+A real run (2026-06-29): GTFS downloaded (65M) + validated + swapped; OSM fresh ->
+skipped; MOTIS incremental re-import + restart in ~5s; travel healthy afterward
+(Coit Tower -> Oracle Park, all modes incl. transit). A transient 511 HTTP 500 on a
+prior attempt was correctly tolerated (kept current data, logged).
+
+* Follow-ups (optional)
+- Codify the two containers in a compose file (the script currently embeds the
+  Nominatim re-create args).
+- Email/healthcheck on repeated refresh failure (today it just logs).
