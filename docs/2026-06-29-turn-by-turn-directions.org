@@ -1,4 +1,4 @@
-#+TITLE: turn-by-turn directions — design (for review; no code yet)
+#+TITLE: turn-by-turn directions — design + as-built
 #+DATE: <2026-06-29>
 #+STATUS: DESIGN APPROVED (Pierre 2026-06-29) — implementing. Decisions: (1) confidence-gated street turns; (2) MILES everywhere (incl. the existing travel tool); (3) mode REQUIRED; (4) roll directions into the travel skill (one skill), validated by the discrimination eval — split only if the model mis-picks.
 
@@ -8,9 +8,11 @@ tool) to actual route STEPS — "how do I get from A to B", "which bus do I take
 "directions to X". Next item on Pierre's roadmap after travel (routing + 511
 transit + Nominatim geocoder, all shipped).
 
-This doc is the Phase-1 design: an architect plan + a 4-lens internal design
-review, grounded in live MOTIS probes. It ends with **open questions for Pierre**.
-No code is written until those are settled.
+This doc began as the Phase-1 design (architect plan + a 4-lens internal review,
+grounded in live MOTIS probes, ending with open questions for Pierre). Pierre's
+answers are recorded in the STATUS line above; the implementation followed, and the
+"As-built deviations" + "Pierre's PR review notes" sections below reconcile the doc
+with what shipped. So this is now both the design rationale and the as-built record.
 
 * Measured findings (live MOTIS, http://$ASSIST_ROUTING_URL — measure, don't guess)
 The travel-tool lesson was to verify response shapes, not guess. What MOTIS

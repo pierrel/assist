@@ -525,13 +525,18 @@ def _decode_polyline(points, precision) -> list:
         return []
     try:
         factor = 10 ** int(precision)
-        out = []; lat = lon = 0; i = 0; n = len(points)
+        out = []
+        lat = lon = 0
+        i = 0
+        n = len(points)
         while i < n:
             for axis in range(2):
                 shift = result = 0
                 while True:
-                    b = ord(points[i]) - 63; i += 1
-                    result |= (b & 0x1f) << shift; shift += 5
+                    b = ord(points[i]) - 63
+                    i += 1
+                    result |= (b & 0x1f) << shift
+                    shift += 5
                     if b < 0x20:
                         break
                 delta = ~(result >> 1) if (result & 1) else (result >> 1)
