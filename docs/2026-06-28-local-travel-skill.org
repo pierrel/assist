@@ -28,8 +28,16 @@ the agent caught the resolved-name mismatch and refused to trust it. Mitigated b
 a skill nudge to include the city/area for ambiguous names; deeper fix (Nominatim
 or MOTIS geocoder tuning) is a possible later improvement.
 Remaining (held for Pierre): 511 token (full Bay Area transit beyond BART), PR +
-Copilot, deploy (ASSIST_ROUTING_URL in .deploy.env + sandbox egress allowlist +
-MOTIS reachable from the sandbox). NOT merged/deployed.
+Copilot, deploy (set ASSIST_ROUTING_URL in .deploy.env; the tool runs in the
+assist HOST process — like search_internet — so MOTIS only needs to be reachable
+from the assist service, NOT a sandbox-egress concern). NOT merged/deployed.
+
+NOTE ON THIS DOC: the CURRENT design is (a) this top section and (b) the
+"* REVISED after Pierre (2026-06-28, round 2): MOTIS …" section below. EVERY OTHER
+section — Requirements, Candidate stack, Architecture, Design-review outcomes,
+Resolved backend/env contract, the Forks — is the **original pre-MOTIS
+exploration** (Valhalla / Navitia / Nominatim / ASSIST_GEOCODER_URL) and is
+**SUPERSEDED**; kept only for history. Do not treat those as the current design.
 
 
 * Goal
@@ -43,12 +51,12 @@ hardware we control, no third-party leak of where the user is going.
 * Requirements
 - Input is usually place *names/descriptions* ("from home to the Ferry Building",
   "downtown to the airport"), not coordinates → need **geocoding** (name → lat/lon).
-- Output: per-mode **duration + distance** (and enough to compare modes). Possibly
-  a short human summary the agent relays.
+- Output: per-mode time (and distance for car/bike/walk; transit returns time
+  only), enough to compare modes. Possibly a short human summary the agent relays.
 - Modes: transit, walk, bike, car — ideally one call can compare them.
 - Scope: intra-city + nearby cities (a metro region), not cross-country.
 
-* Candidate self-hosted stack (the core design research)
+* Candidate self-hosted stack (SUPERSEDED — pre-MOTIS exploration; current design is the MOTIS section)
 All are OSM-based, Dockerized, return time+distance.
 
 ** Routing engine (the main fork)
@@ -71,7 +79,7 @@ All are OSM-based, Dockerized, return time+distance.
 - *GTFS feeds* for transit (per-agency; transit.land / the Mobility Database
   aggregate them). Transit quality is entirely down to having current GTFS.
 
-* Architecture (Löwy: isolate the volatile resource)
+* Architecture (SUPERSEDED — pre-MOTIS; Valhalla/ResourceAccess)
 - The **routing engine is a Resource**; a thin **ResourceAccess** wrapper (the
   assist tool) isolates the engine choice so Valhalla↔OTP↔hosted can be swapped
   without touching the skill or the agent. The engine URL is config/env, not
@@ -96,7 +104,7 @@ All are OSM-based, Dockerized, return time+distance.
 - If a hosted-API fallback is ever allowed (see forks), it would leak the query to
   a third party — so it must be opt-in and never the default for private queries.
 
-* Design-review outcomes (4 lenses — folded in)
+* Design-review outcomes (SUPERSEDED — pre-MOTIS; Valhalla/ASSIST_GEOCODER_URL)
 Decisions taken (the env-URL seam makes the engine choice cheap/reversible, so
 these are design-phase calls, not Pierre forks):
 - *One ``travel(origin, destination)`` tool in ``assist/tools.py``*, shaped exactly
