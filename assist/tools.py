@@ -615,12 +615,14 @@ def _street_narrative(o: dict, d: dict, directmode: str, label: str):
         direct = (data.get("direct") if isinstance(data, dict) else None) or []
         if not direct:
             return None
-        leg = direct[0]["legs"][0]
-        runs = _consolidate_street_steps(leg.get("steps") or [])
+        legs = direct[0]["legs"]  # aggregate across legs, like travel._plan_direct sums them
+        steps = [s for leg in legs for s in (leg.get("steps") or [])]
+        total_dist = sum((leg.get("distance") or 0) for leg in legs)
+        runs = _consolidate_street_steps(steps)
         if not runs:
             return None
         lines = [f'{label} directions from "{o["name"]}" to "{d["name"]}" '
-                 f'(~{_fmt_duration(direct[0]["duration"])}, {_fmt_distance_m(leg.get("distance", 0))}):']
+                 f'(~{_fmt_duration(direct[0]["duration"])}, {_fmt_distance_m(total_dist)}):']
         prev_exit = None
         for n, r in enumerate(runs, start=1):
             phrase = "Head onto" if n == 1 else _turn_phrase(prev_exit, r["entry_bearing"])
