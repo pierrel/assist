@@ -349,10 +349,13 @@ def _first_usable_hit(hits, place: str) -> dict | None:
         raise _TravelBackendError(f"unexpected geocoder response: {type(hits).__name__}")
     for h in hits:
         try:
-            return {"lat": float(h["lat"]), "lon": float(h["lon"]),
-                    "name": h.get("name") or h.get("display_name") or place}
+            lat, lon = float(h["lat"]), float(h["lon"])
+            name = h.get("name") or h.get("display_name") or place
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
+        if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:  # also rejects NaN/inf
+            return {"lat": lat, "lon": lon, "name": name}
+        # out-of-range/NaN/inf coords would poison /plan as "nan,nan" -> skip the hit
     return None
 
 
@@ -438,6 +441,11 @@ def travel(origin: str, destination: str) -> str:
     Covers the loaded metro area(s); a place outside them comes back as no route,
     not a guess.
     """
+    # Routing is required for the whole tool; without it, geocoding (now possibly
+    # via Nominatim) would succeed and every mode would come back "unavailable" --
+    # so fail fast with the standard message instead.
+    if not os.getenv("ASSIST_ROUTING_URL"):
+        return _travel_unavailable("ASSIST_ROUTING_URL is not set")
     try:
         o = _geocode(origin)
         d = _geocode(destination)

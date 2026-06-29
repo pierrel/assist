@@ -34,7 +34,10 @@ def _fake_get(url, params=None, timeout=None, **kw):
     if "/search" in url:  # Nominatim geocoder (the default path)
         q = params["q"].lower()
         key = "civic" if "civic" in q else ("ferry" if "ferry" in q else None)
-        return _Resp([_GEO[key]] if key else [])
+        if not key:
+            return _Resp([])
+        g = _GEO[key]  # Nominatim shape: display_name, no `name` -> exercises the fallback
+        return _Resp([{"display_name": g["name"], "lat": g["lat"], "lon": g["lon"]}])
     if "/api/v1/geocode" in url:  # MOTIS built-in geocoder (fallback path)
         t = params["text"].lower()
         key = "civic" if "civic" in t else ("ferry" if "ferry" in t else None)
@@ -90,6 +93,18 @@ class TestTravel:
         monkeypatch.delenv("ASSIST_ROUTING_URL", raising=False)
         monkeypatch.delenv("ASSIST_GEOCODER_URL", raising=False)
         assert "unavailable" in tools.travel("a", "b").lower()
+
+    def test_geocoder_set_but_routing_unset_is_unavailable(self, monkeypatch):
+        # Routing is required; with Nominatim, geocode would otherwise succeed and
+        # every mode show "unavailable". Fail fast with the standard message, no HTTP.
+        monkeypatch.setenv("ASSIST_GEOCODER_URL", "http://nominatim")
+        monkeypatch.delenv("ASSIST_ROUTING_URL", raising=False)
+        called = []
+        with patch.object(tools.requests, "get",
+                          lambda *a, **k: called.append(1) or _Resp([])):
+            out = tools.travel("civic center", "ferry building")
+        assert "unavailable" in out.lower()
+        assert not called  # bailed before any HTTP
 
     def test_geocode_uses_nominatim_when_set(self, routing_env):
         seen = []
