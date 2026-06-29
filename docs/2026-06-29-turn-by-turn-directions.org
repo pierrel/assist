@@ -1,6 +1,6 @@
 #+TITLE: turn-by-turn directions — design (for review; no code yet)
 #+DATE: <2026-06-29>
-#+STATUS: DESIGN — internal design-review done; awaiting Pierre's call on the open questions before any code
+#+STATUS: DESIGN APPROVED (Pierre 2026-06-29) — implementing. Decisions: (1) confidence-gated street turns; (2) MILES everywhere (incl. the existing travel tool); (3) mode REQUIRED; (4) roll directions into the travel skill (one skill), validated by the discrimination eval — split only if the model mis-picks.
 
 * Goal
 Extend the travel capability from "how long / which mode" (the shipped ~travel~
@@ -167,6 +167,32 @@ import + comment), ~assist/skills/directions/SKILL.md~ (new), ~assist/skills/tra
 4. Minor (recommended defaults, say if you disagree): new ~directions~ skill (not a
    combined travel+directions skill); ~origin~ defaults to "home" for one-place
    asks (matches the travel skill); map render DEFERRED.
+
+* Pierre's PR review notes (2026-06-29)
+- *Transit departure times — FOLLOW-UP, gated on the context rider.* Transit
+  directions should eventually carry real board times: each leg shows a "leave on
+  time" board time AND the next departure, and the chain is anchored to a *departure
+  time a few minutes after the user's most recent message*. The times themselves are
+  in the API already (MOTIS legs carry ``startTime`` / ``scheduledStartTime`` /
+  ``endTime``); what's missing is the "now" anchor — so this depends on the **context
+  rider** milestone (message time + geo) landing first. v1 ships the
+  walk/board/transfer/alight narrative WITHOUT times; the times follow-up comes after
+  the context rider. (See [[queued-assist-feature-roadmap]].)
+- *Degradations must be surfaced by the agent — DONE in v1.* When a result is
+  degraded (no route, an odd resolved name, an unavailable mode, approximate turns),
+  the agent should call it out AND ask for what would resolve it (a more specific
+  place, the city/area, a different mode). Implemented as skill guidance
+  (assist/skills/travel/SKILL.md "Surfacing problems"), not tool code — the tool
+  already returns honest degraded strings; the skill tells the agent to act on them.
+
+* As-built deviations from the plan (doc-vs-diff reconciliation)
+- *One skill, not a new ~directions~ skill* — per Pierre's call (#4): the existing
+  ~travel~ skill was extended to cover both tools with a checkable tool-choice rule +
+  a mode synonym table. Validated by the discrimination eval; split only if the model
+  mis-picks.
+- *No README entry* — ~travel~ itself was never added to the README; kept consistent
+  (no unrequested docs). The skill + this doc are the documentation.
+- Transit "stops" = intermediate stops + 1 (the stops ridden to the alighting stop).
 
 * Internal review outcomes (folded in)
 - simplicity: cut to ~3 core helpers, one street + one transit path (not 4 modes),

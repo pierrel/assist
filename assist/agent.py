@@ -13,7 +13,7 @@ from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
 from assist.spec import AgentSpec
-from assist.tools import read_url, search_internet, travel
+from assist.tools import directions, read_url, search_internet, travel
 from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE, DOMAIN_SKILLS_PATH
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
@@ -366,11 +366,11 @@ def create_agent(model: BaseChatModel,
         middleware=mw + [skills_mw, memory_mw, logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
-        # `travel` is a built-in: a direct deterministic A->B time/distance lookup
-        # the main agent answers inline (gated by the travel skill), like a
-        # calculation — not web research, so not on the research sub-agent.  Skip
-        # if a spec already supplies it, so it's never double-registered.
-        tools=list(spec.tools) + ([travel] if travel not in spec.tools else []),
+        # `travel` (time/distance) and `directions` (turn-by-turn steps) are
+        # built-ins: direct deterministic A->B lookups the main agent answers inline
+        # (gated by the travel skill), like a calculation — not web research, so not
+        # on the research sub-agent.  Skip any a spec already supplies (no dup).
+        tools=list(spec.tools) + [t for t in (travel, directions) if t not in spec.tools],
     )
 
     return agent

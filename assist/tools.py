@@ -21,6 +21,7 @@ casio-runaway shape: ~9,000 fetches across many distinct URLs in two hours).
 """
 
 import logging
+import math
 import os
 import re
 import time
@@ -312,8 +313,8 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _fmt_distance_m(meters: float) -> str:
-    km = meters / 1000.0
-    return f"{km:.1f} km" if km >= 0.1 else f"{int(round(meters))} m"
+    miles = meters / 1609.344  # US units throughout (travel + directions)
+    return f"{miles:.1f} mi" if miles >= 0.1 else f"{int(round(meters * 3.28084))} ft"
 
 
 class _TravelBackendError(Exception):
@@ -427,6 +428,24 @@ def _plan_transit(o: dict, d: dict) -> dict | None:
         return None
 
 
+def _resolve_od(origin: str, destination: str):
+    """Geocode origin + destination -> (o, d) dicts, or an error STRING the caller
+    returns to the agent: service down -> the "unavailable" message; a name that
+    doesn't resolve -> "couldn't find …".  Shared by travel() and directions()."""
+    try:
+        o = _geocode(origin)
+        d = _geocode(destination)
+    except _TravelBackendError as e:
+        return _travel_unavailable(str(e))  # service down -> "unavailable", not "not found"
+    if o is None:
+        return (f"I couldn't find a place matching '{origin}'. Ask the user to "
+                "clarify or give a more specific location.")
+    if d is None:
+        return (f"I couldn't find a place matching '{destination}'. Ask the user "
+                "to clarify or give a more specific location.")
+    return o, d
+
+
 def travel(origin: str, destination: str) -> str:
     """Real-world travel time and distance between two places, by car, bike,
     walking, and public transit.
@@ -446,17 +465,10 @@ def travel(origin: str, destination: str) -> str:
     # so fail fast with the standard message instead.
     if not os.getenv("ASSIST_ROUTING_URL"):
         return _travel_unavailable("ASSIST_ROUTING_URL is not set")
-    try:
-        o = _geocode(origin)
-        d = _geocode(destination)
-    except _TravelBackendError as e:
-        return _travel_unavailable(str(e))  # service down -> "unavailable", not "not found"
-    if o is None:
-        return (f"I couldn't find a place matching '{origin}'. Ask the user to "
-                "clarify or give a more specific location.")
-    if d is None:
-        return (f"I couldn't find a place matching '{destination}'. Ask the user "
-                "to clarify or give a more specific location.")
+    od = _resolve_od(origin, destination)
+    if isinstance(od, str):
+        return od
+    o, d = od
 
     lines = [f'Travel from "{o["name"]}" to "{d["name"]}":']
     for label, mode in _TRAVEL_DIRECT_MODES:
@@ -468,3 +480,216 @@ def travel(origin: str, destination: str) -> str:
     lines.append(f"- Transit: {_fmt_duration(t['duration_s'])}" if t
                  else "- Transit: unavailable")
     return "\n".join(lines)
+
+
+# --- directions (turn-by-turn) -------------------------------------------------
+# `directions` is the step-by-step sibling of `travel`: same _geocode + MOTIS /plan
+# + fail-loud-but-RETURNED contract, but it walks the per-leg/step detail travel
+# discards.  MOTIS's own turn field (relativeDirection) is uniformly "CONTINUE", so
+# street turns are derived from polyline geometry, CONFIDENCE-GATED: a left/right is
+# emitted only when the heading change is unambiguous, else the neutral "Continue
+# onto" -- so a confident WRONG turn is unreachable by construction.
+
+_DIRECTIONS_STREET = {  # mode word -> (MOTIS directModes, label)
+    "car": ("CAR", "Driving"), "drive": ("CAR", "Driving"), "driving": ("CAR", "Driving"),
+    "bike": ("BIKE", "Biking"), "bicycle": ("BIKE", "Biking"), "cycling": ("BIKE", "Biking"),
+    "cycle": ("BIKE", "Biking"),
+    "walk": ("WALK", "Walking"), "walking": ("WALK", "Walking"), "foot": ("WALK", "Walking"),
+    "on foot": ("WALK", "Walking"),
+}
+_DIRECTIONS_TRANSIT = {"transit", "bus", "train", "subway", "metro", "rail", "tram",
+                       "light rail", "public transit"}
+_TRANSIT_NOUN = {"BUS": "bus", "TRAM": "tram", "SUBWAY": "train", "RAIL": "train",
+                 "FERRY": "ferry", "FUNICULAR": "funicular", "CABLE_CAR": "cable car",
+                 "COACH": "coach"}
+_TURN_STRAIGHT_DEG = 30.0   # |heading change| below this -> "Continue" (no turn)
+_TURN_UTURN_DEG = 160.0     # above this -> U-turn
+_MIN_RUN_M = 15             # drop negligible connector runs from the step list
+
+
+def _normalize_mode(mode: str):
+    """('street', MOTIS_directModes, label) | ('transit', None, 'Transit') | None."""
+    m = str(mode or "").strip().lower()  # str() -> never raise on a non-string arg
+    if m in _DIRECTIONS_STREET:
+        directmode, label = _DIRECTIONS_STREET[m]
+        return ("street", directmode, label)
+    if m in _DIRECTIONS_TRANSIT:
+        return ("transit", None, "Transit")
+    return None
+
+
+def _decode_polyline(points, precision) -> list:
+    """Decode a Google-encoded polyline -> [(lat, lon), ...]; [] on any bad input
+    (never raises -- module contract)."""
+    if not isinstance(points, str):
+        return []
+    try:
+        factor = 10 ** int(precision)
+        out = []; lat = lon = 0; i = 0; n = len(points)
+        while i < n:
+            for axis in range(2):
+                shift = result = 0
+                while True:
+                    b = ord(points[i]) - 63; i += 1
+                    result |= (b & 0x1f) << shift; shift += 5
+                    if b < 0x20:
+                        break
+                delta = ~(result >> 1) if (result & 1) else (result >> 1)
+                if axis == 0:
+                    lat += delta
+                else:
+                    lon += delta
+            out.append((lat / factor, lon / factor))
+        return out
+    except (IndexError, TypeError, ValueError):
+        return []
+
+
+def _bearing(a, b) -> float:
+    """Initial compass bearing (0-360deg) from point a=(lat,lon) to b."""
+    lat1, lat2 = math.radians(a[0]), math.radians(b[0])
+    dlon = math.radians(b[1] - a[1])
+    y = math.sin(dlon) * math.cos(lat2)
+    x = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def _turn_phrase(prev_exit, this_entry) -> str:
+    """Confidence-gated turn: commit to left/right ONLY when the heading change is
+    unambiguous; otherwise 'Continue onto' (a confident wrong turn is unreachable)."""
+    if prev_exit is None or this_entry is None:
+        return "Continue onto"
+    delta = ((this_entry - prev_exit + 180) % 360) - 180  # signed -180..180
+    a = abs(delta)
+    if a < _TURN_STRAIGHT_DEG:
+        return "Continue onto"
+    if a > _TURN_UTURN_DEG:
+        return "Make a U-turn onto"
+    return "Turn right onto" if delta > 0 else "Turn left onto"
+
+
+def _consolidate_street_steps(steps) -> list:
+    """Collapse consecutive same-streetName steps into runs with entry/exit bearings
+    (from each run's decoded geometry).  -> [{name, distance_m, entry_bearing,
+    exit_bearing}].  Never raises."""
+    runs = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        name = (step.get("streetName") or "").strip()
+        dist = step.get("distance")
+        dist = dist if isinstance(dist, (int, float)) else 0  # never raise on a bad type
+        pl = step.get("polyline") if isinstance(step.get("polyline"), dict) else {}
+        pts = _decode_polyline(pl.get("points"), pl.get("precision", 7))
+        if runs and runs[-1]["name"] == name:
+            runs[-1]["distance_m"] += dist
+            runs[-1]["_pts"].extend(pts)
+        else:
+            runs.append({"name": name, "distance_m": dist, "_pts": list(pts)})
+    out = []
+    for r in runs:
+        if r["distance_m"] < _MIN_RUN_M:
+            continue
+        pts = r["_pts"]
+        entry = _bearing(pts[0], pts[1]) if len(pts) >= 2 else None
+        exit_ = _bearing(pts[-2], pts[-1]) if len(pts) >= 2 else None
+        out.append({"name": r["name"], "distance_m": r["distance_m"],
+                    "entry_bearing": entry, "exit_bearing": exit_})
+    return out
+
+
+def _street_narrative(o: dict, d: dict, directmode: str, label: str):
+    """A car/bike/walk turn-by-turn list, or None (no route).  Raises
+    _TravelBackendError only if MOTIS is down (caller -> 'unavailable')."""
+    data = _motis_get("/api/v1/plan", {
+        "fromPlace": f"{o['lat']},{o['lon']}", "toPlace": f"{d['lat']},{d['lon']}",
+        "directModes": directmode, "maxDirectTime": _TRAVEL_MAX_DIRECT_S})
+    try:
+        direct = (data.get("direct") if isinstance(data, dict) else None) or []
+        if not direct:
+            return None
+        leg = direct[0]["legs"][0]
+        runs = _consolidate_street_steps(leg.get("steps") or [])
+        if not runs:
+            return None
+        lines = [f'{label} directions from "{o["name"]}" to "{d["name"]}" '
+                 f'(~{_fmt_duration(direct[0]["duration"])}, {_fmt_distance_m(leg.get("distance", 0))}):']
+        prev_exit = None
+        for n, r in enumerate(runs, start=1):
+            phrase = "Head onto" if n == 1 else _turn_phrase(prev_exit, r["entry_bearing"])
+            lines.append(f"{n}. {phrase} {r['name'] or 'an unnamed road'} "
+                         f"({_fmt_distance_m(r['distance_m'])})")
+            prev_exit = r["exit_bearing"]
+        lines.append(f'{len(runs) + 1}. Arrive at "{d["name"]}"')
+        return "\n".join(lines)
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+        return None  # malformed itinerary -> "no route", never raise into the agent loop
+
+
+def _transit_narrative(o: dict, d: dict):
+    """A walk/board/transfer/alight transit list, or None (no journey).  Raises
+    _TravelBackendError only if MOTIS is down."""
+    data = _motis_get("/api/v1/plan", {
+        "fromPlace": f"{o['lat']},{o['lon']}", "toPlace": f"{d['lat']},{d['lon']}",
+        "transitModes": "TRANSIT"})
+    try:
+        its = (data.get("itineraries") if isinstance(data, dict) else None) or []
+        if not its:
+            return None
+        it = min(its, key=lambda x: x["duration"])
+        legs = [l for l in (it.get("legs") or [])  # drop degenerate zero-length legs
+                if not (not l.get("duration") and
+                        (l.get("from") or {}).get("name") == (l.get("to") or {}).get("name"))]
+        if not legs:
+            return None
+        lines = [f'Transit directions from "{o["name"]}" to "{d["name"]}" '
+                 f'(~{_fmt_duration(it["duration"])}):']
+        for n, l in enumerate(legs, start=1):
+            to_name = (l.get("to") or {}).get("name") or "your destination"
+            if l.get("mode") == "WALK":
+                dest = f'"{d["name"]}"' if n == len(legs) else to_name
+                lines.append(f"{n}. Walk to {dest} ({_fmt_duration(l.get('duration', 0))})")
+            else:
+                noun = _TRANSIT_NOUN.get(l.get("mode"), "line")
+                route = l.get("routeShortName") or l.get("tripShortName") or noun
+                toward = f" toward {l['headsign']}" if l.get("headsign") else ""
+                stops = len(l.get("intermediateStops") or []) + 1  # stops ridden to the alighting stop
+                lines.append(f"{n}. Take the {route} {noun}{toward} to {to_name} "
+                             f"({stops} stop{'s' if stops != 1 else ''})")
+        return "\n".join(lines)
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+        return None
+
+
+def directions(origin: str, destination: str, mode: str) -> str:
+    """Step-by-step route directions between two places for a SINGLE travel mode.
+
+    Use this when the user wants DIRECTIONS / how to actually get somewhere -- "how
+    do I get to X", "directions to Y", "which bus do I take", "walk me through it" --
+    as opposed to "how long / how far" (use `travel` for that).  Pass plain place
+    NAMES (the geocoder resolves them) and a `mode`: "car", "bike", "walk", or
+    "transit".  Returns a numbered list -- turns + streets for car/bike/walk
+    (street turns are approximate), or walk/board/transfer/alight for transit -- in
+    US units (miles).  Relay it; never invent streets or lines.  A place outside the
+    covered area or with no route comes back as "couldn't find a route", not a guess.
+    """
+    if not os.getenv("ASSIST_ROUTING_URL"):
+        return _travel_unavailable("ASSIST_ROUTING_URL is not set")
+    m = _normalize_mode(mode)
+    if m is None:
+        return ("Tell me which travel mode you want directions for: car, bike, "
+                "walk, or transit.")
+    kind, directmode, label = m
+    od = _resolve_od(origin, destination)
+    if isinstance(od, str):
+        return od
+    o, d = od
+    try:
+        out = _transit_narrative(o, d) if kind == "transit" else _street_narrative(o, d, directmode, label)
+    except _TravelBackendError as e:
+        return _travel_unavailable(str(e))  # plan service down -> "unavailable"
+    if out is None:
+        route_kind = "transit" if kind == "transit" else label.lower()
+        return (f'I couldn\'t find a {route_kind} route from "{o["name"]}" to '
+                f'"{d["name"]}".')
+    return out

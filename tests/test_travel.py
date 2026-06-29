@@ -64,8 +64,8 @@ class TestFormat:
         assert tools._fmt_duration(9600) == "2 h 40 min"
 
     def test_distance(self):
-        assert tools._fmt_distance_m(14000) == "14.0 km"
-        assert tools._fmt_distance_m(80) == "80 m"
+        assert tools._fmt_distance_m(14000) == "8.7 mi"
+        assert tools._fmt_distance_m(80) == "262 ft"
 
 
 class TestTravel:
@@ -73,9 +73,9 @@ class TestTravel:
         with patch.object(tools.requests, "get", _fake_get):
             out = tools.travel("civic center", "ferry building")
         assert 'from "Civic Center" to "Ferry Building"' in out
-        assert "- Car: 22 min, 14.0 km" in out
-        assert "- Bike: 48 min, 13.0 km" in out
-        assert "- Walk: 2 h 40 min, 13.0 km" in out
+        assert "- Car: 22 min, 8.7 mi" in out
+        assert "- Bike: 48 min, 8.1 mi" in out
+        assert "- Walk: 2 h 40 min, 8.1 mi" in out
         assert "- Transit: 35 min" in out  # fastest of the two itineraries
 
     def test_passes_coords_not_names_to_plan(self, routing_env):
@@ -127,7 +127,7 @@ class TestTravel:
             out = tools.travel("civic center", "ferry building")
         assert any("/api/v1/geocode" in u for u in seen)   # MOTIS geocoder fallback
         assert not any("/search" in u for u in seen)
-        assert "- Car: 22 min, 14.0 km" in out            # full summary still works
+        assert "- Car: 22 min, 8.7 mi" in out            # full summary still works
 
     def test_service_down_is_unavailable_not_not_found(self, routing_env):
         # A geocoder/service outage must yield the "unavailable" message, NOT a
