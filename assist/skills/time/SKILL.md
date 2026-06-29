@@ -60,8 +60,11 @@ execute("date -d '7/5' '+%A'")
 
 ## Countdown — days until / since a date
 
+The `+ 43200` rounds to the nearest whole day, which absorbs the partial current
+day and any daylight-saving hour in the span (so the count isn't off by one):
+
 ```
-execute("echo $(( ($(date -d '2026-12-25' +%s) - $(date +%s)) / 86400 )) days")
+execute("echo $(( ($(date -d '2026-12-25' +%s) - $(date +%s) + 43200) / 86400 )) days")
 ```
 
 A positive number is days **until** the date; negative means it already passed.
@@ -76,7 +79,7 @@ A positive number is days **until** the date; negative means it already passed.
 - "What's the date a week from Friday... I mean, next Thursday?" →
   `execute("date -d 'next Thursday' '+%A, %B %-d, %Y'")` → respond with the date.
 - "How many days until Christmas?" →
-  `execute("echo $(( ($(date -d 'Dec 25' +%s) - $(date +%s)) / 86400 )) days")`.
+  `execute("echo $(( ($(date -d 'Dec 25' +%s) - $(date +%s) + 43200) / 86400 )) days")`.
 
 ## Anti-patterns
 

@@ -9,7 +9,6 @@ derived from `date` itself (not hard-coded) so the eval is year-independent.
 Prompts deliberately avoid the SKILL.md EXAMPLES verbatim (probe generalization).
 """
 import re
-import subprocess
 import tempfile
 from unittest import TestCase
 
@@ -18,12 +17,6 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
 from .utils import create_filesystem, skill_was_loaded, executed_commands, cleanup_workspace
-
-
-def _weekday(expr: str) -> str:
-    """The weekday `date -d <expr>` resolves to right now (e.g. 'Sunday')."""
-    return subprocess.run(["date", "-d", expr, "+%A"],
-                          capture_output=True, text=True).stdout.strip()
 
 
 class TestTimeAgent(TestCase):
@@ -52,12 +45,20 @@ class TestTimeAgent(TestCase):
         return any(re.search(r"(?:^|[\s;&|()])date\b", cmd)
                    for cmd in executed_commands(agent))
 
+    def _weekday(self, expr: str) -> str:
+        """The weekday `date -d <expr>` resolves to IN THE SANDBOX — same clock and
+        TZ the agent uses. Fail fast on empty output (else assertIn('', reply) would
+        vacuously pass and hide a broken `date`)."""
+        out = (self.sandbox.execute(f"date -d '{expr}' +%A").output or "").strip()
+        self.assertTrue(out, f"sandbox `date -d {expr}` produced no output")
+        return out
+
     def test_weekday_of_a_date(self):
         agent = self._agent()
         reply = str(agent.message("What day of the week does the 5th of July land on?") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
-        self.assertIn(_weekday("7/5").lower(), reply)
+        self.assertIn(self._weekday("7/5").lower(), reply)
 
     def test_relative_date(self):
         agent = self._agent()
@@ -71,7 +72,7 @@ class TestTimeAgent(TestCase):
         reply = str(agent.message("Remind me what the date is right now.") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
-        self.assertIn(_weekday("today").lower(), reply)
+        self.assertIn(self._weekday("today").lower(), reply)
 
     def test_does_not_load_on_non_date_prompt(self):
         # Anti-test: an off-topic prompt must not trip the time skill.

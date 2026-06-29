@@ -19,10 +19,16 @@ def _sandbox_timezone() -> str:
     "what's today" in UTC (wrong for an evening PT user).  Order: ASSIST_TIMEZONE
     override (operator config; the context-rider milestone will set per-user later),
     else the host's zone, else UTC."""
-    tz = os.environ.get("ASSIST_TIMEZONE")
+    tz = os.environ.get("ASSIST_TIMEZONE") or os.environ.get("TZ")
     if tz:
         return tz
-    try:
+    try:  # Debian-likes: /etc/timezone is a plain zone name
+        name = open("/etc/timezone").read().strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    try:  # most distros: /etc/localtime symlinks into zoneinfo
         link = os.readlink("/etc/localtime")
         if "zoneinfo/" in link:
             return link.split("zoneinfo/", 1)[1]
