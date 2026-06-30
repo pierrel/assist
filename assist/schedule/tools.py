@@ -65,7 +65,7 @@ def schedule_tools(store) -> list:
         if not tz:
             return "Couldn't schedule: I don't know your timezone for this message."
         cad = Cadence(minute=minute, hour=hour,
-                      weekdays=tuple(weekdays) if weekdays else None,
+                      weekdays=tuple(weekdays) if weekdays is not None else None,
                       every_n_minutes=every_n_minutes)
         try:
             cadence.validate(cad)

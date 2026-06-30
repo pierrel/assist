@@ -86,10 +86,14 @@ class Scheduler:
 
     def poll(self) -> None:
         now = self._now()
-        for s in self._store.due(now):
-            self._fire(s, now)
+        due = self._store.due(now)
+        if not due:
+            return
+        healthy = self._health_check()   # probe once per tick, only when something's due
+        for s in due:
+            self._fire(s, now, healthy)
 
-    def _fire(self, s, now) -> None:
+    def _fire(self, s, now, healthy: bool) -> None:
         # advance-persist-THEN-dispatch: persisting next_fire_at first means a crash
         # before dispatch loses the fire (consistent with no-catch-up) but never
         # double-fires; the only double-fire path is dispatch-then-fail-to-persist.
@@ -104,7 +108,7 @@ class Scheduler:
         if not self._claim(s.id):
             log.info("schedule %s/%s due but already in-flight; skipping", s.thread_id, s.id)
             return
-        if not self._health_check():
+        if not healthy:
             log.info("schedule %s/%s due but LLM unreachable; skipping (no catch-up)",
                      s.thread_id, s.id)
             self._release(s.id)

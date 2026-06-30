@@ -110,7 +110,11 @@ class ScheduleStore:
             entries = os.listdir(self._root)
         except FileNotFoundError:
             return []
-        return [e for e in entries if os.path.isfile(self._path(e))]
+        # Only descend into actual thread dirs — the root also holds non-dir files
+        # (e.g. ThreadManager's threads.db); isdir-first avoids stat'ing file/schedules.json.
+        return [e for e in entries
+                if os.path.isdir(os.path.join(self._root, e))
+                and os.path.isfile(self._path(e))]
 
     def due(self, now_utc: datetime) -> list[Schedule]:
         """Enabled schedules whose next_fire_at is at or before now."""

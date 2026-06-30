@@ -78,7 +78,7 @@ def test_dedup_skips_when_schedule_inflight(tmp_path):
     store = _store(tmp_path, _sched(sid="a"))
     d, sch = _sched_run(store)
     sch._claim("a")                                      # pretend this schedule is running
-    sch._fire(store.for_thread("t1")[0], NOW)
+    sch._fire(store.for_thread("t1")[0], NOW, True)
     _flush(sch)
     assert d.calls == []                                 # skipped (deduped by schedule id)
     assert datetime.fromisoformat(store.for_thread("t1")[0].next_fire_at) > NOW  # still advanced
@@ -109,7 +109,7 @@ def test_persist_failure_blocks_dispatch(tmp_path):
     def boom(*a, **k):
         raise OSError("disk full")
     store.update = boom                                  # advance can't persist
-    sch._fire(store.for_thread("t1")[0], NOW)
+    sch._fire(store.for_thread("t1")[0], NOW, True)
     _flush(sch)
     assert d.calls == []                                 # no dispatch when next_fire can't persist
 

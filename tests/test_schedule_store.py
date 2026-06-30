@@ -100,3 +100,12 @@ def test_concurrent_updates_no_lost_update(tmp_path, store):
         t.join()
     # Every schedule's update must have landed — no lost write.
     assert all(s.next_fire_at == "2026-12-31T00:00:00+00:00" for s in store.for_thread("t1"))
+
+
+def test_all_ignores_non_dir_files_in_root(tmp_path, store):
+    # The thread root also holds non-dir files (e.g. ThreadManager's threads.db);
+    # all()/due() must not choke on them.
+    _mk(str(tmp_path), "t1")
+    store.add(_sched("t1", "a"))
+    (tmp_path / "threads.db").write_text("not a thread dir")
+    assert {s.id for s in store.all()} == {"a"}

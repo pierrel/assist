@@ -32,8 +32,9 @@ month"), say so plainly instead of approximating.
 To change one, pass **only the field(s) being changed plus the id** — everything
 else stays as it is. "Change it to fire at 5am" → `modify_schedule(id, hour=5)`
 (the minute and days are untouched). If you don't know the id, call
-`list_schedules()` first. To switch a clock schedule to an every-N-minutes one (or
-vice-versa), delete it and create a new one.
+`list_schedules()` first. `modify` shifts or narrows existing fields; to **broaden**
+a schedule (specific weekdays → every day, a fixed hour → hourly) or switch between a
+clock schedule and an every-N-minutes one, **delete it and create a new one**.
 
 ## After any change
 Relay back the schedule's cadence and **next run time** exactly as the tool
