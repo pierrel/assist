@@ -52,11 +52,15 @@ _STREET_PLAN = {"direct": [{"duration": 600, "legs": [{"distance": 1200.0, "step
     _step("A Street", _EAST, 600.0),
     _step("B Street", _NORTH, 600.0),
 ]}]}]}
-_TRANSIT_PLAN = {"itineraries": [{"duration": 1260, "legs": [
+# MOTIS leg/itinerary times are UTC 'Z' (verified against the live service). With
+# TZ=UTC pinned in the test (the utc_tz fixture), they render as the same wall-clock.
+_TRANSIT_PLAN = {"itineraries": [{"duration": 1260,
+    "startTime": "2026-06-30T14:45:00Z", "endTime": "2026-06-30T15:06:00Z", "legs": [
     {"mode": "WALK", "from": {"name": "Origin"}, "to": {"name": "Stop A"}, "duration": 180},
     {"mode": "BUS", "routeShortName": "9R", "headsign": "Downtown",
      "from": {"name": "Stop A"}, "to": {"name": "Stop B"},
-     "intermediateStops": [{}, {}], "duration": 720},
+     "intermediateStops": [{}, {}], "duration": 720,
+     "startTime": "2026-06-30T14:47:00Z"},
     {"mode": "WALK", "from": {"name": "Stop B"}, "to": {"name": "Dest"}, "duration": 360},
 ]}]}
 
@@ -74,6 +78,23 @@ def _fake_get(url, params=None, timeout=None, **kw):
 def routing_env(monkeypatch):
     monkeypatch.setenv("ASSIST_ROUTING_URL", "http://motis")
     monkeypatch.setenv("ASSIST_GEOCODER_URL", "http://nominatim")
+
+
+@pytest.fixture
+def utc_tz():
+    """Pin the process tz to UTC so _fmt_clock's astimezone() renders MOTIS's UTC 'Z'
+    leg times deterministically (the asserted clock is then tz-host-independent)."""
+    import os
+    import time
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "UTC"
+    time.tzset()
+    yield
+    if old is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = old
+    time.tzset()
 
 
 class TestHelpers:
@@ -117,13 +138,58 @@ class TestDirections:
             out = tools.directions("home", "the office", "bike")
         assert out.startswith("Biking directions")
 
-    def test_transit_directions_narrative(self, routing_env):
+    def test_transit_directions_narrative(self, routing_env, utc_tz):
         with patch.object(tools.requests, "get", _fake_get):
             out = tools.directions("home", "the office", "transit")
         assert out.startswith("Transit directions")
+        assert "departs 2:45 PM — arrives 3:06 PM" in out   # itinerary window (UTC-pinned)
         assert "1. Walk to Stop A (3 min)" in out
-        assert "2. Take the 9R bus toward Downtown to Stop B (3 stops)" in out
+        assert "2. Take the 9R bus toward Downtown to Stop B (3 stops, board 2:47 PM)" in out
         assert '3. Walk to "the office" (6 min)' in out      # last walk -> dest name
+
+    def test_transit_time_anchor_reaches_plan(self, routing_env):
+        seen = {}
+        def capture(url, params=None, timeout=None, **kw):
+            if "/api/v1/plan" in url and "transitModes" in (params or {}):
+                seen["params"] = params
+            return _fake_get(url, params=params, timeout=timeout, **kw)
+        with patch.object(tools.requests, "get", capture):
+            tools.directions("home", "the office", "transit")
+        from datetime import datetime
+        assert "time" in seen["params"]
+        datetime.fromisoformat(seen["params"]["time"].replace("Z", "+00:00"))  # ISO-parseable
+
+    def test_transit_missing_times_degrade(self, routing_env, utc_tz):
+        # No itinerary/leg times → no board suffix, no window, no raise (v1 narrative).
+        plan = {"itineraries": [{"duration": 1260, "legs": [
+            {"mode": "BUS", "routeShortName": "9R", "headsign": "Downtown",
+             "from": {"name": "A"}, "to": {"name": "B"},
+             "intermediateStops": [{}, {}], "duration": 720},
+        ]}]}
+        def no_times(url, params=None, **kw):
+            if "/api/v1/plan" in url:
+                return _Resp(plan)
+            return _fake_get(url, params=params, **kw)
+        with patch.object(tools.requests, "get", no_times):
+            out = tools.directions("home", "office", "transit")
+        assert "Take the 9R bus toward Downtown to B (3 stops)" in out  # no ", board ..."
+        assert "board" not in out and "departs" not in out
+
+    def test_transit_odd_typed_time_degrades(self, routing_env, utc_tz):
+        # A non-string time (epoch int) must omit the board time, not raise.
+        plan = {"itineraries": [{"duration": 720,
+            "startTime": 1234567890, "endTime": 1234568000, "legs": [
+            {"mode": "BUS", "routeShortName": "9R", "from": {"name": "A"},
+             "to": {"name": "B"}, "intermediateStops": [], "duration": 720,
+             "startTime": 1234567890},
+        ]}]}
+        def odd(url, params=None, **kw):
+            if "/api/v1/plan" in url:
+                return _Resp(plan)
+            return _fake_get(url, params=params, **kw)
+        with patch.object(tools.requests, "get", odd):
+            out = tools.directions("home", "office", "transit")  # must not raise
+        assert "Take the 9R bus to B" in out and "board" not in out
 
     def test_mode_synonyms_normalize(self):
         assert tools._normalize_mode("Driving")[1] == "CAR"

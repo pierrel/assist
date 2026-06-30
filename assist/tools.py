@@ -26,6 +26,7 @@ import os
 import re
 import time
 import threading
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
@@ -310,6 +311,22 @@ def _fmt_duration(seconds: float) -> str:
     if m < 60:
         return f"{m} min"
     return f"{m // 60} h {m % 60:02d} min"
+
+
+def _fmt_clock(iso: str | None) -> str | None:
+    """A MOTIS leg/itinerary time (ISO-8601, UTC 'Z') → a local wall-clock like
+    "6:24 AM", or None if missing/unparseable. astimezone() (no arg) converts to the
+    system-local zone — the metro's tz on this single-region deploy — so the time
+    reads as it does on the platform. Returns None (not raises) on bad input, per the
+    never-raise-into-the-agent-loop contract."""
+    if not isinstance(iso, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(iso).astimezone()
+    except (ValueError, TypeError):
+        return None
+    hour12 = dt.hour % 12 or 12  # avoid the glibc-only %-I
+    return f"{hour12}:{dt.minute:02d} {dt:%p}"
 
 
 def _fmt_distance_m(meters: float) -> str:
@@ -665,7 +682,9 @@ def _transit_narrative(o: dict, d: dict):
     _TravelBackendError only if MOTIS is down."""
     data = _motis_get("/api/v1/plan", {
         "fromPlace": f"{o['lat']},{o['lon']}", "toPlace": f"{d['lat']},{d['lon']}",
-        "transitModes": "TRANSIT"})
+        "transitModes": "TRANSIT",
+        # Anchor to now so the itinerary's departures are the upcoming ones.
+        "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
     try:
         its = (data.get("itineraries") if isinstance(data, dict) else None) or []
         if not its:
@@ -676,8 +695,13 @@ def _transit_narrative(o: dict, d: dict):
                         (l.get("from") or {}).get("name") == (l.get("to") or {}).get("name"))]
         if not legs:
             return None
+        # Header: duration + the departs→arrives window (omit the window if times missing).
+        window = ""
+        depart, arrive = _fmt_clock(it.get("startTime")), _fmt_clock(it.get("endTime"))
+        if depart and arrive:
+            window = f", departs {depart} — arrives {arrive}"
         lines = [f'Transit directions from "{o["name"]}" to "{d["name"]}" '
-                 f'(~{_fmt_duration(it["duration"])}):']
+                 f'(~{_fmt_duration(it["duration"])}{window}):']
         for n, l in enumerate(legs, start=1):
             to_name = (l.get("to") or {}).get("name") or "your destination"
             if l.get("mode") == "WALK":
@@ -688,8 +712,11 @@ def _transit_narrative(o: dict, d: dict):
                 route = l.get("routeShortName") or l.get("tripShortName") or noun
                 toward = f" toward {l['headsign']}" if l.get("headsign") else ""
                 stops = len(l.get("intermediateStops") or []) + 1  # stops ridden to the alighting stop
+                # Board time (realtime startTime, else scheduled); omit if unparseable.
+                board = _fmt_clock(l.get("startTime") or l.get("scheduledStartTime"))
+                board_txt = f", board {board}" if board else ""
                 lines.append(f"{n}. Take the {route} {noun}{toward} to {to_name} "
-                             f"({stops} stop{'s' if stops != 1 else ''})")
+                             f"({stops} stop{'s' if stops != 1 else ''}{board_txt})")
         return "\n".join(lines)
     except (KeyError, TypeError, ValueError, AttributeError, IndexError):
         return None

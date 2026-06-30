@@ -64,8 +64,9 @@ If the user **names a mode**, pass it. If they **don't**, ask which mode they wa
 - **directions:** relay the numbered steps. For **street** routes (car/bike/walk)
   the turn directions are **approximate** — it's fine to hedge ("roughly"), and
   never invent a turn or street the tool didn't give. For **transit**, relay the
-  lines, stops, and transfers as listed. Mention the resolved place names if they
-  might differ from what the user meant.
+  lines, stops, transfers, **and the board/departure times** as listed (e.g. "catch
+  the 9R at 2:47 PM"). Mention the resolved place names if they might differ from
+  what the user meant.
 
 ## Surfacing problems (don't hide a degraded result)
 
