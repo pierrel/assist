@@ -476,7 +476,8 @@ def travel(origin: str, destination: str) -> str:
     take the train" question.  It gives times + distances, NOT turn-by-turn
     directions.  Pass plain place
     NAMES/addresses as the user said them (e.g. "the Ferry Building", "123 Main
-    St") -- do NOT pass coordinates.  Returns a short per-mode summary computed by
+    St"); the one exception is the user's current location for "from here"/"near
+    me", which you pass as "<lat>,<lon>" from the message context.  Returns a short per-mode summary computed by
     the routing service -- time and distance for car/bike/walk, time for transit
     (transit distance isn't reported); relay those numbers, never invent your own.
     Covers the loaded metro area(s); a place outside them comes back as no route,
@@ -698,7 +699,9 @@ def directions(origin: str, destination: str, mode: str) -> str:
     Use this when the user wants DIRECTIONS / how to actually get somewhere -- "how
     do I get to X", "directions to Y", "which bus do I take", "walk me through it" --
     as opposed to "how long / how far" (use `travel` for that).  Pass plain place
-    NAMES (the geocoder resolves them) and a `mode`: "car", "bike", "walk", or
+    NAMES (the geocoder resolves them) -- except the user's current location for
+    "from here"/"near me", which you pass as "<lat>,<lon>" from the message context
+    -- and a `mode`: "car", "bike", "walk", or
     "transit".  Returns a numbered list -- turns + streets for car/bike/walk
     (street turns are approximate), or walk/board/transfer/alight for transit -- in
     US units (miles).  Relay it; never invent streets or lines.  A place outside the
