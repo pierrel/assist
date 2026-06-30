@@ -10,7 +10,8 @@
 #
 set -euo pipefail
 
-BASE_URL="${1:-http://localhost:${ASSIST_PORT:-5050}}"
+# $1 wins; else ASSIST_BASE_URL (set to https://... when TLS is on); else http default.
+BASE_URL="${1:-${ASSIST_BASE_URL:-http://localhost:${ASSIST_PORT:-5050}}}"
 POLL_INTERVAL=3      # seconds between polls
 POLL_TIMEOUT=300     # max seconds to wait for a response
 
