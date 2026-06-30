@@ -263,6 +263,24 @@ class TestContextInvocation(AgentTestMixin, TestCase):
         agent.message("What should I focus on for my running this month?")
         self.assertSubAgentCall(agent, "context-agent")
 
+    def _first_dispatch_message_index(self, agent):
+        """{subagent_type: index of the first AIMessage that dispatches it}. Keyed
+        by MESSAGE (not tool_calls-array) position so a parallel batch — both task
+        calls in one AIMessage — gives equal indices, i.e. 'context before or with
+        research' passes; only a separate *earlier* research message fails."""
+        idx, ai_i = {}, 0
+        for m in agent.all_messages():
+            if isinstance(m, AIMessage) and m.tool_calls:
+                for tc in m.tool_calls:
+                    if tc.get("name") == "task":
+                        args = tc.get("args") or {}
+                        sa = (args.get("subagent_type") or args.get("agent")
+                              or args.get("name") or "")
+                        if sa and sa not in idx:
+                            idx[sa] = ai_i
+                ai_i += 1
+        return idx
+
     def test_research_turn_dispatches_context_before_research(self):
         # Needs external research AND local grounding → context first/with research.
         agent, _ = self._agent()
@@ -270,10 +288,12 @@ class TestContextInvocation(AgentTestMixin, TestCase):
         calls = self.subagent_calls(agent)
         self.assertIn("context-agent", calls,
                       f"context-agent should ground a research turn; calls={calls}")
-        if "research-agent" in calls:
+        first = self._first_dispatch_message_index(agent)
+        if "research-agent" in first:
             self.assertLessEqual(
-                calls.index("context-agent"), calls.index("research-agent"),
-                f"context-agent should come before (or with) research-agent; calls={calls}")
+                first["context-agent"], first["research-agent"],
+                f"context-agent should dispatch before (or in the same parallel batch "
+                f"as) research-agent; calls={calls}")
 
     def test_trivial_first_turn_skips_context(self):
         # Self-contained calculation → no local context needed (the thin exclusion).
