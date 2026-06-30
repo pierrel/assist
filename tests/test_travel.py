@@ -191,3 +191,19 @@ class TestTravel:
         with patch.object(tools.requests, "get", no_transit):
             out = tools.travel("civic center", "ferry building")
         assert "- Transit: unavailable" in out and "- Car: 22 min" in out
+
+
+def test_geocode_passes_through_coord_string():
+    """A bare "lat,lon" (the "from here" origin) resolves to those coords WITHOUT a
+    geocode call; a real place name does not match and falls through to geocoding."""
+    # passthrough: exact coords + the synthetic "your location" name (so a real
+    # geocode — which would return a different name — provably didn't run)
+    assert tools._parse_coord_string("37.7749,-122.4194") == {
+        "lat": 37.7749, "lon": -122.4194, "name": "your location"}
+    assert tools._geocode("37.7749, -122.4194") == {
+        "lat": 37.7749, "lon": -122.4194, "name": "your location"}
+    # real names / non-coords → None (fall through to the geocoder)
+    for name in ["Ferry Building", "San Francisco, CA", "Building 7, suite 3", "", "1,2,3"]:
+        assert tools._parse_coord_string(name) is None
+    # out-of-range numbers are not coords
+    assert tools._parse_coord_string("200,200") is None

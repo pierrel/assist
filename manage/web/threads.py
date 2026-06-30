@@ -529,11 +529,29 @@ def render_thread(
           {"<div class='success-msg'>Pushed local main to origin/main.</div>" if pushed else ""}
           {conflict_banner_html}
           {f'<script>try {{ localStorage.removeItem("assist:review:" + {json.dumps(tid)}); }} catch (_) {{}}</script>' if reviewed else ""}
-          <form action="/thread/{tid}/message" method="post" onsubmit="try{{this.sent_at.value=new Date().toISOString();this.tz.value=Intl.DateTimeFormat().resolvedOptions().timeZone;}}catch(e){{}}">
+          <script>
+          // On send (not on thread-open): stamp time/tz, then fetch location.
+          // The browser remembers the permission grant for this origin, so it
+          // prompts once; maximumAge serves a cached fix instantly afterwards.
+          // Denied/unsupported/timeout → submit without coords (rider stays time-only).
+          function assistSend(form){{
+            try{{ form.sent_at.value=new Date().toISOString(); form.tz.value=Intl.DateTimeFormat().resolvedOptions().timeZone; }}catch(e){{}}
+            if(!navigator.geolocation){{ return true; }}
+            navigator.geolocation.getCurrentPosition(
+              function(p){{ form.lat.value=p.coords.latitude; form.lon.value=p.coords.longitude; form.submit(); }},
+              function(){{ form.submit(); }},
+              {{maximumAge:3600000, timeout:5000}}
+            );
+            return false;  // wait for the async fix, then submit programmatically
+          }}
+          </script>
+          <form action="/thread/{tid}/message" method="post" onsubmit="return assistSend(this);">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..." {form_disabled}></textarea><br/>
             <input type="hidden" name="sent_at"/>
             <input type="hidden" name="tz"/>
+            <input type="hidden" name="lat"/>
+            <input type="hidden" name="lon"/>
             <div class="button-group">
               <button class="btn" type="submit" {form_disabled}>Send</button>
               <button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>
@@ -850,12 +868,14 @@ def _mark_pending(tid: str, text: str) -> None:
     _set_status(tid, stage, pending_message=text)
 
 
-def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
-    """Build the per-turn rider from the client's send-time + timezone. Event-loop
-    safe (no network/subprocess/lock; the only I/O is ZoneInfo's one-time cached
-    tzdata read); returns None on missing/bad data so a malformed rider never blocks
-    the message submit."""
-    if not sent_at and not tz:
+def _build_rider(sent_at: str | None, tz: str | None,
+                 lat: str | None = None, lon: str | None = None) -> ContextRider | None:
+    """Build the per-turn rider from the client's send-time + timezone + coords.
+    Event-loop safe (no network/subprocess/lock; the only I/O is ZoneInfo's one-time
+    cached tzdata read); each field is best-effort so a malformed one never blocks the
+    submit (a bad/out-of-range coord drops just geo, keeping the time), and an
+    all-absent rider is None."""
+    if not (sent_at or tz or lat or lon):
         return None
     dt = None
     if sent_at:
@@ -865,10 +885,18 @@ def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
                 dt = None
         except ValueError:
             dt = None
-    if dt is None and not tz:
-        return None   # bad/naive sent_at with no tz → effectively no rider
+    coords = {}
+    if lat is not None and lon is not None:
+        try:  # both-or-neither; out-of-range/non-numeric → drop geo, keep the rest
+            la, lo = float(lat), float(lon)
+            if -90.0 <= la <= 90.0 and -180.0 <= lo <= 180.0:
+                coords = {"lat": la, "lon": lo}
+        except (ValueError, TypeError):
+            pass
+    if dt is None and not tz and not coords:
+        return None   # nothing usable
     try:
-        return ContextRider(sent_at=dt, tz=tz or None)
+        return ContextRider(sent_at=dt, tz=tz or None, **coords)
     except Exception:
         return None
 
@@ -876,10 +904,12 @@ def _build_rider(sent_at: str | None, tz: str | None) -> ContextRider | None:
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks,
                        text: str = Form(...),
-                       sent_at: str | None = Form(None), tz: str | None = Form(None)):
+                       sent_at: str | None = Form(None), tz: str | None = Form(None),
+                       lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     _mark_pending(tid, text)
-    background_tasks.add_task(_process_message, tid, text, _build_rider(sent_at, tz))
+    background_tasks.add_task(_process_message, tid, text,
+                             _build_rider(sent_at, tz, lat, lon))
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 

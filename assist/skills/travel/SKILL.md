@@ -42,7 +42,12 @@ If the user **names a mode**, pass it. If they **don't**, ask which mode they wa
 
 ## Place names (both tools)
 
-- The tool geocodes names itself — don't pass coordinates.
+- The tool geocodes names itself — pass place NAMES, not coordinates.
+- **"from here" / "near me" / "nearby":** when the user wants travel or directions
+  from their current location and gives no named origin, pass their coordinates from
+  the message context (the `[Message context: ... from ~<lat>, <lon>]` line) as the
+  origin, formatted exactly `"<lat>,<lon>"`. If there's no location in the context,
+  fall back to "home" or ask.
 - If the user gives only one place ("directions to the airport"), the other is
   usually "home" or the place from context; if unclear, ask.
 - For a short/ambiguous name, include the city/area from context (pass "Ferry

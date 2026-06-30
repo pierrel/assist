@@ -1,0 +1,52 @@
+#+title: Geo context rider (#5) — per-message location → model + "from here"
+#+date: 2026-06-29
+
+* Goal
+Extend the context rider (#3 shipped TIME only) to also carry the user's
+geo-location per message, so the agent knows *where* they are — enabling "find a
+restaurant nearby" / "directions from here". Pierre queued this as the geo half.
+
+* Most of the contract was already built (#3)
+~ContextRider~ already has ~lat/lon/place_label~ (validated), ~prose_line()~ renders
+coarse geo, the middleware injects it (ephemeral, main-agent-only), and
+~_process_message~ threads any rider onto ~configurable~. So #5 is three small deltas.
+
+* Deltas (as built)
+1. *Browser geo source* (~manage/web/threads.py~, message form). On message SEND
+   (not on thread-open, per Pierre), the form's ~assistSend()~ fetches
+   ~navigator.geolocation.getCurrentPosition~ (maxAge 1h, 5s timeout) and submits
+   with ~lat~/~lon~ hidden fields. The browser remembers the grant for
+   localhost:5050, so it prompts ONCE; later sends are instant/silent. Denied /
+   unsupported / timeout → submit without coords (rider stays time-only). Requires a
+   secure context — localhost qualifies (Pierre accesses via localhost:5050).
+2. *Backend* (~_build_rider~ + ~post_message~). Optional ~lat~/~lon~ Form fields →
+   ~_build_rider~ parses best-effort: both-or-neither, in-range; a bad/out-of-range
+   coord drops just geo, keeps the time; geo-only rider is valid. Pure-CPU on the
+   loop thread (event-loop safe).
+3. *"from here"* (~assist/tools.py~ + travel skill). ~_geocode~ gains a
+   ~_parse_coord_string~ passthrough: a bare ~"lat,lon"~ (two in-range numbers) →
+   those coords with name "your location", no forward-geocode; a real place name
+   falls through. The travel SKILL.md tells the model: for "from here"/"near me",
+   pass the message-context coords as the origin formatted ~"lat,lon"~.
+
+* Privacy (unchanged from #3, confirmed)
+Precise coords stay on ~configurable~ (per-invocation, NOT checkpointed); only the
+coarse ~~lat,lon~~ (2-decimal ≈ city block) reaches the model + the persisted prose;
+middleware is main-agent-only (no geo to the research sub-agent's egress). No raw
+coords logged. Browser permission grant = consent. "from here" routes from the
+coarse coords the model sees (v1).
+
+* Pierre's decisions
+- Web access: *localhost:5050* → geolocation works (secure context).
+- Consent: fetch on SEND (not open); browser prompts once + remembers; maxAge cache.
+- "from here" precision: coarse (recommended). Out-of-range coord: drop geo, keep time.
+
+* Validation
+Unit: ~_build_rider~ coords (valid / geo-only / bad-drops-geo-keeps-time);
+e2e (lat/lon flow to the rider on ~configurable~); ~_geocode~ coord passthrough +
+names still geocode; page renders with the geo JS. 767 unit green. A live "directions
+from here" smoke is APPROVAL-GATED (LLM + degraded fans).
+
+* emacsos (phone) — separate follow-up
+The phone has real GPS + already passes per-turn ~configurable~; it populates the same
+~ContextRider(lat=, lon=)~ — same mechanism, same privacy posture. Not wired here.

@@ -376,12 +376,34 @@ def _nominatim_geocode(place: str) -> dict | None:
     return _first_usable_hit(hits, place)
 
 
+def _parse_coord_string(place: str) -> dict | None:
+    """A bare ``"lat,lon"`` (exactly two in-range numbers) → a geocode hit
+    {lat, lon, name}, so "from here" routes from the user's coordinates (from the
+    message context) without a forward-geocode. A real place name (anything that
+    isn't two numbers) → None, falling through to geocoding."""
+    parts = str(place).split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        lat, lon = float(parts[0].strip()), float(parts[1].strip())
+    except (ValueError, TypeError):
+        return None
+    if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+        return {"lat": lat, "lon": lon, "name": "your location"}
+    return None
+
+
 def _geocode(place: str) -> dict | None:
     """Resolve a place NAME to {lat, lon, name} (top match, with the resolved name
-    so the agent can say what it routed to), or None if nothing matched.  Uses the
-    self-hosted Nominatim geocoder when ASSIST_GEOCODER_URL is set (far better at
-    real addresses/POIs than MOTIS's built-in geocoder), else falls back to MOTIS
-    /api/v1/geocode.  Raises _TravelBackendError if the chosen backend is down."""
+    so the agent can say what it routed to), or None if nothing matched.  A bare
+    ``"lat,lon"`` is passed through directly (no geocode) so "from here" routes from
+    the user's coordinates.  Uses the self-hosted Nominatim geocoder when
+    ASSIST_GEOCODER_URL is set (far better at real addresses/POIs than MOTIS's
+    built-in geocoder), else falls back to MOTIS /api/v1/geocode.  Raises
+    _TravelBackendError if the chosen backend is down."""
+    coords = _parse_coord_string(place)
+    if coords:
+        return coords
     if os.getenv("ASSIST_GEOCODER_URL"):
         return _nominatim_geocode(place)
     return _first_usable_hit(_motis_get("/api/v1/geocode", {"text": place}), place)

@@ -171,3 +171,26 @@ def test_build_rider_bad_sent_at_keeps_valid_tz():
     assert _build_rider("2026-06-29T21:05:00.000Z", "Not/AZone") is None
     # bad sent_at AND no tz → None, not an empty rider threaded through configurable
     assert _build_rider("not-a-date", None) is None
+
+
+def test_build_rider_with_coords():
+    from manage.web.threads import _build_rider
+    # valid lat/lon (browser strings) → coarse geo in the prose line
+    r = _build_rider("2026-06-29T21:05:00.000Z", "America/Los_Angeles",
+                     lat="37.7749", lon="-122.4194")
+    assert r is not None and r.lat == 37.7749 and r.lon == -122.4194
+    assert "~37.77, -122.42" in r.prose_line()
+    # geo-only rider (coords, no time) is valid
+    g = _build_rider(None, None, lat="40.0", lon="-70.0")
+    assert g is not None and g.lat == 40.0 and "from ~40.00, -70.00" in g.prose_line()
+
+
+def test_build_rider_bad_coords_drop_geo_keep_time():
+    from manage.web.threads import _build_rider
+    # out-of-range / non-numeric / half-a-pair → geo dropped, the rest survives
+    for lat, lon in [("91", "0"), ("abc", "1"), ("37.7", None)]:
+        r = _build_rider(None, "America/Los_Angeles", lat=lat, lon=lon)
+        assert r is not None and r.tz == "America/Los_Angeles"
+        assert r.lat is None and r.lon is None
+    # bad coords AND nothing else → None
+    assert _build_rider(None, None, lat="999", lon="999") is None

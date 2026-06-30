@@ -411,7 +411,8 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
         "/thread/thread-e2e/message",
         data={"text": "what's today?",
               "sent_at": "2026-06-29T21:05:00.000Z",  # real browser toISOString() format
-              "tz": "America/Los_Angeles"},
+              "tz": "America/Los_Angeles",
+              "lat": "37.7749", "lon": "-122.4194"},
         follow_redirects=False,
     )
     assert r.status_code == 303, r.text
@@ -420,3 +421,4 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
     assert captured.get("tz") == "America/Los_Angeles"
     rider = (captured.get("configurable") or {}).get(CONTEXT_RIDER_KEY)
     assert rider is not None and rider.tz == "America/Los_Angeles"
+    assert rider.lat == 37.7749 and rider.lon == -122.4194  # coords flow to the rider too
