@@ -311,8 +311,10 @@ class TestContextInvocation(AgentTestMixin, TestCase):
         # dispatch the context-agent to look BEFORE asking. Old code asked "where
         # are you?" / "what cuisine?" without looking.
         fs = {**self.FS,
-              "profile.org": "* Me\n** Home: Mission District, San Francisco\n"
-                             "** Food: loves Thai and ramen\n"}
+              # synthetic persona/location (no real PII/addresses in fixtures); the
+              # assertion is content-independent — it checks that context is dispatched.
+              "profile.org": "* Me\n** Home: the Lakeside neighborhood, Centerville\n"
+                             "** Food: loves noodles and dumplings\n"}
         agent, _ = self._agent(fs)
         agent.message("Find me a good restaurant nearby")
         self.assertSubAgentCall(
