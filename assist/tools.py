@@ -321,8 +321,8 @@ def _fmt_clock(iso: str | None) -> str | None:
     never-raise-into-the-agent-loop contract."""
     if not isinstance(iso, str):
         return None
-    try:
-        dt = datetime.fromisoformat(iso).astimezone()
+    try:  # normalize a trailing 'Z' explicitly (works on any Python, not just 3.11+)
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
     except (ValueError, TypeError):
         return None
     hour12 = dt.hour % 12 or 12  # avoid the glibc-only %-I
