@@ -23,6 +23,8 @@ if __name__ == "__main__":
     # Use a trusted local cert (mkcert) so there's no browser warning.
     ssl_kwargs = {}
     cert, key = os.getenv("ASSIST_SSL_CERT"), os.getenv("ASSIST_SSL_KEY")
+    if bool(cert) != bool(key):  # fail fast on a half-set config (silent HTTP hides it)
+        raise SystemExit("Set BOTH ASSIST_SSL_CERT and ASSIST_SSL_KEY (or neither).")
     if cert and key:
         ssl_kwargs = {"ssl_certfile": cert, "ssl_keyfile": key}
     uvicorn.run(
