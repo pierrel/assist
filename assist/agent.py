@@ -301,7 +301,7 @@ def create_agent(model: BaseChatModel,
 
     context_sub = CompiledSubAgent(
         name="context-agent",
-        description="Discovers and surfaces relevant context from the user's local filesystem. Use this agent to find files, read content, and understand the user's file structure before taking action. It is read-only — it will not modify files.",
+        description="Discovers and surfaces relevant context from the user's local filesystem — files, formats, and prior notes. Dispatch it on the first turn of a thread, before any research, and whenever the user's local files could inform the answer. Read-only — it will not modify files.",
         runnable=create_context_agent(model,
                                       working_dir,
                                       checkpointer,

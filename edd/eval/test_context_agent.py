@@ -2,12 +2,25 @@ import tempfile
 from textwrap import dedent
 
 from unittest import TestCase
+from unittest.mock import patch
 
-from assist.agent import create_context_agent, AgentHarness
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
+
+from assist.agent import create_agent, create_context_agent, AgentHarness
 
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem
+from .utils import create_filesystem, AgentTestMixin
+
+
+def _stub_subagent(*args, **kwargs):
+    """A sub-agent runnable that returns a canned reply without any LLM call —
+    used by the invocation eval so dispatching context/research-agent doesn't spin
+    their own loops on the GPU. deepagents invokes it via .invoke(state, config)."""
+    return RunnableLambda(
+        lambda state: {"messages": list((state or {}).get("messages", []))
+                       + [AIMessage(content="(stubbed sub-agent — invocation eval)")]})
 
 
 class TestContextAgent(TestCase):
@@ -211,3 +224,60 @@ class TestContextAgent(TestCase):
                          "Should surface gift ideas for Jordan")
         self.assertRegex(res, "(?i)gardening|French cuisine",
                          "Should connect interests to gift suggestions")
+
+
+class TestContextInvocation(AgentTestMixin, TestCase):
+    """When does the GENERAL agent *choose* to dispatch the context-agent?
+    (The class above tests the context-agent's output; this tests the
+    orchestrator's invocation decision — Pierre's rule: first turn, before
+    research, whenever local context helps; skip trivial first turns.)
+    Prompts avoid telegraphing 'context'/'find files' so this probes the
+    decision, not lexical proximity."""
+
+    FS = {
+        "README.org": "My notes and plans live here.",
+        "fitness.org": "* Training\n** Goal: run a half marathon in the fall\n"
+                       "** Current: 5k three times a week\n",
+        "gtd": {"inbox.org": "* Tasks\n** TODO Renew passport\n"},
+    }
+
+    def setUp(self):
+        self.model = select_assistant_model(0.1)
+
+    def _agent(self, filesystem=None):
+        root = tempfile.mkdtemp()
+        create_filesystem(root, filesystem if filesystem is not None else self.FS)
+        # Stub the sub-agent RUNNABLES (not their descriptions): this eval asserts
+        # the orchestrator's *dispatch* decision, which is driven by the prompt +
+        # the real sub-agent descriptions — so the dispatch (what we assert) still
+        # happens, but the context/research sub-agents don't run their own LLM
+        # loops. Keeps the GPU to just the orchestrator's calls.
+        with patch("assist.agent.create_context_agent", _stub_subagent), \
+             patch("assist.agent.create_research_agent", _stub_subagent):
+            agent = create_agent(self.model, root)
+        return AgentHarness(agent), root
+
+    def test_first_turn_substantive_invokes_context(self):
+        # Substantive first turn over the user's files → context-agent should fire.
+        agent, _ = self._agent()
+        agent.message("What should I focus on for my running this month?")
+        self.assertSubAgentCall(agent, "context-agent")
+
+    def test_research_turn_dispatches_context_before_research(self):
+        # Needs external research AND local grounding → context first/with research.
+        agent, _ = self._agent()
+        agent.message("How do tabata intervals work, and add them to my running notes?")
+        calls = self.subagent_calls(agent)
+        self.assertIn("context-agent", calls,
+                      f"context-agent should ground a research turn; calls={calls}")
+        if "research-agent" in calls:
+            self.assertLessEqual(
+                calls.index("context-agent"), calls.index("research-agent"),
+                f"context-agent should come before (or with) research-agent; calls={calls}")
+
+    def test_trivial_first_turn_skips_context(self):
+        # Self-contained calculation → no local context needed (the thin exclusion).
+        agent, _ = self._agent()
+        agent.message("What's 12 times 9?")
+        self.assertNotIn("context-agent", self.subagent_calls(agent),
+                         "a self-contained calculation should not pay for a context pass")
