@@ -31,7 +31,7 @@ coarse geo, the middleware injects it (ephemeral, main-agent-only), and
 
 * Privacy (unchanged from #3, confirmed)
 Precise coords stay on ~configurable~ (per-invocation, NOT checkpointed); only the
-coarse ~~lat,lon~~ (2-decimal ≈ city block) reaches the model + the persisted prose;
+coarse ~lat,lon~ (2-decimal ≈ city block) reaches the model + the persisted prose;
 middleware is main-agent-only (no geo to the research sub-agent's egress). No raw
 coords logged. Browser permission grant = consent. "from here" routes from the
 coarse coords the model sees (v1).

@@ -202,6 +202,9 @@ def test_geocode_passes_through_coord_string():
         "lat": 37.7749, "lon": -122.4194, "name": "your location"}
     assert tools._geocode("37.7749, -122.4194") == {
         "lat": 37.7749, "lon": -122.4194, "name": "your location"}
+    # the model copies the context-prose form "~<lat>, <lon>" — must still parse
+    assert tools._parse_coord_string("~37.77, -122.42") == {
+        "lat": 37.77, "lon": -122.42, "name": "your location"}
     # real names / non-coords → None (fall through to the geocoder)
     for name in ["Ferry Building", "San Francisco, CA", "Building 7, suite 3", "", "1,2,3"]:
         assert tools._parse_coord_string(name) is None

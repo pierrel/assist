@@ -378,14 +378,16 @@ def _nominatim_geocode(place: str) -> dict | None:
 
 def _parse_coord_string(place: str) -> dict | None:
     """A bare ``"lat,lon"`` (exactly two in-range numbers) → a geocode hit
-    {lat, lon, name}, so "from here" routes from the user's coordinates (from the
-    message context) without a forward-geocode. A real place name (anything that
+    {lat, lon, name}, so "from here" routes from the user's coordinates without a
+    forward-geocode. Tolerates the leading ``~`` the model sees in the context prose
+    (``~37.77, -122.42``) + surrounding whitespace. A real place name (anything that
     isn't two numbers) → None, falling through to geocoding."""
     parts = str(place).split(",")
     if len(parts) != 2:
         return None
     try:
-        lat, lon = float(parts[0].strip()), float(parts[1].strip())
+        lat = float(parts[0].strip().lstrip("~").strip())
+        lon = float(parts[1].strip().lstrip("~").strip())
     except (ValueError, TypeError):
         return None
     if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:

@@ -46,8 +46,9 @@ If the user **names a mode**, pass it. If they **don't**, ask which mode they wa
 - **"from here" / "near me" / "nearby":** when the user wants travel or directions
   from their current location and gives no named origin, pass their coordinates from
   the message context (the `[Message context: ... from ~<lat>, <lon>]` line) as the
-  origin, formatted exactly `"<lat>,<lon>"`. If there's no location in the context,
-  fall back to "home" or ask.
+  origin — e.g. `"37.77,-122.42"` (the leading `~` and spaces from the context line
+  are fine to include). If there's no location in the context, fall back to "home"
+  or ask.
 - If the user gives only one place ("directions to the airport"), the other is
   usually "home" or the place from context; if unclear, ask.
 - For a short/ambiguous name, include the city/area from context (pass "Ferry
