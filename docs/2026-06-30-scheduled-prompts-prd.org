@@ -1,73 +1,94 @@
-#+title: PRD — Scheduled prompts (thread-based cron)
+#+title: PRD — Scheduled prompts (agent-driven thread schedules)
 #+date: 2026-06-30
-#+status: DRAFT for review (product requirements only — NOT a technical design, NOT UI-specific)
+#+status: DRAFT v2 — revised from PR #159 review (Pierre's comments folded in)
 
 * What this is
-A product requirements doc for letting a user **schedule a prompt to run on a
-recurring timer**, as a normal assistant **thread**. This doc is high-level and
-deliberately **UI-agnostic** — it does not specify the web or phone surface, nor the
-implementation. Those come later (per-client UX + a technical design), gated on this
-PRD being accepted.
+Product requirements for letting a thread **run a prompt on a recurring schedule**,
+where the schedule is **managed by the agent itself, conversationally, from inside the
+thread**. High-level and mostly client-agnostic: the conversational interface is the
+primary one (it works anywhere the agent runs — web or phone). The web client
+*additionally* gets a **management view** of all schedules. Detailed per-client UX and
+the implementation (scheduler, storage, how it ties into the run path) remain deferred
+to the technical design that follows this PRD.
 
 * Problem / motivation
 Every assistant interaction today is user-initiated: the user has to remember to ask,
-and to ask at the right time. But a lot of genuinely useful work is **recurring and
-time-anchored** — a morning briefing, an end-of-day summary, a weekly review, an
-hourly check on something. The user shouldn't have to be the timer. A scheduled prompt
-runs the assistant on a cadence so the recurring work just happens, and the result is
-already there when the user looks.
+and to ask at the right time. A lot of genuinely useful work is **recurring and
+time-anchored** — a morning briefing, a weekly review, an hourly check. The user
+shouldn't have to be the timer. A scheduled prompt runs the assistant on a cadence so
+the recurring work just happens, and the result is already there when the user looks.
+
+* How it works (the product model)
+- **Agent-driven.** The user just talks to the agent in a thread — "every morning at
+  7a, review my inbox and recommend what I should do today" — and the agent sets up the
+  schedule using its scheduling **skill + tools**. The same way, the user asks the
+  agent to read, change, pause, or cancel it, all in natural language. There is **no
+  separate "initial prompt" concept** — setup is simply the agent acting on the user's
+  request within the thread.
+- **One schedule per thread, scoped to that thread.** The recurring prompt runs in its
+  own thread, so context accumulates and the whole history is reviewable and
+  continuable like any conversation. A thread manages only its own schedule.
+- **Cadence is whatever natural language can describe.** The agent interprets it
+  ("every morning at 7", "weekly", "every 30 minutes on weekdays"). No fixed presets,
+  no exposed cron syntax.
+- **Edits are relative diffs to the existing schedule.** "Change it to fire at 5a"
+  modifies only the hour of the *current* schedule (keeping its day/cadence); it does
+  NOT restart relative to today or jump to the next 5a as a fresh schedule. The agent
+  applies the change as a diff against what's already set.
+- **A web management interface** lists **all** scheduled jobs across threads — each
+  with a link to its thread, its description, and the ability to delete it.
 
 * Goals
-1. Schedule a prompt to run automatically on a **recurring cadence** (cron-like).
-2. Support an **optional one-time INITIAL prompt** that runs once at setup — to
-   establish standing context/instructions the recurring runs build on.
-3. A separate **RECURRING prompt** that runs on each timer tick.
-4. Each run is a real **thread** (a conversation) — reviewable, openable, and
-   continuable like any other, so results accumulate and stay in the user's history.
-5. **Client-agnostic by design**: the same capability serves the web UI AND the
-   emacsos phone (and future clients), sharing as much as possible. Separate client
-   surfaces are fine, but the core behavior + data model are shared.
-
-* Non-goals (for this PRD)
-- The concrete UI to create / view / manage schedules (web form, phone screen) — a
-  later per-client design.
-- The technical mechanism (scheduler, storage, how it ties into the run path) — the
-  technical design, after this PRD.
-- Sub-minute / real-time scheduling; event/condition-triggered (non-time) runs;
-  sharing schedules between users.
+1. The agent can **create, read, modify, pause/stop, and delete** a thread's schedule
+   in response to natural-language requests, from inside the thread (a skill + tools).
+2. **One schedule per thread**; the recurring prompt runs in that thread.
+3. **Natural-language cadence** — any schedule a user can describe in words.
+4. **Relative edits** — a schedule change is a diff against the current schedule, not a
+   restart.
+5. A **web management view** of all schedules: link to thread + description + delete.
+6. **Survives restarts**, but **does not fire while the LLM service is down** — missed
+   ticks are skipped, not caught up; fail silently for now.
+7. **Overlapping runs wait** — a tick whose thread (or the single run slot) is busy
+   queues as usual rather than running concurrently.
+8. **Client-agnostic core.** Conversational management works on web and phone (both
+   embed the agent); the shared behavior + data live in the assist layer, with thin
+   per-client surfaces.
 
 * User stories
-- As a user, I can **schedule a recurring prompt** (e.g. "every morning at 7am,
-  summarize my calendar and todos") so the assistant runs it on time without me
-  asking.
-- As a user, I can optionally give an **initial prompt** that runs once when I create
-  the schedule (e.g. to set standing context the recurring runs rely on).
-- As a user, each scheduled run **lands in a thread I can open, read, and continue**,
-  just like a conversation I started myself.
-- As a user, I can **see my scheduled prompts**, and **edit / pause / delete** them.
-- As a user, I can tell **when a run last happened** and **whether it failed**.
-- As a user, my schedules work **whether I'm on the web or my phone** (same schedules,
-  same behavior).
+- "Every morning at 7a, review my inbox and recommend what I can or should do that day"
+  → the agent sets up a daily 7am schedule on this thread.
+- "Every week, provide me with the daily weather for the rest of the week" → the agent
+  sets up a weekly schedule.
+- "When does the next scheduled task run?" → the agent tells me, for this thread.
+- "Stop running the scheduled task" → the agent pauses this thread's schedule.
+- "Cancel the cron" → the agent deletes this thread's schedule.
+- "Change the schedule to fire at 5a" → the agent edits the existing schedule's hour to
+  5, keeping the rest of it.
+- (web) I open a management page that lists every scheduled job — each links to its
+  thread, shows its description, and I can delete it from there.
+- Each scheduled run lands in its thread; I can open it, read it, and continue it.
 
-* Open product questions (resolve with/just before the technical design)
-1. **One thread or fresh thread per run?** Does the recurring prompt continue ONE
-   ongoing thread (context accumulates run-over-run) or start a FRESH thread each tick
-   (clean, independent results)? Or is it per-schedule choice? — This is the biggest
-   product decision and shapes everything downstream.
-2. **Initial-prompt relationship.** Does the initial prompt run in the *same* thread
-   the recurring prompt will use (seeding it), and is it required, or truly optional?
-3. **Cadence granularity.** Daily/weekly presets? Arbitrary cron? Minimum interval?
-4. **Result delivery / notification.** Is the result purely passive (it's in the
-   thread when you look) or is there an active signal (a ping / unread badge) when a
-   run completes — and does that differ web vs phone?
-5. **Overlap & missed runs.** What happens if a run is still going when the next tick
-   fires (skip / queue), and if the device/service was off at tick time (skip / catch
-   up)?
-6. **Scope of "shared."** Confirm the shared core lives in the assist layer (the
-   thread + run path are already shared; the web UI uses them and emacsos embeds
-   them), with thin per-client config surfaces on top.
+* Decisions from review (resolved by Pierre on PR #159)
+- **One schedule per thread** (resolves one-thread-vs-fresh) — recurring runs in the
+  same thread.
+- **"Initial prompt" dropped** — agent-driven setup from inside the thread instead.
+- **NL cadence**, agent-interpreted — no presets, no exposed cron.
+- **Down-time behavior:** completely divorced from the device; if the LLM service is
+  off the tick does not fire; no catch-up; **fail silently** for now.
+- **Overlap:** a busy run slot makes the tick **wait** (normal one-turn-at-a-time).
+- **Shared core in assist:** confirmed.
 
-* Out of scope / possible future
-- Per-client UIs (web, phone) — separate design.
-- Conditional / event-triggered runs (non-time).
-- Shared or team schedules.
+* Still open (for the technical design)
+- **Result delivery / notification.** v1 is passive — the result is in the thread when
+  you look (an active ping / unread signal is deferred). Run-status surfacing (last
+  run, failed) is minimal for v1 given "fail silently."
+- How the web management view is reached, and the per-thread management affordance —
+  detailed UX is design, not this PRD.
+
+* Out of scope now — but the design should stay incrementable toward these
+- **Triggers (Pierre).** A thread should be able to **"wake up" from a non-cron
+  event**, not only a timer. Out of scope for v1, but the technical design should treat
+  the cron tick as *one kind of thread wakeup* so event-triggers can be added
+  incrementally rather than bolted on.
+- Detailed per-client UX (a phone management surface), conditional logic beyond
+  triggers, and shared/team schedules.
