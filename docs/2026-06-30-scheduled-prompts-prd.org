@@ -25,9 +25,11 @@ the recurring work just happens, and the result is already there when the user l
   agent to read, change, pause, or cancel it, all in natural language. There is **no
   separate "initial prompt" concept** — setup is simply the agent acting on the user's
   request within the thread.
-- **One schedule per thread, scoped to that thread.** The recurring prompt runs in its
-  own thread, so context accumulates and the whole history is reviewable and
-  continuable like any conversation. A thread manages only its own schedule.
+- **Multiple schedules per thread (a small cap, ~5), scoped to that thread.** Each
+  schedule's recurring prompt runs **within the thread it was created in** — results
+  stay with that conversation, reviewable and continuable like any thread. A thread
+  manages its own schedules; multiple schedules in one thread interleave their runs
+  there (fine when they're related; use separate threads to keep them apart).
 - **Cadence is whatever natural language can describe.** The agent interprets it
   ("every morning at 7", "weekly", "every 30 minutes on weekdays"). No fixed presets,
   no exposed cron syntax.
@@ -41,7 +43,8 @@ the recurring work just happens, and the result is already there when the user l
 * Goals
 1. The agent can **create, read, modify, pause/stop, and delete** a thread's schedule
    in response to natural-language requests, from inside the thread (a skill + tools).
-2. **One schedule per thread**; the recurring prompt runs in that thread.
+2. **Multiple schedules per thread** (a small cap, ~5); each recurring prompt runs
+   **within the thread it was created in**.
 3. **Natural-language cadence** — any schedule a user can describe in words.
 4. **Relative edits** — a schedule change is a diff against the current schedule, not a
    restart.
@@ -69,8 +72,8 @@ the recurring work just happens, and the result is already there when the user l
 - Each scheduled run lands in its thread; I can open it, read it, and continue it.
 
 * Decisions from review (resolved by Pierre on PR #159)
-- **One schedule per thread** (resolves one-thread-vs-fresh) — recurring runs in the
-  same thread.
+- **Multiple schedules per thread** (cap ~5); each recurring prompt runs **within the
+  thread it was created in** (not a fresh/separate thread per run).
 - **"Initial prompt" dropped** — agent-driven setup from inside the thread instead.
 - **NL cadence**, agent-interpreted — no presets, no exposed cron.
 - **Down-time behavior:** completely divorced from the device; if the LLM service is
@@ -84,6 +87,11 @@ the recurring work just happens, and the result is already there when the user l
   run, failed) is minimal for v1 given "fail silently."
 - How the web management view is reached, and the per-thread management affordance —
   detailed UX is design, not this PRD.
+- **Bounding a long-lived recurring thread.** Because each run appends to the creating
+  thread (×up to 5 schedules), a daily schedule over weeks/months will outgrow the
+  local model's context window. The design needs a story for keeping the thread bounded
+  (summarize/compact old runs, or cap retained history) without losing useful
+  run-over-run continuity.
 
 * Out of scope now — but the design should stay incrementable toward these
 - **Triggers (Pierre).** A thread should be able to **"wake up" from a non-cron
