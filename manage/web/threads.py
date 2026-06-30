@@ -68,6 +68,35 @@ from manage.web.state import (
 )
 
 
+# Shared by both message forms (per-message on the thread page AND the new-thread form
+# on the index): on SEND, stamp time/tz and fetch the browser's location, then submit
+# with the rider fields. Plain string (single braces) so it drops into f-strings via
+# {_GEO_SEND_SCRIPT}. See _build_rider for the server side.
+_GEO_SEND_SCRIPT = """<script>
+// On send (not on page open): stamp time/tz, then fetch location. The browser
+// remembers the permission grant for this origin, so it prompts once; maximumAge
+// serves a cached fix afterwards. Denied/unsupported/timeout -> submit without coords.
+function assistSend(form){
+  if(form.__sending){ return false; }  // ignore repeat clicks while a send is in flight
+  try{ form.sent_at.value=new Date().toISOString(); form.tz.value=Intl.DateTimeFormat().resolvedOptions().timeZone; }catch(e){}
+  form.__sending=true;
+  if(!navigator.geolocation){ return true; }
+  navigator.geolocation.getCurrentPosition(
+    function(p){ form.lat.value=p.coords.latitude; form.lon.value=p.coords.longitude; form.submit(); },
+    function(){ form.submit(); },
+    {maximumAge:3600000, timeout:5000}
+  );
+  return false;  // wait for the async fix, then submit programmatically
+}
+</script>"""
+
+# The hidden rider fields assistSend populates; drop into a form via {_RIDER_HIDDEN_INPUTS}.
+_RIDER_HIDDEN_INPUTS = ('<input type="hidden" name="sent_at"/>'
+                        '<input type="hidden" name="tz"/>'
+                        '<input type="hidden" name="lat"/>'
+                        '<input type="hidden" name="lon"/>')
+
+
 @app.exception_handler(InvalidThreadId)
 async def _invalid_thread_id(request, exc):
     # A crafted tid (traversal/separator) reaching any tid-based route surfaces
@@ -194,7 +223,8 @@ def render_index(query: str = "") -> str:
           </div>
 
           <div class="new-thread-form">
-            <form action="/threads/with-message" method="post" id="newThreadForm">
+            {_GEO_SEND_SCRIPT}
+            <form action="/threads/with-message" method="post" id="newThreadForm" onsubmit="return assistSend(this);">
               {_domain_selector_html()}
               <textarea
                 id="initialMessage"
@@ -202,6 +232,7 @@ def render_index(query: str = "") -> str:
                 placeholder="Type a message to start a new thread..."
                 oninput="toggleNewThreadButton()"
               ></textarea>
+              {_RIDER_HIDDEN_INPUTS}
               <button class="btn new-thread-btn" id="newThreadBtn" type="submit">New Thread</button>
             </form>
           </div>
@@ -529,31 +560,11 @@ def render_thread(
           {"<div class='success-msg'>Pushed local main to origin/main.</div>" if pushed else ""}
           {conflict_banner_html}
           {f'<script>try {{ localStorage.removeItem("assist:review:" + {json.dumps(tid)}); }} catch (_) {{}}</script>' if reviewed else ""}
-          <script>
-          // On send (not on thread-open): stamp time/tz, then fetch location.
-          // The browser remembers the permission grant for this origin, so it
-          // prompts once; maximumAge serves a cached fix instantly afterwards.
-          // Denied/unsupported/timeout → submit without coords (rider stays time-only).
-          function assistSend(form){{
-            if(form.__sending){{ return false; }}  // ignore repeat clicks while a send is in flight
-            try{{ form.sent_at.value=new Date().toISOString(); form.tz.value=Intl.DateTimeFormat().resolvedOptions().timeZone; }}catch(e){{}}
-            form.__sending=true;
-            if(!navigator.geolocation){{ return true; }}
-            navigator.geolocation.getCurrentPosition(
-              function(p){{ form.lat.value=p.coords.latitude; form.lon.value=p.coords.longitude; form.submit(); }},
-              function(){{ form.submit(); }},
-              {{maximumAge:3600000, timeout:5000}}
-            );
-            return false;  // wait for the async fix, then submit programmatically
-          }}
-          </script>
+          {_GEO_SEND_SCRIPT}
           <form action="/thread/{tid}/message" method="post" onsubmit="return assistSend(this);">
             <label for="text">Your message</label><br/>
             <textarea id="text" name="text" required placeholder="Type your message..." {form_disabled}></textarea><br/>
-            <input type="hidden" name="sent_at"/>
-            <input type="hidden" name="tz"/>
-            <input type="hidden" name="lat"/>
-            <input type="hidden" name="lon"/>
+            {_RIDER_HIDDEN_INPUTS}
             <div class="button-group">
               <button class="btn" type="submit" {form_disabled}>Send</button>
               <button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>
@@ -614,7 +625,8 @@ def render_thread(
     """
 
 
-def _initialize_thread(tid: str, text: str, domain: str | None) -> None:
+def _initialize_thread(tid: str, text: str, domain: str | None,
+                       rider: ContextRider | None = None) -> None:
     """Background task: clone the repo, start sandbox, process the first message."""
     try:
         if domain:
@@ -631,7 +643,7 @@ def _initialize_thread(tid: str, text: str, domain: str | None) -> None:
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
                 _set_status(tid, "error", error=f"Clone failed: {e}", pending_message=text)
                 return
-        _process_message(tid, text)
+        _process_message(tid, text, rider)
     except Exception as e:
         logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
         _set_status(tid, "error", error=str(e), pending_message=text)
@@ -779,6 +791,8 @@ async def create_thread_with_message(
     background_tasks: BackgroundTasks,
     text: str = Form(...),
     domain: str | None = Form(None),
+    sent_at: str | None = Form(None), tz: str | None = Form(None),
+    lat: str | None = Form(None), lon: str | None = Form(None),
 ):
     # Reserve the thread directory synchronously so the redirect target is valid,
     # but defer everything slow (clone, sandbox, agent, description) to the background.
@@ -786,7 +800,8 @@ async def create_thread_with_message(
     tid = chat.thread_id
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "")
-    background_tasks.add_task(_initialize_thread, tid, text, selected)
+    background_tasks.add_task(_initialize_thread, tid, text, selected,
+                             _build_rider(sent_at, tz, lat, lon))
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 

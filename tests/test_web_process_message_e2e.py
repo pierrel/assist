@@ -422,3 +422,28 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
     rider = (captured.get("configurable") or {}).get(CONTEXT_RIDER_KEY)
     assert rider is not None and rider.tz == "America/Los_Angeles"
     assert rider.lat == 37.7749 and rider.lon == -122.4194  # coords flow to the rider too
+
+
+def test_new_thread_form_flows_rider(client, monkeypatch):
+    """The index new-thread form (/threads/with-message) now carries the rider too —
+    sent_at/tz/lat/lon reach _initialize_thread (→ the first message's _process_message)."""
+    from assist.context_rider import ContextRider  # noqa: F401
+    captured = {}
+    monkeypatch.setattr("manage.web.threads._initialize_thread",
+                        lambda tid, text, domain, rider=None: captured.update(rider=rider))
+
+    class _FakeChat:
+        thread_id = "thread-e2e"
+    monkeypatch.setattr(web.MANAGER, "new", lambda: _FakeChat())
+
+    r = client.post(
+        "/threads/with-message",
+        data={"text": "find a restaurant nearby",
+              "sent_at": "2026-06-29T21:05:00.000Z", "tz": "America/Los_Angeles",
+              "lat": "37.7749", "lon": "-122.4194"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, r.text
+    rider = captured.get("rider")
+    assert rider is not None
+    assert rider.tz == "America/Los_Angeles" and rider.lat == 37.7749 and rider.lon == -122.4194
