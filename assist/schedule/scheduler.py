@@ -36,7 +36,7 @@ class Scheduler:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="schedule-run")
-        self._inflight: set[str] = set()   # tids with a wakeup queued/running (dedup)
+        self._inflight: set[str] = set()   # schedule ids with a wakeup queued/running (dedup)
         self._inflight_lock = threading.Lock()
 
     # --- lifecycle (started/stopped by the web lifespan) ------------------------
@@ -90,25 +90,27 @@ class Scheduler:
         except Exception:
             log.exception("advance failed for %s/%s; skipping dispatch", s.thread_id, s.id)
             return
-        if not self._claim(s.thread_id):
-            log.info("schedule %s/%s due but thread busy; skipping (already in-flight)",
-                     s.thread_id, s.id)
+        # Dedup by SCHEDULE id (not thread): this bounds a single schedule's own backlog
+        # (a slow run vs a short cadence) while letting two distinct schedules on the same
+        # thread both fire — THREAD_QUEUE serializes them harmlessly.
+        if not self._claim(s.id):
+            log.info("schedule %s/%s due but already in-flight; skipping", s.thread_id, s.id)
             return
         if not self._health_check():
             log.info("schedule %s/%s due but LLM unreachable; skipping (no catch-up)",
                      s.thread_id, s.id)
-            self._release(s.thread_id)
+            self._release(s.id)
             return
-        self._executor.submit(self._run_wakeup, s.thread_id, s.prompt, s.tz)
+        self._executor.submit(self._run_wakeup, s.id, s.thread_id, s.prompt, s.tz)
 
     # --- consumer: the wakeup --------------------------------------------------
-    def _run_wakeup(self, tid: str, prompt: str, tz: str) -> None:
+    def _run_wakeup(self, sid: str, tid: str, prompt: str, tz: str) -> None:
         try:
             self._dispatch(tid, prompt, tz)
         except Exception:
-            log.warning("scheduled run failed for %s (fail-silently)", tid, exc_info=True)
+            log.warning("scheduled run failed for %s/%s (fail-silently)", tid, sid, exc_info=True)
         finally:
-            self._release(tid)
+            self._release(sid)
 
     def _advance(self, s, now) -> None:
         nxt = cadence.next_after(s, now).isoformat()

@@ -74,14 +74,24 @@ def test_health_down_skips_silently_but_advances(tmp_path):
     assert datetime.fromisoformat(store.for_thread("t1")[0].next_fire_at) > NOW  # no catch-up
 
 
-def test_dedup_skips_when_thread_inflight(tmp_path):
-    store = _store(tmp_path, _sched())
+def test_dedup_skips_when_schedule_inflight(tmp_path):
+    store = _store(tmp_path, _sched(sid="a"))
     d, sch = _sched_run(store)
-    sch._claim("t1")                                     # pretend a wakeup is already running
+    sch._claim("a")                                      # pretend this schedule is running
     sch._fire(store.for_thread("t1")[0], NOW)
     _flush(sch)
-    assert d.calls == []                                 # skipped (deduped)
+    assert d.calls == []                                 # skipped (deduped by schedule id)
     assert datetime.fromisoformat(store.for_thread("t1")[0].next_fire_at) > NOW  # still advanced
+
+
+def test_two_schedules_same_thread_both_fire(tmp_path):
+    # Distinct schedules on one thread, both due: dedup is per-schedule, so both dispatch
+    # (THREAD_QUEUE serializes them). The thread-keyed bug would have dropped one.
+    store = _store(tmp_path, _sched(sid="a"), _sched(sid="b"))
+    d, sch = _sched_run(store)
+    sch.poll()
+    _flush(sch)
+    assert sorted(t for t, _ in d.calls) == ["t1", "t1"]   # both fired
 
 
 def test_reconcile_advances_past_missed_without_firing(tmp_path):

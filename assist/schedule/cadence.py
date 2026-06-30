@@ -105,6 +105,16 @@ def describe(cad: Cadence) -> str:
     return f"{_days_label(cad.weekdays)} at {at}"
 
 
+def fmt_instant(iso_utc: str | None, tz: str, *, empty: str = "—") -> str:
+    """Format a stored UTC instant as a local wall-clock ("Mon Jun 15, 7:00 AM").
+    Shared by the agent's confirm-back and the web view so they never diverge."""
+    if not iso_utc:
+        return empty
+    local = datetime.fromisoformat(iso_utc).astimezone(ZoneInfo(tz))
+    h12 = local.hour % 12 or 12
+    return f"{local:%a %b %d}, {h12}:{local.minute:02d} {local:%p}"
+
+
 def _clock(hour: int | None, minute: int) -> str:
     h = 0 if hour is None else hour
     h12 = h % 12 or 12

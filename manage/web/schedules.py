@@ -7,23 +7,14 @@ a blocking op on the single-worker loop would stall the whole server.
 from __future__ import annotations
 
 import html
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from assist.schedule import cadence
+from assist.schedule.store import ScheduleNotFound
 from manage.web.app import app
 from manage.web.state import SCHEDULE_STORE
-
-
-def _fmt_next(iso_utc: str | None, tz: str) -> str:
-    if not iso_utc:
-        return "—"
-    local = datetime.fromisoformat(iso_utc).astimezone(ZoneInfo(tz))
-    h12 = local.hour % 12 or 12
-    return f"{local:%a %b %d}, {h12}:{local.minute:02d} {local:%p}"
 
 
 def _row(s) -> str:
@@ -34,7 +25,7 @@ def _row(s) -> str:
         f'{html.escape(s.thread_id)}</a></td>'
         f"<td>{html.escape(cadence.describe(s.cadence))}{paused}</td>"
         f'<td class="prompt">{html.escape(s.prompt)}</td>'
-        f"<td>{_fmt_next(s.next_fire_at, s.tz)}</td>"
+        f"<td>{cadence.fmt_instant(s.next_fire_at, s.tz)}</td>"
         f'<td><form method="post" action="/schedules/{html.escape(s.thread_id)}/'
         f'{html.escape(s.id)}/delete">'
         f'<button class="btn btn-secondary" type="submit">Delete</button></form></td>'
@@ -77,6 +68,6 @@ async def schedules_page():
 async def delete_schedule_route(tid: str, sid: str):
     try:
         await run_in_threadpool(SCHEDULE_STORE.remove, tid, sid)
-    except Exception:
-        pass  # already gone is fine
+    except ScheduleNotFound:
+        pass  # already gone is fine; other errors surface
     return RedirectResponse("/schedules", status_code=303)

@@ -38,6 +38,10 @@ class ScheduleStore:
         self._lock = threading.Lock()
 
     def _path(self, tid: str) -> str:
+        # A tid is one safe path segment; reject a crafted id (traversal/separator) by
+        # construction — the user-facing /schedules delete route passes tid straight in.
+        if not tid or tid in (".", "..") or os.sep in tid or (os.altsep and os.altsep in tid):
+            raise ScheduleNotFound(tid)
         return os.path.join(self._root, tid, SCHEDULES_FILE)
 
     def _read(self, tid: str) -> list[Schedule]:

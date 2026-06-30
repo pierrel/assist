@@ -12,8 +12,8 @@ Tools never raise into the agent loop — every failure returns a corrective str
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from langgraph.config import get_config
 
@@ -37,17 +37,10 @@ def _tz() -> str | None:
     return getattr(rider, "tz", None)
 
 
-def _fmt_fire(iso_utc: str | None, tz: str) -> str:
-    if not iso_utc:
-        return "not scheduled"
-    local = datetime.fromisoformat(iso_utc).astimezone(ZoneInfo(tz))
-    h12 = local.hour % 12 or 12
-    return f"{local:%a %b %d}, {h12}:{local.minute:02d} {local:%p}"
-
-
 def _line(s: Schedule) -> str:
     return (f"[{s.id}] {cadence.describe(s.cadence)} — \"{s.prompt}\""
-            f"{'' if s.enabled else ' (paused)'}; next: {_fmt_fire(s.next_fire_at, s.tz)}")
+            f"{'' if s.enabled else ' (paused)'}; "
+            f"next: {cadence.fmt_instant(s.next_fire_at, s.tz, empty='not scheduled')}")
 
 
 def schedule_tools(store) -> list:
@@ -139,9 +132,15 @@ def schedule_tools(store) -> list:
         tid = _thread_id()
         if not tid:
             return "No active thread."
+
+        def _apply(s: Schedule) -> Schedule:
+            s = replace(s, enabled=enabled)
+            if enabled:  # resume: recompute forward so a long-paused schedule doesn't
+                # fire immediately for missed windows (the no-catch-up guarantee).
+                s = s.with_next_fire(cadence.next_after(s, datetime.now(timezone.utc)).isoformat())
+            return s
         try:
-            from dataclasses import replace
-            saved = store.update(tid, schedule_id, lambda s: replace(s, enabled=enabled))
+            saved = store.update(tid, schedule_id, _apply)
         except ScheduleNotFound:
             return f"No schedule {schedule_id} on this thread."
         return f"{verb}. {_line(saved)}"

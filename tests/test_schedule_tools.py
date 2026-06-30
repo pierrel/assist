@@ -48,6 +48,18 @@ def test_pause_resume(tools):
     assert tools.store.for_thread("t1")[0].enabled is True
 
 
+def test_resume_recomputes_next_fire_no_catchup(tools):
+    # A schedule paused past its fire time must NOT fire immediately on resume.
+    tools.create_schedule("x", hour=8)
+    sid = tools.store.for_thread("t1")[0].id
+    tools.pause_schedule(sid)
+    tools.store.update("t1", sid, lambda s: s.with_next_fire("2020-01-01T00:00:00+00:00"))
+    tools.resume_schedule(sid)
+    from datetime import datetime, timezone
+    nxt = datetime.fromisoformat(tools.store.for_thread("t1")[0].next_fire_at)
+    assert nxt > datetime.now(timezone.utc)   # recomputed forward, not the stale past value
+
+
 def test_delete(tools):
     tools.create_schedule("x", hour=8)
     sid = tools.store.for_thread("t1")[0].id
