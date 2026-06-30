@@ -131,6 +131,8 @@ deploy-service:
 		ASSIST_SEARCH_URL='$(ASSIST_SEARCH_URL)' \
 		ASSIST_ROUTING_URL='$(ASSIST_ROUTING_URL)' \
 		ASSIST_GEOCODER_URL='$(ASSIST_GEOCODER_URL)' \
+		ASSIST_SSL_CERT='$(ASSIST_SSL_CERT)' \
+		ASSIST_SSL_KEY='$(ASSIST_SSL_KEY)' \
 		'bash -s' < scripts/install-service.sh
 	@echo "✓ Service installed"
 
