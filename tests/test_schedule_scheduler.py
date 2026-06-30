@@ -127,6 +127,22 @@ def test_scheduler_restartable(tmp_path):
         sch.stop()
 
 
+def test_advance_uses_current_record_not_stale_snapshot(tmp_path):
+    # A modify between due()'s snapshot and _advance must not be clobbered: next_fire is
+    # recomputed from the CURRENT cadence under the lock, not the stale snapshot.
+    from zoneinfo import ZoneInfo
+
+    from assist.schedule.cadence import apply_patch
+    store = _store(tmp_path, _sched(sid="a"))          # hour=7
+    d, sch = _sched_run(store)
+    stale = store.for_thread("t1")[0]                  # snapshot at hour=7
+    store.update("t1", "a", lambda s: apply_patch(s, hour=5))   # concurrent modify -> hour=5
+    sch._advance(stale, NOW)                            # advance with the STALE snapshot
+    nf = datetime.fromisoformat(store.for_thread("t1")[0].next_fire_at).astimezone(
+        ZoneInfo("America/Los_Angeles"))
+    assert nf.hour == 5                                 # current cadence, not the stale 7
+
+
 def test_future_schedule_not_due(tmp_path):
     store = _store(tmp_path, _sched(next_fire=FUTURE))
     d, sch = _sched_run(store)

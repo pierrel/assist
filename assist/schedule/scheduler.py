@@ -125,16 +125,20 @@ class Scheduler:
             self._release(sid)
 
     def _advance(self, s, now) -> None:
-        nxt = cadence.next_after(s, now).isoformat()
-        self._store.update(s.thread_id, s.id, lambda x: x.with_next_fire(nxt))
+        # Recompute next_fire from the CURRENT record under the store lock (not the
+        # possibly-stale due() snapshot ``s``), so a concurrent modify of the cadence/tz
+        # isn't clobbered with a next_fire computed from the old cadence.
+        self._store.update(
+            s.thread_id, s.id,
+            lambda x: x.with_next_fire(cadence.next_after(x, now).isoformat()))
 
-    def _claim(self, tid: str) -> bool:
+    def _claim(self, sid: str) -> bool:
         with self._inflight_lock:
-            if tid in self._inflight:
+            if sid in self._inflight:
                 return False
-            self._inflight.add(tid)
+            self._inflight.add(sid)
             return True
 
-    def _release(self, tid: str) -> None:
+    def _release(self, sid: str) -> None:
         with self._inflight_lock:
-            self._inflight.discard(tid)
+            self._inflight.discard(sid)
