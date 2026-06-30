@@ -24,8 +24,9 @@ or which line to take from your own knowledge** — call the tool.
 ## Calling `travel(origin, destination)`
 
 Pass plain place **names/addresses as the user said them** ("home", "the Ferry
-Building", "123 Main St"). Do NOT pass coordinates or a mode — it returns all four
-modes; you highlight the relevant one when you reply.
+Building", "123 Main St") — the one coordinate exception is the user's current
+location for "from here"/"near me" (see *Place names* below). Don't pass a mode — it
+returns all four modes; you highlight the relevant one when you reply.
 
 ## Calling `directions(origin, destination, mode)`
 

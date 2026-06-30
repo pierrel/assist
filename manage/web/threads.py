@@ -535,7 +535,9 @@ def render_thread(
           // prompts once; maximumAge serves a cached fix instantly afterwards.
           // Denied/unsupported/timeout → submit without coords (rider stays time-only).
           function assistSend(form){{
+            if(form.__sending){{ return false; }}  // ignore repeat clicks while a send is in flight
             try{{ form.sent_at.value=new Date().toISOString(); form.tz.value=Intl.DateTimeFormat().resolvedOptions().timeZone; }}catch(e){{}}
+            form.__sending=true;
             if(!navigator.geolocation){{ return true; }}
             navigator.geolocation.getCurrentPosition(
               function(p){{ form.lat.value=p.coords.latitude; form.lon.value=p.coords.longitude; form.submit(); }},
