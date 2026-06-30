@@ -1,13 +1,14 @@
-"""The in-process scheduler — a producer (cron poll loop) feeding a consumer (submit).
+"""The in-process scheduler — a cron poll loop feeding a dispatch consumer.
 
 In-process is REQUIRED, not just convenient: THREAD_QUEUE is a per-process singleton, so
 only an in-process producer shares the single turn slot (→ "overlap waits"), and "don't
 fire while the service/LLM is down" falls out for free. The poll loop runs on a daemon
 thread; dispatch runs on a single-worker executor; nothing here touches the asyncio loop.
 
-``submit(schedule)`` is the one consumer entry — it owns the health gate, the per-thread
-in-flight dedup, and the executor. A future event-trigger becomes a second producer that
-computes a wakeup and calls the same dispatch path, with no change here.
+``_fire`` is the consumer tail — it advances the next fire, applies a per-SCHEDULE
+in-flight dedup + the health gate, and hands the wakeup to the executor. A future
+event-trigger would split this into a shared ``submit(wakeup)`` and call the same
+dispatch path; that refactor is deferred until the first such producer exists.
 """
 from __future__ import annotations
 
@@ -41,6 +42,13 @@ class Scheduler:
 
     # --- lifecycle (started/stopped by the web lifespan) ------------------------
     def start(self) -> None:
+        # Idempotent + restartable: a second start while running is a no-op; a start
+        # after stop() clears the stop flag and rebuilds the (shut-down) executor, so a
+        # re-run lifespan (common in tests) doesn't leave a no-op or extra poll threads.
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="schedule-run")
         self._thread = threading.Thread(target=self._run, daemon=True, name="schedule-poll")
         self._thread.start()
 

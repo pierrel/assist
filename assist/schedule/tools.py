@@ -71,7 +71,7 @@ def schedule_tools(store) -> list:
             cadence.validate(cad)
         except InvalidCadence as e:
             return f"Couldn't schedule: {e}"
-        sched = Schedule(id=os.urandom(3).hex(), thread_id=tid, prompt=prompt, cadence=cad,
+        sched = Schedule(id=os.urandom(6).hex(), thread_id=tid, prompt=prompt, cadence=cad,
                          tz=tz, created_at=datetime.now(timezone.utc).isoformat())
         try:
             sched = sched.with_next_fire(cadence.next_after(sched, datetime.now(timezone.utc)).isoformat())

@@ -374,7 +374,7 @@ async def lifespan(app: FastAPI):
         try:
             stop_scheduler()
         except Exception:
-            pass
+            logging.getLogger(__name__).warning("scheduler shutdown failed", exc_info=True)
         # Clean up Docker sandbox containers
         try:
             SandboxManager.cleanup_all()

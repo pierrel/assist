@@ -114,6 +114,19 @@ def test_persist_failure_blocks_dispatch(tmp_path):
     assert d.calls == []                                 # no dispatch when next_fire can't persist
 
 
+def test_scheduler_restartable(tmp_path):
+    # A re-run lifespan (common in tests) must get a working scheduler, not a no-op.
+    store = _store(tmp_path, _sched())
+    d, sch = _sched_run(store)
+    sch.start()
+    sch.stop()
+    sch.start()
+    try:
+        assert sch._thread.is_alive()        # not left dead by the prior stop()
+    finally:
+        sch.stop()
+
+
 def test_future_schedule_not_due(tmp_path):
     store = _store(tmp_path, _sched(next_fire=FUTURE))
     d, sch = _sched_run(store)
