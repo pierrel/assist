@@ -64,6 +64,18 @@ def _web_skill_sources() -> dict:
     return _render_skill_sources
 
 
+# The web app's main agent also gets the schedule tools, injected by the web composition
+# root (manage/web/state) — scoped to the web-only builder for the same reason as the
+# render skill: a schedule's effect needs the web's co-resident Scheduler, so emacsos and
+# the eval agents (which build their own agents) must NOT get a tool that never fires.
+_web_tools: tuple = ()
+
+
+def set_web_tools(tools) -> None:
+    global _web_tools
+    _web_tools = tuple(tools)
+
+
 class InvalidThreadId(ValueError):
     """A thread id that isn't a single safe path segment (traversal/separator).
 
@@ -251,7 +263,7 @@ class ThreadManager:
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
                       configurable=configurable,
-                      spec=AgentSpec(skill_sources=_web_skill_sources()))
+                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools))
 
     def remove(self, thread_id: str) -> None:
         tdir = self.thread_dir(thread_id)
@@ -284,7 +296,8 @@ class ThreadManager:
 
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
                       model=self.model, sandbox_backend=sandbox_backend,
-                      on_queue_state=on_queue_state, spec=AgentSpec(skill_sources=_web_skill_sources()))
+                      on_queue_state=on_queue_state,
+                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools))
 
     def close(self) -> None:
         try:

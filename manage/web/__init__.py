@@ -20,7 +20,7 @@ from manage.web.app import app
 
 # Importing the route modules registers their endpoints on ``app``.
 # Order matters only insofar as ``review`` imports from ``threads``.
-from manage.web import threads, review, evals  # noqa: E402,F401
+from manage.web import threads, review, evals, schedules  # noqa: E402,F401
 
 # Re-export the names that external scripts (and any direct
 # ``from manage.web import X`` consumers) historically relied on, so

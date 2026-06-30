@@ -15,9 +15,10 @@ import os
 import re
 import subprocess
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 
 import markdown
+import requests
 from fastapi import BackgroundTasks, Form, HTTPException
 from fastapi.responses import (
     FileResponse,
@@ -34,6 +35,7 @@ from assist.domain_manager import (
     OriginAdvancedError,
 )
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
+from assist.schedule.scheduler import Scheduler
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
@@ -50,6 +52,7 @@ from manage.web.state import (
     INIT_STAGES,
     MANAGER,
     MERGE_LOCK,
+    SCHEDULE_STORE,
     STAGE_LABELS,
     _clear_conflict,
     _domain_selector_html,
@@ -219,7 +222,8 @@ def render_index(query: str = "") -> str:
         <div class="container">
           <div class="topbar">
             <h1 style="font-size:1.4rem; margin:0">Assist Web</h1>
-            <a href="/evals" class="btn">Evals</a>
+            <span><a href="/schedules" class="btn">Schedules</a>
+            <a href="/evals" class="btn">Evals</a></span>
           </div>
 
           <div class="new-thread-form">
@@ -916,6 +920,40 @@ def _build_rider(sent_at: str | None, tz: str | None,
         return ContextRider(sent_at=dt, tz=tz or None, **coords)
     except Exception:
         return None
+
+
+def _llm_reachable() -> bool:
+    """Quick liveness probe of the LLM endpoint for the scheduler's fire gate. Runs on
+    the scheduler thread (off the event loop), only when a schedule is due."""
+    url = os.getenv("ASSIST_MODEL_URL")
+    if not url:
+        return False
+    try:
+        return requests.get(f"{url.rstrip('/')}/models", timeout=3).status_code == 200
+    except Exception:
+        return False
+
+
+def _scheduled_dispatch(tid: str, prompt: str, tz: str) -> None:
+    """Run a schedule's prompt as a turn IN its own thread via the normal run path, so
+    THREAD_QUEUE serializes it (overlap waits) and the per-turn sandbox + middleware
+    apply. A time-only rider gives the turn 'now' in the schedule's zone. No
+    _mark_pending — there's no waiting render to win."""
+    rider = _build_rider(datetime.now(timezone.utc).isoformat(), tz)
+    _process_message(tid, prompt, rider)
+
+
+# The single in-process scheduler (the web runs one uvicorn worker). Started/stopped by
+# the lifespan, which imports start/stop lazily to avoid an import cycle.
+_SCHEDULER = Scheduler(SCHEDULE_STORE, _scheduled_dispatch, _llm_reachable)
+
+
+def start_scheduler() -> None:
+    _SCHEDULER.start()
+
+
+def stop_scheduler() -> None:
+    _SCHEDULER.stop()
 
 
 @app.post("/thread/{tid}/message")

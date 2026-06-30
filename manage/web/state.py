@@ -25,7 +25,9 @@ from fastapi import FastAPI
 from assist.domain_manager import DomainManager
 from assist.env import load_dev_env
 from assist.sandbox_manager import SandboxManager
-from assist.thread_manager import ThreadManager
+from assist.schedule.store import ScheduleStore
+from assist.schedule.tools import schedule_tools
+from assist.thread_manager import ThreadManager, set_web_tools
 
 
 def _configure_logging() -> None:
@@ -81,6 +83,13 @@ load_dev_env()
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
+
+# The one shared schedule store (disk-as-truth on the thread root) — used by the
+# Scheduler (started in the lifespan, see threads.py) AND the schedule tools AND the
+# /schedules view, so they share its single read-modify-write lock. The web app is a
+# single uvicorn worker, so exactly one Scheduler/store pair exists.
+SCHEDULE_STORE = ScheduleStore(ROOT)
+set_web_tools(schedule_tools(SCHEDULE_STORE))
 _raw = os.getenv("ASSIST_DOMAINS", "")
 DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}
@@ -356,9 +365,16 @@ async def lifespan(app: FastAPI):
     # Populate description cache at startup
     for tid in MANAGER.list():
         get_cached_description(tid)
+    # Start the schedule poll loop (local import breaks the state<->threads cycle).
+    from manage.web.threads import start_scheduler, stop_scheduler
+    start_scheduler()
     try:
         yield
     finally:
+        try:
+            stop_scheduler()
+        except Exception:
+            pass
         # Clean up Docker sandbox containers
         try:
             SandboxManager.cleanup_all()
