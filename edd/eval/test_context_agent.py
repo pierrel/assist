@@ -264,10 +264,13 @@ class TestContextInvocation(AgentTestMixin, TestCase):
         self.assertSubAgentCall(agent, "context-agent")
 
     def _first_dispatch_message_index(self, agent):
-        """{subagent_type: index of the first AIMessage that dispatches it}. Keyed
-        by MESSAGE (not tool_calls-array) position so a parallel batch — both task
-        calls in one AIMessage — gives equal indices, i.e. 'context before or with
-        research' passes; only a separate *earlier* research message fails."""
+        """{subagent_type: ordinal of the task-dispatching AIMessage that first
+        dispatches it}. The counter advances only for AIMessages that carry task
+        calls (it increments inside that branch) — both context and research
+        dispatch in such messages, so their relative order is preserved and a
+        parallel batch (both task calls in one AIMessage) yields EQUAL ordinals,
+        i.e. 'context before or with research' passes; only a separate *earlier*
+        research message fails."""
         idx, ai_i = {}, 0
         for m in agent.all_messages():
             if isinstance(m, AIMessage) and m.tool_calls:
