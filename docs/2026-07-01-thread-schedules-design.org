@@ -1,0 +1,232 @@
+#+TITLE: Thread schedules (agent-driven "thread-based cron") — technical design
+#+DATE: <2026-07-01>
+#+STATUS: DRAFT for review (design synthesized from architect + 3-lens design-review)
+
+* Problem
+The assistant is entirely user-initiated; recurring, time-anchored work (morning
+briefing, weekly review) forces the user to be the timer. A thread should run a prompt
+on a cadence, with the schedule managed conversationally by the agent from inside the
+thread. Requirements are fixed by the approved PRD
+([[file:2026-06-30-scheduled-prompts-prd.org]]); this is the design, not a redesign.
+
+* Constraints carried from the PRD
+Agent-driven (skill + tools, no "initial prompt"); ≤5 schedules/thread; each fires
+WITHIN its creating thread; NL cadence; relative edits; web list+delete view; survives
+restart but does NOT fire while the LLM is down (no catch-up, fail silently); overlap
+waits on the one-turn queue; shared core in assist; incrementable toward future
+event-triggers.
+
+* Solution overview
+One internal primitive — a *wakeup* = ~(thread_id, prompt)~; dispatching it = "run
+prompt P in thread T now," through the EXISTING run path
+(~manage/web/threads.py:_process_message~). The cron scheduler is one *producer* of
+timed wakeups; future event-triggers become another producer calling the same
+~submit(wakeup)~ — no structural change (PRD future requirement).
+
+This reuse is load-bearing: funneling through ~_process_message~ → ~THREAD_QUEUE~
+inherits overlap-wait, the per-turn sandbox, all middleware, the rider plumbing, status
+updates, and description/domain sync. A parallel runner would reimplement all of it and,
+worse, would not share the single LLM slot.
+
+* Components (Löwy roles)
+- *Cron poll loop* (a trigger source / producer) — ~assist/schedule/scheduler.py~ —
+  selects due schedules, advances ~next_fire_at~, calls ~submit~. Startup reconcile.
+- *Scheduler* (Manager — the wakeup workflow / consumer) — same module — ~submit(wakeup)~
+  owns the health-gate + in-flight dedup + the single-worker executor + the injected
+  ~dispatch~. The producer/consumer split (one ~submit~ entry) is what makes future
+  triggers a second producer with no rework.
+- *cadence* (Engine — pure functions, no class, no I/O, no clock reads) —
+  ~assist/schedule/cadence.py~ — ~next_after(schedule, now)~, ~apply_patch(schedule,
+  delta)~, and ~describe(cadence)~ (the human label — engine-derived, see §Repr).
+- *ScheduleStore* (ResourceAccess — injected, not a module global) —
+  ~assist/schedule/store.py~ — disk-as-truth over per-thread
+  ~<thread_dir>/schedules.json~; one ~threading.Lock~ around every read-modify-write;
+  an injected tid→dir resolver + list-tids (web supplies ~MANAGER.thread_dir~ /
+  ~MANAGER.list~). Methods hide the JSON/layout entirely: ~for_thread(tid)~ /
+  ~add(tid,sched)~ / ~patch(tid,sid,delta)~ / ~set_enabled~ / ~remove(tid,sid)~ /
+  ~all()~ / ~due(now)~.
+- *Schedule / Cadence* (Resource) — ~assist/schedule/model.py~ — structured, diffable
+  record (see §Repr).
+- *Thin clients* — schedule tools (~assist/schedule/tools.py~), schedule skill
+  (~assist/skills/schedule/SKILL.md~), web view (~manage/web/schedules.py~).
+- *Seam* — injected ~dispatch(tid,prompt)~ + ~health_check()~ + the store (+ resolver),
+  all wired by the web layer so ~assist/schedule/~ never imports ~manage~.
+
+* Scheduler mechanism — in-process daemon thread (decision)
+A single daemon ~threading.Thread~ poll loop started from the web FastAPI lifespan; NOT
+OS-cron / systemd-timer / asyncio-task.
+- ~THREAD_QUEUE~ is a per-PROCESS singleton (thread_queue.py:39-45) — only an in-process
+  producer shares the single turn slot, so "overlap waits" REQUIRES in-process (an
+  OS-cron child would run concurrently vs llama.cpp ~--parallel 1~).
+- "No fire while the LLM service is down / divorced from the device" falls out for free
+  (no service → no scheduler thread → no fire).
+- asyncio-task rejected: dispatch blocks (a whole turn) → event-loop outage.
+- Tick ~30s (env-configurable); accuracy is ±tick — fine for NL cadences.
+
+* Schedule representation + storage (decision)
+~Schedule~: ~id, thread_id, prompt, cadence, tz, enabled, next_fire_at, created_at~.
+~Cadence~: ~{minute, hour|None, weekdays|None, every_n_minutes|None}~.
+- *Structured, diffable fields — NOT an opaque cron string.* Relative edits patch fields
+  ("fire at 5a" → ~patch(hour=5)~ leaves minute/weekdays intact); the small model fills
+  semantically-named, range-checkable args (the repo's proven small-model lever).
+- *Dropped ~day_of_month~* — no monthly user story (add when observed).
+- *The human cadence label is ENGINE-DERIVED* (~cadence.describe~), never a model-supplied
+  string — else the model can write "every hour" while setting ~hour=7~ and that wrong
+  label is what the web view shows. (Fix-by-construction, per PR #139.)
+- *~tz~ captured at create* from the turn's rider; a clock cadence with ~tz=None~ is
+  refused (computing "7am" in the server zone silently is a misfire). ~now~ passed to the
+  engine is tz-aware.
+- *Storage: disk-as-truth*, per-thread ~schedules.json~ (atomic tmp+rename), consistent
+  with ~status.json~; dies with the thread via ~hard_delete~'s rmtree (no eviction hook).
+  *One process-wide ~threading.Lock~* serializes every read-modify-write — there is a
+  real race: the poll loop advancing ~next_fire_at~ (poll thread, NOT holding
+  THREAD_QUEUE) vs a ~modify~/~pause~ tool (in the thread's turn) vs a web ~delete~ all
+  RMW the same file; atomic-write alone is last-writer-wins → lost update. The lock is
+  held only for the fast file op, never across dispatch or a turn. No in-memory cache,
+  working-copy, snapshot, or ~_evict_caches~ coupling (all dropped — R1).
+
+* Tools + skill (decision)
+- Tools: ~create / list / modify / pause / resume / delete~; ~thread_id~ from
+  ~get_config()["configurable"]~ (the ContextRider pattern). The *cap (≤5)* is enforced
+  in ~create~ under the store lock with a corrective message.
+- *~modify~ merges a SPARSE delta SERVER-SIDE:* signature ~modify(schedule_id, *,
+  minute=None, hour=None, weekdays=None, every_n_minutes=None)~ where *unset = unchanged*;
+  the tool reads the stored schedule and the engine applies only the supplied fields. The
+  model supplies the id + the delta — it never re-emits the full cadence (the #1
+  relative-edit failure mode for Qwen3.6).
+- *Enumerate-and-decline:* the field set can't express "every other day" / "last weekday"
+  etc. The skill enumerates the supported shapes and tells the model to say so when a
+  request is outside them; the engine rejects incoherent combos (e.g. ~every_n_minutes~
+  with clock fields) with a precise corrective message. Do not silently approximate.
+- Tool returns include the engine-derived label + next-fire time so the agent confirms
+  back and the user catches a misparse.
+- Skill (guidance-first, no middleware): arg-shape rules ("read first, pass ONLY changed
+  field(s)+id"), ambiguity resolution ("morning"→a concrete hour), confirm-back, the cap,
+  "don't claim success on a tool error," "runs in THIS thread." YAML: no ~": "~ in the
+  unquoted ~description~ (loader footgun).
+
+* Firing / failure / overlap (decision)
+- *Overlap waits* — inherited from ~THREAD_QUEUE~ (a scheduled dispatch and a user turn
+  for the same thread serialize; reentrant only within one call stack). The dispatch must
+  go through ~_process_message~, never construct a second ~Thread~.
+- *advance-persist-THEN-dispatch:* compute + persist ~next_fire_at~ before ~submit~; if
+  the persist raises, skip the dispatch. The only double-fire path is dispatch-then-fail-
+  persist; this closes it. Gives at-most-once (a crash between persist and dispatch loses
+  one fire — consistent with "no catch-up / fail silently").
+- *Startup reconcile* (in the spawned thread, sequential before polling — never in the
+  async lifespan body): advance any past ~next_fire_at~ to the next FUTURE instant WITHOUT
+  firing = the "no catch-up" guarantee.
+- *Health gate (best-effort):* before dispatch, ~health_check()~ (a cached llama.cpp
+  ~/models~ probe) — down → skip + log, no thread error banner, ~next_fire_at~ already
+  advanced. RESIDUAL (named, not hidden): llama.cpp can die between the probe and the
+  turn; that turn then errors via ~_process_message~'s normal path (an error status in the
+  thread). v1 accepts this (the error lands where the user looks; passive-result model) —
+  see Decision D2.
+- *In-flight dedup (kept — R2 reversed):* skip a fire if a wakeup is already queued/
+  running for that tid (a lock-guarded set, add on submit / remove on completion). Bounds
+  a real backlog: the PRD allows "every 30 minutes on weekdays"; a run that exceeds 30 min
+  would otherwise pile standing duplicates (advance-to-next-future alone does NOT prevent
+  it). Cheap and tied to a supported cadence — kept over the simplicity reviewer's drop.
+- *Single-worker executor + non-blocking submit:* the poll tick submits without blocking;
+  one worker is enough (THREAD_QUEUE serializes turns globally regardless — extra workers
+  would just block on it). A wedged turn (THREAD_QUEUE ~wait_timeout~ up to 4h) blocking
+  scheduled runs is inherited THREAD_QUEUE behavior, same as it blocks user turns.
+- ~_scheduled_dispatch~ skips ~_mark_pending~ (that only wins a user-POST render race);
+  it builds a time-only ~ContextRider(sent_at=now, tz=schedule.tz)~ and calls
+  ~_process_message(tid, prompt, rider)~ on the executor worker.
+
+* Web management view (decision)
+~manage/web/schedules.py~ (registered via ~manage/web/__init__.py~). ~GET /schedules~
+renders one row per schedule across all threads from ~store.all()~ — thread link
+(~/thread/{tid}~), description (engine label + prompt snippet + next fire), delete button.
+No create/edit UI (agent-driven). ~POST /schedules/{tid}/{sid}/delete~ →
+~run_in_threadpool(store.remove, …)~ → redirect. Topbar link in ~render_index~.
+*Off-loop is mandatory:* the routes take the store lock + read disk, so they run in the
+threadpool (plain ~def~ handler, or ~async~ + ~run_in_threadpool~) — never inline on the
+loop. Tested under a held lock (below).
+
+* Cross-client boundary (decision — R3)
+Schedule *tools* are NOT registered as core built-ins at ~agent.py:374~. The
+travel/directions built-in precedent does not transfer: those are self-contained, but a
+schedule tool's effect requires a co-resident Manager — registered everywhere, the
+emacsos agent (no Manager in v1) would create schedules that never fire and confidently
+report success (a silent dead feature + false success — the small-model failure mode to
+avoid). Instead, wire the tools through the *web's ~AgentSpec~* — the exact pattern
+~ThreadManager~ already uses for the web-only render skill. The reusable *classes* live in
+~assist/schedule/~ (shared core); the store + Manager + tools are wired in the web
+lifespan/builder. "Web-only for v1" is a property of the wiring; emacsos opts in later by
+starting its own Manager + adding the tools to its own spec — zero core change. Single
+uvicorn worker assumed (documented at the scheduler/store, like ~MERGE_LOCK~).
+
+* Context bounding (decision)
+v1 reuses the existing deepagents ~SummarizationMiddleware~ (agent.py:195-199, trigger
+0.85, offload to ~/conversation_history/{tid}.md~) — already installed; a scheduled turn
+is just another turn on the same ~thread_id~, serialized by THREAD_QUEUE, so the offload
+file + checkpoint stay shared + bounded. No new compaction code. Known v1 limitation
+(recorded, not fixed): summarization is lossy, so "bounding *without* losing run-over-run
+continuity" is in tension; the offload ~.md~ grows append-only (an archive, never loaded).
+
+* Event-loop liveness analysis
+| Code | Thread | On the asyncio loop? | Mitigation |
+| poll loop / reconcile | daemon thread | no | — |
+| dispatch (~_process_message~, THREAD_QUEUE acquire) | executor worker | no | — |
+| store RMW (lock + atomic write) | poll thread / tool worker | no | tools run inside a turn |
+| health probe | poll thread | no | cached |
+| ~GET /schedules~ / ~POST delete~ | — | NO | threadpool (lock + disk) |
+Backstop: run web tests / smoke under ~PYTHONASYNCIODEBUG=1~.
+
+* Risks / edge cases
+- DST: ~next_after~ builds local wall-time then localizes via zoneinfo (not UTC math);
+  spring-forward skipped hour → next valid instant; fall-back repeated hour. Unit-tested.
+- ~now~ must be tz-aware or ContextRider raises (ties to tz-at-create).
+- Thread deleted out-of-band → rmtree removes ~schedules.json~; ~all()/due()~ skip a tid
+  whose dir is gone (defensive, cheap).
+- Bad cadence args from the model (hour=25) → engine range-validates, corrective message.
+- A scheduled run editing its own schedule → allowed; ~next_fire_at~ already advanced
+  at dispatch, so a mid-run modify recomputes from now consistently.
+- Double-Manager (emacsos later starting one on a shared dir) → double-fire; v1 single
+  Manager, documented.
+
+* Test plan
+*Unit/integration (no LLM — write now, NOT blocked by the eval freeze):*
+- ~cadence.next_after~: daily/weekly/hourly/interval + weekday filters, tz-aware, *DST
+  boundaries*, and the *no-catch-up* rule (past ~next_fire_at~ → next future instant).
+- ~cadence.apply_patch~: patch ~hour~ leaves the rest (relative-edit, delta-only).
+- ~cadence.describe~: label matches the structured fields (engine-derived).
+- ~ScheduleStore~: CRUD, cap, atomic persistence, *reload-from-disk = survive-restart*,
+  and *un-mocked concurrency* (hold the lock in another thread, assert serialization /
+  no lost update across advance vs patch vs delete).
+- ~Scheduler~ with fake clock + fake dispatch + fake health: due→dispatch-once,
+  ~next_fire_at~ advances, disabled never fire, *health-down skips silently* (dispatch
+  not called, no error set), *dedup* (≤1 in-flight/tid), *startup reconcile advances past
+  missed without firing*, *persist-fail → no dispatch*. Plus one real-Thread test that a
+  due schedule actually fires through ~_process_message~ (don't mock the risk).
+- *Event-loop:* hold THREAD_QUEUE + the store lock in another thread, assert ~GET
+  /schedules~ returns promptly; run under ~PYTHONASYNCIODEBUG=1~.
+- Web: ~/schedules~ renders thread link + label + delete (assert rendered HTML — the
+  symptom); delete removes + redirects.
+- Tools: ~create~/~modify~ with a fake ~get_config~ thread_id; cap error message;
+  ~modify~ reads-then-patches server-side (assert ONLY the delta changed); unsupported
+  cadence → declined.
+*Deferred to eval (LLM-bound — design now, DO NOT run under the freeze):* NL→structured
+cadence; relative edit "change to 5a" → ~modify(hour=5)~ NOT delete+create, other fields
+preserved; right-schedule targeting with multiple; skill loads + reads back the resolved
+next fire; generality (eval prompts must NOT mirror the skill examples — alignment rule).
+
+* Decisions for Pierre
+- *D1 — in-flight dedup:* KEEP (recommended) — guards the "every 30 minutes" cadence
+  against a standing backlog; cheap. (Reviewers split; event-loop trace convinced me over
+  the simplicity drop.) OK to keep?
+- *D2 — "fail silently" residual:* if llama.cpp dies mid-run, the scheduled turn writes a
+  normal error status into its thread (not fully silent). Recommend ACCEPT (the error
+  lands where the user looks; passive-result model) rather than building error-suppression
+  for scheduled runs. Agree?
+- *D3 — supported cadence set (v1):* daily / weekly / specific-weekdays / hourly /
+  every-N-minutes — and DECLINE anything outside it (no silent approximation). Enough for
+  v1?
+- *D4 — tick granularity:* ~30s poll (±30s accuracy). Fine?
+
+* Future (incremental, no rework)
+Event-triggers = a second wakeup producer (file-watch / webhook / inbox poll) computing
+~(tid, prompt)~ and calling the same ~submit(wakeup)~; the Scheduler/Store/run-path are
+untouched.
