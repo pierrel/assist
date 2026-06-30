@@ -301,3 +301,17 @@ class TestContextInvocation(AgentTestMixin, TestCase):
         agent.message("What's 12 times 9?")
         self.assertNotIn("context-agent", self.subagent_calls(agent),
                          "a self-contained calculation should not pay for a context pass")
+
+    def test_looks_for_answer_before_asking(self):
+        # Mirrors thread 20260629193754: "find a restaurant nearby" — the answer
+        # (the user's location + food prefs) is in their files, so the agent must
+        # dispatch the context-agent to look BEFORE asking. Old code asked "where
+        # are you?" / "what cuisine?" without looking.
+        fs = {**self.FS,
+              "profile.org": "* Me\n** Home: Mission District, San Francisco\n"
+                             "** Food: loves Thai and ramen\n"}
+        agent, _ = self._agent(fs)
+        agent.message("Find me a good restaurant nearby")
+        self.assertSubAgentCall(
+            agent, "context-agent",
+            "should look in the user's files for location/preferences before asking")
