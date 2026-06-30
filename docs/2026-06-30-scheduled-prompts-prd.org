@@ -1,0 +1,73 @@
+#+title: PRD — Scheduled prompts (thread-based cron)
+#+date: 2026-06-30
+#+status: DRAFT for review (product requirements only — NOT a technical design, NOT UI-specific)
+
+* What this is
+A product requirements doc for letting a user **schedule a prompt to run on a
+recurring timer**, as a normal assistant **thread**. This doc is high-level and
+deliberately **UI-agnostic** — it does not specify the web or phone surface, nor the
+implementation. Those come later (per-client UX + a technical design), gated on this
+PRD being accepted.
+
+* Problem / motivation
+Every assistant interaction today is user-initiated: the user has to remember to ask,
+and to ask at the right time. But a lot of genuinely useful work is **recurring and
+time-anchored** — a morning briefing, an end-of-day summary, a weekly review, an
+hourly check on something. The user shouldn't have to be the timer. A scheduled prompt
+runs the assistant on a cadence so the recurring work just happens, and the result is
+already there when the user looks.
+
+* Goals
+1. Schedule a prompt to run automatically on a **recurring cadence** (cron-like).
+2. Support an **optional one-time INITIAL prompt** that runs once at setup — to
+   establish standing context/instructions the recurring runs build on.
+3. A separate **RECURRING prompt** that runs on each timer tick.
+4. Each run is a real **thread** (a conversation) — reviewable, openable, and
+   continuable like any other, so results accumulate and stay in the user's history.
+5. **Client-agnostic by design**: the same capability serves the web UI AND the
+   emacsos phone (and future clients), sharing as much as possible. Separate client
+   surfaces are fine, but the core behavior + data model are shared.
+
+* Non-goals (for this PRD)
+- The concrete UI to create / view / manage schedules (web form, phone screen) — a
+  later per-client design.
+- The technical mechanism (scheduler, storage, how it ties into the run path) — the
+  technical design, after this PRD.
+- Sub-minute / real-time scheduling; event/condition-triggered (non-time) runs;
+  sharing schedules between users.
+
+* User stories
+- As a user, I can **schedule a recurring prompt** (e.g. "every morning at 7am,
+  summarize my calendar and todos") so the assistant runs it on time without me
+  asking.
+- As a user, I can optionally give an **initial prompt** that runs once when I create
+  the schedule (e.g. to set standing context the recurring runs rely on).
+- As a user, each scheduled run **lands in a thread I can open, read, and continue**,
+  just like a conversation I started myself.
+- As a user, I can **see my scheduled prompts**, and **edit / pause / delete** them.
+- As a user, I can tell **when a run last happened** and **whether it failed**.
+- As a user, my schedules work **whether I'm on the web or my phone** (same schedules,
+  same behavior).
+
+* Open product questions (resolve with/just before the technical design)
+1. **One thread or fresh thread per run?** Does the recurring prompt continue ONE
+   ongoing thread (context accumulates run-over-run) or start a FRESH thread each tick
+   (clean, independent results)? Or is it per-schedule choice? — This is the biggest
+   product decision and shapes everything downstream.
+2. **Initial-prompt relationship.** Does the initial prompt run in the *same* thread
+   the recurring prompt will use (seeding it), and is it required, or truly optional?
+3. **Cadence granularity.** Daily/weekly presets? Arbitrary cron? Minimum interval?
+4. **Result delivery / notification.** Is the result purely passive (it's in the
+   thread when you look) or is there an active signal (a ping / unread badge) when a
+   run completes — and does that differ web vs phone?
+5. **Overlap & missed runs.** What happens if a run is still going when the next tick
+   fires (skip / queue), and if the device/service was off at tick time (skip / catch
+   up)?
+6. **Scope of "shared."** Confirm the shared core lives in the assist layer (the
+   thread + run path are already shared; the web UI uses them and emacsos embeds
+   them), with thin per-client config surfaces on top.
+
+* Out of scope / possible future
+- Per-client UIs (web, phone) — separate design.
+- Conditional / event-triggered runs (non-time).
+- Shared or team schedules.
