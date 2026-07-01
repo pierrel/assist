@@ -235,7 +235,7 @@ def create_agent(model: BaseChatModel,
     the absent case stays silent).  Precedence on a name collision is
     ``domain < built-in < embedder-extras`` — a same-named domain skill
     does NOT override a built-in (the safety skills ``dev`` /
-    ``git-conflict`` are the floor).
+    ``git-sync`` are the floor).
     """
     if spec is None:
         spec = AgentSpec()
@@ -287,7 +287,7 @@ def create_agent(model: BaseChatModel,
     # actually holds skills, so an absent/empty one adds no useless source.
     # Prepended so it sits FIRST: the deepagents listing is last-source-wins, so
     # precedence is domain < built-in < embedder-extras — built-in safety skills
-    # (dev, git-conflict) are NOT overridable by a same-named domain skill.  (An
+    # (dev, git-sync) are NOT overridable by a same-named domain skill.  (An
     # embedder that explicitly routes DOMAIN_SKILLS_PATH via extra_skill_sources
     # has already placed it after SKILLS_ROUTE; the guard avoids a double-insert
     # and leaves that deliberate override at its chosen precedence.)  See
