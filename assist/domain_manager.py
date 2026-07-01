@@ -6,6 +6,8 @@ from typing import List
 from pydantic import BaseModel
 from datetime import datetime
 
+from assist.domain_mirror import CONTAINER_MIRROR_URL, MIRROR_REMOTE
+
 logger = logging.getLogger(__name__)
 
 
@@ -125,6 +127,11 @@ def clone_repo(repo_url: str, dest_dir: str, branch_suffix: str | None = None) -
     parent = os.path.dirname(dest_dir)
     os.makedirs(parent, exist_ok=True)
     subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True)
+    # The container fetches main from the ro-mounted domain mirror, never origin. The URL
+    # only needs to resolve inside the sandbox (where /srv/domain.git is mounted); adding
+    # the remote here is just a config write. See assist/domain_mirror.py.
+    subprocess.run(['git', '-C', dest_dir, 'remote', 'add', MIRROR_REMOTE,
+                    CONTAINER_MIRROR_URL], check=True)
     create_timestamped_branch(dest_dir, suffix=branch_suffix)
 
 
@@ -426,8 +433,24 @@ class DomainManager:
         """
         if not self.repo:
             return
-        ensure_thread_branch(self.repo_path, suffix=self.branch_suffix)
+        branch = ensure_thread_branch(self.repo_path, suffix=self.branch_suffix)
         git_commit(self.repo_path, commit_message)
+        self._push_thread_branch(branch)
+
+    def _push_thread_branch(self, branch: str) -> None:
+        """Push the thread branch to origin after each turn so Pierre can check it out and
+        fix it from a real computer. Best-effort: a push failure must not break the turn
+        (origin briefly unreachable, etc.) — it's logged, not raised. NOT the agent (host
+        holds the creds); NOT ``main`` (that's the user-gated publish). ``--force-with-
+        lease`` because the agent may have rebased the branch this turn."""
+        pushed = subprocess.run(
+            ['git', '-C', self.repo_path, 'push', '--force-with-lease',
+             'origin', branch],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        )
+        if pushed.returncode != 0:
+            logger.warning("thread-branch push failed for %s: %s",
+                           branch, pushed.stderr.strip())
 
     def merge_to_main(self, summary_model=None) -> str:
         """Rebase the thread branch onto ``origin/main`` and squash-merge it
