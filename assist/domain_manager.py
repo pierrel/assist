@@ -6,8 +6,6 @@ from typing import List
 from pydantic import BaseModel
 from datetime import datetime
 
-from assist.domain_mirror import CONTAINER_MIRROR_URL, MIRROR_REMOTE
-
 logger = logging.getLogger(__name__)
 
 
@@ -127,11 +125,6 @@ def clone_repo(repo_url: str, dest_dir: str, branch_suffix: str | None = None) -
     parent = os.path.dirname(dest_dir)
     os.makedirs(parent, exist_ok=True)
     subprocess.run(['git', 'clone', '--branch', 'main', repo_url, dest_dir], check=True)
-    # The container fetches main from the ro-mounted domain mirror, never origin. The URL
-    # only needs to resolve inside the sandbox (where /srv/domain.git is mounted); adding
-    # the remote here is just a config write. See assist/domain_mirror.py.
-    subprocess.run(['git', '-C', dest_dir, 'remote', 'add', MIRROR_REMOTE,
-                    CONTAINER_MIRROR_URL], check=True)
     create_timestamped_branch(dest_dir, suffix=branch_suffix)
 
 
@@ -474,6 +467,23 @@ class DomainManager:
         if pushed.returncode != 0:
             logger.warning("thread-branch push failed for %s: %s",
                            branch, pushed.stderr.strip())
+
+    def fetch_origin(self) -> None:
+        """Refresh ``origin/main`` in the clone so the agent can rebase onto a current
+        origin/main. The agent CANNOT fetch from inside the sandbox — the git
+        privilege-separation that blocks push also makes ``git-upload-pack`` inaccessible
+        to the non-root agent — so the host (which has full git + origin access, incl.
+        local-path "life"-style domains) keeps the ref fresh here, at turn start.
+        Best-effort: a failure (origin briefly unreachable) must not break the turn."""
+        if not self.repo or not is_git_repo(self.repo_path):
+            return
+        r = subprocess.run(
+            ['git', '-C', self.repo_path, 'fetch', 'origin'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        )
+        if r.returncode != 0:
+            logger.warning("origin pre-fetch failed for %s: %s",
+                           self.repo_path, r.stderr.strip())
 
     def merge_to_main(self) -> str:
         """Rebase the thread branch onto ``origin/main`` and squash-merge it
