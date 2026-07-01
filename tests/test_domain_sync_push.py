@@ -114,12 +114,15 @@ def test_sync_aborts_agent_left_inprogress_rebase(tmp_path):
     # start a rebase that conflicts -> leaves rebase-merge + detached HEAD
     r = subprocess.run(["git", "-C", clone, "rebase", "origin/main"],
                        capture_output=True, text=True)
-    assert r.returncode != 0 and os.path.isdir(os.path.join(clone, ".git", "rebase-merge"))
+    def _rebase_dir_present():
+        g = os.path.join(clone, ".git")
+        return os.path.isdir(os.path.join(g, "rebase-merge")) or os.path.isdir(os.path.join(g, "rebase-apply"))
+    assert r.returncode != 0 and _rebase_dir_present()   # either rebase backend
 
     dm.sync("end of turn")
 
     assert current_branch(clone) == branch          # reattached, not detached "HEAD"
-    assert not os.path.isdir(os.path.join(clone, ".git", "rebase-merge"))  # rebase aborted
+    assert not _rebase_dir_present()   # rebase aborted (both backends gone)
 
 
 def test_sync_reattaches_plain_detached_head(tmp_path):
