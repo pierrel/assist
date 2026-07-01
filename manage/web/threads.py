@@ -387,7 +387,8 @@ def render_thread(
 
     push_btn_html = (
         f"""<div style="display:flex; gap:.5rem; align-items:center; margin:0;">
-              <a class="btn btn-secondary" href="/thread/{tid}/push-preview" target="_blank">
+              <a class="btn btn-secondary" href="/thread/{tid}/push-preview"
+                 target="_blank" rel="noopener noreferrer">
                 Preview push
               </a>
               <form action="/thread/{tid}/push-main" method="post" style="margin: 0;">
@@ -1399,7 +1400,10 @@ def push_preview_page(tid: str):
     dm = _get_domain_manager(tid)
     if not dm or not dm.repo:
         raise HTTPException(status_code=400, detail="No git repository for this thread")
-    diffs = dm.push_preview()
+    # Serialize with merge/push_main (which reset/rewrite main): they hold MERGE_LOCK, so
+    # holding it here keeps the preview's fetch+diff from racing a concurrent merge.
+    with MERGE_LOCK:
+        diffs = dm.push_preview()
     body = (_render_inline_diffs(tid, diffs) if diffs
             else "<p>Nothing to push — local main matches origin/main.</p>")
     return HTMLResponse(

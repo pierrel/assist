@@ -90,3 +90,33 @@ def test_push_preview_empty_when_in_sync(tmp_path):
     clone = str(tmp_path / "clone")
     dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="ef56")
     assert dm.push_preview() == []   # nothing unpushed
+
+
+def test_sync_aborts_agent_left_inprogress_rebase(tmp_path):
+    # If the agent's turn ends mid-rebase (HEAD detached, rebase in progress), sync() must
+    # abort it and return to the thread branch — not commit an orphan onto detached HEAD.
+    import os
+    origin = _origin_with_main(tmp_path)   # seeds README
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="gh78")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    branch = current_branch(clone)
+    (tmp_path / "clone" / "README").write_text("thread edit\n")
+    _git("commit", "-am", "thread edits README", cwd=clone)
+    # advance origin main with a conflicting README edit, then host-fetch
+    _git("checkout", "main", cwd=clone)
+    (tmp_path / "clone" / "README").write_text("main edit\n")
+    _git("commit", "-am", "main edits README", cwd=clone)
+    _git("push", "origin", "main", cwd=clone)
+    _git("checkout", branch, cwd=clone)
+    _git("fetch", "origin", cwd=clone)
+    # start a rebase that conflicts -> leaves rebase-merge + detached HEAD
+    r = subprocess.run(["git", "-C", clone, "rebase", "origin/main"],
+                       capture_output=True, text=True)
+    assert r.returncode != 0 and os.path.isdir(os.path.join(clone, ".git", "rebase-merge"))
+
+    dm.sync("end of turn")
+
+    assert current_branch(clone) == branch          # reattached, not detached "HEAD"
+    assert not os.path.isdir(os.path.join(clone, ".git", "rebase-merge"))  # rebase aborted

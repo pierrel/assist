@@ -450,9 +450,24 @@ class DomainManager:
         """
         if not self.repo:
             return
+        self._abort_inprogress_rebase()
         branch = ensure_thread_branch(self.repo_path, suffix=self.branch_suffix)
         git_commit(self.repo_path, commit_message)
         self._push_thread_branch(branch)
+
+    def _abort_inprogress_rebase(self) -> None:
+        """If the agent left a rebase in progress (its turn ended mid-conflict-loop),
+        HEAD is detached and the end-of-turn commit would orphan onto no branch. Abort it:
+        HEAD returns to the thread branch with all *committed* work intact (the design's
+        un-stuck guarantee). The partial, uncommitted conflict resolution is discarded —
+        the agent re-syncs next turn against a clean branch."""
+        git_dir = os.path.join(self.repo_path, ".git")
+        if os.path.isdir(os.path.join(git_dir, "rebase-merge")) or \
+                os.path.isdir(os.path.join(git_dir, "rebase-apply")):
+            subprocess.run(['git', '-C', self.repo_path, 'rebase', '--abort'],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            logger.warning("aborted an agent-left in-progress rebase in %s (re-sync next turn)",
+                           self.repo_path)
 
     def _push_thread_branch(self, branch: str) -> None:
         """Push the thread branch to origin after each turn so Pierre can check it out and
