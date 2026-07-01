@@ -432,20 +432,21 @@ class DomainManager:
         return self.repo_path
 
     def sync(self, commit_message: str) -> None:
-        """Restore the thread-branch invariant, then commit pending work.
+        """Restore the thread-branch invariant, commit pending work, and push the THREAD
+        branch to origin.
 
         Before committing we ensure HEAD is on an ``assist/<ts>`` thread
         branch (see :func:`ensure_thread_branch`): if a prior flow left
         the thread on ``main``, the commit would otherwise land on
-        ``main`` and the work would never render in the review UI.  Does
-        NOT push.
+        ``main`` and the work would never render in the review UI.
 
-        Pushes are gated to the user-initiated merge → push-main flow;
-        the agent must not be able to publish to ``origin`` directly,
-        and we extend that contract to host-side automated pushes too
-        (decision logged in =docs/2026-05-07-per-thread-web-git-isolation.org=).
-        Trade-off: an in-flight thread is local-only until the user
-        merges, so a deploy-box loss mid-thread loses the work.
+        Then it host-pushes the *thread branch* to origin every turn (see
+        :meth:`_push_thread_branch`) so a branch is recoverable/fixable from a real
+        computer (Pierre, PR #162). Two distinct pushes, do not conflate: the **thread
+        branch** push here is host-side + automatic; the **``main``** publish stays
+        user-gated (the "Push to origin" button → :meth:`push_main`). The **agent** can
+        push neither (no creds + push-blocker middleware + the git-shim). So a deploy-box
+        loss mid-thread no longer loses committed work — origin has the branch.
         """
         if not self.repo:
             return
@@ -459,6 +460,10 @@ class DomainManager:
         (origin briefly unreachable, etc.) — it's logged, not raised. NOT the agent (host
         holds the creds); NOT ``main`` (that's the user-gated publish). ``--force-with-
         lease`` because the agent may have rebased the branch this turn."""
+        if branch in ("", "HEAD"):
+            # Detached HEAD (e.g. the agent left a rebase mid-flight) or an unreadable
+            # ref — no thread branch to publish; pushing "HEAD" would junk a ref on origin.
+            return
         pushed = subprocess.run(
             ['git', '-C', self.repo_path, 'push', '--force-with-lease',
              'origin', branch],
@@ -501,10 +506,8 @@ class DomainManager:
         4. ``git checkout main`` and ``git reset --hard origin/main``
            (safe — step 2 verified local ``main`` had no extra
            commits).
-        5. ``git merge --squash <thread-branch>``, generate the AI
-           summary from the diff (model invocation, optional fallback —
-           done late so a failed merge never burns a model call), and
-           commit with that summary.
+        5. ``git merge --squash <thread-branch>``, build the deterministic
+           squash summary, and commit with it.
         6. Re-create a fresh ``assist/<ts>-<suffix>`` thread branch off
            ``main`` so the user can keep chatting in the same thread
            after the merge.
@@ -605,12 +608,6 @@ class DomainManager:
                 check=True,
             )
 
-            # Generate the AI summary as late as possible — directly
-            # before the commit it labels.  Every git step before this
-            # could fail (network on fetch, conflict on rebase, dirty
-            # state on checkout, etc.); spending an LLM round-trip only
-            # after they've all succeeded means a failed merge never
-            # burns a model call.
             summary = self._summarize_merge(diffs, branch_name)
             subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', summary], check=True)
             squashed = True
@@ -706,6 +703,9 @@ class DomainManager:
         remote. Empty when nothing is unpushed."""
         if not self.repo or not is_git_repo(self.repo_path):
             return []
-        subprocess.run(['git', '-C', self.repo_path, 'fetch', 'origin'],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        r = subprocess.run(['git', '-C', self.repo_path, 'fetch', 'origin'],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        if r.returncode != 0:
+            logger.warning("push-preview fetch failed for %s: %s (preview may be stale)",
+                           self.repo_path, r.stderr.strip())
         return git_diff_range(self.repo_path, 'origin/main...main')

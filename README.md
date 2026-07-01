@@ -541,7 +541,7 @@ applies unchanged; for assist's small model the `TRIGGER WORDS` /
 `MUST load before` shape still earns its keep.
 
 **Name collisions — built-ins win.** If a domain skill is named like one
-of assist's built-ins (`dev`, `calculate`, `org-format`, `git-conflict`,
+of assist's built-ins (`dev`, `calculate`, `org-format`, `git-sync`,
 `pdf`), the built-in takes precedence and the domain version is ignored
 — the safety skills can't be shadowed. Pick a distinctive name.
 

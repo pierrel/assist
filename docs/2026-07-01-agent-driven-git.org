@@ -1,6 +1,25 @@
 #+TITLE: Agent-driven domain-repo git flow
 #+DATE: <2026-07-01>
-#+STATUS: DRAFT for review (Pierre) — before technical build
+#+STATUS: BUILT (branch agent-driven-git) — see "Changed from design" below
+
+* Changed from design (as-built)
+The **reachability mechanism pivoted from the read-only mirror to the host pre-fetch**
+(this doc's own §Reachability "simpler alternative", and open-Q3). The git-sync eval
+proved the ro-mirror is *unfetchable from inside the sandbox*: the privilege-separation
+that blocks push (git-real 0700 root) also makes ``git-upload-pack`` inaccessible to the
+non-root agent, so ``git fetch <any remote>`` fails. As built: the HOST pre-fetches
+``origin/main`` into the clone at turn start (``DomainManager.fetch_origin``, from
+``_get_sandbox_backend``, off-loop) and the agent rebases the LOCAL ``origin/main`` ref
+(no fetch, no upload-pack, no mount). This DELETES the whole mirror machinery
+(``DomainMirror``, the ro ``/srv/domain.git`` mount, the ``mirror`` remote) — simpler, and
+still solves the "life" local-path case (the host reaches origin). So below, decision-table
+#1, §Reachability's "recommended mirror", and the mirror references in Components/Files/
+Risks/edge-cases/SKILL.md are SUPERSEDED — the shipped skill rebases ``origin/main`` and
+tells the agent "never fetch". Everything else (per-turn commit+push thread branch,
+user-gated main push, dropped AI summary, push-preview view, conflict loop, async→sync
+route fix) shipped as designed.
+
+
 
 Builds on [[file:2026-05-07-per-thread-web-git-isolation.org]] (per-thread branch + push
 isolation) and the sandbox egress-allowlist model.
