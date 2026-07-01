@@ -437,7 +437,7 @@ class DomainManager:
         :meth:`_push_thread_branch`) so a branch is recoverable/fixable from a real
         computer (Pierre, PR #162). Two distinct pushes, do not conflate: the **thread
         branch** push here is host-side + automatic; the **``main``** publish stays
-        user-gated (the "Push to origin" button → :meth:`push_main`). The **agent** can
+        user-gated (the "Merge & Push" button → :meth:`merge_and_push`). The **agent** can
         push neither (no creds + push-blocker middleware + the git-shim). So a deploy-box
         loss mid-thread no longer loses committed work — origin has the branch.
         """

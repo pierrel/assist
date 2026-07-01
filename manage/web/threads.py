@@ -1398,7 +1398,9 @@ def merge_thread(tid: str):
                 status_code=303,
             )
         except OriginAdvancedError as e:
-            # origin kept advancing during the push — a transient racing condition; retry.
+            # origin/main isn't a fast-forward from local main. Often transient (retry via
+            # Merge & Push); if it persists the two genuinely diverged and need manual
+            # reconciliation from a real computer. The error message says both.
             raise HTTPException(status_code=409, detail=str(e))
         except ValueError as e:
             # User-friendly error (already on main, no changes, catch-up conflict).
