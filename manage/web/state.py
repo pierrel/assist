@@ -23,6 +23,7 @@ from typing import Dict
 from fastapi import FastAPI
 
 from assist.domain_manager import DomainManager
+from assist.domain_mirror import DomainMirror
 from assist.env import load_dev_env
 from assist.sandbox_manager import SandboxManager
 from assist.schedule.store import ScheduleStore
@@ -163,13 +164,36 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
         return None
 
 
+def _get_domain_mirror(tid: str) -> DomainMirror | None:
+    """The read-only mirror for this thread's domain, or None (no git domain)."""
+    dm = _get_domain_manager(tid)
+    if not dm or not dm.repo:
+        return None
+    return DomainMirror(ROOT, dm.repo, _domain_label(dm.repo))
+
+
 def _get_sandbox_backend(tid: str, tz: str | None = None):
     """Get sandbox backend for a thread, or None if Docker is unavailable.
 
     ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
-    runs in the user's local time (else the host/server zone)."""
+    runs in the user's local time (else the host/server zone).
+
+    Runs off the event loop (called from ``_process_message``'s background task), so the
+    turn-start mirror refresh (a git fetch) is safe here. If the refresh fails but a
+    last-good mirror exists, mount that (stale but usable); if none exists yet, skip the
+    mount (the agent can't sync this turn, but the thread still works)."""
     work_dir = MANAGER.thread_default_working_dir(tid)
-    return SandboxManager.get_sandbox_backend(work_dir, tz=tz)
+    mirror = _get_domain_mirror(tid)
+    mirror_path = None
+    if mirror is not None:
+        try:
+            mirror.refresh()
+            mirror_path = mirror.path
+        except Exception as e:
+            logging.getLogger(__name__).warning("mirror refresh failed for %s: %s", tid, e)
+            if os.path.isdir(mirror.path):
+                mirror_path = mirror.path
+    return SandboxManager.get_sandbox_backend(work_dir, tz=tz, mirror_path=mirror_path)
 
 
 def _has_unmerged_changes(tid: str) -> bool:

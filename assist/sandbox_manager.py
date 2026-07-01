@@ -221,8 +221,14 @@ class SandboxManager:
         )
 
     @classmethod
-    def get_sandbox_backend(cls, work_dir: str, tz: str | None = None):
+    def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
+                            mirror_path: str | None = None):
         """Return a DockerSandboxBackend for work_dir, creating a container if needed.
+
+        ``mirror_path`` (when the thread has a git domain) is the host path of the
+        domain's bare mirror; it is bind-mounted READ-ONLY at ``/srv/domain.git`` so the
+        agent can ``git fetch mirror`` to rebase onto main without reaching — or being
+        able to push to — the real origin. Read-only by kernel construction.
 
         Returns None if Docker is not available.
         """
@@ -330,12 +336,16 @@ class SandboxManager:
                 for k, v in os.environ.items()
                 if k.startswith("ASSIST_")
             })
+            volumes = {work_dir: {"bind": "/workspace", "mode": "rw"}}
+            if mirror_path:
+                from assist.domain_mirror import CONTAINER_MOUNT
+                volumes[mirror_path] = {"bind": CONTAINER_MOUNT, "mode": "ro"}
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
                 remove=True,
                 user=user_arg,
-                volumes={work_dir: {"bind": "/workspace", "mode": "rw"}},
+                volumes=volumes,
                 working_dir="/workspace",
                 stdin_open=True,
                 tty=False,
