@@ -187,8 +187,9 @@ def test_review_diff_excludes_other_threads_merged_work(tmp_path):
     _git("add", ".", cwd=other)
     _git("commit", "-m", "other thread", cwd=other)
     _git("push", "origin", "main", cwd=other)
-    # host pre-fetch (turn start) + the agent rebases onto origin/main
-    _git("fetch", "origin", cwd=clone)
+    # host turn-start pre-fetch (fetch_origin fast-forwards local main to origin/main),
+    # then the agent rebases onto origin/main
+    dm.fetch_origin()
     _git("rebase", "origin/main", cwd=clone)
 
     files = [c.path for c in dm.main_diff()]

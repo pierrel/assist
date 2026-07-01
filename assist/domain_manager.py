@@ -200,53 +200,30 @@ def git_diff(repo_dir: str) -> List[Change]:
     return changes
 
 
-def _review_base(repo_dir: str) -> str:
-    """The base to diff a thread branch against for review: whichever of local ``main`` /
-    ``origin/main`` is the MORE ADVANCED main line.
-
-    - When ``origin/main`` is strictly ahead of local ``main`` (another thread merged +
-      pushed; local ``main`` is the stale clone-time ref), use ``origin/main`` — else that
-      other thread's work spuriously shows up as THIS thread's change (the thread
-      20260701075938 bug).
-    - When local ``main`` is ahead (this thread just merged a squash that isn't pushed
-      yet), keep local ``main`` — else the just-merged work would re-appear as unreviewed.
-
-    Implemented as: use ``origin/main`` iff local ``main`` is an ancestor of it. Falls back
-    to ``main`` when ``origin/main`` isn't resolvable."""
-    if subprocess.run(
-            ['git', '-C', repo_dir, 'rev-parse', '--verify', '--quiet', 'origin/main'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False).returncode != 0:
-        return 'main'
-    local_is_behind = subprocess.run(
-        ['git', '-C', repo_dir, 'merge-base', '--is-ancestor', 'main', 'origin/main'],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False).returncode == 0
-    return 'origin/main' if local_is_behind else 'main'
-
-
 def git_diff_main(repo_dir: str) -> List[Change]:
-    """Return diffs of the thread branch compared to the current upstream main.
+    """Return diffs of the thread branch compared to ``main``.
 
-    Uses ``origin/main`` (see :func:`_review_base`) so changes another thread merged into
-    main don't show up as this thread's work. Includes tracked changes and untracked
-    files as added.
+    ``main`` is kept fast-forwarded to ``origin/main`` each turn (see
+    :meth:`DomainManager._fast_forward_local_main`), so ``main...HEAD`` reflects only THIS
+    thread's own work — never changes another thread merged into main. Includes tracked
+    changes and untracked files as added.
     """
     changes: List[Change] = []
-    base = _review_base(repo_dir)
 
-    # Files changed relative to the current main
+    # Files changed relative to main
     names = subprocess.run(
-        ['git', '-C', repo_dir, 'diff', '--name-only', f'{base}...'],
+        ['git', '-C', repo_dir, 'diff', '--name-only', 'main...'],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         check=False,
     )
     if names.returncode not in (0, 1):
-        raise RuntimeError(f"git diff --name-only {base}... failed: {names.stderr.strip()}")
+        raise RuntimeError(f"git diff --name-only main... failed: {names.stderr.strip()}")
 
     for path in [l.strip() for l in names.stdout.splitlines() if l.strip()]:
         d = subprocess.run(
-            ['git', '-C', repo_dir, 'diff', '--no-color', f'{base}...', '--', path],
+            ['git', '-C', repo_dir, 'diff', '--no-color', 'main...', '--', path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding='utf-8',
@@ -254,7 +231,7 @@ def git_diff_main(repo_dir: str) -> List[Change]:
             check=False,
         )
         if d.returncode not in (0, 1):
-            raise RuntimeError(f"git diff {base}... failed for {path}: {d.stderr.strip()}")
+            raise RuntimeError(f"git diff main... failed for {path}: {d.stderr.strip()}")
         if d.stdout:
             changes.append(Change(path=path, diff=d.stdout))
 
@@ -453,10 +430,10 @@ class DomainManager:
         )
         if worktree.returncode == 1:
             return True
-        # 2. Branch commits vs the current-main merge-base (origin/main, not stale local
-        #    main — else another thread's merged work would badge this thread as unmerged).
+        # 2. Branch commits vs main merge-base (main is kept ff'd to origin/main each turn,
+        #    so another thread's merged work doesn't badge this thread as unmerged).
         committed = subprocess.run(
-            ['git', '-C', self.repo_path, 'diff', '--quiet', f'{_review_base(self.repo_path)}...'],
+            ['git', '-C', self.repo_path, 'diff', '--quiet', 'main...'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
         if committed.returncode == 1:
@@ -558,6 +535,25 @@ class DomainManager:
         if r.returncode != 0:
             logger.warning("origin pre-fetch failed for %s: %s",
                            self.repo_path, r.stderr.strip())
+            return
+        self._fast_forward_local_main()
+
+    def _fast_forward_local_main(self) -> None:
+        """Keep local ``main`` fast-forwarded to ``origin/main`` so the review diff
+        (``main...HEAD``) always reflects THIS thread's own work — never changes another
+        thread merged into main. Only when local ``main`` is strictly BEHIND
+        ``origin/main`` (an ancestor of it) and isn't the checked-out branch; this never
+        rewinds a just-merged-but-unpushed local squash (local ``main`` legitimately
+        ahead)."""
+        if current_branch(self.repo_path) == 'main':
+            return
+        behind = subprocess.run(
+            ['git', '-C', self.repo_path, 'merge-base', '--is-ancestor', 'main', 'origin/main'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False).returncode == 0
+        if behind:
+            subprocess.run(
+                ['git', '-C', self.repo_path, 'update-ref', 'refs/heads/main', 'origin/main'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
 
     def merge_to_main(self) -> str:
         """Rebase the thread branch onto ``origin/main`` and squash-merge it
