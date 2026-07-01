@@ -262,8 +262,8 @@ def git_diff_main(repo_dir: str) -> List[Change]:
 
 def git_diff_range(repo_dir: str, range_spec: str) -> List[Change]:
     """Committed diffs across a commit range (e.g. ``origin/main..main`` = what local
-    main has that origin/main doesn't). No working-
-    tree/untracked files — a range diff is commit-to-commit."""
+    main has that origin/main doesn't). No working-tree or untracked files — a range
+    diff is commit-to-commit."""
     changes: List[Change] = []
     names = subprocess.run(
         ['git', '-C', repo_dir, 'diff', '--name-only', range_spec],

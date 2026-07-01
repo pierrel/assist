@@ -1397,11 +1397,17 @@ def push_preview_page(tid: str):
         MANAGER.get(tid)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Thread not found")
+    if _get_status(tid).get("stage") in BUSY_STAGES:
+        # A live turn's agent is running git in the same checkout; a concurrent
+        # fetch+diff here would race it (index.lock) and mislead. Same 409 as merge/push.
+        raise HTTPException(
+            status_code=409,
+            detail="Thread is busy. Wait for the current turn to finish before previewing.")
     dm = _get_domain_manager(tid)
     if not dm or not dm.repo:
         raise HTTPException(status_code=400, detail="No git repository for this thread")
-    # Serialize with merge/push_main (which reset/rewrite main): they hold MERGE_LOCK, so
-    # holding it here keeps the preview's fetch+diff from racing a concurrent merge.
+    # Also serialize with merge/push_main (which reset/rewrite main): they hold MERGE_LOCK,
+    # so holding it here keeps the preview's fetch+diff from racing a concurrent merge.
     with MERGE_LOCK:
         diffs = dm.push_preview()
     body = (_render_inline_diffs(tid, diffs) if diffs
