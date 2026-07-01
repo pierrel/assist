@@ -1,6 +1,6 @@
 ---
 name: git-sync
-description: Bring this thread's branch up to date with the latest main AND resolve git rebase conflicts — rebase onto main, working through any conflict markers. Use when the user asks to sync with main, get the latest, rebase onto main, update the branch, land recent changes, OR to resolve a merge/rebase conflict (files under Unmerged paths, a Merge-to-Main conflict banner). Load before running any git rebase.
+description: Bring this thread's branch up to date with the latest main AND resolve git rebase conflicts — rebase onto main, working through any conflict markers. Use when the user asks to sync with main, get the latest, rebase onto main, update the branch, land recent changes, OR to resolve a merge/rebase conflict (files under Unmerged paths, a Merge & Push conflict banner). Load before running any git rebase.
 ---
 
 # Sync this thread's branch with main

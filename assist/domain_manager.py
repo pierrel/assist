@@ -527,9 +527,14 @@ class DomainManager:
             ['git', '-C', self.repo_path, 'merge-base', '--is-ancestor', 'main', 'origin/main'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False).returncode == 0
         if behind:
-            subprocess.run(
+            r = subprocess.run(
                 ['git', '-C', self.repo_path, 'update-ref', 'refs/heads/main', 'origin/main'],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            if r.returncode != 0:
+                # A silent failure here leaves local main stale, which would let another
+                # thread's merged work re-appear in this thread's review diff — log it.
+                logger.warning("could not fast-forward local main to origin/main in %s: %s",
+                               self.repo_path, r.stderr.strip())
 
     def merge_to_main(self) -> str:
         """Rebase the thread branch onto ``origin/main`` and squash-merge it
@@ -692,9 +697,9 @@ class DomainManager:
         Refuses (raises :class:`OriginAdvancedError`) if ``origin/main``
         has advanced past local ``main``'s ancestor — pushing would not
         be a fast-forward, and silently overwriting remote work is the
-        worst possible failure mode.  The caller is expected to surface
-        the error to the user with the "click Merge to Main again, then
-        click Push again" copy.
+        worst possible failure mode.  Callers (``merge_and_push``) surface
+        the error's "click Merge & Push again / reconcile from a real
+        computer" copy to the user.
 
         No-op (raises ``ValueError``) if no remote is configured.
         """
@@ -743,14 +748,17 @@ class DomainManager:
 
         This is the single "Merge & Push" button: there is no reason to merge without
         pushing, and keeping them together removes the merge/push deadlock (push says
-        "merge first", merge says "push first"). Self-heals the rare window where origin
-        advances between the merge and the push: it rebases local ``main`` onto the current
-        ``origin/main`` and retries.
+        "merge first", merge says "push first"). It flushes any prior unpushed merge, then
+        rebases the thread branch onto the current ``origin/main``, squashes into ``main``,
+        and pushes.
 
         Raises :class:`MergeConflictError` when rebasing the THREAD branch conflicts
         (resolve via the git-sync skill, then click again); ``ValueError`` when there's
-        nothing to merge, HEAD is on ``main``, or a main/origin catch-up itself conflicts
-        (that one needs a fix from a real computer — the thread branch is pushed for it)."""
+        nothing to merge or HEAD is on ``main``; :class:`OriginAdvancedError` when
+        ``origin/main`` genuinely diverged so the push can't fast-forward — a clear,
+        recoverable error (reconcile from a real computer; the thread branch is pushed),
+        NOT a deadlock. It does not auto-rebase local ``main`` onto a diverged origin
+        (that would rewrite the squash SHA and desync the thread branch)."""
         if not self.repo:
             raise ValueError("No remote configured for this domain")
         # 1. Flush any prior unpushed merge first (a previous push that failed for a
