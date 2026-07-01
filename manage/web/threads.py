@@ -386,12 +386,17 @@ def render_thread(
             pass
 
     push_btn_html = (
-        f"""<form action="/thread/{tid}/push-main" method="post" style="margin: 0;">
-              <button class="btn push-btn" type="submit"
-                      onclick="return confirm('Push local main to origin?');">
-                Push to origin
-              </button>
-            </form>"""
+        f"""<div style="display:flex; gap:.5rem; align-items:center; margin:0;">
+              <a class="btn btn-secondary" href="/thread/{tid}/push-preview" target="_blank">
+                Preview push
+              </a>
+              <form action="/thread/{tid}/push-main" method="post" style="margin: 0;">
+                <button class="btn push-btn" type="submit"
+                        onclick="return confirm('Push local main to origin?');">
+                  Push to origin
+                </button>
+              </form>
+            </div>"""
         if show_push_button else ""
     )
 
@@ -1382,9 +1387,42 @@ async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: st
     )
 
 
+@app.get("/thread/{tid}/push-preview", response_class=HTMLResponse)
+def push_preview_page(tid: str):
+    """Render the diff a push would send (local main vs origin/main), so the user can
+    review before clicking "Push to origin". Sync (blocking git fetch + diff) → runs in
+    the threadpool, never the event loop."""
+    try:
+        MANAGER.get(tid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    dm = _get_domain_manager(tid)
+    if not dm or not dm.repo:
+        raise HTTPException(status_code=400, detail="No git repository for this thread")
+    diffs = dm.push_preview()
+    body = (_render_inline_diffs(tid, diffs) if diffs
+            else "<p>Nothing to push — local main matches origin/main.</p>")
+    return HTMLResponse(
+        f"""<!doctype html><html><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Preview push</title><style>{_DIFF_CSS}
+  body {{ font-family: system-ui, sans-serif; margin: 1rem; }}
+  .btn {{ display:inline-block; padding:.4rem .7rem; border:1px solid #ccc; border-radius:6px;
+          background:#f5f5f5; text-decoration:none; color:#222; }}</style></head><body>
+  <a class="btn" href="/thread/{tid}">&larr; Back to thread</a>
+  <h2>Push preview — local main vs origin/main</h2>
+  {body}
+</body></html>""")
+
+
 @app.post("/thread/{tid}/merge")
-async def merge_thread(tid: str):
+def merge_thread(tid: str):
     """Rebase the thread branch onto origin/main and squash into local main.
+
+    Declared SYNC (not ``async def``) on purpose: it acquires ``MERGE_LOCK`` and runs
+    blocking git subprocesses, so FastAPI must run it in the threadpool — an ``async def``
+    would block the single-worker event loop for the whole merge (a full outage). Same
+    reason ``/show`` and the push routes are sync.
 
     Holds ``MERGE_LOCK`` for the duration so two web requests merging or
     pushing at the same instant don't race the host's git operations.
@@ -1411,17 +1449,9 @@ async def merge_thread(tid: str):
     if not dm or not dm.repo:
         raise HTTPException(status_code=400, detail="No git repository configured for this thread")
 
-    # Get a model for summarizing
-    from assist.model_manager import select_assistant_model
-    try:
-        summary_model = select_assistant_model(temperature=0.1)
-    except Exception:
-        # If model fails to load, pass None and use fallback summary
-        summary_model = None
-
     with MERGE_LOCK:
         try:
-            dm.merge_to_main(summary_model)
+            dm.merge_to_main()
             _clear_conflict(tid)
             return RedirectResponse(
                 url=f"/thread/{tid}?merged=1",
@@ -1446,8 +1476,11 @@ async def merge_thread(tid: str):
 
 
 @app.post("/thread/{tid}/push-main")
-async def push_main(tid: str):
+def push_main(tid: str):
     """Fast-forward push local ``main`` to ``origin/main``.
+
+    Sync (not ``async def``): holds ``MERGE_LOCK`` + blocking git (fetch/push), so it must
+    run in the threadpool, never on the event loop.
 
     User-initiated only — the agent has no way to reach this endpoint.
     Holds ``MERGE_LOCK`` so a concurrent merge can't slip in between

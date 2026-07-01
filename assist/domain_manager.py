@@ -255,6 +255,29 @@ def git_diff_main(repo_dir: str) -> List[Change]:
     return changes
 
 
+def git_diff_range(repo_dir: str, range_spec: str) -> List[Change]:
+    """Committed diffs across a commit range (e.g. ``origin/main...main``). No working-
+    tree/untracked files — a range diff is commit-to-commit."""
+    changes: List[Change] = []
+    names = subprocess.run(
+        ['git', '-C', repo_dir, 'diff', '--name-only', range_spec],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    if names.returncode not in (0, 1):
+        raise RuntimeError(f"git diff --name-only {range_spec} failed: {names.stderr.strip()}")
+    for path in [l.strip() for l in names.stdout.splitlines() if l.strip()]:
+        d = subprocess.run(
+            ['git', '-C', repo_dir, 'diff', '--no-color', range_spec, '--', path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding='utf-8', errors='replace', check=False,
+        )
+        if d.returncode not in (0, 1):
+            raise RuntimeError(f"git diff {range_spec} failed for {path}: {d.stderr.strip()}")
+        if d.stdout:
+            changes.append(Change(path=path, diff=d.stdout))
+    return changes
+
+
 def git_commit(repo_dir: str, message: str) -> None:
     """Stage all changes (including new files) and commit with message.
 
@@ -452,9 +475,9 @@ class DomainManager:
             logger.warning("thread-branch push failed for %s: %s",
                            branch, pushed.stderr.strip())
 
-    def merge_to_main(self, summary_model=None) -> str:
+    def merge_to_main(self) -> str:
         """Rebase the thread branch onto ``origin/main`` and squash-merge it
-        into local ``main`` with an AI-generated commit summary.
+        into local ``main`` with a deterministic commit summary.
 
         Sequence:
 
@@ -578,7 +601,7 @@ class DomainManager:
             # state on checkout, etc.); spending an LLM round-trip only
             # after they've all succeeded means a failed merge never
             # burns a model call.
-            summary = self._summarize_merge(diffs, branch_name, summary_model)
+            summary = self._summarize_merge(diffs, branch_name)
             subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', summary], check=True)
             squashed = True
 
@@ -608,39 +631,12 @@ class DomainManager:
 
         return summary
 
-    def _summarize_merge(self, diffs: List[Change], branch: str, model) -> str:
-        """Build the merge commit summary — model-driven if available,
-        deterministic fallback otherwise.  Extracted for testability.
-        """
-        if model is None:
-            # Honest fallback: summarise by file count rather than
-            # naming the first file as if it's representative — the
-            # original "Merge X: README.md" style was misleading on
-            # multi-file merges.  Truncated to the historical
-            # 72-char commit-message ceiling.
-            return f"Merge {branch}: {len(diffs)} file(s)"[:72]
-
-        log_result = subprocess.run(
-            ['git', '-C', self.repo_path, 'log', 'main', '--oneline', '-20'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
-        )
-        recent_commits = log_result.stdout if log_result.returncode == 0 else ""
-        diff_content = "\n\n".join([f"File: {c.path}\n{c.diff}" for c in diffs])
-
-        prompt = f"""You are summarizing a git merge for a commit message. Be concise and clear.
-
-Recent commit messages from this repository:
-{recent_commits}
-
-Changes in this merge:
-{diff_content}
-
-Write a single-line commit message (max 72 characters) that summarizes these changes.
-Follow the style of recent commits if applicable. Do not include any explanation, just the commit message."""
-
-        from langchain_core.messages import HumanMessage
-        response = model.invoke([HumanMessage(content=prompt)])
-        return response.content.strip().split('\n')[0][:72]
+    def _summarize_merge(self, diffs: List[Change], branch: str) -> str:
+        """The squash-commit message — deterministic (by file count, truncated to the
+        72-char ceiling). The per-turn commits already carry the agent's prose and the
+        reviewer sees the full diff, so the host LLM round-trip that used to write this
+        was dropped in the agent-driven-git rework (one fewer model call, less code)."""
+        return f"Merge {branch}: {len(diffs)} file(s)"[:72]
 
     def push_main(self) -> None:
         """Fast-forward push local ``main`` to ``origin/main``.
@@ -692,3 +688,14 @@ Follow the style of recent commits if applicable. Do not include any explanation
             return int(result.stdout.strip()) > 0
         except ValueError:
             return False
+
+    def push_preview(self) -> List[Change]:
+        """The diff a push would send: local ``main`` vs ``origin/main`` — what the user
+        reviews before clicking "Push to origin", distinct from the per-thread review diff
+        (``main_diff``). Fetches origin first so the comparison is against the current
+        remote. Empty when nothing is unpushed."""
+        if not self.repo or not is_git_repo(self.repo_path):
+            return []
+        subprocess.run(['git', '-C', self.repo_path, 'fetch', 'origin'],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        return git_diff_range(self.repo_path, 'origin/main...main')

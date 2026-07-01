@@ -107,7 +107,7 @@ class TestDomainMerge(_DomainGitFixture):
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
         self.assertGreater(len(dm.main_diff()), 0)
 
-        summary = dm.merge_to_main(summary_model=None)
+        summary = dm.merge_to_main()
         self.assertIsInstance(summary, str)
         self.assertGreater(len(summary), 0)
 
@@ -163,7 +163,7 @@ class TestDomainMerge(_DomainGitFixture):
         """
         before = self._origin_main_sha()
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
-        dm.merge_to_main(summary_model=None)
+        dm.merge_to_main()
         after = self._origin_main_sha()
         self.assertEqual(before, after, "merge_to_main pushed to origin/main; it must not")
 
@@ -181,7 +181,7 @@ class TestDomainMerge(_DomainGitFixture):
         subprocess.run(['git', 'push', 'origin', 'main'], cwd=external, check=True, capture_output=True)
 
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
-        dm.merge_to_main(summary_model=None)
+        dm.merge_to_main()
 
         # Local main now contains both the external change and the
         # squashed thread work.
@@ -206,7 +206,7 @@ class TestDomainMerge(_DomainGitFixture):
 
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
         with self.assertRaises(MergeConflictError) as ctx:
-            dm.merge_to_main(summary_model=None)
+            dm.merge_to_main()
 
         self.assertEqual(ctx.exception.branch, 'feature/test')
         self.assertIn('README.md', ctx.exception.files)
@@ -232,13 +232,13 @@ class TestDomainMerge(_DomainGitFixture):
 
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
         with self.assertRaises(subprocess.CalledProcessError):
-            dm.merge_to_main(summary_model=None)
+            dm.merge_to_main()
 
         # Also assert it specifically didn't raise MergeConflictError
         # — a separate run because the assertRaises above consumed
         # the first.  Re-dirty if needed (still dirty from above).
         try:
-            dm.merge_to_main(summary_model=None)
+            dm.merge_to_main()
         except MergeConflictError:
             self.fail("dirty-worktree rebase failure was misclassified as MergeConflictError")
         except subprocess.CalledProcessError:
@@ -249,14 +249,14 @@ class TestDomainMerge(_DomainGitFixture):
         threads' worth of unpushed commits don't pile onto local main.
         """
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
-        dm.merge_to_main(summary_model=None)
+        dm.merge_to_main()
         # Now on a fresh assist/* branch.  Add another change to merge.
         with open(os.path.join(self.repo_path, "second.txt"), 'w') as f:
             f.write("second turn\n")
         subprocess.run(['git', '-C', self.repo_path, 'add', '.'], check=True)
         subprocess.run(['git', '-C', self.repo_path, 'commit', '-m', 'Second turn'], check=True)
         with self.assertRaises(ValueError) as ctx:
-            dm.merge_to_main(summary_model=None)
+            dm.merge_to_main()
         self.assertIn("unpushed commits", str(ctx.exception))
 
     # --- push_main ----------------------------------------------------------
@@ -264,7 +264,7 @@ class TestDomainMerge(_DomainGitFixture):
     def test_push_main_succeeds_when_local_ahead(self):
         before = self._origin_main_sha()
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
-        dm.merge_to_main(summary_model=None)
+        dm.merge_to_main()
         self.assertTrue(dm.has_unpushed_main())
 
         dm.push_main()
@@ -278,7 +278,7 @@ class TestDomainMerge(_DomainGitFixture):
         outcome.
         """
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
-        dm.merge_to_main(summary_model=None)
+        dm.merge_to_main()
 
         # Externally advance origin/main past the merge commit.
         external = self._external_clone()
@@ -376,17 +376,14 @@ class TestThreadBranchInvariant(_DomainGitFixture):
         self.assertEqual(second, 'assist/20260101-000000-abcd-1')
 
     def test_merge_summary_failure_does_not_strand_on_main(self):
-        """If the LLM summary call raises mid-merge (after checkout main,
-        before the squash commit), the thread must be restored to its
-        branch with its work intact — never left on ``main``.
+        """If the summary step raises mid-merge (after checkout main, before the squash
+        commit), the thread must be restored to its branch with its work intact — never
+        left on ``main``.
         """
-        class _RaisingModel:
-            def invoke(self, _messages):
-                raise RuntimeError("LLM unavailable")
-
         dm = DomainManager(repo_path=self.repo_path, repo=self.remote_dir)
-        with self.assertRaises(RuntimeError):
-            dm.merge_to_main(summary_model=_RaisingModel())
+        with patch.object(dm, '_summarize_merge', side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                dm.merge_to_main()
 
         # Not stranded on main; back on the thread branch, work reviewable.
         self.assertEqual(current_branch(self.repo_path), 'feature/test')
@@ -414,7 +411,7 @@ class TestThreadBranchInvariant(_DomainGitFixture):
                            branch_suffix='abcd')
         with patch('assist.domain_manager.create_timestamped_branch', side_effect=flaky):
             with self.assertRaises(RuntimeError):
-                dm.merge_to_main(summary_model=None)
+                dm.merge_to_main()
 
         # HEAD healed off main onto a fresh thread branch.
         cur = current_branch(self.repo_path)

@@ -68,3 +68,25 @@ def test_sync_force_pushes_after_a_rebase_rewrite(tmp_path):
                           capture_output=True, text=True).stdout.strip() == \
         subprocess.run(["git", "-C", clone, "rev-parse", branch],
                        capture_output=True, text=True).stdout.strip()
+
+
+def test_push_preview_shows_local_main_ahead_of_origin(tmp_path):
+    # push_preview = what a push would send (local main vs origin/main).
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="ef56")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    _git("checkout", "main", cwd=clone)
+    (tmp_path / "clone" / "landed.txt").write_text("merged, not pushed")
+    _git("add", ".", cwd=clone)
+    _git("commit", "-m", "landed a merge", cwd=clone)
+    diffs = dm.push_preview()
+    assert any("landed.txt" in c.path for c in diffs)
+
+
+def test_push_preview_empty_when_in_sync(tmp_path):
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="ef56")
+    assert dm.push_preview() == []   # nothing unpushed
