@@ -120,3 +120,27 @@ def test_sync_aborts_agent_left_inprogress_rebase(tmp_path):
 
     assert current_branch(clone) == branch          # reattached, not detached "HEAD"
     assert not os.path.isdir(os.path.join(clone, ".git", "rebase-merge"))  # rebase aborted
+
+
+def test_sync_reattaches_plain_detached_head(tmp_path):
+    # Agent detached HEAD WITHOUT a rebase (e.g. git checkout <sha>); sync() must
+    # re-branch at the current commit and commit on a branch — not orphan (Copilot rd2).
+    import os
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="ij90")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    sha = subprocess.run(["git", "-C", clone, "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    _git("checkout", sha, cwd=clone)                     # detached HEAD, no rebase
+    assert current_branch(clone) == "HEAD"
+    (tmp_path / "clone" / "detached_work.txt").write_text("work\n")
+
+    dm.sync("work while detached")
+
+    b = current_branch(clone)
+    assert b.startswith("assist/") and b != "HEAD"       # re-attached to a thread branch
+    shown = subprocess.run(["git", "-C", clone, "show", "--name-only", "--oneline", "HEAD"],
+                           capture_output=True, text=True).stdout
+    assert "detached_work.txt" in shown   # work committed, not orphaned

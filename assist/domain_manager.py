@@ -61,12 +61,15 @@ def _branch_exists(repo_dir: str, name: str) -> bool:
     ).returncode == 0
 
 
-def create_timestamped_branch(repo_dir: str, suffix: str | None = None) -> str:
-    """Create and checkout a new assist/[timestamp][-suffix] branch from main.
+def create_timestamped_branch(repo_dir: str, suffix: str | None = None,
+                              start_point: str = 'main') -> str:
+    """Create and checkout a new assist/[timestamp][-suffix] branch from ``start_point``.
 
     ``suffix`` is appended (with a leading hyphen) when supplied.  Pass
     the last 4 chars of the thread id to avoid collisions when two
-    threads are created within the same UTC second.
+    threads are created within the same UTC second.  ``start_point`` is
+    normally ``main`` (a fresh thread branch) but is ``HEAD`` when
+    re-attaching a detached HEAD so the detached commit is preserved.
 
     Returns the new branch name.
     """
@@ -84,7 +87,8 @@ def create_timestamped_branch(repo_dir: str, suffix: str | None = None) -> str:
     while _branch_exists(repo_dir, branch_name):
         branch_name = f'{base}-{n}'
         n += 1
-    subprocess.run(['git', '-C', repo_dir, 'checkout', '-b', branch_name, 'main'], check=True)
+    subprocess.run(['git', '-C', repo_dir, 'checkout', '-b', branch_name, start_point],
+                   check=True)
     return branch_name
 
 
@@ -101,11 +105,19 @@ def ensure_thread_branch(repo_dir: str, suffix: str | None = None) -> str:
     When HEAD is on ``main``, re-branch onto a fresh ``assist/<ts>``
     branch off ``main``.  ``git checkout -b`` carries the working tree's
     uncommitted edits forward, so an in-flight turn lands on the new
-    branch.  Any other state — already on a thread branch, on some other
-    branch, or detached — is left untouched.  Returns the branch HEAD
-    ends up on.
+    branch.  When HEAD is DETACHED (the agent ran ``git checkout <sha>`` /
+    ``origin/main``, or left a rebase state), re-branch AT the current
+    commit so a commit doesn't orphan onto no branch — the detached work
+    is preserved on a reviewable/pushable thread branch.  Already on a
+    thread branch, or on some other named branch: left untouched.  Returns
+    the branch HEAD ends up on.
     """
     branch = current_branch(repo_dir)
+    if branch == 'HEAD':   # detached — re-attach at the current commit
+        new_branch = create_timestamped_branch(repo_dir, suffix=suffix, start_point='HEAD')
+        logger.warning("Thread was on detached HEAD; re-branched to %s at the current "
+                       "commit so its work stays on a branch", new_branch)
+        return new_branch
     if branch != 'main':
         return branch
     new_branch = create_timestamped_branch(repo_dir, suffix=suffix)
@@ -249,7 +261,8 @@ def git_diff_main(repo_dir: str) -> List[Change]:
 
 
 def git_diff_range(repo_dir: str, range_spec: str) -> List[Change]:
-    """Committed diffs across a commit range (e.g. ``origin/main...main``). No working-
+    """Committed diffs across a commit range (e.g. ``origin/main..main`` = what local
+    main has that origin/main doesn't). No working-
     tree/untracked files — a range diff is commit-to-commit."""
     changes: List[Change] = []
     names = subprocess.run(
@@ -723,4 +736,4 @@ class DomainManager:
         if r.returncode != 0:
             logger.warning("push-preview fetch failed for %s: %s (preview may be stale)",
                            self.repo_path, r.stderr.strip())
-        return git_diff_range(self.repo_path, 'origin/main...main')
+        return git_diff_range(self.repo_path, 'origin/main..main')
