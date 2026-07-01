@@ -18,9 +18,13 @@ agent-impossible.
 
 * Goals / non-goals
 - The **agent** decides when to sync and does fetch / ff / rebase / conflict-resolution
-  from inside the thread. It **NEVER pushes**.
-- **Unchanged, non-agent:** (a) initial clone + branch at thread creation; (b) push to
-  origin (user button; impossible for the agent).
+  from inside the thread. It **NEVER pushes** (any branch).
+- **Host-side, automatic (not the agent):** (a) initial clone + branch at thread
+  creation; (b) after **every turn**, commit the turn's work AND **push the thread
+  branch** to origin — so Pierre can check out that branch on a real computer and fix it
+  there (Pierre, PR #162 review). This is a *feature-branch* push; it is not a publish.
+- **Host-side, user-gated:** the push of **`main`** to origin (the "Push to origin"
+  button) — the only *publish*, still user-triggered and impossible for the agent.
 - New web view: **local main vs origin/main** — what would be pushed.
 - A **usable git path** for local-path domains ("life") reachable from the container.
 - **Non-goals:** the agent pushing anywhere; submodule/LFS; per-turn *auto*-rebase
@@ -35,7 +39,7 @@ agent-impossible.
 | 4 | Squash-to-local-main + push | **Host**, user-gated (Merge/Land + Push buttons). Not handed to the small model. |
 | 5 | AI merge summary | Drop the host model call; deterministic squash message. (Open Q2.) |
 | 6 | Conflict model | Live in-workspace rebase; agent resolves markers + ~--continue~; ~--abort~ = the un-stuck escape. |
-| 7 | Per-turn auto-commit | **Keep** host-side automatic (what makes work reviewable). (Open Q4.) |
+| 7 | Per-turn host git | **Commit AND push the thread branch** to origin every turn (host-side, automatic) — reviewable + fixable from a real computer. Agent never pushes; `main` push stays user-gated. |
 | 8 | Mirror freshness | Host fetch at clone time + turn start; per-domain refresh lock. |
 | 9 | Push-preview freshness | Host fetch of the real origin at render (sync-def route / threadpool). |
 | 10 | Push barrier | 4 independent layers: push-blocker middleware + credential-free sandbox + setuid git-shim + **ro mirror mount**. |
@@ -146,8 +150,7 @@ before any tool call that runs git fetch, rebase, or that touches origin/main."
 
 ## The only remote you touch is `mirror` (read-only)
 - Fetch/rebase target is EXACTLY `mirror/main`. Never `origin`.
-- You CANNOT push. `origin` is unreachable and push is blocked. The user
-  publishes via the "Push to origin" button. Do not attempt it.
+- You do not push. The user pushes manually.
 
 ## Decision tree (run in order; do not improvise)
 1. execute('git -C /workspace fetch mirror')
@@ -177,7 +180,7 @@ c. execute('git -C /workspace rebase --continue')
   what conflicted and ask which side to keep. Do not guess.
 
 ## HARD RULES (never, in any execute arg)
-- never `git push` / `push --force` / `send-pack`   (blocked; user-only)
+- never `git push` / `push --force` / `send-pack`   (the user pushes manually)
 - never `git rebase --skip`         (drops a commit = lost work)
 - never `git reset --hard main` / `--hard mirror/main`  (loses the branch)
 - never `git checkout main` / touch the `main` branch   (host owns land)
@@ -258,8 +261,30 @@ holding a ~threading.Lock~ — blocking the loop; convert to sync ~def~/~run_in_
   un-mocked (symptom, not proxy).
 - Event-loop: web tests under ~PYTHONASYNCIODEBUG=1~; the push-preview + converted
   merge/push routes don't block under a held mirror lock.
-- Deferred (GPU freeze): the small-model behavioral eval of git-sync (does Qwen reliably
-  fetch→rebase→resolve→~--continue~ without pushing or touching ~main~?). Do not gate on it.
+- **Rich git-sync behavior eval suite (`edd/eval/`, real-LLM — the trickiest part, per
+  Pierre PR #162)** — now runnable (fans restored). Cover MANY conflict/edge scenarios the
+  agent must resolve, not just the happy path: main-not-advanced (no-op), clean
+  fast-forward, single-file rebase conflict resolved + ~--continue~, MULTI-STEP rebase
+  (conflict on several commits), a genuinely-unresolvable conflict → ~--abort~ + ask-user,
+  leftover-marker detection, a push attempt (must refuse, not retry), a
+  ~reset --hard main~ / ~--skip~ temptation (must refuse), wrong-remote (~origin~ vs
+  ~mirror~). Each scenario builds a real repo fixture with a real divergence and asserts
+  the agent's git end-state (branch on top of ~mirror/main~, zero markers, no push
+  succeeded) — test the symptom, not the proxy. Run under the ≤60-min / 15-min-break duty
+  cycle; this suite GATES the merge (target: consistent pass without over-fitting).
+
+* Resolutions (PR #162 review — proceeding on these)
+- Q1 squash-to-main: **host-side** (don't hand ~reset --hard main~ to the small model).
+- Q2 merge summary: **drop the host model call**, deterministic message.
+- Q3 reachability: **ro mirror** (gives the agent a real, push-proof ~git fetch~; best fit
+  for the rich conflict evals Pierre wants).
+- Q4 per-turn host git: **commit AND push the thread branch** every turn (Pierre).
+- Q5 discard-and-restart: **in v1** — skill recipe to reset the *thread branch* to
+  ~mirror/main~ (never ~main~).
+- Q6: **yes** — convert the ~async def~ merge/push routes to sync ~def~/threadpool in this PR.
+- Q7 mirror GC: prune ~$ROOT/.mirrors/<label>.git~ when a domain leaves ~ASSIST_DOMAINS~
+  (host-side, lazy).
+- SKILL.md: keep guidance TERSE — "the user pushes manually," no mechanism TMI (Pierre).
 
 * Open questions for Pierre
 1. **Squash-to-local-main:** host-deterministic land (recommended) vs the agent producing
