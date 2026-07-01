@@ -69,7 +69,7 @@ Each reviewer should return a numbered findings list with severity (BLOCKER / IM
 
 After Phase 2, push the branch and verify the build succeeds. Then run a GitHub Copilot review loop.
 
-**Deploy for parallel testing (default).** As soon as the local review loop converges, `make deploy-code` + `make restart` **from the feature branch** so the user can test the running change *while* Copilot reviews — don't wait for the Copilot loop to finish. Then **redeploy on every change made in response to a review** (Copilot or the user): fix → re-run tests → redeploy, and tell the user so they re-test. This is the default cadence, not a special request. (Only one feature branch is prod's source at a time, since `deploy-code` is `rsync --delete`.)
+**Deploy for parallel testing (default).** As soon as the local review loop converges, `make deploy-code` + `make restart` **from the feature branch — BEFORE pushing/opening the PR** — so the user can start testing the running change immediately, without waiting on PR + Copilot setup. Deploy → tell the user it's live → *then* open the PR and run the Copilot loop. Then **redeploy on every change made in response to a review** (Copilot or the user): fix → re-run tests → redeploy, and tell the user so they re-test. This is the default cadence, not a special request. (Only one feature branch is prod's source at a time, since `deploy-code` is `rsync --delete`.)
 
 **Setup.** Open the PR (or push to an existing one). If the build/CI doesn't pass first, fix that before requesting Copilot — there's no point reviewing a broken build.
 
