@@ -263,30 +263,6 @@ def git_diff_main(repo_dir: str) -> List[Change]:
     return changes
 
 
-def git_diff_range(repo_dir: str, range_spec: str) -> List[Change]:
-    """Committed diffs across a commit range (e.g. ``origin/main..main`` = what local
-    main has that origin/main doesn't). No working-tree or untracked files — a range
-    diff is commit-to-commit."""
-    changes: List[Change] = []
-    names = subprocess.run(
-        ['git', '-C', repo_dir, 'diff', '--name-only', range_spec],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
-    )
-    if names.returncode not in (0, 1):
-        raise RuntimeError(f"git diff --name-only {range_spec} failed: {names.stderr.strip()}")
-    for path in [l.strip() for l in names.stdout.splitlines() if l.strip()]:
-        d = subprocess.run(
-            ['git', '-C', repo_dir, 'diff', '--no-color', range_spec, '--', path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            encoding='utf-8', errors='replace', check=False,
-        )
-        if d.returncode not in (0, 1):
-            raise RuntimeError(f"git diff {range_spec} failed for {path}: {d.stderr.strip()}")
-        if d.stdout:
-            changes.append(Change(path=path, diff=d.stdout))
-    return changes
-
-
 def git_commit(repo_dir: str, message: str) -> None:
     """Stage all changes (including new files) and commit with message.
 
@@ -734,8 +710,9 @@ class DomainManager:
         )
         if check.returncode != 0:
             raise OriginAdvancedError(
-                "origin/main has advanced past local main. "
-                "Click 'Merge to Main' again to rebase, then click Push again."
+                "origin/main advanced past your local main (another thread's work landed). "
+                "Click Merge & Push again; if it persists, the two diverged and you'll need "
+                "to reconcile from a real computer (the branch is pushed to origin)."
             )
         subprocess.run(['git', '-C', self.repo_path, 'push', 'origin', 'main'], check=True)
 
@@ -761,16 +738,37 @@ class DomainManager:
         except ValueError:
             return False
 
-    def push_preview(self) -> List[Change]:
-        """The diff a push would send: local ``main`` vs ``origin/main`` — what the user
-        reviews before clicking "Push to origin", distinct from the per-thread review diff
-        (``main_diff``). Fetches origin first so the comparison is against the current
-        remote. Empty when nothing is unpushed."""
-        if not self.repo or not is_git_repo(self.repo_path):
-            return []
-        r = subprocess.run(['git', '-C', self.repo_path, 'fetch', 'origin'],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
-        if r.returncode != 0:
-            logger.warning("push-preview fetch failed for %s: %s (preview may be stale)",
-                           self.repo_path, r.stderr.strip())
-        return git_diff_range(self.repo_path, 'origin/main..main')
+    def merge_and_push(self) -> str:
+        """Merge the thread branch into ``main`` AND push to ``origin`` — one user action.
+
+        This is the single "Merge & Push" button: there is no reason to merge without
+        pushing, and keeping them together removes the merge/push deadlock (push says
+        "merge first", merge says "push first"). Self-heals the rare window where origin
+        advances between the merge and the push: it rebases local ``main`` onto the current
+        ``origin/main`` and retries.
+
+        Raises :class:`MergeConflictError` when rebasing the THREAD branch conflicts
+        (resolve via the git-sync skill, then click again); ``ValueError`` when there's
+        nothing to merge, HEAD is on ``main``, or a main/origin catch-up itself conflicts
+        (that one needs a fix from a real computer — the thread branch is pushed for it)."""
+        if not self.repo:
+            raise ValueError("No remote configured for this domain")
+        # 1. Flush any prior unpushed merge first (a previous push that failed for a
+        #    transient reason while origin did NOT advance — a fast-forward push now).
+        pushed_pending = False
+        if self.has_unpushed_main():
+            self.push_main()   # OriginAdvancedError if origin diverged meanwhile -> surfaced
+            pushed_pending = True
+        # 2. Merge this thread's own work, if any.
+        branch_name = current_branch(self.repo_path)
+        if branch_name == 'main':
+            raise ValueError("Already on main branch - nothing to merge")
+        if not self.main_diff():
+            if pushed_pending:
+                return "Pushed pending changes to origin."
+            raise ValueError("No changes to merge")
+        summary = self.merge_to_main()   # rebase onto current origin/main + squash + commit + re-branch
+        # 3. Push the fresh merge. main == origin/main + the squash (origin was just fetched
+        #    in merge_to_main), so this fast-forwards unless origin advanced in the window.
+        self.push_main()
+        return summary

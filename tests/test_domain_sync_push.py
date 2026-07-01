@@ -70,26 +70,6 @@ def test_sync_force_pushes_after_a_rebase_rewrite(tmp_path):
                        capture_output=True, text=True).stdout.strip()
 
 
-def test_push_preview_shows_local_main_ahead_of_origin(tmp_path):
-    # push_preview = what a push would send (local main vs origin/main).
-    origin = _origin_with_main(tmp_path)
-    clone = str(tmp_path / "clone")
-    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="ef56")
-    _git("config", "user.email", "t@example.com", cwd=clone)
-    _git("config", "user.name", "Test", cwd=clone)
-    _git("checkout", "main", cwd=clone)
-    (tmp_path / "clone" / "landed.txt").write_text("merged, not pushed")
-    _git("add", ".", cwd=clone)
-    _git("commit", "-m", "landed a merge", cwd=clone)
-    diffs = dm.push_preview()
-    assert any("landed.txt" in c.path for c in diffs)
-
-
-def test_push_preview_empty_when_in_sync(tmp_path):
-    origin = _origin_with_main(tmp_path)
-    clone = str(tmp_path / "clone")
-    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="ef56")
-    assert dm.push_preview() == []   # nothing unpushed
 
 
 def test_sync_aborts_agent_left_inprogress_rebase(tmp_path):
@@ -196,3 +176,76 @@ def test_review_diff_excludes_other_threads_merged_work(tmp_path):
     assert "mine.txt" in files                 # this thread's work IS shown
     assert "fitness.txt" not in files          # the other thread's merged work is NOT
     assert dm.has_changes_vs_main() is True     # still correctly flagged as having work
+
+
+def _origin_main_sha(origin):
+    r = subprocess.run(["git", "-C", origin, "rev-parse", "main"], capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def test_merge_and_push_merges_then_pushes(tmp_path):
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="pq56")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    thread = current_branch(clone)
+    (tmp_path / "clone" / "feature.txt").write_text("work\n")
+    _git("add", ".", cwd=clone)
+    _git("commit", "-m", "my work", cwd=clone)
+    before = _origin_main_sha(origin)
+
+    dm.merge_and_push()
+
+    assert _origin_main_sha(origin) != before                 # origin/main advanced (pushed)
+    # feature.txt landed on origin/main
+    check = str(tmp_path / "check")
+    _git("clone", origin, check)
+    assert (tmp_path / "check" / "feature.txt").exists()
+    # local main == origin/main; thread is on a fresh branch
+    assert _has_ref(clone, "main")
+    new_branch = current_branch(clone)
+    assert new_branch.startswith("assist/") and new_branch != thread
+
+
+def test_merge_and_push_no_changes_raises(tmp_path):
+    from assist.domain_manager import DomainManager
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="rs78")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    import pytest
+    with pytest.raises(ValueError):
+        dm.merge_and_push()                                   # nothing to merge
+
+
+def test_merge_and_push_diverged_surfaces_clear_error_not_deadlock(tmp_path):
+    # A prior failed push left an unpushed merge on local main, and origin then advanced
+    # (diverged). merge_and_push surfaces a clear OriginAdvancedError (fix from a real
+    # computer) — NOT a merge/push mutual-block deadlock.
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="tu90")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    # simulate a prior local merge that wasn't pushed: put a commit on local main
+    _git("checkout", "main", cwd=clone)
+    (tmp_path / "clone" / "prior.txt").write_text("prior merge\n")
+    _git("add", ".", cwd=clone)
+    _git("commit", "-m", "prior unpushed merge", cwd=clone)
+    _git("checkout", "-b", "assist/thread-tu90", cwd=clone)
+    # another thread advances origin/main (non-conflicting)
+    other = str(tmp_path / "other")
+    _git("clone", origin, other)
+    (tmp_path / "other" / "elsewhere.txt").write_text("other\n")
+    _git("config", "user.email", "o@x", cwd=other)
+    _git("config", "user.name", "O", cwd=other)
+    _git("add", ".", cwd=other)
+    _git("commit", "-m", "other", cwd=other)
+    _git("push", "origin", "main", cwd=other)
+
+    from assist.domain_manager import OriginAdvancedError
+    import pytest
+    with pytest.raises(OriginAdvancedError):
+        dm.merge_and_push()   # diverged -> clear error, no deadlock

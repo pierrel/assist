@@ -368,38 +368,10 @@ def render_thread(
           following file(s) need manual reconciliation:
           <ul>{files_html}</ul>
           The agent can attempt to resolve this — type a message asking
-          it to fix the conflict, then re-click <em>Merge to Main</em>.
+          it to fix the conflict (ask it to sync with main), then re-click
+          <em>Merge &amp; Push</em>.
         </div>
         """
-
-    # The push-to-origin button is visible only when a previous merge
-    # has put unpushed work on local ``main``.  ``has_unpushed_main``
-    # is a no-fetch ref-distance check; the push endpoint does the
-    # authoritative ``fetch + ancestor check`` server-side.
-    show_push_button = False
-    if not is_init:
-        try:
-            dm_for_push = _get_domain_manager(tid)
-            if dm_for_push:
-                show_push_button = dm_for_push.has_unpushed_main()
-        except Exception:
-            pass
-
-    push_btn_html = (
-        f"""<div style="display:flex; gap:.5rem; align-items:center; margin:0;">
-              <a class="btn btn-secondary" href="/thread/{tid}/push-preview"
-                 target="_blank" rel="noopener noreferrer">
-                Preview push
-              </a>
-              <form action="/thread/{tid}/push-main" method="post" style="margin: 0;">
-                <button class="btn push-btn" type="submit"
-                        onclick="return confirm('Push local main to origin?');">
-                  Push to origin
-                </button>
-              </form>
-            </div>"""
-        if show_push_button else ""
-    )
 
     diff_block_html = ""
     if diffs:
@@ -408,26 +380,15 @@ def render_thread(
         <div class="diff-container">
           <div class="diff-actions">
             <a class="btn btn-secondary review-btn" href="/thread/{tid}/review">Review</a>
-            {push_btn_html}
             <form action="/thread/{tid}/merge" method="post" style="margin: 0;">
               <button class="btn merge-btn" type="submit"
-                      onclick="return confirm('Merge this branch into main? This will rebase onto origin/main and squash into a single commit.');">
-                Merge to Main
+                      onclick="return confirm('Merge this branch into main and push to origin? This rebases onto origin/main, squashes into one commit, and pushes.');">
+                Merge &amp; Push
               </button>
             </form>
           </div>
           <div class="diff-files">
             {diff_files_html}
-          </div>
-        </div>
-        """
-    elif show_push_button:
-        # Diff is empty (post-merge) but the user still needs the push
-        # button — render a slimmed-down action row.
-        diff_block_html = f"""
-        <div class="diff-container">
-          <div class="diff-actions">
-            {push_btn_html}
           </div>
         </div>
         """
@@ -565,9 +526,8 @@ def render_thread(
           {_thread_domain_html(tid)}
           {status_banner}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
-          {"<div class='success-msg'>Branch successfully merged to main!</div>" if merged else ""}
+          {"<div class='success-msg'>Merged to main and pushed to origin!</div>" if merged else ""}
           {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}
-          {"<div class='success-msg'>Pushed local main to origin/main.</div>" if pushed else ""}
           {conflict_banner_html}
           {f'<script>try {{ localStorage.removeItem("assist:review:" + {json.dumps(tid)}); }} catch (_) {{}}</script>' if reviewed else ""}
           {_GEO_SEND_SCRIPT}
@@ -1388,51 +1348,15 @@ async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: st
     )
 
 
-@app.get("/thread/{tid}/push-preview", response_class=HTMLResponse)
-def push_preview_page(tid: str):
-    """Render the diff a push would send (local main vs origin/main), so the user can
-    review before clicking "Push to origin". Sync (blocking git fetch + diff) → runs in
-    the threadpool, never the event loop."""
-    try:
-        MANAGER.get(tid)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    if _get_status(tid).get("stage") in BUSY_STAGES:
-        # A live turn's agent is running git in the same checkout; a concurrent
-        # fetch+diff here would race it (index.lock) and mislead. Same 409 as merge/push.
-        raise HTTPException(
-            status_code=409,
-            detail="Thread is busy. Wait for the current turn to finish before previewing.")
-    dm = _get_domain_manager(tid)
-    if not dm or not dm.repo:
-        raise HTTPException(status_code=400, detail="No git repository for this thread")
-    # Also serialize with merge/push_main (which reset/rewrite main): they hold MERGE_LOCK,
-    # so holding it here keeps the preview's fetch+diff from racing a concurrent merge.
-    with MERGE_LOCK:
-        diffs = dm.push_preview()
-    body = (_render_inline_diffs(tid, diffs) if diffs
-            else "<p>Nothing to push — local main matches origin/main.</p>")
-    return HTMLResponse(
-        f"""<!doctype html><html><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Preview push</title><style>{_DIFF_CSS}
-  body {{ font-family: system-ui, sans-serif; margin: 1rem; }}
-  .btn {{ display:inline-block; padding:.4rem .7rem; border:1px solid #ccc; border-radius:6px;
-          background:#f5f5f5; text-decoration:none; color:#222; }}</style></head><body>
-  <a class="btn" href="/thread/{tid}">&larr; Back to thread</a>
-  <h2>Push preview — local main vs origin/main</h2>
-  {body}
-</body></html>""")
-
-
 @app.post("/thread/{tid}/merge")
 def merge_thread(tid: str):
-    """Rebase the thread branch onto origin/main and squash into local main.
+    """Merge & Push: rebase the thread branch onto origin/main, squash into local main,
+    and push to origin — one action (see ``DomainManager.merge_and_push``).
 
     Declared SYNC (not ``async def``) on purpose: it acquires ``MERGE_LOCK`` and runs
     blocking git subprocesses, so FastAPI must run it in the threadpool — an ``async def``
     would block the single-worker event loop for the whole merge (a full outage). Same
-    reason ``/show`` and the push routes are sync.
+    reason ``/show`` is sync.
 
     Holds ``MERGE_LOCK`` for the duration so two web requests merging or
     pushing at the same instant don't race the host's git operations.
@@ -1461,7 +1385,7 @@ def merge_thread(tid: str):
 
     with MERGE_LOCK:
         try:
-            dm.merge_to_main()
+            dm.merge_and_push()
             _clear_conflict(tid)
             return RedirectResponse(
                 url=f"/thread/{tid}?merged=1",
@@ -1473,58 +1397,17 @@ def merge_thread(tid: str):
                 url=f"/thread/{tid}?conflict=1",
                 status_code=303,
             )
+        except OriginAdvancedError as e:
+            # origin kept advancing during the push — a transient racing condition; retry.
+            raise HTTPException(status_code=409, detail=str(e))
         except ValueError as e:
-            # User-friendly error (already on main, no changes, unpushed local main).
+            # User-friendly error (already on main, no changes, catch-up conflict).
             raise HTTPException(status_code=400, detail=str(e))
         except subprocess.CalledProcessError as e:
             # Git command failed
             raise HTTPException(status_code=500, detail=f"Git operation failed: {e}")
         except Exception as e:
             # Unexpected error
-            logging.error(f"Merge failed for thread {tid}: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Merge failed: {str(e)}")
+            logging.error(f"Merge & Push failed for thread {tid}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Merge & Push failed: {str(e)}")
 
-
-@app.post("/thread/{tid}/push-main")
-def push_main(tid: str):
-    """Fast-forward push local ``main`` to ``origin/main``.
-
-    Sync (not ``async def``): holds ``MERGE_LOCK`` + blocking git (fetch/push), so it must
-    run in the threadpool, never on the event loop.
-
-    User-initiated only — the agent has no way to reach this endpoint.
-    Holds ``MERGE_LOCK`` so a concurrent merge can't slip in between
-    the fetch and the push.  Returns 409 when ``origin/main`` has
-    advanced past local ``main`` so the user knows to re-merge.
-    """
-    try:
-        MANAGER.get(tid)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Thread not found")
-
-    if _get_status(tid).get("stage") in BUSY_STAGES:
-        raise HTTPException(
-            status_code=409,
-            detail="Thread is busy. Wait for the current turn to finish before pushing.",
-        )
-
-    dm = _get_domain_manager(tid)
-    if not dm or not dm.repo:
-        raise HTTPException(status_code=400, detail="No git repository configured for this thread")
-
-    with MERGE_LOCK:
-        try:
-            dm.push_main()
-            return RedirectResponse(
-                url=f"/thread/{tid}?pushed=1",
-                status_code=303,
-            )
-        except OriginAdvancedError as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except subprocess.CalledProcessError as e:
-            raise HTTPException(status_code=500, detail=f"Git operation failed: {e}")
-        except Exception as e:
-            logging.error(f"Push failed for thread {tid}: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Push failed: {str(e)}")
