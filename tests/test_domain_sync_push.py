@@ -163,3 +163,35 @@ def test_sync_skips_commit_when_rebase_abort_fails(tmp_path, monkeypatch):
     status = subprocess.run(["git", "-C", clone, "status", "--porcelain"],
                             capture_output=True, text=True).stdout
     assert "uncommitted.txt" in status   # sync bailed before git_commit; still uncommitted
+
+
+def test_review_diff_excludes_other_threads_merged_work(tmp_path):
+    # Bug (thread 20260701075938): after the agent rebases onto an advanced origin/main,
+    # the review diff must be vs origin/main — NOT stale local main — so another thread's
+    # merged+pushed file doesn't spuriously appear as this thread's change.
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="mn34")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    # this thread's own change
+    (tmp_path / "clone" / "mine.txt").write_text("thread work\n")
+    _git("add", ".", cwd=clone)
+    _git("commit", "-m", "my work", cwd=clone)
+    # ANOTHER thread merged + pushed fitness.txt to origin/main
+    other = str(tmp_path / "other")
+    _git("clone", origin, other)
+    (tmp_path / "other" / "fitness.txt").write_text("other thread's change\n")
+    _git("config", "user.email", "o@x", cwd=other)
+    _git("config", "user.name", "O", cwd=other)
+    _git("add", ".", cwd=other)
+    _git("commit", "-m", "other thread", cwd=other)
+    _git("push", "origin", "main", cwd=other)
+    # host pre-fetch (turn start) + the agent rebases onto origin/main
+    _git("fetch", "origin", cwd=clone)
+    _git("rebase", "origin/main", cwd=clone)
+
+    files = [c.path for c in dm.main_diff()]
+    assert "mine.txt" in files                 # this thread's work IS shown
+    assert "fitness.txt" not in files          # the other thread's merged work is NOT
+    assert dm.has_changes_vs_main() is True     # still correctly flagged as having work
