@@ -1,0 +1,279 @@
+#+TITLE: Agent-driven domain-repo git flow
+#+DATE: <2026-07-01>
+#+STATUS: DRAFT for review (Pierre) — before technical build
+
+Builds on [[file:2026-05-07-per-thread-web-git-isolation.org]] (per-thread branch + push
+isolation) and the sandbox egress-allowlist model.
+
+* Problem
+Every origin-touching git operation is host-side today (~assist/domain_manager.py~):
+clone (:119), per-turn ~sync~ (:411), ~merge_to_main~ (:432), ~push_main~. The sandboxed
+agent CANNOT fetch/rebase against ~origin/main~ — its clone's ~origin~ (e.g.
+~user@host:/path/to/life.git~) is unreachable from the internal egress network and it has
+no credentials. So the agent can't bring its branch up to date; a stale-main collision
+only ever surfaces at the host merge step, where a rebase conflict *aborts* and the user
+is stuck. We want the agent to own the interactive sync (fetch / fast-forward / rebase /
+conflict-resolution) from inside the thread — while push stays user-only and
+agent-impossible.
+
+* Goals / non-goals
+- The **agent** decides when to sync and does fetch / ff / rebase / conflict-resolution
+  from inside the thread. It **NEVER pushes**.
+- **Unchanged, non-agent:** (a) initial clone + branch at thread creation; (b) push to
+  origin (user button; impossible for the agent).
+- New web view: **local main vs origin/main** — what would be pushed.
+- A **usable git path** for local-path domains ("life") reachable from the container.
+- **Non-goals:** the agent pushing anywhere; submodule/LFS; per-turn *auto*-rebase
+  (explicitly scrapped — sync is agent-initiated).
+
+* Decision table
+| # | Decision | Choice |
+|---+----------+--------|
+| 1 | Sandbox origin reachability | Read-only bind-mounted per-domain **mirror** (~/srv/domain.git~, ~mode: ro~); container remote ~mirror~. No network, no creds, ro by construction. (Alt considered: host pre-fetch into the clone — §Reachability.) |
+| 2 | Tools vs skill | **Skill-guides-execute**; new ~git-sync~ SKILL.md; NO dedicated git tools (guidance-first ethos; push barrier is independent of tool choice). |
+| 3 | Rebase/resolve ownership | **Agent** (in-container). |
+| 4 | Squash-to-local-main + push | **Host**, user-gated (Merge/Land + Push buttons). Not handed to the small model. |
+| 5 | AI merge summary | Drop the host model call; deterministic squash message. (Open Q2.) |
+| 6 | Conflict model | Live in-workspace rebase; agent resolves markers + ~--continue~; ~--abort~ = the un-stuck escape. |
+| 7 | Per-turn auto-commit | **Keep** host-side automatic (what makes work reviewable). (Open Q4.) |
+| 8 | Mirror freshness | Host fetch at clone time + turn start; per-domain refresh lock. |
+| 9 | Push-preview freshness | Host fetch of the real origin at render (sync-def route / threadpool). |
+| 10 | Push barrier | 4 independent layers: push-blocker middleware + credential-free sandbox + setuid git-shim + **ro mirror mount**. |
+| 11 | Discard-and-restart | Skill recipe to reset the **thread branch** (never ~main~) to ~mirror/main~. (Open Q5.) |
+
+* Reachability — the crux (how the container reaches main)
+Recommended: **read-only per-domain mirror.** The host maintains one bare mirror per
+domain at ~$ROOT/.mirrors/<label>.git~ (~git fetch --prune origin~ at clone time + each
+turn start), and bind-mounts it ~mode: ro~ at ~/srv/domain.git~ in every container of
+that domain. The clone gets a second remote ~mirror = file:///srv/domain.git~; the agent
+fetches/rebases against ~mirror/main~ and never touches ~origin~.
+
+Why this over a host git-http daemon / Forgejo remote / dual network remote:
+- **Read-only by the *kernel*** (~mode: ro~) — the agent cannot receive-pack/push into it
+  even if every other barrier failed. Strongest, transport-independent push barrier.
+- **No network surface, no credentials, no allowlist change** — a filesystem mount. The
+  unreachable-local-path problem ("life") simply evaporates: the container never reaches
+  origin. Real-origin reachability/creds stay fully host-side (encapsulated in the mirror
+  refresh).
+- **Uniform** across domain kinds (local bare path today, Forgejo tomorrow both reduce to
+  "a host-maintained bare mirror, mounted ro").
+- **Gives the small model a `git fetch` that actually works** (from the mount) — more
+  robust than "don't fetch, the ref is already fresh."
+
+Simpler alternative (noted, not recommended): **host pre-fetch into the clone** — the
+host runs ~git -C <workspace> fetch origin~ at turn start, and the agent just rebases the
+already-fresh local ~origin/main~ (no mirror, no mount, no second remote). Less code, but
+the agent has no working ~fetch~ (it must be told not to run one, and a stray
+~git fetch origin~ errors) — a small-model-robustness cost. See Open Q for the call.
+
+* User stories
+** Routine
+1. I ask the agent to "get the latest main first"; it fetches ~mirror~, sees main
+   advanced, rebases cleanly, confirms up-to-date — no push.
+2. I never mention git; the agent edits files and the host auto-commits each turn to my
+   thread branch, so my work is always reviewable.
+3. I ask to sync and main has *not* moved; the agent reports "already up to date" and
+   does nothing (no needless rebase).
+4. I finish and click **Merge/Land**; the host squashes my rebased branch onto local
+   main and re-branches me forward so I can keep chatting.
+5. Before publishing I open the **push preview** and see ~origin/main...main~ — exactly
+   what will go to origin — distinct from the per-turn review diff.
+6. I click **Push to origin**; the host fast-forward-pushes local main; the agent had no
+   part in it.
+** The "life" local-path repo
+7. My ~life~ domain is ~user@host:/path/to/life.git~; my thread's agent syncs against a
+   read-only mirror at ~/srv/domain.git~ and never needs that unreachable path.
+8. Another thread merged into ~life~ yesterday; when my turn starts the host refreshes the
+   mirror, so my agent's sync picks up that work.
+9. (operator) I moved the ~life~ bare repo on disk; the next turn's host mirror refresh
+   fails LOUDLY with a clear host-side error, and my container still has the last-good
+   mirror.
+** Messy
+10. Main advanced under me while I worked; I ask to sync; the agent rebases my branch onto
+    the new main and I continue on top.
+11. Returning after weeks, main is far ahead; the agent rebases through several conflicting
+    steps, running ~--continue~ after each, and lands my branch cleanly on top.
+12. Two of my threads touched the same files; the second thread's agent hits a rebase
+    conflict, resolves the overlap in ~/workspace~, and continues.
+13. I ask the agent to resolve a conflict it genuinely can't reconcile; it ~--abort~s (my
+    committed work intact), tells me exactly what conflicted, and asks which side to keep.
+14. I click **Push** but a previous merge left an unpushed local main / origin moved; the
+    host refuses with "Merge to Main again, then Push again" (~OriginAdvancedError~).
+15. I want to throw away this thread's work and restart from latest main; the agent resets
+    the *thread branch* to ~mirror/main~ — never ~main~ itself.
+16. I ask the agent to push; it explains it cannot and points me to the "Push to origin"
+    button instead of retrying.
+17. I ask the agent to sync mid-edit; because the host auto-commits per turn, the rebase
+    operates on a committed branch (no dirty-tree surprise), or the agent commits/says so
+    before rebasing.
+18. I try to merge with an empty diff; the host says "no changes to merge" cleanly.
+19. My agent hit a genuinely un-resolvable conflict; next turn I say which side to keep and
+    it resumes the CONFLICT LOOP from there.
+20. I open two threads on the same domain at once; each has its own clone, and the shared
+    mirror refresh is serialized by a per-domain lock so neither sees a half-fetched mirror.
+
+* Edge cases (behavior + how we keep it un-stuck)
+| Edge case | Expected behavior | Un-stuck mechanism |
+|-----------+-------------------+--------------------|
+| Rebase conflict | Agent resolves markers, ~git add~, ~--continue~ | CONFLICT LOOP; ~--abort~ preserves committed work |
+| Origin unreachable from sandbox | Never happens — agent only touches ~mirror~ (ro) | No origin dependency in the container |
+| Dirty tree at sync | Branch is committed (per-turn auto-commit) before rebase; skill commits/warns if dirty | Auto-commit invariant |
+| Detached HEAD / stranded on main | Agent never touches ~main~; host ~ensure_thread_branch~ re-branches | HARD RULE + host invariant |
+| main ff-clean vs diverged | Clean → fast rebase; diverged → rebase (+conflict loop) | Decision-tree step 2 count |
+| Empty diff / nothing to merge | Host raises "No changes to merge" | Existing ~main_diff~ guard |
+| Agent tries to push | Blocked; agent sees explicit error and stops | 4 barriers + skill HARD RULE |
+| Partial/interrupted rebase (multi-step) | Loop ~--continue~ until success | CONFLICT LOOP repeats |
+| Force-push / send-pack attempt | Blocked identically to push | Shim matches ~push~/~send-pack~; HARD RULE |
+| ~reset --hard main~ attempt | Forbidden; only the *thread branch* may be reset | Skill HARD RULE (main is host-owned) |
+| Submodule / Git-LFS | Not supported v1; ordinary objects fetch fine over ~file://~ | Documented limitation |
+| Huge diff | Works but slow; preview may be large | Note; no special handling v1 |
+| Concurrent turns racing the mirror | Per-domain refresh lock serializes host fetch | New mirror lock |
+| Missing creds | Container never needs any; host holds real-origin creds only | Credential separation by construction |
+| Moved local bare repo | Host mirror refresh fails loudly at turn start | Host error surfaced; last-good mirror retained |
+
+* Agent guidance — the git-sync SKILL.md structure (centerpiece)
+Principles (CLAUDE.md/AGENTS.md): **checkable-arg recipes over prose**; one fixed decision
+tree the model does not improvise on; hard rules expressed as exact tokens the model must
+NOT put in ~execute~ args; every edge case maps to a named branch; frontmatter avoids
+~:<space>~ and does not mirror eval prompts.
+
+Frontmatter (shape): ~name: git-sync~; description triggering on "sync with main / get the
+latest / rebase onto main / bring my branch up to date / land my changes"; "MUST load
+before any tool call that runs git fetch, rebase, or that touches origin/main."
+
+#+begin_src markdown
+# Sync this thread's branch with main
+
+## The only remote you touch is `mirror` (read-only)
+- Fetch/rebase target is EXACTLY `mirror/main`. Never `origin`.
+- You CANNOT push. `origin` is unreachable and push is blocked. The user
+  publishes via the "Push to origin" button. Do not attempt it.
+
+## Decision tree (run in order; do not improvise)
+1. execute('git -C /workspace fetch mirror')
+2. execute('git -C /workspace rev-list --count HEAD..mirror/main')
+   - "0"  -> main has NOT advanced. Up to date. STOP.
+   - > 0  -> main advanced. Go to step 3.
+3. execute('git -C /workspace rebase mirror/main')
+   - exit 0                -> success. Report "synced". STOP.
+   - "CONFLICT" in output  -> go to CONFLICT LOOP.
+   - any other non-zero    -> go to STUCK.
+
+## CONFLICT LOOP  (repeat until rebase reports success)
+a. execute('git -C /workspace status')   -> read `Unmerged paths`
+b. for each unmerged file:
+   - read_file('/workspace/<file>')
+   - resolve every <<<<<<< / ======= / >>>>>>> block with edit_file;
+     leave ZERO markers
+   - execute('git -C /workspace add /workspace/<file>')
+c. execute('git -C /workspace rebase --continue')
+   - exit 0     -> success. Report what you resolved. STOP.
+   - "CONFLICT" -> another step conflicted; back to (a)
+   - other      -> STUCK
+
+## STUCK  (the un-stuck escape hatch)
+- If you cannot resolve, run execute('git -C /workspace rebase --abort').
+  Your committed work is preserved on the branch. Tell the user exactly
+  what conflicted and ask which side to keep. Do not guess.
+
+## HARD RULES (never, in any execute arg)
+- never `git push` / `push --force` / `send-pack`   (blocked; user-only)
+- never `git rebase --skip`         (drops a commit = lost work)
+- never `git reset --hard main` / `--hard mirror/main`  (loses the branch)
+- never `git checkout main` / touch the `main` branch   (host owns land)
+- only ever operate on /workspace; only ever fetch `mirror`
+#+end_src
+
+Edge case → guidance mapping:
+| Edge case | Handled by |
+|-----------+------------|
+| main advanced | step 2 count > 0 → step 3 rebase |
+| main not advanced | step 2 == "0" → STOP |
+| rebase conflict | CONFLICT LOOP + ~--continue~ |
+| can't resolve | STUCK → ~--abort~ + ask (un-stuck) |
+| leftover markers | (b) "leave ZERO markers" |
+| multi-step rebase | CONFLICT LOOP loops on ~--continue~ |
+| tries to push / force / send-pack | HARD RULES + barrier error |
+| ~reset --hard main~ / ~--skip~ | HARD RULES |
+| touching ~main~ / stranding | HARD RULE "never touch main" |
+| origin unreachable | never used — agent only touches ~mirror~ |
+| wrong remote | "fetch target is EXACTLY mirror/main" |
+
+The existing ~git-conflict~ SKILL.md is rewritten to this same CONFLICT LOOP (with
+~--continue~, since the rebase is now live), replacing today's abort-and-preempt text.
+
+* Components (Löwy)
+- **DomainMirror** (Resource Access) — where/how the real origin lives + is reached; the
+  container never learns this. ~assist/domain_mirror.py~ (or a section of domain_manager).
+- **git-sync skill** (guidance/Engine) — how the small model sequences git; the part most
+  likely to churn.
+- **DomainManager land + push_main** (Manager) — user-gated publish, deterministic.
+- **web routes/buttons** (Client) — affordances only.
+
+* Files to touch
+New: ~assist/skills/git-sync/SKILL.md~; ~assist/domain_mirror.py~ (create/refresh
+~$ROOT/.mirrors/<label>.git~ + per-domain lock); this doc.
+Modified: ~domain_manager.py~ (~clone_repo~ add ~mirror~ remote; new ~push_preview()~;
+shrink ~merge_to_main~ — drop the host model summary, keep the defensive rebase + squash +
+recovery); ~sandbox_manager.py~ (~get_sandbox_backend~ add the ro mirror volume);
+~manage/web/state.py~ (~_get_sandbox_backend~ pass the mirror path; hook refresh);
+~manage/web/threads.py~ (refresh mirror at turn start; new push-preview route as sync
+~def~; wire preview + button into ~render_thread~); ~assist/skills/git-conflict/SKILL.md~
+(rewrite for live rebase); ~dockerfiles/Dockerfile.sandbox~ (~mkdir /srv~ mount point).
+
+* Event-loop
+Container git (fetch/rebase/resolve via ~execute~) is inside the sandbox — off the loop.
+Host mirror refresh runs in ~_process_message~ (sync ~def~ background task) — off the loop;
+the per-domain lock is short-held. **Push-preview route MUST be sync ~def~** (threadpool),
+like ~/show~ (threads.py:1299). **Latent bug to fix in the same pass:** ~merge_thread~
+(:1386) and ~push_main~ (:1449) are ~async def~ calling blocking git subprocesses while
+holding a ~threading.Lock~ — blocking the loop; convert to sync ~def~/~run_in_threadpool~.
+
+* Risks
+1. **Container reaching a writable remote = push escape** — THE load-bearing risk. The
+   mirror is ~mode: ro~ (kernel), the real origin is never mounted/reachable/credentialed
+   from the container, and the shim + middleware still apply. Four independent layers.
+2. **Credential leakage** — the mirror needs none (local ~file://~). Audit the ~ASSIST_*~
+   env passthrough (sandbox_manager.py:328) to confirm no git token rides in.
+3. **Corrupting the shared /workspace/.git** — one turn at a time per thread; host
+   sync/merge run sequentially. Shared mirror gets a per-domain refresh lock.
+4. **Small model corrupts the branch mid-rebase** — guardrails + ~--abort~ escape +
+   deterministic host land fallback; worst case work stays committed + reviewable.
+5. **Moved local bare repo** — host mirror refresh fails loudly at turn start.
+6. **Mirror staleness vs real origin at land** — existing ~push_main~ FF ~is-ancestor~
+   guard + ~OriginAdvancedError~ catch divergence; preserved.
+7. **Submodules / LFS / huge diffs** — out of scope v1; ~file://~ handles ordinary
+   objects; flag as known limitation.
+
+* Test plan
+- Unit (host, no Docker): ~clone_repo~ adds the ~mirror~ remote; DomainMirror creates +
+  refreshes a bare mirror + serializes concurrent refreshes; ~push_preview~ returns
+  ~origin/main...main~; ~merge_to_main~ makes no model call and still recovers from a
+  mid-land failure; ~push_main~ FF-guard unchanged.
+- Middleware/shim: existing push-blocker + shim tests stay green; add ~git push mirror~
+  fails on the ro mount.
+- Dockerized smoke: sandbox with a real ro mirror mount; agent ~git fetch mirror~ + a
+  rebase (clean and one-conflict) via ~execute~, resolves, ~--continue~; assert the branch
+  lands on top of ~mirror/main~ and no push succeeds. Exercise the ro mount + real rebase
+  un-mocked (symptom, not proxy).
+- Event-loop: web tests under ~PYTHONASYNCIODEBUG=1~; the push-preview + converted
+  merge/push routes don't block under a held mirror lock.
+- Deferred (GPU freeze): the small-model behavioral eval of git-sync (does Qwen reliably
+  fetch→rebase→resolve→~--continue~ without pushing or touching ~main~?). Do not gate on it.
+
+* Open questions for Pierre
+1. **Squash-to-local-main:** host-deterministic land (recommended) vs the agent producing
+   local ~main~ in ~/workspace~ (hands ~reset --hard main~ to the small model — I recommend
+   against)?
+2. **Merge commit summary:** drop the host model call + deterministic message
+   (recommended), or agent writes a curated one-liner on land?
+3. **Reachability mechanism:** the ro **mirror** (recommended — gives the agent a working
+   fetch, push-proof by construction) vs the simpler **host pre-fetch into the clone** (less
+   code, but the agent has no working fetch)?
+4. **Per-turn auto-commit:** keep host-automatic (recommended) — confirm.
+5. **Discard-and-restart-from-main:** an explicit affordance (button + skill recipe to
+   reset the *thread branch* to ~mirror/main~) in v1?
+6. **Convert the ~async def~ merge/push routes** to sync ~def~/threadpool in this same PR
+   (they currently block the loop), or track separately?
+7. **Mirror storage/GC:** ~$ROOT/.mirrors/<label>.git~ acceptable; who prunes a mirror when
+   a domain leaves ~ASSIST_DOMAINS~?
