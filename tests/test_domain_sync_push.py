@@ -144,3 +144,19 @@ def test_sync_reattaches_plain_detached_head(tmp_path):
     shown = subprocess.run(["git", "-C", clone, "show", "--name-only", "--oneline", "HEAD"],
                            capture_output=True, text=True).stdout
     assert "detached_work.txt" in shown   # work committed, not orphaned
+
+
+def test_sync_skips_commit_when_rebase_abort_fails(tmp_path, monkeypatch):
+    # If aborting an in-progress rebase fails (corrupt state), sync() must NOT commit/push
+    # into the broken repo — it bails out for manual attention (Copilot rd4).
+    origin = _origin_with_main(tmp_path)
+    clone = str(tmp_path / "clone")
+    dm = DomainManager(repo_path=clone, repo=origin, branch_suffix="kl12")
+    _git("config", "user.email", "t@example.com", cwd=clone)
+    _git("config", "user.name", "Test", cwd=clone)
+    monkeypatch.setattr(dm, "_abort_inprogress_rebase", lambda: False)
+    (tmp_path / "clone" / "uncommitted.txt").write_text("work\n")
+    dm.sync("should not commit")
+    status = subprocess.run(["git", "-C", clone, "status", "--porcelain"],
+                            capture_output=True, text=True).stdout
+    assert "uncommitted.txt" in status   # sync bailed before git_commit; still uncommitted

@@ -463,24 +463,38 @@ class DomainManager:
         """
         if not self.repo:
             return
-        self._abort_inprogress_rebase()
+        if not self._abort_inprogress_rebase():
+            # The abort itself failed (corrupt/unwritable rebase state) — the repo is in a
+            # bad rebase mid-flight. Committing/pushing into it would make it worse; leave
+            # it as-is for manual attention (already logged at ERROR). Skip this sync.
+            return
         branch = ensure_thread_branch(self.repo_path, suffix=self.branch_suffix)
         git_commit(self.repo_path, commit_message)
         self._push_thread_branch(branch)
 
-    def _abort_inprogress_rebase(self) -> None:
+    def _abort_inprogress_rebase(self) -> bool:
         """If the agent left a rebase in progress (its turn ended mid-conflict-loop),
         HEAD is detached and the end-of-turn commit would orphan onto no branch. Abort it:
         HEAD returns to the thread branch with all *committed* work intact (the design's
         un-stuck guarantee). The partial, uncommitted conflict resolution is discarded —
-        the agent re-syncs next turn against a clean branch."""
+        the agent re-syncs next turn against a clean branch.
+
+        Returns True if there was nothing to abort OR the abort succeeded; False if a
+        rebase was in progress and ``git rebase --abort`` FAILED (so the caller must not
+        commit into the broken state)."""
         git_dir = os.path.join(self.repo_path, ".git")
-        if os.path.isdir(os.path.join(git_dir, "rebase-merge")) or \
-                os.path.isdir(os.path.join(git_dir, "rebase-apply")):
-            subprocess.run(['git', '-C', self.repo_path, 'rebase', '--abort'],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-            logger.warning("aborted an agent-left in-progress rebase in %s (re-sync next turn)",
-                           self.repo_path)
+        if not (os.path.isdir(os.path.join(git_dir, "rebase-merge")) or
+                os.path.isdir(os.path.join(git_dir, "rebase-apply"))):
+            return True
+        r = subprocess.run(['git', '-C', self.repo_path, 'rebase', '--abort'],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        if r.returncode != 0:
+            logger.error("could not abort an in-progress rebase in %s: %s — skipping this "
+                         "sync (repo needs manual attention)", self.repo_path, r.stderr.strip())
+            return False
+        logger.warning("aborted an agent-left in-progress rebase in %s (re-sync next turn)",
+                       self.repo_path)
+        return True
 
     def _push_thread_branch(self, branch: str) -> None:
         """Push the thread branch to origin after each turn so Pierre can check it out and
