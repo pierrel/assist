@@ -27,6 +27,8 @@ from assist.env import load_dev_env
 from assist.sandbox_manager import SandboxManager
 from assist.schedule.store import ScheduleStore
 from assist.schedule.tools import schedule_tools
+from assist.events.store import SubscriptionStore
+from assist.events.tools import subscription_tools
 from assist.thread_manager import ThreadManager, set_web_tools
 
 
@@ -89,7 +91,11 @@ MANAGER = ThreadManager(ROOT)
 # /schedules view, so they share its single read-modify-write lock. The web app is a
 # single uvicorn worker, so exactly one Scheduler/store pair exists.
 SCHEDULE_STORE = ScheduleStore(ROOT)
-set_web_tools(schedule_tools(SCHEDULE_STORE))
+# The subscription store shares the thread root the same way (disk-as-truth, per-thread).
+# Subscription tools let the agent set up message-event triage; the inbound-SMS route reads
+# the same store to route a message to its subscription's thread.
+SUBSCRIPTION_STORE = SubscriptionStore(ROOT)
+set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE))
 _raw = os.getenv("ASSIST_DOMAINS", "")
 DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}
