@@ -462,3 +462,49 @@ def test_new_thread_form_flows_rider(client, monkeypatch):
     rider = captured.get("rider")
     assert rider is not None
     assert rider.tz == "America/Los_Angeles" and rider.lat == 37.7749 and rider.lon == -122.4194
+
+
+def test_process_message_supersedes_pending_reply(client, monkeypatch):
+    """A new inbound message while a reply is awaiting approval rejects that draft and runs
+    ONE turn with the fold-into-a-single-reply rider (Pierre's preference), checked after the
+    queue acquire so a quick second text can't race a still-processing turn."""
+    class _Chat:
+        def __init__(self):
+            self.resumed, self.messaged, self._pending = [], [], True
+
+        def pending_reply(self):
+            return {"text": "old draft"} if self._pending else None
+
+        def resume_reply(self, decision):
+            self.resumed.append(decision); self._pending = False; return ""
+
+        def message(self, text):
+            self.messaged.append(text); return "combined reply"
+
+    chat = _Chat()
+    _stub_happy_path(monkeypatch, chat)
+    threads._process_message("thread-e2e", "second message", sender="+15551234567")
+    assert chat.resumed and chat.resumed[0]["type"] == "reject"     # pending draft rejected
+    assert chat.messaged and "ONE reply" in chat.messaged[0]        # fold rider present
+    assert "second message" in chat.messaged[0]                     # + the new message
+
+
+def test_process_message_no_supersede_when_nothing_pending(client, monkeypatch):
+    class _Chat:
+        def __init__(self):
+            self.resumed, self.messaged = [], []
+
+        def pending_reply(self):
+            return None
+
+        def resume_reply(self, decision):
+            self.resumed.append(decision); return ""
+
+        def message(self, text):
+            self.messaged.append(text); return "ok"
+
+    chat = _Chat()
+    _stub_happy_path(monkeypatch, chat)
+    threads._process_message("thread-e2e", "hello", sender="+15551234567")
+    assert chat.resumed == []                                       # nothing to supersede
+    assert chat.messaged == ["hello"]                               # plain turn, no rider

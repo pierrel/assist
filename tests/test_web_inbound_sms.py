@@ -97,3 +97,15 @@ def test_reply_decision_bad_verb(client, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
     _set_status("t-sub", "awaiting_approval", pending_reply="d", pending_sender="+1")
     assert client.post("/thread/t-sub/reply/nonsense").status_code == 400
+
+
+def test_dispatch_calls_process_message_with_rendered_template(client, monkeypatch):
+    from assist.events.model import Subscription
+    sub = Subscription(id="s", thread_id="t-sub", sender_regexp=".*", template="from {sender}: {text}")
+    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda sender: sub)
+    calls = []
+    monkeypatch.setattr(threads, "_process_message", lambda *a, **k: calls.append((a, k)))
+    threads._dispatch_event("+1555", "hello")
+    assert len(calls) == 1                                # supersede now lives in _process_message
+    assert calls[0][0][0] == "t-sub" and "hello" in calls[0][0][1]
+    assert calls[0][1].get("sender") == "+1555"

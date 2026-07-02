@@ -645,6 +645,12 @@ def _initialize_thread(tid: str, text: str, domain: str | None,
         _set_status(tid, "error", error=str(e), pending_message=text)
 
 
+_SUPERSEDE_RIDER = (
+    "[There was an earlier reply you drafted in this conversation that was NOT sent — a "
+    "newer message arrived first. Write ONE reply that addresses the earlier message(s) and "
+    "this new one together; do not propose a separate reply for each.]\n\n")
+
+
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None) -> None:
     # `sender` (set only for an inbound-message triage turn) rides the run config as
@@ -701,6 +707,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
+                # A NEW message (not a resume) arriving while a reply is still awaiting
+                # approval supersedes that draft: reject it to unblock the paused graph, and
+                # ride an instruction so the agent folds everything unanswered into ONE reply
+                # instead of stacking a second (Pierre's preference). Checked here, after the
+                # queue acquire, so a second quick text can't race past a still-processing
+                # turn — by now the prior turn is done and the interrupt state is final.
+                if resume_decision is None and text is not None and chat.pending_reply():
+                    chat.resume_reply({"type": "reject", "message": (
+                        "A newer message arrived before this reply was approved; discard "
+                        "this draft — a single combined reply follows.")})
+                    if sender:
+                        text = _SUPERSEDE_RIDER + text
                 resp = (chat.resume_reply(resume_decision) if resume_decision
                         else chat.message(text))
             finally:
@@ -956,7 +974,9 @@ def _dispatch_event(sender: str, text: str) -> None:
     """Route an inbound message to its subscription's thread and run the triage turn there,
     with the sender in the run config so send_reply can target it. No matching subscription
     → nothing to do (the message is already recorded). Runs off the loop (a BackgroundTask),
-    like _scheduled_dispatch, so _process_message's blocking work is fine."""
+    like _scheduled_dispatch. If a reply is already awaiting approval, _process_message folds
+    this message into a single updated reply (the supersede handling lives there, after the
+    queue acquire, so two quick texts can't race past a still-processing turn)."""
     sub = SUBSCRIPTION_STORE.route(sender)
     if sub is None:
         logging.info("inbound message from %s matched no subscription; recorded only", sender)
