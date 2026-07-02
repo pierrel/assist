@@ -85,9 +85,12 @@ def _message_text(message: Any) -> str:
     return content if isinstance(content, str) else str(content)
 
 
-def _seen_urls(messages: list) -> set[str]:
-    """Every URL in a TOOL RESULT or the USER's message, normalized — the sources
-    the model cannot fabricate.
+def _seen_urls(messages: list) -> dict[str, str]:
+    """Every URL in a TOOL RESULT or the USER's message: a map from the normalized
+    form (the membership key) to the ORIGINAL as it appeared (first seen). The
+    normalized keys are the sources the model cannot fabricate; the originals feed
+    the correction message so it never surfaces a normalize_url-truncated form
+    (e.g. a stripped trailing paren on a Wikipedia URL).
 
     Scans ``ToolMessage`` content (search results + pages the agent already
     fetched, so legitimate link-following is preserved) and ``HumanMessage``
@@ -98,17 +101,17 @@ def _seen_urls(messages: list) -> set[str]:
     eval). A copied-from-search URL is still allowed because it also appears in
     the search ``ToolMessage``; only a URL invented in the model's own text and
     present in no tool/user message is rejected."""
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     for m in messages:
         if not isinstance(m, (HumanMessage, ToolMessage)):
             continue
         for raw in _URL_RE.findall(_message_text(m)):
-            seen.add(normalize_url(raw))
+            seen.setdefault(normalize_url(raw), raw)
     return seen
 
 
-def _correction(allowed: set[str]) -> str:
-    listed = sorted(allowed)[:_MAX_LISTED]
+def _correction(allowed: dict[str, str]) -> str:
+    listed = sorted(allowed.values())[:_MAX_LISTED]
     urls = "\n".join(f"- {u}" for u in listed) if listed else "(none yet — run search_internet first)"
     return (
         "That URL was not fetched: it does not appear in any search result, the "

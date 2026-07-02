@@ -239,7 +239,7 @@ def test_recursion_limit_sets_error_status(client, monkeypatch):
 
         def message(self, text):
             raise GraphRecursionError(
-                "Recursion limit of 150 reached without hitting a stop condition")
+                "Recursion limit reached without hitting a stop condition")
     _stub_happy_path(monkeypatch, _RunawayChat())
 
     r = client.post("/thread/thread-e2e/message", data={"text": "hi"},
