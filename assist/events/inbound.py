@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -37,5 +38,6 @@ class InboundLog:
         except FileExistsError:
             return False
         with os.fdopen(fd, "w") as f:
-            json.dump({"message_id": message_id, "sender": sender, "text": text}, f)
+            json.dump({"message_id": message_id, "sender": sender, "text": text,
+                       "received_at": datetime.now(timezone.utc).isoformat()}, f)
         return True
