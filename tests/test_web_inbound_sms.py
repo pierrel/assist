@@ -121,3 +121,18 @@ def test_triage_tools_exclude_host_effect_tools():
     assert "create_subscription" not in triage and "create_schedule" not in triage
     assert "delete_subscription" not in triage
     assert "create_subscription" in normal and "send_reply" not in normal
+
+
+def test_reply_approve_refuses_superseded_draft(client, monkeypatch):
+    from manage.web.state import _set_status
+    monkeypatch.setattr(threads, "_existing_thread_dir", lambda tid: str(tid))
+    queued = []
+    monkeypatch.setattr(threads, "_process_message", lambda *a, **k: queued.append(1))
+    _set_status("t-sub", "awaiting_approval", pending_reply="NEW draft", pending_sender="+1")
+    # user approves the OLD draft they saw → mismatch → 409, nothing queued
+    r = client.post("/thread/t-sub/reply/approve", data={"seen": "OLD draft"})
+    assert r.status_code == 409 and queued == []
+    # approving the current draft goes through
+    r2 = client.post("/thread/t-sub/reply/approve", data={"seen": "NEW draft"},
+                     follow_redirects=False)
+    assert r2.status_code == 303 and len(queued) == 1

@@ -454,6 +454,7 @@ def render_thread(
         <div class="approval-banner">
           <div><strong>Reply awaiting your approval</strong> — to {to}:</div>
           <form action="/thread/{tid}/reply/edit" method="post" class="approval-form">
+            <input type="hidden" name="seen" value="{draft}">
             <textarea name="text" rows="3" class="approval-draft">{draft}</textarea>
             <div class="approval-actions">
               <button class="btn merge-btn" formaction="/thread/{tid}/reply/approve"
@@ -736,6 +737,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                 "A newer message arrived before this reply was approved. "
                                 "Discard this draft and do NOT reply yet — acknowledge only; "
                                 "the newer message follows next.")})
+                        if chat.pending_reply():
+                            # The reject-turn kept re-proposing past the cap; the graph is
+                            # still interrupted. Do NOT run a new turn on it (langgraph would
+                            # drop this message). The message is durably archived (re-
+                            # triggerable) and the re-proposed draft stays pending for review;
+                            # surface it loudly instead of silently losing the new message.
+                            logging.warning("supersede couldn't clear the pending interrupt on "
+                                            "%s; new message archived but not triaged this turn", tid)
+                            _set_status(tid, "awaiting_approval",
+                                        pending_reply=chat.pending_reply().get("text", ""),
+                                        pending_sender=prior_pending_sender)
+                            return
                         if same_sender:
                             text = _SUPERSEDE_RIDER + text
                     resp = chat.message(text)
@@ -1058,7 +1071,7 @@ _REPLY_DECISIONS = {
 
 @app.post("/thread/{tid}/reply/{decision}")
 def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
-                   text: str = Form(default="")):
+                   text: str = Form(default=""), seen: str = Form(default="")):
     """Approve / reject / edit a pending send_reply proposal, resuming the paused triage
     turn off the loop (the resume runs the tool → the outbound POST, so it must not run on
     the event loop; the BackgroundTask puts it in the threadpool)."""
@@ -1068,6 +1081,13 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     status = _get_status(tid)
     if status.get("stage") != "awaiting_approval":
         raise HTTPException(status_code=409, detail="This thread has no reply awaiting approval.")
+    # Approve sends the CURRENT pending draft as-is; if a newer message superseded it since
+    # the page was rendered, the draft the user saw (`seen`) no longer matches — refuse so
+    # we never send a reply the user didn't review. (edit sends the user's own text; reject
+    # sends nothing — neither needs the check.)
+    if decision == "approve" and seen and seen != (status.get("pending_reply") or ""):
+        raise HTTPException(status_code=409,
+                            detail="This reply was updated by a newer message — reload and review it.")
     sender = status.get("pending_sender") or ""
     background_tasks.add_task(_process_message, tid, None, None, sender,
                              _REPLY_DECISIONS[decision](text))

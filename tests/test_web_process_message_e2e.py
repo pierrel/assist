@@ -535,3 +535,24 @@ def test_process_message_no_supersede_when_nothing_pending(client, monkeypatch):
     threads._process_message("thread-e2e", "hello", sender="+15551234567")
     assert chat.resumed == []                                       # nothing to supersede
     assert chat.messaged == ["hello"]                               # plain turn, no rider
+
+
+def test_process_message_supersede_gives_up_after_cap_without_dropping(client, monkeypatch):
+    """If the reject-turn keeps re-proposing past the cap, don't run a fresh turn on the
+    still-interrupted graph (which langgraph would drop) — leave the draft pending + status
+    awaiting_approval; the new message stays durably archived."""
+    class _StubbornChat:
+        def __init__(self):
+            self.messaged = []
+        def pending_reply(self):
+            return {"text": "keeps re-proposing"}     # never clears
+        def resume_reply(self, decision):
+            return ""
+        def message(self, text):
+            self.messaged.append(text); return "should not run"
+    chat = _StubbornChat()
+    _stub_happy_path(monkeypatch, chat)
+    _set_status("thread-e2e", "awaiting_approval", pending_sender="+15551234567")
+    threads._process_message("thread-e2e", "new msg", sender="+15551234567")
+    assert chat.messaged == []                          # never ran a turn on the stuck graph
+    assert _get_status("thread-e2e").get("stage") == "awaiting_approval"
