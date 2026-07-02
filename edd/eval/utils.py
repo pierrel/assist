@@ -1,6 +1,9 @@
+import ast
+import functools
 import os
 import shutil
 import subprocess
+from unittest.mock import patch
 from unittest import TestCase
 from langchain_core.messages import ToolMessage, AIMessage
 
@@ -215,3 +218,120 @@ def create_filesystem(root_dir: str,
             # Create a directory and recursively process its contents
             os.makedirs(path, exist_ok=True)
             create_filesystem(path, content)
+
+
+# -------------------- research URL-provenance spy --------------------
+
+# One source of truth for "the same URL" — the prod guard defines it, the eval
+# imports it, so the spy's provenance accounting can't drift from the guard's.
+from assist.middleware.url_provenance import normalize_url
+
+
+def _urls_in_search_result(result_str: str) -> list[str]:
+    """Extract URLs from a search_internet result string
+    (``[{'title','url','content'}, ...]``). Returns [] for non-list results
+    (e.g. the unavailable message or ``"[]"``)."""
+    try:
+        items = ast.literal_eval(result_str)
+    except (ValueError, SyntaxError):
+        return []
+    if not isinstance(items, list):
+        return []
+    return [it["url"] for it in items
+            if isinstance(it, dict) and it.get("url")]
+
+
+class ResearchToolSpy:
+    """Context manager that records every ``search_internet`` / ``read_url``
+    call made anywhere in the research agent (it patches the names where
+    ``assist.agent`` binds them, so nested sub-agent calls are captured too —
+    ``all_messages()`` only exposes the top-level thread). Calls pass through to
+    the real tools, so research runs for real.
+
+    Optionally injects a fetch failure to test dead-fetch recovery:
+      - ``fail_first=N`` — the first N *distinct* URLs fetched return a 404.
+      - ``fail_urls={...}`` — these exact URLs return a 404.
+
+    After the ``with`` block:
+      ``fetched``        — list[str], every read_url url arg in call order
+      ``searched``       — list[str], every search query
+      ``search_results`` — set[str], normalized URLs returned by all searches
+      ``failed_first``   — list[str] normalized URLs failed via ``fail_first``
+    """
+
+    def __init__(self, fail_first: int = 0, fail_urls=None,
+                 search_fixture=None, read_fixture=None):
+        """``search_fixture`` (list of ``{title,url,content}`` dicts) makes
+        ``search_internet`` return that canned set for every query instead of
+        hitting SearXNG — deterministic and immune to the upstream-engine
+        rate-limits/CAPTCHAs that make live research evals flaky. In canned mode
+        ``read_url`` also returns canned text (``read_fixture`` maps normalized
+        url->text; otherwise a generic body), so the eval exercises the model's
+        URL-choice behavior without any network."""
+        self.fetched: list[str] = []
+        self.searched: list[str] = []
+        self.search_results: set[str] = set()
+        self.failed_first: list[str] = []
+        self._fail_first = fail_first
+        self._fail = {normalize_url(u) for u in (fail_urls or [])}
+        self._search_fixture = search_fixture
+        self._read_fixture = {normalize_url(k): v
+                              for k, v in (read_fixture or {}).items()}
+        self._patches: list = []
+
+    @staticmethod
+    def _err(url: str) -> str:
+        return f"Error fetching URL: 404 Client Error: Not Found for url: {url}"
+
+    def __enter__(self):
+        import assist.agent as ag
+        real_read, real_search = ag.read_url, ag.search_internet
+
+        # @wraps so deepagents/langchain wrap these as tools named "read_url" /
+        # "search_internet" (it derives the tool name + description from
+        # __name__/__doc__), not "spy_read"/"spy_search".
+        @functools.wraps(real_read)
+        def spy_read(url):
+            self.fetched.append(url)
+            n = normalize_url(url)
+            if n in self._fail:
+                return self._err(url)
+            if (self._fail_first and n not in self.failed_first
+                    and len(self.failed_first) < self._fail_first):
+                self.failed_first.append(n)
+                return self._err(url)
+            if self._search_fixture is not None:  # canned mode: no network
+                return self._read_fixture.get(n, f"Reference page at {url}.")
+            return real_read(url)
+
+        @functools.wraps(real_search)
+        def spy_search(query, max_results=5):
+            self.searched.append(query)
+            if self._search_fixture is not None:
+                res = str(self._search_fixture[:max_results])
+            else:
+                res = real_search(query, max_results)
+            for u in _urls_in_search_result(res):
+                self.search_results.add(normalize_url(u))
+            return res
+
+        self._patches = [patch.object(ag, "read_url", spy_read),
+                         patch.object(ag, "search_internet", spy_search)]
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *exc):
+        for p in self._patches:
+            p.stop()
+        return False
+
+    def guessed_fetches(self) -> list[str]:
+        """Fetched URLs that came from NO search result — i.e. the agent
+        constructed/guessed them rather than picking a search hit."""
+        return [u for u in self.fetched
+                if normalize_url(u) not in self.search_results]
+
+    def fetch_count(self, url: str) -> int:
+        n = normalize_url(url)
+        return sum(1 for u in self.fetched if normalize_url(u) == n)

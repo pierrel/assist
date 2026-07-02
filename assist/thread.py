@@ -162,7 +162,16 @@ class Thread:
         self.on_queue_state = on_queue_state
         self.runconfig = {
             "configurable": {"thread_id": self.thread_id},
-            "max_concurrency": self.max_concurrency
+            "max_concurrency": self.max_concurrency,
+            # Bound the TOP-LEVEL orchestrator too. Without this it runs at
+            # langgraph's default (~10007 steps); the sub-agents have their own
+            # recursion_limits (research 150, context 500) but the trunk was
+            # effectively unbounded. Now that a recursion hit is terminal (not
+            # rolled-back-and-retried), this makes the orchestrator's own runaway
+            # (e.g. re-dispatch / read_file thrash) fail fast in a few minutes.
+            # Its own steps are mostly task-dispatch + synthesis, so 500 is
+            # generous for legit work while still bounding a runaway; eval-gated.
+            "recursion_limit": 500,
         }
         if configurable is not None:
             if not isinstance(configurable, Mapping):

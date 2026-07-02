@@ -29,6 +29,7 @@ from assist.middleware.search_unavailable_breaker import SearchUnavailableBreake
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
+from assist.middleware.url_provenance import UrlProvenanceMiddleware
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
@@ -583,7 +584,12 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url],
-        "middleware": _subagent_safety_mw(),
+        # Provenance guard: refuse read_url on a URL that appears nowhere prior
+        # (a fabrication). On the SEARCHER (here) and the fact-checker — the two
+        # sub-agents whose read_url should only ever hit a URL already in context.
+        # NOT on the orchestrator (it re-dispatches, so a rejected fetch there can
+        # thrash); its runaway is bounded by recursion_limit.
+        "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware()],
     }
 
     critique_sub_agent = {
@@ -598,7 +604,11 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url],
-        "middleware": _subagent_safety_mw(),
+        # Provenance-guard the fact-checker too: it re-fetches URLs cited in the
+        # report it's handed — those already appear in its context (the report
+        # ToolMessage), so they pass, while a URL it invents is refused. Without
+        # this, fabricated fact-check fetches bypass the guard entirely.
+        "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware()],
     }
 
     # The orchestrator DELEGATES searching to the research-agent (see its
@@ -613,21 +623,28 @@ def create_research_agent(model: BaseChatModel,
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
                                       workspace_dir=workspace_dir),
         backend=backend,
+        # NOT provenance-guarded here (only the searcher + fact-check sub-agents
+        # are): guarding the orchestrator's own read_url risked re-dispatch thrash
+        # (a rejected fetch -> re-dispatch research -> more searches). The
+        # orchestrator's runaway is bounded by its recursion_limit instead.
         middleware=base_mw + middleware + [logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]
     )
 
-    # 150 graph steps ≈ 75 model calls.  This is now the deliberate runaway
-    # backstop for the research flow: with the Pattern-E volume cap and
-    # Pattern-F re-dispatch cap removed, a research agent that keeps issuing
-    # DISTINCT-arg searches/reads is bounded only by this limit (the host-side
-    # search/read tools aren't covered by the sandbox exec timeout).  Lowered
-    # from 300 so a runaway is caught in a few minutes rather than ~12-75 min.
-    # GraphRecursionError is in RollbackRunnable's rollback_on, so hitting it
-    # rolls back rather than crashing the thread.
-    rollback_runnable = RollbackRunnable(agent, recursion_limit=150)
+    # 300 graph steps ≈ 150 model calls: the deliberate runaway backstop for the
+    # research flow (Pattern-E/F caps removed, so a distinct-arg search/read
+    # runaway is bounded only by this limit; host-side tools aren't under the
+    # sandbox exec timeout). Hitting it is now TERMINAL: GraphRecursionError is
+    # no longer in RollbackRunnable's rollback_on, so it is NOT
+    # rolled-back-and-re-invoked (which used to multiply the effective bound ~7x
+    # — a true-150 was really ~1050). 300 is the true effective ceiling, restored
+    # from the pre-2026-06-06 value: the recursion baseline (2026-07-02) showed a
+    # true-150 cut off legit research turns (2 hits across the contract tests),
+    # so 150 was too tight once the ~7x cushion was removed. 300 still bounds a
+    # runaway to ~5 min (vs the 70-min incident) with room for thorough research.
+    rollback_runnable = RollbackRunnable(agent, recursion_limit=300)
 
     # Wrap with the references-cleanup runnable so intermediate drafts
     # and sub-sub-agent scratch files get pruned after the research call

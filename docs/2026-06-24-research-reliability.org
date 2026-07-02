@@ -1,0 +1,85 @@
+#+TITLE: Research reliability — URL provenance, dead-URL recovery, corroboration
+#+DATE: <2026-06-24>
+#+STATUS: DESIGN (awaiting redirect)
+
+* Context / why
+
+Research is the heart of the agent's value (roadmap: "Research is at the heart
+of what this agent is capable of"). The 2026-06-24 threads.db forensics showed
+the dominant historical failure mode: research sessions *fetching hundreds of
+guessed / dead URLs* (e.g. =casio.com/watch/<every-model>=, polygon articles
+that 404) — the largest single thread held 101 GB of such a runaway. PR #141
+improved *what* a fetch returns; it did nothing about *which URLs the agent
+chooses* or *whether cited sources support the claim*. That is this work.
+
+* Failure modes (grounded in the map, all currently UNgoverned + UNtested)
+
+1. *URL provenance* — the inner research agent (=sub_research.txt.j2=) is not
+   told to fetch only URLs that appeared in =search_internet= results. The small
+   model constructs/guesses URLs. (root cause of the dead-URL flood)
+2. *Dead-URL handling* — on a failed =read_url= the prompt says only "try
+   another source"; no rule against re-fetching the same dead URL or guessing
+   variants. Only loop-detection (same-URL ×3) + recursion_limit(150) backstop.
+3. *Corroboration* — =fact_checker.md.j2= verifies claims but has no
+   =search_internet= and can only *report* mismatches/dead links, not fix them.
+   The orchestrator's citation rules don't require corroboration in the first
+   place.
+4. *Recovery* — no eval that the agent completes a useful report after a fetch
+   fails.
+
+Eval coverage today: 3 happy-path tests (=test_research_agent.py=), none of 1–4.
+No helper inspects =read_url= / =search_internet= call ARGS.
+
+* Approach
+
+- *Guidance-first* (small-model ethos: prompts before middleware). URL-choice is
+  a single-agent behavior inside =sub_research=, where the memory says soft
+  prompt edits DO move the model (unlike multi-agent delegation). Validate by eval.
+- *Eval-driven* (the contract). Reproduce each failure as an eval FIRST, baseline
+  it, then fix to pass — measure baseline→after at N=3/5/10.
+- *Evals run live, no cassette dependency.* Provenance is a STRUCTURAL property
+  (every =read_url= arg ∈ prior =search_internet= result URLs) — robust to model
+  variation, so it asserts reliably on a live run without the (unmerged) cassette
+  infra. Recovery uses a patched =read_url= that errors for a target URL.
+
+* Increment 1 (this PR): URL provenance + dead-URL recovery
+
+** Eval helpers (=edd/eval/utils.py=)
+- =tool_call_args(agent, name) -> list[dict]= — args of every call to a tool.
+- =urls_fetched(agent) -> list[str]= — every =read_url= url arg, in order.
+- =search_result_urls(agent) -> set[str]= — URLs returned across all
+  =search_internet= results (parse the tool RESULTS).
+- assertion: every fetched url ∈ search_result_urls (provenance), and no url is
+  fetched >1× (no dead-URL retry).
+
+** Evals (=edd/eval/test_research_reliability.py=)
+- =test_only_fetches_search_result_urls= — real research question; assert
+  =urls_fetched ⊆ search_result_urls= (no constructed/guessed URLs).
+- =test_recovers_from_dead_fetch= — patch =read_url= to error for the URL the
+  agent first picks; assert it does NOT re-fetch that URL, fetches a different
+  search-result URL, and still writes a report.
+
+** Fix (=templates/deepagents/sub_research.txt.j2=)
+- Add: "Only call =read_url= on a URL that appears in a =search_internet=
+  result. Never construct, guess, or modify a URL." + "If a =read_url= returns
+  an error, do NOT retry it or try a guessed variant — pick a DIFFERENT
+  search-result URL, or search again."
+- Consider making =read_url='s error string directive ("…try a different
+  search result; do not retry this URL").
+
+** Measure
+Baseline (current prompt) → after (new guidance), N=3 then N=5/N=10 for the two
+new tests + spot-check the 3 existing research tests for regression.
+
+* Increment 2 (follow-up, NOT this PR): corroboration
+- LLM-judge eval: does each cited URL's fetched content support the claim?
+- Give =fact-check-agent= a remediation path (search for a better source, or
+  have the orchestrator drop unsupported claims). Harder; separate design.
+
+* Risks / open questions
+- Small model may under-comply with soft guidance → eval decides; if guidance
+  can't carry it, consider a structural nudge (e.g. =read_url= rejects a URL not
+  seen in a prior search result — a middleware last-resort, weighed against the
+  "guardrails: coarse real bounds only" rule).
+- Provenance assertion must tolerate trivial URL normalization (trailing slash,
+  fragment) — compare normalized forms.

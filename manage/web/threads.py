@@ -36,6 +36,7 @@ from assist.domain_manager import (
     MergeConflictError,
     OriginAdvancedError,
 )
+from langgraph.errors import GraphRecursionError
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.events.reply import SMS_SENDER_KEY
 from assist.schedule.scheduler import Scheduler
@@ -800,6 +801,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             error=("The sandbox container for this thread was lost mid-run. "
                    "Your last message was not completed. Send the message "
                    "again to retry in a fresh sandbox."),
+            **pending_kwargs,
+        )
+    except GraphRecursionError as e:
+        # The turn hit its step ceiling (the runaway backstop) and was stopped.
+        # Distinct message from the generic branch: this is terminal, not a
+        # transient fault, and retrying the same request would just run away
+        # again — so suggest narrowing/splitting, NOT "send again to retry".
+        logging.warning("Recursion limit hit for thread %s: %s", tid, e)
+        _set_status(
+            tid, "error",
+            error=("This request grew too large to complete — it hit the internal "
+                   "step limit and was stopped. Try narrowing it or splitting it "
+                   "into smaller parts."),
             **pending_kwargs,
         )
     except Exception as e:
