@@ -217,6 +217,8 @@ class Thread:
         try:
             snap = self.agent.get_state(self.runconfig)
         except Exception:
+            logger.warning("pending_reply: get_state failed for %s; treating as no pending "
+                           "approval", self.thread_id, exc_info=True)
             return None
         for intr in (getattr(snap, "interrupts", None) or ()):
             value = intr.value or {}

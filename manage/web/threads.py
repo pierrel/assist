@@ -455,7 +455,8 @@ def render_thread(
           <div><strong>Reply awaiting your approval</strong> — to {to}:</div>
           <form action="/thread/{tid}/reply/edit" method="post" class="approval-form">
             <input type="hidden" name="seen" value="{draft}">
-            <textarea name="text" rows="3" class="approval-draft">{draft}</textarea>
+            <label for="reply-draft-{tid}">Proposed reply to {to} (edit before sending):</label>
+            <textarea id="reply-draft-{tid}" name="text" rows="3" class="approval-draft">{draft}</textarea>
             <div class="approval-actions">
               <button class="btn merge-btn" formaction="/thread/{tid}/reply/approve"
                       type="submit">Approve &amp; send</button>
@@ -1085,7 +1086,10 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     # the page was rendered, the draft the user saw (`seen`) no longer matches — refuse so
     # we never send a reply the user didn't review. (edit sends the user's own text; reject
     # sends nothing — neither needs the check.)
-    if decision == "approve" and seen and seen != (status.get("pending_reply") or ""):
+    # Compare newline-normalized (browsers submit form text with CRLF, but the draft is
+    # stored with LF, so a byte compare would spuriously 409 a multi-line reply).
+    if decision == "approve" and seen and \
+            seen.replace("\r\n", "\n") != (status.get("pending_reply") or "").replace("\r\n", "\n"):
         raise HTTPException(status_code=409,
                             detail="This reply was updated by a newer message — reload and review it.")
     sender = status.get("pending_sender") or ""
