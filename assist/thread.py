@@ -12,6 +12,7 @@ from assist.agent import create_agent
 from assist.spec import AgentSpec
 from assist.checkpoint_rollback import invoke_with_rollback
 from assist.thread_queue import THREAD_QUEUE
+from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,38 @@ class Thread:
             last_msg = messages[-1]
             if isinstance(last_msg, AIMessage):
                 return last_msg.content
+        return ""
+
+    def pending_reply(self) -> dict | None:
+        """If this thread is paused awaiting approval of a ``send_reply`` (HITL interrupt),
+        return ``{"text": <draft>}`` — read from the durable checkpoint, so it survives the
+        request that produced it. ``None`` when the thread isn't awaiting an approval.
+        """
+        try:
+            snap = self.agent.get_state(self.runconfig)
+        except Exception:
+            return None
+        for intr in (getattr(snap, "interrupts", None) or ()):
+            value = intr.value or {}
+            for ar in value.get("action_requests", []):
+                if ar.get("name") == "send_reply":
+                    return {"text": ar.get("args", {}).get("text", "")}
+        return None
+
+    def resume_reply(self, decision: dict) -> str:
+        """Resume a paused ``send_reply`` with a HITL decision — ``{"type": "approve"}``,
+        ``{"type": "reject", "message": …}``, or ``{"type": "edit", "edited_action":
+        {"name": "send_reply", "args": {"text": …}}}``. On approve/edit the tool body runs
+        (the reply is sent); returns the agent's final content."""
+        with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
+            result = invoke_with_rollback(
+                self.agent,
+                Command(resume={"decisions": [decision]}),
+                self.runconfig,
+            )
+        messages = result.get("messages", [])
+        if messages and isinstance(messages[-1], AIMessage):
+            return messages[-1].content
         return ""
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:

@@ -372,6 +372,8 @@ def create_agent(model: BaseChatModel,
         # (gated by the travel skill), like a calculation — not web research, so not
         # on the research sub-agent.  Skip any a spec already supplies (no dup).
         tools=list(spec.tools) + [t for t in (travel, directions) if t not in spec.tools],
+        # HITL gating (e.g. the web spec gates send_reply → approve/edit/reject); None off.
+        **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     )
 
     return agent

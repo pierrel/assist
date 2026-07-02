@@ -69,11 +69,19 @@ def _web_skill_sources() -> dict:
 # render skill: a schedule's effect needs the web's co-resident Scheduler, so emacsos and
 # the eval agents (which build their own agents) must NOT get a tool that never fires.
 _web_tools: tuple = ()
+# HITL gating for the web AgentSpec (e.g. {"send_reply": {...}}); the eval agents build
+# their own agents and must NOT inherit it.
+_web_interrupt_on: dict | None = None
 
 
 def set_web_tools(tools) -> None:
     global _web_tools
     _web_tools = tuple(tools)
+
+
+def set_web_interrupt_on(interrupt_on: dict | None) -> None:
+    global _web_interrupt_on
+    _web_interrupt_on = interrupt_on
 
 
 class InvalidThreadId(ValueError):
@@ -263,7 +271,8 @@ class ThreadManager:
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
                       configurable=configurable,
-                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools))
+                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
+                                     interrupt_on=_web_interrupt_on))
 
     def remove(self, thread_id: str) -> None:
         tdir = self.thread_dir(thread_id)
@@ -297,7 +306,8 @@ class ThreadManager:
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
                       model=self.model, sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
-                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools))
+                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
+                                     interrupt_on=_web_interrupt_on))
 
     def close(self) -> None:
         try:

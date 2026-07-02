@@ -67,6 +67,12 @@ class AgentSpec:
     # in ``create_agent``).
     default_backend: BackendProtocol | None = None
 
+    # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
+    # InterruptOnConfig}`` passed straight to ``create_deep_agent(interrupt_on=…)``.  The
+    # web spec gates ``send_reply`` (approve/edit/reject) so an inbound-message triage turn
+    # can propose a reply but never send without approval.  ``None`` = no HITL.
+    interrupt_on: Mapping[str, Any] | None = None
+
     def __post_init__(self) -> None:
         # The class is frozen; normalization goes through
         # object.__setattr__ by design.  Everything here is pure CPU.
