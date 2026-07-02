@@ -165,7 +165,7 @@ class Thread:
             "max_concurrency": self.max_concurrency,
             # Bound the TOP-LEVEL orchestrator too. Without this it runs at
             # langgraph's default (~10007 steps); the sub-agents have their own
-            # recursion_limits (research 150, context 500) but the trunk was
+            # recursion_limits (research 300, context 500) but the trunk was
             # effectively unbounded. Now that a recursion hit is terminal (not
             # rolled-back-and-retried), this makes the orchestrator's own runaway
             # (e.g. re-dispatch / read_file thrash) fail fast in a few minutes.

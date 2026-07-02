@@ -20,10 +20,12 @@ unambiguous bound (a substring/membership check on tool+user text, not a fuzzy
 "looks invented" heuristic), and it does not end the turn: it returns a
 corrective tool result so the model retries with a real URL.
 
-Scope: the research SEARCHER only (it owns both ``search_internet`` and
-``read_url``). NOT the fact-check agent — that subagent re-fetches URLs cited in
-a report it was handed, with no search results of its own, so the same check
-would reject every (legitimate) fetch.
+Scope: the research SEARCHER and the FACT-CHECKER — the two sub-agents whose
+``read_url`` should only ever hit a URL already in context (the searcher's own
+search results; the fact-checker's cited URLs, which live in the report
+``ToolMessage`` it is handed). NOT the orchestrator: guarding its ``read_url``
+risks re-dispatch thrash (a rejected fetch → re-dispatch research → more
+searches); its runaway is bounded by ``recursion_limit`` instead.
 """
 import logging
 import re
