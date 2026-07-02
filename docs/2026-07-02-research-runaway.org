@@ -95,9 +95,9 @@ heal-and-retry."
 
 ** Decision — bound the orchestrator too
 =Thread.runconfig= set no =recursion_limit=, so the top-level agent ran at
-langgraph's default (~10007). The sub-agents had their own limits (research 150,
-context 500) but the trunk was effectively unbounded. Set orchestrator
-=recursion_limit=500=.
+langgraph's default (~10007). The sub-agents had their own limits (research 300
+— see §values below, context 500) but the trunk was effectively unbounded. Set
+orchestrator =recursion_limit=500=.
 
 ** Decision — sub-agent recursion is turn-terminal (Option 1)
 When a sub-agent hits its limit, =GraphRecursionError= propagates out of the
@@ -133,12 +133,14 @@ synthesize trunk). Final: research 300, orchestrator 500.
 - *Provenance eval* (=test_research_reliability.py=, live model): normal ops
   clean after the laundering + all-guarded-subagents fixes.
 - *The eval CANNOT validate Layer 2.* It runs through =AgentHarness= at
-  =recursion_limit=5000=, so it does not exercise the prod bound (500/150). A
+  =recursion_limit=5000=, so it does not exercise the prod bound (orch 500 /
+  research 300). A
   trial that over-searched to 303 (harness=5000) leaked fabrications under that
   load — which is exactly the runaway the recursion bound stops in prod, and
   confirms the two-layer design (provenance for normal ops; recursion for the
   runaway). The recursion baseline runs the research suite with a recursion-hit
-  counter to size true-150 directly.
+  counter to size the research limit directly (it found true-150 too tight →
+  research is now 300; see §values below).
 
 * Known limitations / follow-ups
 
