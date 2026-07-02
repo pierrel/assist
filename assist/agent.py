@@ -442,6 +442,21 @@ def create_context_agent(model: BaseChatModel,
     return RollbackRunnable(agent, recursion_limit=500)
 
 
+# Effective context window REPORTED to the research subagents' summarizer.
+# deepagents auto-installs a SummarizationMiddleware on every dict-spec
+# subagent that fires at a FIXED 0.85 fraction of the model's
+# profile["max_input_tokens"] (see compute_summarization_defaults).  At the
+# orchestrator's real ~131k window that's ~111k — but the local Qwen3-27B
+# bogs down long before then (~30k), so context sails through the slow zone
+# and the research-agent "hangs".  Reporting a smaller window to JUST these
+# subagents makes the same auto-summarizer fire at 0.85*60k≈51k, bounding
+# their working set under the slow zone.  In the current middleware stack
+# max_input_tokens is read only by the summarizer, so nothing else shifts.
+# Eval-tuned starting point; the orchestrator keeps its full window (it only
+# reads URLs and works fine at 0.85).
+RESEARCH_SUBAGENT_WINDOW = 60_000
+
+
 def create_research_agent(model: BaseChatModel,
                           working_dir: str,
                           checkpointer=None,
@@ -578,11 +593,18 @@ def create_research_agent(model: BaseChatModel,
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 
+    # Reduced-window copy for the subagents — see RESEARCH_SUBAGENT_WINDOW.
+    # model_copy() is a shallow copy sharing the HTTP client; reassigning
+    # .profile on the copy leaves the orchestrator's full-window profile intact.
+    research_subagent_model = model.model_copy()
+    research_subagent_model.profile = {"max_input_tokens": RESEARCH_SUBAGENT_WINDOW}
+
     research_sub_agent = {
         "name": "research-agent",
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url],
+        "model": research_subagent_model,
         "middleware": _subagent_safety_mw(),
     }
 
@@ -590,6 +612,7 @@ def create_research_agent(model: BaseChatModel,
         "name": "critique-agent",
         "description": "Used to critique the final report. You MUST provide the file it should critique.",
         "system_prompt": base_prompt_for("deepagents/sub_critique.txt.j2"),
+        "model": research_subagent_model,
         "middleware": _subagent_safety_mw(),
     }
 
@@ -598,6 +621,7 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to check all references for alignment with claims and statements. You MUST provide the file it should fact-check.",
         "system_prompt": base_prompt_for("deepagents/fact_checker.md.j2"),
         "tools": [read_url],
+        "model": research_subagent_model,
         "middleware": _subagent_safety_mw(),
     }
 
