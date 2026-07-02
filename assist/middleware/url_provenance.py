@@ -113,8 +113,20 @@ def _seen_urls(messages: list) -> dict[str, str]:
         if not isinstance(m, (HumanMessage, ToolMessage)):
             continue
         for raw in _URL_RE.findall(_message_text(m)):
-            seen.setdefault(normalize_url(raw), raw.rstrip(_DISPLAY_STRIP))
+            seen.setdefault(normalize_url(raw), _display_url(raw))
     return seen
+
+
+def _display_url(raw: str) -> str:
+    """The captured URL trimmed for the correction message so it's fetchable:
+    drop trailing sentence punctuation, plus a trailing closing bracket ONLY when
+    it's UNBALANCED — a prose wrapper like ``(…/page)`` — while a balanced one is
+    a valid URL character (Wikipedia ``…/Mercury_(element)``) and is kept."""
+    u = raw.rstrip(_DISPLAY_STRIP)
+    closers = {")": "(", "]": "[", "}": "{"}
+    while u and u[-1] in closers and u.count(u[-1]) > u.count(closers[u[-1]]):
+        u = u[:-1].rstrip(_DISPLAY_STRIP)
+    return u
 
 
 def _correction(allowed: dict[str, str]) -> str:

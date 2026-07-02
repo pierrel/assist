@@ -111,6 +111,19 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertNotIn("shop.example/page.", result.content)       # trailing dot trimmed
         self.assertIn("Mercury_(element)", result.content)           # valid paren kept whole
 
+    def test_correction_strips_prose_wrapper_paren_keeps_valid_paren(self):
+        # A URL wrapped in prose parens "(…/page)" is listed WITHOUT the trailing
+        # ')' (unbalanced = a wrapper), while a valid parenthesized URL keeps it.
+        msgs = [ToolMessage(
+            content=("See (https://shop.example/page) and "
+                     "https://en.wikipedia.org/wiki/Mercury_(element)"),
+            name="search_internet", tool_call_id="s1")]
+        result, handler = self._call("https://www.fabricated.example/x", msgs)
+        self.assertIsNone(handler.called_with)
+        self.assertIn("https://shop.example/page", result.content)
+        self.assertNotIn("shop.example/page)", result.content)   # wrapper paren stripped
+        self.assertIn("Mercury_(element)", result.content)       # valid paren kept
+
     def test_model_cannot_launder_via_its_own_text(self):
         # A URL present ONLY in the model's own AIMessage content is NOT provenance —
         # else the model writes a fabricated URL into its reasoning, then fetches it
