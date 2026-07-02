@@ -133,6 +133,8 @@ deploy-service:
 		ASSIST_GEOCODER_URL='$(ASSIST_GEOCODER_URL)' \
 		ASSIST_SSL_CERT='$(ASSIST_SSL_CERT)' \
 		ASSIST_SSL_KEY='$(ASSIST_SSL_KEY)' \
+		ASSIST_SMS_SECRET='$(ASSIST_SMS_SECRET)' \
+		ASSIST_SMS_OUTBOUND_URL='$(ASSIST_SMS_OUTBOUND_URL)' \
 		'bash -s' < scripts/install-service.sh
 	@echo "✓ Service installed"
 

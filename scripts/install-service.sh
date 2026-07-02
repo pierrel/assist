@@ -39,6 +39,8 @@ ENV_VARS=""
 [ -n "$ASSIST_GEOCODER_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_GEOCODER_URL=$ASSIST_GEOCODER_URL\"\n"
 [ -n "$ASSIST_SSL_CERT" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_CERT=$ASSIST_SSL_CERT\"\n"
 [ -n "$ASSIST_SSL_KEY" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_KEY=$ASSIST_SSL_KEY\"\n"
+[ -n "$ASSIST_SMS_SECRET" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SMS_SECRET=$ASSIST_SMS_SECRET\"\n"
+[ -n "$ASSIST_SMS_OUTBOUND_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SMS_OUTBOUND_URL=$ASSIST_SMS_OUTBOUND_URL\"\n"
 
 # Generate service file from template and install it
 cat "$DEPLOY_PATH/scripts/assist-web.service.template" | \
