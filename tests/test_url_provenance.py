@@ -85,6 +85,18 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNotNone(handler.called_with,
                              "a copied parenthesized search-result URL must pass")
 
+    def test_trailing_punctuation_matches_clean_url(self):
+        # A URL captured from a fetched page's prose WITH trailing punctuation
+        # ("...see https://shop.example/deep/page.") must still match the model's
+        # clean copied fetch — normalize_url strips the trailing char on BOTH
+        # sides, so the widened regex can't cause a spurious rejection.
+        msgs = [_search_result(["https://shop.example/index"]),
+                ToolMessage(content="Details at https://shop.example/deep/page. Enjoy.",
+                            name="read_url", tool_call_id="r0")]
+        _result, handler = self._call("https://shop.example/deep/page", msgs)
+        self.assertIsNotNone(handler.called_with,
+                             "a clean URL must match a prose URL with trailing punctuation")
+
     def test_model_cannot_launder_via_its_own_text(self):
         # A URL present ONLY in the model's own AIMessage content is NOT provenance —
         # else the model writes a fabricated URL into its reasoning, then fetches it

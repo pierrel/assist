@@ -50,23 +50,32 @@ _URL_RE = re.compile(r'https?://[^\s"\'<>]+')
 # Cap how many available URLs the correction lists — enough to redirect, not so
 # many it bloats the context the model must re-read.
 _MAX_LISTED = 8
+# Trailing chars stripped before comparison — sentence punctuation and brackets
+# that cling to a URL captured from prose. Stripped from BOTH the seen-set and
+# the checked URL (via normalize_url), so they stay consistent: a search result's
+# ``…/Mercury_(element)`` and the model's copied ``…/Mercury_(element)`` both
+# reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
+_TRAILING = ".,;:!?)]}'\""
 
 
 def normalize_url(url: str) -> str:
     """Canonical form for provenance comparison: lowercase scheme+host, drop the
-    fragment and a single trailing slash. Tolerates junk (returns it stripped).
+    fragment, a trailing slash, and trailing sentence punctuation/brackets.
+    Tolerates junk (returns it stripped).
 
     Single source of truth for "the same URL" — the provenance eval imports this
     so the guard and the eval can't drift on what counts as a match."""
+    s = url.strip().rstrip(_TRAILING)
     try:
-        p = urlsplit(url.strip())
+        p = urlsplit(s)
         if not p.scheme:
-            return url.strip().rstrip("/")
+            return s.rstrip("/")
         host = (p.hostname or "").lower()
         netloc = host + (f":{p.port}" if p.port else "")
-        return urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/"), p.query, ""))
+        rebuilt = urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/"), p.query, ""))
+        return rebuilt.rstrip(_TRAILING)
     except ValueError:
-        return url.strip().rstrip("/")
+        return s.rstrip("/")
 
 
 def _message_text(message: Any) -> str:
