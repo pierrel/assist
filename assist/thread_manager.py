@@ -318,11 +318,12 @@ class ThreadManager:
         if not working_dir:
             working_dir = self.make_default_working_dir(tdir)
 
+        # A freshly-created thread is never a triage turn → normal tools, no reply HITL.
         return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
                       model=self.model, sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
                       spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
-                                     interrupt_on=_web_interrupt_on))
+                                     interrupt_on=None))
 
     def close(self) -> None:
         try:
