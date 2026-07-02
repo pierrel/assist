@@ -1,0 +1,147 @@
+#+TITLE: Research runaway — URL-provenance guard + recursion fail-fast
+#+DATE: <2026-07-02>
+#+STATUS: DESIGN (as-built, PR #165, awaiting Pierre review)
+
+Supersedes the increment-1 sketch in =docs/2026-06-24-research-reliability.org=
+(that branch was stranded when the GPU fans died; this revives + hardens it and
+adds the recursion fix). Two orthogonal, complementary layers.
+
+* Context / the incident
+
+A prod research turn (thread =20260702084748-a8553d33=, "coffee shop with WiFi
+near Valencia") ran for ~70 minutes holding the single LLM slot, and left a
+stale =processing= status. Forensics: the model searched legitimately, then
+*fabricated* coffee-shop URLs from memory (=wavecoffee.co/...=, present in ZERO
+search results) and =read_url=-looped them — self-aware ("I notice I'm stuck in
+a loop") but not stopping, accumulating thousands of fetches. Same family as the
+2026-06-24 dead-URL flood (one thread held 101 GB).
+
+Two independent causes, so two independent fixes:
+1. *The model chooses bad URLs* — invents them. → URL-provenance guard.
+2. *Nothing bounded the runaway in time* — a recursion-limit hit was being
+   rolled-back-and-retried ~7×, and the orchestrator was effectively unbounded.
+   → recursion fail-fast.
+
+They are layers, not alternatives: provenance is a *targeted guard* on the
+fabrication surface; recursion is the *coarse real backstop* behind everything
+(matches the "coarse real bounds as the backstop; targeted guards only on
+unambiguous signals" ethos). Neither alone suffices — see §Validation.
+
+* Layer 1 — URL-provenance guard
+
+=UrlProvenanceMiddleware= (=assist/middleware/url_provenance.py=) intercepts
+=read_url= and refuses a URL that appears in NO prior tool result or user
+message — i.e. a fabrication. Corrective, not turn-ending: it returns a
+=ToolMessage= listing the real URLs to retry with, so the model recovers (this
+is the anti-pattern the rolled-back volume-cap violated — it must not kill the
+turn, see =docs/2026-06-05-research-volume-cap-destroys-output.org=).
+
+Coarse + unambiguous by construction: a substring/membership check on prior
+text, not a fuzzy "looks invented" heuristic.
+
+** Decision — provenance source is tool + user messages ONLY (the laundering fix)
+Reviving on the current model, the original guard was *defeated*: the model
+laundered a fabricated URL by writing it into its own reasoning first, then
+fetching it — the guard counted =AIMessage= content as provenance (14 of 24
+fetches slipped through). Fix: =_seen_urls= scans only =ToolMessage= (search
+results + pages already fetched → link-following preserved) and =HumanMessage=
+(a URL the user pasted), NEVER the model's own =AIMessage=. A copied-from-search
+URL still passes (it is also in the search =ToolMessage=); only a URL invented
+in the model's own text is refused.
+
+** Decision — guard the SEARCHER and FACT-CHECKER, NOT the orchestrator
+=read_url= is given to three agents. Fabricated fetches from the two unguarded
+ones bypassed the guard entirely (the eval's global =read_url= spy counts all).
+- *Searcher* (=research_sub_agent=): guarded. The original + main offender.
+- *Fact-checker*: guarded. It re-fetches URLs *cited in the report it is
+  handed* — those are in its context (the report =ToolMessage=) → they pass;
+  invented ones refused. (The old "exempt the fact-checker" note was
+  over-cautious.)
+- *Orchestrator*: NOT guarded — reverted. An eval trial where it *was* guarded
+  became a 303-search runaway: guarding the orchestrator's own =read_url= risks
+  *re-dispatch thrash* (a rejected fetch → the orchestrator re-dispatches
+  research → more searches). The orchestrator's runaway is bounded by its
+  =recursion_limit= (Layer 2) instead, not by provenance.
+
+** Normalization
+=normalize_url= (single source of truth, imported by the eval so they can't
+drift) lowercases scheme+host, drops the fragment + a trailing slash, and strips
+trailing sentence punctuation/brackets on BOTH sides — so a search result's
+=…/Mercury_(element)= and the model's copied =…/Mercury_(element)= reduce to the
+same key, and a prose =…/page.= matches the clean =…/page= (this closed a
+Copilot-flagged over-rejection introduced by widening the URL regex to keep
+whole parenthesized URLs).
+
+* Layer 2 — recursion fail-fast
+
+=recursion_limit= is the deliberate runaway backstop (per the 2026-06-06
+rollback, =docs/2026-06-05-loop-detection-audit.org=, commit d477ec4: all
+per-tool caps / loop heuristics were removed and =recursion_limit= made THE
+bound). But =invoke_with_rollback= had =GraphRecursionError= in its =rollback_on=
+tuple — so a limit hit rolled back a couple of checkpoints and RE-INVOKED, up to
+=1 + max_rollback_depth*max_retries_per_step = 7= times, each resuming the
+runaway (~150 → ~1050 effective steps). It silently defeated the very backstop
+the team chose.
+
+** Decision — GraphRecursionError is terminal (minimal change)
+Drop =GraphRecursionError= from both =rollback_on= defaults →
+(=BadRequestError=,). The existing =if not isinstance(exc, rollback_on): raise=
+guard then makes a recursion hit terminal on the first attempt, no new branch.
+=BadRequestError= rollback (recovering a malformed LLM message by rolling back +
+letting non-determinism take a different path) is *preserved* — that is
+genuinely recoverable; a recursion hit is not (rolling back a couple of steps
+just re-enters the same runaway). "Fail fast on infrastructure failure; don't
+heal-and-retry."
+
+** Decision — bound the orchestrator too
+=Thread.runconfig= set no =recursion_limit=, so the top-level agent ran at
+langgraph's default (~10007). The sub-agents had their own limits (research 150,
+context 500) but the trunk was effectively unbounded. Set orchestrator
+=recursion_limit=500=.
+
+** Decision — sub-agent recursion is turn-terminal (Option 1)
+When a sub-agent hits its limit, =GraphRecursionError= propagates out of the
+=task= tool (langgraph's default tool-error handler re-raises a non-
+=ToolInvocationError=) and terminates the turn. We accept this (Option 1) over a
+graceful =task=-boundary degradation (Option 2): Option 2 hands the orchestrator
+"sub-agent failed, carry on", and the small model reliably *re-dispatches* — the
+exact Pattern-F behavior d477ec4 removed. Partial =references/= files persist;
+the user retries.
+
+** Terminal error surface
+A recursion hit no longer wedges the thread at =processing= (the prod symptom):
+=manage/web/threads.py= gains an =except GraphRecursionError= branch (mirrors the
+=SandboxContainerLostError= one) that sets a terminal =error= status with
+*narrow/split* guidance — NOT "retry" (retrying re-runs the runaway).
+
+** recursion_limit values are eval-gated
+150 was silently ~1050 (7× via rollback). The true-150 + orchestrator-500 are
+provisional pending a research-eval baseline with a recursion-hit counter — bump
+if legit deep research brushes the ceiling. (Baseline in progress.)
+
+* Validation
+
+- *Unit*: 880 tests — anti-laundering, paren-URL, trailing-punct, recursion-
+  terminal (call_count==1, no rollback), BadRequest-still-rolls-back, and the
+  prod symptom (recursion → terminal =error= status, no wedge).
+- *Provenance eval* (=test_research_reliability.py=, live model): normal ops
+  clean after the laundering + all-guarded-subagents fixes.
+- *The eval CANNOT validate Layer 2.* It runs through =AgentHarness= at
+  =recursion_limit=5000=, so it does not exercise the prod bound (500/150). A
+  trial that over-searched to 303 (harness=5000) leaked fabrications under that
+  load — which is exactly the runaway the recursion bound stops in prod, and
+  confirms the two-layer design (provenance for normal ops; recursion for the
+  runaway). The recursion baseline runs the research suite with a recursion-hit
+  counter to size true-150 directly.
+
+* Known limitations / follow-ups
+
+- *Provenance residual under extreme load*: a determined over-search still leaks
+  some fabrication; the recursion bound (not provenance) is the backstop for
+  that. Do not expect the guard to be bulletproof under a runaway.
+- *Orchestrator re-dispatch (over-search)*: the orchestrator dispatching research
+  many times (Pattern-F territory, deliberately un-guarded since d477ec4) is
+  bounded by orchestrator =recursion_limit=, not eliminated. Out of scope.
+- *recursion_limit values*: eval-gated (see above).
+- *Corroboration* (does a cited URL support the claim): the increment-2
+  follow-up from the 2026-06-24 doc — still separate, not this PR.
