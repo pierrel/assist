@@ -120,7 +120,7 @@ def test_post_message_runs_process_message_without_crashing(
 
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: _FakeChat(),
     )
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
 
@@ -174,7 +174,7 @@ def _stub_happy_path(monkeypatch, chat):
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: chat,
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: chat,
     )
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
@@ -348,7 +348,7 @@ def test_pending_message_renders_at_top_as_latest(client, monkeypatch):
             ]
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: _FakeChat(),
     )
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
 
@@ -381,7 +381,7 @@ def test_pending_bubble_not_duplicated_when_already_persisted(client, monkeypatc
             return [{"role": "user", "content": persisted}]
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: _FakeChat(),
     )
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
 
@@ -413,7 +413,7 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
         def get_messages(self):
             return [{"role": "user", "content": "hi"}]
 
-    def _get(tid, sandbox_backend=None, on_queue_state=None, configurable=None):
+    def _get(tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False):
         captured["configurable"] = configurable
         return _FakeChat()
 
@@ -483,10 +483,37 @@ def test_process_message_supersedes_pending_reply(client, monkeypatch):
 
     chat = _Chat()
     _stub_happy_path(monkeypatch, chat)
+    # The pending draft is for the SAME sender → fold into one combined reply.
+    _set_status("thread-e2e", "awaiting_approval", pending_sender="+15551234567")
     threads._process_message("thread-e2e", "second message", sender="+15551234567")
     assert chat.resumed and chat.resumed[0]["type"] == "reject"     # pending draft rejected
     assert chat.messaged and "ONE reply" in chat.messaged[0]        # fold rider present
     assert "second message" in chat.messaged[0]                     # + the new message
+
+
+def test_process_message_supersede_different_sender_does_not_fold(client, monkeypatch):
+    """A catch-all subscription funneling different senders must NOT mix conversations: the
+    old draft is rejected but the new sender's message runs clean (no fold rider)."""
+    class _Chat:
+        def __init__(self):
+            self.resumed, self.messaged, self._pending = [], [], True
+
+        def pending_reply(self):
+            return {"text": "draft for A"} if self._pending else None
+
+        def resume_reply(self, decision):
+            self.resumed.append(decision); self._pending = False; return ""
+
+        def message(self, text):
+            self.messaged.append(text); return "reply to B"
+
+    chat = _Chat()
+    _stub_happy_path(monkeypatch, chat)
+    _set_status("thread-e2e", "awaiting_approval", pending_sender="+1AAAAAAAAAA")  # sender A
+    threads._process_message("thread-e2e", "hi from B", sender="+1BBBBBBBBBB")      # sender B
+    assert chat.resumed and chat.resumed[0]["type"] == "reject"     # A's draft dropped
+    assert chat.messaged and "ONE reply" not in chat.messaged[0]    # NO fold (cross-sender)
+    assert "hi from B" in chat.messaged[0]
 
 
 def test_process_message_no_supersede_when_nothing_pending(client, monkeypatch):

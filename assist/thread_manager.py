@@ -69,7 +69,12 @@ def _web_skill_sources() -> dict:
 # render skill: a schedule's effect needs the web's co-resident Scheduler, so emacsos and
 # the eval agents (which build their own agents) must NOT get a tool that never fires.
 _web_tools: tuple = ()
-# HITL gating for the web AgentSpec (e.g. {"send_reply": {...}}); the eval agents build
+# A message-triage turn (inbound SMS) runs on UNTRUSTED input, so it gets a SEPARATE,
+# reduced tool set: only the reply tool (HITL-gated) — NOT the schedule/subscription tools,
+# which are host-effect and NOT sandbox-contained (an injected text must not be able to
+# plant/delete a subscription or schedule). See docs/2026-07-01-inbound-sms-interception.org.
+_web_triage_tools: tuple = ()
+# HITL gating for the triage AgentSpec (e.g. {"send_reply": {...}}); the eval agents build
 # their own agents and must NOT inherit it.
 _web_interrupt_on: dict | None = None
 
@@ -77,6 +82,11 @@ _web_interrupt_on: dict | None = None
 def set_web_tools(tools) -> None:
     global _web_tools
     _web_tools = tuple(tools)
+
+
+def set_web_triage_tools(tools) -> None:
+    global _web_triage_tools
+    _web_triage_tools = tuple(tools)
 
 
 def set_web_interrupt_on(interrupt_on: dict | None) -> None:
@@ -257,13 +267,18 @@ class ThreadManager:
             working_dir: str | None = None,
             sandbox_backend=None,
             on_queue_state: Callable[[str], None] | None = None,
-            configurable: dict | None = None) -> Thread:
+            configurable: dict | None = None,
+            triage: bool = False) -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
         if not working_dir:
             working_dir = self.make_default_working_dir(tdir)
 
+        # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
+        # the reply HITL gate; a normal turn gets the full config tools and no HITL.
+        tools = _web_triage_tools if triage else _web_tools
+        interrupt_on = _web_interrupt_on if triage else None
         return Thread(working_dir,
                       thread_id=thread_id,
                       checkpointer=self.checkpointer,
@@ -271,8 +286,8 @@ class ThreadManager:
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
                       configurable=configurable,
-                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
-                                     interrupt_on=_web_interrupt_on))
+                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=tools,
+                                     interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:
         tdir = self.thread_dir(thread_id)

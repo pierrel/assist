@@ -18,9 +18,6 @@ class TestSubscriptionModel(unittest.TestCase):
         self.assertTrue(s.matches("+15551234567"))
         self.assertFalse(s.matches("+16505550000"))
 
-    def test_disabled_never_matches(self):
-        s = _sub("a", "t1", r".*").with_enabled(False)
-        self.assertFalse(s.matches("anything"))
 
     def test_bad_regexp_does_not_raise_at_match(self):
         self.assertFalse(_sub("a", "t1", r"(unclosed").matches("x"))

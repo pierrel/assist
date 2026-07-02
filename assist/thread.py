@@ -193,26 +193,21 @@ class Thread:
                                   sandbox_backend=sandbox_backend,
                                   spec=spec)
 
-    def message(self, text: str) -> str:
-        """Continue the thread and return the last response.
-
-        Acquires the per-thread LLM affinity queue for the duration of
-        the agent loop so concurrent threads don't thrash llama.cpp's
-        single KV-cache slot.  See ``assist/thread_queue.py``.
-        """
+    def _run(self, graph_input) -> str:
+        """Acquire the per-thread LLM affinity queue for the agent loop (so concurrent
+        threads don't thrash llama.cpp's single KV-cache slot — see ``assist/thread_queue``),
+        invoke the graph with checkpoint-rollback, and return the last AIMessage's content.
+        ``graph_input`` is a ``{"messages": …}`` dict (a new turn) or a ``Command`` (resume)."""
         with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
-            result = invoke_with_rollback(
-                self.agent,
-                {"messages": [{"role": "user", "content": text}]},
-                self.runconfig,
-            )
-        # Extract content from the last AIMessage
+            result = invoke_with_rollback(self.agent, graph_input, self.runconfig)
         messages = result.get("messages", [])
-        if messages:
-            last_msg = messages[-1]
-            if isinstance(last_msg, AIMessage):
-                return last_msg.content
+        if messages and isinstance(messages[-1], AIMessage):
+            return messages[-1].content
         return ""
+
+    def message(self, text: str) -> str:
+        """Continue the thread with a new user message and return the last response."""
+        return self._run({"messages": [{"role": "user", "content": text}]})
 
     def pending_reply(self) -> dict | None:
         """If this thread is paused awaiting approval of a ``send_reply`` (HITL interrupt),
@@ -235,16 +230,7 @@ class Thread:
         ``{"type": "reject", "message": …}``, or ``{"type": "edit", "edited_action":
         {"name": "send_reply", "args": {"text": …}}}``. On approve/edit the tool body runs
         (the reply is sent); returns the agent's final content."""
-        with THREAD_QUEUE.acquire(self.thread_id, on_state_change=self.on_queue_state):
-            result = invoke_with_rollback(
-                self.agent,
-                Command(resume={"decisions": [decision]}),
-                self.runconfig,
-            )
-        messages = result.get("messages", [])
-        if messages and isinstance(messages[-1], AIMessage):
-            return messages[-1].content
-        return ""
+        return self._run(Command(resume={"decisions": [decision]}))
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):

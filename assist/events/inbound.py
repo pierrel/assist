@@ -1,9 +1,15 @@
 """Durable inbound-message log — records every inbound message BEFORE the 200, keyed by a
-content-hash ``message_id``, so the ack means "assist owns this text" (not "the LLM was
-reachable"): a crash before the triage turn leaves a recoverable record, never a lost text.
-The same record is the dedup key — the phone re-POSTs only what it never got a 2xx for, and
-an atomic ``O_EXCL`` create claims a message_id exactly once (no lock, no TOCTOU) so the
-daemon's own retry race can't double-dispatch.
+content-hash ``message_id``. Two jobs:
+
+- **Archive**: every text (matched or not) is persisted here permanently and never deleted,
+  so it survives even after the phone deletes it from the modem — the record's the audit
+  trail. The write happens before the 200, so a message is in assist before it leaves the
+  phone. (Note: this persists the TEXT, not the triage OUTCOME — a crash between the 200 and
+  the async triage turn means the action isn't taken automatically; the text is here and can
+  be re-triggered, but there's no auto-re-dispatch, by design — no heal machinery.)
+- **Dedup**: the phone re-POSTs only what it never got a 2xx for, and an atomic ``O_EXCL``
+  create claims a message_id exactly once (no lock, no TOCTOU) so the daemon's own retry
+  race can't double-dispatch.
 """
 from __future__ import annotations
 

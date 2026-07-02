@@ -23,9 +23,12 @@ the whole turn) is what needs a gate, and deepagents already provides one:
 thread uses a durable ~SqliteSaver~ (threads.db), so the paused interrupt survives across
 requests and restarts; the user approves later and the graph resumes via
 ~Command(resume=…)~. No custom propose-tool / pending-store / enforcer — the framework HITL
-IS the gate. (The triage agent's spec simply doesn't include host-effect tools like
-schedule/subscription editing — those aren't sandbox-contained — so its only gated action is
-the reply.)
+IS the gate. The triage turn's spec includes ONLY ~send_reply~ (+ sandbox base tools), NOT
+the schedule/subscription config tools — those are host-effect and NOT sandbox-contained, so
+an injected text must not reach them. Enforced by ~MANAGER.get(triage=True)~ selecting
+~_web_triage_tools~ (reply-only) instead of ~_web_tools~ (config tools); the triage marker is
+the turn carrying a ~sender~. So the only ungated effects are sandbox-local (contained,
+delete-the-thread) and the reply is HITL-gated.
 
 * Model (v1, post-review)
 - *Event*: inbound ~{sender, text}~; assist stamps arrival time. Sender is an opaque string.
@@ -74,7 +77,7 @@ the reply.)
 ~HumanInTheLoopMiddleware~ (added by ~create_deep_agent(interrupt_on=…)~): configure
 ~interrupt_on={"send_reply": {"allowed_decisions": ["approve", "edit", "reject"]}}~. When the
 agent calls ~send_reply~, the graph raises an interrupt carrying ~action_requests:
-[ActionRequest{action, args, …}]~ (args = the draft) — surfaced in the turn result's
+[ActionRequest{name, args, …}]~ (args = the draft) — surfaced in the turn result's
 ~__interrupt__~. The web detects it, sets a status + shows the draft with approve / edit /
 reject. Resume by re-invoking the graph (same runconfig; SqliteSaver restores) with
 ~Command(resume={"decisions": [{"type": "approve"}]})~ (or ~{"type": "reject", "message":

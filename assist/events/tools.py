@@ -24,9 +24,8 @@ def _thread_id() -> str | None:
 
 
 def _line(s: Subscription) -> str:
-    head = f"[{s.id}] sender ~ /{s.sender_regexp}/{'' if s.enabled else ' (paused)'}"
     preview = s.template.strip().splitlines()[0] if s.template.strip() else "(empty template)"
-    return f"{head}\n    template: {preview[:80]}"
+    return f"[{s.id}] sender ~ /{s.sender_regexp}/\n    template: {preview[:80]}"
 
 
 def subscription_tools(store) -> list:
@@ -103,24 +102,6 @@ def subscription_tools(store) -> list:
             return f"No subscription {subscription_id} on this thread."
         return f"Updated. {_line(saved)}"
 
-    def _set_enabled(subscription_id: str, enabled: bool, verb: str) -> str:
-        tid = _thread_id()
-        if not tid:
-            return "No active thread."
-        try:
-            saved = store.update(tid, subscription_id, lambda s: s.with_enabled(enabled))
-        except SubscriptionNotFound:
-            return f"No subscription {subscription_id} on this thread."
-        return f"{verb}. {_line(saved)}"
-
-    def pause_subscription(subscription_id: str) -> str:
-        """Stop a subscription from firing (keep it; can be resumed)."""
-        return _set_enabled(subscription_id, False, "Paused")
-
-    def resume_subscription(subscription_id: str) -> str:
-        """Resume a paused subscription."""
-        return _set_enabled(subscription_id, True, "Resumed")
-
     def delete_subscription(subscription_id: str) -> str:
         """Delete a subscription from this thread permanently."""
         tid = _thread_id()
@@ -133,4 +114,4 @@ def subscription_tools(store) -> list:
         return f"Deleted subscription {subscription_id}."
 
     return [create_subscription, list_subscriptions, modify_subscription,
-            pause_subscription, resume_subscription, delete_subscription]
+            delete_subscription]

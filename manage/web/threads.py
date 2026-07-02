@@ -660,6 +660,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # Carry the pending message in the status so the thread page can show
     # it as a placeholder bubble while processing (cleared once status==ready).
     pending_kwargs = {"pending_message": text} if text else {}
+    # The pending draft's sender, captured NOW before any _set_status below overwrites it —
+    # used by the supersede path to decide whether a new message folds into the pending reply.
+    prior_pending_sender = _get_status(tid).get("pending_sender") or ""
 
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
@@ -701,26 +704,41 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         _cfg[CONTEXT_RIDER_KEY] = rider
                     if sender:
                         _cfg[SMS_SENDER_KEY] = sender
+                    # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,
                                        on_queue_state=None,
-                                       configurable=(_cfg or None))
+                                       configurable=(_cfg or None),
+                                       triage=bool(sender))
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
-                # A NEW message (not a resume) arriving while a reply is still awaiting
-                # approval supersedes that draft: reject it to unblock the paused graph, and
-                # ride an instruction so the agent folds everything unanswered into ONE reply
-                # instead of stacking a second (Pierre's preference). Checked here, after the
-                # queue acquire, so a second quick text can't race past a still-processing
-                # turn — by now the prior turn is done and the interrupt state is final.
-                if resume_decision is None and text is not None and chat.pending_reply():
-                    chat.resume_reply({"type": "reject", "message": (
-                        "A newer message arrived before this reply was approved; discard "
-                        "this draft — a single combined reply follows.")})
-                    if sender:
-                        text = _SUPERSEDE_RIDER + text
-                resp = (chat.resume_reply(resume_decision) if resume_decision
-                        else chat.message(text))
+                if resume_decision is not None:
+                    # Resume an approve/edit/reject. If the pending reply was already
+                    # resolved (a double-click, or a superseding text got there first),
+                    # there's nothing to resume — resuming a non-interrupted graph would
+                    # raise. Treat it as a no-op.
+                    resp = chat.resume_reply(resume_decision) if chat.pending_reply() else ""
+                else:
+                    # A NEW message while a reply is still awaiting approval supersedes that
+                    # draft: reject it to unblock the paused graph, then run this message so
+                    # the agent folds everything into ONE reply (Pierre's preference). The
+                    # reject is looped-to-clear because the reject-turn may itself re-propose
+                    # — a fresh message turn on a still-interrupted graph would be silently
+                    # dropped by langgraph. Only fold (the rider) when the pending draft is
+                    # the SAME sender; a different sender (a catch-all subscription) must not
+                    # mix conversations — reject and run the new message clean.
+                    if text is not None and chat.pending_reply():
+                        same_sender = bool(sender) and sender == prior_pending_sender
+                        for _ in range(3):
+                            if not chat.pending_reply():
+                                break
+                            chat.resume_reply({"type": "reject", "message": (
+                                "A newer message arrived before this reply was approved. "
+                                "Discard this draft and do NOT reply yet — acknowledge only; "
+                                "the newer message follows next.")})
+                        if same_sender:
+                            text = _SUPERSEDE_RIDER + text
+                    resp = chat.message(text)
             finally:
                 # One container per turn: kill it as soon as this turn's agent
                 # run finishes — success, error, or the early return above —
@@ -1015,6 +1033,11 @@ def inbound_sms(payload: _InboundSms, background_tasks: BackgroundTasks,
         raise HTTPException(status_code=401, detail="Bad or missing X-Assist-SMS-Secret")
     if not (payload.message_id and payload.sender and payload.text):
         raise HTTPException(status_code=400, detail="message_id, sender and text are required")
+    # The sender becomes the reply recipient, folded into the phone's mmcli `number='…'`
+    # arg. Bound it to a phone-number/shortcode/sender-id shape so a crafted originating
+    # address (which can carry arbitrary chars) can't break out of that arg.
+    if not re.fullmatch(r"[+0-9A-Za-z]{1,20}", payload.sender):
+        raise HTTPException(status_code=400, detail="sender is not a valid number/shortcode")
     try:
         fresh = INBOUND_LOG.claim(payload.message_id, payload.sender, payload.text)
     except ValueError:
@@ -1039,10 +1062,7 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     """Approve / reject / edit a pending send_reply proposal, resuming the paused triage
     turn off the loop (the resume runs the tool → the outbound POST, so it must not run on
     the event loop; the BackgroundTask puts it in the threadpool)."""
-    try:
-        MANAGER.get(tid)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Thread not found")
+    _existing_thread_dir(tid)  # 404 on a bad/missing tid — cheap, no agent build
     if decision not in _REPLY_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
     status = _get_status(tid)

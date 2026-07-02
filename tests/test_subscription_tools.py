@@ -52,13 +52,10 @@ def test_modify_unknown_id(tools):
     assert "No subscription" in fns["modify_subscription"]("nope", template="x")
 
 
-def test_pause_resume_delete(tools):
+def test_delete(tools):
     fns, store = tools
     fns["create_subscription"](r".*", "t")
     sid = store.for_thread("t1")[0].id
-    assert "Paused" in fns["pause_subscription"](sid)
-    assert store.for_thread("t1")[0].enabled is False
-    assert "Resumed" in fns["resume_subscription"](sid)
     assert "Deleted" in fns["delete_subscription"](sid)
     assert store.for_thread("t1") == []
 

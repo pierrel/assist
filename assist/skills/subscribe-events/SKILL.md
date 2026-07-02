@@ -12,8 +12,7 @@ own matching.
 
 ## Tools
 - `create_subscription(sender_regexp, template)` — start watching.
-- `list_subscriptions()` / `modify_subscription(id, ...)` / `pause_subscription(id)` /
-  `resume_subscription(id)` / `delete_subscription(id)`.
+- `list_subscriptions()` / `modify_subscription(id, ...)` / `delete_subscription(id)`.
 
 ## sender_regexp — match the sender
 A Python regexp searched against the sender string (a phone number like `+15551234567`, or

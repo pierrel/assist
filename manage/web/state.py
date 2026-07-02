@@ -31,7 +31,8 @@ from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.inbound import InboundLog
-from assist.thread_manager import ThreadManager, set_web_tools, set_web_interrupt_on
+from assist.thread_manager import (
+    ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on)
 
 
 def _configure_logging() -> None:
@@ -99,11 +100,11 @@ SCHEDULE_STORE = ScheduleStore(ROOT)
 SUBSCRIPTION_STORE = SubscriptionStore(ROOT)
 # Durable inbound-message log (records before the 200; dedup by content-hash message_id).
 INBOUND_LOG = InboundLog(ROOT)
-# send_reply rides the web tools too but is HITL-gated (see REPLY_INTERRUPT_ON, applied in
-# the web AgentSpec) — an inbound-message triage turn proposes a reply; the user approves.
-set_web_tools(schedule_tools(SCHEDULE_STORE)
-              + subscription_tools(SUBSCRIPTION_STORE)
-              + reply_tools())
+# Normal turns get the config tools (schedule + subscription). A TRIAGE turn (untrusted
+# inbound SMS) gets ONLY send_reply, HITL-gated — never the host-effect config tools — so an
+# injected text can't plant/delete a subscription or schedule (MANAGER.get(triage=True)).
+set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE))
+set_web_triage_tools(reply_tools())
 set_web_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")
 DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]

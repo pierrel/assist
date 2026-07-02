@@ -109,3 +109,15 @@ def test_dispatch_calls_process_message_with_rendered_template(client, monkeypat
     assert len(calls) == 1                                # supersede now lives in _process_message
     assert calls[0][0][0] == "t-sub" and "hello" in calls[0][0][1]
     assert calls[0][1].get("sender") == "+1555"
+
+
+def test_triage_tools_exclude_host_effect_tools():
+    # The untrusted-SMS triage turn must NOT get the host-effect config tools (schedule/
+    # subscription) — only the HITL-gated reply. Normal turns keep the config tools.
+    from assist import thread_manager as tm
+    triage = {getattr(f, "__name__", "") for f in tm._web_triage_tools}
+    normal = {getattr(f, "__name__", "") for f in tm._web_tools}
+    assert "send_reply" in triage
+    assert "create_subscription" not in triage and "create_schedule" not in triage
+    assert "delete_subscription" not in triage
+    assert "create_subscription" in normal and "send_reply" not in normal
