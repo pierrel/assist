@@ -11,6 +11,7 @@ import html
 import io
 import json
 import logging
+import hmac
 import os
 import re
 import subprocess
@@ -19,7 +20,8 @@ from datetime import datetime, timezone
 
 import markdown
 import requests
-from fastapi import BackgroundTasks, Form, HTTPException
+from pydantic import BaseModel
+from fastapi import BackgroundTasks, Form, Header, HTTPException
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -35,6 +37,7 @@ from assist.domain_manager import (
     OriginAdvancedError,
 )
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
+from assist.events.reply import SMS_SENDER_KEY
 from assist.schedule.scheduler import Scheduler
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
@@ -49,10 +52,12 @@ from manage.web.state import (
     DESCRIPTION_CACHE,
     DOMAIN_MANAGERS,
     DOMAINS,
+    INBOUND_LOG,
     INIT_STAGES,
     MANAGER,
     MERGE_LOCK,
     SCHEDULE_STORE,
+    SUBSCRIPTION_STORE,
     STAGE_LABELS,
     _clear_conflict,
     _domain_selector_html,
@@ -442,6 +447,23 @@ def render_thread(
         )
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
+    elif stage == "awaiting_approval":
+        draft = html.escape(status.get("pending_reply", ""))
+        to = html.escape(status.get("pending_sender", "") or "the sender")
+        status_banner = f"""
+        <div class="approval-banner">
+          <div><strong>Reply awaiting your approval</strong> — to {to}:</div>
+          <form action="/thread/{tid}/reply/edit" method="post" class="approval-form">
+            <textarea name="text" rows="3" class="approval-draft">{draft}</textarea>
+            <div class="approval-actions">
+              <button class="btn merge-btn" formaction="/thread/{tid}/reply/approve"
+                      type="submit">Approve &amp; send</button>
+              <button class="btn btn-secondary" type="submit">Send edited</button>
+              <button class="btn btn-secondary" formaction="/thread/{tid}/reply/reject"
+                      type="submit">Reject</button>
+            </div>
+          </form>
+        </div>"""
 
     # Disable the input form during the initial setup phase
     form_disabled = "disabled" if is_init else ""
@@ -479,6 +501,10 @@ def render_thread(
           form {{ margin-top: 1rem; }}
           .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; color: inherit; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
           .btn-secondary {{ background: #ddd; }}
+          .approval-banner {{ background: #fff3cd; border: 1px solid #ffe69c; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #664d03; }}
+          .approval-form {{ margin-top: .5rem; }}
+          .approval-draft {{ width: 100%; min-height: 3rem; height: auto; box-sizing: border-box; padding: .5rem; font-family: inherit; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }}
+          .approval-actions {{ display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }}
           .success-msg {{ background: #d4edda; border: 1px solid #c3e6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #155724; }}
           .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); }}
           .modal-content {{ background: #fff; margin: 10% auto; padding: 1.5rem; width: min(95%, 500px); border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); box-sizing: border-box; }}
@@ -619,10 +645,15 @@ def _initialize_thread(tid: str, text: str, domain: str | None,
         _set_status(tid, "error", error=str(e), pending_message=text)
 
 
-def _process_message(tid: str, text: str, rider: ContextRider | None = None) -> None:
+def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
+                     sender: str | None = None, resume_decision: dict | None = None) -> None:
+    # `sender` (set only for an inbound-message triage turn) rides the run config as
+    # ``sms_sender`` so send_reply knows who to reply to; a normal turn passes None.
+    # `resume_decision` (set only when approving/rejecting a pending send_reply) resumes the
+    # paused graph instead of starting a new turn — reusing this path's sandbox/queue/sync.
     # Carry the pending message in the status so the thread page can show
     # it as a placeholder bubble while processing (cleared once status==ready).
-    pending_kwargs = {"pending_message": text}
+    pending_kwargs = {"pending_message": text} if text else {}
 
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
@@ -659,14 +690,19 @@ def _process_message(tid: str, text: str, rider: ContextRider | None = None) -> 
                     # on_queue_state=None: the outer acquire above already
                     # owns the callback; the inner acquire is the reentrant
                     # no-op fast path (no state callback fires from it).
+                    _cfg = {}
+                    if rider:
+                        _cfg[CONTEXT_RIDER_KEY] = rider
+                    if sender:
+                        _cfg[SMS_SENDER_KEY] = sender
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,
                                        on_queue_state=None,
-                                       configurable=({CONTEXT_RIDER_KEY: rider}
-                                                     if rider else None))
+                                       configurable=(_cfg or None))
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
-                resp = chat.message(text)
+                resp = (chat.resume_reply(resume_decision) if resume_decision
+                        else chat.message(text))
             finally:
                 # One container per turn: kill it as soon as this turn's agent
                 # run finishes — success, error, or the early return above —
@@ -691,7 +727,14 @@ def _process_message(tid: str, text: str, rider: ContextRider | None = None) -> 
         if dm and dm.changes():
             last_assistant = resp if resp else "assistant update"
             dm.sync(last_assistant)
-        _set_status(tid, "ready")
+        # The turn may have paused on a send_reply HITL interrupt (the agent proposed a
+        # reply). Surface it for approval instead of marking the turn done.
+        pending = chat.pending_reply()
+        if pending:
+            _set_status(tid, "awaiting_approval",
+                        pending_reply=pending.get("text", ""), pending_sender=sender or "")
+        else:
+            _set_status(tid, "ready")
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
         # the user can simply retry — but they should know their
@@ -907,6 +950,88 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str) -> None:
     _mark_pending — there's no waiting render to win."""
     rider = _build_rider(datetime.now(timezone.utc).isoformat(), tz)
     _process_message(tid, prompt, rider)
+
+
+def _dispatch_event(sender: str, text: str) -> None:
+    """Route an inbound message to its subscription's thread and run the triage turn there,
+    with the sender in the run config so send_reply can target it. No matching subscription
+    → nothing to do (the message is already recorded). Runs off the loop (a BackgroundTask),
+    like _scheduled_dispatch, so _process_message's blocking work is fine."""
+    sub = SUBSCRIPTION_STORE.route(sender)
+    if sub is None:
+        logging.info("inbound message from %s matched no subscription; recorded only", sender)
+        return
+    _process_message(sub.thread_id, sub.render(sender, text), sender=sender)
+
+
+def _sms_secret_state(provided: str | None):
+    """Auth for the SMS endpoints: True if authorized, False if wrong/missing secret, None
+    if the feature is disabled (ASSIST_SMS_SECRET unset → 503, fail closed)."""
+    secret = os.getenv("ASSIST_SMS_SECRET")
+    if not secret:
+        return None
+    return bool(provided) and hmac.compare_digest(provided, secret)
+
+
+class _InboundSms(BaseModel):
+    message_id: str
+    sender: str
+    text: str
+
+
+@app.post("/inbound/sms")
+def inbound_sms(payload: _InboundSms, background_tasks: BackgroundTasks,
+                x_assist_sms_secret: str | None = Header(default=None)):
+    """Receive an inbound message forwarded from the phone: authenticate, record it durably
+    (so the 200 means "assist owns this text"), then dispatch a triage turn off the loop.
+
+    SYNC ``def`` (like ``/merge``) so auth + the durable record run in the threadpool, never
+    on the single-worker event loop. 200 accepted|duplicate → the phone deletes the SMS;
+    400 malformed (delete); 401 bad secret (retain); 503 disabled (retain)."""
+    auth = _sms_secret_state(x_assist_sms_secret)
+    if auth is None:
+        raise HTTPException(status_code=503, detail="Inbound SMS is not configured")
+    if not auth:
+        raise HTTPException(status_code=401, detail="Bad or missing X-Assist-SMS-Secret")
+    if not (payload.message_id and payload.sender and payload.text):
+        raise HTTPException(status_code=400, detail="message_id, sender and text are required")
+    try:
+        fresh = INBOUND_LOG.claim(payload.message_id, payload.sender, payload.text)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid message_id")
+    if not fresh:
+        return {"status": "duplicate"}
+    background_tasks.add_task(_dispatch_event, payload.sender, payload.text)
+    return {"status": "accepted"}
+
+
+_REPLY_DECISIONS = {
+    "approve": lambda text: {"type": "approve"},
+    "reject": lambda text: {"type": "reject", "message": "The user declined to send this reply."},
+    "edit": lambda text: {"type": "edit",
+                          "edited_action": {"name": "send_reply", "args": {"text": text}}},
+}
+
+
+@app.post("/thread/{tid}/reply/{decision}")
+def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
+                   text: str = Form(default="")):
+    """Approve / reject / edit a pending send_reply proposal, resuming the paused triage
+    turn off the loop (the resume runs the tool → the outbound POST, so it must not run on
+    the event loop; the BackgroundTask puts it in the threadpool)."""
+    try:
+        MANAGER.get(tid)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    if decision not in _REPLY_DECISIONS:
+        raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
+    status = _get_status(tid)
+    if status.get("stage") != "awaiting_approval":
+        raise HTTPException(status_code=409, detail="This thread has no reply awaiting approval.")
+    sender = status.get("pending_sender") or ""
+    background_tasks.add_task(_process_message, tid, None, None, sender,
+                             _REPLY_DECISIONS[decision](text))
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 # The single in-process scheduler (the web runs one uvicorn worker). Started/stopped by

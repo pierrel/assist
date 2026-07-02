@@ -30,6 +30,7 @@ from assist.schedule.tools import schedule_tools
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
+from assist.events.inbound import InboundLog
 from assist.thread_manager import ThreadManager, set_web_tools, set_web_interrupt_on
 
 
@@ -96,6 +97,8 @@ SCHEDULE_STORE = ScheduleStore(ROOT)
 # Subscription tools let the agent set up message-event triage; the inbound-SMS route reads
 # the same store to route a message to its subscription's thread.
 SUBSCRIPTION_STORE = SubscriptionStore(ROOT)
+# Durable inbound-message log (records before the 200; dedup by content-hash message_id).
+INBOUND_LOG = InboundLog(ROOT)
 # send_reply rides the web tools too but is HITL-gated (see REPLY_INTERRUPT_ON, applied in
 # the web AgentSpec) — an inbound-message triage turn proposes a reply; the user approves.
 set_web_tools(schedule_tools(SCHEDULE_STORE)

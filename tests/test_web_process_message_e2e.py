@@ -111,6 +111,9 @@ def test_post_message_runs_process_message_without_crashing(
             return "ok"
         def description(self):
             return "desc"
+        def pending_reply(self):
+            return None
+
         def get_messages(self):
             return [{"role": "user", "content": "hi"},
                     {"role": "assistant", "content": "ok"}]
@@ -191,6 +194,9 @@ def test_process_message_kills_container_at_turn_end_on_success(client, monkeypa
     class _Chat:
         def message(self, text):
             return "ok"
+
+        def pending_reply(self):
+            return None
     _stub_happy_path(monkeypatch, _Chat())
     calls = _spy_cleanup(monkeypatch)
 
@@ -332,6 +338,9 @@ def test_pending_message_renders_at_top_as_latest(client, monkeypatch):
     newest-at-top and get_messages() is chronological, so the pending bubble
     must be appended (rendered first after the reverse), not inserted at 0."""
     class _FakeChat:
+        def pending_reply(self):
+            return None
+
         def get_messages(self):
             return [
                 {"role": "user", "content": "OLD question"},
@@ -365,6 +374,9 @@ def test_pending_bubble_not_duplicated_when_already_persisted(client, monkeypatc
     the message twice."""
     persisted = "## Change review\n\nLooks solid to me\n"  # trailing newline, as _format_review_message emits
     class _FakeChat:
+        def pending_reply(self):
+            return None
+
         def get_messages(self):
             return [{"role": "user", "content": persisted}]
     monkeypatch.setattr(
@@ -395,6 +407,9 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
     class _FakeChat:
         def message(self, text):
             return "ok"
+        def pending_reply(self):
+            return None
+
         def get_messages(self):
             return [{"role": "user", "content": "hi"}]
 
