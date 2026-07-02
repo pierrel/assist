@@ -75,6 +75,16 @@ class TestUrlProvenanceMiddleware(TestCase):
         _result, handler = self._call("https://shop.example/deep/page-2", msgs)
         self.assertIsNotNone(handler.called_with)
 
+    def test_allows_parenthesized_search_result_url(self):
+        # A URL with a paren (Wikipedia disambiguation pages — a dominant research
+        # source) must be captured WHOLE from the search result, so the model's
+        # verbatim-copied fetch of it is allowed, not truncated-then-rejected.
+        url = "https://en.wikipedia.org/wiki/Mercury_(element)"
+        msgs = [_search_result([url])]
+        _result, handler = self._call(url, msgs)
+        self.assertIsNotNone(handler.called_with,
+                             "a copied parenthesized search-result URL must pass")
+
     def test_model_cannot_launder_via_its_own_text(self):
         # A URL present ONLY in the model's own AIMessage content is NOT provenance —
         # else the model writes a fabricated URL into its reasoning, then fetches it

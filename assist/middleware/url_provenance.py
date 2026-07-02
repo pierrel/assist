@@ -28,6 +28,7 @@ would reject every (legitimate) fetch.
 import logging
 import re
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools.tool_node import ToolCallRequest
@@ -37,10 +38,15 @@ from langgraph.types import Command
 logger = logging.getLogger(__name__)
 
 _READ_TOOL = "read_url"
-# URLs as they appear in tool results / text. Stop at whitespace and the
-# delimiters that bracket a URL in JSON-ish search output ("..."), markdown, or
-# prose so the captured token is the bare URL.
-_URL_RE = re.compile(r'https?://[^\s"\'<>)\]}]+')
+# URLs as they appear in tool results / text. Stop at whitespace and the quote
+# delimiters that bracket a URL in the search output (Python-repr ``'...'`` /
+# JSON ``"..."``). We deliberately DO NOT stop at ``)`` / ``]`` / ``}``: those are
+# valid URL characters (e.g. Wikipedia ``.../Mercury_(element)``) and the model
+# copies the FULL url verbatim as the read_url arg — truncating it here would
+# store a different string in the seen-set and wrongly reject the legit fetch.
+# Over-including a trailing bracket from prose only ever fails OPEN (the arg has
+# no trailing bracket, so it just doesn't match), never over-rejects.
+_URL_RE = re.compile(r'https?://[^\s"\'<>]+')
 # Cap how many available URLs the correction lists — enough to redirect, not so
 # many it bloats the context the model must re-read.
 _MAX_LISTED = 8
@@ -52,7 +58,6 @@ def normalize_url(url: str) -> str:
 
     Single source of truth for "the same URL" — the provenance eval imports this
     so the guard and the eval can't drift on what counts as a match."""
-    from urllib.parse import urlsplit, urlunsplit
     try:
         p = urlsplit(url.strip())
         if not p.scheme:
