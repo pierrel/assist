@@ -6,6 +6,9 @@ import subprocess
 from unittest.mock import patch
 from unittest import TestCase
 from langchain_core.messages import ToolMessage, AIMessage
+# One source of truth for "the same URL" — the prod guard defines it, the eval
+# imports it, so the spy's provenance accounting can't drift from the guard's.
+from assist.middleware.url_provenance import normalize_url
 
 
 class AgentTestMixin:
@@ -221,11 +224,6 @@ def create_filesystem(root_dir: str,
 
 
 # -------------------- research URL-provenance spy --------------------
-
-# One source of truth for "the same URL" — the prod guard defines it, the eval
-# imports it, so the spy's provenance accounting can't drift from the guard's.
-from assist.middleware.url_provenance import normalize_url
-
 
 def _urls_in_search_result(result_str: str) -> list[str]:
     """Extract URLs from a search_internet result string
