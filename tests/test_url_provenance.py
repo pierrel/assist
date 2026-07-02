@@ -97,6 +97,20 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNotNone(handler.called_with,
                              "a clean URL must match a prose URL with trailing punctuation")
 
+    def test_correction_lists_clean_fetchable_urls(self):
+        # The correction (shown on a rejected fetch) must list fetchable URLs: a
+        # prose URL with a trailing '.' is listed clean; a valid parenthesized URL
+        # is listed WHOLE (not truncated by the membership normalization).
+        msgs = [ToolMessage(
+            content=("Refs: https://shop.example/page. and "
+                     "https://en.wikipedia.org/wiki/Mercury_(element)"),
+            name="search_internet", tool_call_id="s1")]
+        result, handler = self._call("https://www.fabricated.example/x", msgs)
+        self.assertIsNone(handler.called_with)                       # fabricated -> rejected
+        self.assertIn("https://shop.example/page", result.content)
+        self.assertNotIn("shop.example/page.", result.content)       # trailing dot trimmed
+        self.assertIn("Mercury_(element)", result.content)           # valid paren kept whole
+
     def test_model_cannot_launder_via_its_own_text(self):
         # A URL present ONLY in the model's own AIMessage content is NOT provenance —
         # else the model writes a fabricated URL into its reasoning, then fetches it

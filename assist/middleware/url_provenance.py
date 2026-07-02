@@ -49,6 +49,13 @@ _READ_TOOL = "read_url"
 # Over-including a trailing bracket from prose only ever fails OPEN (the arg has
 # no trailing bracket, so it just doesn't match), never over-rejects.
 _URL_RE = re.compile(r'https?://[^\s"\'<>]+')
+# Trailing sentence punctuation to trim off the ORIGINAL before it's surfaced in
+# the correction message — so a URL captured from prose ("…see …/page.") is
+# listed as a clean, fetchable "…/page". Excludes brackets ``)]}`` on purpose:
+# those can be valid URL characters (Wikipedia ``…/Mercury_(element)``), so
+# stripping them would list a broken URL. (Membership uses normalize_url, which
+# is stricter; this only cleans the human/model-facing display.)
+_DISPLAY_STRIP = ".,;:!?"
 # Cap how many available URLs the correction lists — enough to redirect, not so
 # many it bloats the context the model must re-read.
 _MAX_LISTED = 8
@@ -106,7 +113,7 @@ def _seen_urls(messages: list) -> dict[str, str]:
         if not isinstance(m, (HumanMessage, ToolMessage)):
             continue
         for raw in _URL_RE.findall(_message_text(m)):
-            seen.setdefault(normalize_url(raw), raw)
+            seen.setdefault(normalize_url(raw), raw.rstrip(_DISPLAY_STRIP))
     return seen
 
 
