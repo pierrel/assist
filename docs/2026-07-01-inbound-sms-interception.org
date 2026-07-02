@@ -117,6 +117,23 @@ text}~ → phone ~mmcli~ send. Canonical contract here.
    approved reply. ~make install-sms-forward~ mirroring ~install-server-service~; secret via
    0600 ~EnvironmentFile~; pytest for the mmcli parse + POST/delete + send.
 
+* Queued (v2) — per-sender stacked pending replies + groups (Pierre, 2026-07-02)
+Refine the pending-reply model from *one per thread* to *one per SENDER*:
+- A pending reply is keyed by sender (or a GROUP of numbers, for a group message). Messages
+  from a given sender still accumulate into that sender's single pending reply (today's
+  fold-into-one, but per-sender).
+- Different senders STACK: several pending approvals coexist, shown separately in the UI —
+  one approval per number / set of numbers.
+- The proposal carries the target number(s); a group reply goes to all of them and the
+  approval shows the recipients.
+- This resolves the catch-all residual below (which supersedes across senders).
+- *Implementation tension to decide then:* today's gate is a SINGLE HITL interrupt per thread
+  (a paused graph has one interrupt, so one pending max). Per-sender STACKED pendings need
+  either per-sender threads (each with its own interrupt — the original pre-regexp routing
+  idea) or a per-sender pending-proposal store layered over the turn (closer to the
+  propose-tool + store the first design review floated, before HITL simplified it). Groups =
+  a thread/proposal keyed on a set of numbers.
+
 * Risks / residuals
 - *Number→name is fully on the agent* (Pierre C6) — the biggest eval target; no code fallback
   in v1.
