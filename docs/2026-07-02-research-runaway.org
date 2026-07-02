@@ -114,10 +114,16 @@ A recursion hit no longer wedges the thread at =processing= (the prod symptom):
 =SandboxContainerLostError= one) that sets a terminal =error= status with
 *narrow/split* guidance — NOT "retry" (retrying re-runs the runaway).
 
-** recursion_limit values are eval-gated
-150 was silently ~1050 (7× via rollback). The true-150 + orchestrator-500 are
-provisional pending a research-eval baseline with a recursion-hit counter — bump
-if legit deep research brushes the ceiling. (Baseline in progress.)
+** recursion_limit values — baselined 2026-07-02
+150 was silently ~1050 (7× via rollback). The recursion baseline (research
+contract tests × rounds, with a recursion-hit counter) showed a *true-150 cut
+off legit research* — 2 turns hit 150 and terminated (correlating with test
+failures). So 150 was too tight once the ~7× cushion was removed. **Bumped
+research to 300** (the pre-2026-06-06 value): a true-300 (~150 model calls) still
+bounds a runaway to ~5 min (vs the 70-min incident) but gives thorough research
+room. Orchestrator stays 500 (the eval runs the orchestrator at the harness's
+5000, so its prod-500 wasn't stressed; 500 is generous for a delegate-and-
+synthesize trunk). Final: research 300, orchestrator 500.
 
 * Validation
 

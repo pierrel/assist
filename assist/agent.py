@@ -633,18 +633,18 @@ def create_research_agent(model: BaseChatModel,
                    fact_check_sub_agent]
     )
 
-    # 150 graph steps ≈ 75 model calls.  This is now the deliberate runaway
-    # backstop for the research flow: with the Pattern-E volume cap and
-    # Pattern-F re-dispatch cap removed, a research agent that keeps issuing
-    # DISTINCT-arg searches/reads is bounded only by this limit (the host-side
-    # search/read tools aren't covered by the sandbox exec timeout).  Lowered
-    # from 300 so a runaway is caught in a few minutes rather than ~12-75 min.
-    # Hitting this limit is now TERMINAL: GraphRecursionError is no longer in
-    # RollbackRunnable's rollback_on, so it is NOT rolled-back-and-re-invoked
-    # (which used to multiply the effective bound ~7x to ~1050 steps). This 150
-    # is therefore the true effective ceiling now; the value is eval-gated (a
-    # limit hit surfaces as a terminal error, not a silent loop).
-    rollback_runnable = RollbackRunnable(agent, recursion_limit=150)
+    # 300 graph steps ≈ 150 model calls: the deliberate runaway backstop for the
+    # research flow (Pattern-E/F caps removed, so a distinct-arg search/read
+    # runaway is bounded only by this limit; host-side tools aren't under the
+    # sandbox exec timeout). Hitting it is now TERMINAL: GraphRecursionError is
+    # no longer in RollbackRunnable's rollback_on, so it is NOT
+    # rolled-back-and-re-invoked (which used to multiply the effective bound ~7x
+    # — a true-150 was really ~1050). 300 is the true effective ceiling, restored
+    # from the pre-2026-06-06 value: the recursion baseline (2026-07-02) showed a
+    # true-150 cut off legit research turns (2 hits across the contract tests),
+    # so 150 was too tight once the ~7x cushion was removed. 300 still bounds a
+    # runaway to ~5 min (vs the 70-min incident) with room for thorough research.
+    rollback_runnable = RollbackRunnable(agent, recursion_limit=300)
 
     # Wrap with the references-cleanup runnable so intermediate drafts
     # and sub-sub-agent scratch files get pruned after the research call
