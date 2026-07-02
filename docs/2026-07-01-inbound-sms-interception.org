@@ -70,6 +70,17 @@ the reply.)
   unset → 503 (fail closed), both directions. 0600 ~EnvironmentFile~; placeholders in both
   ~.env.example~.
 
+* HITL protocol (verified against installed langchain)
+~HumanInTheLoopMiddleware~ (added by ~create_deep_agent(interrupt_on=…)~): configure
+~interrupt_on={"send_reply": {"allowed_decisions": ["approve", "edit", "reject"]}}~. When the
+agent calls ~send_reply~, the graph raises an interrupt carrying ~action_requests:
+[ActionRequest{action, args, …}]~ (args = the draft) — surfaced in the turn result's
+~__interrupt__~. The web detects it, sets a status + shows the draft with approve / edit /
+reject. Resume by re-invoking the graph (same runconfig; SqliteSaver restores) with
+~Command(resume={"decisions": [{"type": "approve"}]})~ (or ~{"type": "reject", "message":
+…}~ / ~{"type": "edit", "edited_action": {…}}~). On approve, ~send_reply~'s body runs (POSTs
+the reply to the phone). "edit" lets the user tweak the draft before it sends.
+
 * Wire contract
 Inbound (phone → assist): ~POST /inbound/sms~, header ~X-Assist-SMS-Secret~, ~{message_id,
 sender, text}~ → 200 accepted|duplicate (delete) · 400 malformed (delete) · 401/503
