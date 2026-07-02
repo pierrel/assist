@@ -1,121 +1,116 @@
 #+TITLE: Message events → agent triage → approved actions
 #+DATE: <2026-07-01>
-#+STATUS: DESIGN — converged after 2 review rounds; building
+#+STATUS: DESIGN — approved-with-changes (Pierre review on PR #164); building
 
-Feature #8. Incoming messages (SMS first) become **events** the agent triages against the
-user's prose **rules**; the triage turn can only **propose a reply** (it has no tool that
-executes), and **nothing is sent until the user approves** (pre-execution gate). Parallels
-the *schedule* feature (agent-configured, fires a turn in a thread) but the trigger is an
-inbound message, not a clock.
+Feature #8. Incoming messages (SMS first) become **events**. A subscription matches senders
+by **regexp** and, on a match, fires a turn in that subscription's thread using an
+agent-authored **template**. The agent triages the message and may draft a reply; the reply
+tool is gated by **deepagents human-in-the-loop** (interrupt), so nothing is sent until the
+user approves. Parallels the *schedule* feature (agent-configured per-thread records that
+fire a turn), triggered by a matching inbound message instead of a clock.
 
-Product decisions (Pierre): pre-execution gate; per-sender threads; individual events
-first; reply in v1. SMS source = emacsos phone modem; rules = prose the agent interprets.
+Product decisions (Pierre): pre-execution gate (via framework HITL); regexp sender routing;
+individual events first; reply in v1; the agent does number→name mapping itself. SMS source
+= emacsos phone modem; guidance = prose the agent authors into the template.
 
-* The gate is STRUCTURAL (the key design-review outcome)
-The safety story is "an untrusted inbound text can cause no effect." Two review rounds
-established this is NOT achievable by passing a small tool list: ~create_deep_agent~
-force-installs the filesystem write tools (and ~execute~ under a sandbox, and ~task~ if a
-sub-agent is registered) via protected middleware — ~tools=~ is additive-only — and the
-small model ignores "propose, don't act" prose (the repo's documented anti-pattern). So the
-gate is a **deny-by-default enforcer middleware**, shaped like ~assist/middleware/
-read_only_enforcer.py~ but an *allowlist*: the triage turn rejects EVERY tool at
-~wrap_tool_call~ except ~{propose_reply, read_file, ls, glob, grep}~, returning an error
-ToolMessage for anything else (~write_file~, ~edit_file~, ~execute~, ~task~, ~write_todos~,
-~search_internet~, ~read_url~, …). "Can't act" is then a property of the bound surface,
-**unit-testable** (assert a ~write_file~ call in a triage turn is rejected and the FS is
-untouched) — not a hoped-for model behavior.
+* Safety: the sandbox contains it; only the reply is gated
+Earlier drafts added a deny-by-default "propose-only" enforcer. Dropped (Pierre): the triage
+turn runs in the per-turn sandbox, so an injected text steering the agent to do something
+bad is contained — worst case, delete the thread (its work is on an isolated thread branch,
+never main). The ONE effect that escapes the sandbox is the outbound **reply**; that (not
+the whole turn) is what needs a gate, and deepagents already provides one:
+~create_deep_agent(interrupt_on={"send_reply": True})~ pauses before the tool runs. The web
+thread uses a durable ~SqliteSaver~ (threads.db), so the paused interrupt survives across
+requests and restarts; the user approves later and the graph resumes via
+~Command(resume=…)~. No custom propose-tool / pending-store / enforcer — the framework HITL
+IS the gate. (The triage agent's spec simply doesn't include host-effect tools like
+schedule/subscription editing — those aren't sandbox-contained — so its only gated action is
+the reply.)
 
-Corollary: the triage turn records nothing by writing files (it can't). Its *text output*
-(persisted in the thread) is the visible triage record; a ~propose_reply(draft)~ call is the
-only durable side effect, and it just enqueues a pending proposal (no send).
-
-* Model (v1, after the review cuts)
+* Model (v1, post-review)
 - *Event*: inbound ~{sender, text}~; assist stamps arrival time. Sender is an opaque string.
-- *Subscription* (ONE, global): a single config file ~{rules: <prose>, template: <prose w/
-  {sender}/{text} slots>}~ — NOT a store subsystem (one record needs no cap/id/per-thread
-  paths). Editable directly and via a setup skill (see below).
-- *Per-sender thread*: sender X routes to X's thread (a ~sender→tid~ map; created on first
-  contact; if the mapped tid was hard-deleted, treat as first-contact and re-map). Holds the
-  conversation + is the reply target.
-- *Triage turn*: render the subscription template with ~{sender,text}~, run ONE turn on the
-  sender's thread through the **propose-only enforcer**. The agent reads the message (+ prior
-  conversation) and the rules, and either calls ~propose_reply(draft)~ or not; its text
-  output is the record.
-- *Approve → send*: pending reply proposals render in the sender's thread (web UI); the user
-  approves/rejects. Approve → assist ~POST /outbound/sms~ to the phone (~mmcli~ send). Reject
-  → discard. No LLM turn on approval (reply is sent by code) — so the untrusted text never
-  reaches an effectful tool, on either turn.
-- *Deferred (named, not built)*: ~propose_action~ + a follow-up execution turn for richer
-  actions (calendar, tasks); bundled events; other event types; user-also-acts;
-  notifications. These re-enter when the first real effectful action exists (same "defer the
-  shared abstraction until a second producer exists" posture as the scheduler).
+- *Subscription* (multiple, per-thread — stored like schedules): ~{id, thread_id,
+  sender_regexp, template}~. The **template** is the whole self-instruction the agent authors
+  — guidance/rules woven in however the agent likes, with ~{sender}~/~{text}~ slots. NO
+  separate "rules" field (Pierre C4). Reuse/parameterize ~assist/schedule/store.py~ (don't
+  clone it).
+- *Routing*: on an inbound message, match its sender against subscriptions' regexps; the
+  FIRST match (by creation order) fires a turn in that subscription's thread with its
+  rendered template. No match → the message is recorded + logged, no turn (a catch-all is
+  expressible as regexp ~.*~). (First-match is the v1 rule; tell-me if you want all-matches.)
+- *Triage turn*: a normal sandboxed agent turn on the subscription's thread. Renders the
+  template with ~{sender, text}~ — the agent gets the raw sender STRING (Pierre C3) and does
+  any number→name mapping itself (Pierre C6, eval-gated; no deterministic mapping). It may
+  call ~send_reply(text)~; that tool is HITL-gated.
+- *Approve → send*: ~send_reply~ interrupts; the pending reply surfaces in the thread (web
+  UI) with approve/reject. Approve → resume → the tool sends via ~POST /outbound/sms~ to the
+  phone (~mmcli~). Reject → resume with a decline (the agent is told; no send).
+- *Deferred (named)*: richer actions beyond reply; bundled events; other event types;
+  user-also-acts; notifications.
 
-* Reviewer-carried technical decisions
-- *Inbound route sync ~def~*; dispatch helper sync ~def~ (pinned by a test — a stray ~async~
-  runs the turn on the loop = outage). Approve route + the outbound POST also off-loop; the
-  outbound ~requests.post~ carries an explicit ~timeout=~ (copy ~_llm_reachable~'s pattern).
-- *Durable-persist the message before the 200* (the ack = "assist owns this text"); dedup +
-  ordering from the same ~message_id~-keyed record. No health-gate, no separate seen-set.
-- *~message_id~ = ~sha256(sender‖smsc_ts‖text)~*, computed on the phone (NOT the reused modem
-  index). Residual: two identical texts from one sender in the same SMSC second collide (one
-  dropped) — never real for SMS; documented.
-- *Persistence off-loop*: the message-record, the ~sender→tid~ map, and the per-thread
-  ~proposals.json~ all use one process lock held only for the fast file op + atomic
-  tmp+rename (mirror ~ScheduleStore~'s discipline) and are read/written on the threadpool /
-  BackgroundTask side, never inline on the async loop.
+* Skills (Pierre C2)
+- *~subscribe-events~ skill*: the agent creates/edits subscriptions (regexp + template),
+  mirroring the schedule skill's *shape*. Because the config is prose (template) + a regexp
+  (not range-checkable structured fields like a schedule's cadence), it's a softer target —
+  eval the SETUP, and the skill **strongly recommends loading the regexp skill** when the
+  user gives a complex sender rule.
+- *~regexp~ skill* (built alongside): helps the agent author + test a correct sender regexp
+  (anchoring, escaping, common phone/shortcode shapes). General-purpose, not SMS-specific.
+
+* Reviewer-carried technical decisions (still apply)
+- *Inbound route sync ~def~*; dispatch helper sync ~def~ (pinned by a test); approve/resume
+  route + the outbound ~requests.post~ off-loop with explicit ~timeout=~.
+- *Durable-persist the message before the 200* (ack = "assist owns this text"); dedup +
+  ordering from a ~message_id~-keyed record. ~message_id = sha256(sender‖smsc_ts‖text)~ on
+  the phone (not the reused modem index). Same-second identical-text collision = documented
+  residual.
+- Persistence (inbound record, subscription store, routing) uses one lock + atomic
+  tmp+rename (ScheduleStore discipline), off the async loop.
 - *Auth*: shared secret ~ASSIST_SMS_SECRET~, ~hmac.compare_digest~, missing header → 401,
   unset → 503 (fail closed), both directions. 0600 ~EnvironmentFile~; placeholders in both
   ~.env.example~.
 
 * Wire contract
-Inbound (phone → assist): ~POST /inbound/sms~, header ~X-Assist-SMS-Secret~, body
-~{message_id, sender, text}~ → 200 accepted|duplicate (delete) · 400 malformed (delete) ·
-401 (retain,alert) · 503 (retain,backoff). Outbound (assist → phone, on approve): ~POST
-/outbound/sms~, same header, ~{to, text}~ → phone ~mmcli~ send. Canonical contract here.
+Inbound (phone → assist): ~POST /inbound/sms~, header ~X-Assist-SMS-Secret~, ~{message_id,
+sender, text}~ → 200 accepted|duplicate (delete) · 400 malformed (delete) · 401/503
+(retain). Outbound (assist → phone, on approve): ~POST /outbound/sms~, same header, ~{to,
+text}~ → phone ~mmcli~ send. Canonical contract here.
 
 * Plan (MVP-first) — assist
-1. *~ProposeOnlyEnforcer~ middleware* (~assist/middleware/~, shaped like
-   ~read_only_enforcer.py~): deny-by-default allowlist ~{propose_reply, read_file, ls, glob,
-   grep}~; reject others at ~wrap_tool_call~ with an error ToolMessage. Unit-tested un-mocked.
-2. *~propose_reply(draft)~ tool* — records a pending proposal on the current thread; no send.
-3. *Triage agent build* — a minimal ~AgentSpec~ (only ~propose_reply~ added) + the enforcer,
-   used by dispatch. Distinct from the full web agent.
-4. *Subscription config* — one JSON file ~{rules, template}~; a small ~subscribe-events~ skill
-   (mirror the schedule skill *shape*, but note: prose fields, so eval the SETUP too) to
-   read/write it; also hand-editable.
-5. *~sender→tid~ map* + *per-thread ~proposals.json~* — tiny lock-serialized JSON (ScheduleStore
-   discipline), off-loop.
-6. *~POST /inbound/sms~* (sync ~def~, ~manage/web/threads.py~): auth → durable record (dedup)
-   → ~background_tasks.add_task(_dispatch_event)~ → 200. *~_dispatch_event~* (sync ~def~):
-   resolve/create sender thread, render template, run the triage turn (enforcer).
-7. *Approve/reject routes* (sync ~def~) + the ~POST /outbound/sms~ call (timeout) + UI to show
-   pending proposals in the sender's thread.
-8. *Config* ~ASSIST_SMS_SECRET~ + phone URL in ~.deploy.env.example~ / ~.dev.env.example~.
-9. *Tests*: (unit, structural) the enforcer rejects every non-allowlisted tool incl.
-   ~write_file~/~execute~/~task~ and leaves the FS untouched — this is the GATE test, NOT an
-   eval; auth; dedup; durable-persist-before-dispatch; sync-def pins; event-loop liveness
-   (POST returns promptly while a turn holds THREAD_QUEUE, ~PYTHONASYNCIODEBUG=1~); approve→
-   outbound-send, reject→nothing; per-sender routing incl. re-map after hard-delete. (eval)
-   triage generalization — paraphrase gap, name-not-number, multi-rule collision, literal-
-   instruction trap, UNDER-ACTING (ambiguous text must still surface *something*, not vanish
-   silently), no-bleed-onto-normal-threads; + a SETUP eval (a prose "watch my texts, if it's
-   the plumber tell me" produces a usable subscription with ~{sender}/{text}~ slots).
+1. *Subscription model + store* — ~{id, thread_id, sender_regexp, template}~; reuse/
+   parameterize the schedule store (lock + atomic write + per-thread + cap).
+2. *~subscribe-events~ skill + tools* (create/list/modify/delete a subscription, thread-scoped
+   via run config like the schedule tools) + the *~regexp~ skill*.
+3. *Inbound record store* (durable, ~message_id~-keyed dedup) + *sender→subscription match*.
+4. *~send_reply(text)~ tool* + a triage-agent build that adds it and sets ~interrupt_on=
+   {"send_reply": True}~ (and omits host-effect tools). Reuses the ~_process_message~ path.
+5. *~POST /inbound/sms~* (sync ~def~): auth → record (dedup) → ~background_tasks.add_task(
+   _dispatch_event)~ → 200. *~_dispatch_event~* (sync ~def~): match sender → render template →
+   run the HITL-enabled turn on the subscription's thread.
+6. *Approval*: detect the pending interrupt in the thread view; ~approve~/~reject~ routes
+   (sync ~def~) resume the graph (~Command(resume=…)~); approve → ~POST /outbound/sms~.
+7. *Config* ~ASSIST_SMS_SECRET~ + phone URL in ~.deploy.env.example~ / ~.dev.env.example~.
+8. *Tests*: auth; dedup; durable-persist-before-dispatch; sync-def pins; event-loop liveness
+   (POST returns promptly while a turn holds THREAD_QUEUE, ~PYTHONASYNCIODEBUG=1~); HITL —
+   ~send_reply~ interrupts (no send before approve), approve resumes+sends, reject doesn't;
+   regexp routing (match/first-match/no-match). *Evals*: triage generalization — paraphrase
+   gap, number→name mapping (Pierre C6), multi-rule/among-subscriptions, literal-instruction
+   trap, UNDER-ACTING (ambiguous text must still surface something), no-bleed; + a SETUP eval
+   (prose "watch my texts, if it's the plumber tell me" → a usable subscription with a
+   sensible regexp + template).
 
-* Plan — emacsos
-10. *~sms-forward~ daemon* (own systemd unit, ~After=ModemManager~): poll ~mmcli~ (re-query ~-L~
-    each poll), content-hash id, POST inbound, delete on 200/400 / retain+backoff else,
-    distinct WARN per status, ~15–30s~. + a ~POST /outbound/sms~ handler that ~mmcli~-sends an
-    approved reply. ~make install-sms-forward~ mirroring ~install-server-service~; secret via
-    0600 ~EnvironmentFile~; pytest for the mmcli parse + POST/delete + send (mock ~mmcli~/
-    ~requests~).
+* Plan — emacsos (built after assist; live-test deferred — phone is off for hours)
+9. *~sms-forward~ daemon* (own systemd unit, ~After=ModemManager~): poll ~mmcli~ (re-query ~-L~
+   each poll), content-hash id, POST inbound, delete on 200/400 / retain+backoff else,
+   distinct WARN per status, 15–30s. + a ~POST /outbound/sms~ handler that ~mmcli~-sends an
+   approved reply. ~make install-sms-forward~ mirroring ~install-server-service~; secret via
+   0600 ~EnvironmentFile~; pytest for the mmcli parse + POST/delete + send.
 
 * Risks / residuals
-- *Number→name*: prose mapping in the rules ("+1555… = Ana"), eval-tested; upgrade to
-  resolving the name in the render step if the model fumbles.
-- *Under-acting*: the biggest small-model risk — an ambiguous text yielding no proposal AND
-  no visible signal. The triage template mandates the turn end by stating its decision
-  (propose a reply, or explicitly "no action, here's why") so nothing vanishes silently;
-  eval-checked.
-- *message_id same-second collision* (above); *reply loop* bounded by the approval gate (no
-  auto-reply); *LLM down/crash mid-turn* — text durably recorded before 200, re-triggerable;
-  richer actions / bundling / other event types deferred.
+- *Number→name is fully on the agent* (Pierre C6) — the biggest eval target; no code fallback
+  in v1.
+- *Under-acting* — an ambiguous text yielding no reply AND no signal; the template must have
+  the agent end by stating its decision; eval-checked.
+- *First-match routing* among overlapping subscriptions (above); *message_id same-second
+  collision*; *interrupt lost only if threads.db is lost* (durable otherwise); *reply loop*
+  bounded by the approval gate.
