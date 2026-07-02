@@ -83,3 +83,19 @@ class TestSubscriptionStore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_subscriptions_vanish_when_thread_dir_removed(tmp_path):
+    # Deleting a thread rmtrees <root>/<tid>/, which holds subscriptions.json — so a deleted
+    # thread's subscriptions disappear from the store by construction (no orphan routing).
+    import shutil
+    for tid in ("t1", "t2"):
+        os.makedirs(os.path.join(tmp_path, tid))
+    store = SubscriptionStore(str(tmp_path))
+    store.add(_sub("keep", "t1", r"^\+1555"))
+    store.add(_sub("gone", "t2", r"^\+1555"))
+    assert store.route("+15551234567").id == "keep"      # t1's is earliest
+    shutil.rmtree(os.path.join(tmp_path, "t2"))           # hard_delete removes the thread dir
+    assert store.for_thread("t2") == []                  # gone
+    assert store.route("+15551234567").id == "keep"      # t2's no longer routed
+    assert all(s.thread_id != "t2" for s in store.all())

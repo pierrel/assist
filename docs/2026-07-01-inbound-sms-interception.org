@@ -126,6 +126,9 @@ Refine the pending-reply model from *one per thread* to *one per SENDER*:
   one approval per number / set of numbers.
 - The proposal carries the target number(s); a group reply goes to all of them and the
   approval shows the recipients.
+- Scope is per-sender PER-THREAD: a different thread can independently queue its own set of
+  pending replies, even to the SAME senders as another thread. (Weird but accepted — figure
+  the cross-thread UX out then.)
 - This resolves the catch-all residual below (which supersedes across senders).
 - *Implementation tension to decide then:* today's gate is a SINGLE HITL interrupt per thread
   (a paused graph has one interrupt, so one pending max). Per-sender STACKED pendings need
