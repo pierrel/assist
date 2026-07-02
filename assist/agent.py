@@ -585,9 +585,10 @@ def create_research_agent(model: BaseChatModel,
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url],
         # Provenance guard: refuse read_url on a URL that appears nowhere prior
-        # (a fabrication). Applied to EVERY read_url-capable agent — this searcher,
-        # the fact-checker, and the orchestrator — since fabrication can happen at
-        # any of them; a legit fetch is always of a URL already in context.
+        # (a fabrication). On the SEARCHER (here) and the fact-checker — the two
+        # sub-agents whose read_url should only ever hit a URL already in context.
+        # NOT on the orchestrator (it re-dispatches, so a rejected fetch there can
+        # thrash); its runaway is bounded by recursion_limit.
         "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware()],
     }
 
@@ -622,10 +623,11 @@ def create_research_agent(model: BaseChatModel,
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
                                       workspace_dir=workspace_dir),
         backend=backend,
-        # Provenance-guard the orchestrator's own read_url too: it reads specific
-        # URLs from the research results/report (all provenanced in its context)
-        # while writing the report — a URL it invents is a fabrication and refused.
-        middleware=base_mw + middleware + [logging_mw, UrlProvenanceMiddleware()],
+        # NOT provenance-guarded here (only the searcher + fact-check sub-agents
+        # are): guarding the orchestrator's own read_url risked re-dispatch thrash
+        # (a rejected fetch -> re-dispatch research -> more searches). The
+        # orchestrator's runaway is bounded by its recursion_limit instead.
+        middleware=base_mw + middleware + [logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]
