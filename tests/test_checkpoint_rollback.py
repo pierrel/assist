@@ -191,6 +191,45 @@ class TestInvokeWithRollback:
         assert agent.invoke.call_count == 1
         agent.get_state_history.assert_not_called()
 
+    def test_recursion_error_is_terminal_not_retried(self):
+        """A GraphRecursionError (the runaway backstop) is NOT rolled back — it
+        propagates on the FIRST attempt with no rollback, even when history
+        exists. Anti-amplification pin: it used to be in rollback_on and got
+        re-invoked up to ~7x, resuming the runaway (~1050 effective steps)."""
+        from langgraph.errors import GraphRecursionError
+        agent = Mock()
+        agent.invoke.side_effect = GraphRecursionError("Recursion limit of 150 reached")
+        # History IS available, so a rollback would be *possible* — recursion
+        # must still refuse it.
+        agent.get_state_history.return_value = [_make_checkpoint("c1", step=1),
+                                                _make_checkpoint("c2", step=0)]
+
+        with pytest.raises(GraphRecursionError):
+            invoke_with_rollback(
+                agent,
+                {"messages": [{"role": "user", "content": "hi"}]},
+                {"configurable": {"thread_id": "t1"}},
+            )
+
+        assert agent.invoke.call_count == 1
+        agent.get_state_history.assert_not_called()
+
+    def test_bad_request_still_rolls_back_after_recursion_dropped(self):
+        """Guard against over-narrowing rollback_on: a BadRequestError must STILL
+        roll back and retry (call_count > 1) even though GraphRecursionError was
+        removed from the default tuple."""
+        agent = Mock()
+        agent.invoke.side_effect = [_make_bad_request_error(), {"messages": ["ok"]}]
+        agent.get_state_history.return_value = [_make_checkpoint("c1", step=1),
+                                                _make_checkpoint("c2", step=0)]
+        result = invoke_with_rollback(
+            agent,
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"configurable": {"thread_id": "t1"}},
+        )
+        assert result == {"messages": ["ok"]}
+        assert agent.invoke.call_count == 2
+
     def test_raises_immediately_when_no_history(self):
         """If there are no checkpoints at all, raise without retrying."""
         agent = Mock()

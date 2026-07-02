@@ -629,8 +629,11 @@ def create_research_agent(model: BaseChatModel,
     # DISTINCT-arg searches/reads is bounded only by this limit (the host-side
     # search/read tools aren't covered by the sandbox exec timeout).  Lowered
     # from 300 so a runaway is caught in a few minutes rather than ~12-75 min.
-    # GraphRecursionError is in RollbackRunnable's rollback_on, so hitting it
-    # rolls back rather than crashing the thread.
+    # Hitting this limit is now TERMINAL: GraphRecursionError is no longer in
+    # RollbackRunnable's rollback_on, so it is NOT rolled-back-and-re-invoked
+    # (which used to multiply the effective bound ~7x to ~1050 steps). This 150
+    # is therefore the true effective ceiling now; the value is eval-gated (a
+    # limit hit surfaces as a terminal error, not a silent loop).
     rollback_runnable = RollbackRunnable(agent, recursion_limit=150)
 
     # Wrap with the references-cleanup runnable so intermediate drafts

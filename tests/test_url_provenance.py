@@ -75,6 +75,16 @@ class TestUrlProvenanceMiddleware(TestCase):
         _result, handler = self._call("https://shop.example/deep/page-2", msgs)
         self.assertIsNotNone(handler.called_with)
 
+    def test_model_cannot_launder_via_its_own_text(self):
+        # A URL present ONLY in the model's own AIMessage content is NOT provenance —
+        # else the model writes a fabricated URL into its reasoning, then fetches it
+        # (observed on Qwen3.6). It must still be rejected.
+        msgs = [_search_result(["https://shop.example/f91w"]),
+                AIMessage(content="I'll check https://www.casiowatch.com/kids/ next.")]
+        result, handler = self._call("https://www.casiowatch.com/kids/", msgs)
+        self.assertIsNone(handler.called_with, "model's own text must not provenance a URL")
+        self.assertEqual(result.status, "error")
+
     def test_normalizes_trailing_slash(self):
         msgs = [_search_result(["https://shop.example/f91w"])]
         _result, handler = self._call("https://shop.example/f91w/", msgs)

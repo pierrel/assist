@@ -37,7 +37,6 @@ import uuid
 from typing import Any
 
 from openai import BadRequestError
-from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 
 logger = logging.getLogger(__name__)
@@ -50,7 +49,7 @@ def invoke_with_rollback(
     *,
     max_retries_per_step: int = 2,
     max_rollback_depth: int = 3,
-    rollback_on: tuple[type[Exception], ...] = (BadRequestError, GraphRecursionError),
+    rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
 ) -> dict[str, Any]:
     """Invoke an agent with checkpoint-based rollback for state errors.
 
@@ -64,13 +63,20 @@ def invoke_with_rollback(
         max_rollback_depth: Maximum number of checkpoints to go back
             through before giving up.
         rollback_on: Exception types that trigger a rollback (default:
-            ``(BadRequestError, GraphRecursionError)``).
+            ``(BadRequestError,)``). NOTE: ``GraphRecursionError`` is
+            deliberately NOT here — a recursion-limit hit is a runaway, not a
+            recoverable bad-content error. Rolling back frees only a couple of
+            steps, so re-invoking just resumes the runaway (it was multiplying
+            the per-agent ``recursion_limit`` ~7x). The ``recursion_limit`` IS
+            the runaway backstop; it must be terminal, not retried past.
 
     Returns:
         The agent's invoke result (dict with ``messages`` key).
 
     Raises:
-        The original exception if all rollback attempts are exhausted.
+        The original exception if all rollback attempts are exhausted, and
+        immediately (one attempt) for any exception not in ``rollback_on`` —
+        including ``GraphRecursionError``.
     """
     current_input = input_data
     current_config = config
@@ -180,10 +186,12 @@ class RollbackRunnable:
         agent: The compiled subagent graph.
         max_retries_per_step: Passed to ``invoke_with_rollback``.
         max_rollback_depth: Passed to ``invoke_with_rollback``.
-        rollback_on: Exception types that trigger rollback.
+        rollback_on: Exception types that trigger rollback (default
+            ``(BadRequestError,)``; ``GraphRecursionError`` is terminal — see
+            ``invoke_with_rollback``).
         recursion_limit: If set, injected into the config passed to the
-            agent to cap the number of graph steps (default: None = use
-            LangGraph default of 1000).
+            agent to cap the number of graph steps. This is the per-agent
+            runaway backstop and is now terminal (a hit is NOT rolled back).
     """
 
     def __init__(
@@ -192,7 +200,7 @@ class RollbackRunnable:
         *,
         max_retries_per_step: int = 2,
         max_rollback_depth: int = 3,
-        rollback_on: tuple[type[Exception], ...] = (BadRequestError, GraphRecursionError),
+        rollback_on: tuple[type[Exception], ...] = (BadRequestError,),
         recursion_limit: int | None = None,
     ):
         self._agent = agent

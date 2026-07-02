@@ -226,6 +226,30 @@ def test_process_message_kills_container_even_when_turn_errors(client, monkeypat
     assert len(calls) == 1, f"erroring turn must still tear down its container, got {calls}"
 
 
+def test_recursion_limit_sets_error_status(client, monkeypatch):
+    """The prod symptom pin: when the runaway backstop fires (GraphRecursionError,
+    now terminal), the turn must reach a TERMINAL error status with narrow/split
+    guidance — NOT stay wedged at 'processing' (the 70-min prod incident) and NOT
+    dump a raw langgraph exception repr."""
+    from langgraph.errors import GraphRecursionError
+
+    class _RunawayChat:
+        def pending_reply(self):
+            return None
+
+        def message(self, text):
+            raise GraphRecursionError(
+                "Recursion limit of 150 reached without hitting a stop condition")
+    _stub_happy_path(monkeypatch, _RunawayChat())
+
+    r = client.post("/thread/thread-e2e/message", data={"text": "hi"},
+                    follow_redirects=False)
+    assert r.status_code == 303, r.text
+    status = _wait_for_terminal_status("thread-e2e")
+    assert status.get("stage") == "error"
+    assert "step limit" in (status.get("error") or "").lower(), status.get("error")
+
+
 def test_process_message_reaps_registered_container_when_creation_then_raises(
         client, monkeypatch, tmp_path):
     """The exact round-1 gap: sandbox creation registers a container and THEN

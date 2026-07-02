@@ -9,15 +9,16 @@ zero — the small model still slips. This middleware makes a fabricated fetch
 *unreachable*: ``read_url`` is refused unless the URL it's given already appears
 somewhere earlier in the conversation.
 
-"Already appears earlier" — not "came from a search result" — is deliberate: a
-provenanced URL is one the agent could have *copied* rather than *invented*. That
-set is every URL textually present in a prior message: search-result URLs, a URL
-the user put in the question, and links inside a page the agent already fetched
-(legitimate link-following). Only a URL that appears NOWHERE prior — a pure
-fabrication — is rejected. This keeps the guard a coarse, unambiguous bound (a
-substring/membership check on prior text, not a fuzzy "looks invented"
-heuristic), and it does not end the turn: it returns a corrective tool result so
-the model retries with a real URL.
+A provenanced URL is one the agent could have *copied* rather than *invented*:
+one textually present in a TOOL RESULT or the USER's message — search-result
+URLs, links inside a page the agent already fetched (legitimate link-following),
+or a URL the user pasted in the question. The model's OWN prior text does NOT
+count (else it launders a fabricated URL by writing it into its reasoning, then
+fetching it — see ``_seen_urls``). Only a URL that appears in no tool/user
+message — a pure fabrication — is rejected. This keeps the guard a coarse,
+unambiguous bound (a substring/membership check on tool+user text, not a fuzzy
+"looks invented" heuristic), and it does not end the turn: it returns a
+corrective tool result so the model retries with a real URL.
 
 Scope: the research SEARCHER only (it owns both ``search_internet`` and
 ``read_url``). NOT the fact-check agent — that subagent re-fetches URLs cited in
@@ -30,7 +31,7 @@ from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
 logger = logging.getLogger(__name__)
@@ -69,13 +70,22 @@ def _message_text(message: Any) -> str:
 
 
 def _seen_urls(messages: list) -> set[str]:
-    """Every URL that textually appears in the message content so far, normalized.
+    """Every URL in a TOOL RESULT or the USER's message, normalized — the sources
+    the model cannot fabricate.
 
-    Scans ``.content`` only — a ``read_url`` call's URL lives in the AIMessage's
-    ``tool_calls``, not its content, so the URL under check is never counted as
-    its own provenance."""
+    Scans ``ToolMessage`` content (search results + pages the agent already
+    fetched, so legitimate link-following is preserved) and ``HumanMessage``
+    content (a URL the user pasted in the question). It deliberately EXCLUDES the
+    model's own ``AIMessage`` content: otherwise the model launders a fabricated
+    URL by writing it into its reasoning first, then fetching it — observed on
+    Qwen3.6 (14 of 24 fetches slipped through this way against the provenance
+    eval). A copied-from-search URL is still allowed because it also appears in
+    the search ``ToolMessage``; only a URL invented in the model's own text and
+    present in no tool/user message is rejected."""
     seen: set[str] = set()
     for m in messages:
+        if not isinstance(m, (HumanMessage, ToolMessage)):
+            continue
         for raw in _URL_RE.findall(_message_text(m)):
             seen.add(normalize_url(raw))
     return seen
