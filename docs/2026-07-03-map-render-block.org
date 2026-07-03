@@ -31,19 +31,32 @@ REMOVES the file-traversal/exfil surface (no path, no serve route, no
 parse stays web-only in =_render_assistant_content=; =_RENDER_BLOCK_RE= NOT
 touched (one-map-per-turn is a flag, not a new scan).
 
-*Trade-off (flagged):* inline data lives in the assistant MESSAGE, so it re-enters
-the LLM context on later turns (a file keeps the message tiny). Typical maps are
-small (~1-5 KB: a few pins + a route polyline), so v1 accepts it; if maps grow or
-context bloat shows up, switch to the =.gitignore='d-dir file (same render
-mechanism, only the payload source changes). A render-time SIZE CAP bounds a
-runaway inline block.
+*Trade-off (MEASURED — a non-issue):* inline data lives in the assistant MESSAGE,
+so it re-enters the LLM context on later turns. But it's TINY: ~250 bytes (pins)
+to ~750 bytes (pins + a route) with the compact line format below — measured on a
+real scenario (6 coffee-shop pins geocoded + a real 133-point MOTIS walk route).
+Pierre's point holds: the place NAMES the model supplies hit the context EITHER
+WAY (and they're already in the conversation); only the tool-GENERATED geometry
+(coords + polyline) could be kept out of context by writing a file (tool returns
+just a filename) — but at ~750 bytes that's not worth a file + repo clutter. So
+inline wins; context cost is negligible. The =.gitignore='d-dir file stays the
+escape hatch only for an unusually large map. A render-time SIZE CAP bounds a
+runaway block.
 
-** Data = GeoJSON (RFC 7946), one block = one map
-A =FeatureCollection= inline in the block: =Point= = pins (=properties.label=),
-=LineString= = paths (route polyline). One collection, many features → a literal
-match for "one map, multiple things". Leaflet ingests it natively (=L.geoJSON=).
-Block shape: =type: map= + =data: <compact single-line GeoJSON>= (fits the
-key:value block parser).
+** Data = a SIMPLE line language (Pierre review), not raw GeoJSON
+The block is one line per thing — simple, compact, and it fits the existing
+=key: value= block parser:
+: type: map
+: pin: <lat>,<lon> <label>
+: path: <google-encoded-polyline> <label>
+Repeated =pin:= / =path:= keys = one map, many things (=_parse_render_block= grows
+a small tweak: accumulate repeated =pin=/=path= keys into lists instead of
+last-wins). The web layer expands them to Leaflet markers + Leaflet-side
+decoded polylines. Chosen over raw inline GeoJSON: MEASURED ~6x smaller on the
+real scenario (simple lines 747 B vs GeoJSON 4328 B; pins-only 246 B) — the
+google-encoded polyline (a compact string) is what shrinks a path vs a GeoJSON
+coordinate array — and it reads plainly, matching "the render block domain
+language should be simple".
 
 * The three decisions
 
@@ -61,10 +74,10 @@ JSON skill.
 
 *Two sub-questions, EVAL-GATED (Pierre's point — resolve with data, not
 assumption):*
-(a) Does =map_view= return the WHOLE ready-to-paste block (=```render\ntype: map\n
-data: {…}\n```=, model echoes it verbatim) — the render-skill "structure beats
-prose" default — OR can the model reliably COMPOSE the inline block from
-tool-provided coords (a lighter design)? UNTESTED.
+(a) Does =map_view= return the WHOLE ready-to-paste block (=type: map= +
+=pin:=/=path:= lines, model echoes it verbatim) — the render-skill "structure
+beats prose" default — OR can the model reliably COMPOSE the =pin:=/=path:= lines
+from tool-provided coords (a lighter design)? UNTESTED.
 (b) *Gate before build:* a focal eval — feed the model accurate coords (tool
 output) and check it emits a well-formed inline map block (mirror the render
 skill's own 3/3 emission gate). PASS → the lighter "model composes" path is
@@ -107,13 +120,14 @@ The two design reviewers split here, and this is the load-bearing decision:
   CSP header) buys real containment for untrusted-data-driven scripts.
 
 * Rendering flow (inline data + sandboxed iframe — no file routes)
-1. =_render_map_block= (threads.py) parses the inline =data:= GeoJSON from the
-   block, applies a render-time SIZE CAP (reject/skip an oversized inline block →
-   falls to a code block), and emits a SANDBOXED iframe via =srcdoc= so the data
-   travels WITH it: =<iframe sandbox="allow-scripts allow-popups" srcdoc="…">=.
-   NO file I/O (the data is in the block, not a file) → no on-loop-read concern.
-   The srcdoc HTML contains: a CSP =<meta>=, the GeoJSON as a =<script
-   type="application/json">= data island (NOT executed; escape =</= so it can't
+1. =_render_map_block= (threads.py) parses the inline =pin:=/=path:= lines from
+   the block into a small structured object (=[{lat,lon,label}]= pins +
+   =[{polyline,label}]= paths), applies a render-time SIZE/COUNT CAP (oversized →
+   code block), and emits a SANDBOXED iframe via =srcdoc= so the data travels WITH
+   it: =<iframe sandbox="allow-scripts allow-popups" srcdoc="…">=. NO file I/O
+   (the data is in the block, not a file) → no on-loop-read concern. The srcdoc
+   HTML contains: a CSP =<meta>=, the parsed pins/paths as a =<script
+   type="application/json">= data island (NOT executed; =</= escaped so it can't
    break out), a small init script, and Leaflet.
 2. NO =/thread/{tid}/map= or =/map.geojson= routes, NO =_safe_workspace_file= —
    inline data has no path, so the traversal/exfil surface is gone.
@@ -126,12 +140,12 @@ The two design reviewers split here, and this is the load-bearing decision:
    asset route (a sandboxed null-origin iframe can still fetch subresources; a
    cached vendored-bytes route, NOT a first-ever =StaticFiles= mount — the
    codebase inlines every asset today) so it isn't re-sent per map.
-4. The init (=L.geoJSON=): popups bound via a DOM text node
-   (=el.textContent = String(label); layer.bindPopup(el)=) — NEVER
-   =bindPopup(string)= (Leaflet treats a string as HTML) and NEVER =innerHTML=; a
-   =label=-ONLY property allowlist; =fitBounds= to all features; the OSM
-   =L.tileLayer= (hard-coded https URL + attribution). Bad/missing/oversized JSON
-   → empty map, never a throw.
+4. The init: =L.marker= per pin + =L.polyline(decode(path))= per path (a small
+   Leaflet-side polyline decoder). Popups bound via a DOM text node
+   (=el.textContent = String(label); marker.bindPopup(el)=) — NEVER
+   =bindPopup(string)= (Leaflet treats a string as HTML) and NEVER =innerHTML=;
+   =fitBounds= to all layers; the OSM =L.tileLayer= (hard-coded https URL +
+   attribution). Bad/missing/oversized data → empty map, never a throw.
 5. One map per turn: =_render_assistant_content= renders only the FIRST
    =type: map= block (a =map_rendered= flag checked before dispatch); later map
    blocks fall through to code blocks.
@@ -160,12 +174,12 @@ design adds no new on-loop I/O).
   containment; textContent-only popups + a =label=-only property allowlist are the
   prevention. The inline GeoJSON is fully untrusted (agent-authored) — escaping is
   at the RENDER layer, and even a slip is jailed in the null-origin iframe.
-- *Inline-data safety:* the GeoJSON goes into a =<script type="application/json">=
-  data island (not executed), =</= escaped so it can't break out into an
-  executable script; the whole =srcdoc= attribute is HTML-escaped. A render-time
-  SIZE CAP on the inline block is the binding resource bound (the agent could emit
-  a huge block). NO file path → NO traversal/exfil surface at all (an upside of
-  inline vs a file).
+- *Inline-data safety:* the parsed pins/paths go into a =<script
+  type="application/json">= data island (not executed), =</= escaped so it can't
+  break out into an executable script; the whole =srcdoc= attribute is
+  HTML-escaped; labels are text-node only (above). A render-time SIZE/COUNT CAP on
+  the block is the binding resource bound (the agent could emit a huge block). NO
+  file path → NO traversal/exfil surface at all (an upside of inline vs a file).
 - *Event-loop:* =_render_map_block= does NO file I/O (data is in the block); it
   builds a string. =_RENDER_BLOCK_RE= untouched; one-map-per-turn flag.
 - *Tiles:* hard-coded keyless https OSM URL (no SSRF, no secret); a keyed provider
@@ -193,12 +207,12 @@ design adds no new on-loop I/O).
 Unit (CPU): =_render_map_block= (valid inline =data:= → sandboxed =srcdoc= iframe
 string; missing/oversized/bad-JSON =data:= → None / code block; the =srcdoc= is
 HTML-escaped + the JSON island has =</= escaped so it can't break out);
-one-map-per-turn (2 map blocks → 1 embed); *adversarial XSS* (a =label= with
+the =_parse_render_block= tweak (repeated =pin:=/=path:= → lists, not last-wins);
+one-map-per-turn (2 map blocks → 1 embed); *adversarial XSS* (a =pin= =label= with
 =<script>=/=<img onerror>= → the rendered srcdoc has no executable HTML in the
 label, AND it's sandboxed null-origin — test the symptom); =map_view= (mock
-geocoder/MOTIS: places→pins, a route→LineString with decoded polyline,
-unresolvable place dropped+named, feature/size cap, valid GeoJSON, =[lon,lat]=
-axis order, returns a well-formed block). Behavioral: THE GATING focal eval
+geocoder/MOTIS: places→=pin:= lines, a route→a =path:= encoded-polyline line,
+unresolvable place dropped+named, feature/size cap, returns a well-formed block). Behavioral: THE GATING focal eval
 (=test_map_agent.py=, N=3) — feed accurate coords and check the model emits a
 well-formed inline map block (decides "model composes" vs "tool returns the
 block", §Decision 1); include a non-skill-telegraphed prompt (generalization).
