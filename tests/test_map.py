@@ -68,6 +68,14 @@ class TestRenderMapBlock(TestCase):
         many = "type: map\n" + "".join(f"pin: 1,{i} p{i}\n" for i in range(_MAP_MAX_PINS + 1))
         self.assertIsNone(_render_map_block("t", _block(many)))
 
+    def test_polyline_decoded_at_motis_precision_7(self):
+        # MOTIS emits precision-7 polylines; decoding at Google's default 5 puts
+        # every point 100x off the globe, dragging fitBounds off-map and blanking
+        # the view (thread 20260703130532 bug). Pin the precision in the init.
+        html = _render_map_block("t", _block("type: map\npath: abc123 route"))
+        self.assertIn("1e7", html)
+        self.assertNotIn("1e5", html)
+
     def test_oversized_polyline_dropped(self):
         html = _render_map_block(
             "t", _block("type: map\npin: 1,2 ok\npath: " + "a" * 20001 + " toolong"))

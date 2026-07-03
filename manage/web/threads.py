@@ -1399,8 +1399,11 @@ _MAP_MAX_POLYLINE = 20000    # chars per encoded polyline
 # The map init: read the (non-executed) JSON data island, draw circle markers +
 # decoded polylines, fit bounds.  Labels are bound as TEXT NODES (never a string —
 # Leaflet treats a popup string as HTML — and never innerHTML), so an agent label
-# can't inject markup.  `decode` is the standard Google encoded-polyline decoder
-# (precision 5, matching MOTIS).
+# can't inject markup.  `decode` is the Google encoded-polyline decoder at
+# PRECISION 7 (1e7) — MOTIS emits precision-7 polylines (NOT Google's default 5),
+# and map_data is the only path producer; decoding at 5 puts every point 100x off
+# the globe, which then drags fitBounds off-map and blanks the view.  Out-of-range
+# points are dropped so a bad polyline can't blow up fitBounds.
 _MAP_INIT_JS = """
 (function(){
   var d;
@@ -1418,7 +1421,8 @@ _MAP_INIT_JS = """
       shift=0; res=0;
       do { b=str.charCodeAt(i++)-63; res|=(b&0x1f)<<shift; shift+=5; } while(b>=0x20);
       lon += (res&1)?~(res>>1):(res>>1);
-      pts.push([lat/1e5, lon/1e5]);
+      var y=lat/1e7, x=lon/1e7;
+      if(y>=-90 && y<=90 && x>=-180 && x<=180) pts.push([y, x]);
     }
     return pts;
   }
