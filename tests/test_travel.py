@@ -83,6 +83,15 @@ class TestMapData:
             tools.map_data(places="A; B", routes="A -> B")
         assert calls.count("A") == 1 and calls.count("B") == 1
 
+    def test_route_unresolvable_endpoint_is_named(self):
+        """A route whose endpoint can't be geocoded is named as unlocatable, not
+        dropped silently or crashed."""
+        def geo(p):  # A resolves, B does not
+            return {"lat": 37.76, "lon": -122.42, "name": p} if p == "A" else None
+        with patch.object(tools, "_geocode", side_effect=geo):
+            out = tools.map_data(routes="A -> B")
+        assert "route (A -> B): (could not locate one endpoint)" in out
+
     def test_no_args_returns_prompt_not_raises(self):
         """LLM-facing: a malformed `map_data()` (no places) must return the
         guidance string, not raise TypeError."""
