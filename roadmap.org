@@ -137,6 +137,27 @@ agent would add them correctly by calling the routing tool. So keep distance
 computation OUT of research (don't let it emit invented numbers); the
 distance-capable agent fills them via the tool.
 
+*Fix is TWO-SIDED (Pierre) — belt AND suspenders:*
+1. *General agent must NOT ask research for distances/travel times.* When it
+   delegates (the =task= dispatch to the research sub-agent), the delegated task
+   should ask only for the PLACES/facts, never the walking/driving distances or
+   times — the general agent computes those itself with =travel=/=directions=
+   AFTER research returns the candidates. Prompt/guidance on the
+   orchestrator (=research_instructions.txt.j2=): "delegate the finding of
+   places/facts; you compute distances & travel times yourself with the routing
+   tool — never ask the researcher for them."
+2. *Research sub-agent must NOT look up / estimate distances even if asked
+   (refuse).* It has no routing tool, so any distance it produces is a guess.
+   Guidance in =sub_research.txt.j2=: "you do NOT compute or estimate distances or
+   travel times — you have no routing tool; if the task asks for them, omit them
+   (or state the caller should route them) and return only the places/facts."
+   Potentially a harder lever if guidance doesn't hold (the small model may
+   estimate anyway): don't let a hand-estimated number survive — but the coarse-
+   bounds/guidance-first ethos says try guidance + eval first.
+Neither side alone is enough: if only (1), the researcher volunteers guesses; if
+only (2), the general agent might still surface no distances for a distance-nature
+question. Both → research returns places, general agent routes the distances.
+
 *Eval to add (Pierre):* mock a research report/answer that has NO distances while
 the QUESTION is about distances — 3 variations — and assert the agent CALLS the
 appropriate tool (=travel=/=directions=) to get the distances rather than
