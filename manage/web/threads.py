@@ -1354,22 +1354,35 @@ def _file_embed_html(tid: str, path: str, lines: str = "", pages: str = "") -> s
             f'{label} ↗</a></div></div>')
 
 
+def _scalar(value):
+    """Read a render-block value as a single string.  ``_parse_render_block``
+    list-ifies a REPEATED key (for the map's many ``pin:``/``path:`` lines), so a
+    key a scalar consumer expects (``type``, a file ``path``/``lines``/``pages``)
+    could arrive as a list on adversarial/duplicated agent output — take the last
+    (last-wins), so a list never reaches a string op (splitext) or a dict-key
+    lookup (which would raise ``unhashable list`` out of the render path → a 500
+    that bricks the thread page)."""
+    return value[-1] if isinstance(value, list) else value
+
+
 def _render_file_block(tid: str, block: dict) -> str | None:
     """``type: file`` renderer.  Embeds a showable workspace file, or None when
     the path is missing / not a renderable extension (the block is then left to
     show as a normal code block).  An optional ``lines:``/``pages:`` range is
     carried into the embed."""
-    path = block.get("path", "")
+    path = _scalar(block.get("path", ""))
     if not path or os.path.splitext(path)[1].lower() not in _SHOWABLE_EXTS:
         return None
-    return _file_embed_html(tid, path, block.get("lines", ""), block.get("pages", ""))
+    return _file_embed_html(tid, path, _scalar(block.get("lines", "")),
+                            _scalar(block.get("pages", "")))
 
 
 # Vendored Leaflet (BSD-2), read ONCE at import and inlined into each map's
 # sandboxed srcdoc.  Inlined rather than linked because the map iframe is a
 # NULL-origin sandbox (no allow-same-origin): under its CSP, `'self'` is the
 # opaque origin, so a same-origin `<script src>` subresource wouldn't be
-# authorized — a self-contained srcdoc sidesteps that entirely.
+# authorized — a self-contained srcdoc sidesteps that entirely.  Cost: ~147KB of
+# Leaflet ships in each map's srcdoc (page HTML), acceptable at one-map-per-turn.
 _VENDOR_DIR = os.path.join(os.path.dirname(__file__), "vendor")
 with open(os.path.join(_VENDOR_DIR, "leaflet.js"), encoding="utf-8") as _lf:
     _LEAFLET_JS = _lf.read()
@@ -1484,6 +1497,10 @@ def _render_map_block(tid: str, block: dict) -> str | None:
         return None
     data = json.dumps({"pins": pins, "paths": paths}).replace("</", "<\\/")
     nonce = secrets.token_hex(16)
+    # Null-origin sandbox: 'self' would be the opaque origin (authorizes nothing),
+    # so the CSP names concrete sources only — a per-render nonce for the two inline
+    # scripts (Leaflet + init), 'unsafe-inline' for the inlined Leaflet CSS, the
+    # exact OSM tile host for img (raster tiles are <img>, so connect-src stays none).
     csp = ("default-src 'none'; "
            f"script-src 'nonce-{nonce}'; "
            "style-src 'unsafe-inline'; "
@@ -1499,9 +1516,17 @@ def _render_map_block(tid: str, block: dict) -> str | None:
         f'<script nonce="{nonce}">{_LEAFLET_JS}</script>'
         f'<script nonce="{nonce}">{_MAP_INIT_JS}</script>'
         "</body></html>")
+    # Fullscreen control — the map's equivalent of the file embed's open-on-own-
+    # page ↗.  The map is inline (no route to open in a new tab), so the parent
+    # page fullscreens the iframe ELEMENT via the Fullscreen API (allowfullscreen
+    # permits it); the sandboxed content is unchanged.
+    fullscreen = ('<div class="show-cap"><a href="#" '
+                  'onclick="this.closest(\'.show-embed\')'
+                  '.querySelector(\'.show-map\').requestFullscreen();return false;">'
+                  'View fullscreen ⛶</a></div>')
     return (f'<div class="show-embed"><iframe class="show-map" '
-            f'sandbox="allow-scripts allow-popups" '
-            f'srcdoc="{html.escape(srcdoc, quote=True)}"></iframe></div>')
+            f'sandbox="allow-scripts allow-popups" allowfullscreen '
+            f'srcdoc="{html.escape(srcdoc, quote=True)}"></iframe>{fullscreen}</div>')
 
 
 # type -> renderer(tid, block).  The SINGLE source of truth for the render-block
@@ -1550,7 +1575,7 @@ def _render_assistant_content(tid: str, raw: str) -> str:
     map_rendered = False
     for m in _RENDER_BLOCK_RE.finditer(raw):
         block = _parse_render_block(m.group(1))
-        btype = block.get("type", "")
+        btype = _scalar(block.get("type", ""))  # a repeated type: line -> last, never a list
         if btype == "map" and map_rendered:
             continue  # one map per turn -> later map blocks stay as code blocks
         renderer = _RENDER_DISPATCH.get(btype)

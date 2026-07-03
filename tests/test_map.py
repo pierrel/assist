@@ -101,6 +101,32 @@ class TestMapXSS(TestCase):
         self.assertIn("bindPopup(el)", html)
 
 
+class TestRenderRobustness(TestCase):
+    """Regression: the repeated-key -> list parse tweak must NOT crash the scalar
+    consumers (`type` dispatch, file-block `path`).  `_render_assistant_content`
+    runs inline on the async thread handler, so an uncaught raise here 500s the
+    page and permanently bricks that thread (the message is persisted)."""
+
+    def test_repeated_type_line_does_not_crash(self):
+        # two type: lines -> block["type"] would be a list -> _RENDER_DISPATCH.get
+        # (list) is `unhashable type` without the _scalar guard.
+        raw = "```render\ntype: map\ntype: file\npin: 1,2 x\n```"
+        self.assertIsInstance(_render_assistant_content("t", raw), str)
+
+    def test_repeated_file_path_does_not_crash(self):
+        # two path: lines in a file block -> os.path.splitext(list) without _scalar.
+        raw = "```render\ntype: file\npath: a.md\npath: b.md\n```"
+        self.assertIsInstance(_render_assistant_content("t", raw), str)
+
+
+class TestMapFullscreen(TestCase):
+    def test_map_has_fullscreen_control(self):
+        html = _render_map_block("t", _block("type: map\npin: 37.7,-122.4 x"))
+        self.assertIn("allowfullscreen", html)
+        self.assertIn("requestFullscreen", html)
+        self.assertIn("show-cap", html)   # same caption row as the file embed's ↗
+
+
 class TestOneMapPerTurn(TestCase):
     def test_only_first_map_renders(self):
         raw = ("```render\ntype: map\npin: 1,2 a\n```\n\n"

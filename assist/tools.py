@@ -774,18 +774,27 @@ def map_data(places: str, routes: str = "") -> str:
     map block.  Fail-loud-but-returned (like ``travel``): an unplaceable spot is
     named, never raised.
     """
+    def geocode(place: str) -> dict | None:
+        """_geocode, but a backend-down (_TravelBackendError) yields None instead
+        of raising — map_data's contract is fail-loud-but-RETURNED (an unplaceable
+        spot is NAMED, never raised into the agent loop, like ``travel``)."""
+        try:
+            return _geocode(place)
+        except _TravelBackendError:
+            return None
+
     place_list = [p.strip() for p in (places or "").split(";") if p.strip()]
     route_list = [r.strip() for r in (routes or "").split(";") if r.strip()]
     if not place_list and not route_list:
         return "No places given — call map_data with places set to the place names."
     out = []
     for p in place_list:
-        g = _geocode(p)
+        g = geocode(p)
         out.append(f"{p}: {g['lat']:.5f},{g['lon']:.5f}" if g else f"{p}: (could not locate)")
     for r in route_list:
         parts = re.split(r"\s*->\s*|\s+to\s+", r, maxsplit=1)
-        o = _geocode(parts[0]) if parts else None
-        d = _geocode(parts[1]) if len(parts) > 1 else None
+        o = geocode(parts[0]) if parts else None
+        d = geocode(parts[1]) if len(parts) > 1 else None
         if not (o and d):
             out.append(f"route ({r}): (could not locate one endpoint)")
             continue

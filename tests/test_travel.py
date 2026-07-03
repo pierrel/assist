@@ -58,6 +58,18 @@ def routing_env(monkeypatch):
     monkeypatch.setenv("ASSIST_GEOCODER_URL", "http://nominatim")
 
 
+class TestMapData:
+    def test_backend_down_returns_not_raises(self):
+        """map_data's contract is fail-loud-but-RETURNED: a geocoder backend-down
+        (_geocode raises _TravelBackendError) is caught and the place NAMED, never
+        raised into the agent loop."""
+        with patch.object(tools, "_geocode",
+                          side_effect=tools._TravelBackendError("geocoder down")):
+            out = tools.map_data(places="Four Barrel SF; Haus SF")
+        assert "Four Barrel SF: (could not locate)" in out
+        assert "Haus SF: (could not locate)" in out
+
+
 class TestFormat:
     def test_duration(self):
         assert tools._fmt_duration(1320) == "22 min"
