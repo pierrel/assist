@@ -1,0 +1,172 @@
+#+TITLE: Map render block — visualize places + routes on a tiling map
+#+DATE: <2026-07-03>
+#+STATUS: DESIGN (Phase 1, awaiting Pierre review) — design-review team run, findings folded in
+
+Extends the render skill (=docs/2026-06-28-render-skill.org=) with a new
+=type: map=. Origin: the "coffee shops near Fellow Barber" work — showing places
+and the routes/distances between them on an actual map instead of prose.
+
+* What Pierre asked for
+- A map in the assist WEB chat view.
+- EXACTLY ONE map per turn, but that one map carries MULTIPLE things: pins AND
+  paths (routes), etc.
+- A tiling library, as open/libre as possible.
+- Tile source (Pierre's call): OSM public raster tiles for v1; self-host later.
+
+* The contract (mirrors the render skill, unchanged boundary)
+The agent emits a ```render fenced block =type: map, path: <name>.geojson= where
+=path= is a WORKSPACE FILE — the render skill's deliberate "no inline payload"
+security boundary is kept singular. =_RENDER_DISPATCH= (=manage/web/threads.py=)
+gains ="map": _render_map_block=; parse stays web-only in
+=_render_assistant_content=; the linear-hardened =_RENDER_BLOCK_RE= is NOT
+touched (one-map-per-turn is a flag, not a new scan).
+
+** Data = GeoJSON (RFC 7946), one file = one map
+A =FeatureCollection=: =Point= features = pins (=properties.label=), =LineString=
+features = paths (the route polyline). One file, many features → a literal match
+for "one map, multiple things". Leaflet ingests it natively (=L.geoJSON=).
+
+* The three decisions
+
+** 1. A =map_view= tool builds the GeoJSON — and RETURNS THE READY-TO-PASTE BLOCK
+The model does NOT hand-author GeoJSON (small-model "structure beats prose"; and
+the route polyline isn't even exposed to the model as text today). A tool
+geocodes (Nominatim =_geocode=) + routes (MOTIS polyline via the existing
+=_decode_polyline=) + writes =<workspace>/<name>.geojson=.
+
+*Design-review fix (simplicity BLOCKER, adopted):* =map_view= returns the WHOLE
+render block string (=```render\ntype: map\npath: <generated>.geojson\n```=), not
+a bare filename. The skill says "call =map_view=, then emit exactly what it
+returns." This removes the fragile step where the model must thread a
+tool-invented filename into hand-written block syntax — the render skill only
+ever passed a path the model already named; here the tool invents the artifact,
+so it must hand back the whole block to copy verbatim. Highest-value change.
+
+Ownership: the GENERAL/orchestrator agent (it already holds =travel=/=directions=;
+=map_view= registers alongside them at =agent.py:375=), NOT the research
+sub-agent — consistent with the just-merged "research must not judge distances"
+principle. The map is a general-agent concern.
+
+** 2. Leaflet (BSD-2) + vendored + OSM public raster tiles (v1)
+Leaflet over MapLibre for v1: both BSD, but Leaflet is ~a couple files + raster
+tiles, no vector-tile pipeline. MapLibre GL JS + vector tiles is the
+self-hosted-tiles follow-up (data contract unchanged when we swap). Leaflet
+JS/CSS is VENDORED + served same-origin (never a CDN). Tile source:
+=https://tile.openstreetmap.org/{z}/{x}/{y}.png= with attribution — Pierre's v1
+call; the tile URL is a hard-coded constant (no agent input → no SSRF).
+
+** 3. Containment: a sandboxed iframe + its own CSP (NOT inlined in the chat page)
+The two design reviewers split here, and this is the load-bearing decision:
+- The existing render embeds are safe by CONTAINMENT — each is an =<iframe>=
+  WITHOUT =allow-scripts=, so agent HTML can't execute (threads.py ~1348).
+- A map needs JS (Leaflet) over AGENT-AUTHORED data (the geojson labels). The
+  *simplicity* reviewer noted the chat page already runs inline dev scripts with
+  no CSP, so inlining "fits the posture". The *threat-model* reviewer countered:
+  those existing scripts are trusted DEV code; the map is the FIRST place
+  UNTRUSTED agent data drives script execution in the app origin — inlining it
+  there means a popup-XSS slip is a full-origin (session) compromise.
+- *Decision (fix-by-construction + the new adversarial-security lens for a new
+  untrusted-data render path):* render the map inside a dedicated
+  =<iframe sandbox="allow-scripts allow-popups">= pointed at a new
+  =/thread/{tid}/map?path=…= HTML route that carries its OWN CSP
+  (=default-src 'none'; script-src 'self' 'nonce-…'; img-src 'self' data:
+  https://*.tile.openstreetmap.org; connect-src 'self'; style-src 'self'
+  'unsafe-inline'; object-src 'none'; base-uri 'none'=). A popup-XSS is then
+  JAILED in the iframe, never the chat origin — preserving the "embeds can't
+  touch the app origin" property. The simplicity reviewer's inline-in-chat-page
+  alternative is considered-but-rejected: modest extra structure (one route + a
+  CSP header) buys real containment for untrusted-data-driven scripts.
+
+* Rendering flow (folds in the reconciled simplicity wins)
+1. =_render_map_block= (threads.py) emits ONLY a string: =<iframe sandbox=…
+   src="/thread/{tid}/map?path=<html.escape'd>">=. ZERO file I/O on the loop
+   (like =_render_file_block=).
+2. NEW sync route =GET /thread/{tid}/map= (mirrors =show_file_view= — off the
+   event loop): =_safe_workspace_file= confinement + =.geojson=-ONLY extension
+   pin + a serve-time BYTE-SIZE CAP (mirror =_MAX_PDF_EXTRACT_BYTES=; the binding
+   resource bound, since the agent can hand-write a huge =.geojson=). Reads the
+   file, returns the map HTML page.
+3. The map page (that route) INLINES: the geojson as =<script
+   type="application/json">= (data, NOT executed; =json.dumps= escapes =</=), a
+   nonce'd init script, and Leaflet from a same-origin cached route (a vendored
+   constant/route — NOT a first-ever =StaticFiles= mount; the codebase has no
+   static mount, every asset is an inlined constant today). This drops the
+   separate =/map.geojson= route the plan first had — the data is already
+   validated+capped, so inlining it into the sandboxed page is simpler and
+   equally safe.
+4. The init (=L.geoJSON=): popups bound via a DOM text node
+   (=el.textContent = String(label); layer.bindPopup(el)=) — NEVER
+   =bindPopup(string)= (Leaflet treats a string as HTML) and NEVER =innerHTML=; a
+   =label=-ONLY property allowlist; =fitBounds= to all features; the OSM
+   =L.tileLayer= (hard-coded https URL + attribution).
+5. One map per turn: =_render_assistant_content= renders only the FIRST
+   =type: map= block (a =map_rendered= flag checked before dispatch); later map
+   blocks fall through to code blocks.
+
+* v1 vs follow-up
+*v1:* one map/turn; pins AND paths; Leaflet vendored + OSM public tiles; the
+=map_view= tool (returns the block); the sandboxed =/map= route + CSP; the
+web-only map skill; XSS-safe popups; size/feature caps.
+- *Paths in v1 (reconciling the simplicity reviewer):* build paths by REUSING the
+  route geometry the travel stack already decodes (=_street_narrative= decodes the
+  MOTIS polyline then discards it) via a small SHARED helper — NOT a parallel
+  geocode+plan+"a|b|mode"-string code path inside =map_view=. Drop per-route
+  =mode= (default walk). If sharing the geometry proves fiddly under time
+  pressure, the documented fallback is *pins-only v1, paths follow* (pins alone
+  still ship a visible map).
+*Follow-up (flagged, not built):* self-hosted tile server (tileserver-gl /
+OpenMapTiles) — removes the external OSM dependency + the viewer-IP leak, natural
+given we self-host Nominatim + MOTIS; MapLibre + vector tiles once those land;
+push =render_thread= off the event loop (pre-existing render-doc follow-up — this
+design adds no new on-loop I/O).
+
+* Security model (by construction)
+- *XSS:* iframe-sandbox + CSP (containment) AND textContent-only popups +
+  label-only allowlist (prevention), treating the geojson as fully untrusted (the
+  agent can =write_file= a =.geojson= bypassing =map_view= — so escaping is at the
+  RENDER layer, not trusting the tool).
+- *Traversal / exfil:* =_safe_workspace_file= + =.geojson=-only extension pin +
+  =application/geo+json= + =X-Content-Type-Options: nosniff= (so a =.geojson=
+  whose bytes are HTML can't be sniffed as HTML).
+- *Resource / event-loop:* read off the loop (sync route) + serve-time byte cap
+  (binding) + tool-side feature cap (convenience) + one-map-per-turn + regex
+  untouched.
+- *Tiles:* hard-coded keyless https OSM URL (no SSRF, no secret); a keyed
+  provider (if ever) would be proxied server-side, never in page HTML. External
+  tile privacy leak is the accepted v1 trade-off; removed by self-hosting.
+
+* Files to touch
+- NEW =assist/web_skills/map/SKILL.md= (mirror the render skill).
+- NEW vendored Leaflet (=leaflet.js=/=.css=/marker imgs) served same-origin.
+- =assist/tools.py= — =map_view= (returns the block) + the shared route-geometry
+  helper.
+- =assist/agent.py:375= — register =map_view= on the general agent.
+- =assist/thread_manager.py= — add the map skill to =_web_skill_sources=.
+- =manage/web/threads.py= — =_render_map_block= + =_RENDER_DISPATCH= entry; the
+  sync =/thread/{tid}/map= route (CSP + inlined geojson + Leaflet) + the Leaflet
+  asset route; one-map-per-turn flag.
+- Tests (=tests/test_map.py= + =edd/eval/test_map_agent.py=).
+
+* Test list
+Unit (CPU): =_render_map_block= (valid → iframe string; non-geojson/traversal →
+None); the =/map= route (traversal→404, extension pin, nosniff, oversize→reject);
+one-map-per-turn (2 map blocks → 1 embed); *adversarial XSS* (a =label= with
+=<script>=/=<img onerror>= → rendered output has no executable HTML — test the
+symptom); =map_view= (mock geocoder/MOTIS: places→pins, a route→LineString with
+decoded polyline, unresolvable place dropped+named, feature cap, valid GeoJSON,
+=[lon,lat]= axis order, returns a well-formed block). Behavioral: focal emission
+eval (=test_map_agent.py=, N=3) — a "map these / show the route" prompt → the
+model calls =map_view= then emits its returned block; include a
+non-skill-telegraphed prompt (generalization). Cadence per =CLAUDE.md=
+(N=3→5→10), GPU-fan caveat noted.
+
+* Risks
+1. Block-emission reliability — mitigated by =map_view= returning the whole block
+   (finding #1); measured by the focal eval.
+2. Route-polyline reuse fiddliness — mitigated by the pins-only fallback.
+3. Popup XSS — mitigated by iframe-sandbox + CSP + textContent, tested
+   adversarially (symptom-level).
+4. Event-loop liveness — no file I/O in =_render_map_block=; read in the sync
+   route (code-review event-loop lens must confirm).
+5. OSM tile-usage policy — feature cap + one-map-per-turn keep volume low;
+   self-hosting removes it.
