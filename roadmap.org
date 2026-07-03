@@ -213,6 +213,15 @@ Related: the distances item + [[queued-research-rate-limit-resilience]] above.
 *Revisit ~2026-07-24* (≈3 weeks after the 2026-07-03 #165 merge) — by then the
 guards will have run on real research traffic, so there's a log/thread history to
 audit for false positives.
+* Scheduling
+** TODO Day-of-month schedules (e.g. "run on the 25th of each month")
+Thread schedules (#161) support interval + weekday recurrence but not
+day-of-month.  Add it so a user can say "set a schedule to run on the 25th of
+each month for <task>".  Pin the short-month edge in a test: a day past a given
+month's length (the 31st in a 30-day month, the 29th–31st in February) should
+clamp to the last day of that month rather than skip or roll into the next —
+pick the least-surprising rule and lock it with a test.
+
 * Reliability
 ** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
