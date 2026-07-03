@@ -288,6 +288,30 @@ the IP-burn risk (probably not worth it; remove instead).
 
 ** TODO Self-healing flow on errors / suboptimal output
 See [[file:docs/2026-04-25-self-healing.org][docs/2026-04-25-self-healing.org]].  Catch exceptions during agent execution and either spawn a remediation thread or surface for user-directed fix; reuse the "capture conversation" flow.
+** TODO End-of-turn summary must reflect the committed diff, not the model's narration
+*Motivation.*  On file-editing turns the agent writes its "here's what I
+changed" summary from its own memory of what it *intended*, not from what
+actually landed on disk — so on the small model over a long thread the summary
+confabulates completed actions.  Observed (thread =20260630154415-7f0be79f=): a
+bulk "mark all these done / cancel these" GTD edit where the summary claimed
+several items DONE and a whole project's items CANCELLED, but the committed diff
+had done *none* of the cancellations, missed one of the "done"s, and silently
+appended a duplicate heading.  Three internal signals — the =write_todos= plan,
+the =edit_file= results, and the final summary — all disagreed with each other
+*and* with the diff.  Trusting the summary over the diff is exactly backwards.
+*Approach (guidance-first, eval-driven — per AGENTS.md "guidance over
+middleware"):*
+1. Write an eval that reproduces the current behavior: a bulk multi-item edit
+   turn; assert the summary asserts no change that isn't in the actual =git
+   diff= (and omits nothing the diff shows).
+2. Baseline the failure rate at N trials with today's behavior.
+3. Fix by GUIDANCE first — e.g. instruct the agent to read back the diff and
+   derive its summary from it before reporting — and measure the eval pass rate
+   against the baseline.  Reach for middleware (deterministic summary-from-diff)
+   only if guidance provably can't carry it.
+4. Keep whatever moves the pass rate; compare each candidate to the baseline.
+The structural end-state is a summary derived from the diff (fix by
+construction), but start with guidance and let the eval decide.
 ** TODO Tool-call mocking system for evals (record-and-replay cassettes)
 *Motivation.*  Eval runs default to real tool calls, which couples
 their pass/fail to live network reliability + provider-side response
