@@ -147,8 +147,8 @@ class TestRenderRobustness(TestCase):
 class TestMapFullscreen(TestCase):
     def test_map_has_fullscreen_control(self):
         html = _render_map_block("t", _block("type: map\npin: 37.7,-122.4 x"))
-        self.assertIn("allowfullscreen", html)
-        self.assertIn("requestFullscreen", html)
+        self.assertIn("classList.toggle('fs')", html)  # CSS pseudo-fullscreen toggle
+        self.assertIn("invalidateSize", html)          # Leaflet re-fits on resize
         self.assertIn("show-cap", html)   # same caption row as the file embed's ↗
 
 
