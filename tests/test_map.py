@@ -88,6 +88,11 @@ class TestRenderMapBlock(TestCase):
         html = _render_map_block("t", _block("type: map\npin: 37.7,-122.4 x"))
         self.assertIn('loading="lazy"', html)
 
+    def test_map_iframe_has_title(self):
+        # a11y: screen readers identify the embedded iframe by its title.
+        html = _render_map_block("t", _block("type: map\npin: 37.7,-122.4 x"))
+        self.assertIn('title="Map"', html)
+
     def test_oversized_polyline_dropped(self):
         html = _render_map_block(
             "t", _block("type: map\npin: 1,2 ok\npath: " + "a" * 20001 + " toolong"))
