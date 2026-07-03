@@ -45,14 +45,14 @@ class TestSpecWiring(_CreateAgentHarness):
     def test_default_spec_has_only_builtin_travel_tools(self):
         # `travel` + `directions` are built-ins always on the main agent; a default
         # spec adds nothing else.
-        from assist.tools import directions, travel
-        assert self._build()["tools"] == [travel, directions]
-        assert self._build(spec=AgentSpec())["tools"] == [travel, directions]
+        from assist.tools import directions, map_data, travel
+        assert self._build()["tools"] == [travel, directions, map_data]
+        assert self._build(spec=AgentSpec())["tools"] == [travel, directions, map_data]
 
     def test_spec_tools_reach_create_deep_agent(self):
-        from assist.tools import directions, travel
+        from assist.tools import directions, map_data, travel
         kwargs = self._build(spec=AgentSpec(tools=(_tool_a, _tool_b)))
-        assert kwargs["tools"] == [_tool_a, _tool_b, travel, directions]
+        assert kwargs["tools"] == [_tool_a, _tool_b, travel, directions, map_data]
 
     def test_spec_skill_sources_reach_middleware(self):
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
