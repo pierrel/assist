@@ -71,6 +71,18 @@ class TestMapData:
         assert "Cafe B: 37.76000,-122.42000" in out
         assert "route (Cafe A -> Cafe B): abc123" in out
 
+    def test_geocode_memoized_per_call(self):
+        """A place named in `places` and reused as a route endpoint geocodes ONCE."""
+        calls = []
+        def fake(p):
+            calls.append(p)
+            return {"lat": 37.76, "lon": -122.42, "name": p}
+        plan = {"direct": [{"legs": [{"legGeometry": {"points": "abc", "precision": 7}}]}]}
+        with patch.object(tools, "_geocode", side_effect=fake), \
+             patch.object(tools, "_motis_get", return_value=plan):
+            tools.map_data(places="A; B", routes="A -> B")
+        assert calls.count("A") == 1 and calls.count("B") == 1
+
     def test_no_args_returns_prompt_not_raises(self):
         """LLM-facing: a malformed `map_data()` (no places) must return the
         guidance string, not raise TypeError."""

@@ -774,14 +774,20 @@ def map_data(places: str = "", routes: str = "") -> str:
     map block.  Fail-loud-but-returned (like ``travel``): an unplaceable spot is
     named, never raised.
     """
+    cache: dict = {}
+
     def geocode(place: str) -> dict | None:
         """_geocode, but a backend-down (_TravelBackendError) yields None instead
         of raising — map_data's contract is fail-loud-but-RETURNED (an unplaceable
-        spot is NAMED, never raised into the agent loop, like ``travel``)."""
-        try:
-            return _geocode(place)
-        except _TravelBackendError:
-            return None
+        spot is NAMED, never raised into the agent loop, like ``travel``).  Memoized
+        per call, so a place named in ``places`` and reused as a route endpoint hits
+        the geocoder ONCE."""
+        if place not in cache:
+            try:
+                cache[place] = _geocode(place)
+            except _TravelBackendError:
+                cache[place] = None
+        return cache[place]
 
     place_list = [p.strip() for p in (places or "").split(";") if p.strip()]
     route_list = [r.strip() for r in (routes or "").split(";") if r.strip()]
