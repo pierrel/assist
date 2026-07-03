@@ -1535,8 +1535,8 @@ def _render_map_block(tid: str, block: dict) -> str | None:
                   'View fullscreen ⛶</a></div>')
     # loading="lazy": the map (147KB inline Leaflet + tile fetches + init) renders
     # only when scrolled near — so it never blocks the rest of the conversation.
-    return (f'<div class="show-embed"><iframe class="show-map" loading="lazy" '
-            f'sandbox="allow-scripts allow-popups" allowfullscreen '
+    return (f'<div class="show-embed"><iframe class="show-map" title="Map" '
+            f'loading="lazy" sandbox="allow-scripts allow-popups" allowfullscreen '
             f'srcdoc="{html.escape(srcdoc, quote=True)}"></iframe>{fullscreen}</div>')
 
 
