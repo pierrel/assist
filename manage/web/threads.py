@@ -1571,10 +1571,12 @@ def _parse_render_block(body: str) -> dict:
         if ":" in line:
             key, _, value = line.partition(":")
             k, v = key.strip().lower(), value.strip()
-            if k in out:
-                out[k] = out[k] + [v] if isinstance(out[k], list) else [out[k], v]
-            else:
+            if k not in out:
                 out[k] = v
+            elif isinstance(out[k], list):
+                out[k].append(v)          # in place: O(1) amortized, so a block with
+            else:                         # many repeated pin:/path: lines stays O(n),
+                out[k] = [out[k], v]      # not O(n^2) concat, on the render path
     return out
 
 
