@@ -147,12 +147,22 @@ estimating. Variations to cover the shape, e.g.:
 Assert: routing tool invoked with the right places; NO hand-estimated
 miles/minutes surface in the research phase.
 
-*Secondary (verify-the-anchor):* the origin fact was ALSO wrong — the prompt said
-"Fellow Barber at 1398 Valencia St" (real: 696 Valencia, near 18th St), and the
-research agent echoed/confabulated it ("they have a location at 1398 Valencia St")
-instead of verifying. A distance answer is only as good as its anchor; consider an
-eval that the agent verifies/geocodes the named origin before measuring from it.
-Related: [[queued-research-rate-limit-resilience]] + the =read_url= link item above.
+*Also (CONFABULATED ANCHOR — the root of the whole coffee-shop saga):* the origin
+address was FABRICATED BY THE MODEL, not given by the user. Pierre's actual prompt
+(thread =...084748=, 08:47) was just "What's a good coffee shop with WiFi near
+fellow barber (walking) on Valencia?" — NO address. At 08:48:35 the model wrote,
+in its own planning text, "*Confirming Fellow Barber's address — … (they have a
+location at 1398 Valencia St, San Francisco, CA 94110)*" — asserting a wrong street
+number as a parenthetical FACT from its own knowledge (real: 696 Valencia, near
+18th St), then planning to "confirm" via Google Maps (that confirm-step is what
+spun into the 70-min runaway). Verified: ZERO search results ever contained "1398
+Valencia" (not in any tool result content/url/title) — pure confabulation. The
+provenance guard (PR #165) catches fabricated URLs but NOT a fabricated FACT like
+an address. So the deeper item: the agent must VERIFY/geocode a named entity's
+address (via the geocoder/routing tool it already has) instead of asserting it
+from memory — a distance answer is only as good as its anchor, and here the anchor
+was invented. Related: [[queued-research-rate-limit-resilience]] + the =read_url=
+link item above.
 * Reliability
 ** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
