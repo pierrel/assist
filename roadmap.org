@@ -77,6 +77,49 @@ Idea (from 2026-06-15):
 - Watch the trade-off: over-aggressive extraction can drop tables/code/lists the
   research actually needs; the fallback exists for exactly that.  Validate with
   research evals (report still cites the right facts/URLs) before defaulting.
+** TODO Research resilience to search rate-limiting + =read_url= link exploration
+Observed 2026-07-02, thread =20260702160303-2ba1f923= ("Research good coffee
+shops with WiFi within walking distance of Fellow Barber, 1398 Valencia St SF"):
+the agent gave up with "couldn't look this up because web search is currently
+unavailable" even though it HAD a good result.
+
+Root cause (=assist/tools.py= =search_internet=, log-confirmed): the agent fired
+a burst of searches (3 parallel + 2 retries) which tripped SearXNG's free
+UPSTREAM ENGINE rate limits — logged reason =engines failed: [['brave', 'too
+many requests' -> 'Suspended'], ['duckduckgo', 'CAPTCHA'], ['startpage', ...]]=.
+The FIRST search landed before the limits and returned a real, on-point result
+(a "Mission District Coffee Shops for Remote Work" guide); the next four came
+back zero-results-with-engine-errors -> =_SEARCH_UNAVAILABLE_MESSAGE=. Seeing
+4/5 "unavailable", the agent RELAYED unavailable and abandoned the one good
+result. This is NOT the research-runaway PR (#165 provenance/recursion worked:
+real searches, no fabrication, no loop, 1.5 min) — it's upstream of it.
+
+Desired behaviour (Pierre): don't give up on partial success — USE what you got
+and be transparent, e.g. "I could only find a few data points before I was
+rate-limited. Based on X sources, I can tell you that ...". The
+=search_unavailable= handling over-triggers: "unavailable" from SOME queries in
+a burst must not discard the results from the ones that SUCCEEDED.
+
+Two work items:
+1. *Partial-results resilience + honest messaging.* When some searches succeed
+   and others hit rate-limit/engine-error, keep the good results, keep
+   researching from them, and report the partial/rate-limited state instead of a
+   flat "unavailable". Distinguish "backend genuinely down (0 results ever)" from
+   "burst tripped the engine limits (some results in hand)". Relates to the
+   stranded =heed-research-rate-limit-signal= branch. Consider serializing/spacing
+   the searches (the 3-parallel burst is what trips the limits — single/spaced
+   queries succeed) and/or sturdier SearXNG engines (cf. DONE "real Search API"
+   item — the free scraped engines rate-limit hard).
+2. *=read_url= returns the page's hyperlinks (Pierre).* Today =read_url=
+   (=_extract_main_content=) returns TEXT only — it strips =<a href>=, so the
+   research agent can't follow links to explore. Surface the page's outbound
+   links (deduped, maybe labelled with anchor text) so the agent can EXPLORE from
+   a few good results — a direct workaround for rate-limited search (fetch the 1
+   good guide, follow its coffee-shop links). The provenance guard already PERMITS
+   link-following (a URL in a fetched =ToolMessage= is provenanced), so this
+   unlocks a path the guard already allows but =read_url= never exposed. Validate
+   with research evals; watch the char budget (links compete with content —
+   maybe a separate =read_url_links= tool, or a links section appended).
 * Reliability
 ** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
