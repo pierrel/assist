@@ -78,10 +78,18 @@ It returns the exact `lat,lon` for each place and an encoded polyline for each
 route. Copy those into the `pin:`/`path:` lines exactly. (Always put the actual
 place names in `places` — never call `map_data` with an empty `places`.)
 
+The map plots places you've IDENTIFIED — it does NOT find them for you. If the
+request means you first have to FIND the places (e.g. "good coffee shops near
+X"), **do that research first, exactly as you normally would** (search and read
+to find real, well-reviewed places) — the map is the LAST step. Never map a place
+you haven't confirmed exists: `map_data` geocodes a real name, so a made-up name
+gives a wrong or empty pin.
+
 **Worked example.** User: "good coffee shops near Fellow Barber on Valencia, and
-how far to walk?" You call `map_data` for the shops + the walking routes; it
-returns coordinates + polylines; then, alongside your prose recommendations, you
-emit:
+how far to walk?" First **research the shops as you normally would** — search and
+read to find real, highly-rated coffee shops near there. THEN call `map_data`
+with the shops you found + the walking routes; it returns coordinates + polylines;
+then, alongside your written recommendations, you emit:
 
 ```render
 type: map
@@ -91,7 +99,8 @@ pin: 37.76702,-122.42179 Four Barrel
 path: sy{foUtrk_~gA}EynB Fellow Barber to Haus (24 min walk)
 ```
 
-Still give your normal written answer — the map is IN ADDITION to it.
+Still give your normal written answer — the map is IN ADDITION to it, never a
+replacement for the research and recommendations.
 
 ## Rules
 
