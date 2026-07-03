@@ -184,6 +184,32 @@ address (via the geocoder/routing tool it already has) instead of asserting it
 from memory — a distance answer is only as good as its anchor, and here the anchor
 was invented. Related: [[queued-research-rate-limit-resilience]] + the =read_url=
 link item above.
+** TODO Audit research turns for ADVERSE guard effects (provenance / recursion cut-offs)
+The PR #165 guards (=UrlProvenanceMiddleware= + recursion fail-fast) are corrective
+by design and validated on evals, but the thing to actively watch is the
+FALSE-POSITIVE side: a research turn that was going WELL and got CUT OFF by a
+guard, forcing a suboptimal result. Two failure shapes to hunt:
+1. *Provenance guard over-rejecting a LEGIT fetch.* The guard refuses a =read_url=
+   whose URL isn't in prior tool/user messages. A real, correct URL could be
+   rejected if the model got it from somewhere the guard doesn't scan, or via a
+   normalization mismatch (we already fixed paren/trailing-punct edges in review
+   — watch for more). Symptom: the model had a good URL, the guard blocked it,
+   the answer got worse.
+2. *Recursion limit cutting off PRODUCTIVE research (not a runaway).* The
+   recursion baseline already caught that true-150 cut off legit turns (-> bumped
+   to 300). Keep watching at 300: a deep/multi-subject turn that was converging
+   and hit the ceiling is a false-positive terminal — the answer is truncated,
+   not a runaway.
+*How:* audit the thread history (prod =threads.db= + the assist-web log's
+=UrlProvenanceGuard: rejected= and recursion-terminal lines) — for each guard
+intervention / recursion hit, classify TRUE positive (blocked a fabrication /
+bounded a genuine runaway) vs FALSE positive (killed good work). A cheap start:
+grep the logs for guard fires + recursion terminals, pull those threads, and read
+whether the outcome degraded. If false positives show up, they tune the levers
+(guard scope/normalization; recursion_limit value; or route-vs-guess as in the
+distances item). Matches the "coarse real bounds must not misfire on real work"
+ethos — a mid-task guard misfire is worse than the rare runaway it prevents.
+Related: the distances item + [[queued-research-rate-limit-resilience]] above.
 * Reliability
 ** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
