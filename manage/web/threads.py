@@ -1410,7 +1410,7 @@ _MAP_INIT_JS = """
   try { d = JSON.parse(document.getElementById('mapdata').textContent); }
   catch(e){ return; }
   var map = L.map('map');
-  L.tileLayer('%s', {maxZoom: 19,
+  L.tileLayer('__TILE_URL__', {maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors'}).addTo(map);
   // ARITHMETIC accumulation (Math.pow/%//), not bitwise: JS bitwise ops are
   // 32-bit SIGNED, but a precision-7 coordinate's zigzag value exceeds 2^31
@@ -1451,7 +1451,8 @@ _MAP_INIT_JS = """
   if(layers.length){ map.fitBounds(L.featureGroup(layers).getBounds().pad(0.15)); }
   else { map.setView([0,0], 2); }
 })();
-""" % _OSM_TILE_URL
+""".replace("__TILE_URL__", _OSM_TILE_URL)  # .replace, not %/format: the JS now
+# contains `%` (res%2) and `{` (braces), which would break %-format and str.format.
 
 
 def _as_lines(value) -> list:
