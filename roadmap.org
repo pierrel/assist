@@ -213,6 +213,16 @@ Related: the distances item + [[queued-research-rate-limit-resilience]] above.
 *Revisit ~2026-07-24* (≈3 weeks after the 2026-07-03 #165 merge) — by then the
 guards will have run on real research traffic, so there's a log/thread history to
 audit for false positives.
+* Maps
+** TODO Bias travel/location responses to a map render block
+The map render block ships (PR #166), but the agent only maps when explicitly
+asked.  Bias it to ALSO emit a map for travel/location-shaped answers (routes,
+"how far", "near", places with addresses) — the map complements the prose, never
+replaces it.  Guidance-first (the render skill's Maps section / general-agent
+prompt), eval-gated: mock travel/location-shaped answers and assert a map block is
+emitted alongside the prose, WITHOUT over-mapping non-spatial replies (a
+regression spot-check on plain Q&A).
+
 * Scheduling
 ** TODO Day-of-month schedules (e.g. "run on the 25th of each month")
 Thread schedules (#161) support interval + weekday recurrence but not
