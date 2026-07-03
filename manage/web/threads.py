@@ -497,6 +497,11 @@ def render_thread(
           .show-embed {{ margin: .5rem 0; }}
           .show-file {{ width: 100%; height: 65vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
           .show-map {{ width: 100%; height: 55vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
+          /* Pseudo-fullscreen (no Fullscreen API — reliable for a null-origin
+             sandboxed iframe): fill the viewport, caption bar stays visible to exit. */
+          .show-embed.fs {{ position: fixed; inset: 0; z-index: 10000; margin: 0; background: #fff; display: flex; flex-direction: column; }}
+          .show-embed.fs .show-map {{ flex: 1 1 auto; height: auto; border: 0; border-radius: 0; }}
+          .show-embed.fs .show-cap {{ flex: 0 0 auto; padding: .4rem .6rem; }}
           .show-cap {{ font-size: .85rem; margin-top: .3rem; }}
           .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
           /* font-size: 16px on every editable form input — prevents iOS
@@ -1450,6 +1455,9 @@ _MAP_INIT_JS = """
   });
   if(layers.length){ map.fitBounds(L.featureGroup(layers).getBounds().pad(0.15)); }
   else { map.setView([0,0], 2); }
+  // Re-fit when the iframe resizes (e.g. pseudo-fullscreen toggle) — Leaflet
+  // caches its container size and would otherwise show a partial/gray map.
+  window.addEventListener('resize', function(){ map.invalidateSize(); });
 })();
 """.replace("__TILE_URL__", _OSM_TILE_URL)  # .replace, not %/format: the JS now
 # contains `%` (res%2) and `{` (braces), which would break %-format and str.format.
@@ -1526,17 +1534,19 @@ def _render_map_block(tid: str, block: dict) -> str | None:
         f'<script nonce="{nonce}">{_MAP_INIT_JS}</script>'
         "</body></html>")
     # Fullscreen control — the map's equivalent of the file embed's open-on-own-
-    # page ↗.  The map is inline (no route to open in a new tab), so the parent
-    # page fullscreens the iframe ELEMENT via the Fullscreen API (allowfullscreen
-    # permits it); the sandboxed content is unchanged.
+    # page ↗.  Toggles a `.fs` class on the embed (CSS pseudo-fullscreen: fill the
+    # viewport), NOT the Fullscreen API — that's unreliable for a null-origin
+    # sandboxed iframe (permission delegation + no native resize).  The iframe's
+    # own resize listener re-fits Leaflet to the new size.
     fullscreen = ('<div class="show-cap"><a href="#" '
-                  'onclick="this.closest(\'.show-embed\')'
-                  '.querySelector(\'.show-map\').requestFullscreen();return false;">'
-                  'View fullscreen ⛶</a></div>')
+                  'onclick="var e=this.closest(\'.show-embed\');'
+                  'this.textContent=e.classList.toggle(\'fs\')?'
+                  '\'Exit fullscreen \\u2715\':\'View fullscreen \\u26f6\';'
+                  'return false;">View fullscreen ⛶</a></div>')
     # loading="lazy": the map (147KB inline Leaflet + tile fetches + init) renders
     # only when scrolled near — so it never blocks the rest of the conversation.
     return (f'<div class="show-embed"><iframe class="show-map" title="Map" '
-            f'loading="lazy" sandbox="allow-scripts allow-popups" allowfullscreen '
+            f'loading="lazy" sandbox="allow-scripts allow-popups" '
             f'srcdoc="{html.escape(srcdoc, quote=True)}"></iframe>{fullscreen}</div>')
 
 
