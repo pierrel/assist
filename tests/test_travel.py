@@ -59,6 +59,23 @@ def routing_env(monkeypatch):
 
 
 class TestMapData:
+    def test_route_happy_path(self):
+        """Places geocode to pin lines; a route geocodes both endpoints, calls
+        MOTIS /plan, and extracts the legGeometry polyline into a route line."""
+        plan = {"direct": [{"legs": [{"legGeometry": {"points": "abc123", "precision": 7}}]}]}
+        with patch.object(tools, "_geocode",
+                          side_effect=lambda p: {"lat": 37.76, "lon": -122.42, "name": p}), \
+             patch.object(tools, "_motis_get", return_value=plan):
+            out = tools.map_data(places="Cafe A; Cafe B", routes="Cafe A -> Cafe B")
+        assert "Cafe A: 37.76000,-122.42000" in out
+        assert "Cafe B: 37.76000,-122.42000" in out
+        assert "route (Cafe A -> Cafe B): abc123" in out
+
+    def test_no_args_returns_prompt_not_raises(self):
+        """LLM-facing: a malformed `map_data()` (no places) must return the
+        guidance string, not raise TypeError."""
+        assert "No places given" in tools.map_data()
+
     def test_backend_down_returns_not_raises(self):
         """map_data's contract is fail-loud-but-RETURNED: a geocoder backend-down
         (_geocode raises _TravelBackendError) is caught and the place NAMED, never

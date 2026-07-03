@@ -758,7 +758,7 @@ def directions(origin: str, destination: str, mode: str) -> str:
     return out
 
 
-def map_data(places: str, routes: str = "") -> str:
+def map_data(places: str = "", routes: str = "") -> str:
     """Look up map coordinates for real-world places and routes, so you can draw
     them on a map (via a ``type: map`` render block — see the render skill).  Call
     this to get the exact lat,lon of each place and the encoded polyline of each
