@@ -756,3 +756,46 @@ def directions(origin: str, destination: str, mode: str) -> str:
         return (f'I couldn\'t find a {route_kind} route from "{o["name"]}" to '
                 f'"{d["name"]}".')
     return out
+
+
+def map_data(places: str, routes: str = "") -> str:
+    """Look up map coordinates for real-world places and routes, so you can draw
+    them on a map (via a ``type: map`` render block — see the render skill).  Call
+    this to get the exact lat,lon of each place and the encoded polyline of each
+    route FIRST — never guess coordinates.
+
+    ``places``: a SEMICOLON-separated list of place names/addresses.  Example call:
+        map_data(places="Four Barrel Coffee, San Francisco; Haus Coffee, San Francisco")
+    ``routes``: OPTIONAL semicolon-separated ``"ORIGIN -> DESTINATION"`` walking
+        routes, e.g. routes="Fellow Barber SF -> Haus Coffee SF".
+
+    Returns one ``"name: lat,lon"`` per place and one ``"route (...): <encoded
+    polyline>"`` per route — copy those into the ``pin:``/``path:`` lines of the
+    map block.  Fail-loud-but-returned (like ``travel``): an unplaceable spot is
+    named, never raised.
+    """
+    place_list = [p.strip() for p in (places or "").split(";") if p.strip()]
+    route_list = [r.strip() for r in (routes or "").split(";") if r.strip()]
+    if not place_list and not route_list:
+        return "No places given — call map_data with places set to the place names."
+    out = []
+    for p in place_list:
+        g = _geocode(p)
+        out.append(f"{p}: {g['lat']:.5f},{g['lon']:.5f}" if g else f"{p}: (could not locate)")
+    for r in route_list:
+        parts = re.split(r"\s*->\s*|\s+to\s+", r, maxsplit=1)
+        o = _geocode(parts[0]) if parts else None
+        d = _geocode(parts[1]) if len(parts) > 1 else None
+        if not (o and d):
+            out.append(f"route ({r}): (could not locate one endpoint)")
+            continue
+        try:
+            data = _motis_get("/api/v1/plan", {
+                "fromPlace": f"{o['lat']},{o['lon']}",
+                "toPlace": f"{d['lat']},{d['lon']}", "directModes": "WALK"})
+            legs = (data.get("direct") or [{}])[0].get("legs", []) if isinstance(data, dict) else []
+            poly = legs[0].get("legGeometry", {}).get("points", "") if legs else ""
+        except (_TravelBackendError, KeyError, TypeError, IndexError, AttributeError):
+            poly = ""
+        out.append(f"route ({r}): {poly}" if poly else f"route ({r}): (no walking route found)")
+    return "\n".join(out)
