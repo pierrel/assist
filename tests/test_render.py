@@ -132,7 +132,7 @@ class TestRenderAssistantContent:
         assert "<h1>Hi</h1>" in out and "<table>" in out and "show-embed" not in out
 
     def test_dispatch_is_single_source_of_truth(self):
-        assert set(_RENDER_DISPATCH) == {"file"}
+        assert set(_RENDER_DISPATCH) == {"file", "map"}
 
 
 class TestParseRange:

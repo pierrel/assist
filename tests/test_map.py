@@ -1,0 +1,116 @@
+"""Unit tests for the ``type: map`` render block (manage/web/threads.py).
+
+The map data is agent-authored (untrusted small-model output), so alongside the
+happy path these pin the containment contract: a null-origin sandboxed iframe, a
+CSP, non-executable escaped data, text-node labels, and count/size caps.
+"""
+import json
+import re
+from unittest import TestCase
+
+from manage.web.threads import (
+    _parse_render_block, _render_map_block, _render_assistant_content,
+    _MAP_MAX_PINS, _MAP_MAX_PATHS,
+)
+
+
+def _block(body: str) -> dict:
+    return _parse_render_block(body)
+
+
+class TestParseRenderBlock(TestCase):
+    def test_repeated_keys_become_lists(self):
+        b = _block("type: map\npin: 1,2 a\npin: 3,4 b\npin: 5,6 c")
+        self.assertEqual(b["type"], "map")
+        self.assertEqual(b["pin"], ["1,2 a", "3,4 b", "5,6 c"])
+
+    def test_single_key_stays_string(self):
+        # file blocks rely on path/lines being plain strings — must not regress.
+        b = _block("type: file\npath: /workspace/notes.org\nlines: 10-20")
+        self.assertEqual(b["path"], "/workspace/notes.org")
+        self.assertEqual(b["lines"], "10-20")
+
+    def test_mixed_single_path_still_string(self):
+        b = _block("type: map\npin: 1,2 a\npath: xyz walk")
+        self.assertIsInstance(b["pin"], str)   # one pin -> string
+        self.assertEqual(b["path"], "xyz walk")
+
+
+class TestRenderMapBlock(TestCase):
+    def test_valid_map_is_sandboxed_null_origin_iframe(self):
+        html = _render_map_block("t", _block("type: map\npin: 37.76,-122.42 Four Barrel"))
+        self.assertIn('class="show-map"', html)
+        self.assertIn('sandbox="allow-scripts allow-popups"', html)
+        self.assertNotIn("allow-same-origin", html)   # opaque origin = containment
+        self.assertIn("srcdoc=", html)
+        self.assertIn("Content-Security-Policy", html)
+        self.assertIn("tile.openstreetmap.org", html)
+
+    def test_pins_and_paths_reach_the_data_island(self):
+        html = _render_map_block(
+            "t", _block("type: map\npin: 37.76,-122.42 Shop\npath: abc123 Walk"))
+        # the data island JSON (</ escaped) carries the parsed pins + paths
+        self.assertIn("37.76", html)
+        self.assertIn("abc123", html)
+
+    def test_empty_or_invalid_returns_none(self):
+        self.assertIsNone(_render_map_block("t", _block("type: map")))
+        self.assertIsNone(_render_map_block("t", _block("type: map\npin: nope label")))
+        self.assertIsNone(_render_map_block("t", _block("type: map\npin: 200,999 oob")))
+
+    def test_bad_pin_dropped_good_pin_kept(self):
+        html = _render_map_block(
+            "t", _block("type: map\npin: nope bad\npin: 37.7,-122.4 good"))
+        self.assertIsNotNone(html)
+        self.assertIn("37.7", html)
+
+    def test_count_caps(self):
+        many = "type: map\n" + "".join(f"pin: 1,{i} p{i}\n" for i in range(_MAP_MAX_PINS + 1))
+        self.assertIsNone(_render_map_block("t", _block(many)))
+
+    def test_oversized_polyline_dropped(self):
+        html = _render_map_block(
+            "t", _block("type: map\npin: 1,2 ok\npath: " + "a" * 20001 + " toolong"))
+        # the oversized path is dropped; the valid pin still renders
+        self.assertIsNotNone(html)
+        self.assertNotIn("a" * 20001, html)
+
+
+class TestMapXSS(TestCase):
+    def test_label_markup_is_not_executable(self):
+        html = _render_map_block(
+            "t", _block('type: map\npin: 37.7,-122.4 </script><img src=x onerror=alert(1)>'))
+        # the whole srcdoc is HTML-escaped into the attribute; no raw executable
+        # breakout of the data island or the srcdoc.
+        self.assertNotIn("</script><img", html)
+        self.assertNotIn("<img src=x onerror", html)
+
+    def test_data_island_cannot_break_out(self):
+        # a label containing </script> must be </-escaped inside the JSON island
+        html = _render_map_block("t", _block("type: map\npin: 1,2 </script>evil"))
+        # the unescaped closing-script sequence must not appear anywhere
+        self.assertNotIn("</script>evil", html)
+
+    def test_labels_bind_as_textnode_not_html(self):
+        # OUR init binds popups via a text node (element), never bindPopup(string)
+        # which Leaflet would treat as HTML.  (Leaflet's own vendored code uses
+        # innerHTML internally on its trusted DOM — not on agent labels — so we
+        # assert our binding path, not the absence of innerHTML in the whole lib.)
+        html = _render_map_block("t", _block("type: map\npin: 1,2 x"))
+        self.assertIn("el.textContent = label", html)
+        self.assertIn("bindPopup(el)", html)
+
+
+class TestOneMapPerTurn(TestCase):
+    def test_only_first_map_renders(self):
+        raw = ("```render\ntype: map\npin: 1,2 a\n```\n\n"
+               "```render\ntype: map\npin: 3,4 b\n```")
+        out = _render_assistant_content("t", raw)
+        self.assertEqual(out.count('class="show-map"'), 1)
+
+    def test_second_map_falls_through_to_code(self):
+        raw = ("```render\ntype: map\npin: 1,2 a\n```\n\n"
+               "```render\ntype: map\npin: 3,4 second\n```")
+        out = _render_assistant_content("t", raw)
+        # the second map block stays in the markdown stream (rendered as code)
+        self.assertIn("second", out)

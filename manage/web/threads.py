@@ -14,6 +14,7 @@ import logging
 import hmac
 import os
 import re
+import secrets
 import subprocess
 import urllib.parse
 from datetime import datetime, timezone
@@ -495,6 +496,7 @@ def render_thread(
              assistant bubble (org/md rendered page, or pdf viewer). */
           .show-embed {{ margin: .5rem 0; }}
           .show-file {{ width: 100%; height: 65vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
+          .show-map {{ width: 100%; height: 55vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
           .show-cap {{ font-size: .85rem; margin-top: .3rem; }}
           .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
           /* font-size: 16px on every editable form input — prevents iOS
@@ -1363,11 +1365,150 @@ def _render_file_block(tid: str, block: dict) -> str | None:
     return _file_embed_html(tid, path, block.get("lines", ""), block.get("pages", ""))
 
 
+# Vendored Leaflet (BSD-2), read ONCE at import and inlined into each map's
+# sandboxed srcdoc.  Inlined rather than linked because the map iframe is a
+# NULL-origin sandbox (no allow-same-origin): under its CSP, `'self'` is the
+# opaque origin, so a same-origin `<script src>` subresource wouldn't be
+# authorized — a self-contained srcdoc sidesteps that entirely.
+_VENDOR_DIR = os.path.join(os.path.dirname(__file__), "vendor")
+with open(os.path.join(_VENDOR_DIR, "leaflet.js"), encoding="utf-8") as _lf:
+    _LEAFLET_JS = _lf.read()
+with open(os.path.join(_VENDOR_DIR, "leaflet.css"), encoding="utf-8") as _lf:
+    _LEAFLET_CSS = _lf.read()
+
+_OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+# Render-time caps — the block is agent-authored (untrusted); bound the payload.
+_MAP_MAX_PINS = 100
+_MAP_MAX_PATHS = 25
+_MAP_MAX_LABEL = 200         # chars per pin/path label
+_MAP_MAX_POLYLINE = 20000    # chars per encoded polyline
+
+# The map init: read the (non-executed) JSON data island, draw circle markers +
+# decoded polylines, fit bounds.  Labels are bound as TEXT NODES (never a string —
+# Leaflet treats a popup string as HTML — and never innerHTML), so an agent label
+# can't inject markup.  `decode` is the standard Google encoded-polyline decoder
+# (precision 5, matching MOTIS).
+_MAP_INIT_JS = """
+(function(){
+  var d;
+  try { d = JSON.parse(document.getElementById('mapdata').textContent); }
+  catch(e){ return; }
+  var map = L.map('map');
+  L.tileLayer('%s', {maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'}).addTo(map);
+  function decode(str){
+    var pts=[], i=0, lat=0, lon=0;
+    while(i<str.length){
+      var b, shift=0, res=0;
+      do { b=str.charCodeAt(i++)-63; res|=(b&0x1f)<<shift; shift+=5; } while(b>=0x20);
+      lat += (res&1)?~(res>>1):(res>>1);
+      shift=0; res=0;
+      do { b=str.charCodeAt(i++)-63; res|=(b&0x1f)<<shift; shift+=5; } while(b>=0x20);
+      lon += (res&1)?~(res>>1):(res>>1);
+      pts.push([lat/1e5, lon/1e5]);
+    }
+    return pts;
+  }
+  function popup(layer, label){
+    if(!label) return;
+    var el = document.createElement('div');
+    el.textContent = label;
+    layer.bindPopup(el);
+  }
+  var layers = [];
+  (d.pins||[]).forEach(function(p){
+    var m = L.circleMarker([p.lat, p.lon],
+      {radius:7, color:'#1d4ed8', fillColor:'#3b82f6', fillOpacity:0.9, weight:2});
+    popup(m, p.label); m.addTo(map); layers.push(m);
+  });
+  (d.paths||[]).forEach(function(pa){
+    var pts = decode(pa.polyline);
+    if(!pts.length) return;
+    var pl = L.polyline(pts, {color:'#dc2626', weight:4, opacity:0.85});
+    popup(pl, pa.label); pl.addTo(map); layers.push(pl);
+  });
+  if(layers.length){ map.fitBounds(L.featureGroup(layers).getBounds().pad(0.15)); }
+  else { map.setView([0,0], 2); }
+})();
+""" % _OSM_TILE_URL
+
+
+def _as_lines(value) -> list:
+    """A render-block value that may be a single string (key seen once) or a list
+    (key repeated) -> a list of non-empty strings."""
+    if not value:
+        return []
+    return [value] if isinstance(value, str) else [s for s in value if s]
+
+
+def _parse_pin(line: str) -> dict | None:
+    """``lat,lon label`` -> ``{lat, lon, label}``; None if malformed / out of
+    range (dropped, so one bad pin doesn't sink the map)."""
+    coord, _, label = line.strip().partition(" ")
+    lat_s, _, lon_s = coord.partition(",")
+    try:
+        lat, lon = float(lat_s), float(lon_s)
+    except ValueError:
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    return {"lat": lat, "lon": lon, "label": label.strip()[:_MAP_MAX_LABEL]}
+
+
+def _parse_path(line: str) -> dict | None:
+    """``<encoded-polyline> label`` -> ``{polyline, label}``; None if empty or the
+    polyline is over the length cap."""
+    poly, _, label = line.strip().partition(" ")
+    if not poly or len(poly) > _MAP_MAX_POLYLINE:
+        return None
+    return {"polyline": poly, "label": label.strip()[:_MAP_MAX_LABEL]}
+
+
+def _render_map_block(tid: str, block: dict) -> str | None:
+    """``type: map`` renderer.  Parses the block's inline ``pin:``/``path:`` lines
+    and returns a SANDBOXED (null-origin) srcdoc iframe drawing them on a
+    vendored-Leaflet + OSM-tiles map.  None when there's nothing valid to show, or
+    the block exceeds the count caps (then it renders as a code block).
+
+    All map data is agent-authored (untrusted).  Containment is by construction:
+    the iframe sandbox is ``allow-scripts allow-popups`` with NO
+    ``allow-same-origin`` (opaque origin — it can't reach the parent page's DOM,
+    cookies, or session), the srcdoc carries its own strict CSP, labels render as
+    text nodes only, and the JSON data island is non-executable with ``</`` escaped
+    so it can't break out."""
+    pins = [p for p in (_parse_pin(l) for l in _as_lines(block.get("pin"))) if p]
+    paths = [p for p in (_parse_path(l) for l in _as_lines(block.get("path"))) if p]
+    if not pins and not paths:
+        return None
+    if len(pins) > _MAP_MAX_PINS or len(paths) > _MAP_MAX_PATHS:
+        return None
+    data = json.dumps({"pins": pins, "paths": paths}).replace("</", "<\\/")
+    nonce = secrets.token_hex(16)
+    csp = ("default-src 'none'; "
+           f"script-src 'nonce-{nonce}'; "
+           "style-src 'unsafe-inline'; "
+           "img-src data: https://tile.openstreetmap.org; "
+           "connect-src 'none'; base-uri 'none'")
+    srcdoc = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        f'<meta http-equiv="Content-Security-Policy" content="{csp}">'
+        f"<style>{_LEAFLET_CSS}\n"
+        "html,body{margin:0;height:100%} #map{height:100%;width:100%}</style>"
+        '</head><body><div id="map"></div>'
+        f'<script type="application/json" id="mapdata">{data}</script>'
+        f'<script nonce="{nonce}">{_LEAFLET_JS}</script>'
+        f'<script nonce="{nonce}">{_MAP_INIT_JS}</script>'
+        "</body></html>")
+    return (f'<div class="show-embed"><iframe class="show-map" '
+            f'sandbox="allow-scripts allow-popups" '
+            f'srcdoc="{html.escape(srcdoc, quote=True)}"></iframe></div>')
+
+
 # type -> renderer(tid, block).  The SINGLE source of truth for the render-block
 # types the web UI understands; a block whose type isn't here is left as a normal
 # code block.  Extending to a new type (e.g. a chart from a workspace spec file)
 # is one entry here + its renderer + its own security review.
-_RENDER_DISPATCH = {"file": _render_file_block}
+_RENDER_DISPATCH = {"file": _render_file_block, "map": _render_map_block}
 
 # A ```render fenced block (info-string EXACTLY "render"), body parsed as
 # key: value lines.  It is lifted into an embed ONLY when its `type` is known and
@@ -1386,11 +1527,18 @@ _RENDER_BLOCK_RE = re.compile(
 
 
 def _parse_render_block(body: str) -> dict:
+    """Parse ``key: value`` lines.  A key seen ONCE maps to its string (file
+    blocks: ``path``/``lines``/``pages``); a key REPEATED accumulates into a list
+    (map blocks carry many ``pin:``/``path:`` lines = one map, many things)."""
     out = {}
     for line in body.splitlines():
         if ":" in line:
             key, _, value = line.partition(":")
-            out[key.strip().lower()] = value.strip()
+            k, v = key.strip().lower(), value.strip()
+            if k in out:
+                out[k] = out[k] + [v] if isinstance(out[k], list) else [out[k], v]
+            else:
+                out[k] = v
     return out
 
 
@@ -1399,12 +1547,17 @@ def _render_assistant_content(tid: str, raw: str) -> str:
     everything else is markdown.  An unknown/unrenderable block stays in the
     markdown stream (shown as a code block)."""
     out, last = [], 0
+    map_rendered = False
     for m in _RENDER_BLOCK_RE.finditer(raw):
         block = _parse_render_block(m.group(1))
-        renderer = _RENDER_DISPATCH.get(block.get("type", ""))
+        btype = block.get("type", "")
+        if btype == "map" and map_rendered:
+            continue  # one map per turn -> later map blocks stay as code blocks
+        renderer = _RENDER_DISPATCH.get(btype)
         embed = renderer(tid, block) if renderer else None
         if embed is None:
             continue  # leave the fence in place -> markdown renders it as code
+        map_rendered = map_rendered or btype == "map"
         out.append(markdown.markdown(raw[last:m.start()], extensions=_MD_EXTENSIONS))
         out.append(embed)
         last = m.end()
