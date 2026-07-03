@@ -76,6 +76,18 @@ class TestRenderMapBlock(TestCase):
         self.assertIn("1e7", html)
         self.assertNotIn("1e5", html)
 
+    def test_polyline_decoder_is_arithmetic_not_32bit_bitwise(self):
+        # At precision 7 a coordinate's zigzag value exceeds 2^31, so JS 32-bit
+        # bitwise (<<, |=, >>) overflows to a garbage point ("path in China"). The
+        # decoder must accumulate arithmetically (Math.pow), which is exact to 2^53.
+        html = _render_map_block("t", _block("type: map\npath: abc123 route"))
+        self.assertIn("Math.pow(2,shift)", html)
+
+    def test_map_iframe_is_lazy_loaded(self):
+        # the map must not block the rest of the conversation from rendering.
+        html = _render_map_block("t", _block("type: map\npin: 37.7,-122.4 x"))
+        self.assertIn('loading="lazy"', html)
+
     def test_oversized_polyline_dropped(self):
         html = _render_map_block(
             "t", _block("type: map\npin: 1,2 ok\npath: " + "a" * 20001 + " toolong"))

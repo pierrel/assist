@@ -1412,15 +1412,19 @@ _MAP_INIT_JS = """
   var map = L.map('map');
   L.tileLayer('%s', {maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors'}).addTo(map);
+  // ARITHMETIC accumulation (Math.pow/%//), not bitwise: JS bitwise ops are
+  // 32-bit SIGNED, but a precision-7 coordinate's zigzag value exceeds 2^31
+  // (lon ~2.4e9) and would overflow to a garbage point (the "path in China" bug).
+  // JS numbers are exact to 2^53, so float arithmetic decodes cleanly.
   function decode(str){
     var pts=[], i=0, lat=0, lon=0;
     while(i<str.length){
       var b, shift=0, res=0;
-      do { b=str.charCodeAt(i++)-63; res|=(b&0x1f)<<shift; shift+=5; } while(b>=0x20);
-      lat += (res&1)?~(res>>1):(res>>1);
+      do { b=str.charCodeAt(i++)-63; res += (b&0x1f)*Math.pow(2,shift); shift+=5; } while(b>=0x20);
+      lat += (res%2)? -(res+1)/2 : res/2;
       shift=0; res=0;
-      do { b=str.charCodeAt(i++)-63; res|=(b&0x1f)<<shift; shift+=5; } while(b>=0x20);
-      lon += (res&1)?~(res>>1):(res>>1);
+      do { b=str.charCodeAt(i++)-63; res += (b&0x1f)*Math.pow(2,shift); shift+=5; } while(b>=0x20);
+      lon += (res%2)? -(res+1)/2 : res/2;
       var y=lat/1e7, x=lon/1e7;
       if(y>=-90 && y<=90 && x>=-180 && x<=180) pts.push([y, x]);
     }
@@ -1528,7 +1532,9 @@ def _render_map_block(tid: str, block: dict) -> str | None:
                   'onclick="this.closest(\'.show-embed\')'
                   '.querySelector(\'.show-map\').requestFullscreen();return false;">'
                   'View fullscreen ⛶</a></div>')
-    return (f'<div class="show-embed"><iframe class="show-map" '
+    # loading="lazy": the map (147KB inline Leaflet + tile fetches + init) renders
+    # only when scrolled near — so it never blocks the rest of the conversation.
+    return (f'<div class="show-embed"><iframe class="show-map" loading="lazy" '
             f'sandbox="allow-scripts allow-popups" allowfullscreen '
             f'srcdoc="{html.escape(srcdoc, quote=True)}"></iframe>{fullscreen}</div>')
 
