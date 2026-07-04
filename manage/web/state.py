@@ -329,6 +329,63 @@ def _get_status(tid: str) -> dict:
 
 def _set_status(tid: str, stage: str, **kwargs) -> None:
     _atomic_write(_status_path(tid), json.dumps({"stage": stage, **kwargs}))
+    # Single choke point for the "unseen AI response" badge: `ready` and
+    # `awaiting_approval` are set ONLY at _process_message's three response-success
+    # exits (incl. the supersede early-return), and nowhere else — so marking here
+    # catches every response/draft the user should see, and can't miss an exit.
+    # Errors don't mark (the "error" badge, above "new" in precedence, covers them).
+    if stage in ("ready", "awaiting_approval"):
+        _mark_unseen_response(tid)
+
+
+# --- "unseen AI response" badge state -------------------------------------
+# A thread carries an "unseen" AI response from when a turn produces a
+# response/draft until the user OPENS that thread's page.  Two representations of
+# the one bit, kept in sync (see docs/2026-07-03-unread-badge.org):
+#   - a marker file per thread (durable — survives restart),
+#   - the _UNSEEN set (the badge READ PATH — render_index tests membership per row,
+#     O(1), no FS stat; Pierre's cache to keep list page-loads fast).
+# set add/discard/`in` are each atomic under the GIL, so no lock is needed across
+# the event loop (render_index read, get_thread clear) and the bg _process_message
+# thread (mark) — preserving event-loop liveness.
+_UNSEEN: set[str] = set()
+
+
+def _unseen_path(tid: str) -> str:
+    return os.path.join(MANAGER.thread_dir(tid), "unseen_response")
+
+
+def _mark_unseen_response(tid: str) -> None:
+    """Record an AI response the user hasn't seen: the live set + an idempotent
+    marker file (existence is the whole signal — touch, tolerate exists)."""
+    _UNSEEN.add(tid)
+    path = _unseen_path(tid)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").close()
+
+
+def _clear_unseen_response(tid: str) -> None:
+    """Mark ``tid`` seen (its page was opened): drop the set entry + the marker.
+    Bare, missing-ok unlink — no _atomic_write, no lock (runs on the event loop)."""
+    _UNSEEN.discard(tid)
+    path = _unseen_path(tid)
+    if os.path.isfile(path):
+        os.remove(path)
+
+
+def _has_unseen_response(tid: str) -> bool:
+    return tid in _UNSEEN
+
+
+def load_unseen_cache() -> None:
+    """Rebuild _UNSEEN from the on-disk markers at startup, so a scheduled/SMS
+    response's badge survives a restart.  One stat per thread, once."""
+    for tid in MANAGER.list():
+        try:
+            if os.path.isfile(_unseen_path(tid)):
+                _UNSEEN.add(tid)
+        except Exception:
+            pass  # a per-thread dir hiccup must not abort startup
 
 
 def _thread_title(tid: str) -> str:
@@ -392,6 +449,9 @@ async def lifespan(app: FastAPI):
     # Populate description cache at startup
     for tid in MANAGER.list():
         get_cached_description(tid)
+    # Rebuild the "unseen AI response" badge cache from on-disk markers, so a
+    # scheduled/SMS response's badge survives a restart.
+    load_unseen_cache()
     # Start the schedule poll loop (local import breaks the state<->threads cycle).
     from manage.web.threads import start_scheduler, stop_scheduler
     start_scheduler()

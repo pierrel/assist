@@ -69,6 +69,8 @@ from manage.web.state import (
     _get_sandbox_backend,
     _get_status,
     _has_unmerged_changes,
+    _has_unseen_response,
+    _clear_unseen_response,
     _set_conflict,
     _set_status,
     _thread_domain_html,
@@ -155,6 +157,17 @@ def render_index(query: str = "") -> str:
                 '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
                 ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">error</span>'
+            )
+        elif _has_unseen_response(tid):
+            # "new": an AI response the user hasn't opened yet (scheduled turn,
+            # SMS-triage draft, or a reply that landed since their last view).
+            # Below the live process-state badges (a running/errored thread isn't
+            # "new" yet), ABOVE "unmerged" (a response to read beats a housekeeping
+            # reminder) — per Pierre.  Blue/green, distinct from the others.
+            badge = (
+                '<span style="font-size:.7rem; color:#0b5c2e; background:#d7f3e3;'
+                ' border:1px solid #9fdcbb; padding:.1rem .4rem; border-radius:10px;'
+                ' margin-right:.4rem;">new</span>'
             )
         elif _has_unmerged_changes(tid):
             # Soft amber, distinct from yellow (busy) and red (error).
@@ -900,6 +913,10 @@ async def get_thread(
     tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
+
+    # Opening the thread page = the user has seen its responses -> clear the "new"
+    # badge (bare missing-ok unlink + set discard; lock-free on the event loop).
+    _clear_unseen_response(tid)
 
     stage = _get_status(tid).get("stage", "ready")
     # During the initial setup stages there is no point constructing a Thread
