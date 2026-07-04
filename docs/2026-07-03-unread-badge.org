@@ -1,0 +1,137 @@
+#+TITLE: "New" (unread AI response) badge on the web thread list
+#+DATE: <2026-07-03>
+#+STATUS: DESIGN (Phase 1) — architect + 2-lens design-review folded in; awaiting Pierre
+
+* What Pierre asked for (v1 scope = BADGE-ONLY)
+A *"new" badge* on the web thread LIST next to any thread that has an AI response
+the user hasn't seen yet, taking *PRECEDENCE over the existing "unmerged" badge*.
+Motivation: threads now get AI responses WITHOUT the user actively chatting —
+scheduled turns (thread-schedules) and inbound-SMS triage / approvals — so an
+unread indicator matters.
+
+*Explicitly OUT of v1* (Pierre, 2026-07-03 — deferred follow-ups, not this change):
+- the agent =notify= tool (flagging urgent/time-sensitive items),
+- the iOS / PWA home-screen icon badge,
+- unread COUNTS, per-session/per-device tracking, live push to an open list page.
+
+* The contract
+Per thread, know one bit: *is there an AI response the user hasn't seen?*
+- becomes true when a turn produces a user-visible response/draft,
+- becomes false when the user opens that thread's page,
+- drives a "new" badge on the thread list.
+
+* Data model — a single MARKER FILE (existence = unseen)
+A per-thread sidecar file =unseen_response= in the thread dir. Its *existence* is
+the whole signal — no contents, no timestamp. Symmetric with the existing
+per-thread sidecars (=merge_conflict.json=, =description.txt=).
+
+*Why a flag, not the architect's two timestamps:* the badge is BINARY, so a
+present/absent marker is the minimal representation — fix-by-construction (the
+state can't encode an invalid value) — and it *removes the clock-skew edge case
+entirely* (no time comparison). No smaller correct option: =status.json= is out
+(=_set_status= full-REPLACES it every stage transition → would clobber the flag);
+reusing checkpoint/message mtime would force the O(threads×checkpoint) read the
+list must avoid.
+
+New helpers in =manage/web/state.py= (beside =_get_status=/=_status_path=), named
+for symmetry with the =_set_conflict=/=_clear_conflict= sidecar pair:
+- =_unseen_path(tid)= → =os.path.join(thread_dir(tid), "unseen_response")= (constant
+  filename; =thread_dir= validates tid — rejects =..=/=/=/NUL — so no traversal).
+- =_mark_unseen_response(tid)= — *command*, idempotent create (=Path.touch()= /
+  =open(path,"w")=; NEVER =open(...,"x")= — a 2nd/3rd response must tolerate exists).
+- =_clear_unseen_response(tid)= — *command*, *bare* =os.remove= with missing-ok
+  (=Path(path).unlink(missing_ok=True)=). NOT =_atomic_write=, NO lock (see
+  Event-loop).
+- =_has_unseen_response(tid)= — *query*, =os.path.exists(path)=.
+
+* Write path — mark (single choke point)
+Create the marker at ONE seam: inside =_set_status= (=state.py=), when
+=stage in ("ready", "awaiting_approval")=. Audited: those two stages are set ONLY
+at =_process_message='s THREE response-success exits and NOWHERE else —
+=threads.py:757= (supersede-couldn't-clear early =return= → awaiting_approval),
+=:792= (terminal awaiting_approval), =:795= (terminal ready). So the choke point
+covers all three by construction — including the early =return= at :757 that a
+"stamp once before the pending branch" seam would MISS (both design reviewers'
+top finding). Error stages (=SandboxContainerLostError=, =GraphRecursionError=,
+generic) do NOT mark — an error is not an answer to read, and the "error" badge
+(above "new" in precedence) already covers it.
+
+Minor layering note: =_set_status= (a status writer) gaining a marker side-effect
+for exactly 2 of its stages is justified because those 2 stages *are* precisely
+"a response/draft is now waiting" — and it's the only seam that can't miss an exit.
+
+* Clear path — seen
+=get_thread= (=threads.py:892=, the async route) calls =_clear_unseen_response(tid)=
+once per page render (after the =os.path.isdir= 404 guard). Opening the thread page
+= "seen". Merely LISTING threads does not clear it — only opening the thread does.
+
+* Read path — the badge
+In =render_index= (=threads.py:137-167=, the =for tid in MANAGER.list()= loop),
+insert ONE branch BETWEEN the =error= arm (=:153=) and the =_has_unmerged_changes=
+arm (=:159=):
+: elif _has_unseen_response(tid):
+:     badge = '<span ...>new</span>'    # distinct color (blue/green pill)
+Precedence (all mutually-exclusive =elif= arms → one badge per row):
+- *below* live process-state (queued / busy / error) — those are actionable NOW;
+  a running/errored thread shouldn't also cry "new".
+- *above* "unmerged" — per Pierre; "there's something the AI said" is more
+  time-sensitive than a housekeeping reminder.
+Pin the insertion SLOT (don't append — appending would invert the vs-unmerged
+precedence).
+
+* Event-loop liveness (single-worker uvicorn — blocker-level)
+- *Read (on the loop):* one =os.path.exists= (a bare =stat=) per row — strictly
+  CHEAPER than what =render_index= already does per row (=_get_status= open+json.load,
+  =_has_unmerged_changes= git I/O). No checkpoint deserialization. No new blocking.
+- *Create (off the loop):* =_process_message= is a sync =BackgroundTask=; a file
+  create there is fine.
+- *Clear (on the loop):* a single bare =unlink= in =get_thread= — one bounded,
+  lock-free syscall, same class as the =os.path.isdir= already there. MUST stay a
+  raw missing-ok =unlink= — do NOT route through =_atomic_write= (tempfile) or add
+  a lock (Phase-2 must not "harden" it into something blocking).
+
+* Known residuals (accepted for v1 — named, not "fixed")
+1. *Sticky-badge race.* If =get_thread='s clear runs just BEFORE =_process_message='s
+   create (user opens as the turn finishes), the marker is left present → badge
+   stays until the NEXT open. Worst case is a spuriously-sticky badge, never a lost
+   message. The badge's honest meaning is "a response landed since your last
+   page-load." A by-construction fix (marker records a response/seen COUNT; badge
+   only when marker-count > seen-count) is a *v2 option, deliberately not built* —
+   it reintroduces a per-row read the flag avoids.
+2. *open==seen is a proxy; no live poll.* The thread page renders once (no
+   client-side polling). A response arriving while a tab sits open won't auto-appear
+   there; the LIST badge is the signal. Acceptable for v1.
+3. *Multi-tab/device:* one global "seen" per thread — opening anywhere clears it.
+   Fine for a single-user local assistant (matches the "unmerged" model).
+
+* Coverage / correctness (swept)
+- Every response producer funnels through =_process_message= (message POST,
+  =_initialize_thread=, =_scheduled_dispatch=, =_dispatch_event=/SMS-triage, and the
+  approve/edit/reject resume). No out-of-band producer. So the =_set_status= choke
+  point catches them all — the scheduled/SMS-on-a-never-opened-thread case (the
+  whole point) works: create fires, no =get_thread= ran → badge shows.
+- Brand-new thread: create → 303 redirect → =get_thread= clears a not-yet-existing
+  marker (missing-ok no-op) → the init turn creates it → badge on the list after.
+- tid is server-generated + =thread_dir=-validated; the marker filename is a
+  constant → no path-injection surface.
+
+* Files to touch
+- =manage/web/state.py= — the 4 helpers (=_unseen_path=, =_mark_unseen_response=,
+  =_clear_unseen_response=, =_has_unseen_response=); the =_set_status= choke-point
+  create on =ready=/=awaiting_approval=.
+- =manage/web/threads.py= — =_clear_unseen_response= in =get_thread=; the =elif=
+  badge branch in =render_index= (+ the "new" pill styling, inline like the others).
+- Tests (symptom-level — this is the manage/web hot path):
+  1. badge APPEARS — mark unseen, =render_index("")=, assert =>new<= in the row.
+  2. badge CLEARS on view — mark unseen, drive =get_thread= (TestClient) to clear,
+     =render_index=, assert "new" gone (exercises the real =_clear= path, not a proxy).
+  3. precedence: "new" beats "unmerged" (monkeypatch =_has_unmerged_changes=→True +
+     unseen → row shows "new").
+  4. precedence: process-state beats "new" (=_set_status(tid,"processing")= /
+     "error" + unseen → shows busy/error, not "new").
+  5. the choke point stamps on =ready= AND =awaiting_approval= (e2e via
+     =_process_message= to each terminal, incl. the draft/pending case).
+
+* Estimate
+~4 state.py helpers + 1 =_set_status= line + 1 =get_thread= line + 1 =render_index=
+=elif= + a pill string + ~5 tests. Small, additive, no new infra, no locks.
