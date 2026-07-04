@@ -65,6 +65,13 @@ class TestBadgeAppearsAndClears:
         state.load_unseen_cache()
         assert ">new<" not in render_index("")
 
+    def test_load_cache_is_true_rebuild_drops_stale(self, threads_root):
+        # a stale in-memory entry with no marker file must be dropped on reload.
+        _make_thread(threads_root, "t1")
+        state._UNSEEN.add("ghost")   # no marker file backs this
+        state.load_unseen_cache()
+        assert "ghost" not in state._UNSEEN
+
     def test_evict_caches_drops_unseen(self, threads_root):
         # hard-deleting a never-opened unseen thread must not leak its tid in _UNSEEN.
         _make_thread(threads_root, "t1")

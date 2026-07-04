@@ -360,18 +360,27 @@ def _mark_unseen_response(tid: str) -> None:
     """Record an AI response the user hasn't seen: the live set + an idempotent
     marker file (existence is the whole signal — touch, tolerate exists)."""
     _UNSEEN.add(tid)
-    # The thread dir already exists (status.json was just written to it); existence
-    # is the whole signal, so a plain idempotent touch — tolerate already-exists.
-    open(_unseen_path(tid), "w").close()
+    # The durable marker is BEST-EFFORT: this runs in the terminal path (via
+    # _set_status on ready/awaiting_approval), so a file-write OSError must NEVER
+    # propagate and flip an otherwise-successful turn to error. The in-memory set
+    # carries the badge this session; on write failure we just lose restart-survival.
+    try:
+        open(_unseen_path(tid), "w").close()
+    except OSError:
+        pass
 
 
 def _clear_unseen_response(tid: str) -> None:
     """Mark ``tid`` seen (its page was opened): drop the set entry + the marker.
     Bare, missing-ok unlink — no _atomic_write, no lock (runs on the event loop)."""
     _UNSEEN.discard(tid)
-    path = _unseen_path(tid)
-    if os.path.isfile(path):
-        os.remove(path)
+    # Truly missing-ok AND never-raise: this runs on the event loop (get_thread), so
+    # neither a missing file nor any OSError may 500 the thread page. A try/remove
+    # (not isfile→remove) also avoids the TOCTOU race with the marker's writer.
+    try:
+        os.remove(_unseen_path(tid))
+    except OSError:
+        pass
 
 
 def _has_unseen_response(tid: str) -> bool:
@@ -380,12 +389,15 @@ def _has_unseen_response(tid: str) -> bool:
 
 def load_unseen_cache() -> None:
     """Rebuild _UNSEEN from the on-disk markers at startup, so a scheduled/SMS
-    response's badge survives a restart.  One stat per thread, once."""
+    response's badge survives a restart.  One stat per thread, once.  A true
+    REBUILD — clears first, so it's idempotent and drops stale entries if ever
+    re-invoked with a non-empty set."""
+    _UNSEEN.clear()
     for tid in MANAGER.list():
         try:
             if os.path.isfile(_unseen_path(tid)):
                 _UNSEEN.add(tid)
-        except Exception:
+        except OSError:
             pass  # a per-thread dir hiccup must not abort startup
 
 
