@@ -289,6 +289,7 @@ def _evict_caches(tid: str) -> None:
     """
     DOMAIN_MANAGERS.pop(tid, None)
     DESCRIPTION_CACHE.pop(tid, None)
+    _UNSEEN.discard(tid)  # the marker file went with the dir; drop the set entry too
 
 
 # --- Thread status tracking ----------------------------------------------
@@ -359,9 +360,9 @@ def _mark_unseen_response(tid: str) -> None:
     """Record an AI response the user hasn't seen: the live set + an idempotent
     marker file (existence is the whole signal — touch, tolerate exists)."""
     _UNSEEN.add(tid)
-    path = _unseen_path(tid)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    open(path, "w").close()
+    # The thread dir already exists (status.json was just written to it); existence
+    # is the whole signal, so a plain idempotent touch — tolerate already-exists.
+    open(_unseen_path(tid), "w").close()
 
 
 def _clear_unseen_response(tid: str) -> None:

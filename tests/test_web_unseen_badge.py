@@ -31,12 +31,6 @@ def _make_thread(root, tid, title="A thread"):
     state.DESCRIPTION_CACHE[tid] = title
 
 
-def _row(html, title):
-    """The badge text (if any) shown for the row with `title` — just check the row
-    contains/omits a badge label; rows are distinct by their unique titles."""
-    return html
-
-
 class TestBadgeAppearsAndClears:
     def test_badge_appears_when_unseen(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee thread")
@@ -70,6 +64,14 @@ class TestBadgeAppearsAndClears:
         state._UNSEEN.clear()
         state.load_unseen_cache()
         assert ">new<" not in render_index("")
+
+    def test_evict_caches_drops_unseen(self, threads_root):
+        # hard-deleting a never-opened unseen thread must not leak its tid in _UNSEEN.
+        _make_thread(threads_root, "t1")
+        state._mark_unseen_response("t1")
+        assert state._has_unseen_response("t1")
+        state._evict_caches("t1")              # the hard_delete on_delete callback
+        assert not state._has_unseen_response("t1")
 
 
 class TestChokePoint:
