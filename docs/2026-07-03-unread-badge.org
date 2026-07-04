@@ -20,29 +20,48 @@ Per thread, know one bit: *is there an AI response the user hasn't seen?*
 - becomes false when the user opens that thread's page,
 - drives a "new" badge on the thread list.
 
-* Data model — a single MARKER FILE (existence = unseen)
-A per-thread sidecar file =unseen_response= in the thread dir. Its *existence* is
-the whole signal — no contents, no timestamp. Symmetric with the existing
-per-thread sidecars (=merge_conflict.json=, =description.txt=).
+* Data model — a MARKER FILE (durable) + an in-memory SET (fast read) (Pierre)
+Two representations of the same one bit, kept in sync:
+- *On disk (source of truth, survives restart):* a per-thread sidecar file
+  =unseen_response= in the thread dir. Its *existence* is the signal — no contents,
+  no timestamp. Symmetric with the existing =merge_conflict.json= sidecar. (Pierre:
+  "It's important to persist on disk.")
+- *In memory (the READ path):* a process-singleton =set[tid]= =_UNSEEN= in
+  =state.py= (alongside =MANAGER=/=THREAD_QUEUE=). =render_index= tests membership —
+  O(1), NO filesystem hit per row. *Populated ONCE at startup* by scanning the
+  thread dirs for the marker (Pierre: "populated at startup in a very efficient
+  manner → page loads are very quick"). This is the answer to Pierre's load-time
+  worry: the per-row read is a Python set lookup, never a =stat=.
 
-*Why a flag, not the architect's two timestamps:* the badge is BINARY, so a
-present/absent marker is the minimal representation — fix-by-construction (the
-state can't encode an invalid value) — and it *removes the clock-skew edge case
-entirely* (no time comparison). No smaller correct option: =status.json= is out
-(=_set_status= full-REPLACES it every stage transition → would clobber the flag);
-reusing checkpoint/message mtime would force the O(threads×checkpoint) read the
-list must avoid.
+*Why a flag (present/absent), not the architect's two timestamps:* the badge is
+BINARY, so a present/absent bit is the minimal representation — fix-by-construction
+(can't encode an invalid value) — and it *removes the clock-skew edge case
+entirely* (no time comparison). =status.json= is out (=_set_status= full-REPLACES
+it every stage transition → would clobber the flag).
 
-New helpers in =manage/web/state.py= (beside =_get_status=/=_status_path=), named
-for symmetry with the =_set_conflict=/=_clear_conflict= sidecar pair:
+*Why BOTH a file and a set* (not just one): the set alone wouldn't survive a
+restart (a scheduled/SMS response's badge would vanish on redeploy); the file alone
+would =stat= per row on every list render (Pierre's load-time worry). File = durable
+backing; set = fast runtime read; startup reconciles set ← files.
+
+New in =manage/web/state.py=, named for symmetry with =_set_conflict=/=_clear_conflict=:
+- =_UNSEEN: set[str]= — process singleton; the badge read path.
 - =_unseen_path(tid)= → =os.path.join(thread_dir(tid), "unseen_response")= (constant
   filename; =thread_dir= validates tid — rejects =..=/=/=/NUL — so no traversal).
-- =_mark_unseen_response(tid)= — *command*, idempotent create (=Path.touch()= /
-  =open(path,"w")=; NEVER =open(...,"x")= — a 2nd/3rd response must tolerate exists).
-- =_clear_unseen_response(tid)= — *command*, *bare* =os.remove= with missing-ok
-  (=Path(path).unlink(missing_ok=True)=). NOT =_atomic_write=, NO lock (see
-  Event-loop).
-- =_has_unseen_response(tid)= — *query*, =os.path.exists(path)=.
+- =_mark_unseen_response(tid)= — *command*: =_UNSEEN.add(tid)= AND idempotent file
+  create (=Path.touch()=; NEVER =open(...,"x")= — a 2nd/3rd response must tolerate
+  exists). Both, so the badge is live AND survives restart.
+- =_clear_unseen_response(tid)= — *command*: =_UNSEEN.discard(tid)= AND *bare*
+  =Path(path).unlink(missing_ok=True)=. NOT =_atomic_write=, NO lock (see Event-loop).
+- =_has_unseen_response(tid)= — *query*: =tid in _UNSEEN= (in-memory; no FS).
+- =load_unseen_cache()= — *startup*: for each =MANAGER.list()= tid, =_UNSEEN.add(tid)=
+  iff its marker file exists. O(threads) =stat=s ONCE at startup (not per page load).
+
+*Concurrency (no lock needed):* =set.add=/=discard=/=in= are each atomic under the
+GIL (CPython) — single ops, no compound read-modify-write — so the set is safe
+across the loop (=render_index= read, =get_thread= clear) and the bg
+=_process_message= thread (mark) without a lock. This preserves event-loop liveness
+(no lock acquired on the loop thread — cf. the =peek_holder()= lock-free rule).
 
 * Write path — mark (single choke point)
 Create the marker at ONE seam: inside =_set_status= (=state.py=), when
@@ -79,16 +98,25 @@ Precedence (all mutually-exclusive =elif= arms → one badge per row):
 Pin the insertion SLOT (don't append — appending would invert the vs-unmerged
 precedence).
 
+* Startup wiring
+=load_unseen_cache()= runs at web-app startup (the FastAPI lifespan in
+=manage/web/__main__.py= / =app.py=, where the schedules scheduler is already
+started), AFTER =MANAGER= is ready. One =stat= per thread, once — rebuilds =_UNSEEN=
+from the on-disk markers so scheduled/SMS badges survive a restart.
+
 * Event-loop liveness (single-worker uvicorn — blocker-level)
-- *Read (on the loop):* one =os.path.exists= (a bare =stat=) per row — strictly
-  CHEAPER than what =render_index= already does per row (=_get_status= open+json.load,
-  =_has_unmerged_changes= git I/O). No checkpoint deserialization. No new blocking.
-- *Create (off the loop):* =_process_message= is a sync =BackgroundTask=; a file
-  create there is fine.
-- *Clear (on the loop):* a single bare =unlink= in =get_thread= — one bounded,
-  lock-free syscall, same class as the =os.path.isdir= already there. MUST stay a
-  raw missing-ok =unlink= — do NOT route through =_atomic_write= (tempfile) or add
-  a lock (Phase-2 must not "harden" it into something blocking).
+- *Read (on the loop):* =tid in _UNSEEN= — a Python set membership test, NO
+  filesystem hit per row (this is the point of Pierre's cache). Was already going to
+  be cheaper than the per-row =_get_status=/=_has_unmerged_changes= the list does;
+  now it's a pure in-memory lookup.
+- *Create (off the loop):* =_process_message= is a sync =BackgroundTask=; =set.add=
+  + a file create there is fine.
+- *Clear (on the loop):* =set.discard= + a single bare =unlink= in =get_thread= —
+  bounded, lock-free, same class as the =os.path.isdir= already there. The unlink
+  MUST stay a raw missing-ok =unlink= — do NOT route through =_atomic_write=
+  (tempfile) or add a lock (Phase-2 must not "harden" it into something blocking).
+- *No lock on the set* — single atomic add/discard/=in= under the GIL (see
+  Concurrency above).
 
 * Known residuals (accepted for v1 — named, not "fixed")
 1. *Sticky-badge race.* If =get_thread='s clear runs just BEFORE =_process_message='s
@@ -116,9 +144,12 @@ precedence).
   constant → no path-injection surface.
 
 * Files to touch
-- =manage/web/state.py= — the 4 helpers (=_unseen_path=, =_mark_unseen_response=,
-  =_clear_unseen_response=, =_has_unseen_response=); the =_set_status= choke-point
-  create on =ready=/=awaiting_approval=.
+- =manage/web/state.py= — =_UNSEEN= set + the helpers (=_unseen_path=,
+  =_mark_unseen_response=, =_clear_unseen_response=, =_has_unseen_response=,
+  =load_unseen_cache=); the =_set_status= choke-point =_mark_unseen_response= on
+  =ready=/=awaiting_approval=.
+- =manage/web/__main__.py= / =app.py= — call =load_unseen_cache()= in the startup
+  lifespan (beside the schedules scheduler start).
 - =manage/web/threads.py= — =_clear_unseen_response= in =get_thread=; the =elif=
   badge branch in =render_index= (+ the "new" pill styling, inline like the others).
 - Tests (symptom-level — this is the manage/web hot path):
@@ -131,6 +162,10 @@ precedence).
      "error" + unseen → shows busy/error, not "new").
   5. the choke point stamps on =ready= AND =awaiting_approval= (e2e via
      =_process_message= to each terminal, incl. the draft/pending case).
+  6. =load_unseen_cache()= rebuilds =_UNSEEN= from on-disk markers (write a marker
+     file, clear the set, run load, assert the tid is back in =_UNSEEN= → badge
+     survives restart); and =_clear_unseen_response= removes BOTH the set entry and
+     the file (so a later reload doesn't resurrect it).
 
 * Estimate
 ~4 state.py helpers + 1 =_set_status= line + 1 =get_thread= line + 1 =render_index=
