@@ -1,0 +1,198 @@
+#+TITLE: notify tool + iOS PWA home-screen badge (notifications roadmap v2)
+#+DATE: <2026-07-04>
+#+STATUS: DESIGN (Phase 1) — architect + 2-lens design-review folded in; awaiting Pierre
+
+* What Pierre asked for
+Give the agent a =notify=-style tool to flag URGENT / time-sensitive
+responses/events, and drive a **badge on the iOS home-screen (PWA) icon — a badge
+ONLY, NO push notification** (memory queued-assist-feature-roadmap.md). Builds on
+the just-shipped v1 "new" unread badge (#167): that badge marks *unseen* responses;
+=notify= adds a *stronger* "this needs a fast response" signal.
+
+This is the first concrete instance of the "event-triggers" future the
+thread-schedules design anticipated: a scheduled/SMS turn can raise a
+stronger-than-unseen signal the web app surfaces.
+
+* Two parts — durable core vs best-effort (the volatility split)
+The design SEPARATES what's reliably achievable from what iOS gates:
+- *PART A — durable core (ships, deterministic, testable):* the =notify= tool +
+  an urgent state (mirrors v1's =_UNSEEN=) + an in-app "urgent" pill + a count.
+- *PART B — best-effort (ships, platform-gated):* the iOS PWA icon badge via
+  =navigator.setAppBadge=, on app open/foreground. The CLOSED-app real-time badge
+  is DEFERRED (it needs Web Push, which on iOS is inseparable from a user-visible
+  notification — i.e. it IS the "push notification" Pierre said no to).
+They share ONE seam: a cheap integer count.
+
+* DECISIONS FOR PIERRE (please weigh before I implement)
+** D1 — the Notification-PERMISSION prompt (gates whether Part B exists at all)
+iOS only honors =setAppBadge= for a home-screen-installed PWA that has been
+GRANTED =Notification= permission — so lighting the icon badge at all triggers the
+standard *"Assist would like to send you notifications"* prompt, even though the
+code NEVER posts a notification (no banner, no sound, no lock-screen alert — only
+the numeric icon badge). "Badge only, no notification" collides with the platform:
+the badge needs the notification PERMISSION.
+- If that one-time prompt is acceptable → build Part B (icon badge on open/fg).
+- If even the prompt is unacceptable → DROP Part B; the in-app "urgent" pill
+  (Part A) becomes the whole feature. *(Part A ships either way.)*
+
+** D2 — the icon badge counts URGENT-only (recommended) vs ALL-unread
+Design picks =len(_URGENT)= (agent-flagged urgent) so the home-screen icon stays
+meaningful/mostly-zero. Counting all-unread (=len(_UNSEEN)=) would keep the icon
+chronically lit → trained to ignore. Recommend urgent-only; the in-app UI already
+has BOTH the "new" pill (all unread) and the "urgent" pill. Confirm the icon means
+"N urgent," not "N unread."
+
+** D3 — clear urgent on OPEN (recommended v1) vs persist-until-dismiss
+v1 clears "unseen" when you open the thread (glance == seen). "Urgent" is
+semantically stronger — it may need an ACTION, not just a glance
+(=notify("leave for the airport by 3:15")=). Options: (a) clear on open (simplest,
+symmetric with v1, shippable) — risk: an urgent item de-badges the instant it's
+glanced; (b) persist until an explicit dismiss (a second-tap affordance) — more
+faithful, more UI. Recommend (a) for v1 with the residual named; (b) is a v2
+follow-up. Confirm.
+
+* PART A — the durable core
+
+** A1. Urgent state — a parallel =_URGENT= set (mirrors =_UNSEEN= exactly)
+=manage/web/state.py=, after the =_UNSEEN= block (~:342-401). A parallel
+=_URGENT: set[str]= + a =urgent_response= marker file — the SAME representation v1
+uses and Pierre already blessed (lock-free set = O(1) read path; durable marker =
+survives restart, so a scheduled/SMS urgent flag isn't lost to a deploy). Chosen
+over reusing =_UNSEEN= (different lifecycle/precedence; overloading one set forces
+a flag-in-a-set) and over a generic factory (only two sets ever — YAGNI).
+Helpers, each a 1:1 analog of the =_UNSEEN= version, BUT only those with a live
+caller (design-review F1 — no callerless clone):
+- =_URGENT: set[str] = set()=; =_urgent_path(tid)= → =<thread_dir>/urgent_response=.
+- =_mark_urgent(tid)= — =add= + BEST-EFFORT marker write (=try/except OSError: pass=;
+  runs in the terminal/tool path off-loop — a marker failure must NEVER flip a good
+  turn to error). Verbatim mirror of =_mark_unseen_response=.
+- =_clear_urgent(tid)= — =discard= + BARE missing-ok never-raise =os.remove= in
+  =try/except OSError= (runs on the loop in =get_thread=; no =_atomic_write=, no
+  lock — verbatim mirror of =_clear_unseen_response=, incl. the TOCTOU-safe
+  try/remove, not isfile→remove).
+- =urgent_count()= → =len(_URGENT)= (the Part-B seam; O(1)).  A =_has_urgent(tid)=
+  membership fn ONLY if the pill's =elif= needs it (it does — see A3).
+- =load_urgent_cache()= — =clear()=-first rebuild from markers at startup (mirror of
+  the fixed =load_unseen_cache=), called in =lifespan= beside =load_unseen_cache()=.
+Lifecycle hooks (symmetry): =_evict_caches= += =_URGENT.discard(tid)=; =get_thread=
+clears BOTH =_clear_unseen_response= and =_clear_urgent= on open.
+*Concurrency:* identical to v1 — GIL-atomic =add=/=discard=/=in=/=len=, no lock,
+safe across the on-loop reads/clear and the off-loop =_process_message= mark.
+
+** A2. The =notify= tool — WEB-only, closure-built, trusted-turns-only
+NEW =assist/events/notify.py= (beside =reply.py=). WEB-only (touches web state;
+core =assist/tools.py= built-ins run in emacsos/CLI which have NO Manager/web-state
+— same rationale as schedule/subscription/reply tools).
+- Surface: =def notify(reason: str) -> str= — one string arg (the small model gets
+  one-arg tools right). Reads =tid= from =get_config()= (=_thread_id()=); if none,
+  RETURNS a corrective string (="Couldn't flag this: no active thread."=) — never
+  raises, never marks a =None= key (design-review F8, matches every sibling tool's
+  =if not tid: return "…"= opener). On success: =_mark_urgent(tid)=, return
+  =f"Flagged this thread as urgent: {reason}"=. =reason= is NOT persisted to the
+  marker (existence is the whole signal — no PII in the badge); it lives in the
+  transcript the user reads.
+- Builder: =def notify_tools(mark_urgent) -> list= — a CLOSURE over the
+  mark-urgent callback (design-review F9), mirroring =schedule_tools(store)=. This
+  AVOIDS the =state=↔=notify= import cycle BY CONSTRUCTION (no in-function import),
+  the dominant idiom here.
+- *Registration (containment by construction — the security core):* add
+  =notify_tools(_mark_urgent)= to =set_web_tools(...)= at =state.py:106= ONLY —
+  NEVER to =set_web_triage_tools= (=state.py:107=). A TRIAGE turn (untrusted inbound
+  SMS) gets ONLY =_web_triage_tools= (=thread_manager.py:280= = =reply_tools()=), so
+  =notify= is simply not in that turn's tool list — an attacker's SMS cannot force a
+  badge on Pierre's phone. A test PINS =notify ∉ _web_triage_tools=.
+
+** A3. The urgent pill + the count seam
+=manage/web/threads.py=:
+- *Thread-list "urgent" pill* in =render_index= (~:139-180): insert
+  =elif _has_urgent(tid):= a red/orange pill BETWEEN the =error= arm and the
+  =_has_unseen_response= ("new") arm. Precedence:
+  =queued/busy > error > URGENT > new > unmerged= (urgent beats plain "new" — an
+  agent-flagged item is more time-sensitive; below error/busy — a running/broken
+  thread is actionable now). Mutually-exclusive =elif= → one pill per row. Pin the
+  slot (don't append). This pill is the RELIABLE in-app surface (design-review F2) —
+  the iOS icon badge is the enhancement; without the pill, =notify= would be a
+  near-no-op whenever the PWA is closed.
+- *Count seam* for Part B: inject =<meta name="assist-badge-count" content="{urgent_count()}">=
+  into the index =<head>= (~:204). =urgent_count()= computed ONCE (not per row),
+  O(1). No JSON endpoint (the meta is smaller + one fewer route — design-review F3).
+
+* PART B — iOS PWA icon badge (best-effort, platform-gated)
+Honest feasibility (verbatim into the PR):
+- ✅ =setAppBadge(n)=/=clearAppBadge()= from the OPEN/foregrounded page works on
+  iOS 16.4+ for a home-screen-installed PWA with Notification permission — no push,
+  no service worker. "Set the badge to the urgent count on open/foreground" is
+  reliably deliverable (eventually-consistent-on-foreground — which is when the user
+  looks at the icon anyway).
+- ⛔ DEFERRED: a badge that updates while the app is CLOSED needs a service worker
+  woken by Web Push, which on iOS requires a user-visible notification → violates
+  "badge only". Not attempted; documented.
+** B1. PWA manifest + static assets
+NEW dedicated =manage/web/static/= dir (manifest + icon PNGs ONLY — no threads,
+config, or secrets). =manifest.webmanifest= (name, short_name, start_url "/",
+display standalone, icons 192/512). Served via a =StaticFiles= mount in =app.py=
+(the first one — the codebase inlines JS/CSS, but a manifest must be a fetchable URL
+and icons are binary). =StaticFiles= reads on the threadpool (off-loop) + rejects
+=..= escapes by construction → liveness- and traversal-safe. HTTPS already satisfied
+(:5050 mkcert). Verify no apple-touch-icon already ships.
+** B2. =<head>= metas (index, ~:204)
+=<link rel="manifest">=, =apple-mobile-web-app-capable=,
+=apple-mobile-web-app-title=, =<link rel="apple-touch-icon">= (the home-screen
+icon), + the A3 badge-count meta.
+** B3. Permission + page script (static inline =<script>=, like =_GEO_SEND_SCRIPT=)
+No server data except the count-via-meta (an int — no XSS surface). Feature-detect
+=('setAppBadge' in navigator)=; request =Notification.requestPermission()= LAZILY on
+a user gesture (never unsolicited on load — iOS may auto-deny); on =load= +
+=visibilitychange→visible=, =setAppBadge(count)= if =count>0= else =clearAppBadge()=;
+try/catch → silent no-op on any browser lacking the API (desktop/older iOS degrade to
+the in-app pill).
+
+* Event-loop liveness (single-worker uvicorn — blocker-level) — all CONFIRMED
+- Reads on the loop: =_has_urgent=/=urgent_count()= = GIL-atomic set =in=/=len=, O(1),
+  no lock; the =<head>= meta is one =len()= (cheaper than the per-row =_has_unseen=
+  the list already does). =_clear_urgent= on the loop = bare missing-ok unlink +
+  discard, never-raise.
+- The MARK runs OFF-loop (the =notify= tool executes inside =_process_message=, a
+  sync BackgroundTask). =StaticFiles= serves on the threadpool. No new lock/blocking.
+
+* Security / containment (by construction)
+- =notify= unreachable from the SMS-TRIAGE turn (not in =_web_triage_tools=) — the
+  core containment, pinned by a test. HONEST residual (design-review F2, accepted,
+  NOT hardened): a SCHEDULED turn (=triage=False=) DOES hold =notify=; if untrusted
+  content already steers a trusted turn to self-schedule a "call notify" prompt, it
+  could fire — but that turn can already =send_reply=-draft/schedule/subscribe, so
+  a badge on Pierre's own phone is not the marginal risk. Scoped, not over-claimed.
+- Nuisance: =_URGENT= is set-keyed-by-tid → N calls collapse to one; bounded by
+  thread count (same as =_UNSEEN=). No cap needed.
+- No leak: the badge is a BARE integer; =reason= isn't persisted; manifest is static
+  app metadata. Count is only visible on Pierre's own unlocked device.
+
+* Tests (symptom-level — cloned from tests/test_web_unseen_badge.py)
+NEW =tests/test_web_urgent_badge.py=: notify tool marks urgent (stub =get_config=) →
+=urgent_count()==1=; =render_index= shows the urgent pill + =<meta assist-badge-count content="1">=;
+precedence (urgent > new/unmerged, error/busy > urgent); marker survives restart via
+=load_urgent_cache()=; clear-on-open via =get_thread=; =notify= with no active thread
+returns the corrective string (no raise); *containment:* assert =notify ∉ _web_triage_tools=
+(un-mocked, the by-construction guarantee). Part-B manifest/head served (=rel="manifest"=,
+=apple-touch-icon=) — a TestClient static GET returns 200. The Part-B JS is Safari-only →
+verify manually on a home-screen-installed iOS PWA (state the trigger). No =edd/= eval
+changes (no model-behavior contract change); no middleware (guidance/state, not a guard).
+
+* Files to touch
+- =manage/web/state.py= — =_URGENT= set + helpers + =load_urgent_cache= + lifespan
+  call + =_evict_caches= line + =notify_tools(_mark_urgent)= at :106.
+- =assist/events/notify.py= — NEW: =notify= + =notify_tools(mark_urgent)= closure.
+- =manage/web/threads.py= — urgent pill in =render_index=; the =<head>= metas +
+  badge-count meta; the permission/=setAppBadge= page script; =_clear_urgent= in
+  =get_thread=.
+- =manage/web/app.py= — the =StaticFiles= mount.
+- =manage/web/static/= — NEW: =manifest.webmanifest= + icon PNGs.
+- =tests/test_web_urgent_badge.py= — NEW symptom tests.
+
+* Risks
+1. iOS Badging drift (highest) — feature-detect + silent no-op + the in-app pill
+   fallback. Best-effort, documented.
+2. The Notification-permission prompt (D1) — the sharpest edge vs "no notification";
+   Pierre's decision, gates Part B.
+3. Precedence / clear-policy (D3) — one-place changes, cheap to re-rank.
+4. Import cycle — avoided by construction via the closure builder (F9).
