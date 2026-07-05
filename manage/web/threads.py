@@ -145,15 +145,24 @@ _BADGE_SCRIPT = """<script>
       if (p && p.catch) { p.catch(function(){}); }
     } catch (e) {}
   }
-  function ensurePermThenSync(){
+  function maybeOfferPermission(){
     try {
-      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-        Notification.requestPermission().then(sync).catch(function(){});
-      } else { sync(); }
+      if (typeof Notification === 'undefined' || Notification.permission !== 'default') {
+        sync(); return;   // already granted/denied, or unsupported -> just sync
+      }
+      // The Badging API needs notification permission, and iOS only grants it from a
+      // real user gesture.  Show a VISIBLE one-tap button (discoverable + reliable —
+      // an ambient first-click could navigate away before the prompt resolves).
+      var b = document.createElement('button');
+      b.textContent = 'Enable home-screen badge';
+      b.style.cssText = 'position:fixed;left:50%;bottom:1rem;transform:translateX(-50%);'
+        + 'z-index:9999;padding:.6rem 1rem;border-radius:8px;border:0;background:#1d4ed8;'
+        + 'color:#fff;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,.2);';
+      b.onclick = function(){ b.remove(); Notification.requestPermission().then(sync).catch(function(){}); };
+      document.body.appendChild(b);
     } catch (e) {}
   }
-  document.addEventListener('click', ensurePermThenSync, { once: true });
-  window.addEventListener('load', sync);
+  window.addEventListener('load', maybeOfferPermission);
   document.addEventListener('visibilitychange', function(){
     if (document.visibilityState === 'visible') sync();
   });
