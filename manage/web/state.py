@@ -104,9 +104,11 @@ INBOUND_LOG = InboundLog(ROOT)
 # Normal turns get the config tools (schedule + subscription). A TRIAGE turn (untrusted
 # inbound SMS) gets ONLY send_reply, HITL-gated — never the host-effect config tools — so an
 # injected text can't plant/delete a subscription or schedule (MANAGER.get(triage=True)).
-# notify_tools takes an injected mark-urgent callback (a CLOSURE — avoids the
-# state<->notify import cycle by construction; notify.py never imports web state).
-# The lambda late-binds `_mark_urgent` (defined further down) at tool-call time.
+# notify_tools takes an injected mark-urgent callback (notify.py never imports web
+# state → no import cycle).  The lambda is NOT redundant: `_mark_urgent` is defined
+# ~300 lines below (kept beside the symmetric _UNSEEN block), but this runs at import
+# time, so a bare `notify_tools(_mark_urgent)` would NameError — the lambda DEFERS the
+# lookup to tool-call time.  (Do not "simplify" it away.)
 # Lands in the NORMAL tool set ONLY — never the triage set — so an untrusted inbound
 # SMS can't force an urgent badge on Pierre's phone.
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)

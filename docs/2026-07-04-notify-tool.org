@@ -169,8 +169,10 @@ NEW =tests/test_web_urgent_badge.py=: notify tool marks urgent (stub =get_config
 precedence (urgent > new/unmerged, error/busy > urgent); marker survives restart via
 =load_urgent_cache()=; clear-on-open via =get_thread=; =notify= with no active thread
 returns the corrective string (no raise); *containment:* assert =notify ∉ _web_triage_tools=
-(un-mocked, the by-construction guarantee). Part-B manifest/head served (=rel="manifest"=,
-=apple-touch-icon=) — a TestClient static GET returns 200. The Part-B JS is Safari-only →
+(un-mocked, the by-construction guarantee). Part-B manifest/head served (=render_index= output has =rel="manifest"=,
+=apple-touch-icon=, the badge script) + the manifest file parses as valid JSON. (No
+route test of framework =StaticFiles= — that would be theoretical per the no-theoretical-
+tests rule; the mount is a one-line framework call.) The Part-B JS is Safari-only →
 verify manually on a home-screen-installed iOS PWA (state the trigger). No =edd/= eval
 changes (no model-behavior contract change); no middleware (guidance/state, not a guard).
 
