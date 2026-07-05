@@ -10,6 +10,8 @@ the web deployment only; emacsos/CLI have no Manager). Never raises into the age
 """
 from __future__ import annotations
 
+import html
+
 from langgraph.config import get_config
 
 
@@ -35,6 +37,8 @@ def notify_tools(mark_urgent) -> list:
         if not tid:
             return "Couldn't flag this urgent: no active thread."
         mark_urgent(tid)
-        return f"Flagged this thread as urgent: {reason}"
+        # Escape reason: the tool result renders through markdown (raw HTML passes),
+        # and reason could carry agent-echoed untrusted content — don't let it inject.
+        return f"Flagged this thread as urgent: {html.escape(reason)}"
 
     return [notify]

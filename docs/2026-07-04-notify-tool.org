@@ -16,12 +16,12 @@ stronger-than-unseen signal the web app surfaces.
 * Two parts — durable core vs best-effort (the volatility split)
 The design SEPARATES what's reliably achievable from what iOS gates:
 - *PART A — durable core (ships, deterministic, testable):* the =notify= tool +
-  an urgent state (mirrors v1's =_UNSEEN=) + an in-app "urgent" pill + a count.
+  an urgent state (mirrors v1's =_UNSEEN=) + an in-app "urgent" pill + a boolean "any urgent?" flag.
 - *PART B — best-effort (ships, platform-gated):* the iOS PWA icon badge via
   =navigator.setAppBadge=, on app open/foreground. The CLOSED-app real-time badge
   is DEFERRED (it needs Web Push, which on iOS is inseparable from a user-visible
   notification — i.e. it IS the "push notification" Pierre said no to).
-They share ONE seam: a cheap integer count.
+They share ONE seam: a cheap boolean "any urgent?".
 
 * DECISIONS — RESOLVED by Pierre (2026-07-05)
 ** D1 — Notification permission → ACCEPTABLE, BUILD Part B.
@@ -94,7 +94,7 @@ core =assist/tools.py= built-ins run in emacsos/CLI which have NO Manager/web-st
   =notify= is simply not in that turn's tool list — an attacker's SMS cannot force a
   badge on Pierre's phone. A test PINS =notify ∉ _web_triage_tools=.
 
-** A3. The urgent pill + the count seam
+** A3. The urgent pill + the badge seam
 =manage/web/threads.py=:
 - *Thread-list "urgent" pill* in =render_index= (~:139-180): insert
   =elif _has_urgent(tid):= a red/orange pill BETWEEN the =error= arm and the
@@ -112,9 +112,9 @@ core =assist/tools.py= built-ins run in emacsos/CLI which have NO Manager/web-st
 
 * PART B — iOS PWA icon badge (best-effort, platform-gated)
 Honest feasibility (verbatim into the PR):
-- ✅ =setAppBadge(n)=/=clearAppBadge()= from the OPEN/foregrounded page works on
+- ✅ =setAppBadge()= (a DOT)/=clearAppBadge()= from the OPEN/foregrounded page works on
   iOS 16.4+ for a home-screen-installed PWA with Notification permission — no push,
-  no service worker. "Set the badge to the urgent count on open/foreground" is
+  no service worker. "Set a badge DOT when any urgent, on open/foreground" is
   reliably deliverable (eventually-consistent-on-foreground — which is when the user
   looks at the icon anyway).
 - ⛔ DEFERRED: a badge that updates while the app is CLOSED needs a service worker
@@ -131,9 +131,9 @@ and icons are binary). =StaticFiles= reads on the threadpool (off-loop) + reject
 ** B2. =<head>= metas (index, ~:204)
 =<link rel="manifest">=, =apple-mobile-web-app-capable=,
 =apple-mobile-web-app-title=, =<link rel="apple-touch-icon">= (the home-screen
-icon), + the A3 badge-count meta.
+icon), + the A3 assist-urgent meta.
 ** B3. Permission + page script (static inline =<script>=, like =_GEO_SEND_SCRIPT=)
-No server data except the count-via-meta (an int — no XSS surface). Feature-detect
+No server data except the boolean-via-meta (0/1 — no XSS surface). Feature-detect
 =('setAppBadge' in navigator)=; request =Notification.requestPermission()= LAZILY on
 a user gesture (never unsolicited on load — iOS may auto-deny); on =load= +
 =visibilitychange→visible=, read the =assist-urgent= meta and call
@@ -144,7 +144,7 @@ last-set value while the app is backgrounded/closed, and re-syncs to =_any_urgen
 on the next foreground — so it stays until ALL urgent threads are opened (D3).
 
 * Event-loop liveness (single-worker uvicorn — blocker-level) — all CONFIRMED
-- Reads on the loop: =_has_urgent=/=urgent_count()= = GIL-atomic set =in=/=len=, O(1),
+- Reads on the loop: =_has_urgent=/=_any_urgent()= = GIL-atomic set =in=/=len=, O(1),
   no lock; the =<head>= meta is one =len()= (cheaper than the per-row =_has_unseen=
   the list already does). =_clear_urgent= on the loop = bare missing-ok unlink +
   discard, never-raise.
@@ -165,7 +165,7 @@ on the next foreground — so it stays until ALL urgent threads are opened (D3).
 
 * Tests (symptom-level — cloned from tests/test_web_unseen_badge.py)
 NEW =tests/test_web_urgent_badge.py=: notify tool marks urgent (stub =get_config=) →
-=urgent_count()==1=; =render_index= shows the urgent pill + =<meta assist-badge-count content="1">=;
+=_any_urgent()==1=; =render_index= shows the urgent pill + =<meta assist-urgent content="1">=;
 precedence (urgent > new/unmerged, error/busy > urgent); marker survives restart via
 =load_urgent_cache()=; clear-on-open via =get_thread=; =notify= with no active thread
 returns the corrective string (no raise); *containment:* assert =notify ∉ _web_triage_tools=
@@ -181,7 +181,7 @@ changes (no model-behavior contract change); no middleware (guidance/state, not 
   call + =_evict_caches= line + =notify_tools(_mark_urgent)= at :106.
 - =assist/events/notify.py= — NEW: =notify= + =notify_tools(mark_urgent)= closure.
 - =manage/web/threads.py= — urgent pill in =render_index=; the =<head>= metas +
-  badge-count meta; the permission/=setAppBadge= page script; =_clear_urgent= in
+  assist-urgent meta; the permission/=setAppBadge= page script; =_clear_urgent= in
   =get_thread=.
 - =manage/web/app.py= — the =StaticFiles= mount.
 - =manage/web/static/= — NEW: =manifest.webmanifest= + icon PNGs.
