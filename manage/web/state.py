@@ -30,6 +30,7 @@ from assist.schedule.tools import schedule_tools
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
+from assist.events.notify import notify_tools
 from assist.events.inbound import InboundLog
 from assist.thread_manager import (
     ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on)
@@ -103,7 +104,13 @@ INBOUND_LOG = InboundLog(ROOT)
 # Normal turns get the config tools (schedule + subscription). A TRIAGE turn (untrusted
 # inbound SMS) gets ONLY send_reply, HITL-gated — never the host-effect config tools — so an
 # injected text can't plant/delete a subscription or schedule (MANAGER.get(triage=True)).
-set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE))
+# notify_tools takes an injected mark-urgent callback (a CLOSURE — avoids the
+# state<->notify import cycle by construction; notify.py never imports web state).
+# The lambda late-binds `_mark_urgent` (defined further down) at tool-call time.
+# Lands in the NORMAL tool set ONLY — never the triage set — so an untrusted inbound
+# SMS can't force an urgent badge on Pierre's phone.
+set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
+              + notify_tools(lambda tid: _mark_urgent(tid)))
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")
@@ -290,6 +297,7 @@ def _evict_caches(tid: str) -> None:
     DOMAIN_MANAGERS.pop(tid, None)
     DESCRIPTION_CACHE.pop(tid, None)
     _UNSEEN.discard(tid)  # the marker file went with the dir; drop the set entry too
+    _URGENT.discard(tid)  # same for the urgent flag
 
 
 # --- Thread status tracking ----------------------------------------------
@@ -401,6 +409,61 @@ def load_unseen_cache() -> None:
             pass  # a per-thread dir hiccup must not abort startup
 
 
+# --- "urgent" (agent notify-flagged) badge state --------------------------
+# The notify() agent tool flags a thread URGENT — a STRONGER signal than v1's
+# "unseen".  Same durable-marker + in-memory-set + startup-rebuild pattern as
+# _UNSEEN, lock-free (GIL-atomic set ops across the on-loop reads/clear and the
+# off-loop tool call).  Read paths: _has_urgent (the thread-list "urgent" pill) and
+# _any_urgent (the iOS icon DOT — a BOOLEAN, not a count, per Pierre).
+_URGENT: set[str] = set()
+
+
+def _urgent_path(tid: str) -> str:
+    return os.path.join(MANAGER.thread_dir(tid), "urgent_response")
+
+
+def _mark_urgent(tid: str) -> None:
+    """Flag ``tid`` urgent (from the notify tool): the live set + a BEST-EFFORT
+    durable marker (OSError swallowed — a marker write must never fail the turn)."""
+    _URGENT.add(tid)
+    try:
+        open(_urgent_path(tid), "w").close()
+    except OSError:
+        pass
+
+
+def _clear_urgent(tid: str) -> None:
+    """Clear ``tid``'s urgent flag (its page was opened): drop the set entry + the
+    marker.  Bare, missing-ok, never-raise (runs on the event loop in get_thread)."""
+    _URGENT.discard(tid)
+    try:
+        os.remove(_urgent_path(tid))
+    except OSError:
+        pass
+
+
+def _has_urgent(tid: str) -> bool:
+    return tid in _URGENT
+
+
+def _any_urgent() -> bool:
+    """True iff any thread is urgent — the iOS icon-DOT seam (a boolean; the badge
+    is a plain dot, not a count, per Pierre)."""
+    return bool(_URGENT)
+
+
+def load_urgent_cache() -> None:
+    """Rebuild _URGENT from the on-disk markers at startup (mirror of
+    load_unseen_cache) — a notify-flagged urgent survives a restart."""
+    _URGENT.clear()
+    for tid in MANAGER.list():
+        try:
+            if os.path.isfile(_urgent_path(tid)):
+                _URGENT.add(tid)
+        except OSError:
+            pass
+
+
 def _thread_title(tid: str) -> str:
     """Display title for a thread; placeholder if still initializing."""
     status = _get_status(tid)
@@ -465,6 +528,7 @@ async def lifespan(app: FastAPI):
     # Rebuild the "unseen AI response" badge cache from on-disk markers, so a
     # scheduled/SMS response's badge survives a restart.
     load_unseen_cache()
+    load_urgent_cache()
     # Start the schedule poll loop (local import breaks the state<->threads cycle).
     from manage.web.threads import start_scheduler, stop_scheduler
     start_scheduler()

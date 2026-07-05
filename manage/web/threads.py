@@ -71,6 +71,9 @@ from manage.web.state import (
     _has_unmerged_changes,
     _has_unseen_response,
     _clear_unseen_response,
+    _has_urgent,
+    _clear_urgent,
+    _any_urgent,
     _set_conflict,
     _set_status,
     _thread_domain_html,
@@ -123,6 +126,38 @@ _MD_EXTENSIONS = ["fenced_code", "tables"]
 # this; test_route_renders_every_showable_ext pins route coverage).
 _SHOWABLE_EXTS = (".org", ".md", ".pdf")
 
+# The iOS PWA home-screen icon badge — a DOT (not a count), lit while any thread is
+# urgent, cleared when none remain (per Pierre).  Reads the `assist-urgent` meta the
+# server renders; syncs on load + when the app returns to the foreground.  setAppBadge
+# needs Notification permission (the badge-only feature's one prompt) — requested lazily
+# on the first tap.  Feature-detected + try/caught → silent no-op where unsupported
+# (desktop/older iOS fall back to the in-app "urgent" pill).  A static string (no server
+# data but the meta) so there's no injection surface.
+_BADGE_SCRIPT = """<script>
+(function(){
+  if (!('setAppBadge' in navigator)) return;
+  function sync(){
+    try {
+      var m = document.querySelector('meta[name="assist-urgent"]');
+      if (m && m.content === '1') { navigator.setAppBadge(); }
+      else { navigator.clearAppBadge(); }
+    } catch (e) {}
+  }
+  function ensurePermThenSync(){
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        Notification.requestPermission().then(sync).catch(function(){});
+      } else { sync(); }
+    } catch (e) {}
+  }
+  document.addEventListener('click', ensurePermThenSync, { once: true });
+  window.addEventListener('load', sync);
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible') sync();
+  });
+})();
+</script>"""
+
 
 def render_index(query: str = "") -> str:
     q = (query or "").strip()
@@ -157,6 +192,15 @@ def render_index(query: str = "") -> str:
                 '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
                 ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">error</span>'
+            )
+        elif _has_urgent(tid):
+            # "urgent": the agent called notify() to flag this thread time-sensitive.
+            # Stronger than "new" (above it), still below the live process-state
+            # badges (a running/errored thread is actionable now). Red pill.
+            badge = (
+                '<span style="font-size:.7rem; color:#fff; background:#dc2626;'
+                ' border:1px solid #b91c1c; padding:.1rem .4rem; border-radius:10px;'
+                ' margin-right:.4rem;">urgent</span>'
             )
         elif _has_unseen_response(tid):
             # "new": an AI response the user hasn't opened yet (scheduled turn,
@@ -199,10 +243,18 @@ def render_index(query: str = "") -> str:
         f'{matched} match{"" if matched == 1 else "es"} for '
         f'&ldquo;{html.escape(q)}&rdquo; &middot; <a href="/">clear</a></p>'
     ) if q else ""
+    # The iOS PWA icon badge is a DOT (not a count): 1 iff any thread is urgent.
+    # The page script reads this meta and calls setAppBadge()/clearAppBadge().
+    urgent_flag = "1" if _any_urgent() else "0"
     return f"""
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="manifest" href="/static/manifest.webmanifest" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-title" content="Assist" />
+        <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+        <meta name="assist-urgent" content="{urgent_flag}" />
         <title>Assist Web</title>
         <style>
           :root {{ --pad: 1rem; }}
@@ -284,6 +336,7 @@ def render_index(query: str = "") -> str:
             }}
           }}
         </script>
+        {_BADGE_SCRIPT}
       </body>
     </html>
     """
@@ -917,6 +970,7 @@ async def get_thread(
     # Opening the thread page = the user has seen its responses -> clear the "new"
     # badge (bare missing-ok unlink + set discard; lock-free on the event loop).
     _clear_unseen_response(tid)
+    _clear_urgent(tid)   # opening the thread clears its urgent flag (its pill + the icon dot once none remain)
 
     stage = _get_status(tid).get("stage", "ready")
     # During the initial setup stages there is no point constructing a Thread
