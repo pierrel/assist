@@ -133,6 +133,16 @@ class TestPWAAssets:
         assert 'apple-mobile-web-app-capable' in html
         assert "setAppBadge" in html   # the badge script is present
 
+    def test_thread_page_also_syncs_badge(self, threads_root):
+        # opening an urgent thread clears it server-side; the thread page must carry
+        # the meta + badge script so foregrounding there re-syncs the icon dot (not
+        # only on a return to /).
+        _make_thread(threads_root, "t1", "Coffee")
+        state._set_status("t1", "initializing")
+        html = asyncio.run(get_thread("t1"))
+        assert 'name="assist-urgent"' in html
+        assert "setAppBadge" in html
+
     def test_manifest_file_is_valid_json(self):
         path = os.path.join(os.path.dirname(state.__file__), "static", "manifest.webmanifest")
         with open(path) as f:

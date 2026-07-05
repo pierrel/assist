@@ -542,10 +542,15 @@ def render_thread(
         if is_init
         else "If you close or refresh, your message will still be processed."
     )
+    # Carry the iOS badge sync onto the thread page too — opening an urgent thread
+    # cleared it (above), so foregrounding here must re-sync the icon dot, not only
+    # on a return to the index.  urgent_flag reflects the post-clear _URGENT state.
+    urgent_flag = "1" if _any_urgent() else "0"
     return f"""
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="assist-urgent" content="{urgent_flag}" />
         <title>{html.escape(title)}</title>
         <style>
           :root {{ --pad: 1rem; }}
@@ -692,6 +697,7 @@ def render_thread(
             {body}
           </div>
         </div>
+        {_BADGE_SCRIPT}
       </body>
     </html>
     """

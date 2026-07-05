@@ -1,6 +1,6 @@
 #+TITLE: notify tool + iOS PWA home-screen badge (notifications roadmap v2)
 #+DATE: <2026-07-04>
-#+STATUS: DESIGN (Phase 1) — architect + 2-lens design-review folded in; awaiting Pierre
+#+STATUS: APPROVED + BUILT (2026-07-05) — Pierre's decisions folded in (see below); implemented in PR #168
 
 * What Pierre asked for
 Give the agent a =notify=-style tool to flag URGENT / time-sensitive
