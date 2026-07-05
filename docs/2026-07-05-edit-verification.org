@@ -1,0 +1,125 @@
+#+TITLE: Trust the diff, not the narration — edit-verification guidance
+#+DATE: <2026-07-05>
+#+STATUS: DESIGN (Phase 1) — audit + direction; awaiting Pierre. Guidance-first, eval-gated.
+
+* The incident (what we're fixing)
+On a bulk GTD edit (thread =20260630154415-7f0be79f=: "mark these done, cancel that
+project"), the agent wrote its end-of-turn summary from its own MEMORY OF INTENT, not
+from what landed on disk. The committed diff did NONE of the cancellations, MISSED one
+"done", and silently APPENDED a duplicate heading — yet the summary claimed all of it
+done. The =write_todos= plan, the =edit_file= tool results, and the final summary ALL
+disagreed with each other and with the diff. Two failure halves Pierre named:
+1. *Lied about an edit* — claimed changes the diff doesn't contain (confabulation).
+2. *Ignored edit requests* — silently skipped some of the user's requested edits.
+Already scoped in =roadmap.org:310-333=. This doc is the audit + direction + eval sketch.
+
+Not a silent tool failure: =edit_file= DOES return =Error: String not found= on a bad
+anchor. The bug is the model's SUMMARY confabulating independently of the tool results
+and the diff. "Trusting the summary over the diff is exactly backwards."
+
+* Audit — where edit/verify guidance lives today (and the gaps)
+Full catalog in the design-review notes; the load-bearing findings:
+- *The main write path has ZERO self-verification.* =general_instructions.md.j2= Step 4
+  ("Clean Up") = mark todos done + summarize what you did — NO read-the-diff-back step.
+  This is the surface the incident's summary came from.
+- *The strongest anti-fabrication language is on the WRONG agent.* =context_agent.md.j2=:
+  "You MUST NEVER claim to have written/edited anything… if you produce such a claim you
+  are LYING." — but context_agent is READ-ONLY (can't write). The honesty rule is absent
+  exactly where writes happen.
+- *The verification MECHANISM exists but nothing invokes it to verify.* Every turn is
+  git-committed to the thread branch; =git-history= skill has =git log=/=git diff=; but
+  its trigger is undo/rollback, not "did my edit land". The diff is rendered for the
+  HUMAN (web UI), and the model NEVER reads it back.
+- *Tool confirmations invite over-trust:* =write_file=→"Updated file X",
+  =edit_file=→"Successfully replaced N instance(s)". The model then narrates from memory,
+  and — load-bearing — *that narration becomes the per-turn commit message*
+  (=threads.py:853=), so a divergence between claim and diff is invisible to the model.
+- *The precedent to copy already exists — for numbers, not edits.* =calculate= skill:
+  "every numeric answer must come from a Python computation you ran… *if you state a
+  number you did not compute, the answer is wrong even when it happens to be right.*" And
+  research has =fact_checker= (verify claims against sources). The edit path has NO
+  equivalent "verify your claims against the diff."
+- No =verify=/=diff= skill exists; no middleware runs =git diff= after edits.
+
+* Direction / opinion — STRENGTHEN guidance, do NOT add a new skill
+*Recommendation: an always-on, CHECKABLE "reconcile against the diff before you report"
+rule in =general_instructions.md.j2=, backed by an eval; escalate to a by-construction
+mechanism ONLY if the eval proves guidance can't carry it (per the repo's guidance-first
+ethos and roadmap:310's scoped plan).*
+
+*Why NOT a new skill.* A skill loads only when the model matches a keyword in the USER's
+message and chooses =load_skill= (the first-tool-call gate). The incident is precisely
+the case where the model THINKS it already succeeded — nothing in the user's message says
+"verify", so it has no cue to load a verify skill. *A discoverable, loadable unit cannot
+cover a silent over-confidence bug.* Plus: another unit to maintain, competing with the
+mandatory first-turn skill/context sequence. Verification must be ALWAYS-ON → the general
+prompt, which rides every main-agent turn.
+
+*The shape of the rule (small-model lesson: soft prose is weak; a checkable constraint is
+the lever).* Not "be honest about changes" — a concrete, checkable, unavoidable step,
+copying =calculate='s framing:
+#+begin_quote
+Before you summarize what you changed, run =git diff= (the thread's per-turn diff) and
+derive EVERY "I did X" claim from that output. State nothing the diff doesn't show; omit
+nothing it does. A change-summary you did NOT check against the diff is wrong even when it
+happens to be right — and claiming an edit the diff doesn't contain is fabrication.
+#+end_quote
+Plus a completeness half for the "ignored requests" failure: *cross-check the diff against
+the list of edits the user asked for — if the diff is missing any, you did NOT do them;
+say so and do them, don't report success.*
+
+*Where it goes:* =general_instructions.md.j2= Step 4 (the always-on write path). Lift the
+honesty line from =context_agent= to the write path. A one-line pointer in the =dev= and
+=org-format= skills ("verify the edit landed via git diff — see the general rule"). No new
+skill, no middleware (yet).
+
+*The by-construction fallback (held in reserve, eval-gated).* Pierre's "fix by
+construction, not by lowering probability" end-state: make it IMPOSSIBLE to summarize a
+change the diff doesn't contain. Two mechanisms, cheapest first, only if the eval shows
+prose insufficient:
+1. *Ground the summary in truth (preferred):* a post-edit / pre-summary step that computes
+   the actual =git diff= and INJECTS it into context before the model writes its final
+   summary — the model summarizes FROM the real diff, not memory. Keeps the model's
+   judgment/phrasing but removes the confabulation surface. (Plumbing exists:
+   =domain_manager.git_diff=.)
+2. *Deterministic summary-from-diff:* middleware assembles the change list from the diff
+   itself (=_summarize_merge= already does this shape for merge commits). Strongest
+   containment, least model flexibility — the last resort.
+Start with guidance; let the eval choose whether to escalate to (1) then (2).
+
+* Evals sketch (the contract — small-model behavior, so the eval decides)
+New =edd/eval/test_edit_verification.py=. Realistic fixture: a populated =gtd/projects.org=
+/ todo file (match the incident's scale — a dozen+ items across projects; small clean
+fixtures pass when the real failure needs a messy file). Baseline the CURRENT prompt first
+(expect it to fail — reproduce the incident), then measure the guidance edit.
+
+1. *Confabulation guard (the incident).* Prompt a bulk multi-item edit ("mark A, B, C done;
+   cancel every item under project P; add item Q"). After the turn, compute the REAL
+   =git diff=. Assert: every change the summary CLAIMS is present in the diff (no
+   fabricated done/cancel), i.e. summary-claims ⊆ diff.
+2. *Completeness guard (ignored requests).* Same shape. Assert: every requested edit is
+   present in the diff (nothing silently skipped), i.e. requested-edits ⊆ diff — and if
+   something is missing, the summary SAYS it wasn't done (doesn't report false success).
+3. *Failed-anchor honesty.* Set up so one edit's =old_string= can't match (anchor drift)
+   → =edit_file= returns its error. Assert the agent NOTICES (reads the diff / the tool
+   error) and does NOT claim that edit succeeded — it retries or reports the failure.
+4. *No-op turn.* A turn where the model THINKS it edited but the diff is empty → assert the
+   summary does not claim edits (the strongest over-confidence case).
+Scoring is claim-vs-diff set containment (a checkable oracle — parse the summary's claimed
+items, parse the diff's changed headings, compare) rather than free-text judging, so it's
+deterministic. Cadence per =CLAUDE.md= (baseline → N=3 post-edit → N=5 → N=10). If the
+guidance edit doesn't clear the confabulation eval consistently (small model), that's the
+signal to build the by-construction diff-injection (fallback 1), and re-eval.
+
+* Scope
+IN: the guidance edit (general_instructions Step 4 + honesty line + skill pointers) + the
+reproduction evals. OUT (reserve): the diff-injection mechanism + deterministic
+summary-from-diff — built only if the evals prove guidance can't carry it. No new skill.
+
+* Risks
+1. Small-model doesn't obey the read-back rule (soft prose is weak) — mitigated by the
+   checkable framing + the eval gate + the by-construction fallback.
+2. =git diff= cost per turn — it's one cheap sandbox command (the turn is already
+   committed); negligible vs the turn.
+3. The rule over-fires on non-edit turns (a pure Q&A turn shouldn't run git diff) — scope
+   the rule to "if you edited files this turn".
