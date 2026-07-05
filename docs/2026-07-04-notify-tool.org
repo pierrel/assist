@@ -23,33 +23,24 @@ The design SEPARATES what's reliably achievable from what iOS gates:
   notification — i.e. it IS the "push notification" Pierre said no to).
 They share ONE seam: a cheap integer count.
 
-* DECISIONS FOR PIERRE (please weigh before I implement)
-** D1 — the Notification-PERMISSION prompt (gates whether Part B exists at all)
-iOS only honors =setAppBadge= for a home-screen-installed PWA that has been
-GRANTED =Notification= permission — so lighting the icon badge at all triggers the
-standard *"Assist would like to send you notifications"* prompt, even though the
-code NEVER posts a notification (no banner, no sound, no lock-screen alert — only
-the numeric icon badge). "Badge only, no notification" collides with the platform:
-the badge needs the notification PERMISSION.
-- If that one-time prompt is acceptable → build Part B (icon badge on open/fg).
-- If even the prompt is unacceptable → DROP Part B; the in-app "urgent" pill
-  (Part A) becomes the whole feature. *(Part A ships either way.)*
-
-** D2 — the icon badge counts URGENT-only (recommended) vs ALL-unread
-Design picks =len(_URGENT)= (agent-flagged urgent) so the home-screen icon stays
-meaningful/mostly-zero. Counting all-unread (=len(_UNSEEN)=) would keep the icon
-chronically lit → trained to ignore. Recommend urgent-only; the in-app UI already
-has BOTH the "new" pill (all unread) and the "urgent" pill. Confirm the icon means
-"N urgent," not "N unread."
-
-** D3 — clear urgent on OPEN (recommended v1) vs persist-until-dismiss
-v1 clears "unseen" when you open the thread (glance == seen). "Urgent" is
-semantically stronger — it may need an ACTION, not just a glance
-(=notify("leave for the airport by 3:15")=). Options: (a) clear on open (simplest,
-symmetric with v1, shippable) — risk: an urgent item de-badges the instant it's
-glanced; (b) persist until an explicit dismiss (a second-tap affordance) — more
-faithful, more UI. Recommend (a) for v1 with the residual named; (b) is a v2
-follow-up. Confirm.
+* DECISIONS — RESOLVED by Pierre (2026-07-05)
+** D1 — Notification permission → ACCEPTABLE, BUILD Part B.
+Pierre: "permission prompt is fine … let's build part b." Lighting the iOS icon
+badge requires granting the =Notification= permission (the standard prompt), even
+though the code NEVER posts a notification (no banner/sound/alert — only the icon
+badge). Accepted.
+** D2 — the icon badge is a BINARY DOT, NOT a count. Keep the "urgent" pill.
+Pierre: "I like the 'urgent' pill but not the count." So the home-screen icon shows
+a plain badge DOT (=navigator.setAppBadge()= with NO argument) whenever ANY urgent
+thread is unopened, and =clearAppBadge()= when none remain — no number. The in-app
+thread-list "urgent" pill stays (per-thread visibility). The Part-A seam is
+therefore a BOOLEAN "any urgent?" (=bool(_URGENT)=), not =len(_URGENT)=.
+** D3 — clear the THREAD's urgent on open; the ICON dot persists until ALL urgent opened.
+Pierre: "On open of the thread that has an urgent notification. The app icon badge
+should persist until all urgent threads are opened." So =get_thread= clears that
+one thread's urgent (its pill goes away); the icon dot reflects =bool(_URGENT)= — it
+stays until EVERY urgent thread has been opened (the set drains to empty), then
+clears on the next app open/foreground.
 
 * PART A — the durable core
 
@@ -70,8 +61,9 @@ caller (design-review F1 — no callerless clone):
   =try/except OSError= (runs on the loop in =get_thread=; no =_atomic_write=, no
   lock — verbatim mirror of =_clear_unseen_response=, incl. the TOCTOU-safe
   try/remove, not isfile→remove).
-- =urgent_count()= → =len(_URGENT)= (the Part-B seam; O(1)).  A =_has_urgent(tid)=
-  membership fn ONLY if the pill's =elif= needs it (it does — see A3).
+- =_has_urgent(tid)= → =tid in _URGENT= (the pill's =elif=); =_any_urgent()= →
+  =bool(_URGENT)= (the Part-B seam — a BOOLEAN "any urgent unopened?", NOT a count,
+  per D2). Both O(1).
 - =load_urgent_cache()= — =clear()=-first rebuild from markers at startup (mirror of
   the fixed =load_unseen_cache=), called in =lifespan= beside =load_unseen_cache()=.
 Lifecycle hooks (symmetry): =_evict_caches= += =_URGENT.discard(tid)=; =get_thread=
@@ -113,8 +105,9 @@ core =assist/tools.py= built-ins run in emacsos/CLI which have NO Manager/web-st
   slot (don't append). This pill is the RELIABLE in-app surface (design-review F2) —
   the iOS icon badge is the enhancement; without the pill, =notify= would be a
   near-no-op whenever the PWA is closed.
-- *Count seam* for Part B: inject =<meta name="assist-badge-count" content="{urgent_count()}">=
-  into the index =<head>= (~:204). =urgent_count()= computed ONCE (not per row),
+- *Badge seam* for Part B (D2 — a DOT, not a count): inject
+  =<meta name="assist-urgent" content="1">= (or ="0"=) into the index =<head>=
+  (~:204), =content= = ="1" if _any_urgent() else "0"=, computed ONCE (not per row),
   O(1). No JSON endpoint (the meta is smaller + one fewer route — design-review F3).
 
 * PART B — iOS PWA icon badge (best-effort, platform-gated)
@@ -143,9 +136,12 @@ icon), + the A3 badge-count meta.
 No server data except the count-via-meta (an int — no XSS surface). Feature-detect
 =('setAppBadge' in navigator)=; request =Notification.requestPermission()= LAZILY on
 a user gesture (never unsolicited on load — iOS may auto-deny); on =load= +
-=visibilitychange→visible=, =setAppBadge(count)= if =count>0= else =clearAppBadge()=;
-try/catch → silent no-op on any browser lacking the API (desktop/older iOS degrade to
-the in-app pill).
+=visibilitychange→visible=, read the =assist-urgent= meta and call
+=navigator.setAppBadge()= (NO argument → a plain DOT, per D2) when ="1"=, else
+=clearAppBadge()=; try/catch → silent no-op on any browser lacking the API
+(desktop/older iOS degrade to the in-app pill). The dot persists on the icon at its
+last-set value while the app is backgrounded/closed, and re-syncs to =_any_urgent()=
+on the next foreground — so it stays until ALL urgent threads are opened (D3).
 
 * Event-loop liveness (single-worker uvicorn — blocker-level) — all CONFIRMED
 - Reads on the loop: =_has_urgent=/=urgent_count()= = GIL-atomic set =in=/=len=, O(1),
