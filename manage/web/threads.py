@@ -139,8 +139,10 @@ _BADGE_SCRIPT = """<script>
   function sync(){
     try {
       var m = document.querySelector('meta[name="assist-urgent"]');
-      if (m && m.content === '1') { navigator.setAppBadge(); }
-      else { navigator.clearAppBadge(); }
+      // setAppBadge/clearAppBadge return Promises — .catch the async rejection
+      // (e.g. permission denied) so it doesn't surface as an unhandled rejection.
+      var p = (m && m.content === '1') ? navigator.setAppBadge() : navigator.clearAppBadge();
+      if (p && p.catch) { p.catch(function(){}); }
     } catch (e) {}
   }
   function ensurePermThenSync(){
