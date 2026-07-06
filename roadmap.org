@@ -312,6 +312,15 @@ release → worker crash — fixed in emacsos by pinning the generator to a
 
 *Related (hygiene, NOT the fix).*  Branch =isolate-subagent-checkpointer= (assist, pushed/unmerged, commit f93d451): gives each ephemeral sub-agent its own =InMemorySaver= instead of the parent's persistent one.  Correct on its own — merge when convenient — but it does not resolve the wedge (confirmed by the dump).
 
+** TODO Org mid-section-split bug re-regressed on the current model
+=test_org_insertion::TestAddTopLevelSection::test_does_not_split_section= has drifted from
+its ~4/5 historical baseline (docs/2026-06-03-org-insertion-mid-section.org) to ~1/3 on the
+current Qwen3.6 — INDEPENDENT of the edit-files skill (isolation: 1/3 WITHOUT edit-files,
+1/4 with it). The org-format skill's heading discipline no longer reliably prevents a
+top-level-section insertion from splitting a section on this model. Investigate: does
+org-format's rule need strengthening / re-shaping for the current model, or has a model/
+prompt change weakened skill adherence? Surfaced 2026-07-06 during the edit-files PR #169
+org re-run (Pierre's tension check). Not caused by #169; a pre-existing model-behavior drift.
 ** Bound production =threads.db= growth
 Overall plan + history: [[file:docs/2026-05-03-prod-threads-db-growth.org][docs/2026-05-03-prod-threads-db-growth.org]].  Prod DB hit 187 GB on 2026-05-03 because nothing capped thread count, checkpoints per thread, or content per checkpoint.  Four layers, each with its own design doc and TODO below.
 
