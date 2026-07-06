@@ -1,0 +1,61 @@
+#+TITLE: Research evals — only a few hit real search; the rest mock the research subagent
+#+DATE: <2026-07-06>
+#+STATUS: ASSESSMENT (Pierre 2026-07-06) — proposal, not yet implemented
+
+* The problem (Pierre)
+Real-LLM research evals hit the self-hosted SearXNG, which RATE-LIMITS under a burst —
+so running the suite grinds for hours / trips "search unavailable". Goal: *only research
+SUBAGENT evals should actually do real search — and not even all of them, only a few
+crucial ones. Every OTHER eval that touches research should MOCK the research subagent to
+return its findings immediately* (canned), so it runs fast + rate-limit-free.
+
+* The good news — the mocking pattern already exists
+=test_context_agent.py:17= has =_stub_subagent= — a =RunnableLambda= that stubs
+=create_research_agent= / =create_context_agent= so "dispatching context/research-agent
+doesn't spin" (it returns immediately without real search). Patched via
+=patch("assist.agent.create_research_agent", _stub_subagent)= (:256). This is exactly the
+pattern to generalize. It just needs lifting into a shared =edd/eval/utils.py= helper so
+every non-research eval can use it in one line.
+
+* Inventory (edd/eval/*.py) — who hits real search today
+| Eval | Real search? | Category |
+| test_research_agent.py | YES (no mocks) | *[A] KEEP REAL* — the crucial research-behavior gate |
+| test_research_reliability.py | YES (partial mocks) | *[A] KEEP REAL* — URL-provenance + dead-fetch recovery (needs the real read_url path) |
+| eval_multi_turn_research.py | YES (no mocks) | *[B] MOCK or drop* — multi-turn research quality; overlaps test_research_agent — keep ONE real, mock/drop this |
+| test_research_multi_turn_token_regression.py | YES (no mocks) | *[B] MOCK the subagent to return a LARGE canned report* — it tests CONTEXT/overflow handling, not search; a big canned report drives the context deterministically without SearXNG (would also have made the #137 investigation fast) |
+| test_location_research.py | YES (7 mocks) | *[B] MOCK* — it only asserts research WAS dispatched (counts =task= calls); it does NOT need real results → stub the research subagent, keep counting the dispatch |
+| test_context_agent.py | no (already stubs) | *[C] already correct* — the reference pattern |
+| test_agent.py, eval_large_tool_results.py | mostly mocked | *[C]* — verify they don't leak a real-search path |
+| everything else (skills, git, map, travel, edit-files, ...) | no | *[C]* no research |
+
+Net: keep *~1-2 crucial real-search evals* (=test_research_agent=, =test_research_reliability=);
+*mock the research subagent* in the other 3 that currently hit search
+(=eval_multi_turn_research=, =test_research_multi_turn_token_regression=,
+=test_location_research=).
+
+* Proposed change
+1. *Lift the stub to a shared helper* — =edd/eval/utils.py=:
+   : def stub_research_subagent(findings="...canned report...") -> contextmanager
+   returning =patch("assist.agent.create_research_agent", lambda *a, **k: RunnableLambda(...))=
+   that responds immediately with =findings= (parameterizable: a short answer, or a LARGE
+   report for the token-regression eval). Generalize =_stub_subagent= from test_context_agent.
+2. *Apply it* to the [B] evals: they get fast + deterministic + rate-limit-free while still
+   testing what they actually assert (dispatch happened / context handled / multi-turn flow).
+3. *Keep [A] real* — =test_research_agent= + =test_research_reliability= are the only evals
+   that must exercise the real search/read_url path; run those sparingly (and they're where a
+   real SearXNG regression would surface).
+4. *Document the convention* in the eval README / CLAUDE.md: "a non-research eval that
+   triggers research MUST stub it; only test_research_* do real search."
+
+* Why this is worth doing
+- Removes the SearXNG rate-limit grind from the whole non-research suite → the suite runs in
+  minutes, not hours; no "search unavailable" flakes.
+- Determinism: a canned report makes context/overflow behavior reproducible (the
+  token-regression + #137 work was slow + noisy precisely because it drove real search).
+- Isolation: an eval that's really testing skill-loading / context-dispatch / map behavior
+  shouldn't fail because SearXNG hiccuped.
+
+* Scope / next step
+Assessment only. On approval: implement the shared =stub_research_subagent= helper + convert
+the 3 [B] evals, keep the 2 [A] real, add the convention note. A focused, mostly-mechanical
+change; each converted eval re-run once to confirm it still asserts its real target.
