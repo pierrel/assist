@@ -415,8 +415,7 @@ def load_unseen_cache() -> None:
 # The notify() agent tool flags a thread URGENT — a STRONGER signal than v1's
 # "unseen".  Same durable-marker + in-memory-set + startup-rebuild pattern as
 # _UNSEEN, lock-free (GIL-atomic set ops across the on-loop reads/clear and the
-# off-loop tool call).  Read paths: _has_urgent (the thread-list "urgent" pill) and
-# _any_urgent (the iOS icon DOT — a BOOLEAN, not a count, per Pierre).
+# off-loop tool call).  Read path: _has_urgent (the thread-list "urgent" pill).
 _URGENT: set[str] = set()
 
 
@@ -446,12 +445,6 @@ def _clear_urgent(tid: str) -> None:
 
 def _has_urgent(tid: str) -> bool:
     return tid in _URGENT
-
-
-def _any_urgent() -> bool:
-    """True iff any thread is urgent — the iOS icon-DOT seam (a boolean; the badge
-    is a plain dot, not a count, per Pierre)."""
-    return bool(_URGENT)
 
 
 def load_urgent_cache() -> None:

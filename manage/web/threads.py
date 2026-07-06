@@ -73,7 +73,6 @@ from manage.web.state import (
     _clear_unseen_response,
     _has_urgent,
     _clear_urgent,
-    _any_urgent,
     _set_conflict,
     _set_status,
     _thread_domain_html,
@@ -126,48 +125,6 @@ _MD_EXTENSIONS = ["fenced_code", "tables"]
 # this; test_route_renders_every_showable_ext pins route coverage).
 _SHOWABLE_EXTS = (".org", ".md", ".pdf")
 
-# The iOS PWA home-screen icon badge — a DOT (not a count), lit while any thread is
-# urgent, cleared when none remain (per Pierre).  Reads the `assist-urgent` meta the
-# server renders; syncs on load + when the app returns to the foreground.  setAppBadge
-# needs Notification permission (the badge-only feature's one prompt) — requested lazily
-# on the first tap.  Feature-detected + try/caught → silent no-op where unsupported
-# (desktop/older iOS fall back to the in-app "urgent" pill).  A static string (no server
-# data but the meta) so there's no injection surface.
-_BADGE_SCRIPT = """<script>
-(function(){
-  if (!('setAppBadge' in navigator)) return;
-  function sync(){
-    try {
-      var m = document.querySelector('meta[name="assist-urgent"]');
-      // setAppBadge/clearAppBadge return Promises — .catch the async rejection
-      // (e.g. permission denied) so it doesn't surface as an unhandled rejection.
-      var p = (m && m.content === '1') ? navigator.setAppBadge() : navigator.clearAppBadge();
-      if (p && p.catch) { p.catch(function(){}); }
-    } catch (e) {}
-  }
-  function maybeOfferPermission(){
-    try {
-      if (typeof Notification === 'undefined' || Notification.permission !== 'default') {
-        sync(); return;   // already granted/denied, or unsupported -> just sync
-      }
-      // The Badging API needs notification permission, and iOS only grants it from a
-      // real user gesture.  Show a VISIBLE one-tap button (discoverable + reliable —
-      // an ambient first-click could navigate away before the prompt resolves).
-      var b = document.createElement('button');
-      b.textContent = 'Enable home-screen badge';
-      b.style.cssText = 'position:fixed;left:50%;bottom:1rem;transform:translateX(-50%);'
-        + 'z-index:9999;padding:.6rem 1rem;border-radius:8px;border:0;background:#1d4ed8;'
-        + 'color:#fff;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,.2);';
-      b.onclick = function(){ b.remove(); Notification.requestPermission().then(sync).catch(function(){}); };
-      document.body.appendChild(b);
-    } catch (e) {}
-  }
-  window.addEventListener('load', maybeOfferPermission);
-  document.addEventListener('visibilitychange', function(){
-    if (document.visibilityState === 'visible') sync();
-  });
-})();
-</script>"""
 
 
 def render_index(query: str = "") -> str:
@@ -254,18 +211,10 @@ def render_index(query: str = "") -> str:
         f'{matched} match{"" if matched == 1 else "es"} for '
         f'&ldquo;{html.escape(q)}&rdquo; &middot; <a href="/">clear</a></p>'
     ) if q else ""
-    # The iOS PWA icon badge is a DOT (not a count): 1 iff any thread is urgent.
-    # The page script reads this meta and calls setAppBadge()/clearAppBadge().
-    urgent_flag = "1" if _any_urgent() else "0"
     return f"""
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="manifest" href="/static/manifest.webmanifest" />
-        <meta name="apple-mobile-web-app-capable" content="yes" />
-        <meta name="apple-mobile-web-app-title" content="Assist" />
-        <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
-        <meta name="assist-urgent" content="{urgent_flag}" />
         <title>Assist Web</title>
         <style>
           :root {{ --pad: 1rem; }}
@@ -347,7 +296,6 @@ def render_index(query: str = "") -> str:
             }}
           }}
         </script>
-        {_BADGE_SCRIPT}
       </body>
     </html>
     """
@@ -553,15 +501,10 @@ def render_thread(
         if is_init
         else "If you close or refresh, your message will still be processed."
     )
-    # Carry the iOS badge sync onto the thread page too — opening an urgent thread
-    # cleared it (above), so foregrounding here must re-sync the icon dot, not only
-    # on a return to the index.  urgent_flag reflects the post-clear _URGENT state.
-    urgent_flag = "1" if _any_urgent() else "0"
     return f"""
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <meta name="assist-urgent" content="{urgent_flag}" />
         <title>{html.escape(title)}</title>
         <style>
           :root {{ --pad: 1rem; }}
@@ -708,7 +651,6 @@ def render_thread(
             {body}
           </div>
         </div>
-        {_BADGE_SCRIPT}
       </body>
     </html>
     """

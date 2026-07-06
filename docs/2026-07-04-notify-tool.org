@@ -1,6 +1,14 @@
 #+TITLE: notify tool + iOS PWA home-screen badge (notifications roadmap v2)
 #+DATE: <2026-07-04>
-#+STATUS: APPROVED + BUILT (2026-07-05) — Pierre's decisions folded in (see below); implemented in PR #168
+#+STATUS: SHIPPED (2026-07-05, PR #168) — Part A ONLY (notify tool + in-app "urgent" pill).
+
+*** IMPORTANT (Pierre, 2026-07-05): PART B (the iOS PWA icon badge — manifest, service
+worker, setAppBadge, apple metas) was REMOVED before merge. Only the DURABLE core
+shipped: the notify() tool + the _URGENT state + the in-app thread-list "urgent" pill.
+The whole async server-side push story moved to a "nice-to-have" ROADMAP item (relevant
+ONLY while the iOS phone build isn't the primary device; obsolete once the phone build is
+— see roadmap.org and the sketched design in the closed PR #170). Everything below about
+Part B / iOS is HISTORICAL DESIGN CONTEXT, not as-built. ***
 
 * What Pierre asked for
 Give the agent a =notify=-style tool to flag URGENT / time-sensitive

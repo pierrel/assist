@@ -232,6 +232,25 @@ month's length (the 31st in a 30-day month, the 29th–31st in February) should
 clamp to the last day of that month rather than skip or roll into the next —
 pick the least-surprising rule and lock it with a test.
 
+* Notifications
+** TODO Notify/urgent evals + firm up the guidance on WHEN to flag urgent
+The =notify()= tool + the in-app "urgent" pill shipped (PR #168), but there's no eval
+on it and the guidance on WHEN the agent should call =notify()= (vs a routine response)
+is thin.  Create evals: mock turns that ARE genuinely time-sensitive (a message needing
+a reply before a deadline, an imminent event) → assert the agent calls =notify()=; AND
+routine turns → assert it does NOT (no over-flagging — an urgent pill on everything is
+noise).  Then firm up the tool docstring / general-agent guidance eval-driven (small
+model — a checkable "flag urgent ONLY when time-sensitive" constraint, not just prose).
+Baseline first; measure.  Small-model behavior → the eval is the contract.
+** TODO (NICE-TO-HAVE, iOS-phone-only) Async server-side Web Push (notify while app closed)
+Deliver an actual push notification (+ home-screen badge) to a CLOSED PWA via a service
+worker woken by a server push (VAPID + pywebpush).  Design fully sketched + DISPOSABLE
+(delete-to-de-iOS; a =_mark_urgent= hook + an =assist/push/= vault) in the CLOSED PR #170
+(docs/2026-07-05-web-push.org on the closed =web-push= branch).  **Relevant ONLY while the
+iOS phone build isn't the primary device — OBSOLETE once the emacsos phone build is
+primary** (that build gets native notifications, no Web Push needed).  So: nice-to-have,
+build only if the iOS PWA stays the primary phone surface for a while; otherwise skip.
+
 * Security
 ** TODO Sanitize the conversation markdown render (raw HTML passes -> XSS)
 The web conversation view renders assistant + tools-role messages via
