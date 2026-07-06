@@ -24,8 +24,6 @@ You are about to change one or more files. Do all four phases. The last one is n
 - If `edit_file` reports the string was not found, your anchor is wrong: re-read the file,
   copy a line that actually exists, and try again. Do NOT invent a different anchor from
   memory, and do NOT report the edit as done.
-- For `.org` files the unique anchor is a heading line — load the `org-format` skill for
-  the heading-body detail.
 
 ## 3. WHAT — do EVERY requested change
 
@@ -37,7 +35,7 @@ You are about to change one or more files. Do all four phases. The last one is n
 
 ## 4. VERIFY — your report must come from the file, not from your plan
 
-This is the rule, the same shape as `calculate`'s "never state a number you didn't compute":
+This is the rule:
 
 > Every claim you make about what you changed — including any COUNT — must come from the
 > file as it is NOW, read back this turn. A change you report, or a number you state, that
@@ -50,10 +48,10 @@ Before you write your summary:
 2. RECONCILE against your phase-3 checklist. Every item must appear in the diff. If one
    doesn't, you SKIPPED it — go back and make that edit now. Do not report success without it.
 3. If the summary or the edit will state a COUNT or a derived total ("12 active items left",
-   a remaining count, a new total), that is a NUMBER — treat it exactly like the calculate
-   skill: don't count by eye and don't carry it from your plan (you will be off by one).
-   Run a command on the FINAL file and use its output — `grep -c`, `wc -l`, or a one-line
-   `python3` count. A count you didn't run a command to get is wrong even when it matches.
+   a remaining count, a new total): don't count by eye and don't carry it from your plan
+   (you will be off by one). Run a command on the FINAL file and use its output — `grep -c`,
+   `wc -l`, or a one-line `python3` count. A count you didn't run a command to get is wrong
+   even when it happens to match.
 4. Write the summary from the diff and the re-read file, line by line. If the diff is empty,
    say you changed nothing — never narrate edits a clean diff contradicts.
 

@@ -19,24 +19,18 @@ autoloads .dev.env).
 import logging
 import os
 import re
-import subprocess
 import tempfile
 from textwrap import dedent
 from unittest import TestCase
 
 from assist.agent import AgentHarness, create_agent
-from assist.domain_manager import clone_repo
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import cleanup_workspace, executed_commands, skill_was_loaded
+from .utils import (build_thread_repo, cleanup_workspace, executed_commands,
+                    skill_was_loaded, _git)
 
 logger = logging.getLogger(__name__)
-
-
-def _git(*args, cwd=None, check=True):
-    return subprocess.run(["git", *args], cwd=cwd, check=check,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 # A messy, realistic GTD org file — a dozen+ items across projects, mixed states,
@@ -117,25 +111,9 @@ class _EditScenario(TestCase):
         # setUp, and tearDown doesn't run on a setUp-skip — addCleanup still does, so
         # the tmp dir isn't leaked on a Docker-unavailable skip.
         self.addCleanup(cleanup_workspace, self.tmp)
-        self.origin = os.path.join(self.tmp, "origin.git")
-        _git("init", "--bare", "-b", "main", self.origin)
-        seed = os.path.join(self.tmp, "seed")
-        _git("clone", self.origin, seed)
-        _git("config", "user.email", "a@b", cwd=seed)
-        _git("config", "user.name", "A", cwd=seed)
-        with open(os.path.join(seed, "README.md"), "w") as f:
-            f.write("base\n")
-        _git("add", ".", cwd=seed)
-        _git("commit", "-m", "base", cwd=seed)
-        _git("push", "origin", "main", cwd=seed)
-
-        self.workspace = os.path.join(self.tmp, "work")
-        clone_repo(self.origin, self.workspace)
-        _git("config", "user.email", "a@b", cwd=self.workspace)
-        _git("config", "user.name", "A", cwd=self.workspace)
-        _git("checkout", "-b", "assist/edit-thread", cwd=self.workspace)
-        # commit the messy projects.org as the base, so a post-turn git diff shows
-        # exactly the agent's edits.
+        # Shared origin/clone/branch scaffolding, then commit the messy projects.org as
+        # the base so a post-turn git diff shows exactly the agent's edits.
+        self.workspace = build_thread_repo(self.tmp, "assist/edit-thread")
         with open(os.path.join(self.workspace, "projects.org"), "w") as f:
             f.write(_PROJECTS_ORG)
         _git("add", ".", cwd=self.workspace)
@@ -275,3 +253,34 @@ class TestMultiStepPlan(_EditScenario):
                     if re.match(r"^\*+\s+(DONE|CANCELLED|CANCELED)\s+\S", line)]
         self.assertEqual(leftover, [],
                          f"DONE/CANCELLED headings not deleted: {leftover}" + diag)
+
+
+class TestOrgTension(_EditScenario):
+    """The edit-files vs org-format tension (Pierre): edit-files loads on a .org edit
+    and no longer points to org-format.  Confirm its own unique-anchor discipline keeps
+    org structure intact on its own — a body edit + a heading insert must NOT split a
+    section, corrupt a heading, or lose the other headings."""
+
+    def test_org_structure_survives_body_edit_and_insert(self):
+        agent, summary = self._run(
+            "In projects.org, change the note under 'Buy groceries' to 'Oat milk and "
+            "eggs', and add a new TODO 'Buy stamps' under the Errands project.")
+        final = self._final()
+        st = _states(final)
+        diag = self._diag(agent, summary)
+        # every original heading is still a valid heading with its state intact:
+        for item, want in [("Buy groceries", "TODO"), ("Call the dentist", "TODO"),
+                           ("Fix the leaky faucet", "TODO"), ("Mow the lawn", "TODO")]:
+            self.assertEqual(st.get(item), want,
+                             f"'{item}' heading corrupted/lost" + diag)
+        # the body edit landed and the new heading was added:
+        self.assertIn("Oat milk and eggs", final, "body edit didn't land" + diag)
+        self.assertEqual(st.get("Buy stamps"), "TODO", "new heading not added" + diag)
+        # no section split: the new body text must sit under Buy groceries, before the
+        # next heading (a naive multi-line anchor would move/duplicate a heading).
+        lines = final.splitlines()
+        gi = next(i for i, l in enumerate(lines) if "Buy groceries" in l)
+        nxt = next((i for i in range(gi + 1, len(lines))
+                    if re.match(r"^\*+\s", lines[i])), len(lines))
+        self.assertTrue(any("Oat milk and eggs" in l for l in lines[gi + 1:nxt]),
+                        "the new note isn't under Buy groceries (section split?)" + diag)
