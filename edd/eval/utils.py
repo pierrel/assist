@@ -9,6 +9,37 @@ from langchain_core.messages import ToolMessage, AIMessage
 # One source of truth for "the same URL" — the prod guard defines it, the eval
 # imports it, so the spy's provenance accounting can't drift from the guard's.
 from assist.middleware.url_provenance import normalize_url
+from assist.domain_manager import clone_repo
+
+
+def _git(*args, cwd=None):
+    return subprocess.run(["git", *args], cwd=cwd, check=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def build_thread_repo(tmp: str, branch: str) -> str:
+    """Set up a bare origin + a workspace clone checked out on ``branch`` (a base
+    README committed to main), the common scaffolding for the sandbox+git evals.
+    Returns the workspace path; the caller commits its own fixture files onto the
+    branch, then gets a sandbox for it.  Shared by test_edit_files / test_git_* so
+    the origin/seed/clone/branch boilerplate lives in one place."""
+    origin = os.path.join(tmp, "origin.git")
+    _git("init", "--bare", "-b", "main", origin)
+    seed = os.path.join(tmp, "seed")
+    _git("clone", origin, seed)
+    _git("config", "user.email", "a@b", cwd=seed)
+    _git("config", "user.name", "A", cwd=seed)
+    with open(os.path.join(seed, "README.md"), "w") as f:
+        f.write("base\n")
+    _git("add", ".", cwd=seed)
+    _git("commit", "-m", "base", cwd=seed)
+    _git("push", "origin", "main", cwd=seed)
+    workspace = os.path.join(tmp, "work")
+    clone_repo(origin, workspace)
+    _git("config", "user.email", "a@b", cwd=workspace)
+    _git("config", "user.name", "A", cwd=workspace)
+    _git("checkout", "-b", branch, cwd=workspace)
+    return workspace
 
 
 class AgentTestMixin:
