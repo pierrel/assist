@@ -1,0 +1,122 @@
+#+TITLE: Web Push for the assist PWA — a DISPOSABLE iOS vault
+#+DATE: <2026-07-05>
+#+STATUS: DESIGN (Phase 1) — architect design; awaiting Pierre. Builds on notify (#168, pending merge).
+
+* Goal + prime constraint
+Deliver an actual PUSH NOTIFICATION (+ home-screen badge) to Pierre's iPhone WHILE
+THE PWA IS CLOSED, fired when the agent calls =notify()=. The in-app pill + the
+open-app =setAppBadge= are done (#168), but a closed app runs no JS — only a
+service worker woken by a server push can reach it (iOS 16.4+, installed PWA,
+permission granted — all satisfied).
+
+*PRIME CONSTRAINT — DISPOSABILITY (Pierre: "moving away from iOS ASAP, make it all
+disposable").* The entire iOS/push apparatus is ONE new package =assist/push/= +
+one =sw.js= + a few =# PUSH:=-marked lines. The STABLE core (notify tool, =_URGENT=,
+the in-app pill) never depends on it. Removal = delete the package + grep-out the
+markers (§Removal). A future non-iOS transport plugs into the SAME seam.
+
+* Volatility decomposition
+| STABLE (untouched, no push dependency) | DISPOSABLE (new =assist/push/*= + marked lines) |
+| notify() =events/notify.py=; =_URGENT=/=_mark_urgent=/=_any_urgent= =state.py=; the "urgent" pill + open-app =setAppBadge= | =sw.js=; VAPID keys; =PushSubscriptionStore=; =send_push=; =/push/subscribe= route + =_PUSH_SCRIPT=; =pywebpush= dep |
+
+* The seam (containment by construction)
+=_mark_urgent= (=state.py=) gets ONE optional hook — the only stable-file change,
+mirroring the existing =notify_tools(lambda tid: _mark_urgent(tid))= injection idiom
+so =state.py='s dependency edge points AWAY from =assist/push=:
+: _PUSH_HOOK = None                 # PUSH: set by the push wiring; None => no-op
+: def set_push_hook(fn): global _PUSH_HOOK; _PUSH_HOOK = fn   # PUSH:
+: def _mark_urgent(tid):
+:     _URGENT.add(tid); <best-effort marker write>
+:     if _PUSH_HOOK:                # PUSH:
+:         try: _PUSH_HOOK()
+:         except Exception: pass    # push failure NEVER touches urgent state
+*No-op when unconfigured:* the hook is registered only if VAPID keys are present
+(=is_configured()=). No keys → hook never set → =_mark_urgent= runs its stable body.
+The stable path has ZERO runtime dependence on push. (Hooking at the STATE seam, not
+in =notify.py= — notify.py is deliberately web-agnostic; and any future caller of
+=_mark_urgent=, e.g. a scheduled turn, should push too.)
+
+* Module layout (the vault — all deletable as a unit)
+: assist/push/__init__.py   # public: send_push, PushSubscriptionStore, is_configured, VAPID_PUBLIC
+:            config.py       # ASSIST_VAPID_PUBLIC/PRIVATE/SUBJECT env; is_configured()
+:            store.py        # PushSubscriptionStore(PerThreadJsonStore) — disk-as-truth, device-scoped
+:            model.py        # PushSubscription(endpoint, keys{p256dh,auth})
+:            sender.py       # send_push(title, body): pywebpush encrypt+POST; prune on 410
+:            routes.py       # POST /push/subscribe + _PUSH_SCRIPT + set_push_hook wiring
+: manage/web/static/sw.js    # service worker: push + notificationclick
+: scripts/gen-vapid.py       # one-shot keygen; PRINTS env lines, writes nothing
+Store reuses =PerThreadJsonStore= (=record_store.py=) like =SubscriptionStore=, but
+DEVICE-scoped (not thread — a device outlives every thread): a fixed =ROOT/_push/=
+segment; inherits the lock + atomic write + traversal guard. Cap ~20 endpoints.
+
+* Client mechanics
+=sw.js=: =push= → =showNotification(title, body)= + =setAppBadge()=; =notificationclick=
+→ open =/=. =_PUSH_SCRIPT= (head, beside =_BADGE_SCRIPT=, =# PUSH:=-marked): after the
+permission grant, register =/static/sw.js=, then =pushManager.subscribe({userVisibleOnly:
+true, applicationServerKey: <VAPID public from a meta>})= (idempotent via =getSubscription()=
+first), then POST the sub to =/push/subscribe=. iOS requires =userVisibleOnly:true= — every
+push MUST show a notification (no silent badge-only push) — which is exactly the ask.
+
+* Server mechanics
+=send_push(title, body)=: no-op if unconfigured; for each stored sub call
+=pywebpush.webpush(sub, payload, vapid_private, claims)=; on 404/410 → prune; other
+errors → log + continue. =pywebpush= handles RFC-8291 encryption + VAPID JWT (do NOT
+hand-roll) — isolated behind =send_push= (no other module imports it; one =pyproject=
+line to remove). Wiring: =set_push_hook(lambda: send_push(GENERIC_TITLE, GENERIC_BODY))=.
+
+* Event-loop safety
+=_mark_urgent= → the hook → =send_push= runs inside the notify tool, i.e. inside
+=_process_message= (a sync BackgroundTask, OFF the loop) — the blocking =webpush=
+POSTs are fine there (same as =send_reply='s =requests.post=). =/push/subscribe= is a
+SYNC =def= route (threadpool, like =/inbound/sms=) — the store write never touches the
+loop. Liveness test: hold the store lock in another thread, assert the route returns
+promptly.
+
+* Security model (new route + a secret)
+- */push/subscribe authz:* reuse the proven =/inbound/sms= shared-secret pattern
+  (=hmac.compare_digest= on an =X-Assist-Push-Secret= header; fail CLOSED / 503 if
+  unset). Single-user, WG-fronted; no new listener. Trade-off (documented): the secret
+  is in page source to anyone who can already load the WG-gated app — its job is to
+  stop an unauthenticated WAN caller from planting endpoints, which it does.
+- *Endpoint validation:* accept only =https://= endpoints on a known-push-service
+  allowlist (Apple/Mozilla/FCM) → the store can't become an SSRF fan-out. Cap 20; prune 410.
+- *VAPID private key = secret:* env only (=ASSIST_VAPID_PRIVATE=), gitignored
+  (=.dev.env=/=.deploy.env=, never =.example=, never argv/logs); systemd via
+  install-service.sh like =ASSIST_SMS_SECRET=. =gen-vapid.py= PRINTS the keypair (writes
+  no file).
+- *Payload — GENERIC, no PII, no =reason=:* =title="Assist"=, =body="You have an urgent
+  item"=. Do NOT echo =reason= (it can carry agent-echoed untrusted content — notify
+  already escapes it — and a push payload is shown on the LOCK SCREEN of a closed
+  device). Same payload every time; the user taps in to see which thread (the pill +
+  badge carry that). Reversible to thread-title later if wanted — one line.
+
+* Removal checklist (delete-to-de-iOS)
+1. =rm -r assist/push/= 2. =rm manage/web/static/sw.js= 3. =rm scripts/gen-vapid.py=
+4. =state.py=: delete the =_PUSH_HOOK=/=set_push_hook= def + the =if _PUSH_HOOK= block +
+   the one disposable wiring import (~7 lines, all =# PUSH:=). 5. =threads.py=: delete
+   =_PUSH_SCRIPT= + its include-sites + the =<meta name="assist-vapid">= line (=# PUSH:=).
+6. =pyproject.toml=: delete the =pywebpush= line. 7. env examples + install-service.sh:
+   delete the =ASSIST_VAPID_*= / =ASSIST_PUSH_SECRET= lines. 8. =git grep -n 'PUSH:'=
+   returns nothing (the completeness check). After 1-8, notify/urgent/pill/open-app-badge
+   are byte-for-byte the pre-push behavior (verify: =pytest tests/= green with =assist/push=
+   gone). *Future transport:* implement any no-arg =hook()= + =set_push_hook(hook)= — the
+   seam contract is "a callable fired after a thread is marked urgent", transport-agnostic.
+
+* Config / env (placeholders in .example; real values in .deploy.env only)
+=ASSIST_VAPID_PUBLIC= / =ASSIST_VAPID_PRIVATE= (secret) / =ASSIST_VAPID_SUBJECT=
+(mailto:) / =ASSIST_PUSH_SECRET= (or reuse =ASSIST_SMS_SECRET=). =is_configured()= = all
+present; absent → whole feature dark.
+
+* Tests (symptom-level, tests/push/ — no LLM)
+subscribe stores (+ wrong-secret 401, unset 503, non-allowlisted endpoint 400);
+=_mark_urgent= triggers =send_push= (mocked) with the GENERIC no-PII payload; NO-OP when
+unconfigured (proves stable independence); 410 prunes; subscribe off-loop (liveness);
+the DELETION test (=pytest tests/= for notify/urgent green with =assist/push= absent).
+=sw.js= = manual DEVICE verify (the crux — app CLOSED → notify() → lock-screen
+notification + icon badge; idle-app verify is insufficient).
+
+* Risks
+iOS push fragility (16.4+, installed PWA — satisfied; dropped subs → 410-prune +
+idempotent re-subscribe-on-load; bump an SW version const on change); pywebpush
+transitive deps (cryptography) — isolated, acceptable; secret-in-page-source (accepted
+v1 for single-user WG); payload-generic (reversible).
