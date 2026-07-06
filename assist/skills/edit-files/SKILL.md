@@ -1,6 +1,6 @@
 ---
 name: edit-files
-description: Changing the contents of existing files — marking items done or cancelled, adding or removing entries, fixing or rewriting a passage, applying a batch of changes across a list, or any multi-step edit whose result you then summarize or count. EXAMPLES — "wrap up the first two errands and scrap the dentist one in errands.txt"; "under the Home project set everything to cancelled and drop the finished ones"; "fix the broken link in the intro and tack on a closing line". MUST load before any tool call that edits, updates, rewrites, or removes content from a file the user named, and before you report what you changed.
+description: Changing the contents of existing files — marking items done or cancelled, adding or removing entries, fixing or rewriting a passage, applying a batch of changes across a list, or any multi-step edit whose result you then summarize or count. EXAMPLES — "check off the tasks I finished on the sprint board and delete the ones we dropped"; "in packing.md tick everything I've packed and drop what I'm leaving behind"; "fix the broken link in the intro and tack on a closing line". MUST load before any tool call that edits, updates, rewrites, or removes content from a file the user named, and before you report what you changed.
 ---
 
 # Editing files — find it, change it, verify it
