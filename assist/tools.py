@@ -179,7 +179,10 @@ def read_url(url: str) -> str:
     Returns the page's main article text where the page marks one
     (``<article>``/``<main>``) so the char budget holds signal, not nav/footer
     chrome; degrades to a whole-page text strip (scripts/styles removed) when
-    the page marks no article. Capped at 4000 chars.
+    the page marks no article. Capped at 24000 chars (~6k tokens) — enough to hold a
+    typical article's full main text, not just the top; a realistic research turn does
+    ~5 reads so the subagent context stays well under the slow zone (measured ~15-20k).
+    (A genuinely huge page still truncates here; read_url→file+grep is the follow-up.)
 
     Per-host throttled (~1s between calls to the same host) so a burst of
     fetches to different sites isn't artificially serialised, but a tight
@@ -195,7 +198,7 @@ def read_url(url: str) -> str:
             timeout=15,
         )
         resp.raise_for_status()
-        return _extract_main_content(resp.text)[:4000]
+        return _extract_main_content(resp.text)[:24000]
     except Exception as e:
         return f"Error fetching URL: {e}"
 

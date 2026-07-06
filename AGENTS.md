@@ -136,6 +136,7 @@ When changing how the model behaves (a skill, a prompt, a tool surface):
 2. Always run the emacs linter (`eldev lint` or `eldev lint -f [file]`) whenever any elisp files are modified.
 3. Always run tests (`eldev test` from the assist/emacs directory) whenever elisp files are modified.
 4. Always run any new elisp functions for correct functionality (using `eldev eval [expression]`) and iterate on any failures until all tests pass.
+5. **ALWAYS MOCK the research subagent in evals — unless the eval specifically tests research/search behavior.** Real search hits the self-hosted SearXNG, which rate-limits under a burst (the whole suite grinds for hours + trips "search unavailable" false-negatives). Only a *few crucial* evals do real search (`test_research_agent`, `test_research_reliability`); every *other* eval that happens to trigger research must stub the research subagent to return canned findings immediately — use the shared `stub_research_subagent` helper (generalized from `test_context_agent`'s `_stub_subagent`). Mocking also adds determinism (canned findings vs stochastic search). See `docs/2026-07-06-research-eval-mocking.org`. When you DO run a real-search eval, run it slowly/serially and grep the log for rate-limit messages (`_SEARCH_UNAVAILABLE` / "search unavailable") so a throttled run isn't mistaken for a real failure.
 
 # Documentation guidelines
 README files are always updated as new user-facing functionality is added or modified. Do not clutter the top-level README file(s) - always add sections as needed.
