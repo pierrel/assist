@@ -54,6 +54,25 @@ Consider:
 1. URLs that do not work (404, etc)
 2. URLs that do not corroborate the information in the final report
 3. Better ways to search
+** TODO read_url: retrieval-on-demand instead of the 4000-char truncation cap
+read_url currently returns =_extract_main_content(resp.text)[:4000]= — ~4000 chars ≈
+~650-800 words ≈ ~1k tokens. A typical article body is 800-3000 words (references/docs
+far more), so the agent researches from page-TOPS and can't see anything deeper — a
+silent, blunt truncation that trades completeness for context-safety (the cap exists to
+bound subagent context; see #137). Pierre (2026-07-06): "the cap smells funny; it
+shouldn't stick around."
+*Strategy (fix-by-construction):* read_url WRITES the full extracted content to a file
+(reuse the existing =large_tool_results/= offload seam, backends.py:63) and RETURNS a
+=path= + a short preview; the agent then greps / reads specific sections on demand. Full
+content stays available; only a preview enters context.
+*Why it matters beyond completeness:* this bounds the subagent's context BY CONSTRUCTION
+(previews + paths, not full pages) — a cleaner answer to the slow-zone context-bloat that
+#137 targets with an earlier-summarization trigger. So it likely SUPERSEDES both the 4k
+cap AND the #137 approach: don't put the bulk in context rather than summarize it earlier.
+Sequence: land this, then re-assess whether #137's window-shrink is still needed at all.
+*Follow-up (to the follow-up):* a semantic-search DB over the offloaded pages (embed
+chunks → the agent queries "find the part about X") — better than grep for fuzzy queries,
+but heavier (embedding model + vector store); do only if grep-on-file proves insufficient.
 ** TODO Clean main-content extraction for =read_url= (signal-per-token)
 Today =read_url= (=assist/tools.py=) strips =<script>=/=<style>=, then strips
 ALL tags, collapses whitespace, and truncates to =text[:4000]=.  It does NO
