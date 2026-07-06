@@ -130,6 +130,21 @@ GUARD (documented passing-now — a future regression trips them) AND pursue the
 model can report the PLAN as done instead of the actual file state.* The skill still
 ships (valuable always-there edit discipline); the evals guard it.
 
+** REPRODUCED (option 2) + the fix — the load-bearing finding
+The =write_todos= path DID reproduce: a multi-step weekly-review (mark done / cancel /
+DELETE all done+cancelled / add =# ACTIVE: N= = the remaining-TODO count). Baseline the
+COUNT test *3/4* — the model wrote =# ACTIVE: 10= when the file had *11*, from its PLAN,
+and never ran =git diff=. Exactly "reports the plan as done, not the diff".
+*The instructive part — =git diff= ALONE did NOT fix it.* Skill v1 (VALIDATE = "run
+=git diff=, count in the file"): the model DID run =git diff= (=ran a git diff: True=) but
+STILL eyeballed the count off-by-one → *~3/5*, no better than baseline. =git diff= shows
+WHAT changed; the model still guessed the TOTAL. The real fix is =calculate='s principle:
+a count is a NUMBER — compute it MECHANICALLY (=grep -c= / =wc -l= / python) on the final
+file, never eyeball. Skill v2 → *5/5* (and faster — the model greps instead of reasoning).
+*Baseline→after:* regression guards 11/11 → green throughout; count 3/4 (baseline) →
+~3/5 (git-diff-only, unfixed) → *5/5* (mechanical count). The eval-first discipline earned
+its keep: it disproved the obvious fix and pinned the real one.
+
 The oracles (checkable, deterministic — read the FINAL file state, not free-text):
 
 1. *Confabulation guard (the incident).* Prompt a bulk multi-item edit ("mark A, B, C done;
