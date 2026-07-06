@@ -165,10 +165,14 @@ deterministic. Cadence per =CLAUDE.md= (baseline → N=3 post-edit → N=5 → N
 guidance edit doesn't clear the confabulation eval consistently (small model), that's the
 signal to build the by-construction diff-injection (fallback 1), and re-eval.
 
-* Scope
-IN: the guidance edit (general_instructions Step 4 + honesty line + skill pointers) + the
-reproduction evals. OUT (reserve): the diff-injection mechanism + deterministic
-summary-from-diff — built only if the evals prove guidance can't carry it. No new skill.
+* Scope (Pierre's skill-first redirect)
+IN (this PR): the =edit-files= SKILL (=assist/skills/edit-files/=) + the
+incident-reproduction evals (kept as regression guards + the reproduced count case).
+OUT — LATER increments, not this PR: #2 the always-on =general_instructions= reconcile
+rule; #3 the by-construction diff-injection / deterministic summary-from-diff (the
+structural end-state if the skill's eval shows prose can't fully carry it — the count
+case cleared 5/5 with the mechanical-count rule, so #3 is not needed yet).
+(The guidance-first analysis below predates the redirect — kept as the rationale for #2/#3.)
 
 * Risks
 1. Small-model doesn't obey the read-back rule (soft prose is weak) — mitigated by the
