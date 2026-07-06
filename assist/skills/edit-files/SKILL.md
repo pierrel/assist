@@ -49,10 +49,11 @@ Before you write your summary:
 1. Run `execute("git -C /workspace diff")` and look at what actually changed.
 2. RECONCILE against your phase-3 checklist. Every item must appear in the diff. If one
    doesn't, you SKIPPED it — go back and make that edit now. Do not report success without it.
-3. If the summary will state a COUNT or a derived value (e.g. "12 active items left", a new
-   total, "# ACTIVE: N"), `read_file` the final file and count it THERE. Never carry a
-   number over from your plan or your head — the plan is what you intended, the file is what
-   happened, and they diverge exactly when this matters.
+3. If the summary or the edit will state a COUNT or a derived total ("12 active items left",
+   a remaining count, a new total), that is a NUMBER — treat it exactly like the calculate
+   skill: don't count by eye and don't carry it from your plan (you will be off by one).
+   Run a command on the FINAL file and use its output — `grep -c`, `wc -l`, or a one-line
+   `python3` count. A count you didn't run a command to get is wrong even when it matches.
 4. Write the summary from the diff and the re-read file, line by line. If the diff is empty,
    say you changed nothing — never narrate edits a clean diff contradicts.
 
