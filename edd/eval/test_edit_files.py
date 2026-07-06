@@ -113,6 +113,10 @@ class _EditScenario(TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="edit_files_eval_")
+        # Register cleanup NOW (not in tearDown): a skipTest() below raises out of
+        # setUp, and tearDown doesn't run on a setUp-skip — addCleanup still does, so
+        # the tmp dir isn't leaked on a Docker-unavailable skip.
+        self.addCleanup(cleanup_workspace, self.tmp)
         self.origin = os.path.join(self.tmp, "origin.git")
         _git("init", "--bare", "-b", "main", self.origin)
         seed = os.path.join(self.tmp, "seed")
@@ -140,10 +144,8 @@ class _EditScenario(TestCase):
         self.sandbox = SandboxManager.get_sandbox_backend(self.workspace)
         if self.sandbox is None:
             self.skipTest("Docker sandbox unavailable — is Docker running + assist-sandbox built?")
-
-    def tearDown(self):
-        SandboxManager.cleanup(self.workspace)
-        cleanup_workspace(self.tmp)   # shared root-owned-file cleanup (utils)
+        # sandbox teardown runs before the tmp cleanup (addCleanup is LIFO).
+        self.addCleanup(SandboxManager.cleanup, self.workspace)
 
     def _run(self, prompt):
         agent = AgentHarness(create_agent(self.model, self.workspace,
@@ -207,8 +209,10 @@ class TestBulkEdit(_EditScenario):
                 self.fail("summary confabulates marking a non-existent item done" + diag)
 
     def test_summary_does_not_claim_unmade_cancellations(self):
-        """Confabulation guard (secondary): if the Home items are NOT actually
-        cancelled in the file, the summary must not claim they were."""
+        """Confabulation guard (secondary): for any item the summary names alongside
+        'cancel', that item must actually be cancelled in the file — a per-named-item
+        check (a blanket "cancelled the Home items" without naming one isn't caught
+        here; the completeness test already fails an actual skip)."""
         agent, summary = self._run(_PROMPT)
         st = _states(self._final())
         low = summary.lower()
@@ -263,9 +267,11 @@ class TestMultiStepPlan(_EditScenario):
     def test_deletions_actually_happened(self):
         """Completeness on the multi-step path: DONE/CANCELLED items must be GONE."""
         agent, summary = self._run(self._PROMPT)
-        st = _states(self._final())
+        final = self._final()
         diag = self._diag(agent, summary)
-        # after step 3, no DONE or CANCELLED headings should remain in the file:
-        leftover = [k for k, v in st.items() if v in ("DONE",) + _CANCELLED_KW]
+        # Scan LINES (not the dedup-by-text _states dict) so a DONE/CANCELLED heading
+        # left behind can't be masked by a same-text heading elsewhere in the file.
+        leftover = [line.strip() for line in final.splitlines()
+                    if re.match(r"^\*+\s+(DONE|CANCELLED|CANCELED)\s+\S", line)]
         self.assertEqual(leftover, [],
-                         f"DONE/CANCELLED items not deleted: {leftover}" + diag)
+                         f"DONE/CANCELLED headings not deleted: {leftover}" + diag)
