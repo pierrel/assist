@@ -21,6 +21,11 @@ You are about to change one or more files. Do all four phases. The last one is n
   can't match the wrong place and can't split a section.)
 - Inserting mid-file: anchor on the single line your new content goes right before, and
   put [new content] + that same line in `new_string`.
+- In a file of HEADINGS with body text under each (e.g. a heading then a note beneath it),
+  a NEW heading belongs on its own line at a section BOUNDARY — right before the next
+  heading at the same level. Never drop it inside another heading's body: that splits the
+  section, orphaning the body from its heading. So anchor on a HEADING line (which is
+  unique), never on a body line, and keep each heading with the body under it.
 - If `edit_file` reports the string was not found, your anchor is wrong: re-read the file,
   copy a line that actually exists, and try again. Do NOT invent a different anchor from
   memory, and do NOT report the edit as done.
