@@ -1,8 +1,9 @@
 #+TITLE: Trust the diff, not the narration — edit-verification guidance
 #+DATE: <2026-07-05>
-#+STATUS: DESIGN → BUILD (Pierre 2026-07-05): an "edit-files" SKILL is STEP 1; the
-always-on general_instructions guidance (#2) + the by-construction diff-injection (#3)
-are LATER increments. Eval-gated (the eval must FAIL on the incident before the skill).
+#+STATUS: BUILD — edit-files SKILL is step 1 (PR #169); general_instructions guidance (#2) + diff-injection (#3) are later increments; eval-gated.
+An "edit-files" SKILL is step 1 (Pierre 2026-07-05). The always-on general_instructions
+guidance (#2) + the by-construction diff-injection (#3) are LATER increments. Eval-gated
+(the eval reproduced the incident on the write_todos path before the skill — see Evals).
 
 * The incident (what we're fixing)
 On a bulk GTD edit (thread =20260630154415-7f0be79f=: "mark these done, cancel that

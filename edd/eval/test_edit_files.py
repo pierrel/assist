@@ -221,7 +221,11 @@ class TestBulkEdit(_EditScenario):
 
 
 def _count_todo(content: str) -> int:
-    return sum(1 for s in _states(content).values() if s == "TODO")
+    """Count TODO heading LINES directly (not via the dedup-by-text _states dict) —
+    a duplicate-appended TODO must count as two, matching what the agent's own
+    `grep -c`/`wc -l` count sees, so the oracle can't undercount a duplicate."""
+    return sum(1 for line in content.splitlines()
+               if re.match(r"^\*+\s+TODO\s+\S", line))
 
 
 class TestMultiStepPlan(_EditScenario):
