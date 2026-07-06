@@ -325,8 +325,10 @@ class TestReadUrlExtraction:
         # else a doc ending mid-token (here a bare entity) returns empty.
         assert "tail text" in tools._extract_main_content("<article>tail text &amp")
 
-    def test_truncates_to_4000(self):
-        assert len(self._read("<article><p>" + ("x" * 9000) + "</p></article>")) == 4000
+    def test_truncates_to_24000(self):
+        # over the cap -> truncated to 24000; a 9k page (under the cap) is returned whole.
+        assert len(self._read("<article><p>" + ("x" * 30000) + "</p></article>")) == 24000
+        assert len(self._read("<article><p>" + ("x" * 9000) + "</p></article>")) == 9000
 
     def test_error_path_unchanged(self):
         with patch.object(tools, "requests") as rq, \
