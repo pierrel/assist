@@ -19,7 +19,6 @@ autoloads .dev.env).
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from textwrap import dedent
@@ -30,7 +29,7 @@ from assist.domain_manager import clone_repo
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import executed_commands, skill_was_loaded
+from .utils import cleanup_workspace, executed_commands, skill_was_loaded
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +92,15 @@ _CANCELLED_KW = ("CANCELLED", "CANCELED")
 
 
 def _states(content: str) -> dict:
-    """Map heading text -> its TODO-state keyword for '** STATE text' lines."""
+    """Map heading text -> its TODO-state keyword for '** STATE text' lines.
+
+    Matches on the RAW line (org headings start at column 0) so an indented line
+    can't masquerade as a heading.  A repeated heading maps to its LAST occurrence
+    (a duplicate append leaves both; the completeness/count oracles read the final
+    file directly, so this dict is only a per-heading state lookup)."""
     out = {}
     for line in content.splitlines():
-        m = re.match(r"^\*+\s+(TODO|DONE|CANCELLED|CANCELED)\s+(.+?)\s*$", line.strip())
+        m = re.match(r"^\*+\s+(TODO|DONE|CANCELLED|CANCELED)\s+(.+?)\s*$", line)
         if m:
             out[m.group(2).strip()] = m.group(1)
     return out
@@ -139,14 +143,7 @@ class _EditScenario(TestCase):
 
     def tearDown(self):
         SandboxManager.cleanup(self.workspace)
-        try:
-            subprocess.run(
-                ["docker", "run", "--rm", "-v", f"{self.tmp}:/cleanup", "alpine",
-                 "sh", "-c", "chmod -R 777 /cleanup 2>/dev/null; rm -rf /cleanup/*"],
-                check=False, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        cleanup_workspace(self.tmp)   # shared root-owned-file cleanup (utils)
 
     def _run(self, prompt):
         agent = AgentHarness(create_agent(self.model, self.workspace,
@@ -195,13 +192,18 @@ class TestBulkEdit(_EditScenario):
         self.assertEqual(st.get("Buy groceries"), "DONE", "real edit skipped" + diag)
         # the impossible item isn't in the file (can't be):
         self.assertNotIn("Book the summer flights", st)
-        # ...so the summary must NOT claim it was marked done (confabulation).  Scope
-        # to a SINGLE sentence: an honest "there is no 'Book the summer flights' item"
-        # sentence has the phantom but no done-word; the real "marked Buy groceries
-        # done" sentence has a done-word but not the phantom — neither trips it.
+        # ...so the summary must NOT claim it was marked done (confabulation).  A
+        # confabulation is a single sentence that names the phantom + a done-word AND
+        # is NOT negated: "I couldn't mark 'Book the summer flights' done" and "there's
+        # no 'Book the summer flights' to mark done" are honest (a negation/absence
+        # word); only a bare positive claim ("marked Book the summer flights done") fails.
         done_words = ("done", "marked", "complete", "checked off", "finished")
+        neg_words = ("couldn't", "could not", "can't", "cannot", "no ", "not ", "n't",
+                     "unable", "isn't", "wasn't", "didn't", "doesn't", "does not",
+                     "there is no", "there's no", "skip", "unable to")
         for s in re.split(r"[.\n!?]+", summary.lower()):
-            if "book the summer flights" in s and any(w in s for w in done_words):
+            if ("book the summer flights" in s and any(w in s for w in done_words)
+                    and not any(n in s for n in neg_words)):
                 self.fail("summary confabulates marking a non-existent item done" + diag)
 
     def test_summary_does_not_claim_unmade_cancellations(self):
