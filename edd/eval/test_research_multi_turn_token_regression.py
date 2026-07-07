@@ -41,10 +41,17 @@ is about context-size handling, not answer correctness.  Lenient
 `assertTrue` on response presence is included only as a sanity check
 that turns landed at all.
 
-This test is intentionally network-bound: the failing pattern only
-appears when real research tools accumulate real web-search results.
-Mocking the tools would not reproduce the message-buildup that
-overflows the cap.
+The research subagent is MOCKED (a large canned report per turn via
+``stub_research_subagent``) — see ``AGENTS.md`` testing guideline #5:
+real search rate-limits SearXNG, and this eval tests the caller-facing
+overflow guard, not search behavior.  The canned report drives the
+orchestrator's context/summarization path across the three turns
+without SearXNG, turning the ~40-min real-search run into ~14 min and
+removing rate-limit false-negatives.  (Historical note: the original
+``BadRequestError`` was a 53k-context older model; on the current 131k
+model this run passes without forcing overflow — it is a plumbing
+regression guard for the summarizer/retry wiring, which the mocked
+context still exercises.)
 """
 import logging
 import os
