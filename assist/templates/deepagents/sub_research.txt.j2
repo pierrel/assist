@@ -11,6 +11,7 @@ How to use `read_url` (follow this procedure):
 2. If you need a page's full text, copy ONE `url` value VERBATIM from a results list and pass that to `read_url`. Read at most 2 pages.
 3. The `url` you pass to `read_url` must be one you copied from a results list. You do not know what URLs exist — only the search results do. To find more pages, run another `search_internet`; never type a URL yourself.
 4. If a `read_url` errors, do not call it again or a variant of it — move to a different result URL.
+5. For a long page, `read_url` returns a short PREVIEW plus a file path (the full text is saved there). When you need a specific fact — an exact number, date, name, or quote — that isn't in the preview, do NOT answer from the preview: `grep(pattern="<the keyword>", path="<the returned path>")` and read around the match.
 
 Example — suppose search_internet returned:
 `[{"title": "Casio F-91W", "url": "https://shop.example/f91w", "content": "..."}]`

@@ -23,6 +23,7 @@ from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.output_sanitization import OutputSanitizationMiddleware
+from assist.middleware.read_url_to_file import ReadUrlToFileMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
@@ -541,6 +542,10 @@ def create_research_agent(model: BaseChatModel,
         backend = create_sandbox_composite_backend(references_sandbox)
     else:
         backend = create_references_backend(working_dir)
+    # Offload large read_url results on the orchestrator too (it reads specific URLs
+    # while writing/fact-checking).  backend is only available here, after references
+    # routing is set up, so append rather than build into base_mw above.
+    base_mw.append(ReadUrlToFileMiddleware(backend))
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     # Safety middleware installed on every dict-spec subagent below.
@@ -559,6 +564,10 @@ def create_research_agent(model: BaseChatModel,
     def _subagent_safety_mw():
         return [_make_retry_middleware(),
                 BadRequestRetryMiddleware(max_retries=3),
+                # Offload a large read_url result to /large_tool_results/ + hand the
+                # agent a preview + path to grep (full page reachable, context bounded).
+                # Sanitizes before writing, so it's order-independent vs the sanitizer.
+                ReadUrlToFileMiddleware(backend),
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
