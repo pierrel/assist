@@ -151,7 +151,7 @@ class TestGiantsThreadTokenRegression(TestCase):
         # This eval tests the CALLER-facing overflow guard (no BadRequestError leaks
         # past retry/rollback across 3 turns), not search behavior — so a large canned
         # research report per turn drives the orchestrator's context/summarization path
-        # without real search, and turns the ~40-min real-search run into minutes.
+        # without real search — rate-limit-free, deterministic, and faster than real search.
         with stub_research_subagent(_CANNED_REPORT):
             # Build the Thread INSIDE the patch — its __init__ eagerly builds the agent.
             self.thread = self.tm.new()
