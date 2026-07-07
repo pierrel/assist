@@ -23,7 +23,7 @@ from assist.middleware.model_logging_middleware import ModelLoggingMiddleware
 from assist.middleware.json_validation_middleware import JsonValidationMiddleware
 from assist.middleware.tool_name_sanitization import ToolNameSanitizationMiddleware
 from assist.middleware.output_sanitization import OutputSanitizationMiddleware
-from assist.middleware.read_url_to_file import ReadUrlToFileMiddleware
+from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
@@ -366,7 +366,14 @@ def create_agent(model: BaseChatModel,
             workspace_dir=workspace_dir,
             references_dir=references_dir,
         ),
-        middleware=mw + [skills_mw, memory_mw, ContextRiderMiddleware(), logging_mw],
+        middleware=mw + [
+            # Offload a large execute result (a long build/test log) to a file +
+            # hand the model a preview + grep instruction — big logs are the classic
+            # context-flooder for the small model.  head_tail preview: a log's salient
+            # line (the error/exit summary) is at the TAIL, not the head.
+            ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
+                                       preview_style="head_tail"),
+            skills_mw, memory_mw, ContextRiderMiddleware(), logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
         # `travel` (time/distance), `directions` (turn-by-turn steps), and
@@ -545,7 +552,7 @@ def create_research_agent(model: BaseChatModel,
     # Offload large read_url results on the orchestrator too (it reads specific URLs
     # while writing/fact-checking).  backend is only available here, after references
     # routing is set up, so append rather than build into base_mw above.
-    base_mw.append(ReadUrlToFileMiddleware(backend))
+    base_mw.append(ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000))
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     # Safety middleware installed on every dict-spec subagent below.
@@ -567,7 +574,7 @@ def create_research_agent(model: BaseChatModel,
                 # Offload a large read_url result to /large_tool_results/ + hand the
                 # agent a preview + path to grep (full page reachable, context bounded).
                 # Sanitizes before writing, so it's order-independent vs the sanitizer.
-                ReadUrlToFileMiddleware(backend),
+                ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000),
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
