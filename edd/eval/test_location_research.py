@@ -25,7 +25,7 @@ from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
-from .utils import create_filesystem
+from .utils import create_filesystem, stub_research_subagent
 
 _RENDER_SKILLS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "assist", "web_skills")
@@ -64,9 +64,14 @@ class TestLocationResearch(TestCase):
         skills = ({"/render-skill/": FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
                                                         virtual_mode=True)}
                   if with_render else {})
-        agent = AgentHarness(create_agent(self.model, root,
-                                          spec=AgentSpec(skill_sources=skills)))
-        agent.message(question)
+        # Stub the research subagent: this eval tests whether the render/map skill
+        # SUPPRESSES research DISPATCH (it counts `task` calls) — not the research
+        # results — so we don't need real search.  The orchestrator still issues the
+        # dispatch; the stub just returns fast (rate-limit-free + deterministic).
+        with stub_research_subagent("Found several highly-rated options near the area."):
+            agent = AgentHarness(create_agent(self.model, root,
+                                              spec=AgentSpec(skill_sources=skills)))
+            agent.message(question)
         return _metrics(agent)
 
     def test_map_skill_does_not_suppress_research(self):

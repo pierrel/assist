@@ -3,9 +3,11 @@ import functools
 import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 from unittest.mock import patch
 from unittest import TestCase
 from langchain_core.messages import ToolMessage, AIMessage
+from langchain_core.runnables import RunnableLambda
 # One source of truth for "the same URL" — the prod guard defines it, the eval
 # imports it, so the spy's provenance accounting can't drift from the guard's.
 from assist.middleware.url_provenance import normalize_url
@@ -40,6 +42,28 @@ def build_thread_repo(tmp: str, branch: str) -> str:
     _git("config", "user.name", "A", cwd=workspace)
     _git("checkout", "-b", branch, cwd=workspace)
     return workspace
+
+
+@contextmanager
+def stub_research_subagent(findings="(stubbed research findings)"):
+    """Patch ``create_research_agent`` so the research subagent returns ``findings``
+    immediately — no real search, so the eval is rate-limit-free (no SearXNG burst)
+    and deterministic (canned findings vs stochastic search).
+
+    The orchestrator still ISSUES the ``task`` dispatch (the ``research-agent``
+    ``CompiledSubAgent`` stays registered — only the runnable behind it is stubbed),
+    so evals that count research *dispatches* still work; only the subagent's
+    expensive internals are skipped.  Pass a large ``findings`` string to drive
+    context deterministically.  See ``AGENTS.md`` testing guideline #5 and
+    ``docs/2026-07-06-research-eval-mocking.org``.  ALWAYS use this in an eval that
+    triggers research but is not itself testing research/search behavior.
+    """
+    def _stub(*args, **kwargs):
+        return RunnableLambda(
+            lambda state: {"messages": list((state or {}).get("messages", []))
+                           + [AIMessage(content=findings)]})
+    with patch("assist.agent.create_research_agent", _stub):
+        yield
 
 
 class AgentTestMixin:

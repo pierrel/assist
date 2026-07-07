@@ -56,6 +56,20 @@ from unittest import TestCase
 from openai import BadRequestError
 
 from assist.thread_manager import ThreadManager
+from edd.eval.utils import stub_research_subagent
+
+# A substantial canned research report (~a few KB) so the stubbed subagent still
+# drives the orchestrator's context/summarization path across the 3 turns without
+# hitting SearXNG.  Repeated realistic sentences, not lorem, so token counting is
+# representative.
+_CANNED_REPORT = (
+    "The San Francisco Giants finished the 2024 season with a competitive record, "
+    "anchored by strong starting pitching and a resurgent bullpen. Key contributors "
+    "posted career-best numbers at the plate, and the team remained in the divisional "
+    "race deep into September. Notable series included a home sweep and several "
+    "walk-off wins that kept the wildcard hopes alive. Season-ticket packages, mini "
+    "plans, and single-game options were compared for value across the schedule. "
+) * 60
 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -121,12 +135,18 @@ class TestGiantsThreadTokenRegression(TestCase):
             )
 
     def test_three_turns_no_token_overflow(self):
-        r1 = self._send("turn 1", TURN_1)
-        logger.info("turn 1 response (first 300 chars): %s", str(r1)[:300])
-        r2 = self._send("turn 2", TURN_2)
-        logger.info("turn 2 response (first 300 chars): %s", str(r2)[:300])
-        r3 = self._send("turn 3", TURN_3)
-        logger.info("turn 3 response (first 300 chars): %s", str(r3)[:300])
+        # Mock the research subagent (no SearXNG → rate-limit-free + deterministic).
+        # This eval tests the CALLER-facing overflow guard (no BadRequestError leaks
+        # past retry/rollback across 3 turns), not search behavior — so a large canned
+        # research report per turn drives the orchestrator's context/summarization path
+        # without real search, and turns the ~40-min real-search run into minutes.
+        with stub_research_subagent(_CANNED_REPORT):
+            r1 = self._send("turn 1", TURN_1)
+            logger.info("turn 1 response (first 300 chars): %s", str(r1)[:300])
+            r2 = self._send("turn 2", TURN_2)
+            logger.info("turn 2 response (first 300 chars): %s", str(r2)[:300])
+            r3 = self._send("turn 3", TURN_3)
+            logger.info("turn 3 response (first 300 chars): %s", str(r3)[:300])
 
         # Sanity: the thread actually progressed.  Empty replies on every
         # turn would suggest the agent is silently bailing rather than
