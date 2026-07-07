@@ -11,6 +11,8 @@ import html
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+from manage.web.threads import _PULL_TO_REFRESH_SCRIPT
+
 from assist.schedule import cadence
 from assist.schedule.store import ScheduleNotFound
 from manage.web.app import app
@@ -55,6 +57,7 @@ def _render(scheds) -> str:
 </style></head><body>
   <div class="topbar"><a href="/" class="btn">&larr; Threads</a><h2>Scheduled prompts</h2></div>
   {body}
+{_PULL_TO_REFRESH_SCRIPT}
 </body></html>"""
 
 

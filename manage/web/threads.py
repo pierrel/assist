@@ -623,14 +623,18 @@ def render_thread(
               var id = {json.dumps(tid)};
               var done = function(txt){{ var o=btn.textContent; btn.textContent=txt;
                 setTimeout(function(){{ btn.textContent=o; }}, 1200); }};
-              if (navigator.clipboard && navigator.clipboard.writeText) {{
-                navigator.clipboard.writeText(id).then(function(){{ done('Copied!'); }})
-                  .catch(function(){{ done('Copy failed'); }});
-              }} else {{
-                // http/older-browser fallback: a temporary textarea + execCommand
+              // textarea + execCommand fallback — used when clipboard is absent AND when
+              // navigator.clipboard exists but REJECTS (insecure context / denied permission).
+              var fallback = function(){{
                 try {{ var t=document.createElement('textarea'); t.value=id; document.body.appendChild(t);
-                  t.select(); document.execCommand('copy'); document.body.removeChild(t); done('Copied!'); }}
+                  t.select(); var ok=document.execCommand('copy'); document.body.removeChild(t);
+                  done(ok ? 'Copied!' : 'Copy failed'); }}
                 catch(e){{ done('Copy failed'); }}
+              }};
+              if (navigator.clipboard && navigator.clipboard.writeText) {{
+                navigator.clipboard.writeText(id).then(function(){{ done('Copied!'); }}).catch(fallback);
+              }} else {{
+                fallback();
               }}
             }}
           </script>

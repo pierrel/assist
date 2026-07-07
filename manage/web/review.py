@@ -142,6 +142,7 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
             <h1 style="font-size:1.3rem">Review</h1>
             <p><em>No diff to review — the working tree matches main.</em></p>
           </div>
+        {_threads._PULL_TO_REFRESH_SCRIPT}
         </body></html>
         """
 
@@ -340,6 +341,7 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
             rehydrate();
           }})();
         </script>
+        {_threads._PULL_TO_REFRESH_SCRIPT}
       </body>
     </html>
     """

@@ -38,6 +38,25 @@ class TestPullToRefresh:
         assert "pull to refresh" in html and "location.reload()" in html
 
 
+class TestPullToRefreshEveryPage:
+    """Pierre asked for it on every page — cover the other navigable full pages."""
+
+    def test_schedules_page_has_it(self):
+        from manage.web.schedules import _render
+        assert "pull to refresh" in _render([])
+
+    def test_evals_index_has_it(self):
+        from manage.web.evals import render_evals
+        assert "pull to refresh" in render_evals()   # no-results page
+
+    def test_evals_and_review_modules_inject_it(self):
+        # structural guard: the main-table (evals) + review pages inject the shared
+        # script (they need data/a tid to render, so assert the source wiring).
+        import manage.web.evals as e, manage.web.review as r
+        assert open(e.__file__).read().count("_PULL_TO_REFRESH_SCRIPT") >= 3   # 3 templates
+        assert open(r.__file__).read().count("_PULL_TO_REFRESH_SCRIPT") == 2   # 2 pages
+
+
 class TestCopyThreadId:
     def test_thread_page_has_copy_id_button(self, threads_root):
         _make_thread(threads_root, "20260707000000-abcd1234")

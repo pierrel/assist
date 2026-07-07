@@ -8,6 +8,7 @@ from fastapi import Query
 from fastapi.responses import HTMLResponse
 
 from manage.web.app import app
+from manage.web.threads import _PULL_TO_REFRESH_SCRIPT
 
 
 def _status_cell_style(status: str | None) -> str:
@@ -34,7 +35,7 @@ def render_evals() -> str:
         .nav a{{display:inline-flex;align-items:center;min-height:44px;padding:.6rem .8rem;border-radius:6px;text-decoration:none;touch-action:manipulation}}</style></head>
         <body><div class="container">
         <div class="nav"><a href="/">← Back</a></div>
-        <h1 style="font-size:1.4rem">Eval Results</h1>{body}</div></body></html>"""
+        <h1 style="font-size:1.4rem">Eval Results</h1>{body}{_PULL_TO_REFRESH_SCRIPT}</div></body></html>"""
 
     # Collect all test keys across all runs, preserving insertion order per run
     all_keys: list[str] = []
@@ -157,6 +158,7 @@ def render_evals() -> str:
             </table>
           </div>
         </div>
+        {_PULL_TO_REFRESH_SCRIPT}
       </body>
     </html>
     """
@@ -240,6 +242,7 @@ def render_eval_detail(run_id: str, test_key: str) -> str:
           {message_html}
           {details_html}
         </div>
+        {_PULL_TO_REFRESH_SCRIPT}
       </body>
     </html>
     """
