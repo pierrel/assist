@@ -63,7 +63,8 @@ def stub_research_subagent(findings="(stubbed research findings)"):
     construction time, so the patch must be active THEN.  Building the agent/Thread in
     ``setUp`` or before the ``with`` block silently binds the REAL subagent and the mock
     has no effect (the eval then hits SearXNG anyway).  Do:
-    ``with stub_research_subagent(...): agent = create_agent(...); agent.message(...)``.
+    ``with stub_research_subagent(...): agent = AgentHarness(create_agent(...)); agent.message(...)``
+    (``create_agent`` returns a compiled graph; ``AgentHarness`` gives it ``.message()``).
     """
     def _stub(*args, **kwargs):
         return RunnableLambda(

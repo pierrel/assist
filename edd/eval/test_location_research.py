@@ -15,6 +15,7 @@ with/without metrics so the EFFECT is visible, not just pass/fail.
 """
 import os
 import re
+import shutil
 import tempfile
 from unittest import TestCase
 
@@ -60,6 +61,7 @@ class TestLocationResearch(TestCase):
 
     def _run(self, question: str, with_render: bool) -> dict:
         root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         create_filesystem(root, {"README.org": "Personal assistant workspace."})
         skills = ({"/render-skill/": FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
                                                         virtual_mode=True)}
