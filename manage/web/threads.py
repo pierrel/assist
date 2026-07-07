@@ -120,7 +120,7 @@ _PULL_TO_REFRESH_SCRIPT = """<script>
   var startY=0, pulling=false, MAX=90, TRIGGER=65;
   var bar=document.createElement('div');
   bar.style.cssText='position:fixed;top:0;left:0;right:0;height:0;overflow:hidden;'
-    +'display:flex;align-items:flex-end;justify-content:center;background:#1d4ed8;'
+    +'display:flex;align-items:flex-end;justify-content:center;background:#171717;'
     +'color:#fff;font-size:14px;z-index:9999;transition:height .2s ease;';
   var label=document.createElement('div'); label.style.padding='.4rem'; bar.appendChild(label);
   document.body.appendChild(bar);
@@ -181,20 +181,20 @@ def render_index(query: str = "") -> str:
             # the user can tell their message is held behind another
             # thread (vs. actively running).
             badge = (
-                f'<span style="font-size:.7rem; color:#1e3a5f; background:#e1ecf4;'
-                f' border:1px solid #b6d4ef; padding:.1rem .4rem; border-radius:10px;'
+                f'<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
+                f' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
             )
         elif stage in BUSY_STAGES:
             badge = (
-                f'<span style="font-size:.7rem; color:#555; background:#fff3cd;'
-                f' border:1px solid #ffeeba; padding:.1rem .4rem; border-radius:10px;'
+                f'<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
+                f' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
             )
         elif stage == "error":
             badge = (
-                '<span style="font-size:.7rem; color:#721c24; background:#f8d7da;'
-                ' border:1px solid #f5c6cb; padding:.1rem .4rem; border-radius:10px;'
+                '<span style="font-size:.7rem; color:#b91c1c; background:#fafafa;'
+                ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">error</span>'
             )
         elif _has_urgent(tid):
@@ -202,8 +202,8 @@ def render_index(query: str = "") -> str:
             # Stronger than "new" (above it), still below the live process-state
             # badges (a running/errored thread is actionable now). Red pill.
             badge = (
-                '<span style="font-size:.7rem; color:#fff; background:#dc2626;'
-                ' border:1px solid #b91c1c; padding:.1rem .4rem; border-radius:10px;'
+                '<span style="font-size:.7rem; color:#b91c1c; background:#fafafa;'
+                ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">urgent</span>'
             )
         elif _has_unseen_response(tid):
@@ -213,8 +213,8 @@ def render_index(query: str = "") -> str:
             # "new" yet), ABOVE "unmerged" (a response to read beats a housekeeping
             # reminder) — per Pierre.  Blue/green, distinct from the others.
             badge = (
-                '<span style="font-size:.7rem; color:#0b5c2e; background:#d7f3e3;'
-                ' border:1px solid #9fdcbb; padding:.1rem .4rem; border-radius:10px;'
+                '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
+                ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">new</span>'
             )
         elif _has_unmerged_changes(tid):
@@ -222,8 +222,8 @@ def render_index(query: str = "") -> str:
             # Strictly secondary to the process-state badges above —
             # only shows when the thread is otherwise idle.
             badge = (
-                '<span style="font-size:.7rem; color:#7c4a1d; background:#fef0e0;'
-                ' border:1px solid #fbcfa0; padding:.1rem .4rem; border-radius:10px;'
+                '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
+                ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">unmerged</span>'
             )
         items.append(
@@ -243,7 +243,7 @@ def render_index(query: str = "") -> str:
         )
     items_html = "\n".join(items)
     search_status = (
-        f'<p style="font-size:.85rem; color:#666; margin:.2rem 0 .6rem;">'
+        f'<p style="font-size:.85rem; color:#6b7280; margin:.2rem 0 .6rem;">'
         f'{matched} match{"" if matched == 1 else "es"} for '
         f'&ldquo;{html.escape(q)}&rdquo; &middot; <a href="/">clear</a></p>'
     ) if q else ""
@@ -263,23 +263,25 @@ def render_index(query: str = "") -> str:
              44 pt touch-target guidance — enough to tap reliably on mobile. */
           li {{ margin: .4rem 0; display: flex; align-items: stretch; gap: .25rem; }}
           .thread-link {{ flex: 1; display: flex; align-items: center; padding: .85rem .8rem; border-radius: 6px; min-height: 44px; text-decoration: none; color: inherit; touch-action: manipulation; }}
-          .thread-link:hover {{ background: #f3f6fa; }}
-          .thread-link:active {{ background: #e7edf4; }}
-          .del-btn {{ background: none; border: none; color: #999; cursor: pointer; font-size: 1.4rem; padding: 0 .8rem; border-radius: 6px; min-width: 44px; min-height: 44px; touch-action: manipulation; }}
-          .del-btn:hover {{ color: #c00; background: #fee; }}
-          .del-btn:active {{ background: #fdd; }}
+          .thread-link:hover {{ background: #fafafa; }}
+          .thread-link:active {{ background: #f3f4f6; }}
+          .del-btn {{ background: none; border: none; color: #6b7280; cursor: pointer; font-size: 1.4rem; padding: 0 .8rem; border-radius: 6px; min-width: 44px; min-height: 44px; touch-action: manipulation; }}
+          .del-btn:hover {{ color: #b91c1c; background: #fafafa; }}
+          .del-btn:active {{ background: #f3f4f6; }}
           a:active, a:focus {{ outline: none; }}
           /* inline-flex so the same .btn class works on both <button>
              and <a> (e.g., the Evals link in the topbar): the 44 px
              min-height needs flex centering or the text floats up. */
-          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; color: inherit; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
-          .new-thread-form {{ margin-bottom: 1.5rem; padding: 1rem; background: #f9f9f9; border-radius: 8px; border: 1px solid #ddd; }}
+          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #e5e7eb; border-radius: 8px; background: #ffffff; color: #171717; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
+          .btn:hover {{ background: #fafafa; }}
+          .new-thread-form {{ margin-bottom: 1.5rem; padding: 1rem; background: #fafafa; border-radius: 8px; border: 1px solid #e5e7eb; }}
           /* font-size: 16px (not 1rem) explicitly prevents iOS Safari from
              auto-zooming on focus.  Anything below 16px triggers the zoom. */
-          .new-thread-form textarea {{ width: 100%; min-height: 5rem; box-sizing: border-box; padding: .8rem; border: 1px solid #ccc; border-radius: 6px; font-family: inherit; font-size: 16px; resize: vertical; }}
-          .new-thread-form textarea:focus {{ outline: 2px solid #4a90e2; border-color: #4a90e2; }}
+          .new-thread-form textarea {{ width: 100%; min-height: 5rem; box-sizing: border-box; padding: .8rem; border: 1px solid #e5e7eb; border-radius: 6px; font-family: inherit; font-size: 16px; resize: vertical; }}
+          .new-thread-form textarea:focus {{ outline: 2px solid #171717; border-color: #171717; }}
           .new-thread-form select {{ font-size: 16px; padding: .6rem; min-height: 44px; }}
-          .new-thread-btn {{ margin-top: .6rem; display: none; }}
+          .new-thread-btn {{ margin-top: .6rem; display: none; background: #171717; color: #fff; border-color: #171717; }}
+          .new-thread-btn:hover {{ background: #000; }}
           .new-thread-btn.visible {{ display: block; }}
           @media (max-width: 480px) {{
             .btn {{ width: 100%; }}
@@ -313,7 +315,7 @@ def render_index(query: str = "") -> str:
           <form method="get" action="/" style="margin:0 0 .6rem;">
             <input type="search" name="q" value="{html.escape(q)}"
                    placeholder="Search threads..." aria-label="Search threads"
-                   style="width:100%; box-sizing:border-box; padding:.7rem .8rem; font-size:16px; border:1px solid #ccc; border-radius:6px;" />
+                   style="width:100%; box-sizing:border-box; padding:.7rem .8rem; font-size:16px; border:1px solid #e5e7eb; border-radius:6px;" />
           </form>
           {search_status}
           <ul>
@@ -361,7 +363,7 @@ def render_thread(
     can_rename = not (busy or is_init)
     rename_button = (
         '<button type="button" onclick="showRename()" aria-label="Rename thread" '
-        'style="background:none; border:none; color:#999; cursor:pointer; '
+        'style="background:none; border:none; color:#6b7280; cursor:pointer; '
         'font-size:1rem; padding:.2rem .4rem; line-height:1;">&#x270e;</button>'
     ) if can_rename else ""
     # Stacked: full-width input on its own line, Save/Cancel on the line below
@@ -372,7 +374,7 @@ def render_thread(
         f'<input type="text" name="description" value="{html.escape(title)}" '
         f'maxlength="120" required aria-label="Thread name" '
         f'style="width:100%; box-sizing:border-box; padding:.6rem .7rem; '
-        f'font-size:16px; border:1px solid #ccc; border-radius:6px;" />'
+        f'font-size:16px; border:1px solid #e5e7eb; border-radius:6px;" />'
         f'<div style="display:flex; gap:.5rem;">'
         f'<button class="btn" type="submit" style="min-height:auto; padding:.5rem 1rem;">Save</button>'
         f'<button class="btn btn-secondary" type="button" onclick="hideRename()" '
@@ -550,62 +552,64 @@ def render_thread(
           /* inline-flex centers the back-link text vertically inside
              the 44 px min-height; inline-block leaves the text floating
              at the top of the box. */
-          .nav a {{ display: inline-flex; align-items: center; padding: .6rem .8rem; min-height: 44px; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
+          .nav a {{ display: inline-flex; align-items: center; padding: .6rem .8rem; min-height: 44px; border-radius: 6px; color: #171717; text-decoration: underline; touch-action: manipulation; }}
           .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
-          .msg.user {{ background: #e6f3ff; border: 1px solid #b5dbff; }}
-          .msg.assistant {{ background: #f6f6f6; border: 1px solid #ddd; }}
+          .msg.user {{ background: #ffffff; border: 1px solid #e5e7eb; }}
+          .msg.assistant {{ background: #fafafa; border: 1px solid #e5e7eb; }}
           /* A file embed lifted from a ```render block, shown inline in the
              assistant bubble (org/md rendered page, or pdf viewer). */
           .show-embed {{ margin: .5rem 0; }}
-          .show-file {{ width: 100%; height: 65vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
-          .show-map {{ width: 100%; height: 55vh; border: 1px solid #e3e3e3; border-radius: 6px; background: #fff; }}
+          .show-file {{ width: 100%; height: 65vh; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }}
+          .show-map {{ width: 100%; height: 55vh; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }}
           /* Pseudo-fullscreen (no Fullscreen API — reliable for a null-origin
              sandboxed iframe): fill the viewport, caption bar stays visible to exit. */
           .show-embed.fs {{ position: fixed; inset: 0; z-index: 10000; margin: 0; background: #fff; display: flex; flex-direction: column; }}
           .show-embed.fs .show-map {{ flex: 1 1 auto; height: auto; border: 0; border-radius: 0; }}
           .show-embed.fs .show-cap {{ flex: 0 0 auto; padding: .4rem .6rem; }}
           .show-cap {{ font-size: .85rem; margin-top: .3rem; }}
-          .role {{ font-size: .8rem; color: #555; margin-bottom: .2rem; text-transform: uppercase; }}
+          .role {{ font-size: .8rem; color: #6b7280; margin-bottom: .2rem; text-transform: uppercase; }}
           /* font-size: 16px on every editable form input — prevents iOS
              Safari from auto-zooming into the field on focus.  Anything
              below 16px (including 0.95rem) triggers the zoom. */
-          form textarea {{ width: 100%; min-height: 6rem; height: 24vh; box-sizing: border-box; padding: .6rem; font-family: inherit; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }}
+          form textarea {{ width: 100%; min-height: 6rem; height: 24vh; box-sizing: border-box; padding: .6rem; font-family: inherit; font-size: 16px; border: 1px solid #e5e7eb; border-radius: 6px; }}
           form {{ margin-top: 1rem; }}
-          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #333; border-radius: 8px; background: #eee; color: inherit; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
-          .btn-secondary {{ background: #ddd; }}
-          .approval-banner {{ background: #fff3cd; border: 1px solid #ffe69c; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #664d03; }}
+          .btn {{ display: inline-flex; align-items: center; justify-content: center; padding: .7rem 1rem; min-height: 44px; border: 1px solid #171717; border-radius: 8px; background: #171717; color: #fff; font-size: 16px; text-decoration: none; cursor: pointer; touch-action: manipulation; box-sizing: border-box; }}
+          .btn:hover {{ background: #000; }}
+          .btn-secondary {{ background: #ffffff; color: #171717; border-color: #e5e7eb; }}
+          .btn-secondary:hover {{ background: #fafafa; }}
+          .approval-banner {{ background: #fafafa; border: 1px solid #e5e7eb; border-left: 3px solid #a16207; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #171717; }}
           .approval-form {{ margin-top: .5rem; }}
-          .approval-draft {{ width: 100%; min-height: 3rem; height: auto; box-sizing: border-box; padding: .5rem; font-family: inherit; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }}
+          .approval-draft {{ width: 100%; min-height: 3rem; height: auto; box-sizing: border-box; padding: .5rem; font-family: inherit; font-size: 16px; border: 1px solid #e5e7eb; border-radius: 6px; }}
           .approval-actions {{ display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }}
-          .success-msg {{ background: #d4edda; border: 1px solid #c3e6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #155724; }}
+          .success-msg {{ background: #fafafa; border: 1px solid #e5e7eb; border-left: 3px solid #15803d; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #171717; }}
           .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); }}
           .modal-content {{ background: #fff; margin: 10% auto; padding: 1.5rem; width: min(95%, 500px); border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); box-sizing: border-box; }}
           .modal-content h3 {{ margin-top: 0; }}
-          .modal-content textarea {{ width: 100%; min-height: 100px; padding: .6rem; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; font-size: 16px; box-sizing: border-box; }}
+          .modal-content textarea {{ width: 100%; min-height: 100px; padding: .6rem; border: 1px solid #e5e7eb; border-radius: 4px; font-family: inherit; font-size: 16px; box-sizing: border-box; }}
           .modal-content label {{ display: block; margin-bottom: .5rem; font-weight: 500; }}
           .button-group {{ display: flex; gap: .5rem; margin-top: 1rem; }}
           .diff-container {{ margin: 1rem 0 .5rem; }}
           .diff-actions {{ display: flex; justify-content: flex-end; gap: .5rem; margin-bottom: .6rem; flex-wrap: wrap; }}
-          .merge-btn {{ background: #28a745; color: white; border: 1px solid #1e7e34; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; touch-action: manipulation; }}
-          .merge-btn:hover {{ background: #218838; border-color: #1c7430; }}
-          .push-btn {{ background: #0366d6; color: white; border: 1px solid #024ea4; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; touch-action: manipulation; }}
-          .push-btn:hover {{ background: #024ea4; border-color: #023672; }}
-          .review-btn {{ display: inline-flex; align-items: center; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; text-decoration: none; color: #24292f; background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 8px; touch-action: manipulation; }}
-          .review-btn:hover {{ background: #eaeef2; }}
-          .conflict-banner {{ background: #fff3f3; border: 1px solid #f5c6cb; padding: .8rem 1rem; margin: .8rem 0; border-radius: 6px; color: #721c24; font-size: .95rem; }}
+          .merge-btn {{ background: #171717; color: white; border: 1px solid #171717; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; touch-action: manipulation; }}
+          .merge-btn:hover {{ background: #000; border-color: #000; }}
+          .push-btn {{ background: #171717; color: white; border: 1px solid #171717; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; touch-action: manipulation; }}
+          .push-btn:hover {{ background: #000; border-color: #000; }}
+          .review-btn {{ display: inline-flex; align-items: center; padding: .65rem .9rem; min-height: 44px; font-size: .95rem; white-space: nowrap; text-decoration: none; color: #171717; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; touch-action: manipulation; }}
+          .review-btn:hover {{ background: #fafafa; }}
+          .conflict-banner {{ background: #fafafa; border: 1px solid #e5e7eb; border-left: 3px solid #b91c1c; padding: .8rem 1rem; margin: .8rem 0; border-radius: 6px; color: #171717; font-size: .95rem; }}
           .conflict-banner ul {{ margin: .4rem 0 .4rem 1.2rem; padding: 0; }}
-          .conflict-banner code {{ background: #fbe9eb; padding: 0 .25rem; border-radius: 3px; }}
+          .conflict-banner code {{ background: #f3f4f6; padding: 0 .25rem; border-radius: 3px; }}
           {_DIFF_CSS}
-          .error-msg {{ background: #f8d7da; border: 1px solid #f5c6cb; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #721c24; }}
-          .status-banner {{ display: flex; align-items: center; gap: .6rem; background: #fff3cd; border: 1px solid #ffeeba; color: #856404; padding: .6rem .8rem; margin: .5rem 0; border-radius: 6px; font-size: .9rem; }}
-          .spinner {{ width: 14px; height: 14px; border: 2px solid #d6ad00; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: spin 1s linear infinite; }}
+          .error-msg {{ background: #fafafa; border: 1px solid #e5e7eb; border-left: 3px solid #b91c1c; padding: .8rem; margin: .5rem 0; border-radius: 6px; color: #171717; }}
+          .status-banner {{ display: flex; align-items: center; gap: .6rem; background: #fafafa; border: 1px solid #e5e7eb; border-left: 3px solid #a16207; color: #171717; padding: .6rem .8rem; margin: .5rem 0; border-radius: 6px; font-size: .9rem; }}
+          .spinner {{ width: 14px; height: 14px; border: 2px solid #6b7280; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: spin 1s linear infinite; }}
           @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
           .placeholder .dots span {{ display: inline-block; animation: blink 1.4s infinite both; opacity: .2; font-weight: bold; font-size: 1.4rem; line-height: 0; }}
           .placeholder .dots span:nth-child(2) {{ animation-delay: .2s; }}
           .placeholder .dots span:nth-child(3) {{ animation-delay: .4s; }}
           @keyframes blink {{ 0%, 80%, 100% {{ opacity: .2; }} 40% {{ opacity: 1; }} }}
-          form textarea[disabled] {{ background: #f5f5f5; cursor: not-allowed; }}
-          .btn[disabled] {{ background: #eee; color: #aaa; cursor: not-allowed; border-color: #ddd; }}
+          form textarea[disabled] {{ background: #fafafa; cursor: not-allowed; }}
+          .btn[disabled] {{ background: #fafafa; color: #6b7280; cursor: not-allowed; border-color: #e5e7eb; }}
           @media (max-width: 480px) {{
             .msg {{ padding: .5rem .6rem; }}
             .button-group {{ flex-direction: column; }}
@@ -618,8 +622,8 @@ def render_thread(
           <div class="nav" style="display:flex; justify-content:space-between; align-items:center;">
             <a href="/">← All threads</a>
             <button type="button" onclick="copyThreadId(this)"
-                    style="background:none; border:1px solid #d0d7de; border-radius:6px;
-                           color:#57606a; cursor:pointer; font-size:.8rem; padding:.3rem .6rem;
+                    style="background:none; border:1px solid #e5e7eb; border-radius:6px;
+                           color:#171717; cursor:pointer; font-size:.8rem; padding:.3rem .6rem;
                            touch-action:manipulation;">Copy ID</button>
           </div>
           <script>
@@ -665,7 +669,7 @@ def render_thread(
               <button class="btn" type="submit" {form_disabled}>Send</button>
               <button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>
             </div>
-            <div style="font-size:.85rem; color:#666; margin-top:.4rem;">{form_note}</div>
+            <div style="font-size:.85rem; color:#6b7280; margin-top:.4rem;">{form_note}</div>
           </form>
 
           <!-- Capture Modal -->
@@ -1254,9 +1258,9 @@ def _existing_thread_dir(tid: str) -> str:
 
 _SHOW_PAGE_CSS = (
     "body{font-family:sans-serif;max-width:780px;margin:1rem auto;padding:0 1rem;"
-    "line-height:1.55;color:#222}pre,code{background:#f5f5f5;border-radius:4px}"
+    "line-height:1.55;color:#171717}pre,code{background:#fafafa;border-radius:4px}"
     "pre{padding:.6rem;overflow:auto}table{border-collapse:collapse}"
-    "td,th{border:1px solid #ccc;padding:.3rem .5rem}img{max-width:100%}"
+    "td,th{border:1px solid #e5e7eb;padding:.3rem .5rem}img{max-width:100%}"
 )
 
 # The /show page renders AGENT-generated md/org.  The md path (python-markdown)

@@ -13,13 +13,13 @@ from manage.web.threads import _PULL_TO_REFRESH_SCRIPT
 
 def _status_cell_style(status: str | None) -> str:
     if status == "passed":
-        return "background:#c6efce; color:#276221;"
+        return "background:#eaf7ee; color:#15803d;"
     if status in ("failed", "error"):
-        return "background:#ffc7ce; color:#9c0006;"
+        return "background:#fdeeee; color:#b91c1c;"
     if status == "skipped":
-        return "background:#ffeb9c; color:#9c5700;"
+        return "background:#fdf6e3; color:#a16207;"
     # never run
-    return "background:#fff; color:#aaa;"
+    return "background:#ffffff; color:#6b7280;"
 
 
 def render_evals() -> str:
@@ -32,7 +32,7 @@ def render_evals() -> str:
         <html><head><title>Eval Results</title>
         <style>body{{font-family:sans-serif;margin:0}}
         .container{{max-width:1200px;margin:0 auto;padding:1rem}}
-        .nav a{{display:inline-flex;align-items:center;min-height:44px;padding:.6rem .8rem;border-radius:6px;text-decoration:none;touch-action:manipulation}}</style></head>
+        .nav a{{display:inline-flex;align-items:center;min-height:44px;padding:.6rem .8rem;border-radius:6px;color:#171717;text-decoration:underline;touch-action:manipulation}}</style></head>
         <body><div class="container">
         <div class="nav"><a href="/">← Back</a></div>
         <h1 style="font-size:1.4rem">Eval Results</h1>{body}{_PULL_TO_REFRESH_SCRIPT}</div></body></html>"""
@@ -48,8 +48,8 @@ def render_evals() -> str:
     all_keys.sort()
 
     # Header row: run IDs
-    header_cells = "<th style='min-width:7rem;padding:.4rem .5rem;font-size:.75rem;text-align:center;border:1px solid #ddd;background:#f5f5f5;white-space:nowrap'>"
-    header_cells += "</th><th style='min-width:7rem;padding:.4rem .5rem;font-size:.75rem;text-align:center;border:1px solid #ddd;background:#f5f5f5;white-space:nowrap'>".join(
+    header_cells = "<th style='min-width:7rem;padding:.4rem .5rem;font-size:.75rem;text-align:center;border:1px solid #e5e7eb;background:#fafafa;white-space:nowrap'>"
+    header_cells += "</th><th style='min-width:7rem;padding:.4rem .5rem;font-size:.75rem;text-align:center;border:1px solid #e5e7eb;background:#fafafa;white-space:nowrap'>".join(
         html.escape(r["id"]) for r in runs
     )
     header_cells += "</th>"
@@ -61,10 +61,10 @@ def render_evals() -> str:
         passed = sum(1 for t in run["tests"].values() if t["status"] == "passed")
         failed = sum(1 for t in run["tests"].values() if t["status"] in ("failed", "error"))
         stat_cells += (
-            f"<td style='text-align:center;padding:.3rem .4rem;border:1px solid #ddd;"
-            f"font-size:.75rem;background:#f9f9f9'>"
-            f"<span style='color:#276221'>✓{passed}</span> "
-            f"<span style='color:#9c0006'>✗{failed}</span>"
+            f"<td style='text-align:center;padding:.3rem .4rem;border:1px solid #e5e7eb;"
+            f"font-size:.75rem;background:#fafafa'>"
+            f"<span style='color:#15803d'>✓{passed}</span> "
+            f"<span style='color:#b91c1c'>✗{failed}</span>"
             f"</td>"
         )
 
@@ -79,10 +79,10 @@ def render_evals() -> str:
         tooltip = html.escape(key)
 
         row_cells = (
-            f"<td style='padding:.35rem .6rem;border:1px solid #ddd;white-space:nowrap;"
+            f"<td style='padding:.35rem .6rem;border:1px solid #e5e7eb;white-space:nowrap;"
             f"font-size:.8rem;position:sticky;left:0;background:#fafafa;z-index:1'>"
             f"<span title='{tooltip}'>{short}</span>"
-            f"<div style='font-size:.68rem;color:#888;margin-top:.1rem'>{class_part}</div></td>"
+            f"<div style='font-size:.68rem;color:#6b7280;margin-top:.1rem'>{class_part}</div></td>"
         )
 
         for run in runs:
@@ -95,7 +95,7 @@ def render_evals() -> str:
             if result:
                 tip = html.escape((result["message"][:120] if result["message"] else status) or "")
                 row_cells += (
-                    f"<td style='text-align:center;border:1px solid #ddd;padding:0;{cell_style}'>"
+                    f"<td style='text-align:center;border:1px solid #e5e7eb;padding:0;{cell_style}'>"
                     f"<a href='{href}' style='display:block;padding:.35rem .4rem;"
                     f"text-decoration:none;color:inherit;font-size:.8rem;font-weight:600' "
                     f"title='{tip}'>"
@@ -103,7 +103,7 @@ def render_evals() -> str:
                 )
             else:
                 row_cells += (
-                    f"<td style='text-align:center;border:1px solid #ddd;{cell_style}'>"
+                    f"<td style='text-align:center;border:1px solid #e5e7eb;{cell_style}'>"
                     f"<span style='font-size:.8rem'>–</span></td>"
                 )
 
@@ -119,15 +119,15 @@ def render_evals() -> str:
         <style>
           body {{ font-family: sans-serif; margin: 0; }}
           .container {{ max-width: 100%; padding: 1rem; }}
-          .nav a {{ display: inline-flex; align-items: center; min-height: 44px; padding: .6rem .8rem; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
+          .nav a {{ display: inline-flex; align-items: center; min-height: 44px; padding: .6rem .8rem; border-radius: 6px; color: #171717; text-decoration: underline; touch-action: manipulation; }}
           .table-wrap {{ overflow-x: auto; margin-top: 1rem; }}
           table {{ border-collapse: collapse; font-size: .85rem; }}
-          th {{ padding: .4rem .5rem; border: 1px solid #ddd; background: #f5f5f5;
+          th {{ padding: .4rem .5rem; border: 1px solid #e5e7eb; background: #fafafa;
                 font-size: .75rem; white-space: nowrap; text-align: center; }}
-          tr:hover td {{ filter: brightness(0.95); }}
+          tr:hover td {{ filter: brightness(0.98); }}
           .legend {{ display: flex; gap: 1rem; margin: .5rem 0 1rem; font-size: .82rem; flex-wrap: wrap; }}
           .legend-item {{ display: flex; align-items: center; gap: .3rem; }}
-          .legend-swatch {{ width: 14px; height: 14px; border-radius: 3px; border: 1px solid #ccc; }}
+          .legend-swatch {{ width: 14px; height: 14px; border-radius: 3px; border: 1px solid #e5e7eb; }}
         </style>
       </head>
       <body>
@@ -135,20 +135,20 @@ def render_evals() -> str:
           <div class="nav"><a href="/">← Back</a></div>
           <h1 style="font-size:1.4rem; margin-bottom:.5rem">Eval Results</h1>
           <div class="legend">
-            <div class="legend-item"><div class="legend-swatch" style="background:#c6efce"></div> Pass</div>
-            <div class="legend-item"><div class="legend-swatch" style="background:#ffc7ce"></div> Fail / Error</div>
-            <div class="legend-item"><div class="legend-swatch" style="background:#ffeb9c"></div> Skipped</div>
-            <div class="legend-item"><div class="legend-swatch" style="background:#fff; border:1px solid #ccc"></div> Not run</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#eaf7ee"></div> Pass</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#fdeeee"></div> Fail / Error</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#fdf6e3"></div> Skipped</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#fff; border:1px solid #e5e7eb"></div> Not run</div>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th style="min-width:220px;text-align:left;padding:.4rem .6rem;border:1px solid #ddd;background:#f5f5f5;position:sticky;left:0;z-index:2">Test</th>
+                  <th style="min-width:220px;text-align:left;padding:.4rem .6rem;border:1px solid #e5e7eb;background:#fafafa;position:sticky;left:0;z-index:2">Test</th>
                   {header_cells}
                 </tr>
                 <tr>
-                  <td style="border:1px solid #ddd;background:#f9f9f9;padding:.3rem .6rem;font-size:.75rem;color:#666;position:sticky;left:0;z-index:2">Pass ✓ / Fail ✗</td>
+                  <td style="border:1px solid #e5e7eb;background:#fafafa;padding:.3rem .6rem;font-size:.75rem;color:#6b7280;position:sticky;left:0;z-index:2">Pass ✓ / Fail ✗</td>
                   {stat_cells}
                 </tr>
               </thead>
@@ -186,14 +186,14 @@ def render_eval_detail(run_id: str, test_key: str) -> str:
     class_name = "::".join(parts[:-1]) if len(parts) > 1 else ""
 
     message_html = (
-        f"<pre style='background:#f8f8f8;border:1px solid #ddd;padding:.8rem 1rem;"
+        f"<pre style='background:#fafafa;border:1px solid #e5e7eb;padding:.8rem 1rem;"
         f"border-radius:6px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;"
         f"font-size:.82rem'>{html.escape(result['message'])}</pre>"
         if result["message"] else ""
     )
     details_html = (
         f"<h3 style='font-size:1rem;margin-top:1.5rem'>Traceback</h3>"
-        f"<pre style='background:#f8f8f8;border:1px solid #ddd;padding:.8rem 1rem;"
+        f"<pre style='background:#fafafa;border:1px solid #e5e7eb;padding:.8rem 1rem;"
         f"border-radius:6px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;"
         f"font-size:.8rem'>{html.escape(result['details'])}</pre>"
         if result["details"] else ""
@@ -207,7 +207,7 @@ def render_eval_detail(run_id: str, test_key: str) -> str:
         <style>
           body {{ font-family: sans-serif; margin: 0; }}
           .container {{ max-width: 900px; margin: 0 auto; padding: 1rem; }}
-          .nav a {{ display: inline-flex; align-items: center; min-height: 44px; padding: .6rem .8rem; border-radius: 6px; text-decoration: none; touch-action: manipulation; }}
+          .nav a {{ display: inline-flex; align-items: center; min-height: 44px; padding: .6rem .8rem; border-radius: 6px; color: #171717; text-decoration: underline; touch-action: manipulation; }}
           .badge {{ display: inline-block; padding: .3rem .8rem; border-radius: 12px;
                     font-weight: 600; font-size: .9rem; }}
         </style>
@@ -216,23 +216,23 @@ def render_eval_detail(run_id: str, test_key: str) -> str:
         <div class="container">
           <div class="nav"><a href="/evals">← Eval Results</a></div>
           <h1 style="font-size:1.3rem; margin:.8rem 0 .2rem">{html.escape(short_name)}</h1>
-          <div style="color:#666; font-size:.85rem; margin-bottom:1rem">{html.escape(class_name)}</div>
+          <div style="color:#6b7280; font-size:.85rem; margin-bottom:1rem">{html.escape(class_name)}</div>
 
           <table style="border-collapse:collapse; font-size:.9rem; margin-bottom:1rem">
             <tr>
-              <td style="padding:.3rem .8rem .3rem 0; color:#555; font-weight:500">Run</td>
+              <td style="padding:.3rem .8rem .3rem 0; color:#6b7280; font-weight:500">Run</td>
               <td style="padding:.3rem 0">{html.escape(run_id)}</td>
             </tr>
             <tr>
-              <td style="padding:.3rem .8rem .3rem 0; color:#555; font-weight:500">Timestamp</td>
+              <td style="padding:.3rem .8rem .3rem 0; color:#6b7280; font-weight:500">Timestamp</td>
               <td style="padding:.3rem 0">{html.escape(run.get('timestamp', ''))}</td>
             </tr>
             <tr>
-              <td style="padding:.3rem .8rem .3rem 0; color:#555; font-weight:500">Duration</td>
+              <td style="padding:.3rem .8rem .3rem 0; color:#6b7280; font-weight:500">Duration</td>
               <td style="padding:.3rem 0">{result['time']:.2f}s</td>
             </tr>
             <tr>
-              <td style="padding:.3rem .8rem .3rem 0; color:#555; font-weight:500">Status</td>
+              <td style="padding:.3rem .8rem .3rem 0; color:#6b7280; font-weight:500">Status</td>
               <td style="padding:.3rem 0">
                 <span class="badge" style="{cell_style}">{html.escape(status.upper())}</span>
               </td>

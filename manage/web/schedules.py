@@ -48,12 +48,13 @@ def _render(scheds) -> str:
   body {{ font-family: system-ui, sans-serif; margin: 1rem; }}
   .topbar {{ display: flex; gap: .5rem; align-items: center; margin-bottom: 1rem; }}
   table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ text-align: left; padding: .5rem; border-bottom: 1px solid #ddd; vertical-align: top; }}
+  th, td {{ text-align: left; padding: .5rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
   td.prompt {{ max-width: 28rem; }}
-  .paused {{ color: #999; }}
-  .btn {{ display: inline-block; padding: .4rem .7rem; border-radius: 6px; border: 1px solid #ccc;
-          background: #f5f5f5; text-decoration: none; color: #222; cursor: pointer; }}
-  .btn-secondary {{ background: #fff; }}
+  .paused {{ color: #6b7280; }}
+  .btn {{ display: inline-block; padding: .4rem .7rem; border-radius: 6px; border: 1px solid #e5e7eb;
+          background: #ffffff; text-decoration: none; color: #171717; cursor: pointer; }}
+  .btn:hover {{ background: #fafafa; }}
+  .btn-secondary {{ background: #ffffff; }}
 </style></head><body>
   <div class="topbar"><a href="/" class="btn">&larr; Threads</a><h2>Scheduled prompts</h2></div>
   {body}
