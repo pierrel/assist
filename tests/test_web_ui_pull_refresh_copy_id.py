@@ -4,6 +4,7 @@ button on the thread page.  Render the pages and assert the elements are present
 """
 import asyncio
 import os
+from pathlib import Path
 
 import pytest
 
@@ -55,8 +56,8 @@ class TestPullToRefreshEveryPage:
         # the braced INJECTION forms, not the bare identifier — so the import line and
         # any comment mention don't inflate the count.
         import manage.web.evals as e, manage.web.review as r
-        assert open(e.__file__).read().count("{_PULL_TO_REFRESH_SCRIPT}") == 3   # 3 templates
-        assert open(r.__file__).read().count("{_threads._PULL_TO_REFRESH_SCRIPT}") == 2   # 2 pages
+        assert Path(e.__file__).read_text(encoding="utf-8").count("{_PULL_TO_REFRESH_SCRIPT}") == 3   # 3 templates
+        assert Path(r.__file__).read_text(encoding="utf-8").count("{_threads._PULL_TO_REFRESH_SCRIPT}") == 2   # 2 pages
 
 
 class TestCopyThreadId:
