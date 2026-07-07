@@ -110,6 +110,38 @@ _RIDER_HIDDEN_INPUTS = ('<input type="hidden" name="sent_at"/>'
                         '<input type="hidden" name="lat"/>'
                         '<input type="hidden" name="lon"/>')
 
+# Pull-to-refresh for touch devices — drop before </body> on every page.  When the
+# page is scrolled to the top and the user drags down past TRIGGER px, reload.  Shows
+# a bar that grows with the pull and flips to "release to refresh".  No-op on desktop
+# (no touch events).  Passive listeners (only acts at scrollY<=0, so it won't fight
+# normal scrolling).
+_PULL_TO_REFRESH_SCRIPT = """<script>
+(function(){
+  var startY=0, pulling=false, MAX=90, TRIGGER=65;
+  var bar=document.createElement('div');
+  bar.style.cssText='position:fixed;top:0;left:0;right:0;height:0;overflow:hidden;'
+    +'display:flex;align-items:flex-end;justify-content:center;background:#1d4ed8;'
+    +'color:#fff;font-size:14px;z-index:9999;transition:height .15s;';
+  var label=document.createElement('div'); label.style.padding='.4rem'; bar.appendChild(label);
+  document.body.appendChild(bar);
+  window.addEventListener('touchstart',function(e){
+    if(window.scrollY<=0){ startY=e.touches[0].clientY; pulling=true; }
+  },{passive:true});
+  window.addEventListener('touchmove',function(e){
+    if(!pulling) return;
+    var dy=e.touches[0].clientY-startY;
+    if(dy<=0||window.scrollY>0){ bar.style.height='0'; return; }
+    var h=Math.min(dy*0.5,MAX); bar.style.height=h+'px';
+    label.textContent=h>=TRIGGER?'\\u2191 release to refresh':'\\u2193 pull to refresh';
+  },{passive:true});
+  window.addEventListener('touchend',function(){
+    if(!pulling) return; pulling=false;
+    if((parseFloat(bar.style.height)||0)>=TRIGGER){ label.textContent='Refreshing\\u2026'; location.reload(); }
+    else { bar.style.height='0'; }
+  });
+})();
+</script>"""
+
 
 @app.exception_handler(InvalidThreadId)
 async def _invalid_thread_id(request, exc):
@@ -296,6 +328,7 @@ def render_index(query: str = "") -> str:
             }}
           }}
         </script>
+        {_PULL_TO_REFRESH_SCRIPT}
       </body>
     </html>
     """
@@ -578,7 +611,29 @@ def render_thread(
       </head>
       <body>
         <div class="container">
-          <div class="nav"><a href="/">← All threads</a></div>
+          <div class="nav" style="display:flex; justify-content:space-between; align-items:center;">
+            <a href="/">← All threads</a>
+            <button type="button" onclick="copyThreadId(this)"
+                    style="background:none; border:1px solid #d0d7de; border-radius:6px;
+                           color:#57606a; cursor:pointer; font-size:.8rem; padding:.3rem .6rem;
+                           touch-action:manipulation;">Copy ID</button>
+          </div>
+          <script>
+            function copyThreadId(btn){{
+              var id = {json.dumps(tid)};
+              var done = function(txt){{ var o=btn.textContent; btn.textContent=txt;
+                setTimeout(function(){{ btn.textContent=o; }}, 1200); }};
+              if (navigator.clipboard && navigator.clipboard.writeText) {{
+                navigator.clipboard.writeText(id).then(function(){{ done('Copied!'); }})
+                  .catch(function(){{ done('Copy failed'); }});
+              }} else {{
+                // http/older-browser fallback: a temporary textarea + execCommand
+                try {{ var t=document.createElement('textarea'); t.value=id; document.body.appendChild(t);
+                  t.select(); document.execCommand('copy'); document.body.removeChild(t); done('Copied!'); }}
+                catch(e){{ done('Copy failed'); }}
+              }}
+            }}
+          </script>
           <div id="titleView" style="display:flex; align-items:center; gap:.3rem;">
             <h2 style="font-size:1.2rem; margin:0">{html.escape(title)}</h2>
             {rename_button}
@@ -651,6 +706,7 @@ def render_thread(
             {body}
           </div>
         </div>
+        {_PULL_TO_REFRESH_SCRIPT}
       </body>
     </html>
     """
