@@ -121,24 +121,28 @@ _PULL_TO_REFRESH_SCRIPT = """<script>
   var bar=document.createElement('div');
   bar.style.cssText='position:fixed;top:0;left:0;right:0;height:0;overflow:hidden;'
     +'display:flex;align-items:flex-end;justify-content:center;background:#1d4ed8;'
-    +'color:#fff;font-size:14px;z-index:9999;transition:height .15s;';
+    +'color:#fff;font-size:14px;z-index:9999;transition:height .2s ease;';
   var label=document.createElement('div'); label.style.padding='.4rem'; bar.appendChild(label);
   document.body.appendChild(bar);
+  function collapse(){ pulling=false; bar.style.height='0px'; }
   window.addEventListener('touchstart',function(e){
     if(window.scrollY<=0){ startY=e.touches[0].clientY; pulling=true; }
   },{passive:true});
   window.addEventListener('touchmove',function(e){
     if(!pulling) return;
     var dy=e.touches[0].clientY-startY;
-    if(dy<=0||window.scrollY>0){ bar.style.height='0'; return; }
+    if(dy<=0||window.scrollY>0){ bar.style.height='0px'; return; }
     var h=Math.min(dy*0.5,MAX); bar.style.height=h+'px';
     label.textContent=h>=TRIGGER?'\\u2191 release to refresh':'\\u2193 pull to refresh';
   },{passive:true});
   window.addEventListener('touchend',function(){
     if(!pulling) return; pulling=false;
     if((parseFloat(bar.style.height)||0)>=TRIGGER){ label.textContent='Refreshing\\u2026'; location.reload(); }
-    else { bar.style.height='0'; }
+    else { bar.style.height='0px'; }
   });
+  // The gesture can be handed off to the browser (native overscroll) mid-pull — iOS
+  // then fires touchcancel, not touchend.  Without this the bar stays open (blue).
+  window.addEventListener('touchcancel', collapse);
 })();
 </script>"""
 
