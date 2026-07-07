@@ -119,7 +119,10 @@ class TestGiantsThreadTokenRegression(TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.tm = ThreadManager(root_dir=self.tmpdir)
-        self.thread = self.tm.new()
+        # NOTE: the Thread is created INSIDE the stub context in the test body, not
+        # here — Thread.__init__ eagerly builds its agent (calls create_research_agent),
+        # so it must be constructed while stub_research_subagent() is patched or the
+        # mock is too late and the real (SearXNG-hitting) subagent gets built.
 
     def tearDown(self):
         try:
@@ -148,6 +151,8 @@ class TestGiantsThreadTokenRegression(TestCase):
         # research report per turn drives the orchestrator's context/summarization path
         # without real search, and turns the ~40-min real-search run into minutes.
         with stub_research_subagent(_CANNED_REPORT):
+            # Build the Thread INSIDE the patch — its __init__ eagerly builds the agent.
+            self.thread = self.tm.new()
             r1 = self._send("turn 1", TURN_1)
             logger.info("turn 1 response (first 300 chars): %s", str(r1)[:300])
             r2 = self._send("turn 2", TURN_2)
