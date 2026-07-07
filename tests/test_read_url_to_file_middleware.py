@@ -5,6 +5,8 @@ the model-visible result is small (preview + path + grep instruction) regardless
 page size, and the stub backend received the FULL content.  Un-mocked at the seam
 that matters (no LLM).
 """
+from types import SimpleNamespace
+
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
@@ -20,10 +22,7 @@ class _StubBackend:
     def write(self, path, content):
         self.written[path] = content
         # mimic StateBackend.write's return shape (has .error / .path)
-        class _R:
-            error = "exists" if self._existing else None
-            path = None
-        return _R()
+        return SimpleNamespace(error=("exists" if self._existing else None), path=None)
 
 
 class _Req:

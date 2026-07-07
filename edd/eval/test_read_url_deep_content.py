@@ -3,7 +3,7 @@ read_url cap)?  This is the gate for the read_url-to-file change: read_url shoul
 write the full extracted content to a file + return a preview, and the agent should
 GREP the file for specifics.
 
-BASELINE (current main, read_url capped at 24000 chars): the fact ~32000 chars into
+BASELINE (before this change — read_url capped at 24000 chars): the fact ~32000 chars into
 the page is TRUNCATED away — the agent can't see it → should FAIL.  WITH the change:
 the full page is offloaded to a file and the agent greps it → should PASS.
 
@@ -25,7 +25,7 @@ os.environ.setdefault("ASSIST_MODEL_URL", "http://127.0.0.1:8000/v1")
 
 # A canned article about a FICTIONAL venue (so the model CANNOT answer from training
 # data — it must actually read the page).  The DEEP FACT sits ~32000 chars into the
-# extracted text — PAST read_url's current 24000-char cap — so the baseline (capped)
+# extracted text — PAST read_url's former 24000-char cap — so the baseline (capped)
 # can't see it; only writing the full page to a file + grepping it reaches the fact.
 _CAPACITY = "88,204"   # a made-up, unguessable number for a made-up venue
 _DEEP_FACT = f"The Vantalux Coliseum's exact seating capacity is {_CAPACITY} seats."
@@ -67,7 +67,7 @@ class TestReadUrlDeepContent(TestCase):
         self.addCleanup(SandboxManager.cleanup, self.workspace)
 
     def test_agent_reaches_deep_fact(self):
-        """The answer (88,204) lives ~32000 chars into the page — past the 24k cap.
+        """The answer (88,204) lives ~32000 chars into the page — past the former 24k cap.
         Baseline (main) can't see it → fails; with read_url→file + grep → passes."""
         with patch("assist.tools.requests.get", _mock_get), \
              patch("assist.tools.search_internet", _mock_search), \
@@ -80,4 +80,4 @@ class TestReadUrlDeepContent(TestCase):
         found = _CAPACITY in ans or _CAPACITY.replace(",", "") in ans.replace(",", "")
         self.assertTrue(found,
                         f"agent did not reach the deep fact (capacity {_CAPACITY}) — the 24k "
-                        f"cap truncates it, so it needs read_url->file + grep. Answer:\n{ans[:600]}")
+                        f"was past the former cap; with read_url->file the agent must GREP the offloaded file to reach it (offload/grep likely broke). Answer:\n{ans[:600]}")

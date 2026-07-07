@@ -57,7 +57,7 @@ grepping — is carried by the prompt + the framework's grep guidance.
 * Eval (new shape: mock the fetch, rate-limit-free)
 =edd/eval/test_read_url_deep_content.py= — a fictional venue (unguessable capacity 88,204)
 with the fact at ~32000 chars, PAST the 24k cap; =requests.get= + search mocked.
-- *Baseline (current main, 24k cap):* FAILED — the agent can't reach the fact (truncated).
+- *Baseline (pre-change, 24k cap):* FAILED — the agent can't reach the fact (truncated).
 - *With the feature: 3/3 PASS* — the agent greps the offloaded file → reaches the fact.
 Plus 6 middleware unit tests (bounded-by-construction at the seam: full content → file,
 ~1kB preview out; floor/error/Command/write-error paths). 938 unit green.

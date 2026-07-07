@@ -46,8 +46,12 @@ _PREVIEW_CHARS = 600
 _ERROR_PREFIX = "Error fetching URL:"   # read_url's bare-string error shape (tools.py)
 
 
-def _preview_message(msg: ToolMessage, url: str, path: str, full_len: int) -> ToolMessage:
-    preview = str(msg.content)[:_PREVIEW_CHARS]
+def _preview_message(msg: ToolMessage, content: str, url: str, path: str) -> ToolMessage:
+    # Preview from the SANITIZED content (same string written to the file), so the
+    # model-visible preview can't carry raw ANSI/control bytes regardless of where
+    # OutputSanitizationMiddleware sits relative to this one.
+    preview = content[:_PREVIEW_CHARS]
+    full_len = len(content)
     body = (
         f"Fetched {url}. Full page text ({full_len} chars) saved to {path} — this is "
         f"a PREVIEW ONLY (first {_PREVIEW_CHARS} chars):\n{preview}\n… [truncated] "
@@ -90,7 +94,7 @@ class ReadUrlToFileMiddleware(AgentMiddleware):
             logger.warning("ReadUrlToFile: write to %s failed: %s", path, write.error)
             return result
         url = (request.tool_call.get("args") or {}).get("url", "the page")
-        return _preview_message(result, url, path, len(content))
+        return _preview_message(result, content, url, path)
 
     def _safe_offload(self, request, result):
         try:
