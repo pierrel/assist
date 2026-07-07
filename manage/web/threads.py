@@ -340,18 +340,14 @@ def render_index(query: str = "") -> str:
     """
 
 
-# Anchor to a call-segment boundary (string start, or the " -- " join between calls)
-# so a tool arg / prose tail that merely contains "Calling <word>" can't inject a
-# spurious name into the summary.
-_TOOL_NAME_RE = re.compile(r"(?:\A| -- )Calling (?:subagent )?([\w.-]+)")
-
-
-def _tools_summary(raw: str) -> str:
+def _tools_summary(names) -> str:
     """A compact, subtle label for a collapsed tool-call turn — the distinct tool
     names in order (``read_url, grep``), so the turn reads at a glance without
-    expanding.  Falls back to ``tool call`` if the line doesn't match the pattern."""
+    expanding.  ``names`` comes from the structured tool calls (``_messages_to_dicts``),
+    so no arg/prose text can inject a spurious name.  Falls back to ``tool call``."""
     seen: list[str] = []
-    for name in _TOOL_NAME_RE.findall(raw):
+    for name in names or []:
+        name = str(name)
         if name not in seen:
             seen.append(name)
     return html.escape(", ".join(seen)) if seen else "tool call"
@@ -502,7 +498,7 @@ def render_thread(
             # A non-response turn (tool calls) — big and intermediate.  Collapse it
             # into a subtle <details> so the human/AI messages stay the focus; the
             # summary names the tools so the turn is legible without expanding.
-            bubble = (f'<details class="msg tools"><summary>{_tools_summary(raw)}</summary>'
+            bubble = (f'<details class="msg tools"><summary>{_tools_summary(m.get("names"))}</summary>'
                       f'<div class="content">{content_html}</div></details>')
         else:
             cls = "user" if role == "user" else "assistant"

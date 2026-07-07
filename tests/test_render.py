@@ -310,6 +310,18 @@ class TestMessagesToDicts:
         out = _messages_to_dicts([m])
         assert out[0]["role"] == "tools" and "read_file" in out[0]["content"]
 
+    def test_tools_dict_carries_structured_names(self):
+        # the collapsed-turn summary is built from these names, not re-parsed text
+        from assist.thread import _messages_to_dicts, tool_call_label
+        m = self._ai(tool_calls=[
+            {"name": "read_url", "args": {"url": "x"}, "id": "1"},
+            {"name": "task", "args": {"subagent_type": "research"}, "id": "2"},
+        ])
+        assert _messages_to_dicts([m])[0]["names"] == ["read_url", "research"]
+        # task → subagent; plain tool → its name
+        assert tool_call_label({"name": "task", "args": {"subagent_type": "dev"}}) == "dev"
+        assert tool_call_label({"name": "grep", "args": {}}) == "grep"
+
     def test_plain_user_and_assistant(self):
         from assist.thread import _messages_to_dicts
         from langchain_core.messages import HumanMessage

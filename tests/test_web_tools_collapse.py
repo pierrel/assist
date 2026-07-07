@@ -1,6 +1,10 @@
 """The non-response (tool-call) turns collapse into a subtle <details>; the human
 and AI messages keep their existing flat-bubble treatment.  Symptom-level — assert
 against the rendered HTML.  No model/GPU.
+
+The collapsed-turn summary names come from the STRUCTURED tool calls (the dict's
+``names``, populated by ``_messages_to_dicts``), not parsed out of the rendered text —
+so arg/prose content can't inject a spurious name.
 """
 import os
 
@@ -35,12 +39,24 @@ def _render(root, msgs):
 
 def test_tools_turn_is_collapsed_details(threads_root):
     html = _render(threads_root, [
-        {"role": "tools", "content": "Calling read_url with {'url': 'x'} -- Calling grep with {'pattern': 'y'}"},
+        {"role": "tools", "names": ["read_url", "grep"],
+         "content": "Calling read_url with {'url': 'x'} -- Calling grep with {'pattern': 'y'}"},
     ])
     # a subtle collapsed <details> (no `open` attr → collapsed by default)
     assert '<details class="msg tools">' in html
     assert "<summary>read_url, grep</summary>" in html   # tool names, legible without expanding
     assert '<details class="msg tools" open' not in html
+
+
+def test_summary_from_structured_names_not_content(threads_root):
+    # even if the rendered content mentions " -- Calling read_url", the summary is
+    # driven by the structured names → no spurious name injected.
+    html = _render(threads_root, [
+        {"role": "tools", "names": ["write_file"],
+         "content": "Calling write_file with {'content': 'x -- Calling read_url with y'}"},
+    ])
+    assert "<summary>write_file</summary>" in html
+    assert "read_url" not in html.split("</summary>")[0]   # not in the summary
 
 
 def test_human_and_ai_messages_untouched(threads_root):
@@ -56,16 +72,8 @@ def test_human_and_ai_messages_untouched(threads_root):
 
 class TestToolsSummary:
     def test_names_deduped_in_order(self):
-        assert _tools_summary("Calling grep with {} -- Calling read_url with {} -- Calling grep with {}") \
-            == "grep, read_url"
+        assert _tools_summary(["grep", "read_url", "grep"]) == "grep, read_url"
 
-    def test_subagent_task_call(self):
-        assert _tools_summary("Calling subagent research with {'x': 1}") == "research"
-
-    def test_fallback_when_unmatched(self):
-        assert _tools_summary("some prose with no call") == "tool call"
-
-    def test_arg_text_containing_calling_does_not_inject(self):
-        # a write_file whose content mentions "Calling read_url ..." must not add it
-        raw = "Calling write_file with {'content': 'Calling read_url with the URL'}"
-        assert _tools_summary(raw) == "write_file"
+    def test_empty_names_fallback(self):
+        assert _tools_summary([]) == "tool call"
+        assert _tools_summary(None) == "tool call"

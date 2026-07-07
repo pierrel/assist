@@ -43,7 +43,8 @@ def _messages_to_dicts(raw: list) -> list[dict]:
             calls = getattr(m, "tool_calls", None)
             if calls:
                 msgs.append({"role": "tools",
-                             "content": _render_calls(calls, m.content)})
+                             "content": _render_calls(calls, m.content),
+                             "names": [tool_call_label(c) for c in calls]})
             elif m.content:
                 msgs.append({"role": "assistant", "content": m.content})
     return msgs
@@ -56,6 +57,16 @@ def _render_calls(calls: list, content) -> str:
     if content:
         return f"{s} \n> {content}" if s else str(content)
     return s
+
+
+def tool_call_label(call: dict) -> str:
+    """The display name for a tool call — the subagent for a ``task`` call, else the
+    tool name.  Used for the collapsed-turn summary in the web UI, derived from the
+    structured call (not parsed back out of the rendered text)."""
+    name = call.get("name", "none")
+    if name == "task" and call.get("args"):
+        return call["args"].get("subagent_type", "none")
+    return name
 
 
 def render_tool_call(call: dict) -> str:
