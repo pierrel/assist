@@ -1,0 +1,73 @@
+#+TITLE: read_url → file: full page content, greppable on demand
+#+DATE: <2026-07-06>
+#+STATUS: BUILT + eval-proven (branch read-url-to-file). Design-reviewed (2 lenses). Moots #137.
+
+* Problem
+=read_url= returned truncated page text (a 4000-char cap, raised to 24000 this session as
+an interim fix). Even 24k truncates: the research agent works from page-TOPS and can't
+reach a fact buried deeper. Removing the cap without offload would REINTRODUCE context
+bloat (many reads × full pages → the slow-zone #137 targets; measured subagent peak ~13.6k
+with the cap). Pierre: write the full page to a FILE and grep it on demand — fix by
+construction, not a window trick.
+
+* Design (mechanism (b): a small tool-targeted offload middleware)
+=read_url= returns the FULL extracted text (uncapped). A new
+=ReadUrlToFileMiddleware= (=assist/middleware/read_url_to_file.py=, ~110 LOC, clones
+=OutputSanitizationMiddleware='s sync+async =wrap_tool_call= shape) intercepts a =read_url=
+result and, when it exceeds a floor, writes the full content to
+=/large_tool_results/<sanitize_tool_call_id(tool_call_id)>= and returns a bounded
+PREVIEW (~600 chars) + the path + a grep instruction. Subagent context is bounded to the
+preview (~1kB) BY CONSTRUCTION, regardless of page size.
+
+*Why =/large_tool_results/=:* it's the exact prefix deepagents' built-in large-result
+eviction uses, already routed to ephemeral =StateBackend= in every research backend
+(=backends.py:63=), and the framework's filesystem system prompt ALREADY tells the model
+to =grep=/=read_file= it — so the behavioral guidance comes free; the sub_research prompt
+adds one checkable reinforcement line.
+
+*Rejected:* (a) making =read_url= backend-aware (pushes deepagents I/O into a pure
+boundary fn — bad layering); (c) uncap + rely on deepagents' 20k-token (=80k-char) offload
+(medium 24-80k-char pages re-flood context; and the threshold is hardcoded/unexposed, a
+2nd FilesystemMiddleware double-registers tools).
+
+* The two design-review revisions (folded in)
+1. *Floor, not literal "always".* Offload only above ~4000 chars; a short page or an
+   =Error fetching URL:= string returns inline — else the small model chases an all-but-
+   empty file. Still effectively "always" for any real article.
+2. *Sanitize before writing.* =read_url= HTML can carry raw ANSI/control bytes (the
+   BadRequest-outage class). The middleware =_sanitize=s the content before the file write,
+   so a later grep/read_file can't re-inject raw bytes — order-independent vs the sanitizer.
+
+* Correctness (the make-or-break, design-review-verified)
+The backend write during =wrap_tool_call= lands in the state a later =grep=/=read_file=
+reads — because deepagents' OWN =FilesystemMiddleware.wrap_tool_call= does exactly this
+(writes =/large_tool_results/= during the hook via =StateBackend.write=, reads back later);
+the feature rides the identical proven path. Ordering: our middleware is INNER of the
+auto-installed FilesystemMiddleware, so it offloads first and the outer one no-ops on the
+small preview (no double-eviction). Write-error → fall back to the original (never break
+research). =Command=/non-=ToolMessage= pass through.
+
+* Ethos: guidance-first honored
+"Guidance over middleware" targets BEHAVIORAL guards that re-do the model's judgment.
+Offload is I/O plumbing the model can't do itself — you can't instruct it to shrink a
+ToolMessage the framework already appended to its context. That's the ethos's own
+exception ("middleware only when guidance provably can't"). The behavioral half — actually
+grepping — is carried by the prompt + the framework's grep guidance.
+
+* Eval (new shape: mock the fetch, rate-limit-free)
+=edd/eval/test_read_url_deep_content.py= — a fictional venue (unguessable capacity 88,204)
+with the fact at ~32000 chars, PAST the 24k cap; =requests.get= + search mocked.
+- *Baseline (current main, 24k cap):* FAILED — the agent can't reach the fact (truncated).
+- *With the feature: 3/3 PASS* — the agent greps the offloaded file → reaches the fact.
+Plus 6 middleware unit tests (bounded-by-construction at the seam: full content → file,
+~1kB preview out; floor/error/Command/write-error paths). 938 unit green.
+
+* Moots #137
+#137 added an earlier-summarization TRIGGER to lower the probability of subagent overflow.
+This bounds per-read context to a ~1kB preview BY CONSTRUCTION regardless of page size or
+read count — the peak #137 chased (~13.6k measured) is now bounded structurally. Recommend
+closing #137 as superseded.
+
+* Follow-up (roadmapped, not here)
+Semantic search over the offloaded pages (embed chunks → query "find the part about X") —
+better than grep for fuzzy queries, but heavier; only if grep-on-file proves insufficient.
