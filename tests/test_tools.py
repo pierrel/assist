@@ -327,7 +327,7 @@ class TestReadUrlExtraction:
 
     def test_returns_full_content_uncapped(self):
         # read_url no longer truncates — it returns the full extracted text; the
-        # large-result offload to a file is ReadUrlToFileMiddleware's job now.
+        # large-result offload to a file is ToolResultToFileMiddleware's job now.
         assert len(self._read("<article><p>" + ("x" * 30000) + "</p></article>")) == 30000
         assert len(self._read("<article><p>" + ("x" * 9000) + "</p></article>")) == 9000
 

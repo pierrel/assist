@@ -180,7 +180,7 @@ def read_url(url: str) -> str:
     (``<article>``/``<main>``) so the char budget holds signal, not nav/footer
     chrome; degrades to a whole-page text strip (scripts/styles removed) when
     the page marks no article. Returns the FULL extracted text (not truncated) —
-    ReadUrlToFileMiddleware offloads a large result to a file and hands the agent a
+    the offload middleware saves a large result to a file and hands the agent a
     preview + path to grep, so full page content stays reachable without flooding
     context. The error path returns a short ``Error fetching URL:`` string inline.
 
