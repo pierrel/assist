@@ -340,6 +340,23 @@ def render_index(query: str = "") -> str:
     """
 
 
+# Anchor to a call-segment boundary (string start, or the " -- " join between calls)
+# so a tool arg / prose tail that merely contains "Calling <word>" can't inject a
+# spurious name into the summary.
+_TOOL_NAME_RE = re.compile(r"(?:\A| -- )Calling (?:subagent )?([\w.-]+)")
+
+
+def _tools_summary(raw: str) -> str:
+    """A compact, subtle label for a collapsed tool-call turn — the distinct tool
+    names in order (``read_url, grep``), so the turn reads at a glance without
+    expanding.  Falls back to ``tool call`` if the line doesn't match the pattern."""
+    seen: list[str] = []
+    for name in _TOOL_NAME_RE.findall(raw):
+        if name not in seen:
+            seen.append(name)
+    return html.escape(", ".join(seen)) if seen else "tool call"
+
+
 def render_thread(
     tid: str,
     chat: Thread | None,
@@ -481,8 +498,16 @@ def render_thread(
         else:
             # Human/user content is plain text with basic escaping
             content_html = html.escape(raw).replace("\n", "<br/>")
-        cls = "user" if role == "user" else ("tools" if role == "tools" else "assistant")
-        bubble = f"<div class=\"msg {cls}\"><div class=\"role\">{role}</div><div class=\"content\">{content_html}</div></div>"
+        if role == "tools":
+            # A non-response turn (tool calls) — big and intermediate.  Collapse it
+            # into a subtle <details> so the human/AI messages stay the focus; the
+            # summary names the tools so the turn is legible without expanding.
+            bubble = (f'<details class="msg tools"><summary>{_tools_summary(raw)}</summary>'
+                      f'<div class="content">{content_html}</div></details>')
+        else:
+            cls = "user" if role == "user" else "assistant"
+            bubble = (f'<div class="msg {cls}"><div class="role">{role}</div>'
+                      f'<div class="content">{content_html}</div></div>')
         rendered.append(bubble)
     if busy:
         rendered.insert(
@@ -556,6 +581,16 @@ def render_thread(
           .msg {{ margin: .6rem 0; padding: .6rem .8rem; border-radius: 8px; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }}
           .msg.user {{ background: #ffffff; border: 1px solid #e5e7eb; }}
           .msg.assistant {{ background: #fafafa; border: 1px solid #e5e7eb; }}
+          /* Non-response (tool-call) turns: a subtle collapsed <details> so they
+             don't compete with the human/AI messages.  Muted, no bubble chrome. */
+          .msg.tools {{ background: transparent; border: 0; padding: 0; margin: .35rem 0 .35rem .2rem; }}
+          .msg.tools > summary {{ list-style: none; cursor: pointer; user-select: none;
+              font-size: .75rem; color: #9ca3af; padding: .15rem 0; }}
+          .msg.tools > summary::-webkit-details-marker {{ display: none; }}
+          .msg.tools > summary::before {{ content: "\\25b8"; color: #cbd5e1; margin-right: .4rem; }}
+          .msg.tools[open] > summary::before {{ content: "\\25be"; }}
+          .msg.tools > .content {{ font-size: .82rem; color: #6b7280; margin: .15rem 0 .15rem .3rem;
+              padding: .3rem .55rem; border-left: 2px solid #e5e7eb; }}
           /* A file embed lifted from a ```render block, shown inline in the
              assistant bubble (org/md rendered page, or pdf viewer). */
           .show-embed {{ margin: .5rem 0; }}
