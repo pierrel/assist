@@ -51,10 +51,12 @@ class TestPullToRefreshEveryPage:
 
     def test_evals_and_review_modules_inject_it(self):
         # structural guard: the main-table (evals) + review pages inject the shared
-        # script (they need data/a tid to render, so assert the source wiring).
+        # script (they need data/a tid to render, so assert the source wiring).  Count
+        # the braced INJECTION forms, not the bare identifier — so the import line and
+        # any comment mention don't inflate the count.
         import manage.web.evals as e, manage.web.review as r
-        assert open(e.__file__).read().count("_PULL_TO_REFRESH_SCRIPT") >= 3   # 3 templates
-        assert open(r.__file__).read().count("_PULL_TO_REFRESH_SCRIPT") == 2   # 2 pages
+        assert open(e.__file__).read().count("{_PULL_TO_REFRESH_SCRIPT}") == 3   # 3 templates
+        assert open(r.__file__).read().count("{_threads._PULL_TO_REFRESH_SCRIPT}") == 2   # 2 pages
 
 
 class TestCopyThreadId:

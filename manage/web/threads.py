@@ -626,8 +626,10 @@ def render_thread(
               // textarea + execCommand fallback — used when clipboard is absent AND when
               // navigator.clipboard exists but REJECTS (insecure context / denied permission).
               var fallback = function(){{
-                try {{ var t=document.createElement('textarea'); t.value=id; document.body.appendChild(t);
-                  t.select(); var ok=document.execCommand('copy'); document.body.removeChild(t);
+                try {{ var t=document.createElement('textarea'); t.value=id; t.setAttribute('readonly','');
+                  t.style.cssText='position:fixed;top:-9999px;left:-9999px;opacity:0;';  // off-screen: no scroll jump
+                  document.body.appendChild(t); t.select();
+                  var ok=document.execCommand('copy'); document.body.removeChild(t);
                   done(ok ? 'Copied!' : 'Copy failed'); }}
                 catch(e){{ done('Copy failed'); }}
               }};
