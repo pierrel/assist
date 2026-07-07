@@ -57,6 +57,13 @@ def stub_research_subagent(findings="(stubbed research findings)"):
     context deterministically.  See ``AGENTS.md`` testing guideline #5 and
     ``docs/2026-07-06-research-eval-mocking.org``.  ALWAYS use this in an eval that
     triggers research but is not itself testing research/search behavior.
+
+    USAGE CONSTRAINT — construct the agent/Thread INSIDE this context.  ``create_agent``
+    (and ``Thread.__init__``, which calls it eagerly) build the research subagent at
+    construction time, so the patch must be active THEN.  Building the agent/Thread in
+    ``setUp`` or before the ``with`` block silently binds the REAL subagent and the mock
+    has no effect (the eval then hits SearXNG anyway).  Do:
+    ``with stub_research_subagent(...): agent = create_agent(...); agent.message(...)``.
     """
     def _stub(*args, **kwargs):
         return RunnableLambda(

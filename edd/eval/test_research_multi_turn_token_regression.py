@@ -46,12 +46,14 @@ The research subagent is MOCKED (a large canned report per turn via
 real search rate-limits SearXNG, and this eval tests the caller-facing
 overflow guard, not search behavior.  The canned report drives the
 orchestrator's context/summarization path across the three turns
-without SearXNG, turning the ~40-min real-search run into ~14 min and
-removing rate-limit false-negatives.  (Historical note: the original
-``BadRequestError`` was a 53k-context older model; on the current 131k
-model this run passes without forcing overflow — it is a plumbing
-regression guard for the summarizer/retry wiring, which the mocked
-context still exercises.)
+without SearXNG, so the run is rate-limit-free and deterministic (and
+much faster than the real-search version).  The mock is entered BEFORE
+the ``Thread`` is constructed (``Thread.__init__`` eagerly builds the
+agent — see ``stub_research_subagent``'s usage constraint).  (Historical
+note: the original ``BadRequestError`` was a 53k-context older model; on
+the current 131k model this run passes without forcing overflow — it is
+a plumbing regression guard for the summarizer/retry wiring, which the
+mocked context still exercises.)
 """
 import logging
 import os
