@@ -1,0 +1,91 @@
+#+TITLE: Tool-result → file: configurable low-bound offload for the small model
+#+DATE: <2026-07-07>
+#+STATUS: BUILT + eval-proven (branch tool-result-to-file). Generalizes read_url→file (#172) to read_url + execute.
+
+* Problem
+Some tools return a lot of text — read_url (a full page), execute (a long build/test log).
+Left inline, a few flood the small model's context (the slow-zone). deepagents'
+=FilesystemMiddleware= only offloads at =tool_token_limit_before_evict=20000= tokens
+(~80k chars) — tuned for a 200k-context FRONTIER model. We run Qwen3.6 (single slot,
+throughput collapses ~30k, we WANT tight context) — a different game. So we want a much
+LOWER bound, on an opt-in set of tools, writing to a file the model greps on demand.
+
+* Decision: STANDALONE middleware, NOT a subclass (Pierre's lean, considered + declined)
+Pierre asked to consider subclassing =FilesystemMiddleware=. Investigated by the architect
+AND an independent review, both concluded STANDALONE, on the code:
+- =FilesystemMiddleware= is a FAT 3-job middleware: system-prompt injection + message
+  eviction (=wrap_model_call=), large-result eviction (=wrap_tool_call= — the one behavior
+  we want), and registering the 7 file tools (=self.tools=). A subclass inherits all three;
+  the main agent already has one auto-installed, so a subclass double-injects the prompt,
+  re-runs message eviction, and re-registers 7 tools (the =self.tools=[]= hack).
+- The one behavior we want (=_process_large_message=) writes RAW content (no sanitize) and
+  emits a read_file/offset preview — we REQUIRE sanitize-before-write (raw ANSI in a log is
+  the BadRequest-outage class) + an eval-proven GREP preview. So we'd override it wholesale
+  while coupling to 3 private members (=_process_large_message=, =_tool_token_limit_before_evict=,
+  =_large_tool_results_prefix=) and fighting its shared 80k threshold.
+- Net: subclassing reuses NOTHING while adding LSP smell (rule 17) + private coupling
+  (rule 14). A small standalone middleware IS the isolated boundary. The ~15-line write+
+  preview block isn't DRY-violating "duplication" (rule 9) — it does a DIFFERENT thing
+  (sanitized + grep-preview vs raw + read_file-preview).
+
+* Design — =ToolResultToFileMiddleware(backend, *, tools, floor_chars, preview_style)=
+(=assist/middleware/tool_result_to_file.py=.) For a POSITIVE allowlist of tool names, a
+result >=floor_chars= is written to =/large_tool_results/<sanitize_tool_call_id>= and
+replaced with a preview + path + grep instruction. Sanitizes before write; write-error /
+=Command= / not-listed / under-floor all pass through; sync + async; never breaks the tool
+path (try/except → original). Bounded to ~1kB per call BY CONSTRUCTION.
+
+Wiring (differs per agent — the tool surfaces differ):
+- read_url — research agent (orchestrator + =_subagent_safety_mw=), floor 4000, =head=
+  preview. Pure rename of the shipped read_url→file; proven.
+- execute — dev/main agent (=create_agent=), floor 8000, =head_tail= preview. NEW.
+
+Exclusions by construction (never listed): =task= (the orchestrator needs the whole
+subagent report inline to synthesize — filing it forces it to grep its own subagent), the
+file tools (read_file/grep/ls — self-truncating), =search_internet= (bounded lists the
+model scans to PICK a url).
+
+* The notification/guidance mechanism (how the agent is told — LOAD-BEARING)
+Three reinforcing layers; the tool-result message is the load-bearing one (in-context, at
+the exact moment):
+
+1. *The tool result the model sees IS the instruction* (=_preview_message=). The middleware
+   REPLACES the raw content with, templatized:
+   #+begin_example
+   Result of {tool}({source}) — {N} chars saved to {path}. This is a PREVIEW ONLY:
+   {preview}
+   … [truncated] To find a specific value — a number, date, name, quote, error, or line —
+   DO NOT answer from this preview: grep the file — grep(pattern="<keyword>", path="{path}")
+   — then read_file around the match.
+   #+end_example
+   ={path}= = =/large_tool_results/<sanitized tool_call_id>=; ={source}= = the url (read_url)
+   / command (execute); ={preview}= = 600 sanitized chars (=head=: first 600; =head_tail=:
+   first 300 + last 300 — a log's salient line is at the TAIL). The grep line is a CHECKABLE
+   arg-shaped instruction (AGENTS.md "instruction shape matters") — the exact call, spelled out.
+2. *Prompt reinforcement* — =sub_research.txt.j2= step 5 (research), telling the model
+   read_url returns a preview+path and to grep for specifics.
+3. *deepagents' filesystem system prompt* — its "Large Tool Results" section already tells
+   the model offloaded results live under =/large_tool_results/<tool_call_id>= and to grep
+   there. By writing to that exact prefix we inherit it free.
+
+* head vs head_tail (the execute-specific catch)
+read_url uses =head= (an article's lede is at the top — proven). A command log's decisive
+line (the error, the exit summary) is at the TAIL while the head is progress noise — so
+execute uses =head_tail= so the preview surfaces "BUILD FAILED" for orientation, and the
+model greps for the specific code.
+
+* Eval-first — per-tool gate (grep-adoption is TOOL-SPECIFIC, not assumed to transfer)
+- read_url: PROVEN — =test_read_url_deep_content= baseline FAIL (24k cap) → 3/3 grep PASS;
+  live turn: 231 offloads / 258 greps.
+- execute: =test_execute_deep_log= (mocked 56k failing-build log, error code ZX-99741 ~4.9k
+  from the end = past the tail preview → forces a grep) — WITH the feature *3/3 PASS*: the
+  model greps the offloaded log. Confirms grep-adoption TRANSFERS to a different tool.
+  (A separate main-baseline wasn't cleanly run; the offload→grep pattern's value was
+  established by read_url's head-to-head, execute confirms transfer. Honest note, not a
+  claimed baseline.)
+- Both mock the network/execute boundary → rate-limit-free, deterministic.
+
+* Follow-up (roadmapped, not here)
+More tools (guarded by their own eval); if deepagents ever exposes a per-tool eviction
+threshold, this middleware collapses toward config. Semantic search over offloaded files
+if grep proves insufficient.
