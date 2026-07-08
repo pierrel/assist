@@ -364,8 +364,9 @@ def _now_ms() -> int:
 
 
 def _format_elapsed(seconds: float) -> str:
-    """Human duration for a timing badge: "14s" | "2m 5s" | "1h 3m". Mirrored by the
-    JS ticker in _ELAPSED_TICKER_SCRIPT — keep the two boundary rules in sync (tested)."""
+    """Human duration for a timing badge: "14s" | "2m 5s" | "1h 3m". The JS ticker in
+    _ELAPSED_TICKER_SCRIPT is a hand-kept mirror — keep its boundary rules identical to
+    this (this Python side is unit-tested; the JS copy is not run in tests)."""
     s = max(0, int(round(seconds)))
     if s < 60:
         return f"{s}s"
@@ -458,7 +459,7 @@ def render_thread(
     # and the append doesn't shift these indices. Keyed by the same user-bubble ordinal the
     # write side records (_human_ordinal). dict miss → pre-feature/errored turn → no badge.
     _timings = _get_timings(tid)
-    _badge_at: dict[int, int] = {}
+    badge_at: dict[int, int] = {}
     if _timings:
         _ord = 0
         for _i, _m in enumerate(msgs):
@@ -466,7 +467,10 @@ def render_thread(
             if _r == "user":
                 _ord += 1
             elif _r == "assistant" and _ord and str(_ord) in _timings:
-                _badge_at[_i] = _timings[str(_ord)]  # overwrites → ends as the LAST one
+                # Keyed by message index; a turn has exactly one content-only assistant
+                # bubble (_messages_to_dicts routes tool-call AIMessages to "tools"), so
+                # this marks that turn's single concluding reply — no double-badging.
+                badge_at[_i] = _timings[str(_ord)]
 
     # While busy, surface the pending (just-submitted) message as a user
     # bubble so it's visible right after the redirect — unless the agent has
@@ -573,11 +577,11 @@ def render_thread(
             cls = "user" if role == "user" else "assistant"
             # Completed-turn elapsed badge on the turn's concluding assistant reply.
             badge = ""
-            if role == "assistant" and _i in _badge_at:
+            if role == "assistant" and _i in badge_at:
                 badge = (f'<span class="elapsed-badge" title="time from your message to '
                          f'this reply" style="margin-left:.5rem; color:#9ca3af; '
                          f'font-size:.75rem; font-weight:normal;">'
-                         f'{html.escape(_format_elapsed(_badge_at[_i]))}</span>')
+                         f'{html.escape(_format_elapsed(badge_at[_i]))}</span>')
             bubble = (f'<div class="msg {cls}"><div class="role">{role}{badge}</div>'
                       f'<div class="content">{content_html}</div></div>')
         rendered.append(bubble)
@@ -847,7 +851,11 @@ def _initialize_thread(tid: str, text: str, domain: str | None,
     """Background task: clone the repo, start sandbox, process the first message."""
     try:
         if domain:
-            _set_status(tid, "cloning", pending_message=text, domain=domain)
+            # Carry started_at through the cloning write (_set_status is a full replace):
+            # otherwise a domain thread's elapsed baseline resets at clone-completion,
+            # excluding the clone+init the user has been waiting through since submit.
+            _set_status(tid, "cloning", pending_message=text, domain=domain,
+                        started_at=_get_status(tid).get("started_at"))
             try:
                 dm = DomainManager(
                     MANAGER.thread_default_working_dir(tid),
@@ -989,7 +997,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                             "%s; new message archived but not triaged this turn", tid)
                             _set_status(tid, "awaiting_approval",
                                         pending_reply=chat.pending_reply().get("text", ""),
-                                        pending_sender=prior_pending_sender)
+                                        pending_sender=prior_pending_sender,
+                                        started_at=started_at)
                             return
                         if same_sender:
                             text = _SUPERSEDE_RIDER + text
@@ -1030,8 +1039,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             logging.warning("turn-timing record failed for %s: %s", tid, e)
         pending = chat.pending_reply()
         if pending:
+            # Preserve started_at so the HITL approve/reject resume reuses the original
+            # submit time — the approved reply's badge then shows human→final-reply, not
+            # the approval-reaction latency (the resume re-records this turn's ordinal).
             _set_status(tid, "awaiting_approval",
-                        pending_reply=pending.get("text", ""), pending_sender=sender or "")
+                        pending_reply=pending.get("text", ""), pending_sender=sender or "",
+                        started_at=started_at)
         else:
             _set_status(tid, "ready")
     except ThreadPauseRequested:

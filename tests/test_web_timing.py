@@ -80,6 +80,25 @@ def test_badge_lands_on_the_correct_assistant_bubble(thread_env):
     assert html.index("2m 5s") < html.index("ANSWER-TWO") < html.index("14s") < html.index("ANSWER-ONE")
 
 
+def test_badge_ordinal_counts_a_review_submission_as_a_user_turn(thread_env):
+    # A review submission renders as a "user" bubble (different render branch, same role),
+    # so the ordinal count must include it and the badge must land on ITS reply — the
+    # design's C1 "span a review submission" case.
+    from manage.web.review import _REVIEW_HEADER
+    msgs = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "ANSWER-ONE"},
+        {"role": "user", "content": _REVIEW_HEADER + "\nlooks good, ship it"},
+        {"role": "assistant", "content": "ANSWER-REVIEW"},
+    ]
+    st._set_status("t1", "ready")
+    st._append_timing("t1", 1, 10)
+    st._append_timing("t1", 2, 200)  # the review turn is ordinal 2
+    html = render_thread("t1", _FakeThread(msgs))
+    assert html.count("elapsed-badge") == 2
+    assert html.index("3m 20s") < html.index("ANSWER-REVIEW") < html.index("10s") < html.index("ANSWER-ONE")
+
+
 def test_no_sidecar_renders_no_badge_and_does_not_crash(thread_env):
     st._set_status("t1", "ready")  # no _append_timing → no turn_timings.json
     html = render_thread("t1", _FakeThread(_two_turns()))
