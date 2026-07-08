@@ -129,6 +129,64 @@ class TestRenderAgent(TestCase):
             f"blocks: {blocks}",
         )
 
+    def _write_paths(self, agent) -> list:
+        """Paths the agent wrote/edited this turn (write_file / edit_file tool calls)."""
+        from langchain_core.messages import AIMessage
+        paths = []
+        for m in agent.all_messages():
+            if not isinstance(m, AIMessage):
+                continue
+            for tc in (getattr(m, "tool_calls", None) or []):
+                if tc.get("name") in ("write_file", "edit_file"):
+                    args = tc.get("args") or tc.get("arguments") or {}
+                    if isinstance(args, dict):
+                        p = args.get("file_path") or args.get("path") or ""
+                        if p:
+                            paths.append(str(p))
+        return paths
+
+    def test_shows_unsupported_file_instead_of_summarizing(self):
+        """The 2026-07-08 regression: asked to SHOW a file whose extension isn't
+        .org/.md/.pdf (here a .txt.j2 template), the agent must render it — either
+        the file directly (it now renders as text) OR a converted /tmp/*.md copy —
+        NOT fall back to reading + summarizing it."""
+        fs = dict(_personal_workspace())
+        fs["research_prompt.txt.j2"] = (
+            "You are a dedicated researcher. Conduct thorough research and cite sources. "
+            "MARKER-QZX7 always cite provenance.")
+        agent = self.create_agent(fs)
+        agent.message("Show me the research_prompt.txt.j2 file")
+        blocks = self._render_block_paths(agent)
+        writes = self._write_paths(agent)
+        # a render block for the original unsupported file (text fallback) OR for a
+        # /tmp/*.md the agent wrote from it — either way it chose to SHOW, not summarize.
+        showed_original = any("research_prompt.txt.j2" in b for b in blocks)
+        showed_tmp_copy = (any("/tmp/" in b and ".md" in b.lower() for b in blocks)
+                           and any("/tmp/" in w and w.lower().endswith(".md") for w in writes))
+        self.assertTrue(
+            showed_original or showed_tmp_copy,
+            f"expected a render block for the .txt.j2 (direct text) or a /tmp/*.md copy "
+            f"of it; render blocks: {blocks}; writes: {writes}",
+        )
+
+    def test_converts_unsupported_file_to_tmp_md_when_asked_formatted(self):
+        """The copy/modify-for-render path specifically: asked to show an unsupported
+        file NICELY FORMATTED, the agent writes a converted /tmp/*.md and renders that
+        (using the now-persistent /tmp scratch dir)."""
+        fs = dict(_personal_workspace())
+        fs["notes.py"] = "# TODO: MARKER-PY42\nprint('backups run nightly')\n"
+        agent = self.create_agent(fs)
+        agent.message("Show me notes.py nicely formatted as markdown")
+        blocks = self._render_block_paths(agent)
+        writes = self._write_paths(agent)
+        wrote_tmp_md = any("/tmp/" in w and w.lower().endswith(".md") for w in writes)
+        rendered_tmp = any("/tmp/" in b and ".md" in b.lower() for b in blocks)
+        self.assertTrue(
+            wrote_tmp_md and rendered_tmp,
+            f"expected the agent to write a /tmp/*.md copy AND render it; "
+            f"writes: {writes}; render blocks: {blocks}",
+        )
+
     def test_emits_page_range(self):
         """Section by page: 'show page N of <pdf>' carries a pages: range."""
         from pypdf import PdfWriter
