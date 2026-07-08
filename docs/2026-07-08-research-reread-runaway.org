@@ -1,300 +1,231 @@
-#+TITLE: Research re-read runaway — timeline, middleware-interference audit, root-cause fix
+#+TITLE: Research read_url runaway — forensic timeline, middleware audit, root-cause fix
 #+DATE: <2026-07-08>
 #+STATUS: DESIGN TO READ (no code). Non-blocking. Guidance-first per AGENTS.md §"prefer guidance over middleware".
 
+* Provenance note (why this doc was rewritten)
+
+The first draft of this doc diagnosed a *cross-dispatch re-dispatch* runaway (the
+orchestrator re-dispatching its searcher, per-run guards resetting each dispatch).
+Live forensics on thread =20260708090812-b37c712b= (a "where is he buried?" turn)
+disproved that. The actual mechanism is simpler and different, and the fix is the
+*opposite* of "add a new bound": we deliberately *removed* a guard we already have
+from the one agent that needed it. This rewrite is grounded entirely in that thread's
+logs — measure, don't argue.
+
 * TL;DR
 
-The runaway is *not caused by an over-eager middleware*. It is caused by a
-structural + guidance gap: the research *orchestrator* (=create_research_agent='s
-main graph, prompted by =research_instructions.txt.j2=) *re-dispatches* its inner
-searcher/fact-check sub-agent many times within one turn, and *every* one of our
-=read_url=/search guards is *per-run (per-dispatch) scoped*, so each fresh dispatch
-resets their counters to zero. Under search-unavailable the orchestrator keeps
-re-dispatching because a thin/failed result reads to it as "the research genuinely
-failed → try again," and nothing at the orchestrator level bounds that.
+Under *search-unavailable*, the research *orchestrator* (=create_research_agent=,
+which has its own =read_url= tool) **fabricates plausible-looking URLs, gets 404, and
+loops** — "Let me try completely different sources now" → guess another URL → 404 →
+repeat, for ~90 min. Forensics on b37c712b: **108,278 "404 Not Found"** results vs
+**10** successes; **0** successful searches (search was unavailable, 139 hits); the
+model cycled fabricated URLs on a handful of real domains (=essence.com=,
+=billboard.com=, =hotnewhiphop=, =complex=, =ajc=) — pages that do not exist.
 
-So this is *the same root cause* as the queued =research-rate-limit-resilience=
-item: *search-unavailable → orchestrator re-dispatch → per-run guards dilute → 61
-reads across 9 URLs over 60-96 min.* The honest "are we causing our own bug?"
-answer: we are not *causing* it with a bad guard, but we *are* failing to bound it
-at the one place the turn history actually persists (the orchestrator), and one
-guard (=UrlProvenanceMiddleware=) *mildly worsens* it by steering fabricated-URL
-attempts back onto the already-read URLs.
+*Why nothing stopped it:* the guard that exists precisely to block fabricated URLs —
+=UrlProvenanceMiddleware= — is **NOT on the orchestrator**. It is wired only on the
+*searcher* and *fact-checker* sub-agents (=agent.py:617,636=), deliberately excluded
+from the orchestrator (=agent.py:650-654=) out of a fear of "re-dispatch thrash." And
+the generic =LoopDetectionMiddleware= *is* on the orchestrator (=agent.py:496=) but
+structurally can't catch this (see §2). So the orchestrator's own =read_url= is
+un-provenanced, un-reread-bounded, and only nominally loop-detected — free to guess
+404s until =recursion_limit= (which is far too loose to matter).
 
-*Recommended fix, in priority order (all guidance-first):*
-1. *(guidance, primary)* Close the re-dispatch loophole in
-   =research_instructions.txt.j2= — a search-unavailable or thin result is *not*
-   grounds to re-dispatch; relay + stop. Make the searcher reliably *surface* the
-   unavailable status to the orchestrator even below the breaker threshold.
-2. *(guidance, primary)* Fold in the partial-results branch (use what succeeded)
-   so "some searches failed" stops discarding good results — the resilience item.
-3. *(minimal guard, only if the eval shows guidance can't carry it)* A single
-   cross-dispatch bound *at the orchestrator* (where history persists): cap
-   =task(research-agent)= re-dispatches per turn, keyed on the unambiguous
-   unavailable constant — finalize-not-kill. This is the "orchestrator re-dispatch
-   bound" fork the reread-breaker doc explicitly deferred
-   (=docs/2026-07-07-read-url-reread-breaker.org:88-91=).
+*The honest "are we causing our own bug?" answer:* **yes — by omission.** This is not
+"too much middleware." It's the inverse: we **removed** a load-bearing guard
+(provenance) from the orchestrator based on a hypothetical (re-dispatch thrash) that is
+*less bad* than the unbounded 404 loop we actually got.
 
-Do *not* add a fourth =read_url= guard, and do *not* widen the per-run breakers —
-they are structurally blind to re-dispatch (=subagents.py:528=), so more of them
-just adds middleware without touching the multiplier.
+*Recommended fix (minimal, no new middleware):*
+1. *(primary)* Give the orchestrator the **same guard pair the searcher/fact-checker
+   already have** — =[UrlProvenanceMiddleware(), ReadUrlRereadBreaker()]= — making the
+   three =read_url=-bearing agents symmetric. Provenance blocks the fabricated-URL
+   404 loop by construction; the reread breaker bounds re-reads of *real* URLs (the
+   older peptides shape). This *reuses* existing guards where they were wrongly
+   omitted — it adds no new middleware class.
+2. *(guidance, to neutralize the original exclusion rationale)* When search is
+   unavailable / returns nothing, the orchestrator must **stop and report "couldn't
+   look this up," not fabricate URLs and not re-dispatch.** This is what makes
+   re-adding provenance safe: the exclusion feared "rejected fetch → re-dispatch →
+   more searches"; the guidance says the correct response to no-sources is to *finish*,
+   not to thrash. Same root as the queued =research-rate-limit-resilience= item.
+3. *(message copy)* Provenance's rejection text must not say "read one of the URLs your
+   search returned" when there are none — it should say "you have no sources; report
+   that you couldn't find this and stop."
 
-* Cast of components (so the two "research-agent"s don't confuse the trace)
+Do NOT build a new cross-dispatch bound (the first draft's idea) — it targets a
+mechanism this runaway doesn't use.
 
-There are two agents both named "research-agent":
+* Cast of components
 
-- *Orchestrator* = =create_research_agent='s main graph (=assist/agent.py:644-659=),
-  system prompt =research_instructions.txt.j2=, tools =[read_url]= only
-  (=agent.py:646=), wrapped =RollbackRunnable(recursion_limit=300)= (=agent.py:672=).
-  It is itself a sub-agent of the top-level general agent (=agent.py:326-339=).
-- *Searcher* = the dict sub-agent *also named* =research-agent= (=agent.py:602-618=),
-  system prompt =sub_research.txt.j2=, tools =[search_internet, read_url]=. Dispatched
-  by the orchestrator via =task=.
-- *Fact-checker* = dict sub-agent =fact-check-agent= (=agent.py:627-637=), tools =[read_url]=.
-- *Trunk* = top-level general agent, web path =recursion_limit=500= (=assist/thread.py:185=).
+- *Orchestrator* = =create_research_agent='s main graph (=agent.py:644-659=), system
+  prompt =research_instructions.txt.j2=, **tools =[read_url]=** (=agent.py:646=),
+  =recursion_limit=500=. It is itself a sub-agent of the general agent, and it has its
+  *own* =read_url= — this is the agent that looped.
+- *Searcher* = dict sub-agent =research-agent= (=agent.py:602-618=), tools
+  =[search_internet, read_url]=, middleware **includes** =UrlProvenanceMiddleware() +
+  ReadUrlRereadBreaker()= (=agent.py:617=).
+- *Fact-checker* = =fact-check-agent= (=agent.py:627-637=), same guard pair (=:636=).
+- *General agent* (trunk) — dispatches the orchestrator.
 
-Guard wiring that matters:
-- =UrlProvenanceMiddleware= + =ReadUrlRereadBreaker=: *searcher* (=agent.py:617=) and
-  *fact-checker* (=agent.py:636=) only. Deliberately *not* the orchestrator
-  (=agent.py:650-655=, comment 605-616).
-- =SearchUnavailableBreakerMiddleware=: inside =_subagent_safety_mw= (=agent.py:597-598=),
-  so on searcher/critique/fact-check; inert on the orchestrator (no =search_internet=).
-- Per-dispatch reset is structural: deepagents builds each =task= dispatch a *fresh*
-  state =subagent_state["messages"] = [HumanMessage(content=description)]=
-  (=deepagents/middleware/subagents.py:528=); =recursion_limit= is *not* forwarded
-  to the sub-agent (=subagents.py:541-542=).
+Guard wiring (the anomaly): provenance + reread breaker on searcher (=:617=) and
+fact-checker (=:636=) — **NOT** on the orchestrator (=:646-654=, the exclusion comment
+at =:650-654=). =LoopDetectionMiddleware= is on all of them, incl. the orchestrator
+(=:496=).
 
-* 1. Timeline of the runaway (concrete trace, grounded in code)
+* 1. Forensic timeline (thread 20260708090812-b37c712b, grounded in the logs)
 
-Reproduced on threads =20260707142207=, =20260708124314=; also "history of San
-Francisco" / "where is he buried". Measured: ~61 =read_url= across ~9 distinct URLs
-(springer 22x, usada 18x, fda 16x, pubmed 14x, wikipedia 10x); 300-400+ messages;
-60-96 min holding the single llama.cpp slot.
+Measured: 108,278 "404 Client Error: Not Found" read_url results, 10 successes, 0
+successful searches, 139 "search unavailable" hits, ~800+ orchestrator messages, ~90
+min on the single llama.cpp slot.
 
-- *T0* — User asks a research question. Trunk (general agent, =recursion_limit=500=,
-  =thread.py:185=) dispatches the *orchestrator* via =task= (=agent.py:326-339=).
-  Fresh orchestrator state = one =HumanMessage= (=subagents.py:528=).
-- *T1* — Orchestrator runs Step 0 (=research_instructions.txt.j2:10-17=): =ls('/')=,
-  maybe =read_file= a *prior report on the same topic*. First source of the
-  "old/prior-report URLs" the runaway later re-reads: the prior report's citation
-  URLs enter the orchestrator's context here.
-- *T2* — Orchestrator dispatches the *searcher* once (=research_instructions.txt.j2:19=
-  "Dispatch it ONCE"). Fresh searcher state = one =HumanMessage= (=subagents.py:528=).
-- *T3* — Searcher calls =search_internet=. *Search is UNAVAILABLE* (SearXNG
-  rate-limited/down) → =tools.py:57-61,206-278= returns the exact
-  =_SEARCH_UNAVAILABLE_MESSAGE= (=tools.py:48-54=). No result URLs come back.
-- *T4* — Searcher has *no new URLs*. Its prompt says STOP on unavailable
-  (=sub_research.txt.j2:21=), but the small model is unreliable here (why the breakers
-  exist). It tries =read_url=:
-  - On a *fabricated* URL (a guessed "correct" PMID/product page) →
-    =UrlProvenanceMiddleware= refuses (=url_provenance.py:156-188=) and returns a
-    correction *listing the already-seen URLs* and saying *"Read one of the URLs your
-    search returned"* (=url_provenance.py:132-141=). *This actively channels the model
-    back onto the handful of known URLs* — the worsening interaction (see §2).
-  - On an *already-seen* URL (prior-report citation, or one read once) → provenance
-    passes; =ToolResultToFileMiddleware= offloads the page and hands back a ~600-char
-    preview + "grep the file" (=tool_result_to_file.py:66-79=). The sought fact is not
-    in the preview, so the model re-reads hoping for a different result.
-- *T5* — =ReadUrlRereadBreaker= (max_reads=3, =read_url_reread_breaker.py:33,103=) caps
-  *this run* at 3 fetches/URL and returns "answer from what you have; stop"
-  (=:110-120=). =LoopDetectionMiddleware= Pattern B (=loop_detection.py:288-343=) would
-  also stop *consecutive* identical calls at 3. So *within this one dispatch* reads are
-  bounded (~3-5/URL). The searcher returns *thin findings*.
-  - Note: =SearchUnavailableBreakerMiddleware= threshold is 4 unavailable searches
-    *per run* (=agent.py:598=, =search_unavailable_breaker.py:59-74,123=). A run that
-    stops after ~2 searches never reaches 4 → *breaker does not fire*, and the returned
-    message may *not* contain the exact unavailable constant. So the orchestrator gets
-    "thin findings," not a clean "search is down."
-- *T6* — Orchestrator is *unsatisfied* with thin findings. The prompt loophole
-  (=research_instructions.txt.j2:19=: "re-dispatch only if the first result genuinely
-  failed to address the question at all") reads, to the model, as license: a
-  search-starved thin result *looks* like a genuine failure → it *re-dispatches the
-  searcher*.
-- *T7* — *Fresh searcher state resets every per-run guard to zero* (=subagents.py:528=;
-  reread breaker counts only from the last =HumanMessage=, =read_url_reread_breaker.py:9-11,48-70=).
-  The searcher re-reads the *same* URLs up to 3 more times. Repeat T3→T6.
-- *T8..Tn* — The multiplier. Incident forensics: ~16 orchestrator dispatches × ~5
-  same-URL reads = 78x on one PubMed URL (=docs/2026-07-07-read-url-reread-breaker.org:54-72=).
-  In the 2026-07 threads: 61 reads across 9 URLs. The fact-checker path does the same on
-  a report with hallucinated citations: it can't *search* for correct ones, so it
-  brute-forces re-reads of the cited URLs.
-- *Context balloon* — Each dispatch appends its task-call =AIMessage= + returned
-  =ToolMessage= to the *orchestrator's* history, plus the orchestrator's own
-  =read_url=/=read_file=/synthesis. 300-400+ messages accumulate → each LLM call's
-  prefill grows → each call slower. =BadRequestRetryMiddleware= (context-overflow 400s)
-  and =EmptyResponseRecoveryMiddleware= retries re-send the huge context, amplifying
-  wall-clock (§2). Result: 60-96 min on the single slot.
-- *Terminal* — Eventually the orchestrator hits =recursion_limit=300= (=agent.py:672=),
-  now *terminal* (=GraphRecursionError= excluded from =rollback_on=,
-  =checkpoint_rollback.py:52,66-71=). The comment at =agent.py:671= claims "~5 min"; the
-  incident ran far longer because per-call latency grows with the ballooned context and
-  the re-dispatch multiplier is unbounded.
+- *T0* — General agent dispatches the orchestrator **once** for "where is he buried?"
+  (Pierre confirmed from the UI: one dispatch of the research subagent — this is *not*
+  a re-dispatch loop).
+- *T1* — Orchestrator dispatches the *searcher* (which has search_internet). **Search
+  is UNAVAILABLE** (SearXNG rate-limited/down): =_SEARCH_UNAVAILABLE_MESSAGE=, no
+  result URLs. The searcher returns nothing usable.
+- *T2* — Orchestrator now has **no real URLs** and a question to answer. It has
+  =read_url= and no provenance guard. It **fabricates** a plausible URL — e.g.
+  =https://www.essence.com/rich-homie-quan-homegoing-celebration-of-life/= — a
+  URL-shaped *guess*, not a search result.
+- *T3* — =read_url= on the fabricated URL → **404 Not Found** (the page doesn't exist).
+- *T4* — Model emits *"Let me try completely different sources now."* and fabricates
+  another (=billboard.com/.../rich-homie-quan-funeral-...=, =hotnewhiphop=, =complex=,
+  =ajc=) → 404. Repeat T2→T4 indefinitely.
+- *Tn* — 108k 404s later, still looping. =recursion_limit=500= is the only ceiling and
+  it's nowhere near tripped in a way that helps (each "step" is cheap; the loop just
+  runs). No guard fires (§2). ~90 min gone.
 
-*Where each guard fires / doesn't:*
+Contrast with the older *peptides* shape (61 reads / 9 URLs, springer 22×): there the
+orchestrator re-read a handful of *real* URLs (from a prior report / the one search)
+rather than fabricating 404s. **Both are the same root gap** — the orchestrator's own
+=read_url= is unguarded — differing only in whether the URLs are fabricated (b37c712b:
+provenance would catch) or real-but-re-read (peptides: the reread breaker would catch).
+The guard *pair* covers both.
 
-| Guard | Fires? | Why it does / doesn't bound the loop |
-|-------+--------+--------------------------------------|
-| =ReadUrlRereadBreaker= (max 3) | within each dispatch | per-run counter resets every dispatch (=subagents.py:528=); caps 3/URL/run, not /turn. Named residual. |
-| =SearchUnavailableBreaker= (thr 4) | usually NOT | ~2 unavailable/run < 4 → diluted; inert on orchestrator (no =search_internet=). |
-| =UrlProvenanceMiddleware= | on fabricated URLs | permits re-reads of known URLs; correction *lists* known URLs → mild steer back. |
-| =LoopDetection= Pattern B | rarely | consecutive + same-args only; re-reads interspersed + cross-dispatch. |
-| orchestrator =recursion_limit=300= | eventually (terminal) | the only aggregate bound — a blunt ceiling, not a semantic stop. |
+* 2. Middleware audit — is a guard CAUSING it, or MISSING?
 
-* 2. Middleware-interference audit (Pierre's priority: are WE causing it?)
+** =UrlProvenanceMiddleware= — MISSING from the orchestrator; this is the root cause
+Provenance refuses any =read_url= whose URL was not produced by a prior search/tool
+result (=url_provenance.py=), which is *exactly* the fabricated-URL case. It is wired on
+the searcher (=:617=) and fact-checker (=:636=) but **not** the orchestrator (=:650-654=).
+The exclusion comment: guarding the orchestrator's own read_url "risked re-dispatch
+thrash (a rejected fetch → re-dispatch research → more searches); the orchestrator's
+runaway is bounded by recursion_limit instead." Forensics show that trade was wrong:
+the un-provenanced orchestrator produced an *unbounded* 404 loop, far worse than the
+bounded re-dispatch it feared. **Verdict: add provenance to the orchestrator.** Neutralize
+the original fear with guidance (#2 below), not by leaving the guard off.
 
-Verdicts are honest — most neutral; two mildly worsen; none is the root cause;
-*none is a removal candidate*.
+** =ReadUrlRereadBreaker= — also MISSING from the orchestrator
+Caps N reads of the *same* URL per run, finalize-not-kill. On searcher/fact-checker
+(=:617,636=), not the orchestrator. It wouldn't have stopped b37c712b (fabricated URLs
+differ each time → provenance is the one that catches that), but it *is* what bounds the
+peptides-style re-read-real-URLs shape. **Verdict: add it too, as the orchestrator's guard
+pair — symmetric with the sub-agents.** Reuse, not new.
 
-** =ReadUrlRereadBreaker= — NEUTRAL, correctly built, wrong scope for THIS bug
-Does exactly what it says within a run (caps 3/URL, finalize-not-kill). *Not* causing
-the loop. Limitation is scope: per-run counter resets each dispatch (=subagents.py:528=).
-Documented residual (=.../2026-07-07-...org:54-72=), not a defect. *Not a removal
-candidate.* Widening it is the last-resort §3(c) — and even then the *orchestrator*, not
-this sub-agent guard, is the right home.
+** =LoopDetectionMiddleware= — PRESENT on the orchestrator, structurally blind to this
+On the orchestrator (=:496=). Two patterns (=loop_detection.py=): (A) same *mutating*
+tool + same error, consecutive; (B) same tool + same *args*, consecutive. b37c712b slips
+both: =read_url= is **read-only** (transparent to Pattern A's mutating-tool walk), so
+108k read_url *errors* don't count; and the model **varies the fabricated URL** each
+call, so Pattern B never sees identical args ≥ threshold in a row. This gap is
+*deliberate* (distinct-arg exploration is legitimate; per PR #128 the detector was
+rolled back to 2 exact-repeat patterns to avoid misfires). *Verdict:* do NOT widen
+LoopDetection to "cap tool errors" or "cap read-only repeats" — that's exactly the
+ambiguous-signal heuristic the project rejects (legit multi-source research also errors
+on some URLs). Provenance is the unambiguous, by-construction guard here.
 
-** =UrlProvenanceMiddleware= — MILD WORSENING (flag), NOT removal
-Refusing a fabricated URL is correct + load-bearing (prevents the 101 GB dead-URL flood,
-=:1-11=). *But* under search-unavailable it has a perverse second-order effect: when the
-model tries to *escape* the known-URL set by guessing a "correct" URL, provenance refuses
-and its correction (=:132-141=) *hands back the list of already-seen URLs and says "Read
-one of the URLs your search returned."* That pushes the model back into re-reading the
-same handful — the runaway's inner loop. *Verdict:* keep the guard; *tune the correction
-copy* so that when no new URLs exist it says "you have the sources you're going to get;
-write from them or stop," not "read one of these again." A message change, not a new guard.
+** =SearchUnavailableBreakerMiddleware= — NEUTRAL; the trigger, not the loop
+Search-unavailable is the *trigger* (no real URLs → the orchestrator improvises). The
+breaker fires on the *searcher*, not the orchestrator. Its role in the fix is guidance
+(#2): the orchestrator must treat "search unavailable / no sources" as a *stop*, not a
+prompt to fabricate.
 
-** =SearchUnavailableBreakerMiddleware= — NEUTRAL but INEFFECTIVE; trigger-side fix belongs here
-Not causing the loop. But its per-run threshold (4, =:123=) is diluted by re-dispatch
-(~2/run), so it *rarely fires* — and when it doesn't, the orchestrator never receives the
-clean "search is down" signal (=:77-94=, worded to match =research_instructions.txt.j2:21=).
-*This is the crux of the trigger side:* the stop-signal often never crosses the agent
-boundary. *Verdict:* make unavailability *reliably surface* to the orchestrator (searcher
-relays unavailable even below threshold when zero searches succeeded), rather than lowering
-the threshold (which would misfire on healthy bursts).
+** =ToolResultToFileMiddleware=, =BadRequestRetry=, =EmptyResponseRecovery=, others — NEUTRAL / amplifiers
+None cause the loop. Retry middlewares amplify *wall-clock* once the context is huge
+(re-sending it), but they don't drive the fabrication. No change.
 
-** =LoopDetectionMiddleware= — NEUTRAL; structurally can't catch this
-Two exact-repeat, consecutive-only patterns (=:288-343=). Re-reads are non-consecutive +
-cross-dispatch. Gap is *deliberate* (distinct-arg exploration is legit). Not a cause.
+*Audit bottom line:* No middleware is *causing* the loop by over-firing. The cause is a
+**missing** guard (provenance) on the orchestrator — a guard we already run on the peer
+agents. The fix removes an inconsistency; it does not add a layer. That is the precise
+answer to "I don't want to paper over an issue we're causing": we caused it by omission,
+and the fix is to stop omitting.
 
-** =BadRequestRetryMiddleware= + =EmptyResponseRecoveryMiddleware= — AMPLIFIERS of wall-clock, not causes
-Neither re-dispatches or re-reads. But once the context balloons, a context-overflow
-=BadRequestError= makes =BadRequestRetry= re-send the huge context up to 3x
-(=bad_request_retry.py:196-243=), and =EmptyResponseRecovery= can retry once more
-(=empty_response_recovery.py:242-268=). On a 300+-message context each is a slow prefill.
-*Verdict:* they *amplify the 60-96 min*, they don't *cause* the loop. Correct defenses; no
-change. Worth noting so a log reader doesn't mistake retry spam for the loop.
+* 3. Root-cause fix (minimal; reuse existing guards + guidance)
 
-** =ToolResultToFileMiddleware= — MILD WORSENING (minor), NOT removal
-Offloading the page + preview (=:66-79=) is essential context-bounding (the I/O exception
-the ethos allows). *But* when the sought fact isn't in the preview, the small model re-reads
-instead of =grep=-ing — a minor contributor to the *urge* to re-read. Re-reading returns the
-identical preview (provably useless; the reread breaker catches it within a run). *Verdict:*
-keep; prompt reinforcement (the reread-breaker message already does this).
+** (a) Give the orchestrator the sub-agents' guard pair (PRIMARY, by construction)
+=agent.py:650-654= — change the orchestrator's middleware to include
+=UrlProvenanceMiddleware()= and =ReadUrlRereadBreaker()=, matching =:617= / =:636=. This
+makes the fabricated-URL 404 loop *unreachable* (provenance rejects a URL no search
+produced) and bounds real-URL re-reads. No new middleware class; delete the special-case
+exclusion.
 
-** =WriteCollision=, =OutputSanitization=, =JsonValidation=, =ToolNameSanitization=, =ThreadQueue=, =GitPushBlocker=, =ModelLogging= — NEUTRAL
-None touches =read_url=/=search_internet=/=task= in a way that could cause re-dispatch/re-read.
+** (b) Guidance: no sources → stop, don't fabricate, don't re-dispatch (makes (a) safe)
+=research_instructions.txt.j2= + =sub_research.txt.j2=: when search is unavailable or
+returns nothing, the correct action is to **report "I couldn't look this up" and finish**
+— explicitly *not* to guess URLs and *not* to re-dispatch the searcher. This neutralizes
+the exact "re-dispatch thrash" the original exclusion feared, so provenance can go on the
+orchestrator without the downside that motivated leaving it off. Prefer an argument-shaped
+rule (AGENTS.md §"instruction's shape"): "Only call =read_url= on a URL that appeared in a
+search result or a file you read. If you have none, stop and say so."
 
-*Audit bottom line:* No middleware is the root cause, and *nothing should be removed.* Two
-mild worseners (UrlProvenance correction copy; ToolResultToFile preview instinct) are
-*message/guidance* tweaks, not structural. The real gap is (a) the orchestrator re-dispatch
-loophole in the prompt and (b) unavailability not reliably surfacing across the sub-agent
-boundary. Guidance problem first; only if guidance provably can't carry it, a *single
-orchestrator-level* bound — not a fourth per-run guard.
+** (c) Provenance rejection copy (small)
+When there are no prior-search URLs, provenance's correction must say "you have no
+sources — report that you couldn't find this and stop," not "read one of the URLs your
+search returned" (there are none). =url_provenance.py:132-141=.
 
-* 3. Root-cause fix (guidance-first, minimal), in priority order
+** (d) recursion_limit — leave it
+Once (a) bounds the loop by construction, =recursion_limit=500= is a harmless backstop.
+Don't tune it here.
 
-** (a) Is an interfering middleware the cause? — NO. Nothing to remove.
-No guard is causing the loop. The only middleware-side edits are *message copy*
-(provenance correction) — not a new layer. So we do not fix this by removing/adding
-middleware first. Satisfies "don't paper over an issue WE'RE causing" + "middleware is
-last resort".
+** Sequencing (eval-first, AGENTS.md)
+1. Reproduction eval (below); confirm it FAILS at baseline (fabricates 404s in a loop).
+2. Apply (a). Eval — the loop should be gone (provenance refuses the fabricated reads).
+3. Add (b) guidance; eval that the turn *finishes honestly* ("couldn't find sources")
+   rather than erroring or re-dispatching. Add (c).
+4. Regression: a *healthy* research turn (search available, real URLs) must not be
+   hindered — provenance already runs on the searcher there, so the orchestrator gaining
+   it should be transparent. Confirm no cut-off.
 
-** (b) GUIDANCE / prompt fix (PRIMARY) — coordinated edits, eval-gated
-Same root cause as =research-rate-limit-resilience= (=roadmap.org:99-141=).
-- *(b1) Orchestrator — close the re-dispatch loophole* (=research_instructions.txt.j2=):
-  today line 19 permits re-dispatch "if the first result genuinely failed"; the loophole
-  is that a search-starved *thin* result reads as a "genuine failure." Change to an
-  argument-shaped rule (AGENTS.md §"instruction's shape"): "You may issue at most ONE
-  =task(research-agent)= call for this question. If it returns unavailable or thin, do not
-  call it again — finalize with what you have or relay the unavailable status and stop."
-- *(b2) Searcher — reliably surface unavailability* (=sub_research.txt.j2= + reuse the
-  =SearchUnavailableBreaker= composed message): when *zero* searches succeed, the searcher's
-  *final message* carries the unavailable status verbatim (=search_unavailable_breaker.py:77-94=),
-  so the orchestrator's stop-branch has an unambiguous string to match even below threshold.
-- *(b3) Partial-results resilience* (=roadmap.org:123-131=): distinguish "backend fully
-  down (0 results ever) → relay + stop" from "burst tripped engine limits, some results in
-  hand → keep the good ones, research from them, report partial honestly." Prevents the
-  *opposite* failure (giving up with a good result in hand) and removes a second reason the
-  orchestrator thrashes.
-- *(b4) Provenance correction copy* (§2): when no new URLs are available, stop inviting
-  re-reads of exhausted URLs.
-
-** (c) LAST RESORT — one cross-dispatch bound AT THE ORCHESTRATOR (only if the eval shows guidance can't carry it)
-If, after (b), the eval still shows re-dispatch under search-unavailable, add *one* bound —
-at the *orchestrator*, not a fourth per-run sub-agent guard. Rationale: the orchestrator's
-own turn history *persists across its dispatches* (each =task= call + returned =ToolMessage=
-accumulates in the orchestrator graph), so a count there *is* cross-dispatch by construction.
-*Shape (coarse, unambiguous, finalize-not-kill):* an =after_model=/=wrap_tool_call= middleware
-on the orchestrator counting completed =task(research-agent)= dispatches this turn (reuse
-=loop_detection._extract_events=). Trigger, cheapest first:
-1. *Unavailable-keyed (preferred):* if the most recent =task(research-agent)= result contains
-   the unavailable constant, refuse a further dispatch + inject the honest "couldn't look
-   this up" finalize. Keys on an exact constant (coarse real bound, not a fuzzy heuristic).
-   Requires (b2).
-2. *Count-keyed (backstop):* cap =task(research-agent)= at N/turn (e.g. 2-3); on the (N+1)th,
-   finalize with what's in hand. Blunter; only if (1)'s signal proves unreliable.
-*Why not thread reread-state across dispatches?* You'd inject shared state into each fresh
-sub-agent invocation (fighting =subagents.py:528=; sub-agents use their own =InMemorySaver=).
-The orchestrator-level count is strictly simpler and lives where the data already is. This is
-the "orchestrator re-dispatch bound" the reread doc deferred (=.../2026-07-07-...org:88-91=).
-
-** Recommended sequencing
-1. Write the *reproduction eval* (below); confirm it FAILS at baseline.
-2. Apply (b1)+(b2)+(b3)+(b4). Eval. Measure re-dispatch count + reads/URL + wall-clock.
-3. Only if re-dispatch persists, add (c) option (1). Re-eval. Prefer to stop here.
-4. Regression: a healthy research eval must not be cut off (guard the false-positive side).
-
-** Eval to reproduce (real-ish; mock search/network)
-=edd/eval/test_read_url_reread_loop.py= is a *single-run* confined agent — *structurally
-silent on re-dispatch*. The new eval must exercise the *full orchestrator*:
-- Build the real =create_research_agent= orchestrator (not the confined stub).
-- Mock =search_internet= → =_SEARCH_UNAVAILABLE_MESSAGE= (backend-down) *and* a variant
-  returning 1 good result then unavailable (partial).
-- Mock =read_url= (via =requests.get=) to return a page that never contains the sought fact.
-- Seed a prior-report file so Step 0 loads stale citation URLs.
-- *Baseline (must FAIL):* orchestrator dispatches =task(research-agent)= > 1x + same URL read
-  across dispatches.
-- *Guarded:* ≤1 (or ≤N) dispatches; no URL read past max_reads *across the turn*; finalizes
-  with the honest unavailable/partial message (non-empty); bounded steps/time.
-- *Partial case:* the good result is USED, not discarded.
-- Mock search/network (AGENTS.md #5); run serially; grep the log for =_SEARCH_UNAVAILABLE=.
-  N≥3 then N=10.
+** Reproduction eval (mock; NO real search — AGENTS.md testing #5)
+Build the real =create_research_agent= orchestrator. Mock =search_internet= →
+=_SEARCH_UNAVAILABLE_MESSAGE= (0 results). Mock =read_url= (via =requests.get=) to 404 on
+any URL. Question: a factual lookup ("where is X buried?").
+- *Baseline (must FAIL):* orchestrator issues many =read_url= calls on URLs that never
+  came from a search result; 404 loop; huge message count.
+- *Guarded (must PASS):* provenance refuses the un-sourced reads; the turn finalizes with
+  an honest "couldn't find sources" message (non-empty); bounded read_url count + steps.
+- Also add the *real-URL re-read* variant (search returns 1 URL; read_url returns a page
+  lacking the fact) to pin the reread-breaker half.
 
 * 4. Risks & open questions for Pierre
 
-1. *Does the small model obey a strengthened "dispatch once, never re-dispatch on
-   unavailable" prompt?* The breaker family exists because it ignores stop-instructions. The
-   eval decides whether (b) alone carries it or (c) is needed. Ship (b)-only if it clears at
-   N=10, accepting the theoretical re-dispatch ceiling remains?
-2. *Surfacing "unavailable" across the sub-agent boundary (b2).* If the model paraphrases,
-   the orchestrator's stop-branch (and a (c)-1 guard) can miss it. Want the searcher's
-   unavailable relay *middleware-enforced* (the breaker already composes the exact string)
-   rather than prompt-hoped? Arguably still "guidance" (existing output), not new middleware.
-3. *Partial vs stop line* (b3): =search_internet= already distinguishes 0-results+engine-errors
-   from genuine =[]= (=tools.py:254-278=). Surface a *distinct* partial signal, or keep one
-   message? Distinct is cleaner but new surface.
-4. *=recursion_limit=300= interplay* — leave it as the blunt backstop; don't tune in this change.
-5. *Provenance copy change (b4)* — must stay corrective when new URLs *do* exist; only soften
-   when the seen-set is exhausted. Provenance-eval regression check.
-6. *"history of SF" / "where is he buried" repros* — also search-unavailable-triggered, or a
-   second trigger (dense-link topics inviting link-hopping)? If link-hopping is a second path,
-   the =read_url=-returns-hyperlinks item (=roadmap.org:132-141=) interacts — confirm from logs.
-7. *Blast radius* — touches =agent.py= wiring + prompts → full three-phase treatment; (c)
-   especially (agent-architecture + new guard surface) goes through the design-review team.
+1. *Does provenance on the orchestrator hurt legitimate deep research?* On the *healthy*
+   path the orchestrator reads URLs that came from the searcher's results (provenance
+   passes) or from files (provenance's file-origin allowance). It should be transparent.
+   The eval's healthy-path regression check is the gate. Open Q: are there legit cases
+   where the orchestrator constructs a URL from a *pattern* (e.g. a known API/base +
+   an id) rather than a search result? If so, provenance would block those — need to
+   confirm from real research transcripts before shipping.
+2. *Guidance vs the small model.* (b) tells the model to stop on no-sources; the model
+   ignores stop-prose in general (why the breakers exist). Here we don't *rely* on it —
+   provenance (a) enforces the hard part by construction; (b) only shapes the *finish*
+   message. So (a) carries correctness even if (b) is soft.
+3. *The peptides re-read shape* is covered by the reread breaker half of the pair, but
+   confirm from the peptides logs that its reads were of *real* (search-sourced) URLs —
+   if they were also fabricated, provenance alone suffices and the reread breaker is
+   belt-and-suspenders.
+4. *Blast radius:* this touches =agent.py= middleware wiring + prompts → full three-phase
+   treatment. It's a *removal of an exclusion* (small diff) but on the research hot path.
+5. *LoopDetection stays as-is* — we explicitly reject widening it to error/read-only
+   heuristics (misfire risk). If Pierre wants a generic backstop anyway, that's a separate
+   conversation with the guardrail-misfire trade-off on the table.
 
 * Critical files
-- =assist/templates/deepagents/research_instructions.txt.j2= (b1/b3)
-- =assist/templates/deepagents/sub_research.txt.j2= (b2/b3)
-- =assist/agent.py= (orchestrator + sub-agent wiring; home of the optional (c) bound, ~458-672)
-- =assist/middleware/url_provenance.py= (b4 copy; =normalize_url= = shared "same URL" def)
-- =assist/middleware/search_unavailable_breaker.py= (the unavailable constant + composed message reused by b2 + (c)-1)
-- =edd/eval/test_read_url_reread_loop.py= (template for the NEW full-orchestrator eval)
+- =assist/agent.py:646-654= — the orchestrator's tools + the provenance/reread EXCLUSION to remove (fix a)
+- =assist/agent.py:617,636= — the searcher/fact-checker guard pair to mirror
+- =assist/templates/deepagents/research_instructions.txt.j2= + =sub_research.txt.j2= — no-sources-stop guidance (fix b)
+- =assist/middleware/url_provenance.py:132-141= — rejection copy when no sources exist (fix c)
+- =assist/middleware/loop_detection.py= — WHY it can't catch this (read-only + varying args); NOT to be widened
+- =edd/eval/test_read_url_reread_loop.py= — template for the new full-orchestrator reproduction eval
