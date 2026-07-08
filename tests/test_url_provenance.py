@@ -139,6 +139,25 @@ class TestUrlProvenanceMiddleware(TestCase):
         _result, handler = self._call("https://shop.example/f91w/", msgs)
         self.assertIsNotNone(handler.called_with, "trailing-slash variant should match")
 
+    def test_allows_url_from_a_subagent_task_result(self):
+        # THE orchestrator healthy-path mechanism: a deepagents sub-agent returns only its
+        # FINAL message text to the parent, as the `task` tool's ToolMessage. So the
+        # orchestrator can only read URLs the searcher wrote into that final message (why
+        # sub_research.txt.j2 now requires a verbatim `Sources:` list). Given such a task
+        # result, provenance must ALLOW the orchestrator to read a listed URL — otherwise
+        # provenance-guarding the orchestrator would break healthy research.
+        task_result = ToolMessage(
+            content=("Rikki Vale is buried at Green Hills Memorial Park, Los Angeles.\n\n"
+                     "Sources:\n"
+                     "- https://www.example-news.test/rikki-vale-obituary\n"
+                     "- https://www.example-bio.test/rikki-vale"),
+            name="task", tool_call_id="t1")
+        msgs = [HumanMessage(content="where is Rikki Vale buried?"), task_result]
+        _result, handler = self._call("https://www.example-news.test/rikki-vale-obituary", msgs)
+        self.assertIsNotNone(
+            handler.called_with,
+            "a URL the searcher listed in its returned findings must pass on the orchestrator")
+
     def test_passes_non_read_url_tools_through(self):
         handler = _Handler()
         req = ToolCallRequest(
@@ -153,20 +172,20 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
 
-    def test_empty_allowlist_tells_agent_to_stop_not_search(self):
-        # No sourced URLs in context (search returned nothing / is unavailable): the
-        # correction must tell the agent to STOP and report it couldn't find sources —
-        # NOT to "run search_internet". The orchestrator (now provenance-guarded) has no
-        # search tool, and an empty allow-list means a search already came back empty, so
-        # advising another search would just feed the fabricate-404 loop this guard closes.
+    def test_empty_allowlist_tells_agent_to_search_or_stop_never_guess(self):
+        # No sourced URLs in context. The correction is shared by all three read_url
+        # agents, so it must serve both: tell a search-capable agent (the searcher) to
+        # search first, AND tell a no-search agent (orchestrator/fact-checker, where an
+        # empty list means search already failed) to report it couldn't find sources and
+        # stop — never keep guessing (that's the fabricate-404 loop this guard closes).
         result, handler = self._call(
-            "https://www.essence.com/rich-homie-quan-homegoing/",
+            "https://www.example-news.test/some-artist-obituary/",
             [HumanMessage(content="where is he buried?")])
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
-        self.assertIn("could not find reliable sources", result.content)
-        self.assertNotIn("search_internet", result.content)
-        self.assertNotIn("none yet", result.content)
+        self.assertIn("could not find reliable sources", result.content)  # stop branch
+        self.assertIn("search_internet", result.content)                  # search-first branch
+        self.assertNotIn("none yet", result.content)                      # old fallback gone
 
     def test_empty_url_passes_through(self):
         # Don't second-guess a malformed call; let the tool surface its own error.

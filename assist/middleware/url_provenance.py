@@ -135,16 +135,19 @@ def _display_url(raw: str) -> str:
 
 
 def _correction(allowed: dict[str, str]) -> str:
-    # No sourced URLs in context at all — the agent has nothing real to read (search
-    # returned nothing / is unavailable). Telling it to "run search_internet" is wrong
-    # here: the orchestrator has no such tool, and when the list is empty a search just
-    # failed. The only correct move is to stop guessing and report the gap.
+    # No sourced URLs in context yet. This branch is shared by all three read_url agents:
+    # the searcher HAS search_internet (so "search first" is the right nudge if it simply
+    # hasn't searched), while the orchestrator + fact-checker do NOT (an empty list there
+    # means search already came back empty/unavailable, so stop). Cover both without
+    # inspecting tool availability: search-if-you-can, otherwise stop — never keep guessing.
     if not allowed:
         return (
             "That URL was a guess: it appears in no search result, the question, or a "
             "page you already read, so it would be a dead link. You have no sourced URLs "
-            "to read. Do NOT type URLs from memory or keep trying different guesses — "
-            "report that you could not find reliable sources for this and stop."
+            "to read. Do NOT type URLs from memory or keep trying different guesses. If "
+            "you can run search_internet, do that first to find real URLs; if search has "
+            "already come back empty or unavailable, report that you could not find "
+            "reliable sources for this and stop."
         )
     listed = sorted(allowed.values())[:_MAX_LISTED]
     urls = "\n".join(f"- {u}" for u in listed)

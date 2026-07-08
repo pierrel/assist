@@ -8,7 +8,8 @@ information — it is a runaway. The 2026-07-07 peptides incident re-read one Pu
 *78 times* under search-unavailable (see docs/2026-07-07-read-url-reread-breaker.org).
 
 On the call that follows ``max_reads`` completed fetches of the same URL in the current
-TURN's history (run == turn for the single-run sub-agents this is wired on), refuse with a corrective ToolMessage (status=error) — FINALIZE, don't kill: the model is told to
+TURN's history (run == turn for the single-run research agents this is wired on — the
+searcher, the fact-checker, and the orchestrator), refuse with a corrective ToolMessage (status=error) — FINALIZE, don't kill: the model is told to
 answer from what it has (or say it can't and stop), instead of looping. That's the
 volume-cap-destroys-output lesson (a runaway must be nudged to finalize, not terminated
 with an empty stub).
@@ -74,8 +75,8 @@ class ReadUrlRereadBreaker(AgentMiddleware):
     """Refuse a ``read_url`` once the same URL has been fetched ``max_reads`` times this run.
 
     The count is bounded to the current turn (via ``_extract_events``' turn slice) —
-    a no-op on the single-run research/fact-check sub-agents it's wired on, and the
-    right behavior if it's ever attached to a longer-lived agent.
+    a no-op on the single-run research agents it's wired on (searcher, fact-checker,
+    orchestrator), and the right behavior if it's ever attached to a longer-lived agent.
 
     Corrective, not turn-ending (mirrors UrlProvenanceMiddleware): the refused call returns
     an error ToolMessage telling the model to stop re-reading and answer. Stateless across
