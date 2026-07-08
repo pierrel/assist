@@ -62,6 +62,8 @@ def schedule_tools(store) -> list:
         - on the Nth of each month: day_of_month=25, hour=7
         - on the Nth of every N months: day_of_month=25, month_interval=2, hour=7 — starts
           THIS month by default; pass anchor_month="2026-03" to start in a specific month.
+        A monthly schedule needs an explicit hour (else it fires at midnight) — ask the
+        user for a time if they didn't give one.
         Times are in the user's local timezone. Returns the saved schedule + next run.
         """
         tid = _thread_id()
