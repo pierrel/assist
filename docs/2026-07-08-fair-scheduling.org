@@ -34,13 +34,18 @@ watchdog Timer) and raises to yield the slot BETWEEN LLM calls — and it alread
   + the #179 =/tmp= persist on the host). ZERO =sandbox_manager.py= change; keeps PR #139's
   "container age == slot-hold age" invariant (reap on pause, recreate on resume).
 
-* The load-bearing problem: the expensive work is in a NON-DURABLE sub-agent
+* The concern we had to rule out: is the expensive work in a NON-DURABLE sub-agent?
 Research runs INSIDE a sub-agent, which is ONE giant superstep at the trunk level — so pausing
 at the outer turn's boundaries is useless (the whole 68 min is one step there). To pause
-research you must pause INSIDE it. But sub-agents today use a NON-durable =InMemorySaver= with a
-throwaway =uuid= per dispatch (=checkpoint_rollback.py:214-221=, deliberate for rollback
-isolation). A naive mid-sub-agent pause loses its findings and re-runs on resume. Pierre's call:
-make sub-agents durably resumable — WITHOUT any lost work — and do it FIRST.
+research you must pause INSIDE it, and resume it without lost work. The WORRY was that this is
+hard: sub-agents are compiled with their own =InMemorySaver= and a throwaway =uuid= per dispatch
+(=checkpoint_rollback.py:214-221=), which LOOKS non-durable — a naive reading says a mid-sub-agent
+pause loses its findings. *This turned out to be FALSE* — see Phase 1 below: langgraph's
+checkpointer precedence SHADOWS that InMemorySaver with the trunk (durable) checkpointer, and the
+nested checkpoint namespace is resume-reproducible, so a paused sub-agent already resumes with no
+lost work. So there was no load-bearing problem to solve — which is why Phase 1 ships zero code.
+(This section is kept to record the concern + why it's a non-issue; earlier drafts of this doc
+asserted the non-durable reading as fact — it was wrong.)
 
 * Phase 1 (DONE — no code change needed) — durable sub-agent resume is ALREADY general
 *Finding (verified 2026-07-08, hands-on with a real SqliteSaver): a nested sub-agent paused
@@ -67,34 +72,6 @@ that isn't the pain. Left ALONE.
 *Approach A (earlier framing): a real checkpointer for sub-agents via removing the uuid hack.*
 Superseded by the finding above: the durability is already there; the removal is unnecessary and
 delicate.
-
-What changes (to be pinned by the architect):
-- =checkpoint_rollback.py= =RollbackRunnable.invoke= (=:212-221=): today assigns a fresh =uuid=
-  + relies on the sub-agent's own =InMemorySaver=. Replace with (a) a DURABLE saver (the trunk's
-  SqliteSaver, namespaced ids — one db, durable, isolated) and (b) a STABLE, collision-free,
-  RESUME-REPRODUCIBLE id per dispatch (derived from parent thread_id + sub-agent name + a
-  per-turn dispatch sequence that replays deterministically from the parent checkpoint), so a
-  resume finds the same sub-agent checkpoint rather than starting fresh.
-- Rollback still works (rewind the sub-agent's checkpoints by its durable id) — reconcile with
-  the reason the fresh-uuid+InMemorySaver existed (checkpoint isolation from the parent).
-- Lifecycle: sub-agent checkpoints are durable, so they must be REAPED at turn end (unless the
-  turn is paused) to bound db growth — mirror the existing thread checkpoint cleanup.
-- Deepagents task-tool dispatch must carry the stable id + support the =input=None= resume path
-  into the sub-agent.
-Uniform-by-default means the context/research/critique/fact-check/dev sub-agents all behave the
-same — one persistence mechanism, no per-sub-agent branches.
-
-Phase-1 risks (for the architect + design review):
-1. *Resume-reproducible ids.* The dispatch-sequence id MUST replay to the same value on resume
-   (else resume can't find the checkpoint). Ground it in the parent checkpoint, not a live
-   counter that resets.
-2. *Rollback reconciliation.* The durable saver must not re-break the =EmptyInputError= path the
-   fresh-uuid+InMemorySaver was added to fix.
-3. *DB growth.* Durable sub-agent checkpoints need reaping at turn end (bounded like the trunk's).
-4. *Single shared SqliteSaver connection* (=thread_manager.py:125=, =check_same_thread=False=):
-   single-flight (one turn at a time) still holds, so no new concurrent-writer hazard — confirm.
-5. *No real search in evals* (Pierre): unit-test the persistence + mock the research sub-agent
-   (AGENTS.md #5); don't burn the SearXNG rate limit proving durability.
 
 * Phase 2 — the scheduler (REVISED after design-review; simpler + liveness-safe)
 Design-review (2 lenses) found a BLOCKER + folded major simplifications. The revised design:
@@ -126,47 +103,29 @@ Design-review (2 lenses) found a BLOCKER + folded major simplifications. The rev
    =paused= reaches the UI ONLY via the off-loop =status.json= write; a test asserts no loop-side
    =current_handle()=/=waiter_count()=.
 
-** original mechanism sketch (superseded by the revised list above)
-- *10-min active-slot quantum, contention-gated.* A per-turn Timer; on expiry set
-  =pause_requested= ONLY if =waiter_count() > 0= (lock-free), else re-arm. =after_model= raises
-  =ThreadPauseRequested=; the run path catches it OUTSIDE the acquire block, does NOT finalize,
-  marks =paused=, reaps the container; the queue requeues the turn at the BACK; resume =
-  =invoke(input=None)= + fresh container.
-- *2h hard cap that handles paused/queued (Pierre).* The kill must measure CUMULATIVE ACTIVE
-  slot-hold, NOT wall-clock-since-start: pause/queue time does NOT count (don't kill a turn for
-  time it spent waiting), AND a turn can't dodge the cap by pausing (active hold accumulates
-  across resumes). Track accumulated-active-ms on the handle, persisted across pause/resume; the
-  watchdog fires when it reaches =DEFAULT_HOLD_TIMEOUT_S=. The container backstop TTL must still
-  exceed the ACTIVE cap (the =test_sandbox_per_turn= invariant) — and since a container is
-  reaped on pause + recreated on resume, its age is bounded by one active slice, well under it.
-- *Round-robin queue.* =_waiters= stays FIFO (a paused turn goes to the back = natural
-  round-robin); no priority needed. Event-loop-liveness: =post_message=/=_mark_pending= stay
-  =peek_holder=-only; =pause_requested= is a plain =__slots__= attr set off-loop (like =expired=);
-  =paused= surfaces to the UI via the =status.json= file, never a loop-side scheduler-map read.
+* Decisions (all resolved with Pierre)
+1. Quantum = *10 min active*; 2h *active-hold* kill (excludes paused/queued time, can't be
+   dodged by pausing).
+2. NO =--parallel= change (single slot). Round-robin, NO priority.
+3. Phase 1 = *rely on the durability langgraph already provides* (no code; pinned by a test).
+   The abandoned "durable checkpointer for all sub-agents" plan is recorded above as a non-issue.
 
-* Open decisions for Pierre
-1. Quantum = *10 min active* (confirmed). 2h active-hold kill (confirmed, must exclude paused
-   time).
-2. Phase 1 = *approach A, ALL sub-agents, durable checkpointer* (confirmed). Lands first.
-3. Durable sub-agent checkpoints in the trunk's SqliteSaver (namespaced ids) vs a separate
-   per-thread sub-agent db — architect to recommend (leaning: same db, namespaced, reaped at
-   turn end).
+* Top risks (Phase 2 — the code that ships)
+1. *2h active-hold accounting across pause/resume* — off-by-one either kills legit long research
+   early or lets a runaway dodge the cap. Pinned by =test_active_hold_accounting_across_resume=.
+2. *Event-loop liveness* (2026-06-10 class) — the resume scheduler must consume ZERO anyio pool
+   tokens (dedicated thread, not BackgroundTasks) and the loop stays =peek_holder=-only.
+   Mandatory un-mocked hold-the-slot liveness test.
+3. *Tick-vs-finally race on =accumulated_active_ms=* — both write it off-loop; serialized under
+   =self._cond=.
+4. *Release-on-pause interleave* — a paused turn unwinding while the next holder runs; covered by
+   the existing =_release_if_holder= identity guard; pinned by a test.
 
-* Top risks (whole design)
-1. *Phase 1 resume-reproducible sub-agent ids + rollback reconciliation* — the crux; a resume
-   that can't find its checkpoint silently re-runs (the loss we're removing). Architect + design
-   review own this.
-2. *2h active-hold accounting across pause/resume* — off-by-one here either kills legit long
-   research early or lets a runaway dodge the cap.
-3. *Event-loop liveness on the scheduler* (2026-06-10 class) — mandatory un-mocked hold-the-slot
-   test.
-4. *DB growth from durable sub-agent checkpoints* — reap at turn end.
-
-* Files
-Phase 1: =assist/checkpoint_rollback.py= (durable stable-id sub-agent saver), =assist/agent.py=
-(sub-agent wiring), =assist/thread_manager.py= (checkpointer/reaping), deepagents task-tool
-dispatch (stable id + resume), tests (durable resume, rollback still works, reaping — all
-mocked, no real search). Phase 2: =assist/thread_queue.py= (pause flag + active-hold accounting
-+ requeue), =assist/middleware/thread_queue_middleware.py= (pause raise), =assist/thread.py=
-(catch + resume), =manage/web/threads.py= (pause handling, container reap-on-pause/recreate),
-=manage/web/state.py= (paused stage), tests (quantum, event-loop-liveness, active-hold cap).
+* Files (Phase 2 only — Phase 1 shipped just a test)
+=assist/thread_queue.py= (pause flag + re-arming tick + active-hold accounting),
+=assist/middleware/thread_queue_middleware.py= (pause raise), =assist/thread.py= (resume via
+=_run(None)=), =manage/web/threads.py= (pause catch + the dedicated resume-scheduler thread +
+container reap-on-pause/recreate-on-resume), =manage/web/state.py= (paused stage). Tests:
+quantum-contention, event-loop-liveness, active-hold accounting, pause/resume integration,
+no-pool-tokens, delete-paused-thread, new-message-behind-resume, release-on-pause identity guard.
+NO =sandbox_manager.py= change.
