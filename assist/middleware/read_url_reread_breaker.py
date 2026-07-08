@@ -7,8 +7,8 @@ fetches, so re-reading the SAME normalized URL past a few times can NEVER return
 information — it is a runaway. The 2026-07-07 peptides incident re-read one PubMed URL
 *78 times* under search-unavailable (see docs/2026-07-07-read-url-reread-breaker.org).
 
-On the call that follows ``max_reads`` completed fetches of the same URL in this RUN's
-history, refuse with a corrective ToolMessage (status=error) — FINALIZE, don't kill: the model is told to
+On the call that follows ``max_reads`` completed fetches of the same URL in the current
+TURN's history (run == turn for the single-run sub-agents this is wired on), refuse with a corrective ToolMessage (status=error) — FINALIZE, don't kill: the model is told to
 answer from what it has (or say it can't and stop), instead of looping. That's the
 volume-cap-destroys-output lesson (a runaway must be nudged to finalize, not terminated
 with an empty stub).
@@ -105,7 +105,7 @@ class ReadUrlRereadBreaker(AgentMiddleware):
 
         self._intervention_count += 1
         logger.warning(
-            "ReadUrlRereadBreaker: refused read_url(%s) — already read %d times this run "
+            "ReadUrlRereadBreaker: refused read_url(%s) — already read %d times this turn "
             "(intervention #%d)", url, self._max_reads, self._intervention_count)
         return ToolMessage(
             content=(

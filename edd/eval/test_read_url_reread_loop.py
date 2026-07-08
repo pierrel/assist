@@ -100,12 +100,16 @@ _PROMPT = (
 
 def _run(agent):
     _reads.clear()
-    with patch("assist.tools.requests.get", _mock_get):
+    # _host_throttle no-op: the 1s per-host politeness delay protects REAL hosts; with
+    # requests.get mocked there is no host, and baselines re-read the same "host" many
+    # times — the delay would only slow the eval.
+    with patch("assist.tools.requests.get", _mock_get), \
+         patch("assist.tools._host_throttle", lambda host: None):
         try:
             return invoke_with_rollback(
                 agent,
                 {"messages": [{"role": "user", "content": _PROMPT}]},
-                {"configurable": {"thread_id": str(uuid.uuid1())}, "recursion_limit": 70})
+                {"configurable": {"thread_id": str(uuid.uuid4())}, "recursion_limit": 70})
         except Exception as e:  # recursion cap / LLM timeout mid-loop are runaway signals
             print(f"\n[reread-loop] run ended via {type(e).__name__}\n")
             return None
