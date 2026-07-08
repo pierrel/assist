@@ -80,7 +80,11 @@ class ModelLoggingMiddleware(AgentMiddleware):
 
     def _format_tool_call(self, tool_call: dict) -> str:
         name = tool_call.get('name', 'unknown')
-        subagent = tool_call.get('arguments', {}).get('subagent_type', None)
+        # args-or-arguments: normalized AIMessage.tool_calls use 'args'; only the raw
+        # OpenAI shape uses 'arguments'. Reading only 'arguments' meant the
+        # "Subagent {type}" label never fired for normalized task calls.
+        args = tool_call.get('args') or tool_call.get('arguments') or {}
+        subagent = args.get('subagent_type', None) if isinstance(args, dict) else None
         if name == "task" and subagent:
             return f"Subagent {subagent}"
         return name

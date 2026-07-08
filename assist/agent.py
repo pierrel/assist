@@ -113,7 +113,9 @@ class AgentHarness:
     
     def __init__(self, agent: CompiledStateGraph, thread_id: str | None = None):
         self.agent = agent
-        self.thread_id = thread_id or uuid.uuid1()
+        # uuid4, not uuid1: uuid1 embeds the host MAC + timestamp, and these ids land
+        # in logs/eval artifacts (the data-hygiene no-host-identifying rule).
+        self.thread_id = thread_id or uuid.uuid4()
 
     def message(self, text: str) -> AIMessage:
         resp = invoke_with_rollback(
