@@ -76,7 +76,8 @@ type: file
 path: /tmp/sub_research.md
 ```
 
-`/tmp` persists for the turn and renders like the workspace, so this is the way
+`/tmp` is a per-thread scratch dir that persists across turns and renders like the
+workspace, so this is the way
 to show a nicely-formatted version of a file whose own extension wouldn't format.
 Use it when converting adds value; otherwise just render the original path as
 plain text (above).

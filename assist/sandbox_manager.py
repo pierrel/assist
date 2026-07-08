@@ -334,10 +334,18 @@ class SandboxManager:
             # container's /tmp so it survives the per-turn container teardown (the
             # container's own /tmp would be lost with it).  Lets the agent stash a
             # file under /tmp (e.g. a renderable .md copy) that outlives the turn and
-            # is reachable by the web renderer.  Created here (idempotent) owned by
-            # the same host user as work_dir, so the run-as uid can write it.
+            # is reachable by the web renderer.  Created here (idempotent) + aligned to
+            # the SAME uid:gid the container runs as (work_dir's owner) so the run-as
+            # uid can write it even if the web process's own uid differs from work_dir's
+            # owner (best-effort chown: a no-op when they already match, the common case).
             tmp_dir = os.path.join(os.path.dirname(work_dir), "tmp")
-            os.makedirs(tmp_dir, exist_ok=True)
+            if not os.path.isdir(tmp_dir):
+                os.makedirs(tmp_dir, exist_ok=True)
+                try:
+                    os.chown(tmp_dir, st.st_uid, st.st_gid)
+                except OSError:
+                    pass  # not permitted (web non-root, uids differ) — mount still
+                          # works when web uid == work_dir owner (the deployment case)
 
             container = client.containers.run(
                 SANDBOX_IMAGE,
