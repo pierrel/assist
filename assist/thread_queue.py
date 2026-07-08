@@ -191,44 +191,52 @@ class ThreadAffinityQueue:
                 and self._holder.thread_id == thread_id
                 and _active_handle.get() is self._holder
             ):
-                # No new state callback, no new watchdog.
-                yield self._holder
-                return
-
-            if self._holder is not None:
-                cb("queued")
-                self._waiters.append(thread_id)
-                deadline = time.time() + wait_timeout
-                try:
-                    while self._holder is not None or (
-                        self._waiters and self._waiters[0] != thread_id
-                    ):
-                        remaining = deadline - time.time()
-                        if remaining <= 0:
-                            raise QueueWaitTimeout(
-                                f"thread {thread_id} waited {wait_timeout}s for queue"
-                            )
-                        self._cond.wait(timeout=remaining)
-                    self._waiters.popleft()
-                except BaseException:
+                reentrant_holder = self._holder
+            else:
+                reentrant_holder = None
+                if self._holder is not None:
+                    cb("queued")
+                    self._waiters.append(thread_id)
+                    deadline = time.time() + wait_timeout
                     try:
-                        self._waiters.remove(thread_id)
-                    except ValueError:
-                        pass
-                    self._cond.notify_all()
-                    raise
+                        while self._holder is not None or (
+                            self._waiters and self._waiters[0] != thread_id
+                        ):
+                            remaining = deadline - time.time()
+                            if remaining <= 0:
+                                raise QueueWaitTimeout(
+                                    f"thread {thread_id} waited {wait_timeout}s for queue"
+                                )
+                            self._cond.wait(timeout=remaining)
+                        self._waiters.popleft()
+                    except BaseException:
+                        try:
+                            self._waiters.remove(thread_id)
+                        except ValueError:
+                            pass
+                        self._cond.notify_all()
+                        raise
 
-            handle = _Handle(
-                thread_id, quantum, hold_timeout,
-                accumulated_active_ms=accumulated_active_ms,
-            )
-            self._holder = handle
-            cb("running")
+                handle = _Handle(
+                    thread_id, quantum, hold_timeout,
+                    accumulated_active_ms=accumulated_active_ms,
+                )
+                self._holder = handle
+                cb("running")
 
-            tick = threading.Timer(self._next_tick_delay(handle), self._on_tick,
-                                   args=(handle,))
-            tick.daemon = True
-            handle.timer = tick
+                tick = threading.Timer(self._next_tick_delay(handle), self._on_tick,
+                                       args=(handle,))
+                tick.daemon = True
+                handle.timer = tick
+
+        # Reentrant no-op fast path — yield OUTSIDE ``self._cond``.  Holding the
+        # Condition across this yield (the old shape) silently blocked ``_on_tick``
+        # (which needs the lock) for the ENTIRE turn, so the quantum pause AND the
+        # 2h cap never fired for any turn that re-acquires — which is every turn
+        # (``Thread._run`` re-acquires inside ``_process_message``'s hold).
+        if reentrant_holder is not None:
+            yield reentrant_holder
+            return
 
         # Start the tick outside the lock so a near-zero quantum (used in tests)
         # doesn't fire while we're still in __enter__.

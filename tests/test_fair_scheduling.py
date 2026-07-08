@@ -121,3 +121,34 @@ def test_pop_hold_drains_so_a_fresh_turn_is_not_charged_prior_active():
         time.sleep(0.05)
     assert q.pop_hold("A") > 0          # the finally persisted this slice
     assert q.pop_hold("A") == 0.0       # ...and it's drained (no double-charge)
+
+
+def test_tick_fires_while_a_reentrant_acquire_holds_the_turn():
+    # THE regression guard for the 2026-07-08 preemption bug: _process_message holds
+    # the slot, then Thread._run re-acquires it (reentrant no-op) for the whole turn.
+    # If that reentrant acquire holds self._cond across its yield, _on_tick (which needs
+    # the lock) is blocked for the ENTIRE turn and the quantum pause never fires. The
+    # unit tests missed it because they acquire directly, never through the reentrant
+    # path. This drives the reentrant path un-mocked and asserts the tick still runs.
+    q = ThreadAffinityQueue(quantum_s=0.05, hold_timeout_s=100, wait_timeout_s=5)
+    got_pause = threading.Event()
+
+    def holder():
+        with q.acquire("A"):                 # outer hold (as _process_message does)
+            with q.acquire("A") as h:        # reentrant (as Thread._run does)
+                # a waiter must be present for the tick to request a pause
+                threading.Thread(target=_park_waiter, args=(q,), daemon=True).start()
+                if _spin(lambda: h.pause_requested, timeout=3.0):
+                    got_pause.set()
+
+    threading.Thread(target=holder, daemon=True).start()
+    assert got_pause.wait(4.0), ("tick never set pause_requested during a reentrant "
+                                 "acquire — it is blocked on self._cond (the bug)")
+
+
+def _park_waiter(q):
+    try:
+        with q.acquire("B", wait_timeout_s=3):
+            pass
+    except Exception:
+        pass
