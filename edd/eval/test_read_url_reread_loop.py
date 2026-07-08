@@ -17,12 +17,12 @@ BASELINE (this file, before the ReadUrlRereadBreaker): asserts the loop REPRODUC
 same URL is fetched more than a few times. Once the breaker lands, the guarded assertion
 flips (a URL is fetched at most N times and the agent still answers).
 
-Fully mocked, rate-limit-free + deterministic: read_url's network (`requests.get`) returns
-a canned page that does NOT contain the number. Only the LLM is real. Broad except so a
+Fully mocked + rate-limit-free: read_url's network (`requests.get`) returns a canned page
+that does NOT contain the number. Only the LLM is real — so, like all evals here, runs
+vary (baseline worst observed 4-22); the GUARDED cap (<=max_reads) holds by construction. Broad except so a
 runaway that dies on the recursion cap OR an LLM timeout still prints the read counts.
 """
 import os
-import tempfile
 import uuid
 from collections import Counter
 from unittest import TestCase

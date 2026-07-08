@@ -1,6 +1,6 @@
 #+TITLE: read_url same-URL re-read breaker (research loop, peptides incident)
 #+DATE: <2026-07-07>
-#+STATUS: SPEC (design phase) — eval-first. Not yet built.
+#+STATUS: BUILT + eval-proven (this PR) — baseline reproduces the loop (worst up to 22), guarded caps <=3 and still answers.
 
 * Incident
 Prod thread =20260707142207-80e10495= ("Tell me about peptides… what's the experimental
