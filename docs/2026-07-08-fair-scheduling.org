@@ -96,7 +96,37 @@ Phase-1 risks (for the architect + design review):
 5. *No real search in evals* (Pierre): unit-test the persistence + mock the research sub-agent
    (AGENTS.md #5); don't burn the SearXNG rate limit proving durability.
 
-* Phase 2 — the scheduler (after Phase 1 lands)
+* Phase 2 — the scheduler (REVISED after design-review; simpler + liveness-safe)
+Design-review (2 lenses) found a BLOCKER + folded major simplifications. The revised design:
+1. *ONE re-arming timer (merge with the existing watchdog), not two.* The existing per-hold
+   =threading.Timer= (=thread_queue.py:178=) becomes re-arming at the 10-min quantum; its
+   callback: if cumulative-active >= 2h cap -> =expired=True= (terminal kill, wins); elif
+   slice >= quantum AND =waiter_count()>0= -> =pause_requested=True=; else re-arm. The 2h cap
+   is a COUNTER the same callback checks, not a 2nd timer. (Simplicity lens.)
+2. *Resume dispatch = a SINGLE dedicated scheduler THREAD, NOT per-resume BackgroundTasks
+   (BLOCKER fix).* The liveness lens proved the parked-resume-BackgroundTask model exhausts the
+   shared anyio 40-token threadpool (BackgroundTasks + ALL sync route handlers draw from it):
+   N paused turns park N pool workers for up to a quantum each, MULTIPLYING under the exact
+   contention that triggers pause -> request-handling STALL (2026-06-10-class outage). Fix by
+   construction: one long-lived scheduler thread owns the resume queue, serially acquires the
+   slot (parks on ITS OWN thread, ZERO pool tokens) and runs each resumed turn via the EXISTING
+   =_process_message= logic with =input=None=. Serial is correct (=--parallel 1=). Its acquire
+   is the SOLE =_waiters= producer -> natural back-of-queue FIFO requeue, no =requeue()= method,
+   no de-dup guard (which corrupted FIFO — IMPORTANT-c).
+3. *Resume REUSES the existing path* (simplicity lens): a paused turn resumes as the existing
+   =reply_decision=->=_process_message= precedent with =input=None= (=Thread._run(None)=, the
+   Phase-1-verified mechanism) + ONE nullable =resume= param. CUT: =_PAUSED_RESUMES= hot-path
+   dict, =RESUME_SENTINEL=, bespoke =Thread.resume()= mechanism, =THREAD_QUEUE.requeue()=.
+4. *=accumulated_active_ms= mutations under =self._cond=* (IMPORTANT-e): the tick (Timer daemon)
+   and the acquire finally (worker) both write it, and =Timer.cancel()= can't stop an in-flight
+   tick -> serialize both under the Condition (both OFF the loop, so safe). Keep the accumulator
+   (it's the by-construction 2h-cap-dodge fix Pierre required — per-slice reset would let a
+   runaway dodge by pausing every 10 min).
+5. *Loop stays clean* (liveness PASS): =post_message=/=_mark_pending= stay =peek_holder=-only;
+   =paused= reaches the UI ONLY via the off-loop =status.json= write; a test asserts no loop-side
+   =current_handle()=/=waiter_count()=.
+
+** original mechanism sketch (superseded by the revised list above)
 - *10-min active-slot quantum, contention-gated.* A per-turn Timer; on expiry set
   =pause_requested= ONLY if =waiter_count() > 0= (lock-free), else re-arm. =after_model= raises
   =ThreadPauseRequested=; the run path catches it OUTSIDE the acquire block, does NOT finalize,
