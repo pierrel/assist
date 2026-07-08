@@ -251,6 +251,49 @@ month's length (the 31st in a 30-day month, the 29th–31st in February) should
 clamp to the last day of that month rather than skip or roll into the next —
 pick the least-surprising rule and lock it with a test.
 
+* Queue management
+** TODO Fair scheduling — pause large jobs so small jobs can complete (round-robin / preemptive)
+*Motivation (observed 2026-07-08).* Thread =20260707142207-80e10495= (a peptides
+fact-check turn) held the queue for *68 minutes* while *5–6 other threads sat
+queued behind it*. Today's =THREAD_QUEUE= is *one turn at a time* (single
+=--parallel 1= llama.cpp slot) with FIFO/affinity ordering, so a single long turn
+*head-of-line-blocks* every other request — a 10-second question waits an hour
+behind a runaway-adjacent research grind. The runaway guards (recursion_limit, the
+read-url re-read breaker) bound a turn's *worst case* but not its *normal* length;
+a legitimately long turn still starves everything behind it.
+
+*Goal.* Don't let a large job monopolise the slot. Interleave so short jobs
+complete promptly even while a long job is in flight — round-robin, shortest-job-
+first with aging, or another fair algo. Pause the large job, run a queued small
+one, resume the large one — no job starved in either direction.
+
+*Why it's feasible.* LangGraph checkpoints every superstep, so a turn is already
+*pausable/resumable at step boundaries* — we don't need to interrupt mid-LLM-call,
+just decline to schedule the large job's *next* step while a small job runs. The
+single LLM slot means no true parallelism; this is *time-slicing at step
+boundaries*, not concurrency. (Contrast the current =THREAD_QUEUE= affinity hold,
+which is all-or-nothing per turn.)
+
+*Design questions to settle first.*
+- *Scheduling policy:* round-robin (simple, fair, but a 200-step job still takes
+  its full wall-clock, just interleaved) vs shortest-remaining / aging (better
+  latency for small jobs, needs a size estimate + starvation guard for the big
+  one). "Size" is unknown up front — estimate by steps-so-far? a running budget?
+- *Preemption granularity:* yield after each superstep (fine, more overhead) vs
+  after N steps / M seconds (coarser). A step can be a slow big-context LLM call
+  (~1 min today), so per-step yield already gives decent responsiveness.
+- *Fairness / anti-starvation both ways:* a preempted long job must still finish
+  (age it up); a flood of small jobs must not permanently pause it.
+- *Interaction with the affinity queue* (=assist/thread_queue.py= =peek_holder=,
+  lock-free) and the *event-loop-liveness* rule — the scheduler runs off the
+  single-worker uvicorn loop; keep it lock-free / in a threadpool.
+- *Scope:* interactive web turns first; scheduled (#161) + SMS-triage (#164) turns
+  are lower-priority background work — a natural priority tier.
+
+Relates to the single-LLM-slot constraint and [[queued-research-rate-limit-resilience]]
+(a long turn is often a search-starved research grind — fixing the trigger shortens
+the jobs this would interleave).
+
 * Context rider
 ** TODO "Last seen" location saver — every turn (incl. scheduled/triggered) gets a geo tag
 The geo rider (PR #155) only tags INTERACTIVE turns — the browser reads Geolocation on
