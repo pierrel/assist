@@ -68,10 +68,13 @@ mechanism this runaway doesn't use.
 - *Fact-checker* = =fact-check-agent= (=agent.py:627-637=), same guard pair (=:636=).
 - *General agent* (trunk) — dispatches the orchestrator.
 
-Guard wiring (the anomaly): provenance + reread breaker on searcher (=:617=) and
-fact-checker (=:636=) — **NOT** on the orchestrator (=:646-654=, the exclusion comment
-at =:650-654=). =LoopDetectionMiddleware= is on all of them, incl. the orchestrator
-(=:496=).
+Guard wiring **before this fix** (the anomaly this doc diagnoses — line numbers below
+reference the pre-fix code; §3 and the PR diff are the as-built): provenance + reread
+breaker were on the searcher and fact-checker but **NOT** the orchestrator (the exclusion
+comment this fix removes). =LoopDetectionMiddleware= was on all of them, incl. the
+orchestrator, but is structurally blind to this loop (§2). *As shipped* (§3), the
+orchestrator carries the same guard pair via =_read_url_guards()=, so it is no longer
+un-guarded and =recursion_limit= is now just a backstop.
 
 * 1. Forensic timeline (thread 20260708090812-b37c712b, grounded in the logs)
 
