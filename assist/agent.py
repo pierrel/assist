@@ -31,6 +31,7 @@ from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddl
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
 from assist.middleware.url_provenance import UrlProvenanceMiddleware
+from assist.middleware.read_url_reread_breaker import ReadUrlRereadBreaker
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
@@ -606,7 +607,7 @@ def create_research_agent(model: BaseChatModel,
         # sub-agents whose read_url should only ever hit a URL already in context.
         # NOT on the orchestrator (it re-dispatches, so a rejected fetch there can
         # thrash); its runaway is bounded by recursion_limit.
-        "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware()],
+        "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware(), ReadUrlRereadBreaker()],
     }
 
     critique_sub_agent = {
@@ -625,7 +626,7 @@ def create_research_agent(model: BaseChatModel,
         # report it's handed — those already appear in its context (the report
         # ToolMessage), so they pass, while a URL it invents is refused. Without
         # this, fabricated fact-check fetches bypass the guard entirely.
-        "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware()],
+        "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware(), ReadUrlRereadBreaker()],
     }
 
     # The orchestrator DELEGATES searching to the research-agent (see its
