@@ -1,6 +1,6 @@
 #+TITLE: Day-of-month (and weekly) scheduled tasks
 #+DATE: <2026-07-08>
-#+STATUS: DESIGN (awaiting Pierre's review). Small, contained change.
+#+STATUS: DESIGN (awaiting Pierre's review). Contained to the schedule module; skip-months adds the anchor + a direct next-fire path, so a bit past trivial.
 
 * Scope clarification (read first)
 Pierre asked for "date of month AND weekly," plus *skip-months* ("every 2 months on the
@@ -94,4 +94,4 @@ for existing rows — every-month semantics unchanged).
 - *Nth-weekday-of-month* ("2nd Tuesday") — a different field (weekday + ordinal-in-month).
 - *Nth-from-last* ("last day", "2nd-to-last") — "last day" falls out of the clamp
   (=day_of_month=31=), but a general "Nth-from-last" is extra.
-These are all separate; this change is day-of-month only.
+These are all separate; this change is day-of-month + month-interval only.
