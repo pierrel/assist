@@ -20,12 +20,17 @@ unambiguous bound (a substring/membership check on tool+user text, not a fuzzy
 "looks invented" heuristic), and it does not end the turn: it returns a
 corrective tool result so the model retries with a real URL.
 
-Scope: the research SEARCHER and the FACT-CHECKER — the two sub-agents whose
-``read_url`` should only ever hit a URL already in context (the searcher's own
-search results; the fact-checker's cited URLs, which live in the report
-``ToolMessage`` it is handed). NOT the orchestrator: guarding its ``read_url``
-risks re-dispatch thrash (a rejected fetch → re-dispatch research → more
-searches); its runaway is bounded by ``recursion_limit`` instead.
+Scope: all three ``read_url``-bearing research agents — the SEARCHER, the
+FACT-CHECKER, and the ORCHESTRATOR. Each should only ever fetch a URL already in
+its context: the searcher's own search results; the fact-checker's cited URLs
+(which live in the report ``ToolMessage`` it is handed); the orchestrator's
+search-sourced URLs (which reach it as the searcher's ``task`` result
+``ToolMessage``) and any prior-report URLs it loaded via ``read_file``. The
+orchestrator was originally excluded for fear of re-dispatch thrash, but thread
+20260708090812 showed the opposite failure — under search-unavailable it had no
+sourced URLs, fabricated plausible ones, and 404-looped ~90 min. Guidance now
+tells it to STOP (not re-dispatch) when it has no sources, so the guard is safe
+here too. See docs/2026-07-08-research-reread-runaway.org.
 """
 import logging
 import re
@@ -130,13 +135,24 @@ def _display_url(raw: str) -> str:
 
 
 def _correction(allowed: dict[str, str]) -> str:
+    # No sourced URLs in context at all — the agent has nothing real to read (search
+    # returned nothing / is unavailable). Telling it to "run search_internet" is wrong
+    # here: the orchestrator has no such tool, and when the list is empty a search just
+    # failed. The only correct move is to stop guessing and report the gap.
+    if not allowed:
+        return (
+            "That URL was a guess: it appears in no search result, the question, or a "
+            "page you already read, so it would be a dead link. You have no sourced URLs "
+            "to read. Do NOT type URLs from memory or keep trying different guesses — "
+            "report that you could not find reliable sources for this and stop."
+        )
     listed = sorted(allowed.values())[:_MAX_LISTED]
-    urls = "\n".join(f"- {u}" for u in listed) if listed else "(none yet — run search_internet first)"
+    urls = "\n".join(f"- {u}" for u in listed)
     return (
         "That URL was not fetched: it does not appear in any search result, the "
         "question, or a page you already read, so it is a guess and would be a "
-        "dead link. Do NOT type URLs from memory. Read one of the URLs your "
-        "search returned, or run search_internet to find the page:\n"
+        "dead link. Do NOT type URLs from memory. Read one of the URLs already in "
+        "context instead:\n"
         f"{urls}"
     )
 

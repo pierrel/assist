@@ -605,15 +605,11 @@ def create_research_agent(model: BaseChatModel,
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url],
         # Provenance guard: refuse read_url on a URL that appears nowhere prior
-        # (a fabrication). On the SEARCHER (here) and the fact-checker — the two
-        # sub-agents whose read_url should only ever hit a URL already in context.
-        # NOT on the orchestrator (it re-dispatches, so a rejected fetch there can
-        # thrash); its runaway is bounded by recursion_limit.
-        # ReadUrlRereadBreaker: refuse re-reading the SAME url past max_reads (the
-        # 2026-07-07 peptides loop — provenance can't see a re-read). Also not on
-        # the orchestrator, but for a different reason: the incident showed zero
-        # orchestrator re-read looping (its 16 steps were all task dispatches), so
-        # wiring it there would be code for an unobserved case.
+        # (a fabrication). ReadUrlRereadBreaker: refuse re-reading the SAME url past
+        # max_reads. This same pair is on all three read_url-bearing agents — the
+        # searcher (here), the fact-checker, and the orchestrator (see below) — after
+        # thread 20260708090812 showed the un-guarded orchestrator 404-looping on
+        # fabricated URLs under search-unavailable.
         "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware(), ReadUrlRereadBreaker()],
     }
 
@@ -648,11 +644,18 @@ def create_research_agent(model: BaseChatModel,
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
                                       workspace_dir=workspace_dir),
         backend=backend,
-        # NOT provenance-guarded here (only the searcher + fact-check sub-agents
-        # are): guarding the orchestrator's own read_url risked re-dispatch thrash
-        # (a rejected fetch -> re-dispatch research -> more searches). The
-        # orchestrator's runaway is bounded by its recursion_limit instead.
-        middleware=base_mw + middleware + [logging_mw],
+        # Provenance + reread guards, same pair as the searcher/fact-check sub-agents.
+        # The orchestrator has its OWN read_url and, under search-unavailable, fabricates
+        # plausible URLs and 404-loops (thread 20260708090812: 108k "404 Not Found", 10
+        # successes, 0 successful searches, ~90 min). Provenance refuses a URL that
+        # appears in no prior tool result: the searcher's findings reach the orchestrator
+        # as a task ToolMessage, so real search-sourced URLs pass while fabrications are
+        # refused — making the 404 loop unreachable. ReadUrlRereadBreaker bounds re-reads
+        # of a real URL. Guidance (research_instructions.txt.j2) tells it to STOP when it
+        # has no sources rather than re-dispatch, which is what the old exclusion feared.
+        # See docs/2026-07-08-research-reread-runaway.org.
+        middleware=base_mw + middleware + [
+            UrlProvenanceMiddleware(), ReadUrlRereadBreaker(), logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]

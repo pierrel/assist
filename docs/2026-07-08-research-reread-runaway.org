@@ -159,7 +159,20 @@ and the fix is to stop omitting.
 =UrlProvenanceMiddleware()= and =ReadUrlRereadBreaker()=, matching =:617= / =:636=. This
 makes the fabricated-URL 404 loop *unreachable* (provenance rejects a URL no search
 produced) and bounds real-URL re-reads. No new middleware class; delete the special-case
-exclusion.
+exclusion. Also update the exclusion paragraph in =url_provenance.py='s module docstring
+(=:23-28=), which currently documents "NOT the orchestrator … bounded by recursion_limit."
+
+*Why provenance is transparent on the healthy path (resolves the original fear + open
+Q1).* =_seen_urls= (=url_provenance.py:95-117=) allows any URL present in *any*
+=ToolMessage= (or the user message) in the agent's context. The searcher returns its
+findings to the orchestrator **as a =task= tool result — a =ToolMessage=** — so every
+URL the searcher actually found lands in the orchestrator's context and provenance lets
+the orchestrator read it. Prior-report URLs the orchestrator loads via =read_file= are
+likewise in a =ToolMessage=. So on the healthy path the guard is invisible; it only bites
+a URL that appears in *no* tool result — i.e. a pure fabrication, which under
+search-unavailable (b37c712b) is *every* URL the orchestrator tried. (Caveat to verify in
+the eval: this relies on the searcher's returned findings text actually *containing* the
+URLs — research citations normally do; the healthy-path regression eval is the check.)
 
 ** (b) Guidance: no sources → stop, don't fabricate, don't re-dispatch (makes (a) safe)
 =research_instructions.txt.j2= + =sub_research.txt.j2=: when search is unavailable or
@@ -170,10 +183,15 @@ orchestrator without the downside that motivated leaving it off. Prefer an argum
 rule (AGENTS.md §"instruction's shape"): "Only call =read_url= on a URL that appeared in a
 search result or a file you read. If you have none, stop and say so."
 
-** (c) Provenance rejection copy (small)
-When there are no prior-search URLs, provenance's correction must say "you have no
-sources — report that you couldn't find this and stop," not "read one of the URLs your
-search returned" (there are none). =url_provenance.py:132-141=.
+** (c) Provenance rejection copy (small) — and it must fit the ORCHESTRATOR, which has no search_internet
+=_correction= (=url_provenance.py:132-141=) currently ends "…run search_internet to find
+the page" and, when the allow-list is empty, "(none yet — run search_internet first)".
+That advice is correct for the *searcher* (it has =search_internet=) but *wrong for the
+orchestrator*, whose tools are =[read_url]= only — it cannot run search. When the
+allow-list is empty (no sources in context) the message should tell *any* agent to
+**stop and report it couldn't find sources**, not to run a tool the orchestrator lacks.
+Keep the "read one of these" branch for when URLs *are* listed. Small copy change, no new
+logic beyond keying on "allow-list empty".
 
 ** (d) recursion_limit — leave it
 Once (a) bounds the loop by construction, =recursion_limit=500= is a harmless backstop.
@@ -201,13 +219,15 @@ any URL. Question: a factual lookup ("where is X buried?").
 
 * 4. Risks & open questions for Pierre
 
-1. *Does provenance on the orchestrator hurt legitimate deep research?* On the *healthy*
-   path the orchestrator reads URLs that came from the searcher's results (provenance
-   passes) or from files (provenance's file-origin allowance). It should be transparent.
-   The eval's healthy-path regression check is the gate. Open Q: are there legit cases
-   where the orchestrator constructs a URL from a *pattern* (e.g. a known API/base +
-   an id) rather than a search result? If so, provenance would block those — need to
-   confirm from real research transcripts before shipping.
+1. *(RESOLVED — verified against =url_provenance.py=.)* Does provenance on the
+   orchestrator hurt legitimate deep research? No: =_seen_urls= allows any URL in a
+   =ToolMessage=, and the searcher's findings reach the orchestrator *as* a =task=
+   =ToolMessage=, so search-sourced URLs pass; prior-report URLs (via =read_file=) pass.
+   The one residual: the searcher's findings text must *contain* the URLs (citations
+   normally do) — the healthy-path regression eval is the gate. Residual open Q: if the
+   orchestrator ever legitimately builds a URL from a *pattern* (base + id) rather than
+   copying a search result, provenance would block it — confirm from real transcripts;
+   if it happens, that path should route through the searcher, not the orchestrator.
 2. *Guidance vs the small model.* (b) tells the model to stop on no-sources; the model
    ignores stop-prose in general (why the breakers exist). Here we don't *rely* on it —
    provenance (a) enforces the hard part by construction; (b) only shapes the *finish*

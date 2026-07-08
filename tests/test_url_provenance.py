@@ -153,6 +153,21 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")
 
+    def test_empty_allowlist_tells_agent_to_stop_not_search(self):
+        # No sourced URLs in context (search returned nothing / is unavailable): the
+        # correction must tell the agent to STOP and report it couldn't find sources —
+        # NOT to "run search_internet". The orchestrator (now provenance-guarded) has no
+        # search tool, and an empty allow-list means a search already came back empty, so
+        # advising another search would just feed the fabricate-404 loop this guard closes.
+        result, handler = self._call(
+            "https://www.essence.com/rich-homie-quan-homegoing/",
+            [HumanMessage(content="where is he buried?")])
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+        self.assertIn("could not find reliable sources", result.content)
+        self.assertNotIn("search_internet", result.content)
+        self.assertNotIn("none yet", result.content)
+
     def test_empty_url_passes_through(self):
         # Don't second-guess a malformed call; let the tool surface its own error.
         _result, handler = self._call("", [_search_result(["https://shop.example/a"])])
