@@ -11,13 +11,14 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 
 * Design decisions
 - *LIVE (part 2):* store one =started_at= field in the existing =status.json= when a turn begins. =render_thread= embeds a *server-computed* =baseline_seconds = now - started_at=; a tiny inline JS ticks it up locally via =performance.now()= delta. No polling, no server round-trips, no clock-skew dependency (the page has NO client polling today — threads.py:1105).
-- *COMPLETED (part 1):* a per-thread sidecar =turn_timings.json= (mirrors the existing =merge_conflict.json= trio in state.py:233-289), a JSON object keyed by *human-message ordinal* → ={started_at, seconds}=. Written off-loop by =_process_message= at its success exits; read on-loop by =render_thread= (one small missing-ok JSON read, exactly like =_get_status= / =_get_conflict=).
+- *COMPLETED (part 1):* a per-thread sidecar =turn_timings.json= (mirrors the existing =merge_conflict.json= trio in state.py:233-289), a flat JSON object keyed by *human-message ordinal* → *seconds* (an int). (Design-review fix: NOT ={started_at, seconds}= — nothing reads a sidecar =started_at=; the badge is a pure duration and =started_at= lives in =status.json= for the live timer only. A copy here is a dead field.) Written off-loop by =_process_message= at its success exits; read on-loop by =render_thread= (one small missing-ok JSON read, exactly like =_get_status= / =_get_conflict=).
   - Rejected =AIMessage.response_metadata= (touches the model/middleware hot path + checkpoint round-trip) and checkpoint-=ts= derivation (fiddly, couples render to langgraph internals).
-  - Keyed by *human-message ordinal* (count of HumanMessages), NOT raw message index: computable identically on write (=chat.get_raw_messages()=) and read (count of ="user"= dicts), append-only, robust to errored/pre-feature turns. Crucially this keeps =assist/thread.py= =_messages_to_dicts= UNTOUCHED, so the exact-equality render tests (tests/test_render.py:319-348) stay green.
-- *Single-word statuses (part 3):* rewrite =STAGE_LABELS= (state.py:321-328) in place. This dict feeds both the list page (threads.py:188,194) and the in-thread banner (threads.py:523) — one source of truth (see O1).
+  - Keyed by *human-message ordinal* (count of HumanMessages), NOT raw message index: append-only, robust to errored/pre-feature turns, keeps =assist/thread.py= =_messages_to_dicts= UNTOUCHED (render tests stay green). *Design-review fix (fix-by-construction):* count the ordinal ONE way on BOTH sides — a single shared helper over the raw =HumanMessage= list — NOT write-side raw + read-side ="user"= dicts (two counters over two representations that silently misalign if the 1:1 HumanMessage↔"user"-dict mapping ever breaks). The render pass computes an =index→seconds= map from the raw messages once, then consults it in the existing reversed loop. A render test must pin badge-on-correct-bubble across a thread containing a tool-only turn AND a review submission.
+- *Single-word statuses (part 3):* Pierre scoped this to the *thread-list page*. Use a list-only single-word mapping at the list call sites (threads.py:188,194); LEAVE the full =STAGE_LABELS= sentences on the in-thread banner (threads.py:523). *Design-review fix (I1):* the earlier "rewrite the shared dict in place" also shortened the in-thread banner — a surface Pierre didn't name, where the sentences carry real "why" info (esp. =paused= / =queued=). The two-line duplication is trivial and does not justify downgrading the banner. (O1 resolved: list-only.)
 
 * Why it's event-loop-safe (load-bearing — single-worker uvicorn)
-- *Writes only off the loop.* =_process_message= runs as a sync BackgroundTask / on the =_ResumeScheduler= thread (threads.py:792, 1334-1343), never on the asyncio loop. The sidecar write + the =started_at= write ride the existing =_set_status= calls (which already do blocking file I/O there). No new on-loop I/O, no new locks.
+- *The =started_at= write adds NO new on-loop blocking.* (Design-review correction: the earlier "writes only off the loop" was FALSE — =_mark_pending= (threads.py:1101, called inline from =async def post_message=:1359) and =create_thread_with_message= (:1039) DO write =status.json= on the loop today.) The change only adds one extra key (=started_at=) to the =pending_kwargs= those calls already pass to the pre-existing on-loop =_set_status= → =_atomic_write=. No NEW =_atomic_write= call, no lock, no subprocess lands on the loop — just one more dict field + one =datetime.now()=. Do NOT later add real blocking I/O to =_mark_pending= trusting an "off-loop" invariant that doesn't hold.
+- *The heavy write (sidecar =_append_timing=) is confined off-loop.* It runs ONLY at =_process_message='s success exits, and =_process_message= is always off the loop (BackgroundTask / =_ResumeScheduler= / =_SCHEDULER= thread — threads.py:1373,1287,1334-1340,1193), never inline from an =async def=.
 - *Reads on the loop are the established pattern.* =render_thread= reads one small JSON with no lock — exactly what =_get_status= (state.py:335) / =_get_conflict= (state.py:237) already do.
 - *One writer per tid.* THREAD_QUEUE + the serial =_ResumeScheduler= serialize all turns for a tid; =_atomic_write= covers crash-safety. Different tids → different files.
 
@@ -51,12 +52,20 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 - *Pre-feature / errored / page-reopen:* ={}=/=.get= misses → no badge, no crash; errored turn rolls back → no entry; reopen mid-turn recomputes baseline from =status.json= =started_at=.
 - *Supersede / HITL-reject loops* (threads.py:882-905): resume the same turn, no new HumanMessage → ordinal unchanged → one entry at the final success exit.
 
-* Open questions / risks
-- *O1* — shared STAGE_LABELS shortens the in-thread banner too (recommended: one source of truth; else add list-only SHORT_STAGE_LABELS).
-- *O2* — badge on =awaiting_approval= turns: recommend record + render only on plain assistant bubbles.
-- *O3* — wall-clock vs active-time for paused turns: recommend wall-clock.
-- *R1* — sidecar grows one entry/turn (threads are tens of turns; YAGNI a cap for v1).
-- *R2* — =started_at= at submit includes queue-wait behind other threads → honest "human→reply", matches the live timer; a long queue-wait shows a large elapsed even for a fast turn. Recommend include.
+* Resolved by design-review (as-built decisions)
+- *O1 → list-only* (interfaces/intention I1): single words on the thread-list page only; banner keeps sentences.
+- *Sidecar value → flat =seconds=* (simplicity #1): no dead =started_at= copy.
+- *Ordinal join → one shared counter over the raw HumanMessage list* (interfaces C1 / simplicity #2), pinned by a tool-only-+-review-submission render test.
+- *Event-loop rationale corrected* (liveness #1): safe because the field rides a pre-existing on-loop atomic write (no NEW blocking); heavy sidecar write is off-loop.
+- *C4* — =started_at= is SUBMIT time (includes queue-wait); add a one-line comment so a reader doesn't assume processing-start (or name it =submitted_at=).
+- *C5* — badge attaches to "the last =assistant=-role bubble strictly before the next =user= bubble" (no double-badge; tools-only tail gets none). O2: record on awaiting_approval, render only on plain assistant bubbles.
+- *C3* — test =_format_elapsed= parity on BOTH the Python badge and the JS timer (=59→"59s"=, =60→"1m 0s"=, =3600→"1h 0m"=).
+
+* Remaining risks / accepted
+- *O3 (accept)* — paused-turn elapsed is WALL-CLOCK incl. pause + queue-wait; the scheduler's =accumulated_active_ms= is deliberately unused. Matches the live timer.
+- *I2 (accept, optional polish)* — a fast turn submitted behind a long research turn shows a large elapsed ("8m") that reads as "AI was slow" when it was queued; a tooltip ("includes Nm queued") would disambiguate. Not blocking.
+- *I4 (note)* — no client polling today, so the live timer keeps ticking after the turn completes until the user reloads; moot (the user must reload to see the reply anyway) → on reload it snaps to the frozen badge.
+- *R1* — sidecar grows one entry/turn (tens/thread; YAGNI a cap for v1).
 - *R3* — one extra off-loop =get_state= per turn to count HumanMessages (negligible).
 - *R4* — turns in-flight at deploy have no =started_at=/entry → spinner-without-timer + no badge; self-heals next turn.
 
