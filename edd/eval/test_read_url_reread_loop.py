@@ -13,13 +13,17 @@ agent), this uses a MINIMAL agent that is maximally confined to the exact condit
 absent number it has no move but to re-read that one URL. That is the incident's
 mechanism (provenance-confined + no search).
 
-BASELINE (this file, before the ReadUrlRereadBreaker): asserts the loop REPRODUCES — the
-same URL is fetched more than a few times. Once the breaker lands, the guarded assertion
-flips (a URL is fetched at most N times and the agent still answers).
+Two tests: the BASELINE (no breaker wired) asserts the loop REPRODUCES — the same URL is
+fetched more than a few times; the GUARDED test (breaker wired) asserts no URL exceeds
+max_reads and the agent still answers (finalize-not-kill).
 
 Fully mocked + rate-limit-free: read_url's network (`requests.get`) returns a canned page
 that does NOT contain the number. Only the LLM is real — so, like all evals here, runs
-vary (baseline worst observed 4-22); the GUARDED cap (<=max_reads) holds by construction.
+vary (baseline worst observed 4-22). The GUARDED cap holds mechanically for sequential
+calls; the one residual is PARALLEL same-URL siblings emitted just under the cap — with
+completed-only counting (the deliberate trade-off: counting pending siblings would refuse
+FIRST fetches) each sibling can still execute, so a rare worst=max_reads+1 on a
+parallel-emitting run is that residual, not a breaker regression.
 _run catches all exceptions so a run that dies on the recursion cap or an LLM timeout
 still reports its read counts instead of erroring out of the assertion.
 """
@@ -102,7 +106,7 @@ def _run(agent):
                 agent,
                 {"messages": [{"role": "user", "content": _PROMPT}]},
                 {"configurable": {"thread_id": str(uuid.uuid1())}, "recursion_limit": 70})
-        except BaseException as e:  # recursion cap / LLM timeout mid-loop are runaway signals
+        except Exception as e:  # recursion cap / LLM timeout mid-loop are runaway signals
             print(f"\n[reread-loop] run ended via {type(e).__name__}\n")
             return None
 

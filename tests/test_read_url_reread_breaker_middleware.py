@@ -20,12 +20,14 @@ def _req(url, tcid="new"):
     return SimpleNamespace(tool_call=tool_call, state=None), tool_call
 
 
-def _history(url, n):
-    """A message history with n prior read_url calls to url (AIMessage + its ToolMessage)."""
+def _history(url, n, prefix="c"):
+    """A message history with n prior read_url calls to url (AIMessage + its ToolMessage).
+    ``prefix`` keeps tool_call_ids unique when composing histories — duplicate ids are a
+    shape real histories can't produce and would mask a pairing regression."""
     msgs = []
     for i in range(n):
-        msgs.append(_ai_read(url, f"c{i}"))
-        msgs.append(ToolMessage(content="page text", tool_call_id=f"c{i}", name="read_url"))
+        msgs.append(_ai_read(url, f"{prefix}{i}"))
+        msgs.append(ToolMessage(content="page text", tool_call_id=f"{prefix}{i}", name="read_url"))
     return msgs
 
 
@@ -68,7 +70,7 @@ def test_different_url_not_counted():
 def test_normalized_url_matches_across_trivial_variants():
     mw = ReadUrlRereadBreaker(max_reads=3)
     # trailing slash / fragment differences are the SAME url (normalize_url)
-    history = _history(_URL, 2) + _history(_URL.rstrip("/") + "#sec", 1)
+    history = _history(_URL, 2) + _history(_URL.rstrip("/") + "#sec", 1, prefix="v")
     out, ran = _run(mw, _URL, history)             # 3 prior (normalized) → 4th refused
     assert not ran and out.status == "error"
 

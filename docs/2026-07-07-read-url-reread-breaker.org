@@ -36,11 +36,12 @@ A third, orthogonal read_url bound, alongside provenance (fabricated first fetch
 (consecutive repeat): *bound how many times the SAME normalised URL may be fetched.*
 
 - *Mechanism.* On each =read_url= call (=wrap_tool_call=, the seam provenance/tool_result_to_file use),
-  count prior =read_url= calls to the same =normalize_url()= target in the visible message history
-  (reuse =normalize_url= from =url_provenance.py=). On the Nth (threshold ≈ 3), *do not run the tool* —
-  return a corrective =ToolMessage=: "You have already read <url> N times; its content is unchanged.
-  Do NOT read it again — answer from what you have, or if you can't, say so and stop." Stateless
-  (scans history, like provenance), so it needs no per-instance bookkeeping.
+  count prior *COMPLETED* fetches of the same =normalize_url()= target — a call paired with its
+  =ToolMessage= result, via the shared =loop_detection._extract_events= — so the in-flight call and
+  any parallel first-fetch siblings never count. After =max_reads= completed fetches (default 3),
+  *refuse the next call* with a corrective =ToolMessage=: "You have already read <url> N times; its
+  content is unchanged. Do NOT read it again — answer from what you have, or if you can't, say so
+  and stop." Stateless except a logging intervention counter, like provenance.
 - *FINALIZE, don't kill.* Return a corrective tool result, never terminate the turn with a stub —
   the volume-cap-destroys-output lesson (doc 2026-06-05, Pattern E). The model gets a nudge and a
   chance to wrap up.
@@ -95,4 +96,4 @@ a full fix:
 * Files
 - New: =assist/middleware/read_url_reread_breaker.py=, =edd/eval/test_read_url_reread_loop.py=.
 - Wire: =assist/agent.py= research + fact-check middleware stacks (next to =UrlProvenanceMiddleware=).
-- Reuse: =normalize_url= from =assist/middleware/url_provenance.py= (extract/share if needed).
+- Reuse: =normalize_url= from =url_provenance.py=; =_extract_events= from =loop_detection.py=.

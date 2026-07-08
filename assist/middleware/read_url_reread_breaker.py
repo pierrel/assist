@@ -34,10 +34,11 @@ _DEFAULT_MAX_READS = 3
 
 
 def _read_url_arg(tool_call: dict) -> str:
-    """The raw URL a read_url tool call targets, or "" if none — the single extraction
-    site (the caller normalizes for counting and reuses the raw form in the refusal
-    text). ``args``-or-``arguments`` mirrors url_provenance (normalized
-    AIMessage.tool_calls use ``args``; the raw OpenAI shape uses ``arguments``)."""
+    """The raw URL a read_url tool call targets, or "" if none — the one extraction
+    path (the incoming request AND each history event go through it; callers normalize
+    for counting and reuse the raw form in the refusal text). ``args``-or-``arguments``
+    mirrors url_provenance (normalized AIMessage.tool_calls use ``args``; the raw
+    OpenAI shape uses ``arguments``)."""
     if tool_call.get("name") != _READ_TOOL:
         return ""
     args: Any = tool_call.get("args") or tool_call.get("arguments") or {}
@@ -58,14 +59,12 @@ def _prior_read_count(messages: list, target: str) -> int:
     The pairing is ``loop_detection._extract_events`` — the SAME call→result loop
     loop_detection and the search-unavailable breaker count with, so all three
     history-counting guards share one implementation (its ``completed`` flag IS the
-    completed-only semantics above, and its turn slice bounds the count to the current
-    turn — a no-op on the single-run sub-agents this is wired on)."""
+    completed-only semantics above; it also bounds the count to the current turn)."""
     n = 0
     for e in _extract_events(messages, window=None):
-        if not e["completed"] or e["tool_name"] != _READ_TOOL:
+        if not e["completed"]:
             continue
-        args = e["args"]
-        url = args.get("url", "") if isinstance(args, dict) else ""
+        url = _read_url_arg({"name": e["tool_name"], "args": e["args"]})
         if url and normalize_url(url) == target:
             n += 1
     return n
