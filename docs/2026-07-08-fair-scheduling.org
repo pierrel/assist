@@ -1,0 +1,123 @@
+#+TITLE: Fair scheduling / queue management — research must not block testing
+#+DATE: <2026-07-08>
+#+STATUS: DESIGN — for Pierre's approval. NO CODE YET. Architect + 3-lens design-review + Pierre's product answer folded in.
+
+* The problem (Pierre's words)
+"Research frequently blocks my testing." A single long research turn (the 2026-07-07
+peptides turn ran 68 min; another 96 min) holds the one llama.cpp slot + the THREAD_QUEUE,
+and Pierre's quick TEST turns queue behind it — up to ~an hour.
+
+* Two facts the design review established (they reshape the whole design)
+1. *The blocking turn is a HIGH-priority WEB turn, not a background one.* =research-agent=
+   is a SUB-AGENT dispatched inside ANY turn (=agent.py:602=), not a turn type. The peptides
+   turn was a web-UI turn Pierre typed ("Tell me about peptides…"). So the turn blocking him
+   is one he STARTED at the UI — a HIGH-priority interactive turn. This kills the architect's
+   first instinct (preempt LOW background turns for HIGH interactive ones): that v1 only helps
+   scheduled/SMS-triggered research, NOT Pierre's actual case (a web turn he kicked off).
+2. *Pierre's decision (2026-07-08): the long research is LEGIT + WANTED — preserve it, do not
+   truncate.* So a per-turn research wall-clock cap (finalize after N min) is OUT — it would
+   throw away real work. The fix must keep the research running AND let short turns return
+   promptly. Two approaches do that: concurrency (a 2nd slot) or preemption (pause/resume).
+
+* Approaches evaluated
+** A — App-level preemption (pause research at a superstep, run the test turn, resume)
+Framework-sound (the design-review confirmed the seam), BUT:
+- *It does not fit Pierre's case in v1.* Preemption keys on priority; the blocker is a HIGH
+  web turn, so you'd need HIGH-preempts-HIGH ("pause the older/longer web turn for the newer
+  one") — the exact case the bounded v1 defers. That's the bigger, harder version.
+- *It's a large blast-radius change to the message hot path* — moves web from =invoke=
+  (=invoke_with_rollback=, =thread.py:222=) to the STREAMING path to get a per-superstep yield
+  point, re-entering the territory the 2026-05-30 + 2026-06-10 deadlock fixes hardened. The
+  review listed 9 must-do safeguards (durability=sync on resume; keep the run a sync threadpool
+  BackgroundTask that drains the iterator itself — never an async StreamingResponse on the loop;
+  =pause_requested= in =_Handle.__slots__=; pause = let the stream unwind + release, resume =
+  a FRESH =stream(input=None)=, never suspend a live generator; catch ordering; off-loop pause
+  requests; a trunk-level BadRequestError-rollback REGRESSION to own; sub-agent partial work
+  discarded on resume; an un-mocked shared-sqlite-connection interleave test).
+- *Sandbox is the EASY part* (review verdict): swap-and-reattach-workspace — kill the container
+  on pause, fresh on resume; =/workspace= + the #179 persistent =/tmp= both persist on the host,
+  so a research turn (read_url + write_file + grep, no long-lived exec) loses nothing. ZERO
+  =sandbox_manager.py= change; keeps PR #139's "container age == slot-hold age" invariant.
+- *Cost of a preemption:* the paused turn's KV prefix is evicted (single slot) → a full prefill
+  on resume (the O(T²) churn the affinity queue exists to avoid). Bounded, but not free.
+
+** B — A second llama.cpp slot (--parallel 2) — RECOMMENDED
+Raise =PARALLEL= to 2 in =serve.sh= (=serve.sh:60=; "raise → splits CTX across slots") so a
+short turn's tokens interleave with research at the llama scheduler level — no app-level
+pause/resume. On Pierre's ACTUAL metric ("does my short test turn come back promptly"), B wins:
+a 300–500-token test answer, decoding even at half speed alongside research, returns in
+SECONDS-to-~a-minute vs 68 min queued. The architect's "both turns slower" objection measures
+throughput, not the metric Pierre cares about.
+- *Why it fits where A doesn't:* B is priority-agnostic — it doesn't care that the blocker is a
+  HIGH web turn. Two web turns simply run on two slots. That is EXACTLY Pierre's case.
+- *Cost / what must change (all contained, none a hot-path rewrite):*
+  - =serve.sh=: =PARALLEL=2=. VRAM: 24 GB − ~17 GB weights ≈ 7 GB for KV; =--parallel 2= splits
+    the 131k ctx across two ~64k slots → roughly the SAME total KV (q4_0), so it should fit —
+    *but this is the one real unknown and step 0 is a SPIKE to confirm fit + acceptable decode
+    speed.* llama restart is Pierre's manual action (llamacpp NOT in passwordless sudo).
+  - =THREAD_QUEUE= (=thread_queue.py=): today ONE holder (built to stop KV thrash on a
+    =--parallel 1= slot, =thread_queue.py:1-8=). With 2 real slots that rationale weakens by
+    construction; the queue relaxes to admit ≤2 concurrent holders (a semaphore of 2, not 1).
+    Beyond 2 it still queues (prevents thrash across >2 turns).
+  - *The single shared SqliteSaver connection* (=thread_manager.py:125=, =check_same_thread=False=)
+    now has TWO turns writing checkpoints concurrently. Fix: per-thread sqlite connections (or
+    WAL mode) so concurrent checkpoint writes don't corrupt/serialize badly. This is the main
+    real engineering — contained to the checkpointer boundary, NOT the hot path.
+  - Per-turn sandboxes: two containers alive at once — natural with PR #139 (one per work_dir),
+    no change; the reap logic already keys on work_dir.
+- *Compose with priority (approach C) for the >2 case:* when both slots are busy, a HIGH
+  interactive turn jumps ahead of QUEUED background turns (a small =_waiters= priority tweak).
+
+** C — Priority queue only (insufficient alone)
+Reorders WAITERS; never touches a RUNNING turn (Pierre's exact pain). Ships only as the
+tie-breaker inside B (which HIGH turn takes the next free slot).
+
+* Recommendation
+*B (--parallel 2) + priority tie-break*, gated on a GPU spike. It preserves the legit research
+(Pierre's decision), returns short turns promptly (his metric), fits the HIGH-blocks-HIGH case A
+punts, and is a smaller, more contained change than A's hot-path invoke→stream rewrite. A stays
+documented as the FALLBACK if the spike shows =--parallel 2= won't fit/perform on the 3090, or if
+Pierre would rather not touch the llama serve config.
+
+* Phased plan
+0. *SPIKE (gates everything):* set =PARALLEL=2= on the dev/serve box (Pierre restarts llamacpp),
+   fire two concurrent requests (one long "research"-shaped, one short), MEASURE: does it fit
+   VRAM (no CPU fallback), and does the short request return in ≤~1 min while the long one runs?
+   If NO → fall back to A. If YES → proceed.
+1. *THREAD_QUEUE → semaphore(2):* relax the single-holder invariant to ≤N (default 2, env-tuned)
+   concurrent holders; keep FIFO/priority among waiters. Un-mocked Condition tests + the
+   mandatory event-loop-liveness test (hold both slots, assert =post_message=/=peek_holder=
+   return promptly).
+2. *Per-thread checkpointer connection (or WAL):* remove the single-shared-connection concurrency
+   hazard so 2 turns write checkpoints safely. Un-mocked concurrent-write test (the "don't mock
+   the risk" rule).
+3. *Priority tie-break:* HIGH (interactive-web/HITL) waiters ahead of LOW (scheduled/SMS) when a
+   slot frees. Small =_waiters= change.
+4. *serve.sh + ops:* =PARALLEL=2= committed; doc the KV/VRAM headroom; the =nvidia-persistenced=
+   cold-boot dependency unchanged.
+
+* Open decisions for Pierre
+1. *Approve B (--parallel 2) as the direction, pending the spike?* (vs. A preemption, which is
+   bigger and doesn't fit your web-vs-web case in v1.) — the primary decision.
+2. *Concurrency cap N:* 2 to start (your test turn + one research). Raise later only if a 2nd GPU
+   appears. Confirm 2.
+3. *If the spike fails* (KV won't fit / decode too slow at --parallel 2 on the 3090): fall back to
+   A (preemption, HIGH-preempts-HIGH), accepting the 9-safeguard hot-path change? Or live with it?
+4. *serve config ownership:* the llama restart is your manual action (not sudo-able) — OK to
+   coordinate the =PARALLEL=2= flip with you?
+
+* Top risks
+1. *SPIKE outcome (gates B):* =--parallel 2= may not fit KV or may halve decode enough to hurt.
+   Mitigation: it's step 0; a bad result routes to A, no code wasted.
+2. *Shared SqliteSaver connection under 2 concurrent turns* (=thread_manager.py:125=): the real
+   engineering; per-thread connections/WAL + an un-mocked concurrent-write test.
+3. *THREAD_QUEUE single→double flight:* the queue's whole point was single-flight; relaxing it
+   touches a load-bearing invariant. Event-loop-liveness test mandatory (the 2026-06-10 class).
+4. *KV thrash across >2 turns:* with 2 slots, a 3rd turn still queues — the affinity rationale
+   holds beyond 2; keep the queue, just widen it to 2.
+
+* Files (B)
+=~/llama-cpp/scripts/serve.sh= (PARALLEL); =assist/thread_queue.py= (single→≤N holders +
+priority tie-break); =assist/thread_manager.py= (per-thread checkpointer connection / WAL);
+=manage/web/threads.py= (priority into acquire); tests (queue semaphore, event-loop-liveness,
+concurrent checkpoint writes). NO hot-path invoke→stream rewrite (that's A).
