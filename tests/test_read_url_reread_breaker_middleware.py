@@ -99,3 +99,35 @@ def test_missing_url_passes_through():
 
     mw.wrap_tool_call(req, handler)
     assert ran["v"]
+
+
+def test_current_inflight_call_not_counted():
+    # At wrap_tool_call time the state already contains the AIMessage carrying the call
+    # being executed (no ToolMessage yet). It must NOT count — otherwise the threshold
+    # shifts by one and prod refuses a read these tests say is allowed.
+    mw = ReadUrlRereadBreaker(max_reads=3)
+    history = _history(_URL, 2) + [_ai_read(_URL, "current")]   # 2 completed + the in-flight call
+    out, ran = _run(mw, _URL, history)
+    assert ran and out.content == "fresh page"                  # 3rd fetch allowed
+
+
+def test_parallel_same_url_siblings_all_allowed_on_first_fetch():
+    # One AIMessage with several same-URL calls and NO completed reads: siblings have no
+    # ToolMessage yet, so none count — the guard must never refuse a FIRST fetch.
+    mw = ReadUrlRereadBreaker(max_reads=3)
+    parallel = AIMessage(content="", tool_calls=[
+        {"name": "read_url", "args": {"url": _URL}, "id": f"p{i}"} for i in range(3)])
+    out, ran = _run(mw, _URL, [parallel])
+    assert ran
+
+
+def test_refusals_keep_the_cap_engaged():
+    # A refusal's corrective ToolMessage pairs with its call, so the completed count
+    # stays at/over the cap and later retries stay refused.
+    mw = ReadUrlRereadBreaker(max_reads=3)
+    history = _history(_URL, 3)
+    history.append(_ai_read(_URL, "r1"))
+    history.append(ToolMessage(content="You have already read ...", tool_call_id="r1",
+                               name="read_url", status="error"))
+    out, ran = _run(mw, _URL, history)
+    assert not ran and out.status == "error"

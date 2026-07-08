@@ -7,8 +7,8 @@ fetches, so re-reading the SAME normalized URL past a few times can NEVER return
 information — it is a runaway. The 2026-07-07 peptides incident re-read one PubMed URL
 *78 times* under search-unavailable (see docs/2026-07-07-read-url-reread-breaker.org).
 
-On the read that would exceed ``max_reads`` fetches of a URL already read this turn, refuse
-with a corrective ToolMessage (status=error) — FINALIZE, don't kill: the model is told to
+On the call that follows ``max_reads`` completed fetches of the same URL in this RUN's
+history, refuse with a corrective ToolMessage (status=error) — FINALIZE, don't kill: the model is told to
 answer from what it has (or say it can't and stop), instead of looping. That's the
 volume-cap-destroys-output lesson (a runaway must be nudged to finalize, not terminated
 with an empty stub).
@@ -43,19 +43,36 @@ def _read_url_target(tool_call: dict) -> str:
 
 
 def _prior_read_count(messages: list, target: str) -> int:
-    """How many times read_url was already CALLED with the same normalized URL this turn."""
+    """How many COMPLETED reads of the same normalized URL are in this run's history —
+    read_url calls that already have their ToolMessage result.
+
+    Completed-only matters: at ``wrap_tool_call`` time the state already contains the
+    AIMessage carrying the call being executed, so counting raw calls would include the
+    CURRENT call (shifting the threshold by one — prod refusing a read the unit tests
+    say is allowed) and any parallel same-URL siblings in that message (refusing them
+    ALL, including the very first fetch — a guard blocking legitimate work). Pairing
+    call→result excludes the in-flight ones. A refusal's corrective ToolMessage also
+    pairs, so once the cap is hit the count stays at/over it and later retries stay
+    refused."""
+    resolved = {m.tool_call_id for m in messages
+                if isinstance(m, ToolMessage) and m.tool_call_id}
     n = 0
     for m in messages:
         if not isinstance(m, AIMessage):
             continue
         for tc in (getattr(m, "tool_calls", None) or []):
-            if _read_url_target(tc) == target:
+            if tc.get("id") in resolved and _read_url_target(tc) == target:
                 n += 1
     return n
 
 
 class ReadUrlRereadBreaker(AgentMiddleware):
-    """Refuse a ``read_url`` once the same URL has been fetched ``max_reads`` times this turn.
+    """Refuse a ``read_url`` once the same URL has been fetched ``max_reads`` times this run.
+
+    The count scans the whole message history with NO turn boundary — correct for the
+    single-run research/fact-check sub-agents it's wired on (their history IS one run);
+    attaching it to a long-lived multi-turn agent would need a turn slice first (see
+    loop_detection._current_turn_slice).
 
     Corrective, not turn-ending (mirrors UrlProvenanceMiddleware): the refused call returns
     an error ToolMessage telling the model to stop re-reading and answer. Stateless across
@@ -85,7 +102,7 @@ class ReadUrlRereadBreaker(AgentMiddleware):
         self._intervention_count += 1
         url = (request.tool_call.get("args") or request.tool_call.get("arguments") or {}).get("url", target)
         logger.warning(
-            "ReadUrlRereadBreaker: refused read_url(%s) — already read %d times this turn "
+            "ReadUrlRereadBreaker: refused read_url(%s) — already read %d times this run "
             "(intervention #%d)", url, self._max_reads, self._intervention_count)
         return ToolMessage(
             content=(

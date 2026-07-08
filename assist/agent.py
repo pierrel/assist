@@ -607,6 +607,11 @@ def create_research_agent(model: BaseChatModel,
         # sub-agents whose read_url should only ever hit a URL already in context.
         # NOT on the orchestrator (it re-dispatches, so a rejected fetch there can
         # thrash); its runaway is bounded by recursion_limit.
+        # ReadUrlRereadBreaker: refuse re-reading the SAME url past max_reads (the
+        # 2026-07-07 peptides loop — provenance can't see a re-read). Also not on
+        # the orchestrator, but for a different reason: the incident showed zero
+        # orchestrator re-read looping (its 16 steps were all task dispatches), so
+        # wiring it there would be code for an unobserved case.
         "middleware": _subagent_safety_mw() + [UrlProvenanceMiddleware(), ReadUrlRereadBreaker()],
     }
 

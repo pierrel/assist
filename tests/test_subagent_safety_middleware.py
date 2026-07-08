@@ -95,6 +95,31 @@ class TestSubagentSafetyMiddleware(TestCase):
                 f"{[m.__name__ for m in missing]}",
             )
 
+    def test_research_url_subagents_carry_url_guards(self):
+        """The research searcher + fact-checker must carry BOTH read_url guards —
+        UrlProvenanceMiddleware (fabricated first fetch) and ReadUrlRereadBreaker
+        (same-URL re-read, the 2026-07-07 peptides loop). The behavioral eval drives
+        a hand-built confined agent, so only this pin catches a refactor silently
+        dropping the guards from the dict specs. critique-agent has no read_url and
+        is deliberately excluded."""
+        from assist.agent import create_research_agent
+        from assist.middleware.read_url_reread_breaker import ReadUrlRereadBreaker
+        from assist.middleware.url_provenance import UrlProvenanceMiddleware
+
+        subagents = self._capture_subagents(
+            create_research_agent, MagicMock(), working_dir="/tmp/x"
+        )
+        by_name = {s.get("name"): s for s in subagents
+                   if isinstance(s, dict) and "runnable" not in s}
+        for name in ("research-agent", "fact-check-agent"):
+            self.assertIn(name, by_name, f"expected dict subagent '{name}'")
+            present = _safety_mw_types_in(by_name[name])
+            for guard in (UrlProvenanceMiddleware, ReadUrlRereadBreaker):
+                self.assertIn(
+                    guard, present,
+                    f"Subagent '{name}' missing {guard.__name__} — the read_url "
+                    f"guards were silently dropped from the dict spec")
+
     def test_main_agent_dict_subagents_have_safety_mw(self):
         from assist.agent import create_agent
 
