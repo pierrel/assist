@@ -20,23 +20,36 @@ class Cadence:
       specific-weekdays / hourly.
     - interval mode: ``every_n_minutes`` — fires at clock-aligned multiples
       (minutes-since-midnight % N == 0), optionally filtered by ``weekdays``.
+    - monthly mode: ``day_of_month`` (1–31; the day is clamped to the month's last
+      day, so 31 fires on Feb 28/29) at ``minute`` (+ optional ``hour``), every
+      ``month_interval`` months phased from ``anchor_month`` (ISO ``"YYYY-MM"``).
+      Mutually exclusive with weekdays / every_n_minutes.
     """
     minute: int = 0
     hour: int | None = None
     weekdays: tuple[int, ...] | None = None   # 0=Mon … 6=Sun; None = every day
     every_n_minutes: int | None = None
+    day_of_month: int | None = None           # 1-31; None = not a monthly schedule
+    month_interval: int = 1                    # fire every N months (1 = every month)
+    anchor_month: str | None = None            # ISO "YYYY-MM": phase + earliest-fire start
 
     def to_dict(self) -> dict:
         return {"minute": self.minute, "hour": self.hour,
                 "weekdays": list(self.weekdays) if self.weekdays is not None else None,
-                "every_n_minutes": self.every_n_minutes}
+                "every_n_minutes": self.every_n_minutes,
+                "day_of_month": self.day_of_month,
+                "month_interval": self.month_interval,
+                "anchor_month": self.anchor_month}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Cadence":
         wd = d.get("weekdays")
         return cls(minute=d.get("minute", 0), hour=d.get("hour"),
                    weekdays=tuple(wd) if wd is not None else None,
-                   every_n_minutes=d.get("every_n_minutes"))
+                   every_n_minutes=d.get("every_n_minutes"),
+                   day_of_month=d.get("day_of_month"),
+                   month_interval=d.get("month_interval", 1),
+                   anchor_month=d.get("anchor_month"))
 
 
 @dataclass(frozen=True)

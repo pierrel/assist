@@ -83,3 +83,34 @@ def test_no_timezone_declines(tools, monkeypatch):
     monkeypatch.setattr(tools_mod, "get_config",
                         lambda: {"configurable": {"thread_id": "t1"}})   # no rider/tz
     assert "timezone" in tools.create_schedule("x", hour=7)
+
+
+def test_create_monthly_defaults_anchor_to_current_month(tools):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    out = tools.create_schedule("rent", day_of_month=1, hour=9)
+    assert "Scheduled" in out and "on the 1st at 9:00 AM" in out
+    saved = tools.store.for_thread("t1")[0]
+    # the tool always sets an anchor for a monthly schedule; default = current month, user tz
+    assert saved.cadence.anchor_month == datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m")
+
+
+def test_create_monthly_skip_months(tools):
+    out = tools.create_schedule("report", day_of_month=25, month_interval=2, hour=7)
+    assert "on the 25th of every 2 months at 7:00 AM" in out
+    saved = tools.store.for_thread("t1")[0]
+    assert saved.cadence.month_interval == 2 and saved.cadence.anchor_month is not None
+
+
+def test_create_monthly_explicit_anchor(tools):
+    out = tools.create_schedule("q", day_of_month=25, month_interval=2, hour=7,
+                                anchor_month="2026-03")
+    assert "Scheduled" in out
+    saved = tools.store.for_thread("t1")[0]
+    assert saved.cadence.anchor_month == "2026-03"
+
+
+def test_create_monthly_invalid_returns_corrective(tools):
+    # day_of_month with weekdays is incoherent -> a corrective string, never a raise
+    out = tools.create_schedule("x", day_of_month=5, weekdays=[0], hour=7)
+    assert out.startswith("Couldn't schedule:")

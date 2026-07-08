@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from langgraph.config import get_config
 
 from assist.context_rider import CONTEXT_RIDER_KEY
+from zoneinfo import ZoneInfo
 from assist.schedule import cadence
 from assist.schedule.cadence import InvalidCadence
 from assist.schedule.model import Cadence, Schedule
@@ -48,7 +49,9 @@ def schedule_tools(store) -> list:
 
     def create_schedule(prompt: str, minute: int = 0, hour: int | None = None,
                         weekdays: list[int] | None = None,
-                        every_n_minutes: int | None = None) -> str:
+                        every_n_minutes: int | None = None,
+                        day_of_month: int | None = None, month_interval: int = 1,
+                        anchor_month: str | None = None) -> str:
         """Schedule PROMPT to run automatically on a recurring cadence, in THIS thread.
 
         Use ONE cadence shape:
@@ -56,6 +59,9 @@ def schedule_tools(store) -> list:
         - specific weekdays at a time: hour=7, minute=0, weekdays=[0,1,2,3,4] (0=Mon..6=Sun)
         - hourly at a given minute: minute=30 (omit hour)
         - every N minutes: every_n_minutes=30 (omit hour)
+        - on the Nth of each month: day_of_month=25, hour=7
+        - on the Nth of every N months: day_of_month=25, month_interval=2, hour=7 — starts
+          THIS month by default; pass anchor_month="2026-03" to start in a specific month.
         Times are in the user's local timezone. Returns the saved schedule + next run.
         """
         tid = _thread_id()
@@ -64,9 +70,15 @@ def schedule_tools(store) -> list:
         tz = _tz()
         if not tz:
             return "Couldn't schedule: I don't know your timezone for this message."
+        # A monthly schedule always has an anchor — default it to the current month (user
+        # tz) when the agent didn't set one, so "every N months" starts now.
+        if day_of_month is not None and anchor_month is None:
+            anchor_month = datetime.now(ZoneInfo(tz)).strftime("%Y-%m")
         cad = Cadence(minute=minute, hour=hour,
                       weekdays=tuple(weekdays) if weekdays is not None else None,
-                      every_n_minutes=every_n_minutes)
+                      every_n_minutes=every_n_minutes,
+                      day_of_month=day_of_month, month_interval=month_interval,
+                      anchor_month=anchor_month)
         try:
             cadence.validate(cad)
         except InvalidCadence as e:
@@ -95,10 +107,12 @@ def schedule_tools(store) -> list:
 
     def modify_schedule(schedule_id: str, minute: int | None = None, hour: int | None = None,
                         weekdays: list[int] | None = None,
-                        every_n_minutes: int | None = None) -> str:
+                        every_n_minutes: int | None = None, day_of_month: int | None = None,
+                        month_interval: int | None = None, anchor_month: str | None = None) -> str:
         """Change an existing schedule. Pass ONLY the field(s) you're changing + the id;
-        omitted fields keep their current value (e.g. "fire at 5am" -> hour=5 only).
-        To switch between a clock schedule and an every-N-minutes one, delete and recreate.
+        omitted fields keep their current value (e.g. "fire at 5am" -> hour=5 only, or
+        "make it every 3 months" -> month_interval=3 only).
+        To switch cadence MODE (clock <-> every-N-minutes <-> monthly), delete and recreate.
         """
         tid = _thread_id()
         if not tid:
@@ -112,6 +126,12 @@ def schedule_tools(store) -> list:
             delta["weekdays"] = tuple(weekdays)
         if every_n_minutes is not None:
             delta["every_n_minutes"] = every_n_minutes
+        if day_of_month is not None:
+            delta["day_of_month"] = day_of_month
+        if month_interval is not None:
+            delta["month_interval"] = month_interval
+        if anchor_month is not None:
+            delta["anchor_month"] = anchor_month
         if not delta:
             return "Nothing to change — pass the field(s) to update."
         try:
