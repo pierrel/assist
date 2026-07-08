@@ -1,0 +1,67 @@
+#+TITLE: Message timing indicators + single-word thread-list statuses (web UI)
+#+DATE: <2026-07-08>
+#+STATUS: DESIGN (Phase 1). Smallest change that satisfies the 3 requirements; agent/checkpoint hot path + assist/thread.py deliberately untouched.
+
+* Requirements
+1. *Elapsed human→AI* on each completed turn — a small badge on the assistant reply (e.g. "14s", "2m 5s").
+2. *Live WIP elapsed* — while a turn is processing, show time from the last human message to now, ticking.
+3. *Single-word statuses* on the thread-list page (STAGE_LABELS are currently sentences).
+
+Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a per-superstep =ts= but the checkpoint→message mapping is fiddly. So we stamp times ourselves, off the agent path.
+
+* Design decisions
+- *LIVE (part 2):* store one =started_at= field in the existing =status.json= when a turn begins. =render_thread= embeds a *server-computed* =baseline_seconds = now - started_at=; a tiny inline JS ticks it up locally via =performance.now()= delta. No polling, no server round-trips, no clock-skew dependency (the page has NO client polling today — threads.py:1105).
+- *COMPLETED (part 1):* a per-thread sidecar =turn_timings.json= (mirrors the existing =merge_conflict.json= trio in state.py:233-289), a JSON object keyed by *human-message ordinal* → ={started_at, seconds}=. Written off-loop by =_process_message= at its success exits; read on-loop by =render_thread= (one small missing-ok JSON read, exactly like =_get_status= / =_get_conflict=).
+  - Rejected =AIMessage.response_metadata= (touches the model/middleware hot path + checkpoint round-trip) and checkpoint-=ts= derivation (fiddly, couples render to langgraph internals).
+  - Keyed by *human-message ordinal* (count of HumanMessages), NOT raw message index: computable identically on write (=chat.get_raw_messages()=) and read (count of ="user"= dicts), append-only, robust to errored/pre-feature turns. Crucially this keeps =assist/thread.py= =_messages_to_dicts= UNTOUCHED, so the exact-equality render tests (tests/test_render.py:319-348) stay green.
+- *Single-word statuses (part 3):* rewrite =STAGE_LABELS= (state.py:321-328) in place. This dict feeds both the list page (threads.py:188,194) and the in-thread banner (threads.py:523) — one source of truth (see O1).
+
+* Why it's event-loop-safe (load-bearing — single-worker uvicorn)
+- *Writes only off the loop.* =_process_message= runs as a sync BackgroundTask / on the =_ResumeScheduler= thread (threads.py:792, 1334-1343), never on the asyncio loop. The sidecar write + the =started_at= write ride the existing =_set_status= calls (which already do blocking file I/O there). No new on-loop I/O, no new locks.
+- *Reads on the loop are the established pattern.* =render_thread= reads one small JSON with no lock — exactly what =_get_status= (state.py:335) / =_get_conflict= (state.py:237) already do.
+- *One writer per tid.* THREAD_QUEUE + the serial =_ResumeScheduler= serialize all turns for a tid; =_atomic_write= covers crash-safety. Different tids → different files.
+
+* Steps (Phase 2)
+** Part 3 — single-word statuses (first; smallest, isolates a rename)
+1. state.py:321-328 — =STAGE_LABELS= values → single words: Initializing / Cloning / Starting / Queued / Processing / Paused. Keys + BUSY_STAGES/INIT_STAGES unchanged.
+2. No call-site changes (threads.py:188,194,523 already use =.get=). Set the banner fallback (threads.py:523) to a single word ("Working").
+
+** Part 2 — live WIP timer
+3. Establish =started_at= via the existing =pending_kwargs= mechanism:
+   - =_mark_pending= (threads.py:1101-1139) idle→busy: include =started_at=now= (elapsed counts from the user's submit → includes queue-wait; see R2).
+   - =create_thread_with_message= (threads.py:1051): =started_at=now= in the initializing write.
+   - =_process_message= (threads.py:808-812): =started_at = _get_status(tid).get("started_at") or now=, put in =pending_kwargs= so every busy =_set_status= (starting_sandbox/processing/queued/paused) re-persists it. =or now= fallback covers scheduled/SMS turns.
+   - Resume preserves it by construction (the =paused= status at line 954 carries =started_at=), so elapsed + timer span the pause. Terminal =ready= (line 937) drops =pending_kwargs= → =started_at= gone → timer stops.
+4. =render_thread= banner (threads.py:520-529): when busy + =started_at= present, emit =baseline_seconds= into a =<span class="elapsed" data-baseline="…">= + an inline script (near threads.py:724) that ticks locally. Absent =started_at= while busy → spinner, no timer (graceful).
+
+** Part 1 — completed-turn badges
+5. state.py — sidecar trio mirroring the conflict file: =_timings_path=, =_get_timings= (missing/corrupt→={}=, never raises), =_append_timing= (read-modify-write + =_atomic_write=). Only =_get_timings= runs on the loop (bare missing-ok read).
+6. =_process_message= success exits (threads.py:934 awaiting_approval, 937 ready): =ordinal = #HumanMessages in chat.get_raw_messages()= (thread.py:312), =seconds = now - started_at=, =_append_timing(...)=. The pause path returns early (line 955) so exactly one entry per turn across pauses.
+7. =_format_elapsed(seconds)= → "14s" | "2m 5s" | "1h 3m" (JS side a 3-line mirror).
+8. =render_thread= reverse loop (threads.py:482-518): load =timings= once; forward-pass build =index→elapsed= map by counting ="user"= dicts; attach to the *concluding assistant reply* of each turn; emit a muted =<span>= badge (threads.py:506-508). =dict.get= throughout → no entry → no badge.
+
+** Tests
+9. Unit: =_format_elapsed= boundaries; =_get_timings= missing/corrupt→={}=.
+10. Render (symptom not proxy): seed =turn_timings.json= for a 3-turn thread, assert the badge is on the CORRECT assistant bubble; busy thread with =started_at= → baseline span + script present; pre-feature thread (no sidecar) → no crash, no badge.
+11. Event-loop: =render_thread= returns promptly with the sidecar present, no lock taken. tests/test_render.py:319-348 stays green UNCHANGED (proof thread.py is untouched).
+
+* Edge cases (chosen behavior)
+- *Paused/resumed turn:* elapsed is WALL-CLOCK from human message to completion, INCLUDING pause + queue-wait (the user-meaningful "time to answer"); the scheduler's =accumulated_active_ms= is internal, not used. Timer keeps ticking through the pause. (O3 — confirm vs active-time.)
+- *Timezone:* the badge is a DURATION, never a wall-clock time → tz-irrelevant; server-computed baseline + client-local increment → no skew.
+- *Pre-feature / errored / page-reopen:* ={}=/=.get= misses → no badge, no crash; errored turn rolls back → no entry; reopen mid-turn recomputes baseline from =status.json= =started_at=.
+- *Supersede / HITL-reject loops* (threads.py:882-905): resume the same turn, no new HumanMessage → ordinal unchanged → one entry at the final success exit.
+
+* Open questions / risks
+- *O1* — shared STAGE_LABELS shortens the in-thread banner too (recommended: one source of truth; else add list-only SHORT_STAGE_LABELS).
+- *O2* — badge on =awaiting_approval= turns: recommend record + render only on plain assistant bubbles.
+- *O3* — wall-clock vs active-time for paused turns: recommend wall-clock.
+- *R1* — sidecar grows one entry/turn (threads are tens of turns; YAGNI a cap for v1).
+- *R2* — =started_at= at submit includes queue-wait behind other threads → honest "human→reply", matches the live timer; a long queue-wait shows a large elapsed even for a fast turn. Recommend include.
+- *R3* — one extra off-loop =get_state= per turn to count HumanMessages (negligible).
+- *R4* — turns in-flight at deploy have no =started_at=/entry → spinner-without-timer + no badge; self-heals next turn.
+
+* Critical files
+- manage/web/threads.py (worker + render + banner)
+- manage/web/state.py (STAGE_LABELS + sidecar trio)
+- assist/thread.py (read-only reference: get_raw_messages:312; _messages_to_dicts:30 stays untouched)
+- tests/test_render.py (must stay green unchanged; add timing render tests here or tests/test_web_timing.py)
