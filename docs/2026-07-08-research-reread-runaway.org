@@ -22,10 +22,10 @@ repeat, for ~90 min. Forensics on b37c712b: **108,278 "404 Not Found"** results 
 model cycled fabricated URLs on a handful of real domains (=essence.com=,
 =billboard.com=, =hotnewhiphop=, =complex=, =ajc=) — pages that do not exist.
 
-*Why nothing stopped it:* the guard that exists precisely to block fabricated URLs —
-=UrlProvenanceMiddleware= — is **NOT on the orchestrator**. It is wired only on the
-*searcher* and *fact-checker* sub-agents (=agent.py:617,636=), deliberately excluded
-from the orchestrator (=agent.py:650-654=) out of a fear of "re-dispatch thrash." And
+*Why nothing stopped it (pre-fix):* the guard that exists precisely to block fabricated
+URLs — =UrlProvenanceMiddleware= — *was* **NOT on the orchestrator**. It was wired only on
+the *searcher* and *fact-checker* sub-agents, deliberately excluded from the orchestrator
+out of a fear of "re-dispatch thrash" (this fix removes that exclusion — see §3). And
 the generic =LoopDetectionMiddleware= *is* on the orchestrator (=agent.py:496=) but
 structurally can't catch this (see §2). So the orchestrator's own =read_url= is
 un-provenanced, un-reread-bounded, and only nominally loop-detected — free to guess
@@ -60,7 +60,7 @@ mechanism this runaway doesn't use.
 
 - *Orchestrator* = =create_research_agent='s main graph (=agent.py:644-659=), system
   prompt =research_instructions.txt.j2=, **tools =[read_url]=** (=agent.py:646=),
-  =recursion_limit=500=. It is itself a sub-agent of the general agent, and it has its
+  =recursion_limit=300=. It is itself a sub-agent of the general agent, and it has its
   *own* =read_url= — this is the agent that looped.
 - *Searcher* = dict sub-agent =research-agent= (=agent.py:602-618=), tools
   =[search_internet, read_url]=, middleware **includes** =UrlProvenanceMiddleware() +
@@ -96,7 +96,7 @@ min on the single llama.cpp slot.
 - *T4* — Model emits *"Let me try completely different sources now."* and fabricates
   another (=billboard.com/.../rich-homie-quan-funeral-...=, =hotnewhiphop=, =complex=,
   =ajc=) → 404. Repeat T2→T4 indefinitely.
-- *Tn* — 108k 404s later, still looping. =recursion_limit=500= is the only ceiling and
+- *Tn* — 108k 404s later, still looping. =recursion_limit=300= is the only ceiling and
   it's nowhere near tripped in a way that helps (each "step" is cheap; the loop just
   runs). No guard fires (§2). ~90 min gone.
 
@@ -197,7 +197,7 @@ Keep the "read one of these" branch for when URLs *are* listed. Small copy chang
 logic beyond keying on "allow-list empty".
 
 ** (d) recursion_limit — leave it
-Once (a) bounds the loop by construction, =recursion_limit=500= is a harmless backstop.
+Once (a) bounds the loop by construction, =recursion_limit=300= is a harmless backstop.
 Don't tune it here.
 
 ** Sequencing (eval-first, AGENTS.md)
