@@ -791,7 +791,8 @@ _SUPERSEDE_RIDER = (
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None,
-                     resume: bool = False, accumulated_active_ms: float = 0.0) -> None:
+                     resume: bool = False, accumulated_active_ms: float = 0.0,
+                     pending_text: str | None = None) -> None:
     # `sender` (set only for an inbound-message triage turn) rides the run config as
     # ``sms_sender`` so send_reply knows who to reply to; a normal turn passes None.
     # `resume_decision` (set only when approving/rejecting a pending send_reply) resumes the
@@ -800,9 +801,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
     # than starting a new message; `accumulated_active_ms` carries the active hold it already
     # burned so the 2h cap can't be dodged by pausing.
-    # Carry the pending message in the status so the thread page can show
-    # it as a placeholder bubble while processing (cleared once status==ready).
-    pending_kwargs = {"pending_message": text} if text else {}
+    # Carry the pending message in the status so the thread page can show it as a
+    # placeholder bubble while processing (cleared once status==ready). On a resume
+    # (text=None) the original message is carried via `pending_text` so the bubble
+    # survives the pause window instead of vanishing until the turn completes.
+    _pending_msg = text if text else pending_text
+    pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
     # The pending draft's sender, captured NOW before any _set_status below overwrites it —
     # used by the supersede path to decide whether a new message folds into the pending reply.
     prior_pending_sender = _get_status(tid).get("pending_sender") or ""
@@ -941,8 +945,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # burned so the 2h cap accounts across resumes.
         carry = THREAD_QUEUE.pop_hold(tid)
         DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
+        # Enqueue the resume BEFORE advertising `paused`, so a new message that races in
+        # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
+        _RESUME_SCHEDULER.submit_resume(
+            tid, rider, sender, carry, pending_kwargs.get("pending_message"))
         _set_status(tid, "paused", **pending_kwargs)
-        _RESUME_SCHEDULER.submit(tid, rider, sender, carry)
         return
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
@@ -1299,7 +1306,7 @@ class _ResumeScheduler:
     again simply re-submits itself here (round-robin, back of the queue)."""
 
     def __init__(self) -> None:
-        self._q: "queue.Queue[tuple]" = queue.Queue()
+        self._q: "queue.Queue[dict]" = queue.Queue()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -1309,17 +1316,29 @@ class _ResumeScheduler:
             target=self._loop, name="resume-scheduler", daemon=True)
         self._thread.start()
 
-    def submit(self, tid: str, rider, sender, accumulated_active_ms: float) -> None:
-        self._q.put((tid, rider, sender, accumulated_active_ms))
+    def submit_resume(self, tid: str, rider, sender, accumulated_active_ms: float,
+                      pending_text: str | None) -> None:
+        """Continue a paused turn from its checkpoint (input=None)."""
+        self._q.put({"tid": tid, "text": None, "rider": rider, "sender": sender,
+                     "resume": True, "acc": accumulated_active_ms, "pending": pending_text})
+
+    def submit_message(self, tid: str, text: str, rider, sender) -> None:
+        """Run a NEW message for a tid that has an in-flight (paused) turn — routed here
+        so it runs AFTER the resume on this serial thread, never on the paused turn's
+        mid-flight checkpoint (fix-by-construction ordering; no priority needed)."""
+        self._q.put({"tid": tid, "text": text, "rider": rider, "sender": sender,
+                     "resume": False, "acc": 0.0, "pending": None})
 
     def _loop(self) -> None:
         while True:
-            tid, rider, sender, acc = self._q.get()
+            it = self._q.get()
             try:
-                _process_message(tid, None, rider=rider, sender=sender,
-                                 resume=True, accumulated_active_ms=acc)
+                _process_message(it["tid"], it["text"], rider=it["rider"],
+                                 sender=it["sender"], resume=it["resume"],
+                                 accumulated_active_ms=it["acc"], pending_text=it["pending"])
             except Exception:
-                logging.error("fair-scheduling resume failed for %s", tid, exc_info=True)
+                logging.error("fair-scheduling dispatch failed for %s", it["tid"],
+                              exc_info=True)
 
 
 _RESUME_SCHEDULER = _ResumeScheduler()
@@ -1341,8 +1360,15 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     _mark_pending(tid, text)
-    background_tasks.add_task(_process_message, tid, text,
-                             _build_rider(sent_at, tz, lat, lon))
+    rider = _build_rider(sent_at, tz, lat, lon)
+    if _get_status(tid).get("stage") == "paused":
+        # A turn is paused mid-flight (its resume is already queued on the scheduler).
+        # Route this new message through the SAME serial scheduler so it runs AFTER the
+        # resume — never on the paused turn's mid-flight checkpoint. This only sets the
+        # flag off-loop-safely (a plain queue.put); the loop stays lock-free.
+        _RESUME_SCHEDULER.submit_message(tid, text, rider, None)
+    else:
+        background_tasks.add_task(_process_message, tid, text, rider)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
