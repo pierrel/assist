@@ -164,7 +164,7 @@ def test_hold_timeout_marks_expired_and_force_releases():
     # flakiness on slow/loaded CI where the Timer thread may take longer
     # than a tight `time.sleep` margin to execute its callback.
     q = ThreadAffinityQueue()
-    with q.acquire("A", hold_timeout_s=0.1) as handle:
+    with q.acquire("A", hold_timeout_s=0.1, quantum_s=0.03) as handle:
         assert handle.expired is False
         assert q.current_handle() is handle
         deadline = time.time() + 2.0
@@ -306,7 +306,7 @@ def test_cross_context_exit_leaks_holder_until_watchdog_recovers():
     # pins the queue-level recovery contract for any future caller that
     # might violate the same-Context-exit contract.
     q = ThreadAffinityQueue()
-    cm = q.acquire("A", hold_timeout_s=0.1)
+    cm = q.acquire("A", hold_timeout_s=0.1, quantum_s=0.03)
     ctx = contextvars.copy_context()
     # `__enter__` binds the contextvar token to `ctx`; the subsequent
     # `__exit__` runs in the test's outer context, so `reset(token)`
@@ -351,7 +351,7 @@ def test_watchdog_force_releases_when_holder_is_wedged():
 
     def wedged_holder():
         with q.acquire(
-            "A", hold_timeout_s=0.1,
+            "A", hold_timeout_s=0.1, quantum_s=0.03,
             on_state_change=lambda s: holder_acquired.set() if s == "running" else None,
         ):
             holder_can_release.wait(timeout=5.0)
@@ -408,7 +408,7 @@ def test_watchdog_does_not_clobber_newly_promoted_holder():
 
     def hold_a():
         with q.acquire(
-            "A", hold_timeout_s=0.1,
+            "A", hold_timeout_s=0.1, quantum_s=0.03,
             on_state_change=lambda s: a_acquired.set() if s == "running" else None,
         ):
             a_can_release.wait(timeout=5.0)

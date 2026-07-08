@@ -309,10 +309,14 @@ def _evict_caches(tid: str) -> None:
 #   starting_sandbox  - docker container starting
 #   queued            - waiting for another thread's LLM affinity hold
 #   processing        - agent is running on a message
+#   paused            - yielded the slot at its quantum so a waiting turn could
+#                       run; the resume scheduler will continue it (fair scheduling)
 #   ready             - idle, accepting input
 #   error             - something failed; see status["error"]
 INIT_STAGES = {"initializing", "cloning", "starting_sandbox"}
-BUSY_STAGES = INIT_STAGES | {"processing", "queued"}
+# `paused` is BUSY (not INIT): the turn is mid-flight and will resume, so the page
+# renders history + keeps input enabled, and _mark_pending won't clobber it.
+BUSY_STAGES = INIT_STAGES | {"processing", "queued", "paused"}
 
 STAGE_LABELS = {
     "initializing": "Setting up thread...",
@@ -320,6 +324,7 @@ STAGE_LABELS = {
     "starting_sandbox": "Starting sandbox container...",
     "queued": "Waiting for another thread to finish...",
     "processing": "Processing your message...",
+    "paused": "Paused for a quicker turn — will resume...",
 }
 
 

@@ -13,9 +13,11 @@ import json
 import logging
 import hmac
 import os
+import queue
 import re
 import secrets
 import subprocess
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -45,7 +47,7 @@ from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
 from assist.thread_manager import InvalidThreadId
-from assist.thread_queue import THREAD_QUEUE
+from assist.thread_queue import THREAD_QUEUE, ThreadPauseRequested
 
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
@@ -788,11 +790,16 @@ _SUPERSEDE_RIDER = (
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
-                     sender: str | None = None, resume_decision: dict | None = None) -> None:
+                     sender: str | None = None, resume_decision: dict | None = None,
+                     resume: bool = False, accumulated_active_ms: float = 0.0) -> None:
     # `sender` (set only for an inbound-message triage turn) rides the run config as
     # ``sms_sender`` so send_reply knows who to reply to; a normal turn passes None.
     # `resume_decision` (set only when approving/rejecting a pending send_reply) resumes the
     # paused graph instead of starting a new turn — reusing this path's sandbox/queue/sync.
+    # `resume=True` (set only by the fair-scheduling resume scheduler after a quantum pause)
+    # continues this thread's in-flight turn from its durable checkpoint (input=None) rather
+    # than starting a new message; `accumulated_active_ms` carries the active hold it already
+    # burned so the 2h cap can't be dodged by pausing.
     # Carry the pending message in the status so the thread page can show
     # it as a placeholder bubble while processing (cleared once status==ready).
     pending_kwargs = {"pending_message": text} if text else {}
@@ -824,7 +831,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # internally; the reentrant fast path (same thread_id + same
         # contextvar) makes it a no-op, so we don't double-count or
         # double-callback.
-        with THREAD_QUEUE.acquire(tid, on_state_change=on_queue_wait):
+        with THREAD_QUEUE.acquire(tid, on_state_change=on_queue_wait,
+                                  accumulated_active_ms=accumulated_active_ms):
             _set_status(tid, "starting_sandbox", **pending_kwargs)
             try:
                 # Inside the try so the `finally` reaps even if sandbox
@@ -848,7 +856,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
-                if resume_decision is not None:
+                if resume:
+                    # Fair-scheduling resume: continue the in-flight turn from its
+                    # durable checkpoint (input=None). No new message, no supersede.
+                    resp = chat.resume()
+                elif resume_decision is not None:
                     # Resume an approve/edit/reject. If the pending reply was already
                     # resolved (a double-click, or a superseding text got there first),
                     # there's nothing to resume — resuming a non-interrupted graph would
@@ -919,6 +931,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         pending_reply=pending.get("text", ""), pending_sender=sender or "")
         else:
             _set_status(tid, "ready")
+    except ThreadPauseRequested:
+        # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
+        # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
+        # the container was already reaped by the `finally` above (reap-on-pause, so no
+        # container outlives its slice). Mark it paused and hand it to the dedicated
+        # resume scheduler — NOT a BackgroundTask (that would park a shared-threadpool
+        # worker per paused turn and stall request handling). Carry the active hold it
+        # burned so the 2h cap accounts across resumes.
+        carry = THREAD_QUEUE.pop_hold(tid)
+        DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
+        _set_status(tid, "paused", **pending_kwargs)
+        _RESUME_SCHEDULER.submit(tid, rider, sender, carry)
+        return
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
         # the user can simply retry — but they should know their
@@ -952,6 +977,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     except Exception as e:
         logging.error("Message processing failed for thread %s: %s", tid, e, exc_info=True)
         _set_status(tid, "error", error=str(e), **pending_kwargs)
+    finally:
+        # Drain this turn's persisted active-hold on any TERMINAL exit (success/error)
+        # so it can't leak — the pause path already popped it (to carry) and returned,
+        # so this is a no-op there.
+        THREAD_QUEUE.pop_hold(tid)
 
 
 def _capture_conversation(tid: str, reason: str) -> None:
@@ -1255,8 +1285,49 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
 _SCHEDULER = Scheduler(SCHEDULE_STORE, _scheduled_dispatch, _llm_reachable)
 
 
+class _ResumeScheduler:
+    """One dedicated thread that dispatches fair-scheduling resumes SERIALLY.
+
+    A paused turn resumes by re-running ``_process_message(..., resume=True)``, which
+    re-acquires the LLM slot and parks in the queue's ``cond.wait`` until its turn comes
+    up. That park must NOT happen on a ``BackgroundTask``: FastAPI's sync route handlers
+    and BackgroundTasks all draw from ONE shared anyio threadpool (40 tokens), so N paused
+    turns parking N workers — under the exact contention that triggers a pause — would
+    starve the pool and stall request handling (a 2026-06-10-class outage). This thread
+    owns the parking instead, consuming ZERO pool tokens. Serial is correct: the LLM slot
+    is ``--parallel 1``, so only one resume can run at a time anyway. A resume that pauses
+    again simply re-submits itself here (round-robin, back of the queue)."""
+
+    def __init__(self) -> None:
+        self._q: "queue.Queue[tuple]" = queue.Queue()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._loop, name="resume-scheduler", daemon=True)
+        self._thread.start()
+
+    def submit(self, tid: str, rider, sender, accumulated_active_ms: float) -> None:
+        self._q.put((tid, rider, sender, accumulated_active_ms))
+
+    def _loop(self) -> None:
+        while True:
+            tid, rider, sender, acc = self._q.get()
+            try:
+                _process_message(tid, None, rider=rider, sender=sender,
+                                 resume=True, accumulated_active_ms=acc)
+            except Exception:
+                logging.error("fair-scheduling resume failed for %s", tid, exc_info=True)
+
+
+_RESUME_SCHEDULER = _ResumeScheduler()
+
+
 def start_scheduler() -> None:
     _SCHEDULER.start()
+    _RESUME_SCHEDULER.start()
 
 
 def stop_scheduler() -> None:

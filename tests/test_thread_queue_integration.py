@@ -209,13 +209,12 @@ class TestThreadStreamMessageHoldsAndReleasesQueue(_ThreadQueueIntegrationBase):
             yield "b"
             yield "c"
 
-        # Tight hold_timeout so the watchdog fires during the stall.
+        # Tight hold_timeout + quantum so the tick enforces the cumulative-active
+        # cap (and thus force-releases) during the stall.  The cap is checked at
+        # tick (quantum) boundaries now, so the quantum must be <= the hold cap.
         with patch.object(chat.agent, "stream", slow_stream):
-            with patch.object(
-                THREAD_QUEUE,
-                "_default_hold_timeout",
-                0.1,
-            ):
+            with patch.object(THREAD_QUEUE, "_default_hold_timeout", 0.1), \
+                    patch.object(THREAD_QUEUE, "_default_quantum", 0.03):
                 stream_iter = chat.stream_message("hello")
                 # First chunk acquires the queue.
                 first = next(stream_iter)

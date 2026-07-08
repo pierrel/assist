@@ -229,6 +229,13 @@ class Thread:
         """Continue the thread with a new user message and return the last response."""
         return self._run({"messages": [{"role": "user", "content": text}]})
 
+    def resume(self) -> str:
+        """Resume this thread's in-flight turn from its durable checkpoint (``input=None``)
+        after a fair-scheduling quantum pause. Completed supersteps (incl. any mid-flight
+        sub-agent) are in the checkpoint under ``durability="sync"``, so no work is redone —
+        see ``docs/2026-07-08-fair-scheduling.org`` + ``tests/test_subagent_durable_resume.py``."""
+        return self._run(None)
+
     def pending_reply(self) -> dict | None:
         """If this thread is paused awaiting approval of a ``send_reply`` (HITL interrupt),
         return ``{"text": <draft>}`` — read from the durable checkpoint, so it survives the

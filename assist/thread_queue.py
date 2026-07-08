@@ -7,34 +7,42 @@ prefill from scratch — prefill cost grows from O(T) to O(T²) per
 agent.  Holding the queue for one full ``Thread.message()`` keeps the
 slot's cached prefix matched, so prefill stays a per-turn delta.
 
-Affinity, not fairness:
+Affinity, then fairness under contention:
 
-- Waiters wait until the slot is vacated — either by the holder's
-  clean release at ``__exit__`` or by the watchdog force-releasing it
-  at ``hold_timeout_s``.  After a force-release the original holder
-  thread may still be unwinding its ``with`` block while a waiter is
-  already running; the identity guard in :meth:`_release_if_holder`
-  prevents the unwinding holder's late cleanup from clobbering the
-  new holder.
-- Waiters are FIFO among themselves.
+- Affinity: holding the slot for one full turn keeps the KV prefix matched.
+- Fairness: a holder that has held the slot for ``quantum_s`` AND has a
+  waiter behind it is asked to PAUSE at its next superstep (cooperative,
+  via ``pause_requested`` -> :class:`ThreadPauseRequested`), so a quick turn
+  isn't blocked for the full length of a long research turn.  The paused
+  turn is resumed later (round-robin, back of the queue) from its durable
+  checkpoint — no lost work.  UNCONTENDED, the holder is never paused (the
+  tick just re-arms), so a long turn with nobody waiting runs uninterrupted.
+- Waiters are FIFO among themselves.  A resumed turn re-acquires like any
+  other waiter, so it lands at the back — natural round-robin, no priority.
 - Same ``thread_id`` re-acquiring is a no-op (re-entrant by id).
 
-Failure-fast bounds:
+Failure-fast bounds (the tick timer, :meth:`_on_tick`, enforces both):
 
-- ``hold_timeout_s`` — a runaway holder is flagged ``expired`` so the
-  cooperative cancel point in :class:`ThreadQueueMiddleware` raises
-  :class:`ThreadHoldExpired` between LLM calls, AND the slot is vacated
-  immediately so the next waiter can claim it without waiting on the
-  runaway's ``finally``.  Honors the project rule that threads die on
+- ``hold_timeout_s`` — a cap on CUMULATIVE ACTIVE hold (summed across a turn's
+  slices; paused/queued wall-time is excluded, and it can't be dodged by
+  pausing).  On breach the holder is flagged ``expired`` so the cooperative
+  cancel point in :class:`ThreadQueueMiddleware` raises :class:`ThreadHoldExpired`
+  between LLM calls (terminal — a runaway backstop, not resumable), AND the slot
+  is vacated immediately.  Honors the project rule that threads die on
   infrastructure failure rather than heal-and-retry.  The cap bounds the
   *detection latency* of the cooperative cancel, not the exact wall-clock
   release time — a ``wrap_model_call`` retry inside
   :class:`EmptyResponseRecoveryMiddleware` or
   :class:`BadRequestRetryMiddleware` can run one or two more LLM calls
-  past expiration before ``after_model`` next fires.  Forcible slot
-  release happens at the timeout regardless, logged at WARNING.
+  past the boundary before ``after_model`` next fires.  Forcible slot
+  release happens regardless, logged at WARNING.
 - ``wait_timeout_s`` — a waiter that can't acquire raises
   :class:`QueueWaitTimeout` and the thread errors.
+
+After a force-release (cap breach) the original holder thread may still be
+unwinding its ``with`` block while a waiter is already running; the identity
+guard in :meth:`_release_if_holder` prevents the unwinding holder's late
+cleanup from clobbering the new holder.
 
 Single-process scope:
 
@@ -68,6 +76,12 @@ def _env_float(name: str, default: float) -> float:
 
 DEFAULT_HOLD_TIMEOUT_S = _env_float("ASSIST_THREAD_HOLD_TIMEOUT_S", 7200.0)
 DEFAULT_WAIT_TIMEOUT_S = _env_float("ASSIST_THREAD_QUEUE_WAIT_S", 14400.0)
+# Fair-scheduling quantum: a holder that has held the slot for this long AND has a
+# waiter behind it yields at its next superstep (cooperative pause), so a quick turn
+# isn't blocked for the full length of a long research turn.  Uncontended, it just
+# re-arms — no pause when nobody is waiting.  The 2h HOLD_TIMEOUT is a separate,
+# terminal cap on *cumulative active* hold (see ``_on_tick``).
+DEFAULT_QUANTUM_S = _env_float("ASSIST_THREAD_QUANTUM_S", 600.0)
 
 
 class QueueWaitTimeout(Exception):
@@ -75,16 +89,38 @@ class QueueWaitTimeout(Exception):
 
 
 class ThreadHoldExpired(Exception):
-    """The holder exceeded ``hold_timeout_s``; cancellation is in flight."""
+    """The holder exceeded ``hold_timeout_s`` of cumulative active hold; the turn is
+    terminated (a runaway backstop — NOT resumable)."""
+
+
+class ThreadPauseRequested(Exception):
+    """The holder's quantum expired with a waiter present.  NON-terminal: the run
+    path catches it OUTSIDE the acquire block, does not finalize the turn, marks it
+    paused, and hands it to the resume scheduler.  Distinct from ThreadHoldExpired
+    (terminal) so the two never share a catch clause."""
 
 
 class _Handle:
-    __slots__ = ("thread_id", "expired", "acquired_at")
+    __slots__ = (
+        "thread_id", "expired", "acquired_at", "pause_requested",
+        "accumulated_active_ms", "quantum_s", "hold_timeout_s", "timer",
+    )
 
-    def __init__(self, thread_id: str) -> None:
+    def __init__(
+        self, thread_id: str, quantum_s: float, hold_timeout_s: float,
+        accumulated_active_ms: float = 0.0,
+    ) -> None:
         self.thread_id = thread_id
         self.expired = False
-        self.acquired_at = time.time()
+        self.acquired_at = time.time()            # start of THIS active slice
+        self.pause_requested = False
+        # Active hold from PRIOR slices (0 for a fresh turn; a resumed turn is
+        # seeded with what it already burned, so the 2h cap can't be dodged by
+        # pausing).  Never counts paused/queued wall-time.
+        self.accumulated_active_ms = accumulated_active_ms
+        self.quantum_s = quantum_s
+        self.hold_timeout_s = hold_timeout_s
+        self.timer: threading.Timer | None = None
 
 
 _active_handle: contextvars.ContextVar = contextvars.ContextVar(
@@ -97,12 +133,20 @@ class ThreadAffinityQueue:
         self,
         hold_timeout_s: float = DEFAULT_HOLD_TIMEOUT_S,
         wait_timeout_s: float = DEFAULT_WAIT_TIMEOUT_S,
+        quantum_s: float = DEFAULT_QUANTUM_S,
     ) -> None:
         self._cond = threading.Condition()
         self._holder: _Handle | None = None
         self._waiters: deque[str] = deque()
         self._default_hold_timeout = hold_timeout_s
         self._default_wait_timeout = wait_timeout_s
+        self._default_quantum = quantum_s
+        # Cumulative ACTIVE hold per thread_id, persisted across a pause so a
+        # resumed turn carries what it already burned toward the 2h cap.  Written
+        # in ``acquire``'s finally; drained by ``pop_hold`` on every exit (a pause
+        # carries the value to the resume; a terminal exit discards it).  Touched
+        # only under ``self._cond``, only off the event loop.
+        self._active_hold_ms: dict[str, float] = {}
 
     @contextmanager
     def acquire(
@@ -111,6 +155,8 @@ class ThreadAffinityQueue:
         on_state_change: Callable[[str], None] | None = None,
         wait_timeout_s: float | None = None,
         hold_timeout_s: float | None = None,
+        quantum_s: float | None = None,
+        accumulated_active_ms: float = 0.0,
     ) -> Iterator[_Handle]:
         """Acquire this thread's single-flight slot for the ``with`` block.
 
@@ -131,6 +177,7 @@ class ThreadAffinityQueue:
         hold_timeout = (
             self._default_hold_timeout if hold_timeout_s is None else hold_timeout_s
         )
+        quantum = self._default_quantum if quantum_s is None else quantum_s
 
         with self._cond:
             # Reentrant only if this caller is on the holder's own call
@@ -171,18 +218,20 @@ class ThreadAffinityQueue:
                     self._cond.notify_all()
                     raise
 
-            handle = _Handle(thread_id)
+            handle = _Handle(
+                thread_id, quantum, hold_timeout,
+                accumulated_active_ms=accumulated_active_ms,
+            )
             self._holder = handle
             cb("running")
 
-            watchdog = threading.Timer(
-                hold_timeout, self._on_hold_timeout, args=(handle,)
-            )
-            watchdog.daemon = True
+            tick = threading.Timer(quantum, self._on_tick, args=(handle,))
+            tick.daemon = True
+            handle.timer = tick
 
-        # Start the watchdog outside the lock so a near-zero timeout
-        # (used in tests) doesn't fire while we're still in __enter__.
-        watchdog.start()
+        # Start the tick outside the lock so a near-zero quantum (used in tests)
+        # doesn't fire while we're still in __enter__.
+        tick.start()
         token = _active_handle.set(handle)
         try:
             yield handle
@@ -192,17 +241,26 @@ class ThreadAffinityQueue:
             # iterate across thread boundaries must bind via
             # ``contextvars.Context.run`` — see `Thread.stream_message`'s
             # `_ContextBoundIterator` for the in-tree pattern.  If the
-            # contract is violated, the watchdog bounds the resulting
+            # contract is violated, the tick bounds the resulting
             # `_holder` leak to ``hold_timeout_s``.
             _active_handle.reset(token)
-            watchdog.cancel()
-            self._release_if_holder(handle)
+            with self._cond:
+                # Persist this slice's active time so a resume carries it toward
+                # the 2h cap; cancel the pending tick; release the slot — all under
+                # one lock so an in-flight tick can't interleave (it would see
+                # `_holder is not handle` and no-op).  ``pop_hold`` drains it: a
+                # pause reads it for the resume seed, a terminal exit discards it.
+                slice_ms = (time.time() - handle.acquired_at) * 1000.0
+                self._active_hold_ms[thread_id] = handle.accumulated_active_ms + slice_ms
+                if handle.timer is not None:
+                    handle.timer.cancel()
+                self._release_if_holder(handle)
 
     def _release_if_holder(self, handle: _Handle) -> bool:
         """Vacate the slot iff ``handle`` is still the current holder.
 
         Idempotent across the two release paths (``acquire``'s ``finally``
-        and the watchdog's :meth:`_on_hold_timeout`); whichever wins the
+        and the tick's :meth:`_on_tick`); whichever wins the
         lock first releases, the other sees ``_holder is not handle`` and
         returns False without clobbering a newly-promoted holder.
         """
@@ -213,24 +271,56 @@ class ThreadAffinityQueue:
                 return True
             return False
 
-    def _on_hold_timeout(self, handle: _Handle) -> None:
-        """Watchdog callback: flag holder ``expired`` and force-release the slot.
+    def _on_tick(self, handle: _Handle) -> None:
+        """Re-arming timer callback: enforce the 2h cumulative-active cap and the
+        fair-scheduling quantum.  Runs on a :class:`threading.Timer` daemon thread,
+        entirely under ``self._cond`` (off the event loop, so taking the lock is
+        safe — only :meth:`peek_holder` must stay lock-free).
 
-        ``expired = True`` is read by :class:`ThreadQueueMiddleware`'s
-        cooperative cancel (via :func:`active_handle` — per-call-stack).
-        The force-release through :meth:`_release_if_holder` is
-        defense-in-depth: it bounds the leak window for any cleanup
-        failure that leaves ``_holder`` set, regardless of cause.
-        Logs WARNING when the release actually fired — should be cold
-        in steady state.
+        Order (the cap wins over the quantum, so both are never set at once):
+          - cumulative active hold >= ``hold_timeout_s`` -> ``expired`` (terminal
+            kill) + force-release the slot.  ``expired`` is read by
+            :class:`ThreadQueueMiddleware`, which raises :class:`ThreadHoldExpired`.
+          - else this slice >= ``quantum_s`` AND a waiter is present -> request a
+            pause: ``pause_requested`` (read by the middleware -> non-terminal
+            :class:`ThreadPauseRequested`).  Uncontended, we do NOT pause.
+          - else re-arm for another quantum.
         """
-        handle.expired = True
-        if self._release_if_holder(handle):
-            logger.warning(
-                "force-released wedged holder %s after %.1fs hold",
-                handle.thread_id,
-                time.time() - handle.acquired_at,
-            )
+        with self._cond:
+            if self._holder is not handle:
+                return  # already released; a stale tick.
+            slice_s = time.time() - handle.acquired_at
+            cumulative_s = handle.accumulated_active_ms / 1000.0 + slice_s
+            if cumulative_s >= handle.hold_timeout_s:
+                handle.expired = True
+                self._release_if_holder(handle)
+                logger.warning(
+                    "thread %s hit the %.0fs cumulative-active cap — terminating",
+                    handle.thread_id, handle.hold_timeout_s,
+                )
+                return  # terminal — do NOT re-arm.
+            if slice_s >= handle.quantum_s and len(self._waiters) > 0:
+                handle.pause_requested = True
+                # Fall through and KEEP TICKING: the holder yields at its next
+                # after_model (which cancels the timer via acquire's finally), but
+                # if it doesn't yield promptly we must still enforce the 2h cap —
+                # so re-arm rather than stop here.
+            # Keep holding; check the cap (and re-assert the pause) next quantum.
+            tick = threading.Timer(handle.quantum_s, self._on_tick, args=(handle,))
+            tick.daemon = True
+            handle.timer = tick
+            tick.start()
+
+    def pop_hold(self, thread_id: str) -> float:
+        """Remove and return the thread's persisted cumulative-active-hold (ms).
+
+        Called on EVERY exit of a turn's ``acquire`` block by the run path: a pause
+        passes the value to the resume's ``accumulated_active_ms`` seed (so the 2h
+        cap can't be dodged by pausing); a terminal exit discards it (a fresh turn
+        starts at 0).  Draining on every exit keeps ``_active_hold_ms`` from growing.
+        """
+        with self._cond:
+            return self._active_hold_ms.pop(thread_id, 0.0)
 
     def current_handle(self) -> _Handle | None:
         with self._cond:
