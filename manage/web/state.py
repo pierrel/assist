@@ -327,6 +327,18 @@ STAGE_LABELS = {
     "paused": "Paused for a quicker turn — will resume...",
 }
 
+# Single-word variants for the compact thread-LIST page only. The in-thread banner
+# keeps the fuller STAGE_LABELS sentences — it has room and the sentence explains *why*
+# a thread is busy (esp. queued/paused). List rows are dense, so one word each reads better.
+LIST_STAGE_LABELS = {
+    "initializing": "Initializing",
+    "cloning": "Cloning",
+    "starting_sandbox": "Starting",
+    "queued": "Queued",
+    "processing": "Processing",
+    "paused": "Paused",
+}
+
 
 def _status_path(tid: str) -> str:
     return os.path.join(MANAGER.thread_dir(tid), "status.json")
@@ -352,6 +364,39 @@ def _set_status(tid: str, stage: str, **kwargs) -> None:
     # Errors don't mark (the "error" badge, above "new" in precedence, covers them).
     if stage in ("ready", "awaiting_approval"):
         _mark_unseen_response(tid)
+
+
+# --- Per-turn timing (completed human→AI elapsed) -------------------------
+# A per-thread sidecar keyed by human-message ordinal → elapsed seconds (int), the
+# durations shown as badges on completed replies. Separate from status.json (which holds
+# only the single CURRENT status and drops started_at at ready) because it must carry N
+# completed-turn durations; separate from the messages/checkpoint (langchain messages have
+# no timestamp, and stamping them would touch assist/thread.py + break the render tests).
+# Mirrors the merge_conflict.json trio: written off-loop by _process_message's success
+# exits, read on-loop by render_thread (a bare missing-ok read, no lock — same as
+# _get_status / _get_conflict). One writer per tid (THREAD_QUEUE + serial resume), and
+# _atomic_write makes a concurrent render-read see the whole old or whole new file.
+def _timings_path(tid: str) -> str:
+    return os.path.join(MANAGER.thread_dir(tid), "turn_timings.json")
+
+
+def _get_timings(tid: str) -> dict:
+    """Map of human-message ordinal (str) → elapsed seconds (int). {} if missing/corrupt."""
+    path = _timings_path(tid)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _append_timing(tid: str, ordinal: int, seconds: float) -> None:
+    """Record one completed turn's elapsed. Read-modify-write of the small dict; off-loop."""
+    timings = _get_timings(tid)
+    timings[str(ordinal)] = round(seconds)
+    _atomic_write(_timings_path(tid), json.dumps(timings))
 
 
 # --- "unseen AI response" badge state -------------------------------------

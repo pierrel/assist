@@ -18,6 +18,7 @@ import re
 import secrets
 import subprocess
 import threading
+import time
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -63,6 +64,8 @@ from manage.web.state import (
     SCHEDULE_STORE,
     SUBSCRIPTION_STORE,
     STAGE_LABELS,
+    LIST_STAGE_LABELS,
+    _append_timing,
     _clear_conflict,
     _domain_selector_html,
     _evict_caches,
@@ -70,6 +73,7 @@ from manage.web.state import (
     _get_domain_manager,
     _get_sandbox_backend,
     _get_status,
+    _get_timings,
     _has_unmerged_changes,
     _has_unseen_response,
     _clear_unseen_response,
@@ -185,13 +189,13 @@ def render_index(query: str = "") -> str:
             badge = (
                 f'<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
                 f' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
-                f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
+                f' margin-right:.4rem;">{html.escape(LIST_STAGE_LABELS.get(stage, stage))}</span>'
             )
         elif stage in BUSY_STAGES:
             badge = (
                 f'<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
                 f' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
-                f' margin-right:.4rem;">{html.escape(STAGE_LABELS.get(stage, stage))}</span>'
+                f' margin-right:.4rem;">{html.escape(LIST_STAGE_LABELS.get(stage, stage))}</span>'
             )
         elif stage == "error":
             badge = (
@@ -355,6 +359,53 @@ def _tools_summary(names) -> str:
     return html.escape(", ".join(seen)) if seen else "tool call"
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Human duration for a timing badge: "14s" | "2m 5s" | "1h 3m". Mirrored by the
+    JS ticker in _ELAPSED_TICKER_SCRIPT — keep the two boundary rules in sync (tested)."""
+    s = max(0, int(round(seconds)))
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m"
+
+
+def _human_ordinal(msgs: list[dict]) -> int:
+    """The turn ordinal = count of user-role bubbles. Counted the SAME way (over
+    chat.get_messages() dicts) on the write side (recording) and the read side
+    (badge placement), so the two can't drift — the design's single-counter rule."""
+    return sum(1 for m in msgs if m.get("role") == "user")
+
+
+# Live WIP timer: a page renders once (no polling), so the server emits a baseline
+# elapsed and JS ticks it up locally via performance.now() — no server round-trip, no
+# clock-skew. Formatting mirrors _format_elapsed. Safe if no .elapsed node is present.
+_ELAPSED_TICKER_SCRIPT = """<script>
+(function () {
+  var el = document.querySelector('.status-banner .elapsed');
+  if (!el) return;
+  var base = parseInt(el.getAttribute('data-baseline') || '0', 10) || 0;
+  var t0 = performance.now();
+  function fmt(s) {
+    s = Math.max(0, Math.round(s));
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60), r = s % 60;
+    if (m < 60) return m + 'm ' + r + 's';
+    var h = Math.floor(m / 60); return h + 'h ' + (m % 60) + 'm';
+  }
+  function tick() { el.textContent = fmt(base + (performance.now() - t0) / 1000); }
+  tick();
+  setInterval(tick, 1000);
+})();
+</script>"""
+
+
 def render_thread(
     tid: str,
     chat: Thread | None,
@@ -400,6 +451,22 @@ def render_thread(
 
     # During the initial setup stages there is no agent state worth showing yet.
     msgs: list[dict] = [] if is_init or chat is None else chat.get_messages()
+
+    # Completed-turn elapsed badges: map each turn's CONCLUDING assistant bubble (the last
+    # assistant strictly before the next user bubble) to its recorded elapsed seconds.
+    # Built over the PERSISTED messages here — before the pending bubble is appended below,
+    # and the append doesn't shift these indices. Keyed by the same user-bubble ordinal the
+    # write side records (_human_ordinal). dict miss → pre-feature/errored turn → no badge.
+    _timings = _get_timings(tid)
+    _badge_at: dict[int, int] = {}
+    if _timings:
+        _ord = 0
+        for _i, _m in enumerate(msgs):
+            _r = _m.get("role")
+            if _r == "user":
+                _ord += 1
+            elif _r == "assistant" and _ord and str(_ord) in _timings:
+                _badge_at[_i] = _timings[str(_ord)]  # overwrites → ends as the LAST one
 
     # While busy, surface the pending (just-submitted) message as a user
     # bubble so it's visible right after the redirect — unless the agent has
@@ -480,7 +547,7 @@ def render_thread(
         """
 
     rendered = []
-    for m in reversed(msgs):
+    for _i, m in reversed(list(enumerate(msgs))):
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
         if role == "assistant":
@@ -504,7 +571,14 @@ def render_thread(
                       f'<div class="content">{content_html}</div></details>')
         else:
             cls = "user" if role == "user" else "assistant"
-            bubble = (f'<div class="msg {cls}"><div class="role">{role}</div>'
+            # Completed-turn elapsed badge on the turn's concluding assistant reply.
+            badge = ""
+            if role == "assistant" and _i in _badge_at:
+                badge = (f'<span class="elapsed-badge" title="time from your message to '
+                         f'this reply" style="margin-left:.5rem; color:#9ca3af; '
+                         f'font-size:.75rem; font-weight:normal;">'
+                         f'{html.escape(_format_elapsed(_badge_at[_i]))}</span>')
+            bubble = (f'<div class="msg {cls}"><div class="role">{role}{badge}</div>'
                       f'<div class="content">{content_html}</div></div>')
         rendered.append(bubble)
     if busy:
@@ -517,15 +591,24 @@ def render_thread(
         )
     body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
 
-    # Status banner
+    # Status banner (in-thread: keeps the fuller STAGE_LABELS sentence). While busy, a live
+    # elapsed timer counts from the turn's submit — server emits the baseline, JS ticks it.
     status_banner = ""
     if busy:
         label = STAGE_LABELS.get(stage, "Working...")
+        elapsed_span = ""
+        started_at = status.get("started_at")
+        if started_at:
+            baseline = max(0, (_now_ms() - started_at) // 1000)
+            elapsed_span = (f'<span class="elapsed" data-baseline="{baseline}" '
+                            f'style="margin-left:.5rem; color:#9ca3af; font-size:.8rem;"></span>')
         status_banner = (
             f'<div class="status-banner">'
             f'<span class="spinner"></span>'
             f'<span>{html.escape(label)}</span>'
+            f'{elapsed_span}'
             f'</div>'
+            f'{_ELAPSED_TICKER_SCRIPT if elapsed_span else ""}'
         )
     elif stage == "error":
         err = html.escape(status.get("error", "Unknown error"))
@@ -807,6 +890,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # survives the pause window instead of vanishing until the turn completes.
     _pending_msg = text if text else pending_text
     pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
+    # Turn-start origin for the elapsed badge + live WIP timer: reuse the started_at already
+    # in status (a queued/paused/resumed turn keeps the original submit time, so elapsed
+    # spans the queue wait + any pause) or stamp now for turns with no upstream setter
+    # (scheduled/SMS). Carried through every BUSY _set_status via pending_kwargs; the
+    # terminal ready/awaiting_approval writes omit pending_kwargs, so it clears and the
+    # live timer stops.
+    started_at = _get_status(tid).get("started_at") or _now_ms()
+    pending_kwargs["started_at"] = started_at
     # The pending draft's sender, captured NOW before any _set_status below overwrites it —
     # used by the supersede path to decide whether a new message folds into the pending reply.
     prior_pending_sender = _get_status(tid).get("pending_sender") or ""
@@ -929,6 +1020,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             dm.sync(last_assistant)
         # The turn may have paused on a send_reply HITL interrupt (the agent proposed a
         # reply). Surface it for approval instead of marking the turn done.
+        # Record this turn's wall-clock elapsed (submit → completion) keyed by turn
+        # ordinal, for the completed-reply badge. Off-loop; the pause path returns before
+        # here, so exactly one entry is written per turn (at its final completion).
+        try:
+            _append_timing(tid, _human_ordinal(chat.get_messages()),
+                           (_now_ms() - started_at) / 1000.0)
+        except Exception as e:
+            logging.warning("turn-timing record failed for %s: %s", tid, e)
         pending = chat.pending_reply()
         if pending:
             _set_status(tid, "awaiting_approval",
@@ -1048,7 +1147,8 @@ async def create_thread_with_message(
     chat = MANAGER.new()
     tid = chat.thread_id
     selected = domain or (DOMAINS[0] if DOMAINS else None)
-    _set_status(tid, "initializing", pending_message=text, domain=selected or "")
+    _set_status(tid, "initializing", pending_message=text, domain=selected or "",
+                started_at=_now_ms())
     background_tasks.add_task(_initialize_thread, tid, text, selected,
                              _build_rider(sent_at, tz, lat, lon))
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
@@ -1136,7 +1236,10 @@ def _mark_pending(tid: str, text: str) -> None:
         return
     holder_tid = THREAD_QUEUE.peek_holder()
     stage = "queued" if (holder_tid is not None and holder_tid != tid) else "processing"
-    _set_status(tid, stage, pending_message=text)
+    # Stamp the turn-start origin at submit (this is the idle→busy edge — the guard above
+    # returns for an already-busy thread, so we never reset a mid-turn turn's clock).
+    # _now_ms() is a bare time read — event-loop-safe, no I/O/lock (see the docstring).
+    _set_status(tid, stage, pending_message=text, started_at=_now_ms())
 
 
 def _build_rider(sent_at: str | None, tz: str | None,
