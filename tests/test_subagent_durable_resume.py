@@ -91,7 +91,7 @@ def test_paused_subagent_resumes_without_rerunning_completed_steps():
     paused_once = {"done": False}
     graph = _build(calls, paused_once)
 
-    tmp = tempfile.mktemp(suffix=".sqlite")
+    _fd, tmp = tempfile.mkstemp(suffix=".sqlite"); os.close(_fd)
     conn = sqlite3.connect(tmp, check_same_thread=False)
     try:
         saver = SqliteSaver(conn)

@@ -110,7 +110,6 @@ def test_new_message_while_paused_routes_through_scheduler(wired, monkeypatch):
     monkeypatch.setattr(threads.BackgroundTasks, "add_task",
                         lambda self, fn, *a, **k: spawned.append(fn))
 
-    client = web.TestClient(web.app) if hasattr(web, "TestClient") else None
     from fastapi.testclient import TestClient
     TestClient(web.app).post(f"/thread/{tid}/message", data={"text": "follow-up"},
                              follow_redirects=False)

@@ -225,7 +225,8 @@ class ThreadAffinityQueue:
             self._holder = handle
             cb("running")
 
-            tick = threading.Timer(quantum, self._on_tick, args=(handle,))
+            tick = threading.Timer(self._next_tick_delay(handle), self._on_tick,
+                                   args=(handle,))
             tick.daemon = True
             handle.timer = tick
 
@@ -245,15 +246,21 @@ class ThreadAffinityQueue:
             # `_holder` leak to ``hold_timeout_s``.
             _active_handle.reset(token)
             with self._cond:
-                # Persist this slice's active time so a resume carries it toward
-                # the 2h cap; cancel the pending tick; release the slot — all under
+                # Cancel the pending tick; persist this slice's active time so a
+                # resume carries it toward the 2h cap; release the slot — all under
                 # one lock so an in-flight tick can't interleave (it would see
-                # `_holder is not handle` and no-op).  ``pop_hold`` drains it: a
-                # pause reads it for the resume seed, a terminal exit discards it.
-                slice_ms = (time.time() - handle.acquired_at) * 1000.0
-                self._active_hold_ms[thread_id] = handle.accumulated_active_ms + slice_ms
+                # `_holder is not handle` and no-op).
                 if handle.timer is not None:
                     handle.timer.cancel()
+                # Persist ONLY while still the holder.  If the tick already
+                # force-released this handle (cap kill), a new same-thread_id turn
+                # may hold the slot now — persisting a stale hold under thread_id
+                # would clobber that turn's accounting.  ``pop_hold`` drains it: a
+                # pause reads it for the resume seed, a terminal exit discards it.
+                if self._holder is handle:
+                    slice_ms = (time.time() - handle.acquired_at) * 1000.0
+                    self._active_hold_ms[thread_id] = (
+                        handle.accumulated_active_ms + slice_ms)
                 self._release_if_holder(handle)
 
     def _release_if_holder(self, handle: _Handle) -> bool:
@@ -305,11 +312,23 @@ class ThreadAffinityQueue:
                 # after_model (which cancels the timer via acquire's finally), but
                 # if it doesn't yield promptly we must still enforce the 2h cap —
                 # so re-arm rather than stop here.
-            # Keep holding; check the cap (and re-assert the pause) next quantum.
-            tick = threading.Timer(handle.quantum_s, self._on_tick, args=(handle,))
+            # Keep holding; check the cap (and re-assert the pause) at the next
+            # boundary — the sooner of the quantum or the remaining time to the cap,
+            # so a near-cap resume can't run a full quantum past the 2h ceiling.
+            tick = threading.Timer(self._next_tick_delay(handle), self._on_tick,
+                                   args=(handle,))
             tick.daemon = True
             handle.timer = tick
             tick.start()
+
+    def _next_tick_delay(self, handle: _Handle) -> float:
+        """Seconds until the next tick: min(quantum, time remaining to the cumulative-
+        active cap).  Bounds cap-enforcement lateness to ~0 for a near-cap holder while
+        still checking the quantum for the pause decision.  Never negative."""
+        cumulative_s = (
+            handle.accumulated_active_ms / 1000.0 + (time.time() - handle.acquired_at))
+        remaining_to_cap = handle.hold_timeout_s - cumulative_s
+        return max(0.0, min(handle.quantum_s, remaining_to_cap))
 
     def pop_hold(self, thread_id: str) -> float:
         """Remove and return the thread's persisted cumulative-active-hold (ms).
