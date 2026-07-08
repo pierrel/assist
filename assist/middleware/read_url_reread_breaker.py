@@ -22,6 +22,7 @@ from typing import Any, Callable
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.types import Command
 
 from assist.middleware.url_provenance import normalize_url
 
@@ -87,8 +88,8 @@ class ReadUrlRereadBreaker(AgentMiddleware):
     def wrap_tool_call(
         self,
         request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], "ToolMessage"],
-    ) -> "ToolMessage":
+        handler: Callable[[ToolCallRequest], "ToolMessage | Command"],
+    ) -> "ToolMessage | Command":
         target = _read_url_target(request.tool_call)
         if not target:
             return handler(request)

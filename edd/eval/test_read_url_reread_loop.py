@@ -19,8 +19,9 @@ flips (a URL is fetched at most N times and the agent still answers).
 
 Fully mocked + rate-limit-free: read_url's network (`requests.get`) returns a canned page
 that does NOT contain the number. Only the LLM is real — so, like all evals here, runs
-vary (baseline worst observed 4-22); the GUARDED cap (<=max_reads) holds by construction. Broad except so a
-runaway that dies on the recursion cap OR an LLM timeout still prints the read counts.
+vary (baseline worst observed 4-22); the GUARDED cap (<=max_reads) holds by construction.
+_run catches all exceptions so a run that dies on the recursion cap or an LLM timeout
+still reports its read counts instead of erroring out of the assertion.
 """
 import os
 import uuid
