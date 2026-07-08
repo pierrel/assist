@@ -34,15 +34,8 @@ class ThreadQueueMiddleware(AgentMiddleware):
         self, state: AgentState, runtime: Runtime
     ) -> dict[str, Any] | None:
         handle = active_handle()
-        # Observability for fair-scheduling: this hook is the ONLY place a pause/kill
-        # can fire, so log whether it sees the handle + flags on every model boundary.
-        # If this logs handle=None during a research turn, the contextvar isn't
-        # propagating into the sub-agent (the pause can never fire there).
         if handle is None:
-            logger.debug("thread-queue after_model: NO active handle (pause can't fire here)")
             return None
-        logger.debug("thread-queue after_model: handle=%s expired=%s pause_requested=%s",
-                     handle.thread_id, handle.expired, handle.pause_requested)
         if handle.expired:
             logger.info("thread-queue: yielding %s — hold cap hit (kill)", handle.thread_id)
             raise ThreadHoldExpired(
