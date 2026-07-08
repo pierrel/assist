@@ -298,6 +298,10 @@ class ThreadAffinityQueue:
                 return  # already released; a stale tick.
             slice_s = time.time() - handle.acquired_at
             cumulative_s = handle.accumulated_active_ms / 1000.0 + slice_s
+            logger.debug(
+                "fair-sched tick: holder=%s slice=%.0fs cumulative=%.0fs waiters=%d "
+                "quantum=%.0fs cap=%.0fs", handle.thread_id, slice_s, cumulative_s,
+                len(self._waiters), handle.quantum_s, handle.hold_timeout_s)
             if cumulative_s >= handle.hold_timeout_s:
                 handle.expired = True
                 self._release_if_holder(handle)
@@ -307,6 +311,11 @@ class ThreadAffinityQueue:
                 )
                 return  # terminal — do NOT re-arm.
             if slice_s >= handle.quantum_s and len(self._waiters) > 0:
+                if not handle.pause_requested:
+                    logger.info(
+                        "fair-sched: requesting pause of %s (held %.0fs >= quantum %.0fs, "
+                        "%d waiting); will yield at next superstep",
+                        handle.thread_id, slice_s, handle.quantum_s, len(self._waiters))
                 handle.pause_requested = True
                 # Fall through and KEEP TICKING: the holder yields at its next
                 # after_model (which cancels the timer via acquire's finally), but

@@ -944,6 +944,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # worker per paused turn and stall request handling). Carry the active hold it
         # burned so the 2h cap accounts across resumes.
         carry = THREAD_QUEUE.pop_hold(tid)
+        logging.info("fair-sched: %s paused (active hold %.0fs carried); queuing resume", tid,
+                     carry / 1000.0)
         DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
         # Enqueue the resume BEFORE advertising `paused`, so a new message that races in
         # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
