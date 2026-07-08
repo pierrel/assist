@@ -1,0 +1,71 @@
+#+TITLE: Day-of-month (and weekly) scheduled tasks
+#+DATE: <2026-07-08>
+#+STATUS: DESIGN (awaiting Pierre's review). Small, contained change.
+
+* Scope clarification (read first)
+Pierre asked for "date of month AND weekly." **Weekly already ships** — the =Cadence=
+=weekdays= field (0=Mon…6=Sun) covers daily / weekly / specific-weekdays (#161). "Every
+Monday" is =weekdays=[0]=; "weekdays at 7am" is =weekdays=[0,1,2,3,4], hour=7=. So the ONLY
+new capability here is *day-of-month* ("run on the 25th of each month"). This doc designs
+that. If "weekly" meant something the current field can't do — *every N weeks* (biweekly),
+or *the 2nd Tuesday of the month* (nth-weekday) — say so; those are separate, larger adds
+and are called out under "Explicitly out of scope" below.
+
+* Current model (what we extend)
+=assist/schedule/model.py= =Cadence=: =minute=, =hour= (None=every hour), =weekdays=
+(None=every day), =every_n_minutes=. Two modes: clock (minute[+hour] on weekdays) or
+interval. =assist/schedule/cadence.py= computes the next fire by a *minute-step search*
+(=next_after=): step forward 1 minute at a time from now, return the first instant matching
+the cadence; bounded by =_MAX_STEPS = 8*24*60 + 60= (~8 days) — deliberately "no monthly"
+(a monthly date is up to 31 days out, past the bound).
+
+* The change (day-of-month)
+1. *Model.* Add =day_of_month: int | None= to =Cadence= (1–31; None = not a monthly
+   schedule) + =to_dict=/=from_dict=. It's a THIRD clock variant, mutually exclusive with
+   =weekdays= and =every_n_minutes= (a date-of-month isn't also weekday-filtered or an
+   interval).
+2. *Match + the short-month clamp (the one real edge).* In =_matches=, a day-of-month
+   cadence fires when
+   : local.day == min(cad.day_of_month, days_in_month(local.year, local.month))
+   (=calendar.monthrange(y, m)[1]= for the month length). So =day_of_month=31= fires on the
+   *last day* of a short month — Feb 28/29, Apr/Jun/Sep/Nov 30 — rather than skipping that
+   month or rolling into the next. This is the least-surprising rule (the roadmap item's
+   named requirement) and gets pinned by a test.
+3. *next_after — extend the search bound.* Raise =_MAX_STEPS= to cover ~32 days (=32*24*60=)
+   so the minute-step search can reach a monthly date. Reuses the existing machinery — the
+   search naturally stops on the clamped day. Cost: ~46k iterations worst case (up from
+   ~11.5k), each a handful of comparisons → sub-10ms, and =next_after= runs *once per fire*,
+   never on a request path. (Simplest correct option; the alternative — computing the next
+   month-day directly with month rollover — is more code for no user-visible gain.)
+4. *validate.* =day_of_month= in 1–31; raise =InvalidCadence= if combined with =weekdays= or
+   =every_n_minutes=, or out of range.
+5. *describe.* "on the 25th at 07:00" — with an ordinal suffix (1st/2nd/3rd/…/21st/…/31st).
+6. *apply_patch.* Add =day_of_month= to the sparse relative-edit (so "change it to the 1st"
+   works), mirroring the existing fields' =_UNSET= handling; setting it clears the
+   mutually-exclusive fields (or validate rejects the incoherent combo — pick in code review).
+7. *Agent tool.* =create_schedule= (=assist/schedule/tools.py=) gains =day_of_month: int |
+   None=; docstring adds the shape: "on the Nth of each month at a time: day_of_month=25,
+   hour=7, minute=0". Keep it ONE-cadence-shape (the small model gets that right).
+
+* Files touched
+=assist/schedule/model.py= (field), =assist/schedule/cadence.py= (validate/_matches/
+next_after bound/describe/apply_patch), =assist/schedule/tools.py= (tool param+docstring),
+tests. No scheduler change (=scheduler.py= just calls =next_after=), no new files, no store
+migration (=from_dict= defaults =day_of_month=None= for existing rows).
+
+* Tests (the contract)
+- Short-month clamp: =day_of_month=31= fires Feb 28 (2025) / Feb 29 (2024) / Apr 30, not
+  skipped, not rolled into the next month.
+- =next_after= across a month boundary (from the 26th → the 25th of NEXT month) and DST-safe
+  (tz-aware, same as today).
+- =describe= ordinals (1st, 2nd, 3rd, 11th, 21st, 22nd, 31st).
+- =validate= rejects day_of_month with weekdays / every_n_minutes / 0 / 32.
+- An agent-facing round-trip (tool → Cadence → describe) for "the 25th at 7am".
+
+* Explicitly out of scope (flag if wanted)
+- *Every-N-weeks / biweekly* — the current =weekdays= is which-days-of-the-week, not a
+  multi-week period. Needs an anchor date + period; larger.
+- *Nth-weekday-of-month* ("2nd Tuesday") — a different field (weekday + ordinal-in-month).
+- *Nth-from-last* ("last day", "2nd-to-last") — "last day" falls out of the clamp
+  (=day_of_month=31=), but a general "Nth-from-last" is extra.
+These are all separate; this change is day-of-month only.
