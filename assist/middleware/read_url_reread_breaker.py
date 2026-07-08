@@ -21,9 +21,10 @@ from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools.tool_node import ToolCallRequest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from assist.middleware.loop_detection import _extract_events
 from assist.middleware.url_provenance import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -32,15 +33,15 @@ _READ_TOOL = "read_url"
 _DEFAULT_MAX_READS = 3
 
 
-def _read_url_target(tool_call: dict) -> str:
-    """The normalized URL a read_url tool call targets, or "" if none.
-    ``args``-or-``arguments`` mirrors url_provenance (normalized AIMessage.tool_calls use
-    ``args``; the raw OpenAI shape uses ``arguments``)."""
+def _read_url_arg(tool_call: dict) -> str:
+    """The raw URL a read_url tool call targets, or "" if none — the single extraction
+    site (the caller normalizes for counting and reuses the raw form in the refusal
+    text). ``args``-or-``arguments`` mirrors url_provenance (normalized
+    AIMessage.tool_calls use ``args``; the raw OpenAI shape uses ``arguments``)."""
     if tool_call.get("name") != _READ_TOOL:
         return ""
     args: Any = tool_call.get("args") or tool_call.get("arguments") or {}
-    url = args.get("url", "") if isinstance(args, dict) else ""
-    return normalize_url(url) if url else ""
+    return args.get("url", "") if isinstance(args, dict) else ""
 
 
 def _prior_read_count(messages: list, target: str) -> int:
@@ -49,31 +50,33 @@ def _prior_read_count(messages: list, target: str) -> int:
 
     Completed-only matters: at ``wrap_tool_call`` time the state already contains the
     AIMessage carrying the call being executed, so counting raw calls would include the
-    CURRENT call (shifting the threshold by one — prod refusing a read the unit tests
-    say is allowed) and any parallel same-URL siblings in that message (refusing them
-    ALL, including the very first fetch — a guard blocking legitimate work). Pairing
-    call→result excludes the in-flight ones. A refusal's corrective ToolMessage also
-    pairs, so once the cap is hit the count stays at/over it and later retries stay
-    refused."""
-    resolved = {m.tool_call_id for m in messages
-                if isinstance(m, ToolMessage) and m.tool_call_id}
+    CURRENT call (shifting the threshold by one) and any parallel same-URL siblings in
+    that message (refusing them ALL, including the very first fetch — a guard blocking
+    legitimate work). A refusal's corrective ToolMessage also pairs, so once the cap is
+    hit the count stays at/over it and later retries stay refused.
+
+    The pairing is ``loop_detection._extract_events`` — the SAME call→result loop
+    loop_detection and the search-unavailable breaker count with, so all three
+    history-counting guards share one implementation (its ``completed`` flag IS the
+    completed-only semantics above, and its turn slice bounds the count to the current
+    turn — a no-op on the single-run sub-agents this is wired on)."""
     n = 0
-    for m in messages:
-        if not isinstance(m, AIMessage):
+    for e in _extract_events(messages, window=None):
+        if not e["completed"] or e["tool_name"] != _READ_TOOL:
             continue
-        for tc in (getattr(m, "tool_calls", None) or []):
-            if tc.get("id") in resolved and _read_url_target(tc) == target:
-                n += 1
+        args = e["args"]
+        url = args.get("url", "") if isinstance(args, dict) else ""
+        if url and normalize_url(url) == target:
+            n += 1
     return n
 
 
 class ReadUrlRereadBreaker(AgentMiddleware):
     """Refuse a ``read_url`` once the same URL has been fetched ``max_reads`` times this run.
 
-    The count scans the whole message history with NO turn boundary — correct for the
-    single-run research/fact-check sub-agents it's wired on (their history IS one run);
-    attaching it to a long-lived multi-turn agent would need a turn slice first (see
-    loop_detection._current_turn_slice).
+    The count is bounded to the current turn (via ``_extract_events``' turn slice) —
+    a no-op on the single-run research/fact-check sub-agents it's wired on, and the
+    right behavior if it's ever attached to a longer-lived agent.
 
     Corrective, not turn-ending (mirrors UrlProvenanceMiddleware): the refused call returns
     an error ToolMessage telling the model to stop re-reading and answer. Stateless across
@@ -90,9 +93,10 @@ class ReadUrlRereadBreaker(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], "ToolMessage | Command"],
     ) -> "ToolMessage | Command":
-        target = _read_url_target(request.tool_call)
-        if not target:
+        url = _read_url_arg(request.tool_call)
+        if not url:
             return handler(request)
+        target = normalize_url(url)
 
         state = request.state or {}
         messages = state.get("messages", []) if isinstance(state, dict) \
@@ -101,7 +105,6 @@ class ReadUrlRereadBreaker(AgentMiddleware):
             return handler(request)
 
         self._intervention_count += 1
-        url = (request.tool_call.get("args") or request.tool_call.get("arguments") or {}).get("url", target)
         logger.warning(
             "ReadUrlRereadBreaker: refused read_url(%s) — already read %d times this run "
             "(intervention #%d)", url, self._max_reads, self._intervention_count)

@@ -144,10 +144,12 @@ def _current_turn_slice(messages: list) -> list:
 def _extract_events(messages: list, window: int | None = None) -> list[dict]:
     """Collect recent (AIMessage tool_call, matching ToolMessage) pairs.
 
-    Each event is ``{tool_name, args_sig, result_content, is_error,
+    Each event is ``{tool_name, args, args_sig, result_content, is_error,
     completed}``. ``completed`` is False for tool calls without a
     matching ToolMessage yet (i.e. the most-recent AI message before
-    the tool node has run).
+    the tool node has run). ``args`` is the raw dict for consumers that
+    need a specific argument (the reread breaker reads ``url``); the
+    hashed ``args_sig`` stays the identity for repeat detection.
 
     Bounded to the current user turn — see ``_current_turn_slice``.
     ``window`` keeps only the last N events (loop detection wants recency for
@@ -176,6 +178,7 @@ def _extract_events(messages: list, window: int | None = None) -> list[dict]:
                 )
                 events.append({
                     "tool_name": tc.get("name") or "",
+                    "args": args,
                     "args_sig": _normalise_args(args),
                     "result_content": content,
                     "is_error": is_error,
@@ -184,6 +187,7 @@ def _extract_events(messages: list, window: int | None = None) -> list[dict]:
             else:
                 events.append({
                     "tool_name": tc.get("name") or "",
+                    "args": args,
                     "args_sig": _normalise_args(args),
                     "result_content": "",
                     "is_error": False,
