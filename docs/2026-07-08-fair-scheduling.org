@@ -42,11 +42,31 @@ throwaway =uuid= per dispatch (=checkpoint_rollback.py:214-221=, deliberate for 
 isolation). A naive mid-sub-agent pause loses its findings and re-runs on resume. Pierre's call:
 make sub-agents durably resumable — WITHOUT any lost work — and do it FIRST.
 
-* Phase 1 (LANDS FIRST) — uniform durable sub-agent persistence
-*Approach A (Pierre's pick): a real checkpointer for sub-agents, so a paused sub-agent resumes
-EXACTLY via =invoke(input=None)= — deterministic no-lost-work, not best-effort notes.*
-*ALL sub-agents get it by default* (Pierre: uniform, to cut exceptional behavior + complexity —
-clean symmetry, not a research-only special case).
+* Phase 1 (DONE — no code change needed) — durable sub-agent resume is ALREADY general
+*Finding (verified 2026-07-08, hands-on with a real SqliteSaver): a nested sub-agent paused
+mid-run RESUMES from its durable checkpoint on a parent replay, WITHOUT re-running completed
+steps — via langgraph's OWN mechanism, no assist change.* Sub-agents inherit the trunk
+checkpointer (config CONFIG_KEY_CHECKPOINTER wins over their own saver) so their per-superstep
+checkpoints are durable in the trunk store; the nested checkpoint_ns is a deterministic hash of
+the parent checkpoint + task position, so a parent replay reproduces it and finds them again.
+This is GENERAL — research is NOT special-cased; every sub-agent gets it identically. Pierre's
+intent (don't make research special; reuse; REDUCE complexity) is met by RELYING on this, not by
+adding a mechanism. Pinned by =tests/test_subagent_durable_resume.py= (asserts completed steps
+run exactly once across a pause/resume — the no-lost-work symptom, un-mocked SqliteSaver).
+
+*Rejected (would have INCREASED complexity):* the earlier "3 edits" plan (remove the
+RollbackRunnable uuid + carry the checkpointer into the rollback resume + a durable saver for
+ALL sub-agents). Hands-on: the uuid hack only fires when =thread_id= is ABSENT (the real nested
+web turn always HAS it, forwarded by deepagents' task tool), so it never touches the pause/resume
+path; and carrying the checkpointer into a NESTED rollback resume failed with =EmptyInputError=
+in an un-mocked test — the rollback path (BadRequestError recovery) is a SEPARATE concern from
+pause/resume and is delicate. Touching it would add complexity for a case (eval/emacsos rollback)
+that isn't the pain. Left ALONE.
+
+** (historical) the abandoned approach — kept for the record
+*Approach A (earlier framing): a real checkpointer for sub-agents via removing the uuid hack.*
+Superseded by the finding above: the durability is already there; the removal is unnecessary and
+delicate.
 
 What changes (to be pinned by the architect):
 - =checkpoint_rollback.py= =RollbackRunnable.invoke= (=:212-221=): today assigns a fresh =uuid=
