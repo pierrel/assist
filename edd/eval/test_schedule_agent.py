@@ -16,7 +16,7 @@ from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 from assist.schedule.tools import schedule_tools
 from assist.schedule.store import ScheduleStore
-from .utils import create_filesystem
+from .utils import create_filesystem, stub_research_subagent
 
 os.environ.setdefault("ASSIST_MODEL_URL", "http://127.0.0.1:8000/v1")
 
@@ -45,16 +45,20 @@ class TestScheduleAgent(TestCase):
         return calls
 
     def test_agent_maps_day_of_month(self):
-        agent = self._agent()
-        agent.message("Set up a recurring reminder on the 25th of each month to pay rent.")
+        # Not a research eval — stub the research subagent so a stray dispatch can't hit
+        # SearXNG (AGENTS.md #5). Build the agent INSIDE the stub (create_agent binds it).
+        with stub_research_subagent():
+            agent = self._agent()
+            agent.message("Set up a recurring reminder on the 25th of each month to pay rent.")
         calls = self._create_calls(agent)
         self.assertTrue(
             any(c.get("day_of_month") == 25 for c in calls),
             f"expected a create_schedule with day_of_month=25; calls: {calls}")
 
     def test_agent_maps_skip_months(self):
-        agent = self._agent()
-        agent.message("Remind me on the 25th of every 2 months to review my finances.")
+        with stub_research_subagent():
+            agent = self._agent()
+            agent.message("Remind me on the 25th of every 2 months to review my finances.")
         calls = self._create_calls(agent)
         self.assertTrue(
             any(c.get("day_of_month") == 25 and c.get("month_interval") == 2 for c in calls),

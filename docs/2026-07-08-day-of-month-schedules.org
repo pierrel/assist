@@ -1,6 +1,6 @@
 #+TITLE: Day-of-month (and weekly) scheduled tasks
 #+DATE: <2026-07-08>
-#+STATUS: DESIGN (awaiting Pierre's review). Contained to the schedule module; skip-months adds the anchor + a direct next-fire path, so a bit past trivial.
+#+STATUS: APPROVED + IMPLEMENTED (PR #180). Anchor decision resolved (see below). Contained to the schedule module.
 
 * Scope clarification (read first)
 Pierre asked for "date of month AND weekly," plus *skip-months* ("every 2 months on the

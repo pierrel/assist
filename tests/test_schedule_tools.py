@@ -88,11 +88,14 @@ def test_no_timezone_declines(tools, monkeypatch):
 def test_create_monthly_defaults_anchor_to_current_month(tools):
     from datetime import datetime
     from zoneinfo import ZoneInfo
+    before = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m")
     out = tools.create_schedule("rent", day_of_month=1, hour=9)
+    after = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m")
     assert "Scheduled" in out and "on the 1st at 9:00 AM" in out
     saved = tools.store.for_thread("t1")[0]
-    # the tool always sets an anchor for a monthly schedule; default = current month, user tz
-    assert saved.cadence.anchor_month == datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m")
+    # the tool always sets an anchor for a monthly schedule; default = current month, user
+    # tz (accept either side of a midnight month-boundary so the test can't flake in CI)
+    assert saved.cadence.anchor_month in {before, after}
 
 
 def test_create_monthly_skip_months(tools):

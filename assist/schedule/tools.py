@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from langgraph.config import get_config
 
 from assist.context_rider import CONTEXT_RIDER_KEY
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from assist.schedule import cadence
 from assist.schedule.cadence import InvalidCadence
 from assist.schedule.model import Cadence, Schedule
@@ -75,7 +75,10 @@ def schedule_tools(store) -> list:
         # A monthly schedule always has an anchor — default it to the current month (user
         # tz) when the agent didn't set one, so "every N months" starts now.
         if day_of_month is not None and anchor_month is None:
-            anchor_month = datetime.now(ZoneInfo(tz)).strftime("%Y-%m")
+            try:
+                anchor_month = datetime.now(ZoneInfo(tz)).strftime("%Y-%m")
+            except ZoneInfoNotFoundError:
+                return f"Couldn't schedule: unknown timezone {tz!r}."
         cad = Cadence(minute=minute, hour=hour,
                       weekdays=tuple(weekdays) if weekdays is not None else None,
                       every_n_minutes=every_n_minutes,
