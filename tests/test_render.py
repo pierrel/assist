@@ -84,8 +84,11 @@ class TestFileEmbed:
     def test_path_is_url_quoted(self):
         assert "my%20report.org" in _file_embed_html("t1", "my report.org")
 
-    def test_render_file_block_rejects_unshowable_ext(self):
-        assert _render_file_block("t1", {"path": "data.txt"}) is None
+    def test_render_file_block_renders_unshowable_as_text_embed(self):
+        # A non-.org/.md/.pdf file now embeds too (renders as text via /show),
+        # instead of degrading to a raw code block.
+        assert "<iframe" in _render_file_block("t1", {"path": "data.txt"})
+        assert "<iframe" in _render_file_block("t1", {"path": "/tmp/x.j2"})
 
     def test_render_file_block_rejects_empty_path(self):
         assert _render_file_block("t1", {}) is None
@@ -122,10 +125,12 @@ class TestRenderAssistantContent:
         assert "show-embed" not in out
         assert "<code" in out  # markdown rendered the fence as a code block
 
-    def test_unshowable_file_left_as_code(self):
+    def test_unshowable_file_becomes_text_embed(self):
+        # A .txt render block now lifts to an embed (text fallback), not a code block.
         raw = "```render\ntype: file\npath: notes.txt\n```"
         out = _render_assistant_content("t1", raw)
-        assert "show-embed" not in out and "<code" in out
+        assert "show-embed" in out and "/thread/t1/show?path=" in out
+        assert "```render" not in out
 
     def test_plain_markdown_untouched(self):
         out = _render_assistant_content("t1", "# Hi\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")
@@ -241,11 +246,24 @@ class TestShowRoute:
             "/thread/t1/show", params={"path": "../../secret.md"})
         assert r.status_code == 404
 
-    def test_unsupported_extension_415(self, workspace):
-        (workspace / "x.txt").write_text("plain")
+    def test_non_rich_ext_renders_as_escaped_text(self, workspace):
+        # Text fallback: a .txt/.j2/etc renders (200) as escaped <pre>, and any
+        # markup in it is neutralised (can't inject HTML/JS).
+        (workspace / "x.j2").write_text("plain {{v}} <script>alert(1)</script>")
         r = TestClient(web.app, raise_server_exceptions=False).get(
-            "/thread/t1/show", params={"path": "x.txt"})
-        assert r.status_code == 415
+            "/thread/t1/show", params={"path": "x.j2"})
+        assert r.status_code == 200
+        assert 'class="show-text"' in r.text
+        assert "&lt;script&gt;" in r.text and "<script>alert" not in r.text
+
+    def test_tmp_file_resolves_and_renders(self, workspace):
+        # /tmp maps to <thread>/tmp (sibling of domain) and renders like the workspace.
+        tmp = workspace.parent / "tmp"
+        tmp.mkdir()
+        (tmp / "summary.md").write_text("# Summary\n\nhello")
+        r = TestClient(web.app, raise_server_exceptions=False).get(
+            "/thread/t1/show", params={"path": "/tmp/summary.md"})
+        assert r.status_code == 200 and "<h1>Summary</h1>" in r.text
 
     def test_route_renders_every_showable_ext(self, workspace):
         # Drift guard: _SHOWABLE_EXTS is the allow-list for the file embed AND

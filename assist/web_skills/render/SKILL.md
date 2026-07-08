@@ -14,8 +14,11 @@ type: file
 path: /workspace/PATH-TO-THE-FILE
 ```
 
-Replace `PATH-TO-THE-FILE` with the real file in the user's workspace (for
-example `path: /workspace/fitness.org`).
+Replace `PATH-TO-THE-FILE` with the real file — either in the user's workspace
+(e.g. `path: /workspace/fitness.org`) or under `/tmp` (e.g.
+`path: /tmp/summary.md`). **`/tmp` is a persistent scratch directory** that
+renders exactly like the workspace, so you can `write_file` a file there to show
+it (see "Showing a file that isn't .org/.md/.pdf" below).
 
 ## Showing only part of a file
 
@@ -48,6 +51,35 @@ Use `lines:` for org/md and `pages:` for pdf. Always write a range as `N-M` (for
 a single line or page use the same number twice, e.g. `pages: 3-3`). The range in
 the block must be numbers you resolved — never put a description like
 `lines: the backups section` in the block. Omit the range to show the whole file.
+
+## Showing a file that isn't .org / .md / .pdf
+
+`.org`, `.md`, and `.pdf` render richly (formatted). **Any other file still
+renders — as plain text.** So you CAN show a `.txt`, `.py`, `.j2`, log, config,
+or extension-less file directly:
+
+```render
+type: file
+path: /workspace/assist/templates/deepagents/sub_research.txt.j2
+```
+
+**When the file would read better converted, convert it first.** If a file is
+easily turned into markdown/org — a template like `sub_research.txt.j2` (really
+just prompt text), a `.txt` that's already markdown-shaped, notes you want
+cleaned up — `write_file` a converted copy under `/tmp` and render THAT:
+
+```
+write_file  /tmp/sub_research.md   ← the file's content (as markdown)
+```
+```render
+type: file
+path: /tmp/sub_research.md
+```
+
+`/tmp` persists for the turn and renders like the workspace, so this is the way
+to show a nicely-formatted version of a file whose own extension wouldn't format.
+Use it when converting adds value; otherwise just render the original path as
+plain text (above).
 
 ## Maps — show places and routes on a map
 
@@ -107,8 +139,9 @@ replacement for the research and recommendations.
 - Emit the render block **instead of** reading the file and summarizing or
   pasting its contents. The block displays the actual file; a summary is not
   what the user asked for.
-- Only `.org`, `.md`, and `.pdf` files render. For any other type, read and
-  summarize it instead (no render block).
+- `.org`, `.md`, and `.pdf` render richly; any other file renders as plain text,
+  or convert it to a `/tmp/*.md` copy first (see "Showing a file that isn't
+  .org/.md/.pdf"). Either way, SHOW the file — don't fall back to summarizing.
 - If you don't know the exact path, find the file first (e.g. `glob`), then
   emit the block with its real path.
 - You may add a short sentence before the block (e.g. "Here's your file:"), but

@@ -73,11 +73,14 @@ class TestNoReuse(_SandboxStateBase):
             patch.object(SandboxManager, "_ensure_egress_proxy_running"),
             patch("assist.sandbox_manager.os.stat", return_value=st),
             patch("assist.sandbox.DockerSandboxBackend", lambda *a, **k: MagicMock()),
+            # the persistent-/tmp dir is created for real; the work_dir here is a
+            # fake path, so stub the mkdir like os.stat above.
+            patch("assist.sandbox_manager.os.makedirs"),
         ]
 
     def test_second_call_reaps_stale_and_creates_fresh(self):
         p = self._patches()
-        with p[0], p[1], p[2], p[3]:
+        with p[0], p[1], p[2], p[3], p[4]:
             SandboxManager.get_sandbox_backend("/ws/t")
             first = SandboxManager._containers["/ws/t"]
             # Second turn for the SAME thread: must NOT reuse `first`.

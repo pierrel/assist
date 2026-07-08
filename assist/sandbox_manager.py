@@ -330,12 +330,22 @@ class SandboxManager:
                 for k, v in os.environ.items()
                 if k.startswith("ASSIST_")
             })
+            # Persistent /tmp: a host dir SIBLING of work_dir, bind-mounted at the
+            # container's /tmp so it survives the per-turn container teardown (the
+            # container's own /tmp would be lost with it).  Lets the agent stash a
+            # file under /tmp (e.g. a renderable .md copy) that outlives the turn and
+            # is reachable by the web renderer.  Created here (idempotent) owned by
+            # the same host user as work_dir, so the run-as uid can write it.
+            tmp_dir = os.path.join(os.path.dirname(work_dir), "tmp")
+            os.makedirs(tmp_dir, exist_ok=True)
+
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
                 remove=True,
                 user=user_arg,
-                volumes={work_dir: {"bind": "/workspace", "mode": "rw"}},
+                volumes={work_dir: {"bind": "/workspace", "mode": "rw"},
+                         tmp_dir: {"bind": "/tmp", "mode": "rw"}},
                 working_dir="/workspace",
                 stdin_open=True,
                 tty=False,

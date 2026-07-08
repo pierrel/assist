@@ -1292,6 +1292,7 @@ _SHOW_PAGE_CSS = (
     "line-height:1.55;color:#171717}pre,code{background:#fafafa;border-radius:4px}"
     "pre{padding:.6rem;overflow:auto}table{border-collapse:collapse}"
     "td,th{border:1px solid #e5e7eb;padding:.3rem .5rem}img{max-width:100%}"
+    "pre.show-text{white-space:pre-wrap;word-break:break-word;font-size:.85rem}"
 )
 
 # The /show page renders AGENT-generated md/org.  The md path (python-markdown)
@@ -1318,18 +1319,27 @@ _SHOW_SECURITY_HEADERS = {
 # "/workspace/fitness.org", "/fitness.org", or "fitness.org".  All three name the
 # same host file under the working dir; map them before resolving.
 _SANDBOX_MOUNT = "/workspace"
+# The sandbox also bind-mounts a persistent host dir at /tmp (sandbox_manager.py),
+# so a render block may point at /tmp/foo.md — a .md copy the agent stashed for
+# rendering.  /tmp maps to the thread's tmp dir, NOT the working dir, so it's
+# resolved against its own root.
+_TMP_MOUNT = "/tmp"
 
 
 def _safe_workspace_file(tid: str, path: str) -> str | None:
-    """Resolve an AGENT path (in /workspace space) against the thread's host
-    agent working dir, traversal-safe.  Accepts ``/workspace/x``, ``/x`` and
-    ``x`` (all → ``<workdir>/x``).  Returns the host path, or None if it would
-    escape the workspace (a crafted ``../``) or is malformed (embedded NUL)."""
-    base = os.path.realpath(MANAGER.thread_default_working_dir(tid))
-    rel = path
-    if rel == _SANDBOX_MOUNT or rel.startswith(_SANDBOX_MOUNT + "/"):
-        rel = rel[len(_SANDBOX_MOUNT):]
-    rel = rel.lstrip("/")  # treat as relative to the workspace root
+    """Resolve an AGENT path against the matching thread host dir, traversal-safe.
+    ``/tmp/x`` → ``<thread>/tmp/x`` (the persistent /tmp mount); ``/workspace/x``,
+    ``/x`` and ``x`` → ``<workdir>/x``.  Returns the host path, or None if it would
+    escape its root (a crafted ``../``) or is malformed (embedded NUL)."""
+    if path == _TMP_MOUNT or path.startswith(_TMP_MOUNT + "/"):
+        base = os.path.realpath(MANAGER.thread_tmp_dir(tid))
+        rel = path[len(_TMP_MOUNT):]
+    else:
+        base = os.path.realpath(MANAGER.thread_default_working_dir(tid))
+        rel = path
+        if rel == _SANDBOX_MOUNT or rel.startswith(_SANDBOX_MOUNT + "/"):
+            rel = rel[len(_SANDBOX_MOUNT):]
+    rel = rel.lstrip("/")  # treat as relative to the chosen mount root
     try:
         target = os.path.realpath(os.path.join(base, rel))
     except ValueError:  # embedded NUL etc. -> treat as not-found, not a 500
@@ -1502,12 +1512,14 @@ def _scalar(value):
 
 
 def _render_file_block(tid: str, block: dict) -> str | None:
-    """``type: file`` renderer.  Embeds a showable workspace file, or None when
-    the path is missing / not a renderable extension (the block is then left to
-    show as a normal code block).  An optional ``lines:``/``pages:`` range is
-    carried into the embed."""
+    """``type: file`` renderer.  Embeds a workspace/tmp file, or None when the
+    path is missing (the block is then left to show as a normal code block).
+    ``.org``/``.md``/``.pdf`` render richly; ANY other file falls back to plain
+    text (the /show route escapes it) — so "show me this .j2/.py/.txt" works
+    instead of silently degrading to a raw code block.  An optional
+    ``lines:``/``pages:`` range is carried into the embed."""
     path = _scalar(block.get("path", ""))
-    if not path or os.path.splitext(path)[1].lower() not in _SHOWABLE_EXTS:
+    if not path:
         return None
     return _file_embed_html(tid, path, _scalar(block.get("lines", "")),
                             _scalar(block.get("pages", "")))
@@ -1833,8 +1845,11 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
     elif ext == ".org":
         body = _org_to_html(src)
     else:
-        raise HTTPException(status_code=415,
-                            detail="show supports .org, .md, .pdf")
+        # Text fallback: any other file (.txt, .py, .j2, no extension, …) shows as
+        # escaped plain text in a <pre>.  html.escape neutralises any markup, so an
+        # agent-generated file can't inject HTML/JS (same guarantee as the org
+        # renderer); binary content degrades to replacement chars, not a crash.
+        body = f'<pre class="show-text">{html.escape(src)}</pre>'
     return HTMLResponse(
         f"<!doctype html><html><head><meta charset=utf-8>"
         f'<meta name=viewport content="width=device-width, initial-scale=1">'
