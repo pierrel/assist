@@ -1,0 +1,89 @@
+#+TITLE: read_url same-URL re-read breaker (research loop, peptides incident)
+#+DATE: <2026-07-07>
+#+STATUS: SPEC (design phase) — eval-first. Not yet built.
+
+* Incident
+Prod thread =20260707142207-80e10495= ("Tell me about peptides… what's the experimental
+evidence say?") ran the =research= sub-agent for *1h36m* before Pierre flagged it; killed via
+=sudo systemctl restart assist-web=. *202 LLM steps, 1437 read_url calls*, re-reading the same
+~12 PubMed URLs *54–78× each* (PMID 37657235 *78×*) + wandering PubMed "similar article" links
+(consecutive PMIDs 36650298→36650314). It monopolised the single llama.cpp slot + THREAD_QUEUE
+the whole time. Diagnosed from =logs/web-2026-07-07-141844.log=; NO evals were run (live forensics).
+
+* Root cause
+=search_internet= was UNAVAILABLE (SearXNG down/rate-limited — 32 "unavailable" hits, 0 successful
+searches). The agent was fact-checking a report (=peptides_evidence.md=) whose citation PMIDs were
+hallucinated; unable to *search* for the correct ones, it *brute-forced read_url* to "find the
+correct PMID," re-reading the same pages and hopping the PubMed citation graph. It narrated "search
+is unavailable, I should relay and stop" but looped 384×.
+
+* Why the existing guards miss it
+- *=UrlProvenanceMiddleware= (deployed, on research + fact-check) can't see a RE-read.* It refuses
+  the first fetch of a *fabricated* URL — but once a URL is read once it's "provenanced" (present in
+  a ToolMessage), so re-reading it 78× is allowed; and PubMed's dense links make every related PMID
+  provenanced, so link-following is nearly unbounded. *The re-read is the dominant loop and provenance
+  structurally cannot catch it.*
+- *=loop_detection= Pattern B (same tool + same args) is CONSECUTIVE-only.* Today's re-reads were
+  NON-consecutive (interspersed across the turn / across dispatches), so it slipped past.
+- *Rollback amplification is ALREADY FIXED* (=checkpoint_rollback.py:52= =rollback_on=(BadRequestError,)=;
+  =GraphRecursionError= deliberately excluded, docstring 66–71). recursion_limit is terminal. Nothing
+  to do — the recommendation in [[queued-research-loop-investigation]] landed.
+- *Per-agent recursion_limits worked* (orchestrator 500, research 300, thread.py runconfig) — but the
+  orchestrator *re-dispatched =task=(research) 16×*, each a fresh budget, so the aggregate ran away.
+
+* The fix — =ReadUrlRereadBreaker= (new middleware)
+A third, orthogonal read_url bound, alongside provenance (fabricated first fetch) and loop_detection
+(consecutive repeat): *bound how many times the SAME normalised URL may be fetched.*
+
+- *Mechanism.* On each =read_url= call (=wrap_tool_call=, the seam provenance/tool_result_to_file use),
+  count prior =read_url= calls to the same =normalize_url()= target in the visible message history
+  (reuse =normalize_url= from =url_provenance.py=). On the Nth (threshold ≈ 3), *do not run the tool* —
+  return a corrective =ToolMessage=: "You have already read <url> N times; its content is unchanged.
+  Do NOT read it again — answer from what you have, or if you can't, say so and stop." Stateless
+  (scans history, like provenance), so it needs no per-instance bookkeeping.
+- *FINALIZE, don't kill.* Return a corrective tool result, never terminate the turn with a stub —
+  the volume-cap-destroys-output lesson (doc 2026-06-05, Pattern E). The model gets a nudge and a
+  chance to wrap up.
+- *Unambiguous signal only.* The guard fires only on a *verbatim* same-URL repeat (a normalised-URL
+  membership count), the coarse/unambiguous class our guardrail ethos sanctions — NOT a fuzzy
+  "looks like looping" heuristic. N re-reads of one URL is real work never; it is always a loop.
+- *Scope.* Attach to the research SEARCHER + FACT-CHECKER (same as provenance) — the read_url loopers.
+  Not the orchestrator (its bound is recursion_limit; it has no read_url loop).
+
+* THE design question the eval must resolve: within-run vs cross-dispatch
+The 78× accumulated across the orchestrator's *16 research dispatches*; a middleware attached to the
+research agent sees only *its own run's* message history (fresh per dispatch), so a per-run counter
+might see far fewer than 78 and under-fire. Two options — the eval decides:
+1. *Per-run counter* (simplest, matches provenance scope) — catches the within-run re-reads; relies on
+   each fresh research run re-tripping quickly (likely, since each redoes the same guess). Ship this if
+   the eval shows within-run re-reads dominate.
+2. *Thread-level counter* — count across the whole turn's messages (all dispatches). Catches the
+   cross-dispatch 78× but needs the breaker to see the parent transcript, not just the sub-agent's.
+   Only if (1) proves insufficient in the eval.
+Measure the actual within-run vs cross-dispatch distribution from the incident log FIRST, then pick.
+
+* Eval-first plan (gate the fix)
+1. *Reproduce (baseline must FAIL).* New =edd/eval/test_read_url_reread_loop.py=: a research/fact-check
+   turn with =search_internet= MOCKED unavailable + =read_url= MOCKED to return a page that does NOT
+   contain the sought fact (so the model wants to re-read), over a fixture that induces the guess loop
+   (a report with a wrong PMID + "find the correct one"). Baseline assertion: the same URL is fetched
+   > N times (the loop reproduces) — confirm it FAILS before building (per the eval-first rule; small,
+   clean fixtures often pass — match the real messy shape).
+2. *Implement* the breaker against the failing eval.
+3. *Gate.* With the breaker: assert no URL is fetched more than N times, AND the turn terminates in
+   bounded steps (no runaway), AND the model still produces an answer (finalize-not-kill — it doesn't
+   return an empty stub). N≥3 trials, then N=10 stability (fans restored 06-30, evals available).
+4. *Regression spot-check* a normal research eval (rich workspace) to confirm the breaker doesn't
+   misfire on legitimate research (a real turn re-reads a URL 0–2×, well under N).
+
+* Out of scope (sibling items, not this build)
+- *The TRIGGER — search-unavailable resilience* ([[queued-research-rate-limit-resilience]]): relay
+  partial results + stop, don't brute-force; space the search burst; read_url returns page hyperlinks.
+  That reduces how often we reach the cliff; this breaker bounds the fall.
+- Lowering recursion_limits / bounding orchestrator re-dispatch — the per-agent bounds already work;
+  revisit only if the eval shows re-dispatch is the dominant multiplier.
+
+* Files
+- New: =assist/middleware/read_url_reread_breaker.py=, =edd/eval/test_read_url_reread_loop.py=.
+- Wire: =assist/agent.py= research + fact-check middleware stacks (next to =UrlProvenanceMiddleware=).
+- Reuse: =normalize_url= from =assist/middleware/url_provenance.py= (extract/share if needed).
