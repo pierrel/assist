@@ -28,14 +28,18 @@ the cadence; bounded by =_MAX_STEPS = 8*24*60 + 60= (~8 days) — deliberately "
    (=calendar.monthrange(y, m)[1]=). So =day_of_month=31= fires on the *last day* of a short
    month — Feb 28/29, the 30-day months — not skipping it or rolling into the next. Least-
    surprising; pinned by a test.
-3. *Which months (the anchor for skip-months).* A month qualifies when
-   : (year*12 + (month-1) - anchor_index) % month_interval == 0
-   The *anchor* is the schedule's =created_at= month (read in the schedule's tz) — NO new
-   field; =created_at= already exists on =Schedule=. So "every 2 months on the 25th" created
-   in July fires Jul 25, Sep 25, Nov 25, Jan 25 … — anchored to *when you set it up*, the
-   intuitive reading (see "Decision to confirm"). =month_interval=1= ignores the anchor
-   (every month). Old rows (=created_at=None=, =month_interval=1= default) → every month,
-   unchanged.
+3. *Which months — EXPLICIT anchor, agent-set, default current month (Pierre's call).* Add
+   =anchor_month: str | None= to =Cadence=: an ISO ="YYYY-MM"= the AGENT always sets for a
+   monthly schedule, *defaulting to the current month* (the tool fills the current YYYY-MM in
+   the user's tz when the agent omits it; the agent passes a specific one for "…starting in
+   March"). A month qualifies when
+   : (cand.year*12 + (cand.month-1) - anchor_index) % month_interval == 0   AND   cand_month >= anchor
+   so the anchor sets BOTH the phase AND the earliest fire: "every 2 months starting Mar 2026"
+   (=anchor_month="2026-03"=) fires Mar/May/Jul… and never before March; default anchor =
+   current month → "every 2 months" starts this month (or the next qualifying day). Explicit +
+   stored (NOT derived from =created_at=), so an edit or re-read is unambiguous. With
+   =month_interval=1= the anchor is moot (every month qualifies) but still set for consistency.
+   Old rows (=anchor_month=None=, =month_interval=1=) → every month, unchanged.
 4. *next_after — direct monthly computation (NOT the minute search).* For a monthly cadence,
    compute the next fire directly: walk candidate months from now (a tiny bounded loop —
    ≤ =month_interval= + 1 months), take the first that qualifies (step 3) whose clamped day
@@ -54,35 +58,39 @@ the cadence; bounded by =_MAX_STEPS = 8*24*60 + 60= (~8 days) — deliberately "
    it to the 1st", "make it every 3 months"), mirroring the =_UNSET= handling; switching TO
    monthly clears the mutually-exclusive fields (validated).
 8. *Agent tool.* =create_schedule= (=assist/schedule/tools.py=) gains =day_of_month: int |
-   None= and =month_interval: int = 1=; docstring adds: "on the Nth of every N months:
-   day_of_month=25, month_interval=2, hour=7, minute=0". Keep ONE cadence shape.
+   None=, =month_interval: int = 1=, and =anchor_month: str | None= (ISO "YYYY-MM"). Docstring:
+   "on the Nth of every N months: day_of_month=25, month_interval=2, hour=7. Omit anchor_month
+   to start this month; pass e.g. anchor_month='2026-03' to start in a specific month." The
+   TOOL fills =anchor_month= = the current month (user tz) when the agent omits it AND the
+   schedule is monthly — so "default to current month" is guaranteed even if the small model
+   forgets. Keep ONE cadence shape.
 
-* Decision to confirm (Pierre)
-*Skip-month anchor:* "every 2 months on the 25th" is anchored to the schedule's *creation
-month* (created in July → Jul/Sep/Nov…). The alternative is a *fixed calendar phase* (every
-2 months = a fixed even/odd month set regardless of when created; "every 3 months" =
-quarterly Jan/Apr/Jul/Oct). Creation-anchored is more intuitive for "every 2 months starting
-now" and needs no extra field; the fixed-phase is more predictable for "quarterly". Design
-assumes *creation-anchored* — say if you'd rather have fixed calendar phase (or a
-user-supplied start month).
+* Decision (resolved 2026-07-08, Pierre)
+*Skip-month anchor:* ALWAYS set an explicit =anchor_month=, default to the current month,
+handled by the agent (the tool defaults it when omitted). Chosen over both auto-derive-from-
+=created_at= (implicit) and fixed-calendar-phase (can't express "starting March"). The
+explicit anchor doubles as the start month.
 
 * Files touched
-=assist/schedule/model.py= (2 fields), =assist/schedule/cadence.py= (validate/_matches/
+=assist/schedule/model.py= (3 fields: day_of_month, month_interval, anchor_month),
+=assist/schedule/cadence.py= (validate/_matches/
 _next_monthly + next_after branch/describe/apply_patch), =assist/schedule/tools.py= (2 tool
 params+docstring), tests. No scheduler change (=scheduler.py= just calls =next_after=), no
-new files, no store migration (=from_dict= defaults =day_of_month=None=, =month_interval=1=
-for existing rows — every-month semantics unchanged).
+new files, no store migration (=from_dict= defaults =day_of_month=None=, =month_interval=1=,
+=anchor_month=None= for existing rows — every-month semantics unchanged).
 
 * Tests (the contract)
 - Short-month clamp: =day_of_month=31= fires Feb 28 (2025) / Feb 29 (2024) / Apr 30, not
   skipped, not rolled into the next month.
 - =next_after= across a month boundary (from the 26th → the 25th of NEXT month) and DST-safe
   (tz-aware, same as today).
-- *Skip-months:* =month_interval=2= created in July fires Jul 25 → Sep 25 → Nov 25 → Jan 25
-  (crosses the year); created July 26 (past the 25th) → first fire Sep 25. =month_interval=3=
-  from an anchor → every 3rd month. Clamp + skip together (=day_of_month=31, month_interval=2=
-  from Jan → Jan 31, Mar 31, May 31, Jul 31…; and a 31 landing on a short skipped-to month
-  clamps).
+- *Skip-months + anchor:* =anchor_month="2026-07", month_interval=2, day=25= fires Jul 25 →
+  Sep 25 → Nov 25 → Jan 26 25 (crosses the year); anchor in the FUTURE (="2026-09"=, now Jul)
+  → first fire Sep 25 (never before the anchor); now = Jul 26 (past the 25th) with anchor Jul
+  → first fire Sep 25. Clamp + skip together (=day=31, interval=2= from Jan → Jan 31, Mar 31,
+  May 31…, a 31 landing on a short month clamps).
+- *Anchor default:* the tool, given a monthly cadence and no anchor_month, sets it to the
+  current month (user tz).
 - =describe= ordinals (1st, 2nd, 3rd, 11th, 21st, 22nd, 31st) + the "every N months" phrasing.
 - =validate= rejects day_of_month with weekdays / every_n_minutes; day 0/32; month_interval 0.
 - An agent-facing round-trip (tool → Cadence → describe) for "the 25th of every 2 months".
