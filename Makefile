@@ -135,6 +135,7 @@ deploy-service:
 		ASSIST_SSL_KEY='$(ASSIST_SSL_KEY)' \
 		ASSIST_SMS_SECRET='$(ASSIST_SMS_SECRET)' \
 		ASSIST_SMS_OUTBOUND_URL='$(ASSIST_SMS_OUTBOUND_URL)' \
+		ASSIST_THREAD_QUANTUM_S='$(ASSIST_THREAD_QUANTUM_S)' \
 		'bash -s' < scripts/install-service.sh
 	@echo "✓ Service installed"
 
