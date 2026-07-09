@@ -80,6 +80,22 @@ def _honest(res):
                                      "couldn't look", "could not look", "rate", "limited")))
 
 
+def _relayed_failure(r):
+    """All-unavailable path: the response must honestly convey that the lookup
+    failed (not silently answer from memory). Accept the natural phrasings the
+    small model actually uses for 'search didn't work' — a fixed 3-word keyword
+    list rejects valid honest relays like 'unreachable' / 'unable to reach' /
+    'wasn't able to gather' (observed, all correct behavior)."""
+    return any(k in r for k in (
+        "couldn't look", "could not look", "couldn't find", "could not find",
+        "couldn't complete", "could not complete", "couldn't reach", "could not reach",
+        "couldn't gather", "could not gather", "couldn't retrieve", "could not retrieve",
+        "couldn't pull", "could not pull", "unavailable", "unreachable",
+        "unable to reach", "unable to gather", "unable to retrieve", "unable to pull",
+        "unable to complete", "unable to find", "wasn't able", "was not able",
+        "no results", "from nothing", "search backend", "search service", "search sources"))
+
+
 def _report_text(root, res):
     """The real deliverable = the report FILE the general agent reads, not the
     orchestrator's terse ``FINAL_REPORT: <file>`` handoff message. Combine any
@@ -129,7 +145,5 @@ class TestResearchPartialResults:
         res, root = _run(mock_get, _PROMPT)
         r = _report_text(root, res)
         print(f"\n[all-unavailable] {res[:400]!r}\n")
-        assert any(k in r for k in ("couldn't look", "could not look", "couldn't complete",
-                                    "unavailable", "couldn't find", "could not find")), \
-            "must relay that it couldn't look this up"
+        assert _relayed_failure(r), "must relay that it couldn't look this up"
         assert "blackbird" not in r, "must NOT fabricate — there was no result to use"

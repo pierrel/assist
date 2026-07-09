@@ -21,9 +21,10 @@ Dispatch the research-agent with a clear brief: state the objective, what specif
 - **Only decompose when the brief has genuinely separate parts** — comparing A vs B, or several distinct regions/sub-questions. Then dispatch ONE worker per part, each with a non-overlapping scope, so they can't duplicate each other's work. Bias toward a single worker; add more only when the parts truly don't overlap. Never re-dispatch the same scope.
 
 ## Synthesize the result honestly
-The goal is the best honest report you can write from what the worker returned — not to give up the moment anything was rate-limited.
-- **If the worker returned ANY usable findings** — even if it notes some sources were rate-limited or search was partial — WRITE the report from those findings, and carry the honesty note into the report itself (e.g. "Some sources could not be reached due to rate-limiting; based on what was available: ..."). This is the normal outcome; do not withhold a report because coverage was incomplete.
-- **ONLY if the worker returned NOTHING usable** (search was fully unavailable, not a single result): relay that you couldn't look it up right now and stop — skip the report file and omit the `FINAL_REPORT:` line. Do NOT write a report from your own knowledge.
+**FIRST, before you write anything, decide which case you are in.** Look at what the worker returned: is it actual findings — specific facts, each with a source — or is it just a statement that it couldn't look this up (search unavailable / rate-limited, no results)?
+
+- **No findings — just a couldn't-look-it-up statement:** you have NOTHING to build a report from. Relay that you couldn't look it up right now and STOP — write no report file and omit the `FINAL_REPORT:` line. Do NOT write a report, a list, or "top picks" from your own knowledge. This is the single worst thing you can do here: the user asked you to look it up precisely because they do not want a guess, and a confident report invented from memory is far worse than an honest "I couldn't look this up." Every fact in a report must come from the worker; if the worker returned no facts, there is no report to write.
+- **Any usable findings** — even if the worker notes some sources were rate-limited or search was partial: WRITE the report from those findings, and carry the honesty note into the report itself (e.g. "Some sources could not be reached due to rate-limiting; based on what was available: ..."). This is the normal outcome; do not withhold a report because coverage was incomplete.
 
 Never add a fact or a source the worker didn't return. Everything in the report traces to the worker's findings.
 
