@@ -246,12 +246,15 @@ def search_internet(
             return _normalize_results(results, max_results)
         saw_down = saw_down or down
     # No engine returned results. If any engine was down/throttled/malformed, this is a
-    # backend-availability failure the agent should relay; if every engine was healthy but
-    # empty, it's a genuine no-results answer.
+    # backend-availability failure — try the Tavily backup before relaying unavailable. If
+    # every engine was healthy but empty, it's a genuine no-results answer.
     if saw_down:
+        tavily = _tavily_search(query, max_results)
+        if tavily is not None:
+            return tavily
         return _search_unavailable(
             f"SearXNG at {base_url}: every engine unreachable or throttled "
-            f"(tried {', '.join(_ROTATION_ENGINES)})"
+            f"(tried {', '.join(_ROTATION_ENGINES)}); Tavily backup unavailable/unset too"
         )
     return "[]"
 
@@ -293,6 +296,36 @@ def _normalize_results(results: list, max_results: int) -> str:
          "content": r.get("content", "")}
         for r in results[:max_results]
     ])
+
+
+_TAVILY_URL = "https://api.tavily.com/search"
+_TAVILY_TIMEOUT_S = 15.0  # a remote API, so more generous than the local SearXNG timeout
+
+
+def _tavily_search(query: str, max_results: int) -> str | None:
+    """FINAL backup after the SearXNG engine rotation is exhausted: the Tavily search API,
+    a managed backend that doesn't rate-limit like the scraped SearXNG engines, so it keeps
+    search alive when the whole rotation is throttled. Returns normalized results, or None if
+    unconfigured / unreachable / empty (caller then relays unavailable). The API key comes
+    from ``TAVILY_API_KEY`` (env only — never committed); if unset, this is a no-op."""
+    key = os.getenv("TAVILY_API_KEY")
+    if not key:
+        return None
+    try:
+        resp = requests.post(
+            _TAVILY_URL,
+            json={"api_key": key, "query": query, "max_results": max_results},
+            timeout=_TAVILY_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or not results:
+        return None
+    # Tavily results are already {title, url, content, ...} — normalize to our shape.
+    return _normalize_results(results, max_results)
 
 
 def _science_fallback(base_url: str, query: str, max_results: int) -> str | None:

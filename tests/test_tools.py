@@ -205,9 +205,10 @@ class TestSearchInternet:
             result = tools.search_internet("q")
         assert "https://m.com" in result
 
-    def test_rotation_all_engines_down_returns_unavailable(self, monkeypatch):
-        """Every engine throttled → the relayable unavailable message."""
+    def test_rotation_all_engines_down_no_tavily_returns_unavailable(self, monkeypatch):
+        """Every engine throttled and no Tavily key → the relayable unavailable message."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
         def fake_get(url, params=None, timeout=None, **kw):
             eng = (params or {}).get("engines")
@@ -216,6 +217,38 @@ class TestSearchInternet:
         with patch.object(tools, "requests") as req:
             req.get.side_effect = fake_get
             assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
+
+    def test_rotation_exhausted_falls_back_to_tavily(self, monkeypatch):
+        """When every SearXNG engine is down AND a Tavily key is set, search_internet falls
+        back to the Tavily API and returns its results."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+
+        def fake_get(url, params=None, timeout=None, **kw):  # every SearXNG engine down
+            return _resp({"results": [],
+                          "unresponsive_engines": [[(params or {}).get("engines"), "CAPTCHA"]]})
+
+        def fake_post(url, json=None, timeout=None, **kw):  # Tavily backup
+            assert "tavily" in url and (json or {}).get("api_key") == "test-key"
+            return _resp({"results": [{"title": "Tav", "url": "https://t.com", "content": "c"}]})
+
+        with patch.object(tools, "requests") as req:
+            req.get.side_effect = fake_get
+            req.post.side_effect = fake_post
+            result = tools.search_internet("q")
+        assert result != tools._SEARCH_UNAVAILABLE_MESSAGE
+        assert "https://t.com" in result
+
+    def test_tavily_backup_only_after_rotation_exhausted(self, monkeypatch):
+        """Tavily is NOT called when a SearXNG engine returns results (it's the last resort)."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+        with patch.object(tools, "requests") as req:
+            req.get.return_value = _resp({"results": [{"title": "T", "url": "https://a.com",
+                                                       "content": "c"}], "unresponsive_engines": []})
+            result = tools.search_internet("q")
+        assert "https://a.com" in result
+        req.post.assert_not_called()
 
     def test_rotation_all_engines_healthy_but_empty_returns_empty(self, monkeypatch):
         """Every engine up but genuinely no results → "[]" (a real no-results answer),
