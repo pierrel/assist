@@ -171,11 +171,7 @@ _SHOWABLE_EXTS = (".org", ".md", ".pdf")
 # Thread-list ordering rank (lower sorts first). Per Pierre: STATUS first — urgent,
 # then processing/starting, then queued/waiting, then "new" (an unopened response),
 # then everything else (ready / error / unmerged / idle). Merge status has NO bearing.
-# The single source of truth for the order; the age tiebreak is handled by the caller's
-# stable sort over MANAGER.list()'s mtime-descending order.
-_STATUS_RANK_OTHER = 4
-
-
+# The age tiebreak within a band is the caller's job (see render_index's sort).
 def _thread_status_rank(tid: str, stage: str) -> int:
     if _has_urgent(tid):
         return 0
@@ -185,7 +181,7 @@ def _thread_status_rank(tid: str, stage: str) -> int:
         return 1
     if _has_unseen_response(tid):      # "new" — a reply the user hasn't opened
         return 3
-    return _STATUS_RANK_OTHER
+    return 4                           # everything else — ready / error / unmerged / idle
 
 
 def render_index(query: str = "") -> str:
@@ -224,8 +220,10 @@ def render_index(query: str = "") -> str:
             )
         elif _has_urgent(tid):
             # "urgent": the agent called notify() to flag this thread time-sensitive.
-            # Stronger than "new" (above it), still below the live process-state
-            # badges (a running/errored thread is actionable now). Red pill.
+            # BADGE order only: below the live process-state badges (a running/errored
+            # thread's current state is the more informative pill), above "new". The
+            # LIST is sorted urgent-FIRST regardless (see _thread_status_rank), so an
+            # urgent+processing thread sorts to the top while still showing "processing".
             badge = (
                 '<span style="font-size:.7rem; color:#b91c1c; background:#fafafa;'
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
