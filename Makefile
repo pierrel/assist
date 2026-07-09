@@ -192,11 +192,13 @@ logs:
 setup-sudo:
 	@echo "→ Setting up passwordless sudo on $(DEPLOY_HOST)..."
 	@echo "  This requires entering your password ONCE"
-	@ssh -t $(DEPLOY_HOST) \
-		SERVICE_NAME=$(SERVICE_NAME) \
-		DEPLOY_PATH=$(DEPLOY_PATH) \
-		ASSIST_THREADS_DIR=$(ASSIST_THREADS_DIR) \
-		'bash -s' < scripts/setup-passwordless-sudo.sh
+	@# Copy the script over and run it via a real PTY.  Piping the script on
+	@# stdin ('bash -s' < file) steals ssh's stdin, so `ssh -t` can't allocate a
+	@# terminal ("Pseudo-terminal will not be allocated") and the sudo inside has
+	@# no TTY to read the password from.  Sending the script as a file leaves
+	@# stdin = the terminal, so sudo can prompt.
+	@scp -q scripts/setup-passwordless-sudo.sh $(DEPLOY_HOST):/tmp/assist-setup-sudo.sh
+	@ssh -t $(DEPLOY_HOST) "SERVICE_NAME='$(SERVICE_NAME)' DEPLOY_PATH='$(DEPLOY_PATH)' ASSIST_THREADS_DIR='$(ASSIST_THREADS_DIR)' bash /tmp/assist-setup-sudo.sh; rm -f /tmp/assist-setup-sudo.sh"
 	@echo ""
 	@echo "✓ Setup complete! You can now deploy from Emacs without password prompts."
 
