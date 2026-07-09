@@ -2,17 +2,21 @@
 
 The 2026-07-02 failure: SearXNG's upstream engines rate-limit under a burst, so the
 research turn GAVE UP ("couldn't look this up") and DISCARDED a real, on-point result it
-already had. The fix (docs/2026-07-08-research-audit.org): search_internet surfaces a
-distinct PARTIAL signal; the searcher/orchestrator USE partial/earlier results and are
-HONEST about the rate-limiting; the SearchUnavailableBreaker finalizes-not-kills.
+already had. The fix (as-built): the searcher/orchestrator USE earlier/partial results and
+stay HONEST about the rate-limiting instead of giving up; the orchestrator holds no read_url
+(can't fabricate URLs) and has a hard no-results gate; the SearchUnavailableBreaker
+finalizes-not-kills. NOTE: search_internet does NOT emit a per-call "PARTIAL" sentinel —
+results are returned plainly (tests/test_tools.py enforces this). Resilience lives in the
+guidance + architecture, not a tool-level signal.
 
 Two mocked shapes (NO real search — per docs/2026-07-06-research-eval-mocking.org):
-  * PARTIAL — every search returns real results prefixed with the rate-limited note.
   * MIXED-BURST — the first search fully succeeds, the rest come back fully unavailable
     (the real coffee-shop shape). The good first result must still reach the report.
+  * ALL-UNAVAILABLE — every search fails with no results: relay honestly, do NOT fabricate.
 
-Asserts the SYMPTOM on the real create_research_agent: a non-empty report that USES the
-real result and is HONEST about the rate-limiting — not a total-failure give-up.
+Asserts the SYMPTOM on the real create_research_agent — the report FILE the general agent
+reads (not the terse FINAL_REPORT handoff): a report that USES the real result and is HONEST
+about the rate-limiting, and no fabrication when nothing was found.
 """
 import os
 import tempfile

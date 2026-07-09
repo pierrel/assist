@@ -315,6 +315,12 @@ Design across the three seams named in Part 3.4, in the boundary reality of Part
 message crosses).
 
 *(b1) =search_internet= surfaces a DISTINCT partial/rate-limited signal (=tools.py=).*
+# AS-BUILT (2026-07-08): b1 was NOT adopted. A per-call "PARTIAL RESULTS" note fired on ~every
+# healthy query (3/4 healthy SearXNG queries have one throttled engine yet return 17-32 results),
+# so it was dropped — search_internet returns results PLAINLY (tests/test_tools.py enforces no
+# "PARTIAL" note when results exist). Resilience came from guidance + architecture (the prompt
+# rewrite + orchestrator-without-read_url), not a tool-level signal. The rest of this bullet is
+# the superseded original proposal, kept for the record.
 - On the NON-EMPTY results path (=tools.py:273-278=), also read =unresponsive_engines= (with the same
   is-list validation already used at =:260-265=). If it is non-empty, APPEND a coarse, model-legible
   note to the returned results, e.g. a leading line:
@@ -378,6 +384,10 @@ channel. Start with prose (b2/b3); adopt the sentinel only if the eval calls for
    =test_research_reliability= (they stay real-search, run sparingly).
 2. *Add b1* (=tools.py= partial signal). Unit test in =tests/test_tools.py=: partial payload → results +
    note; zero+engines → unavailable; zero+none → ="[]"=.
+   # AS-BUILT: b1 DROPPED (fired on healthy queries). The sequencing that shipped: rewrite the research
+   # prompts from best practices + make the orchestrator a pure lead (tools=[], no read_url), and focus
+   # the eval on the MIXED-BURST (early success then unavailable) + ALL-UNAVAILABLE shapes with the
+   # guidance/breaker preserving early results. search_internet returns results plainly.
 3. *Add b2/b3 guidance.* Eval: the agent USES partial/earlier results and emits an HONEST caveat; the
    report is non-empty and cites the real sources. Change one prompt at a time (isolate-to-learn) and
    measure.
