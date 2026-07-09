@@ -1,0 +1,415 @@
+#+TITLE: Research subsystem audit — redundant-call tendency + honest partial-results-on-rate-limit
+#+DATE: <2026-07-08>
+#+STATUS: DESIGN / AUDIT TO READ (no code). Guidance-first per AGENTS.md §"prefer guidance over middleware".
+#+AUTHOR: audit for Pierre
+
+* Scope & method
+Factual audit of the research subsystem (=create_research_agent= + its trio, =search_internet= /
+=read_url=, and the four shipped guardrails) against every research incident doc in =docs/= and the
+=roadmap.org= research items. Two central asks drive it:
+1. Research must NOT tend toward REDUNDANT/wasteful calls (Part 2).
+2. On RATE-LIMITED / PARTIAL search, the agent must be HONEST about being throttled and still return
+   the best report it can — instead of giving up on "search unavailable" (Part 3).
+Every claim is cited =file:line=. Parts 1–4 are factual (no opinions); Part 5 is the proposal.
+
+* PART 1 — Factual map of the research graph
+
+** The four agents and how a result crosses each boundary
+The research flow is a 4-agent tree, itself a sub-agent of the general agent:
+: general-agent  --task-->  research-agent (ORCHESTRATOR)
+:                              |-- task --> research-agent  (SEARCHER)   [search_internet, read_url]
+:                              |-- task --> critique-agent               [NO tools]
+:                              |-- task --> fact-check-agent              [read_url]
+
+*Boundary rule (load-bearing, verified in deepagents):* a sub-agent's result reaches its parent as a
+SINGLE =ToolMessage= whose content is either the sub-agent's =structured_response= (JSON) or, absent
+that, *the last non-empty AIMessage text* (=deepagents/middleware/subagents.py:495-519=). None of the
+research/orchestrator sub-agents set =response_format=, so *only the final AIMessage text crosses*.
+Concretely: the SEARCHER's =search_internet= and =read_url= =ToolMessage=s are DISCARDED — the
+orchestrator sees only the searcher's final prose. This is the single most important architectural
+constraint for Part 3: any partial-status + partial-findings MUST be in that final message or they are
+lost.
+
+** Orchestrator — =create_research_agent= (=agent.py:474-696=)
+- System prompt: =research_instructions.txt.j2= (=agent.py:652=).
+- Tools: =[read_url]= ONLY (=agent.py:650=). It does NOT search; it delegates searching to the searcher
+  (=agent.py:643-647= comment: giving it =search_internet= was "redundant and doubled the over-search").
+  It keeps =read_url= to read specific URLs while writing/fact-checking.
+- Middleware (=agent.py:660=): =base_mw + <shared trio> + _read_url_guards() + [logging_mw]=, where
+  - =base_mw= (=agent.py:492-574=): JsonValidation(strict=False, if absent), BadRequestRetry(3),
+    OutputSanitization, WriteCollision, LoopDetection, ThreadQueue, EmptyResponseRecovery,
+    ToolResultToFile({read_url}, floor 4000).
+  - shared trio passed from =create_agent= (=agent.py:337=): [retry, json_validation, tool_name].
+  - =_read_url_guards()= (=agent.py:458-471=) = =[UrlProvenanceMiddleware(), ReadUrlRereadBreaker()]=.
+    Added to the orchestrator by PR #182 (this is the fabrication-404 fix — see Part 2.5).
+- recursion_limit: =RollbackRunnable(agent, recursion_limit=300)= (=agent.py:677=). Hitting it is
+  TERMINAL: =GraphRecursionError= is NOT in =RollbackRunnable='s =rollback_on= (docstring =agent.py:666-676=;
+  =checkpoint_rollback.py= =rollback_on=(BadRequestError,)=), so no ~7x rollback multiplication.
+- Wrapped in =ReferencesCleanupRunnable= (=agent.py:692-696=): prunes intermediate drafts, keeps only
+  the final report in =references/=.
+- Result to general agent: final AIMessage text (typically ending =FINAL_REPORT: <filename>=, matched by
+  =research_cleanup.py='s =_FINAL_REPORT_LINE=).
+
+** Searcher — dict sub-agent "research-agent" (=agent.py:618-624=)
+- System prompt: =sub_research.txt.j2=. Tools: =[search_internet, read_url]=.
+- Middleware: =_subagent_safety_mw() + _read_url_guards()= (=agent.py:623=).
+  =_subagent_safety_mw()= (=agent.py:590-616=): retry, BadRequestRetry(3), ToolResultToFile({read_url},4000),
+  OutputSanitization, LoopDetection, *SearchUnavailableBreaker(threshold 4)*, ThreadQueue,
+  EmptyResponseRecovery. Plus =_read_url_guards()= = Provenance + RereadBreaker.
+- recursion_limit: NONE set explicitly in =agent.py= for the dict sub-agents (unlike the orchestrator's
+  300 and the context-agent's 500 at =agent.py:455=). They run under the nested-graph default when the
+  orchestrator's =task= tool invokes them. *Factual gap:* the searcher/critique/fact-check volume ceiling
+  is not an explicit coarse bound in our code — worth noting for Part 2.
+- Result to orchestrator: its final AIMessage text only (search =ToolMessage=s discarded).
+
+** Critique — dict sub-agent "critique-agent" (=agent.py:626-631=)
+- System prompt: =sub_critique.txt.j2=. *Tools: NONE* (no =tools= key at =agent.py:626-631=).
+- Middleware: =_subagent_safety_mw()= only (=agent.py:630=) — includes SearchUnavailableBreaker +
+  ToolResultToFile({read_url}), both INERT here (no search/read tools). Uniform-stack rationale
+  (=agent.py:355-361= comment on the peer dev-critique).
+- *Finding (prompt/tool mismatch):* =sub_critique.txt.j2:11= tells it "You can use the search tool to
+  search for information" — but the agent has no search tool. Dead instruction; a small model may waste a
+  step trying to call a tool it lacks. (Distinct from the DEV critique-agent =create_agent=
+  installs at =agent.py:341-362= with =dev_critique.md.j2=.)
+
+** Fact-checker — dict sub-agent "fact-check-agent" (=agent.py:633-641=)
+- System prompt: =fact_checker.md.j2=. Tools: =[read_url]=.
+- Middleware: =_subagent_safety_mw() + _read_url_guards()= (=agent.py:640=).
+- Own budget guidance: =fact_checker.md.j2:19-21= "AT MOST 10 read_url calls; AT MOST ONCE per URL". The
+  reread breaker (cap 3/URL/run) is a hard backstop under this.
+- *Finding (fixed-filename coupling):* =sub_critique.txt.j2:5-7= and =fact_checker.md.j2:5= read the report
+  at the hard-coded =final_report.md= and the topic at =question.txt=, while the orchestrator writes
+  =<topic>.org= and its subagent descriptions say "You MUST provide the file" (=agent.py:628,635=). The
+  fixed-filename convention vs the orchestrator's chosen basename is a latent coupling; note it, verify in
+  transcripts whether the small model resolves it.
+
+** The tools (=assist/tools.py=)
+*=search_internet= (=tools.py:206-278=)* — self-hosted SearXNG, no fallback. Result branches:
+- No =ASSIST_SEARCH_URL= → =_search_unavailable(...)= (=tools.py:222-226=).
+- Unreachable / non-2xx / bad JSON → unavailable (=tools.py:235-236=).
+- Non-dict body / missing =results= / non-list =results= → unavailable (=tools.py:242-253=).
+- *Empty results* (=tools.py:254-271=): if =unresponsive_engines= is a non-empty list → unavailable
+  (=tools.py:266-270=); else → ="[]"= (genuine empty, =tools.py:271=).
+- *Non-empty results* (=tools.py:273-278=): normalizes =[{title,url,content}]= and returns it —
+  *WITHOUT consulting =unresponsive_engines= at all*. This line is the crux of Part 3.
+- =_SEARCH_UNAVAILABLE_MESSAGE= (=tools.py:48-54=) is a second-person directive ("STOP: do not search
+  again … tell the user you couldn't look this up"). No wait-time framing (a down backend is an outage,
+  not a wait-out; =tools.py:45-47=). =SearchUnavailableBreaker= imports this exact constant
+  (=search_unavailable_breaker.py:48=) as its single source of truth.
+*=read_url= (=tools.py:176-203=)* — per-host throttle (1s), extracts main content, returns FULL text
+(offloaded to file by ToolResultToFile). Error path returns inline ="Error fetching URL: {e}"=
+(=tools.py:203=) — a *distinct string per URL*, deliberately not counted by the breaker
+(=search_unavailable_breaker.py:31-35=).
+
+** The four shipped guardrails
+- =UrlProvenanceMiddleware= (#182, =url_provenance.py=): refuses =read_url= on a URL absent from any prior
+  =ToolMessage=/=HumanMessage= (=_seen_urls= =:100-122=; excludes AIMessage to stop self-laundering).
+  Corrective (not turn-ending). Now on ALL THREE read_url agents (=_read_url_guards()=). Rejection copy
+  handles the empty-allow-list case (=_correction= =:137-160=): "you have no sourced URLs … stop".
+- =ReadUrlRereadBreaker= (#178, =read_url_reread_breaker.py=): refuses the (=max_reads=+1)th fetch of the
+  SAME normalized URL in the current TURN (default 3, =:34=). Corrective (finalize-not-kill, =:111-121=).
+  Counts COMPLETED fetches via =loop_detection._extract_events= (=:49-71=). *Per-run/per-turn scope →
+  resets across orchestrator re-dispatches* (the named residual, doc 2026-07-07 §"cross-dispatch").
+- =SearchUnavailableBreakerMiddleware= (#138, =search_unavailable_breaker.py=): after =threshold= (4,
+  env =ASSIST_SEARCH_UNAVAILABLE_THRESHOLD=) results equal the EXACT unavailable constant in the turn
+  (=_count_search_unavailable= =:59-74=, window=None), strips the next =search_internet= call and
+  *terminates the turn* with a canned first-person "couldn't complete … web search is currently
+  unavailable" (=_compose_terminal_message= =:77-94=; =after_model= strip-to-end =:131-163=). Fires on
+  the searcher (and inertly on critique). *This is a strip-to-DEAD-END terminal, the exact shape the
+  2026-06-05 volume-cap-destroys-output doc warns against* — see Part 3.
+- =LoopDetectionMiddleware= (=loop_detection.py=): only two CONSECUTIVE exact-repeat patterns — (A)
+  same mutating tool + same error, (B) same tool + same args. Read-only tools (search/read) and
+  distinct-arg exploration are DELIBERATELY transparent to it (rolled back to 2 patterns per PR #128;
+  the volume-cap Patterns E/F were REMOVED — =agent.py:666-676= comment "Pattern-E/F caps removed").
+
+* PART 2 — Redundant-call audit
+
+For each tendency: the governing guidance/guard, whether the bound is coarse+real or ambiguous, and
+where the small model actually over-calls (incident-cited).
+
+** 2.1 Over-SEARCH (searcher)
+- Guidance: =sub_research.txt.j2:7= "Aim for about 4 searches … you do not need to keep searching once
+  you have a usable answer"; =:11= "Read at most 2 pages".
+- Hard bound: NONE specific to volume. The old =_RESEARCH_TOOL_VOLUME_CAP=6= (Pattern E) was REMOVED.
+  LoopDetection ignores distinct-query streaks by design. SearchUnavailableBreaker only counts the exact
+  unavailable constant — it does NOT bound HEALTHY over-search. So healthy over-search is bounded ONLY by
+  soft guidance + the searcher's (unset-in-code) nested recursion default.
+- Coarse/real vs ambiguous: intentionally soft — AGENTS.md warns that "many distinct searches" is real
+  work and must not be guard-capped. This is acceptable by ethos; the risk is only wall-clock, not a
+  runaway.
+- Where it over-calls: =docs/2026-06-05-research-volume-cap-destroys-output.org= — the James-Blake
+  two-subject query ran 6–8 searches and the (then-present) cap fired and destroyed the output. The
+  lesson there was that the *cap* was the fault, not the over-search. Verdict: over-search is not the
+  redundancy problem; do not re-add a volume cap.
+
+** 2.2 Re-DISPATCH (orchestrator → searcher)
+- Guidance: =research_instructions.txt.j2:19= "Dispatch it ONCE … re-dispatch only if the first result
+  genuinely failed to address the question at all"; =:36= "at most 3 task calls total".
+- Hard bound: NONE (Pattern F removed). Only =recursion_limit=300= caps the aggregate.
+- Coarse/real vs ambiguous: *AMBIGUOUS.* "genuinely failed to address the question at all" is a
+  judgment loophole the small model can rationalize into repeated dispatches. This is the cross-dispatch
+  multiplier.
+- Where it over-calls: =docs/2026-07-07-read-url-reread-breaker.org= — the peptides orchestrator
+  *re-dispatched the searcher 16×*, each a fresh guard budget, aggregating 1437 read_url calls / 78×
+  same-URL. The per-run reread breaker + per-run SearchUnavailableBreaker both *diluted* across those
+  dispatches (threshold 4/run never fired: 32 unavailable hits ≈ 2/dispatch). NOTE: the later b37c712b
+  runaway (2026-07-08) was confirmed SINGLE-dispatch, so re-dispatch is a real but not the dominant
+  driver — the 2026-07-08 doc explicitly recommends NOT building a cross-dispatch guard.
+
+** 2.3 Re-READ (same-URL rereads)
+- Guard: =ReadUrlRereadBreaker= caps 3 fetches/URL/run (coarse+real, unambiguous — a page's content is
+  unchanged, so re-read N>3 is never real work). On all three read_url agents.
+- Residual: per-run scope resets across re-dispatches (2.2). Bounded across dispatches only by
+  recursion_limit.
+- Where it over-calls: peptides PMID 37657235 read *78×* (doc 2026-07-07); b37c712b re-read/guessed URLs
+  108,278× (doc 2026-07-08). *Both were TRIGGERED by search being unavailable* — the agent brute-forced
+  =read_url= as a substitute for the search it couldn't run. This ties 2.3 directly to Part 3.
+
+** 2.4 Re-CRITIQUE / Re-FACT-CHECK
+- Guidance: =research_instructions.txt.j2:33-34,36= "critique-agent zero or one time … fact-check-agent
+  zero or one time … at most once … at most 3 task calls total". Each is instructed to address findings
+  "in a single edit and move on — do not re-critique/re-fact-check".
+- Additive value: yes — critique improves prose, fact-check verifies citations support claims. They are
+  not redundant PASSES per se; the redundancy risk is only re-invoking them, which guidance caps at 1
+  each (soft, no guard). Bound is ambiguous (soft) but low-blast (each is one dispatch).
+- The fact-checker has its own internal bounds (=fact_checker.md.j2:19-21=, 10 reads / once-per-URL) plus
+  the reread breaker.
+
+** 2.5 The fabrication-404 loop (#182) — redundancy exemplar
+- =docs/2026-07-08-research-reread-runaway.org=: under search-unavailable, the ORCHESTRATOR (which has
+  its own =read_url= and, pre-#182, no provenance guard) FABRICATED plausible URLs, got 404, and looped —
+  *108,278 "404 Not Found" vs 10 successes, 0 successful searches, ~90 min*. Every 404 read was a wasted
+  call.
+- Governed now by: =UrlProvenanceMiddleware= added to the orchestrator (#182, =_read_url_guards()=
+  =agent.py:471=), which makes the fabricated fetch UNREACHABLE by construction (a URL in no ToolMessage
+  is refused). This is the coarse+real, by-construction fix — the redundancy is eliminated at the source,
+  not probabilistically reduced.
+
+** 2.6 Bottom line of Part 2
+The redundancy tendencies split cleanly:
+- Bounded coarse+real by construction: same-URL reread (2.3, reread breaker), fabricated reads (2.5,
+  provenance). Good.
+- Bounded only by soft guidance: over-search (2.1 — acceptable per ethos), re-dispatch (2.2 —
+  ambiguous "genuinely failed" loophole), re-critique/fact-check (2.4 — low blast).
+- The single biggest *driver* of the worst redundancy incidents (peptides, b37c712b) is NOT any of these
+  in isolation — it is *search-unavailable pushing the agent to substitute brute-force =read_url= for
+  search.* Fixing Part 3 (honest partial-results, stop-don't-thrash) is therefore ALSO the highest-
+  leverage redundancy fix. The two asks converge.
+
+* PART 3 — Rate-limit / partial-results audit (the real 2026-07-08 event)
+
+Real event class: SearXNG's free upstream engines rate-limit under a burst — brave "too many requests"
+→ Suspended, ddg/startpage CAPTCHA (=roadmap.org:107-111=, and the 2026-07-02 coffee-shop thread
+=20260702160303=).
+
+** 3.1 Does =search_internet= distinguish partial from fully-down? Only in ONE direction.
+- *Fully-down / zero-ever:* zero results + non-empty =unresponsive_engines= → =_SEARCH_UNAVAILABLE=
+  (=tools.py:266-270=). Correct.
+- *Genuine empty:* zero results + no engine failures → ="[]"= (=tools.py:271=). Correct.
+- *PARTIAL (some engines rate-limited, but others returned results):* the non-empty path
+  (=tools.py:273-278=) returns the results and *NEVER inspects =unresponsive_engines=*. So a partially
+  rate-limited search is returned as if fully healthy — *the throttle signal is SILENTLY DROPPED.* The
+  agent cannot know it got a degraded result set.
+- Additionally, in the real coffee-shop burst the dominant shape was *mixed across CALLS*: the first
+  search fully succeeded (real results, no engine errors) and the next four returned zero-results+engine-
+  errors → =_SEARCH_UNAVAILABLE=. The tool is stateless per call, so it cannot know "an earlier call
+  succeeded"; that context lives only in the agent's message history.
+
+** 3.2 What the agents do today → they give up and DISCARD the good results
+- Searcher: =sub_research.txt.j2:21= "If web SEARCH reports that it is unavailable … STOP immediately …
+  do NOT answer from your own knowledge. Make your final message relay that status." No branch for
+  "unavailable NOW but I already have usable results from an earlier search." So on the 2nd–5th
+  unavailable hit, the guidance says stop-and-relay, abandoning the 1st good result.
+- Orchestrator: =research_instructions.txt.j2:21= "do NOT write a report from your own knowledge … relay
+  … and stop … skip writing a report file and omit the =FINAL_REPORT:= line"; and =:140= "if you have no
+  real URL … relay that you couldn't find sources and stop." Again no partial branch.
+- Net observed (=roadmap.org:99-121=): the turn returns "couldn't look this up because web search is
+  currently unavailable" *even though a real, on-point result was in hand* (the "Mission District Coffee
+  Shops for Remote Work" guide). This is NOT the runaway (#165/#182 worked — real searches, no loop, 1.5
+  min); it is the OPPOSITE failure: premature, dishonest surrender.
+
+** 3.3 The SearchUnavailableBreaker actively discards partial results
+- It counts only the EXACT constant (=search_unavailable_breaker.py:59-74=), so a PARTIAL result
+  (results + would-be signal) does not itself trip it — good. BUT in the mixed-burst shape, 4 fully-
+  unavailable calls DO reach threshold 4 and the breaker STRIPS the next search and *terminates the turn*
+  with =_compose_terminal_message()= = "I couldn't complete this research because web search is currently
+  unavailable" (=:90-94=). That canned terminal:
+  1. carries NONE of the good results already in earlier ToolMessages, and
+  2. crosses the subagent boundary as the searcher's final message (Part 1) — so the orchestrator sees
+     total failure and relays "couldn't look it up".
+- This is precisely the =docs/2026-06-05-research-volume-cap-destroys-output.org= anti-pattern (a
+  strip-to-dead-end terminal that destroys the gathered output), reproduced in the search-unavailable
+  breaker instead of the removed volume cap.
+
+** 3.4 The exact gap (named)
+The system treats *rate-limited / partial* as *total-failure* along three seams:
+(1) =search_internet= drops the partial signal on the non-empty path (=tools.py:273-278=);
+(2) the searcher/orchestrator prompts have no "use what you have + be honest" branch — only stop-and-relay;
+(3) the SearchUnavailableBreaker's terminal message asserts total failure and discards in-hand results.
+The best-effort answer is thrown away at whichever seam fires first.
+
+* PART 4 — Lessons incorporated (docs + roadmap)
+
+- =docs/2026-05-31-heed-research-agent-rate-limit-signal.org=: the FIX for cross-dispatch surrender is
+  *guidance, not a meta-loop detector* (Pierre's explicit call). Prompt gap → the model defaults to its
+  over-repeated "always research" prior. *Also introduced the structured-sentinel idea* (a
+  =SEARCH_UNAVAILABLE= sibling of =FINAL_REPORT:=) as the robust cross-boundary channel — directly
+  relevant to Part 5(b) since only the final message crosses. → Fold: prefer guidance; if the partial
+  status won't survive the two summarization hops as prose, use a sentinel line in the final message.
+- =docs/2026-06-05-research-volume-cap-destroys-output.org=: a capped research agent must FINALIZE (write
+  its answer), not die with a canned stub; strip-to-dead-end destroys output; use =jump_to:"model"= +
+  a "write your final answer NOW from what you already gathered (not from memory)" nudge. → Fold: the
+  SearchUnavailableBreaker terminal must become finalize-not-kill (Part 5b).
+- =docs/2026-07-07-read-url-reread-breaker.org=: same-URL reread bound (coarse+real, finalize-not-kill);
+  the residual is cross-dispatch reset; the TRIGGER is search-unavailability. → Fold: Part 2.3, and "fix
+  the trigger" = Part 3.
+- =docs/2026-07-08-research-reread-runaway.org=: root cause was a MISSING guard (provenance off the
+  orchestrator), not too much middleware; fix by reusing existing guards + guidance "no sources → stop,
+  don't fabricate, don't re-dispatch"; DO NOT build a cross-dispatch bound; DO NOT widen LoopDetection to
+  read-only/error heuristics (misfire risk). → Fold: Part 2.2/2.5; Part 5(a) must not add a cross-
+  dispatch guard.
+- =docs/2026-07-06-research-eval-mocking.org=: MOCK the research subagent in every non-research eval;
+  only =test_research_agent= + =test_research_reliability= do real search (rate-limit grind). The
+  partial-results eval must MOCK =search_internet= to emit the partial/mixed shapes — never real search.
+- =roadmap.org= "Research improvements":
+  - =:99-141= "Research resilience to search rate-limiting + read_url link exploration" — the exact
+    partial-results item: distinguish "backend down (0 ever)" from "burst tripped engine limits (some
+    results in hand)", keep the good results, be honest, and consider serializing/spacing the burst
+    (the 3-parallel burst is what trips the limits). Plus =read_url= returning page hyperlinks so a
+    single good result can be explored when search is throttled (provenance already permits link-
+    following; =read_url= just never exposed the links). → the queued =research-rate-limit-resilience=
+    item Part 5(b) implements.
+  - =:206-234= "Audit research turns for ADVERSE guard effects" — the false-positive lens: a guard/
+    recursion cut-off that kills GOOD work is worse than the rare runaway. The SearchUnavailableBreaker
+    discarding partial results (Part 3.3) is exactly such an adverse effect. → Part 5(b) softens it.
+  - =:142-205= "Research must NOT judge distances/travel" and the confabulated-anchor sub-item (a
+    FABRICATED address, not just a fabricated URL) — RELATED but out of scope here; note as adjacent.
+
+* PART 5 — Redesign proposal (guidance-first, minimal, honoring the ethos)
+
+** (a) Redundancy — smallest changes that stop the tendency without truncating deep research
+Principle (AGENTS.md): do NOT guard "many distinct searches / distinct reads" — that is real work. Prefer
+prompt/arg-shape fixes; name a guard only if guidance provably can't.
+
+1. *(no new guard — this is the key finding)* The by-construction bounds already cover the two runaway
+   shapes (reread breaker, provenance). The worst redundancy incidents were TRIGGERED by search-
+   unavailability (Part 2.6), so *Part 5(b) is the primary redundancy fix.* Do NOT add a cross-dispatch
+   re-dispatch guard (2026-07-08 doc: it targets a mechanism the runaway doesn't use, and it is new guard
+   surface with its own misfire risk).
+2. *(guidance, arg-shaped)* Tighten the re-dispatch loophole. =research_instructions.txt.j2:19= currently
+   permits re-dispatch "if the first result genuinely failed to address the question at all" — a
+   judgment the small model rationalizes. Replace with a checkable condition, e.g.: "Re-dispatch the
+   research-agent ONLY if its result contains NO findings and NO sources (an empty or error result). If
+   it returned ANY findings, do not re-dispatch — write the report from them." This is a constraint on an
+   observable (findings/sources present?), not a goal ("enough detail?"). Per AGENTS.md §"the
+   instruction's shape matters more than its content", the model follows a checkable condition far better.
+3. *(guidance hygiene)* Remove the dead "You can use the search tool" line from =sub_critique.txt.j2:11=
+   (the critique agent has no tools; =agent.py:626-631=) so the model doesn't burn a step on a missing
+   tool. Reconcile the fixed =final_report.md= / =question.txt= filenames in =sub_critique.txt.j2= /
+   =fact_checker.md.j2= with the orchestrator's chosen basename (verify in transcripts first — it may
+   already work via the task-prompt path; if it doesn't, that is a real redundancy/confusion source).
+   These are documentation-debt fixes, not behavior guards.
+
+** (b) Partial-results-on-rate-limit — honest best-effort, guidance-first
+Design across the three seams named in Part 3.4, in the boundary reality of Part 1 (only the final
+message crosses).
+
+*(b1) =search_internet= surfaces a DISTINCT partial/rate-limited signal (=tools.py=).*
+- On the NON-EMPTY results path (=tools.py:273-278=), also read =unresponsive_engines= (with the same
+  is-list validation already used at =:260-265=). If it is non-empty, APPEND a coarse, model-legible
+  note to the returned results, e.g. a leading line:
+  : PARTIAL RESULTS — some search engines were rate-limited and returned nothing (<engines>). The
+  : results below are incomplete; use them and note the rate-limiting in your answer.
+  Keep returning the real results. This is a coarse REAL signal (keyed on =unresponsive_engines= being a
+  non-empty list — the same by-construction predicate the fully-down branch already trusts), NOT a fuzzy
+  heuristic. It is DISTINCT from =_SEARCH_UNAVAILABLE_MESSAGE= (which stays for zero-results-ever).
+- Consider (roadmap =:126-131=) distinguishing a zero-results *rate-limit* (engines Suspended/CAPTCHA/
+  "too many requests") from a zero-results *outage* (backend unreachable) in the EMPTY branch, to word
+  the message as wait-out-able vs fix-it. Lower priority; the non-empty partial signal is the load-bearing
+  change.
+- Optional, roadmap =:132-141=: have =read_url= surface the page's outbound hyperlinks (a
+  =read_url_links= tool or an appended links section) so ONE good result can be explored when search is
+  throttled. Provenance already permits following a link that appears in a fetched ToolMessage. Adjacent
+  enhancement — validate the char budget; not required for the honesty fix.
+
+*(b2) Searcher guidance — use partial + earlier results, be honest (=sub_research.txt.j2=).*
+Replace the binary =:21= "unavailable → STOP" with a graded rule:
+- If a search returns PARTIAL RESULTS (the b1 note): USE them; do NOT immediately re-fire a burst (space
+  your searches — one at a time — since bursts trip the limits); include an honesty caveat in your final
+  answer ("some sources were rate-limited; based on what was available: …").
+- If a search returns fully-unavailable BUT you ALREADY have usable results from an earlier search THIS
+  turn: finalize from those with the caveat — do NOT discard them.
+- Only if you have NO usable results at all AND search is unavailable: relay unavailable + stop (the
+  current behavior, now the narrow case).
+Crucially (Part 1 boundary): the searcher's FINAL message must contain BOTH the findings AND the rate-
+limited caveat (its =Sources:= list is already required at =:25=). Only that message crosses.
+
+*(b3) Orchestrator guidance — write the best report you can (=research_instructions.txt.j2=).*
+Mirror b2 at =:21=: if the searcher's returned findings contain ANY usable results (even with a rate-
+limited caveat), WRITE the report from them and carry the caveat into the report ("Some sources could not
+be reached due to rate-limiting; based on the available sources: …"). Only relay-and-stop (skip
+=FINAL_REPORT:=) if the searcher returned NOTHING usable. This directly neutralizes =:21='s current
+"relay + stop, no report" over-trigger.
+
+*(b4) SearchUnavailableBreaker — finalize-not-kill (=search_unavailable_breaker.py=).*
+This is the ONE middleware change, justified because the breaker fires precisely WHEN guidance already
+failed, so guidance cannot carry the terminal behavior. Apply the 2026-06-05 lesson: instead of strip-to-
+dead-end with a total-failure message (=:90-94,163=), FINALIZE — answer the stripped call with a nudge
+ToolMessage and =jump_to:"model"= so the model takes one more turn to synthesize: "Search is unavailable
+and further searches will fail. Write your best answer NOW *from the results you already gathered this
+turn* (do not answer from memory); if you gathered nothing usable, say plainly you couldn't look this up."
+This preserves any partial results in earlier ToolMessages instead of discarding them. It is a behavior
+change to an EXISTING guard (removing an adverse effect per roadmap =:206-234=), NOT a new guard class.
+Note the =jump_to:"model"= BLOCKER from the 2026-06-05 doc (=@hook_config(can_jump_to=["model"])= must be
+declared, and a 5-line spike must confirm it re-enters the model) applies here too.
+
+*(b5) If prose won't survive the two summarization hops → sentinel (from 2026-05-31 doc).*
+If evals show the partial caveat is laundered away crossing searcher→orchestrator→general, add a
+=PARTIAL_RESULTS= / =SEARCH_RATE_LIMITED= sentinel line to the searcher's final message (sibling of
+=FINAL_REPORT:=), keyed off by the orchestrator prompt — the existing, low-plumbing cross-boundary
+channel. Start with prose (b2/b3); adopt the sentinel only if the eval calls for it.
+
+** Sequencing (eval-first, per AGENTS.md; the crucial real-search evals stay mocked elsewhere)
+1. *Reproduce (baseline must FAIL), MOCKED search only.* New eval, mock =search_internet= to emit:
+   (i) the PARTIAL shape (results + b1 note), and (ii) the MIXED-BURST shape (call #1 → real results;
+   calls #2–5 → =_SEARCH_UNAVAILABLE=). Baseline assertions: the turn RELAYS "unavailable" / returns no
+   report despite usable results (the Part 3.2/3.3 failure). Mock =read_url= too (no live network), per
+   =docs/2026-07-06-research-eval-mocking.org=. Do NOT touch =test_research_agent= /
+   =test_research_reliability= (they stay real-search, run sparingly).
+2. *Add b1* (=tools.py= partial signal). Unit test in =tests/test_tools.py=: partial payload → results +
+   note; zero+engines → unavailable; zero+none → ="[]"=.
+3. *Add b2/b3 guidance.* Eval: the agent USES partial/earlier results and emits an HONEST caveat; the
+   report is non-empty and cites the real sources. Change one prompt at a time (isolate-to-learn) and
+   measure.
+4. *Add b4* (breaker finalize-not-kill) after the =jump_to= spike. Eval: the mixed-burst turn PRESERVES
+   the good result (report cites it) instead of the canned total-failure message.
+5. *Regression.* Healthy real-search evals unchanged (partial branch is transparent when
+   =unresponsive_engines= is empty). Provenance/reread guards unaffected. Eval cadence 3/5/10.
+6. *Blast radius:* touches =agent.py= middleware behavior + =tools.py= + prompts → FULL three-phase
+   treatment per CLAUDE.md.
+
+** Risks & open questions for Pierre
+1. *jump_to feasibility (b4).* Confirm =jump_to:"model"= fires from =after_model= on the searcher's
+   compiled graph (the 2026-06-05 B1 spike). If not, fall back to answering the stripped call with the
+   nudge ToolMessage and letting the loop proceed to a normal model turn (watch dangling tool_call_id).
+2. *Partial caveat surviving two summarization hops.* Prose may be laundered searcher→orchestrator→
+   general; b5 sentinel is the fallback. Which do you prefer as the default?
+3. *Spacing the burst (roadmap :128-131).* Serializing searches reduces rate-limit tripping but slows
+   healthy turns. Do we serialize in the tool, or only guide "one search at a time"? (Guidance-first
+   suggests the latter; measure.)
+4. *"Genuinely failed" re-dispatch rewrite (a2).* The proposed checkable condition ("no findings AND no
+   sources") assumes the searcher reliably returns an empty/error result when it fails — verify against
+   transcripts (a searcher that returns a chatty "I couldn't find much" would read as non-empty).
+5. *read_url link exposure (b1 optional).* Char-budget trade-off; likely a separate =read_url_links=
+   tool. Ship the honesty fix first, then assess.
+6. *Adjacent, deliberately out of scope:* the confabulated-anchor item (fabricated ADDRESS, not URL —
+   roadmap :190-205) and the distances-belong-to-routing item (:142-189). Flagged, not addressed here.
+
+* Critical files for implementation
+- =assist/tools.py:254-278= — =search_internet= empty vs partial branches; the partial-signal change (b1).
+- =assist/middleware/search_unavailable_breaker.py:77-94,131-163= — finalize-not-kill terminal (b4).
+- =assist/templates/deepagents/sub_research.txt.j2:7,21,25= — searcher partial/earlier-results guidance (b2).
+- =assist/templates/deepagents/research_instructions.txt.j2:19,21,140= — re-dispatch condition (a2) +
+  orchestrator best-report-on-partial (b3).
+- =assist/agent.py:590-624,660,677= — middleware wiring (breaker install site) + the searcher/orchestrator
+  guard stacks the changes must not disturb.
