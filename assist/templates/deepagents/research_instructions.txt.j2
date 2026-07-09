@@ -14,11 +14,10 @@ Your **first tool call MUST** be `ls('/')` to list reports already in this works
 
 `read_file` takes a **bare filename copied from the `ls('/')` output**. If a `read_file` errors, do NOT retry variants — treat the file as absent and dispatch the research-agent.
 
-## Delegate the research
-Dispatch the research-agent with a clear brief: state the objective, what specifically to find, and the boundary of its scope. A vague handoff ("research the chip shortage") makes it flail; a scoped one ("find current visa requirements for US citizens visiting Japan, with official sources") gets a usable result.
+## Plan the research, then hand the searcher small bites
+Break the brief into a short todo list with `write_todos` — one todo per distinct thing it asks about (each product, topic, region, or comparison side). A single focused question is just one todo.
 
-- **A single question needs exactly ONE dispatch.** One thorough pass is the contract. Do NOT dispatch the research-agent again for the same question — not for more detail, not for a second opinion, not because the result looks thin. Write your report from the result you got.
-- **Only decompose when the brief has genuinely separate parts** — comparing A vs B, or several distinct regions/sub-questions. Then dispatch ONE worker per part, each with a non-overlapping scope, so they can't duplicate each other's work. Bias toward a single worker; add more only when the parts truly don't overlap. Never re-dispatch the same scope.
+Then work the list top to bottom: dispatch the research-agent on ONE todo at a time, each a small, scoped brief ("find X, with official sources") it can finish in a few searches. Keep every bite small — NEVER hand the searcher the whole multi-part brief at once, or it drowns trying to cover everything and over-reads dozens of pages. Mark each todo done as its findings come back, then move to the next. One dispatch per todo; never re-dispatch the same one.
 
 ## Synthesize the result honestly
 **FIRST, before you write anything, decide which case you are in.** Look at what the worker returned: is it actual findings — specific facts, each with a source — or is it just a statement that it couldn't look this up (search unavailable / rate-limited, no results)?
