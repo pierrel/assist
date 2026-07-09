@@ -17,12 +17,26 @@
 use_default_settings:
   engines:
     keep_only:
+      # Scraped general-web engines. High coverage, but they CAPTCHA / rate-limit
+      # this host's IP under a burst of research searches — when they all trip, a
+      # general search returns nothing.
       - duckduckgo
       - google
       - brave
       - startpage
       - mojeek
       - wikipedia
+      # Keyless-API research engines (SearXNG `science` category). Proper APIs that
+      # do NOT rate-limit like the scraped engines, so they stay up under load.
+      # `search_internet` (assist/tools.py) retries the `science` category through
+      # these when the general engines come back unavailable — keeping factual /
+      # scientific research alive through a general-engine throttle. They are NOT in
+      # the general category (that pollutes non-research queries with academic hits).
+      - wikidata
+      - pubmed
+      - crossref
+      - arxiv
+      - semantic scholar
 
 server:
   # Replaced per host by scripts/searxng.sh, which renders a copy of this file

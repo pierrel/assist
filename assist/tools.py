@@ -267,6 +267,15 @@ def search_internet(
                 f"{type(unresponsive).__name__}"
             )
         if unresponsive:
+            # Resilience fallback: the scraped GENERAL engines (brave/ddg/startpage)
+            # get CAPTCHA'd/rate-limited under research load, so `general` comes back
+            # empty. Before failing the whole search, retry the keyless-API research
+            # engines in the `science` category (pubmed/arxiv/crossref/...) — proper
+            # APIs that don't rate-limit and cover factual/scientific queries well. If
+            # they answer, use those rather than losing the turn to a throttle.
+            fallback = _science_fallback(base_url, query, max_results)
+            if fallback is not None:
+                return fallback
             return _search_unavailable(
                 f"SearXNG at {base_url} returned no results and engines failed: "
                 f"{unresponsive}"
@@ -281,12 +290,40 @@ def search_internet(
     # searcher. The rate-limit case that MATERIALLY matters — a search that comes back with
     # NOTHING because engines failed — is handled by the zero-results branch above; the
     # searcher/orchestrator guidance then uses whatever earlier results it already has.
-    normalized = [
+    return _normalize_results(results, max_results)
+
+
+def _normalize_results(results: list, max_results: int) -> str:
+    """SearXNG results -> the model-facing `[{title,url,content}, ...]` string."""
+    return str([
         {"title": r.get("title", ""), "url": r.get("url", ""),
          "content": r.get("content", "")}
         for r in results[:max_results]
-    ]
-    return str(normalized)
+    ])
+
+
+def _science_fallback(base_url: str, query: str, max_results: int) -> str | None:
+    """Retry `query` against the `science` category (keyless-API engines: pubmed,
+    arxiv, crossref, ...). Returns normalized results, or None if the fallback
+    itself is empty/unreachable (so the caller reports the original unavailability).
+    These engines don't rate-limit like the scraped general engines, so this keeps
+    factual/scientific research alive when the general engines are throttled."""
+    try:
+        resp = requests.get(
+            base_url.rstrip("/") + "/search",
+            params={"q": query, "format": "json", "categories": "science"},
+            timeout=_SEARXNG_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        return None
+    return _normalize_results(results, max_results)
 
 
 # --- Local travel: real-world time/distance via the self-hosted MOTIS engine ---

@@ -170,6 +170,35 @@ class TestSearchInternet:
             })
             assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
+    def test_general_throttled_falls_back_to_science(self, monkeypatch):
+        """When the scraped general engines are throttled (empty + failed engines),
+        search_internet retries the keyless-API `science` engines and returns those —
+        so research survives a general-engine rate-limit instead of dying."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+
+        def fake_get(url, params=None, timeout=None, **kw):
+            if (params or {}).get("categories") == "science":
+                return _resp({"results": [{"title": "Peptide review",
+                                           "url": "https://ncbi.nlm.nih.gov/pubmed/1",
+                                           "content": "evidence"}],
+                              "unresponsive_engines": []})
+            return _resp({"results": [], "unresponsive_engines": [["brave", "CAPTCHA"]]})
+
+        with patch.object(tools, "requests") as req:
+            req.get.side_effect = fake_get
+            result = tools.search_internet("peptide evidence")
+        assert result != tools._SEARCH_UNAVAILABLE_MESSAGE
+        assert "ncbi.nlm.nih.gov/pubmed/1" in result and "Peptide review" in result
+
+    def test_science_fallback_also_empty_returns_unavailable(self, monkeypatch):
+        """If even the science fallback is empty, the original unavailability stands."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        with patch.object(tools, "requests") as req:
+            req.get.return_value = _resp({
+                "results": [], "unresponsive_engines": [["brave", "CAPTCHA"]],
+            })
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
+
     def test_results_present_with_some_failed_engines_returns_them_plainly(self, monkeypatch):
         """Results present + some engines throttled is the routine healthy metasearch case
         (one engine timing out while others return a full set) — return the results plainly,
