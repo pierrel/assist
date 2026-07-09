@@ -457,14 +457,13 @@ def create_context_agent(model: BaseChatModel,
 
 def _read_url_guards():
     """The guard pair every read_url-bearing research agent gets, in one place so the
-    three sites can't drift.
+    two sites can't drift.
 
     - UrlProvenanceMiddleware: refuse read_url on a URL absent from prior tool/user
-      messages (a fabrication). Wired on the searcher, the fact-checker, AND the
-      orchestrator: thread 20260708090812 showed the un-guarded orchestrator, under
-      search-unavailable, guessing plausible URLs and 404-looping ~90 min. The searcher's
-      findings reach the orchestrator as a task ToolMessage, so real search-sourced URLs
-      pass while fabrications are refused. See docs/2026-07-08-research-reread-runaway.org.
+      messages (a fabrication). Wired on the searcher and the fact-checker — the two
+      read_url-bearing sub-agents. The orchestrator has no read_url (V2: it delegates all
+      fetching), so it needs no guard: it can't 404-loop on a guessed URL it can't fetch.
+      See docs/2026-07-08-research-reread-runaway.org.
     - ReadUrlRereadBreaker: refuse re-reading the SAME url past max_reads (the 2026-07-07
       peptides real-URL re-read shape).
     """
@@ -568,10 +567,6 @@ def create_research_agent(model: BaseChatModel,
         backend = create_sandbox_composite_backend(references_sandbox)
     else:
         backend = create_references_backend(working_dir)
-    # Offload large read_url results on the orchestrator too (it reads specific URLs
-    # while writing/fact-checking).  backend is only available here, after references
-    # routing is set up, so append rather than build into base_mw above.
-    base_mw.append(ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000))
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     # Safety middleware installed on every dict-spec subagent below.
@@ -643,21 +638,23 @@ def create_research_agent(model: BaseChatModel,
     # The orchestrator DELEGATES searching to the research-agent (see its
     # prompt) — it does not search directly.  Giving it search_internet too
     # was redundant and doubled the over-search (orchestrator-direct +
-    # inner agent both ran capped search passes).  It keeps read_url for
-    # reading specific URLs while writing/fact-checking the report.
+    # inner agent both ran capped search passes).  It holds NO retrieval tools
+    # at all: it is a pure Manager (decompose -> dispatch searcher(s) ->
+    # synthesize the report), and the searcher + fact-check sub-agents are the
+    # only layers that read_url.  This removes the orchestrator's URL-fabrication
+    # surface entirely (it cannot 404-loop on a guessed URL if it has no read_url)
+    # and enforces clean delegation instead of the orchestrator doing worker work.
     agent = create_deep_agent(
         model=model,
-        tools=[read_url],
+        tools=[],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
                                       workspace_dir=workspace_dir),
         backend=backend,
-        # Same read_url guard pair as the sub-agents (see _read_url_guards): the
-        # orchestrator has its OWN read_url and would otherwise 404-loop on fabricated
-        # URLs under search-unavailable. Guidance (research_instructions.txt.j2) tells it
-        # to STOP when it has no sources rather than re-dispatch (what the old exclusion
-        # feared). logging_mw stays innermost/last.
-        middleware=base_mw + middleware + _read_url_guards() + [logging_mw],
+        # No _read_url_guards here: the orchestrator has no read_url to guard.
+        # The searcher + fact-check sub-agents carry those guards themselves.
+        # logging_mw stays innermost/last.
+        middleware=base_mw + middleware + [logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]

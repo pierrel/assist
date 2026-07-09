@@ -294,30 +294,6 @@ Relates to the single-LLM-slot constraint and [[queued-research-rate-limit-resil
 (a long turn is often a search-starved research grind — fixing the trigger shortens
 the jobs this would interleave).
 
-** TODO Graceful drain on deploy — pause in-flight threads, resume after restart
-Today a =make restart= (deploy) *aborts* every in-flight turn (the research/dev
-grind the user was watching just dies; crash-recovery marks it =error=). Instead,
-on deploy move all currently-processing threads to the queue *the same way the
-10-minute quantum timeout does* — reuse the fair-scheduling (#181) pause/resume
-machinery: on a SIGTERM / pre-stop signal, set =pause_requested= on the current
-holder, let it yield at its next =after_model= superstep to a durable checkpoint,
-and drain the queue to =paused= before the process exits. On startup the resume
-scheduler picks the paused turns back up and continues them from their checkpoints
-as if they'd been quantum-preempted — so a deploy is transparent to running work.
-- Reuses: =ThreadPauseRequested= / the pause path in =_process_message=, the
-  =_ResumeScheduler=, the durable per-thread checkpoints, the 2h cumulative-active
-  cap (carries across the restart).
-- New piece: a shutdown hook (systemd =TimeoutStopSec= + a SIGTERM handler, or a
-  =make restart= that signals-then-waits) that triggers the drain and blocks the
-  process exit until the holder has checkpointed + the queue is durably =paused=.
-  Bound the drain wait (a turn mid-LLM-call can't yield until the call returns — the
-  same latency the quantum pause has; cap it and hard-kill past the cap, accepting
-  that one turn resumes from its last checkpoint rather than the very latest step).
-- Edge: an in-memory resume queue must survive the restart — the paused state is
-  already durable in =status.json= (=paused=) + the checkpoint, so startup rebuilds
-  the resume queue by scanning for =paused= threads rather than relying on the old
-  in-process =_ResumeScheduler= state.
-
 * Context rider
 ** TODO "Last seen" location saver — every turn (incl. scheduled/triggered) gets a geo tag
 The geo rider (PR #155) only tags INTERACTIVE turns — the browser reads Geolocation on
@@ -754,6 +730,26 @@ middleware": the only deterministic guard left is exact-repeat detection
 (A/B).  Open question is whether even that can move to prompt/skill guidance or
 stay as a thin backstop.  Lower priority now that the aggressive, misfiring
 patterns are gone.
+
+* Web UI — thread list
+** TODO Thread list ordering by status then last-message age
+Sort the thread list by STATUS first, then by the age of the last message (most
+recent first) within each status band. Status ordering:
+1. urgent
+2. processing
+3. queued / waiting
+4. new
+5. everything else
+Merge status (unmerged / merged) has NO bearing on ordering — drop it as a sort
+key if it currently influences order. The status→rank map should live in one
+place (client and/or server, wherever the list is assembled). Ties within a band
+break on last-message recency.
+** TODO Thread list search — client-only, as-you-type, over descriptions
+Filter the thread list by a client-side substring match on the thread
+DESCRIPTIONS, which are ALREADY on the client. Match as the user types — NO
+server round-trip (no fetch/endpoint). Purely in-browser filter of the loaded
+list against the query.
+
 * Search
 ** TODO Specific search types (science, weather, ...) — agent routes by question intent
 Today =search_internet= is one generic web search. Add MORE SPECIFIC search types the agent

@@ -1,16 +1,19 @@
-"""The search-down circuit breaker terminates a turn that keeps querying a
-dead backend — model-free (the hazard is the grind, not the model).
+"""The search-down circuit breaker stops a turn from re-searching a dead backend —
+model-free (the hazard is the grind, not the model).
 
-Asserts the SYMPTOM: when ``search_internet`` has returned the exact
-unavailable constant ``threshold`` times and the model asks for ANOTHER search,
-``after_model`` emits a terminal AIMessage with NO tool calls (so the agent loop
-ends instead of grinding) whose content relays the search-unavailable status.
+Mechanism (post-2026-07-08): FINALIZE-not-kill via ``wrap_tool_call``. After
+``threshold`` completed ``search_internet`` results have come back as the exact
+unavailable constant this turn, the next ``search_internet`` call is REFUSED — the
+breaker returns a corrective ``ToolMessage`` (status="error") instead of executing
+it, and the handler is NOT called. The turn continues so the model finalizes from
+what it gathered (no strip-to-dead-end that discards partial results).
 
-Crucially the failing searches use DISTINCT query args — that is the case
-LoopDetectionMiddleware's same-args pattern does NOT catch, which is exactly why
-this middleware earns its place.
+Crucially the failing searches use DISTINCT query args — the case
+LoopDetectionMiddleware's same-args pattern does NOT catch, which is why this
+middleware earns its place.
 """
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain.tools.tool_node import ToolCallRequest
 
 from assist.tools import _SEARCH_UNAVAILABLE_MESSAGE
 from assist.middleware.search_unavailable_breaker import (
@@ -19,7 +22,6 @@ from assist.middleware.search_unavailable_breaker import (
 
 
 def _ai_search(query, call_id):
-    """An AIMessage requesting a search_internet call with a DISTINCT query."""
     return AIMessage(content="", tool_calls=[
         {"name": "search_internet", "args": {"query": query}, "id": call_id}])
 
@@ -33,215 +35,174 @@ def _tool(content, call_id):
     return ToolMessage(content=content, tool_call_id=call_id)
 
 
-def _run(messages, threshold=2):
+class _Handler:
+    """Stand-in tool executor: records whether the real search ran."""
+    def __init__(self):
+        self.called = False
+
+    def __call__(self, request):
+        self.called = True
+        return ToolMessage(content="EXECUTED",
+                           tool_call_id=request.tool_call.get("id", ""),
+                           name="search_internet")
+
+
+def _run(messages, threshold=2, tool_name="search_internet", query="q_next", call_id="cN"):
+    """Drive wrap_tool_call with a fresh ``tool_name`` request against ``messages``
+    (the completed history). Returns (result, handler). ``result`` is the corrective
+    ToolMessage when refused, else the handler's execution result."""
     mw = SearchUnavailableBreakerMiddleware(threshold=threshold)
-    return mw.after_model({"messages": messages}, None)
+    handler = _Handler()
+    req = ToolCallRequest(
+        tool_call={"name": tool_name, "args": {"query": query}, "id": call_id},
+        tool=None, state={"messages": messages}, runtime=None)
+    return mw.wrap_tool_call(req, handler), handler
 
 
-def test_terminates_after_threshold_distinct_queries():
-    """Two distinct failing searches, then a third requested -> turn ends."""
+def _refused(result, handler):
+    return (not handler.called
+            and isinstance(result, ToolMessage)
+            and result.status == "error"
+            and "do NOT search again" in result.content
+            and "look this up" in result.content.lower())
+
+
+def test_refuses_after_threshold_distinct_queries():
+    """Two distinct failing searches already completed -> the next search is refused
+    with a finalize nudge, and the real search does NOT run."""
     msgs = [
         HumanMessage(content="research persistent emacs over ssh"),
         _ai_search("emacs tramp persistent session", "c1"),
         _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c1"),
         _ai_search("screen vs tmux remote reattach", "c2"),  # DISTINCT args
         _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c2"),
-        _ai_search("mosh persistent shell", "c3"),           # the (N+1)th
     ]
-    result = _run(msgs)
-    assert result is not None, "should terminate the turn"
-    out = result["messages"][0]
-    assert out.tool_calls == [], "tool calls must be stripped so the loop ends"
-    assert not out.additional_kwargs.get("tool_calls"), "raw tool_calls stripped too"
-    assert "unavailable" in out.content.lower()
-    assert "look this up" in out.content.lower()  # trips the orchestrator relay branch
+    result, handler = _run(msgs)
+    assert _refused(result, handler), "should refuse the next search and nudge to finalize"
 
 
-def test_below_threshold_does_not_terminate():
-    """One failure + another search requested -> let it try again."""
+def test_below_threshold_lets_search_run():
+    """One failure so far -> the next search is allowed (handler runs)."""
     msgs = [
         HumanMessage(content="research X"),
         _ai_search("q1", "c1"),
         _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c1"),
-        _ai_search("q2", "c2"),
     ]
-    assert _run(msgs) is None
+    result, handler = _run(msgs)
+    assert handler.called and result.content == "EXECUTED"
 
 
 def test_genuine_empty_results_not_counted():
-    """A healthy backend returning ``[]`` (no results) is NOT an outage — must
-    not be counted, even across the threshold."""
+    """A healthy backend returning ``[]`` (no results) is NOT an outage."""
     msgs = [
         HumanMessage(content="research obscure thing"),
-        _ai_search("q1", "c1"),
-        _tool("[]", "c1"),
-        _ai_search("q2", "c2"),
-        _tool("[]", "c2"),
-        _ai_search("q3", "c3"),
+        _ai_search("q1", "c1"), _tool("[]", "c1"),
+        _ai_search("q2", "c2"), _tool("[]", "c2"),
     ]
-    assert _run(msgs) is None
+    result, handler = _run(msgs)
+    assert handler.called
 
 
 def test_real_results_not_counted():
-    """Successful searches never trigger the breaker."""
     msgs = [
         HumanMessage(content="research X"),
         _ai_search("q1", "c1"),
         _tool("[{'title': 'a hit', 'url': 'https://x', 'content': '...'}]", "c1"),
         _ai_search("q2", "c2"),
         _tool("[{'title': 'another', 'url': 'https://y', 'content': '...'}]", "c2"),
-        _ai_search("q3", "c3"),
     ]
-    assert _run(msgs) is None
+    result, handler = _run(msgs)
+    assert handler.called
 
 
-def test_model_moved_on_to_other_tool_not_terminated():
-    """Threshold reached, but the latest message calls a DIFFERENT tool — the
-    model is already breaking out, so don't cut it off."""
+def test_partial_results_not_counted():
+    """A PARTIAL result (results present + a rate-limit note) is usable, not an
+    outage — it must NOT count toward the breaker (the model should keep using it)."""
+    partial = ("PARTIAL RESULTS — some search engines were rate-limited (brave). "
+               "[{'title': 'a', 'url': 'https://x', 'content': '...'}]")
     msgs = [
         HumanMessage(content="research X"),
-        _ai_search("q1", "c1"),
-        _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c1"),
-        _ai_search("q2", "c2"),
-        _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c2"),
-        _ai_read("https://example.com", "c3"),  # not a search
+        _ai_search("q1", "c1"), _tool(partial, "c1"),
+        _ai_search("q2", "c2"), _tool(partial, "c2"),
     ]
-    assert _run(msgs) is None
+    result, handler = _run(msgs)
+    assert handler.called, "partial results are usable and must not trip the breaker"
+
+
+def test_non_search_tool_passes_through():
+    """The breaker only governs search_internet — a read_url call is never refused,
+    even past the threshold."""
+    msgs = [
+        HumanMessage(content="research X"),
+        _ai_search("q1", "c1"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c1"),
+        _ai_search("q2", "c2"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c2"),
+    ]
+    result, handler = _run(msgs, tool_name="read_url", call_id="r1")
+    assert handler.called
 
 
 def test_threshold_is_configurable():
-    """With threshold=3, two failures + a third request is still allowed."""
     msgs = [
         HumanMessage(content="research X"),
-        _ai_search("q1", "c1"),
-        _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c1"),
-        _ai_search("q2", "c2"),
-        _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c2"),
-        _ai_search("q3", "c3"),
+        _ai_search("q1", "c1"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c1"),
+        _ai_search("q2", "c2"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c2"),
     ]
-    assert _run(msgs, threshold=3) is None
-    assert _run(msgs, threshold=2) is not None  # same tail trips at 2
+    assert _run(msgs, threshold=3)[1].called            # 2 failures < 3 -> allowed
+    assert _refused(*_run(msgs, threshold=2))            # trips at 2
 
 
 def test_unavailable_results_from_prior_turn_not_counted():
-    """A prior turn's outage must not poison a fresh turn — the per-turn slice
-    starts at the most recent HumanMessage."""
+    """A prior turn's outage must not poison a fresh turn."""
     msgs = [
-        # prior turn: search was down
         HumanMessage(content="earlier question"),
-        _ai_search("old1", "a1"),
-        _tool(_SEARCH_UNAVAILABLE_MESSAGE, "a1"),
-        _ai_search("old2", "a2"),
-        _tool(_SEARCH_UNAVAILABLE_MESSAGE, "a2"),
+        _ai_search("old1", "a1"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "a1"),
+        _ai_search("old2", "a2"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "a2"),
         AIMessage(content="(relayed unavailable last turn)"),
-        # new turn: only one failure so far
         HumanMessage(content="new question"),
-        _ai_search("new1", "b1"),
-        _tool(_SEARCH_UNAVAILABLE_MESSAGE, "b1"),
-        _ai_search("new2", "b2"),
+        _ai_search("new1", "b1"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "b1"),
     ]
-    assert _run(msgs) is None
-
-
-def test_no_tool_calls_or_empty_returns_none():
-    assert _run([]) is None
-    assert _run([HumanMessage(content="hi")]) is None
-    assert _run([HumanMessage(content="hi"), AIMessage(content="done, no tools")]) is None
+    result, handler = _run(msgs)
+    assert handler.called, "only one unavailable this turn -> allowed"
 
 
 def test_counts_cumulatively_across_heavy_read_interleaving():
-    """The count is cumulative over the WHOLE turn, not a recency window: many
-    read_url calls interleaved between failed searches (far exceeding the old
-    12-event window) must NOT push earlier unavailable searches out of view.
-    This is the search-down-plus-fetch-fail grind shape."""
+    """Cumulative over the whole turn, not a recency window: many read_url calls
+    interleaved between failed searches must not push earlier unavailable out of view."""
     msgs = [HumanMessage(content="research X")]
     cid = 0
-    for s in range(4):  # 4 unavailable searches...
+    for s in range(4):
         msgs.append(_ai_search(f"q{s}", f"s{cid}"))
         msgs.append(_tool(_SEARCH_UNAVAILABLE_MESSAGE, f"s{cid}"))
         cid += 1
-        for r in range(5):  # ...each followed by 5 failed reads (24 events total)
+        for r in range(5):
             msgs.append(_ai_read(f"https://x/{s}/{r}", f"r{cid}"))
             msgs.append(_tool("Error fetching URL: down", f"r{cid}"))
             cid += 1
-    msgs.append(_ai_search("q_final", "s_final"))  # the 5th search request
-    mw = SearchUnavailableBreakerMiddleware()  # default threshold 4
-    result = mw.after_model({"messages": msgs}, None)
-    assert result is not None, "cumulative count must trip despite interleaving"
-    assert result["messages"][0].tool_calls == []
-
-
-def test_counts_completed_when_last_message_batches_many_pending_calls():
-    """The count is over the whole turn, independent of message/event ratio: a
-    last AIMessage batching many PENDING search calls must not push the earlier
-    COMPLETED unavailable results out of the count (a window keyed on message
-    length could — events can exceed messages when an AIMessage holds many
-    tool_calls)."""
-    msgs = [HumanMessage(content="research X")]
-    for i in range(4):  # 4 completed unavailable searches, one per AIMessage
-        msgs.append(_ai_search(f"q{i}", f"c{i}"))
-        msgs.append(_tool(_SEARCH_UNAVAILABLE_MESSAGE, f"c{i}"))
-    # last AIMessage batches 10 pending search calls (events >> messages here)
-    msgs.append(AIMessage(content="", tool_calls=[
-        {"name": "search_internet", "args": {"query": f"b{j}"}, "id": f"b{j}"}
-        for j in range(10)]))
-    mw = SearchUnavailableBreakerMiddleware()  # default threshold 4
-    result = mw.after_model({"messages": msgs}, None)
-    assert result is not None, "4 completed unavailable must trip despite batched pending"
-    assert result["messages"][0].tool_calls == []
+    result, handler = _run(msgs, threshold=4)
+    assert _refused(result, handler), "cumulative count must trip despite interleaving"
 
 
 def test_threshold_floored_at_one():
-    """A misconfigured 0/negative threshold is clamped to 1 — it must never
-    strip a healthy (zero-failure) search request."""
+    """A misconfigured 0/negative threshold is clamped to 1 — never refuses a healthy
+    (zero-failure) search."""
     assert SearchUnavailableBreakerMiddleware(threshold=0).threshold == 1
     assert SearchUnavailableBreakerMiddleware(threshold=-5).threshold == 1
-    healthy = [HumanMessage(content="x"), _ai_search("q", "c")]  # 0 unavailable
-    assert SearchUnavailableBreakerMiddleware(threshold=0).after_model(
-        {"messages": healthy}, None) is None
+    healthy = [HumanMessage(content="x")]  # 0 unavailable this turn
+    result, handler = _run(healthy, threshold=0)
+    assert handler.called
 
 
 def test_production_default_threshold_is_backstop_value():
-    """The shipped default (4) is a HARD backstop set ABOVE where the prompt
-    should make the model stop on its own — raise/lower deliberately, the live
-    eval pins the actual value.  Guards against a careless change back to a
-    trip-happy 1-2."""
-    mw = SearchUnavailableBreakerMiddleware()
-    assert mw.threshold == 4
+    """The shipped default (4) is a HARD backstop above where the prompt should stop
+    the model — guards against a careless change back to a trip-happy 1-2."""
+    assert SearchUnavailableBreakerMiddleware().threshold == 4
 
 
-def test_default_threshold_allows_more_before_breaking():
-    """At the default (4), three failed searches do NOT yet trip — the prompt
-    gets room to stop the model first."""
+def test_default_threshold_allows_three_failures():
+    """At the default (4), three failed searches do NOT yet refuse the next."""
     msgs = [HumanMessage(content="research X")]
     for i in range(3):
         msgs.append(_ai_search(f"q{i}", f"c{i}"))
         msgs.append(_tool(_SEARCH_UNAVAILABLE_MESSAGE, f"c{i}"))
-    msgs.append(_ai_search("q_next", "c_next"))  # the 4th request, only 3 completed
-    mw = SearchUnavailableBreakerMiddleware()  # default threshold 4
-    assert mw.after_model({"messages": msgs}, None) is None
-
-
-def test_terminal_message_replaces_in_place_not_duplicated():
-    """The returned message carries the original AIMessage's id, so the messages
-    reducer REPLACES it in place — the merged history must not keep both the
-    tool-call-bearing message AND the terminal one (a duplicate would leave the
-    stripped tool call to re-dispatch)."""
-    from langgraph.graph.message import add_messages
-
-    last = AIMessage(content="", id="ai_last", tool_calls=[
-        {"name": "search_internet", "args": {"query": "q3"}, "id": "c3"}])
-    msgs = [
-        HumanMessage(content="research X", id="h1"),
-        _ai_search("q1", "c1"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c1"),
-        _ai_search("q2", "c2"), _tool(_SEARCH_UNAVAILABLE_MESSAGE, "c2"),
-        last,
-    ]
-    result = _run(msgs)
-    assert result is not None
-    merged = add_messages(msgs, result["messages"])
-    # exactly one message with the last AIMessage's id, and it has no tool calls
-    same_id = [m for m in merged if getattr(m, "id", None) == "ai_last"]
-    assert len(same_id) == 1, "tool-call message was duplicated, not replaced"
-    assert same_id[0].tool_calls == [], "the surviving message still has tool calls"
-    assert merged[-1].id == "ai_last", "terminal message is not the last message"
+    result, handler = _run(msgs, threshold=4)
+    assert handler.called, "only 3 completed unavailable -> the 4th is still allowed"

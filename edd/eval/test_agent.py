@@ -676,8 +676,8 @@ class TestSearchDownMidflightDoesNotGrind(AgentTestMixin, TestCase):
     This is the eval the handoff test lacked.  It PRIMES the model into
     retry-mode with one unsatisfying-but-valid result (so it has already
     "learned" to retry), THEN the backend goes down — every subsequent search
-    returns ``_SEARCH_UNAVAILABLE_MESSAGE``.  The strengthened prompt ("stop,
-    do not retry with a different query") is the first line of defense; the
+    returns ``_SEARCH_UNAVAILABLE_MESSAGE``.  The strengthened prompt (search
+    unavailable → stop, do not search again) is the first line of defense; the
     ``SearchUnavailableBreakerMiddleware`` is the hard backstop.  Together,
     total searches must stay bounded.  WITHOUT either, the slow model grinds
     distinct queries to the recursion_limit (observed ~75-100 searches /
