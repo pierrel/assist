@@ -168,6 +168,25 @@ _MD_EXTENSIONS = ["fenced_code", "tables"]
 _SHOWABLE_EXTS = (".org", ".md", ".pdf")
 
 
+# Thread-list ordering rank (lower sorts first). Per Pierre: STATUS first — urgent,
+# then processing/starting, then queued/waiting, then "new" (an unopened response),
+# then everything else (ready / error / unmerged / idle). Merge status has NO bearing.
+# The single source of truth for the order; the age tiebreak is handled by the caller's
+# stable sort over MANAGER.list()'s mtime-descending order.
+_STATUS_RANK_OTHER = 4
+
+
+def _thread_status_rank(tid: str, stage: str) -> int:
+    if _has_urgent(tid):
+        return 0
+    if stage == "queued":              # waiting for another thread's slot
+        return 2
+    if stage in BUSY_STAGES:           # processing / paused / initializing / cloning / starting
+        return 1
+    if _has_unseen_response(tid):      # "new" — a reply the user hasn't opened
+        return 3
+    return _STATUS_RANK_OTHER
+
 
 def render_index(query: str = "") -> str:
     q = (query or "").strip()
@@ -232,22 +251,28 @@ def render_index(query: str = "") -> str:
                 ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
                 ' margin-right:.4rem;">unmerged</span>'
             )
-        items.append(
+        items.append((
+            _thread_status_rank(tid, stage),
             f'<li>'
             f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
             f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
             f'<button type="submit" class="del-btn" aria-label="Delete thread" '
             f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
             f'</form></li>'
-        )
+        ))
     matched = len(items)
-    if not items:
-        items.append(
+    # Order by STATUS band first, then last-message age within the band. MANAGER.list()
+    # already returns threads mtime-descending (newest activity first), and Python's sort
+    # is STABLE, so sorting by the rank alone keeps that mtime order inside each band.
+    items.sort(key=lambda t: t[0])
+    if items:
+        items_html = "\n".join(item_html for _, item_html in items)
+    else:
+        items_html = (
             f'<li><em>No threads match &ldquo;{html.escape(q)}&rdquo;.</em> '
             f'<a href="/">clear</a></li>'
             if ql else "<li><em>No threads yet</em></li>"
         )
-    items_html = "\n".join(items)
     search_status = (
         f'<p style="font-size:.85rem; color:#6b7280; margin:.2rem 0 .6rem;">'
         f'{matched} match{"" if matched == 1 else "es"} for '
