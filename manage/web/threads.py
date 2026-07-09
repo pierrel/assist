@@ -461,16 +461,23 @@ def render_thread(
     _timings = _get_timings(tid)
     badge_at: dict[int, int] = {}
     if _timings:
+        # Attach each turn's elapsed to ONLY its concluding assistant bubble — the LAST
+        # content-only assistant before the next user. Tracking the last index per turn (vs
+        # marking every assistant) avoids a double-badge when a turn has >1 content assistant
+        # (e.g. a retry / empty-response recovery emits two).
         _ord = 0
+        _last = None
         for _i, _m in enumerate(msgs):
             _r = _m.get("role")
             if _r == "user":
+                if _last is not None and str(_ord) in _timings:
+                    badge_at[_last] = _timings[str(_ord)]  # close the turn that just ended
                 _ord += 1
-            elif _r == "assistant" and _ord and str(_ord) in _timings:
-                # Keyed by message index; a turn has exactly one content-only assistant
-                # bubble (_messages_to_dicts routes tool-call AIMessages to "tools"), so
-                # this marks that turn's single concluding reply — no double-badging.
-                badge_at[_i] = _timings[str(_ord)]
+                _last = None
+            elif _r == "assistant":
+                _last = _i
+        if _last is not None and str(_ord) in _timings:
+            badge_at[_last] = _timings[str(_ord)]  # close the final turn
 
     # While busy, surface the pending (just-submitted) message as a user
     # bubble so it's visible right after the redirect — unless the agent has

@@ -99,6 +99,22 @@ def test_badge_ordinal_counts_a_review_submission_as_a_user_turn(thread_env):
     assert html.index("3m 20s") < html.index("ANSWER-REVIEW") < html.index("10s") < html.index("ANSWER-ONE")
 
 
+def test_badge_only_on_last_assistant_when_a_turn_has_multiple(thread_env):
+    # A single turn can produce >1 content-only assistant bubble (a retry / empty-response
+    # recovery). Only the LAST (concluding) reply gets the badge — no double-badge.
+    msgs = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "FIRST-DRAFT"},
+        {"role": "assistant", "content": "FINAL-ANSWER"},
+    ]
+    st._set_status("t1", "ready")
+    st._append_timing("t1", 1, 30)
+    html = render_thread("t1", _FakeThread(msgs))
+    assert html.count("elapsed-badge") == 1                       # not two
+    # Rendered newest-first: FINAL-ANSWER (with the 30s badge) then FIRST-DRAFT (no badge).
+    assert html.index("30s") < html.index("FINAL-ANSWER") < html.index("FIRST-DRAFT")
+
+
 def test_no_sidecar_renders_no_badge_and_does_not_crash(thread_env):
     st._set_status("t1", "ready")  # no _append_timing → no turn_timings.json
     html = render_thread("t1", _FakeThread(_two_turns()))
