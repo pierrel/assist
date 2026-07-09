@@ -270,29 +270,19 @@ def search_internet(
             )
         return "[]"
 
+    # Results present: return them. We deliberately DON'T flag a per-call "partial" note
+    # when some engines are in `unresponsive_engines` — on a metasearch, one engine being
+    # throttled/timed-out while 15+ others return a full result set is the routine healthy
+    # case (verified: 3/4 healthy queries had a throttled engine yet 17-32 results), so
+    # noting it would falsely caveat nearly every report and needlessly self-throttle the
+    # searcher. The rate-limit case that MATERIALLY matters — a search that comes back with
+    # NOTHING because engines failed — is handled by the zero-results branch above; the
+    # searcher/orchestrator guidance then uses whatever earlier results it already has.
     normalized = [
         {"title": r.get("title", ""), "url": r.get("url", ""),
          "content": r.get("content", "")}
         for r in results[:max_results]
     ]
-    # Partial-results signal: results came back, but if some engines were rate-limited /
-    # unresponsive this set is INCOMPLETE. Surface it (the same `unresponsive_engines` list
-    # the zero-results branch trusts — a coarse, real, by-construction signal, not a
-    # heuristic) so the agent USES these results AND is honest about the gap, rather than
-    # treating them as complete or later giving up entirely. Distinct from
-    # _SEARCH_UNAVAILABLE_MESSAGE (which stays for zero-results-ever).
-    unresponsive = payload.get("unresponsive_engines", [])
-    if isinstance(unresponsive, list) and unresponsive:
-        engines = ", ".join(
-            str(e[0]) if isinstance(e, (list, tuple)) and e else str(e)
-            for e in unresponsive
-        )
-        return (
-            "PARTIAL RESULTS — some search engines were rate-limited and returned nothing "
-            f"({engines}). The results below are incomplete; use them to answer as best you "
-            "can and note the rate-limiting in your final answer.\n"
-            + str(normalized)
-        )
     return str(normalized)
 
 

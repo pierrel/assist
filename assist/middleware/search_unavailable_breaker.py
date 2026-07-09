@@ -48,8 +48,8 @@ from langgraph.types import Command
 
 # Import the EXACT constant (single source of truth) so a wording change in
 # tools.py can't silently desync this breaker.  Only the string constant is
-# imported — never tools.py's blocking helpers (this hook runs inline on the
-# event-loop thread; it must stay pure CPU).
+# imported — never tools.py's blocking helpers (this hook runs on the research
+# BackgroundTask worker; keeping it pure CPU avoids adding I/O to that path).
 from assist.tools import _SEARCH_UNAVAILABLE_MESSAGE
 # Share loop detection's per-turn event extraction (windowless here — we want
 # the cumulative full-turn count).  Same import precedent as
