@@ -243,7 +243,10 @@ def search_internet(
     for engine in _ROTATION_ENGINES:
         results, down = _query_engine(base_url, query, engine)
         if results:
+            logger.info("searxng: %s returned %d results", engine, len(results))
             return _normalize_results(results, max_results)
+        logger.info("searxng: %s %s", engine,
+                    "rate-limited/unavailable" if down else "no results")
         saw_down = saw_down or down
     # No engine returned results. If any engine was down/throttled/malformed, this is a
     # backend-availability failure — try the Tavily backup before relaying unavailable. If
@@ -251,6 +254,7 @@ def search_internet(
     if saw_down:
         tavily = _tavily_search(query, max_results)
         if tavily is not None:
+            logger.info("searxng: all engines exhausted -> tavily backup returned results")
             return tavily
         return _search_unavailable(
             f"SearXNG at {base_url}: every engine unreachable or throttled "

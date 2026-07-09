@@ -250,6 +250,27 @@ class TestSearchInternet:
         assert "https://a.com" in result
         req.post.assert_not_called()
 
+    def test_rotation_logs_each_engine_outcome(self, monkeypatch, caplog):
+        """Each engine's outcome is logged (which engine + good/bad) for observability."""
+        import logging
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+        def fake_get(url, params=None, timeout=None, **kw):
+            eng = (params or {}).get("engines")
+            if eng == "mojeek":
+                return _resp({"results": [{"title": "M", "url": "https://m.com", "content": "c"}],
+                              "unresponsive_engines": []})
+            return _resp({"results": [], "unresponsive_engines": [[eng, "CAPTCHA"]]})
+
+        with patch.object(tools, "requests") as req, \
+             caplog.at_level(logging.INFO, logger="assist.tools"):
+            req.get.side_effect = fake_get
+            tools.search_internet("q")
+        msgs = " ".join(r.message for r in caplog.records)
+        assert "searxng: google rate-limited/unavailable" in msgs
+        assert "searxng: mojeek returned 1 results" in msgs
+
     def test_rotation_all_engines_healthy_but_empty_returns_empty(self, monkeypatch):
         """Every engine up but genuinely no results → "[]" (a real no-results answer),
         NOT unavailable."""
