@@ -1036,11 +1036,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         if dm and dm.changes():
             last_assistant = resp if resp else "assistant update"
             dm.sync(last_assistant)
-        # The turn may have paused on a send_reply HITL interrupt (the agent proposed a
-        # reply). Surface it for approval instead of marking the turn done.
-        # Record this turn's wall-clock elapsed (submit → completion) keyed by turn
-        # ordinal, for the completed-reply badge. Off-loop; the pause path returns before
-        # here, so exactly one entry is written per turn (at its final completion).
+        # Record this turn's wall-clock elapsed (submit → completion) keyed by turn ordinal,
+        # for the completed-reply badge. Off-loop. Runs at BOTH success exits below (ready
+        # and awaiting_approval), keyed by the turn ordinal — so a HITL turn records
+        # human→proposal here, then the approve resume (started_at preserved, same ordinal)
+        # overwrites it with human→final-reply. The quantum-pause path returns earlier
+        # (ThreadPauseRequested) without reaching here, so a paused slice records nothing.
         try:
             _append_timing(tid, _human_ordinal(chat.get_messages()),
                            (_now_ms() - started_at) / 1000.0)
