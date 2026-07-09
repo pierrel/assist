@@ -47,10 +47,13 @@ _SEARXNG_TIMEOUT_S = 10.0
 # wait out.
 _SEARCH_UNAVAILABLE_MESSAGE = (
     "Web search is unavailable — the search backend could not be reached or "
-    "returned an unusable response. STOP: do not search again, and do not "
-    "retry with a different query — it will keep failing the same way. Do NOT "
-    "answer from your own knowledge. Your final message must tell the user you "
-    "couldn't look this up because web search is currently unavailable."
+    "returned an unusable response. Do not search again (it will keep failing "
+    "the same way), and never answer from your own knowledge. What to do next "
+    "depends on what you already have: if an EARLIER search this turn already "
+    "returned real results, do NOT discard them — write your answer from those "
+    "results and add that some searches couldn't complete, so coverage may be "
+    "incomplete. Only if you have gathered NOTHING usable at all should your "
+    "final message say you couldn't look this up right now."
 )
 
 
@@ -203,6 +206,21 @@ def read_url(url: str) -> str:
         return f"Error fetching URL: {e}"
 
 
+# Engine-rotation order. We query ONE engine at a time (not SearXNG's default fan-out to
+# all at once) for two reasons: (1) each engine gets SearXNG's FULL per-engine timeout
+# budget, so a working-but-slower independent engine (mojeek) isn't starved by the shared
+# fan-out timeout being spent waiting on CAPTCHA'd ones — verified 2026-07-09 that mojeek
+# returned 10 results alone while the fan-out returned 0; (2) load spreads over time — the
+# top engine drains until it 429s, then the next, so total searches-before-all-throttled is
+# the SUM of each engine's quota used sequentially, not all tripping together. High-coverage
+# engines first; the resilient independents (mojeek, wikipedia) are the reliable floor.
+# Rate-limited engines 429 fast, so falling through dead ones stays quick, and re-probing
+# them each call means we auto-recover the moment one comes back. Deterministic — fixed
+# order, no state. Science/academic engines are a separate SEARCH TYPE (roadmap), not mixed
+# in here (they pollute general queries — academic hits ranked top-3 for "coffee shops").
+_ROTATION_ENGINES = ("google", "brave", "duckduckgo", "startpage", "mojeek", "wikipedia")
+
+
 def search_internet(
         query: str,
         max_results: int = 5,
@@ -210,72 +228,95 @@ def search_internet(
     """Search the web via the self-hosted SearXNG metasearch at
     ``ASSIST_SEARCH_URL`` (private, multi-engine, no key).
 
-    There is deliberately NO fallback.  If SearXNG is unset, unreachable,
-    errors, returns a malformed response, or returns zero results while
-    reporting any engine failures (``unresponsive_engines``), this RETURNS the
-    explicit ``_SEARCH_UNAVAILABLE_MESSAGE`` (logged at ERROR) — a broken
-    backend fails LOUDLY, but as a tool result the agent relays, not an
-    exception that crashes the research turn.  A genuine empty result for a
-    healthy query (zero results, no engine errors) returns ``"[]"`` so the
-    agent can treat it as "no results"."""
+    Queries ONE engine at a time in ``_ROTATION_ENGINES`` order and returns the FIRST
+    engine that yields results (deterministic). Returns ``_SEARCH_UNAVAILABLE_MESSAGE``
+    (logged) only if every engine is unreachable/throttled/malformed — a broken backend
+    fails LOUDLY but as a relayable tool result, not an exception. Returns ``"[]"`` when
+    the engines are healthy but genuinely have no results for this query."""
     base_url = os.getenv("ASSIST_SEARCH_URL")
     if not base_url:
         return _search_unavailable(
             "ASSIST_SEARCH_URL is not set — a self-hosted SearXNG instance is "
             "required for web search (run `make searxng-up`)."
         )
+    saw_down = False
+    for engine in _ROTATION_ENGINES:
+        results, down = _query_engine(base_url, query, engine)
+        if results:
+            return _normalize_results(results, max_results)
+        saw_down = saw_down or down
+    # No engine returned results. If any engine was down/throttled/malformed, this is a
+    # backend-availability failure the agent should relay; if every engine was healthy but
+    # empty, it's a genuine no-results answer.
+    if saw_down:
+        return _search_unavailable(
+            f"SearXNG at {base_url}: every engine unreachable or throttled "
+            f"(tried {', '.join(_ROTATION_ENGINES)})"
+        )
+    return "[]"
+
+
+def _query_engine(base_url: str, query: str, engine: str) -> tuple[list | None, bool]:
+    """Query a SINGLE SearXNG engine. Returns ``(results_list_or_None, is_down)``.
+
+    ``is_down`` is True when the engine failed — unreachable, HTTP error, malformed body,
+    or reported in ``unresponsive_engines`` — vs up-but-genuinely-empty (False). A malformed
+    response (non-dict, non-list results, non-list unresponsive) is treated as down so a
+    single flaky engine just rotates to the next rather than failing the whole search."""
     try:
         resp = requests.get(
             base_url.rstrip("/") + "/search",
-            params={"q": query, "format": "json"},
+            params={"q": query, "format": "json", "engines": engine},
             timeout=_SEARXNG_TIMEOUT_S,
         )
         resp.raise_for_status()
         payload = resp.json()
-    except Exception as e:
-        return _search_unavailable(f"SearXNG at {base_url} unreachable/errored: {e}")
-
-    # A valid SearXNG response is a dict carrying a `results` list (possibly
-    # empty).  Any deviation — non-dict body, missing key, non-list value (incl.
-    # falsy {}/"", so don't coerce with `or []`) — is a malformed/unhealthy
-    # backend, not a "no results" answer.
+    except Exception:
+        return None, True
     if not isinstance(payload, dict):
-        return _search_unavailable(
-            f"SearXNG at {base_url} returned unexpected JSON shape: "
-            f"{type(payload).__name__}"
-        )
-    if "results" not in payload:
-        return _search_unavailable(f"SearXNG at {base_url} response missing 'results'")
-    results = payload["results"]
+        return None, True
+    results = payload.get("results")
     if not isinstance(results, list):
-        return _search_unavailable(
-            f"SearXNG at {base_url} 'results' not a list: {type(results).__name__}"
-        )
-    if not results:
-        # Distinguish "empty results while at least one engine reported a
-        # failure" (a loud backend failure) from a genuine empty result set for
-        # this query.  SearXNG always returns `unresponsive_engines` as a list
-        # (failing engines, empty when all healthy); a missing key means "none"
-        # but a present non-list value is a malformed/unhealthy backend.
-        unresponsive = payload.get("unresponsive_engines", [])
-        if not isinstance(unresponsive, list):
-            return _search_unavailable(
-                f"SearXNG at {base_url} 'unresponsive_engines' not a list: "
-                f"{type(unresponsive).__name__}"
-            )
-        if unresponsive:
-            return _search_unavailable(
-                f"SearXNG at {base_url} returned no results and engines failed: "
-                f"{unresponsive}"
-            )
-        return "[]"
+        return None, True
+    if results:
+        return results, False
+    unresponsive = payload.get("unresponsive_engines", [])
+    if not isinstance(unresponsive, list):
+        return None, True
+    return None, len(unresponsive) > 0
 
-    normalized = [
+
+def _normalize_results(results: list, max_results: int) -> str:
+    """SearXNG results -> the model-facing `[{title,url,content}, ...]` string."""
+    return str([
         {"title": r.get("title", ""), "url": r.get("url", ""),
          "content": r.get("content", "")}
         for r in results[:max_results]
-    ]
-    return str(normalized)
+    ])
+
+
+def _science_fallback(base_url: str, query: str, max_results: int) -> str | None:
+    """Retry `query` against the `science` category (keyless-API engines: pubmed,
+    arxiv, crossref, ...). Returns normalized results, or None if the fallback
+    itself is empty/unreachable (so the caller reports the original unavailability).
+    These engines don't rate-limit like the scraped general engines, so this keeps
+    factual/scientific research alive when the general engines are throttled."""
+    try:
+        resp = requests.get(
+            base_url.rstrip("/") + "/search",
+            params={"q": query, "format": "json", "categories": "science"},
+            timeout=_SEARXNG_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    results = payload.get("results")
+    if not isinstance(results, list) or not results:
+        return None
+    return _normalize_results(results, max_results)
 
 
 # --- Local travel: real-world time/distance via the self-hosted MOTIS engine ---

@@ -17,12 +17,20 @@
 use_default_settings:
   engines:
     keep_only:
+      # General-web engines. search_internet (assist/tools.py) queries these ONE AT A
+      # TIME in rotation (google until it 429s, then the next, ... mojeek/wikipedia as
+      # the resilient floor) rather than SearXNG's default fan-out — so each gets the
+      # full per-engine timeout and load spreads over time instead of tripping them all
+      # at once. Order in the tool, not here.
       - duckduckgo
       - google
       - brave
       - startpage
       - mojeek
       - wikipedia
+      # (Science engines — pubmed/arxiv/crossref/... — are a separate SEARCH TYPE on the
+      # roadmap, added under their own science-search path when built; kept OUT of the
+      # general rotation so academic hits don't pollute general queries.)
 
 server:
   # Replaced per host by scripts/searxng.sh, which renders a copy of this file

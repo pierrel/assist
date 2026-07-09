@@ -170,6 +170,76 @@ class TestSearchInternet:
             })
             assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
+    def test_rotation_returns_first_engine_with_results(self, monkeypatch):
+        """The engine rotation returns the FIRST engine (in order) that yields results,
+        without querying the rest."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        queried = []
+
+        def fake_get(url, params=None, timeout=None, **kw):
+            eng = (params or {}).get("engines")
+            queried.append(eng)
+            return _resp({"results": [{"title": "T", "url": "https://a.com", "content": "c"}],
+                          "unresponsive_engines": []})
+
+        with patch.object(tools, "requests") as req:
+            req.get.side_effect = fake_get
+            result = tools.search_internet("q")
+        assert "https://a.com" in result
+        assert queried == [tools._ROTATION_ENGINES[0]]  # stopped after the first
+
+    def test_rotation_falls_through_down_engines_to_a_working_one(self, monkeypatch):
+        """Down/throttled engines are skipped; the first WORKING engine's results win —
+        this is the fix for the fan-out starving a working-but-slower engine (mojeek)."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+
+        def fake_get(url, params=None, timeout=None, **kw):
+            eng = (params or {}).get("engines")
+            if eng == "mojeek":
+                return _resp({"results": [{"title": "M", "url": "https://m.com", "content": "c"}],
+                              "unresponsive_engines": []})
+            return _resp({"results": [], "unresponsive_engines": [[eng, "CAPTCHA"]]})
+
+        with patch.object(tools, "requests") as req:
+            req.get.side_effect = fake_get
+            result = tools.search_internet("q")
+        assert "https://m.com" in result
+
+    def test_rotation_all_engines_down_returns_unavailable(self, monkeypatch):
+        """Every engine throttled → the relayable unavailable message."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+
+        def fake_get(url, params=None, timeout=None, **kw):
+            eng = (params or {}).get("engines")
+            return _resp({"results": [], "unresponsive_engines": [[eng, "CAPTCHA"]]})
+
+        with patch.object(tools, "requests") as req:
+            req.get.side_effect = fake_get
+            assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
+
+    def test_rotation_all_engines_healthy_but_empty_returns_empty(self, monkeypatch):
+        """Every engine up but genuinely no results → "[]" (a real no-results answer),
+        NOT unavailable."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        with patch.object(tools, "requests") as req:
+            req.get.return_value = _resp({"results": [], "unresponsive_engines": []})
+            assert tools.search_internet("q") == "[]"
+
+    def test_results_present_with_some_failed_engines_returns_them_plainly(self, monkeypatch):
+        """Results present + some engines throttled is the routine healthy metasearch case
+        (one engine timing out while others return a full set) — return the results plainly,
+        no per-call 'partial' caveat (that would falsely flag nearly every report)."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        with patch.object(tools, "requests") as req:
+            req.get.return_value = _resp({
+                "results": [{"title": "T1", "url": "https://a.com", "content": "c1"}],
+                "unresponsive_engines": [["brave", "too many requests"]],
+            })
+            result = tools.search_internet("q")
+        assert result != tools._SEARCH_UNAVAILABLE_MESSAGE
+        assert "https://a.com" in result and "c1" in result
+        assert "PARTIAL" not in result  # no per-call throttle caveat when results came back
+
     def test_non_dict_payload_returns_unavailable(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:

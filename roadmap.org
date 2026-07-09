@@ -754,3 +754,16 @@ middleware": the only deterministic guard left is exact-repeat detection
 (A/B).  Open question is whether even that can move to prompt/skill guidance or
 stay as a thin backstop.  Lower priority now that the aggressive, misfiring
 patterns are gone.
+* Search
+** TODO Specific search types (science, weather, ...) — agent routes by question intent
+Today =search_internet= is one generic web search. Add MORE SPECIFIC search types the agent
+picks based on the question, instead of mixing everything into the general web search:
+- *Science*: arxiv + pubmed + crossref + semantic scholar (SearXNG =science= category) for
+  scientific/medical questions — high-quality sources that DON'T rate-limit like the scraped
+  general engines. (Do NOT fold these into general search — verified 2026-07-09 that academic
+  hits rank top-3 for "coffee shops in SF". Keep them a distinct science-search path + guidance
+  for when to use it.)
+- *Weather*: a weather API/engine for weather questions.
+- *Others* as useful (news, etc.; maps/places already covered by the travel tool).
+Route by intent (the agent, or a thin classifier) → the right backend. Complements the
+general-web engine-rotation + keyed-API resilience work (see the rate-limiting roadmap item).
