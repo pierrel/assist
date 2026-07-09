@@ -381,13 +381,18 @@ def _timings_path(tid: str) -> str:
 
 
 def _get_timings(tid: str) -> dict:
-    """Map of human-message ordinal (str) → elapsed seconds (int). {} if missing/corrupt."""
+    """Map of human-message ordinal (str) → elapsed seconds (int). {} if missing/corrupt.
+
+    Validates the parsed value is a dict: a syntactically-valid but wrong-shaped file
+    (a bare number/bool/list/string) parses fine but would break the on-loop render's
+    ``str(ord) in timings`` / index — so anything non-dict degrades to {} (no badges)."""
     path = _timings_path(tid)
     if not os.path.isfile(path):
         return {}
     try:
         with open(path) as f:
-            return json.load(f)
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 

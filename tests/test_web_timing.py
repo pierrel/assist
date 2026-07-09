@@ -106,12 +106,26 @@ def test_no_sidecar_renders_no_badge_and_does_not_crash(thread_env):
     assert "ANSWER-ONE" in html and "ANSWER-TWO" in html  # still renders the conversation
 
 
-def test_busy_thread_shows_live_timer_with_baseline_and_ticker(thread_env):
-    st._set_status("t1", "processing", started_at=th._now_ms() - 5000)  # 5s ago
+def test_busy_thread_shows_live_timer_with_baseline_and_ticker(thread_env, monkeypatch):
+    # Freeze the clock so the baseline is deterministic (real wall-clock would let a slow
+    # render floor to 6+ under load — the flaky assertion Copilot flagged).
+    monkeypatch.setattr(th, "_now_ms", lambda: 1_000_000)
+    st._set_status("t1", "processing", started_at=1_000_000 - 5000)  # exactly 5s ago
     html = render_thread("t1", _FakeThread(_two_turns()))
     assert 'class="elapsed"' in html            # the ticking span
-    assert 'data-baseline="5"' in html          # server-computed baseline (~5s)
+    assert 'data-baseline="5"' in html          # server-computed baseline (deterministic)
     assert "setInterval" in html                # the JS ticker is included
+
+
+def test_get_timings_ignores_valid_but_non_dict_json(tmp_path, monkeypatch):
+    # A syntactically-valid but wrong-shaped file must degrade to {} (no badges), not
+    # crash the on-loop render on `str(ord) in timings` / indexing.
+    d = tmp_path / "t"
+    d.mkdir()
+    monkeypatch.setattr(st.MANAGER, "thread_dir", lambda tid: str(d))
+    for bad in ("5", "true", "[]", '"oops"', "null"):
+        (d / "turn_timings.json").write_text(bad)
+        assert st._get_timings("t") == {}
 
 
 def test_busy_without_started_at_degrades_to_spinner_no_timer(thread_env):
