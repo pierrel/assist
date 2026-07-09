@@ -551,7 +551,8 @@ def render_thread(
         """
 
     rendered = []
-    for _i, m in reversed(list(enumerate(msgs))):
+    for _i in range(len(msgs) - 1, -1, -1):
+        m = msgs[_i]
         role = html.escape(m.get("role", ""))
         raw = str(m.get("content", ""))
         if role == "assistant":

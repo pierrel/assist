@@ -13,7 +13,7 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 - *LIVE (part 2):* store one =started_at= field in the existing =status.json= when a turn begins. =render_thread= embeds a *server-computed* =baseline_seconds = now - started_at=; a tiny inline JS ticks it up locally via =performance.now()= delta. No polling, no server round-trips, no clock-skew dependency (the page has NO client polling today — threads.py:1105).
 - *COMPLETED (part 1):* a per-thread sidecar =turn_timings.json= (mirrors the existing =merge_conflict.json= trio in state.py:233-289), a flat JSON object keyed by *human-message ordinal* → *seconds* (an int). (Design-review fix: NOT ={started_at, seconds}= — nothing reads a sidecar =started_at=; the badge is a pure duration and =started_at= lives in =status.json= for the live timer only. A copy here is a dead field.) Written off-loop by =_process_message= at its success exits; read on-loop by =render_thread= (one small missing-ok JSON read, exactly like =_get_status= / =_get_conflict=).
   - Rejected =AIMessage.response_metadata= (touches the model/middleware hot path + checkpoint round-trip) and checkpoint-=ts= derivation (fiddly, couples render to langgraph internals).
-  - Keyed by *human-message ordinal* (count of HumanMessages), NOT raw message index: append-only, robust to errored/pre-feature turns, keeps =assist/thread.py= =_messages_to_dicts= UNTOUCHED (render tests stay green). *Design-review fix (fix-by-construction):* count the ordinal ONE way on BOTH sides — a single shared helper over the raw =HumanMessage= list — NOT write-side raw + read-side ="user"= dicts (two counters over two representations that silently misalign if the 1:1 HumanMessage↔"user"-dict mapping ever breaks). The render pass computes an =index→seconds= map from the raw messages once, then consults it in the existing reversed loop. A render test must pin badge-on-correct-bubble across a thread containing a tool-only turn AND a review submission.
+  - Keyed by *human-message ordinal*, NOT raw message index: append-only, robust to errored/pre-feature turns, keeps =assist/thread.py= =_messages_to_dicts= UNTOUCHED (render tests stay green). *Fix-by-construction:* the ordinal is the count of ="user"=-role dicts in =chat.get_messages()=, computed by the SAME predicate on both sides — write side via =_human_ordinal(chat.get_messages())=, read side an inlined running count over the same =get_messages()= dicts. One representation + one predicate, so the two can't drift (the earlier draft said "raw HumanMessage list"; as-built both sides count the rendered ="user"= dicts). The render pass builds an =index→seconds= map from =chat.get_messages()= once, then consults it in the render loop. A render test pins badge-on-correct-bubble across a thread with a tool-only turn AND a review submission.
 - *Single-word statuses (part 3):* Pierre scoped this to the *thread-list page*. Use a list-only single-word mapping at the list call sites (threads.py:188,194); LEAVE the full =STAGE_LABELS= sentences on the in-thread banner (threads.py:523). *Design-review fix (I1):* the earlier "rewrite the shared dict in place" also shortened the in-thread banner — a surface Pierre didn't name, where the sentences carry real "why" info (esp. =paused= / =queued=). The two-line duplication is trivial and does not justify downgrading the banner. (O1 resolved: list-only.)
 
 * Why it's event-loop-safe (load-bearing — single-worker uvicorn)
@@ -24,8 +24,8 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 
 * Steps (Phase 2)
 ** Part 3 — single-word statuses (first; smallest, isolates a rename)
-1. state.py:321-328 — =STAGE_LABELS= values → single words: Initializing / Cloning / Starting / Queued / Processing / Paused. Keys + BUSY_STAGES/INIT_STAGES unchanged.
-2. No call-site changes (threads.py:188,194,523 already use =.get=). Set the banner fallback (threads.py:523) to a single word ("Working").
+1. state.py — add a separate =LIST_STAGE_LABELS= (single words: Initializing / Cloning / Starting / Queued / Processing / Paused); LEAVE =STAGE_LABELS= sentences unchanged (list-only per I1). Keys + BUSY_STAGES/INIT_STAGES unchanged.
+2. Point the thread-list badges (render_index, threads.py:~192,197) at =LIST_STAGE_LABELS=; the in-thread banner keeps =STAGE_LABELS= sentences.
 
 ** Part 2 — live WIP timer
 3. Establish =started_at= via the existing =pending_kwargs= mechanism:
@@ -55,7 +55,7 @@ Fact: langchain =BaseMessage= has no timestamp; the langgraph checkpoint has a p
 * Resolved by design-review (as-built decisions)
 - *O1 → list-only* (interfaces/intention I1): single words on the thread-list page only; banner keeps sentences.
 - *Sidecar value → flat =seconds=* (simplicity #1): no dead =started_at= copy.
-- *Ordinal join → one shared counter over the raw HumanMessage list* (interfaces C1 / simplicity #2), pinned by a tool-only-+-review-submission render test.
+- *Ordinal join → one counting predicate (="user"= dicts in =chat.get_messages()=) on both sides* (interfaces C1 / simplicity #2), pinned by a tool-only-+-review-submission render test.
 - *Event-loop rationale corrected* (liveness #1): safe because the field rides a pre-existing on-loop atomic write (no NEW blocking); heavy sidecar write is off-loop.
 - *C4* — =started_at= is SUBMIT time (includes queue-wait); add a one-line comment so a reader doesn't assume processing-start (or name it =submitted_at=).
 - *C5* — badge attaches to "the last =assistant=-role bubble strictly before the next =user= bubble" (no double-badge; tools-only tail gets none). O2: record on awaiting_approval, render only on plain assistant bubbles.

@@ -126,6 +126,9 @@ def test_get_timings_ignores_valid_but_non_dict_json(tmp_path, monkeypatch):
     for bad in ("5", "true", "[]", '"oops"', "null"):
         (d / "turn_timings.json").write_text(bad)
         assert st._get_timings("t") == {}
+    # A dict is fine, but non-numeric VALUES are dropped (they'd crash _format_elapsed):
+    (d / "turn_timings.json").write_text('{"1": 14, "2": "oops", "3": null}')
+    assert st._get_timings("t") == {"1": 14}
 
 
 def test_busy_without_started_at_degrades_to_spinner_no_timer(thread_env):

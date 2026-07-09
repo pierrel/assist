@@ -392,7 +392,11 @@ def _get_timings(tid: str) -> dict:
     try:
         with open(path) as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        # Enforce the {ordinal: number} contract so a malformed value (e.g. {"1": "oops"})
+        # can't reach _format_elapsed's int(round(...)) and crash the on-loop render.
+        return {k: v for k, v in data.items() if isinstance(v, (int, float))}
     except Exception:
         return {}
 
