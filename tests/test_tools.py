@@ -170,6 +170,34 @@ class TestSearchInternet:
             })
             assert tools.search_internet("q") == tools._SEARCH_UNAVAILABLE_MESSAGE
 
+    def test_partial_results_with_failed_engines_surfaces_note(self, monkeypatch):
+        """Results present BUT some engines rate-limited: return the results AND a distinct
+        PARTIAL note (not the unavailable message, not a silent full set) so the agent uses
+        them and is honest about the gap."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        with patch.object(tools, "requests") as req:
+            req.get.return_value = _resp({
+                "results": [{"title": "T1", "url": "https://a.com", "content": "c1"}],
+                "unresponsive_engines": [["brave", "too many requests"], ["duckduckgo", "CAPTCHA"]],
+            })
+            result = tools.search_internet("q")
+        assert result != tools._SEARCH_UNAVAILABLE_MESSAGE     # not a total failure
+        assert "PARTIAL RESULTS" in result                     # the honesty signal
+        assert "brave" in result and "duckduckgo" in result    # names the throttled engines
+        assert "https://a.com" in result and "c1" in result    # the real results still present
+
+    def test_full_results_with_no_engine_failures_have_no_partial_note(self, monkeypatch):
+        """Healthy full result set: NO partial note (the note must be transparent when all
+        engines respond — a regression guard for the healthy path)."""
+        monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
+        with patch.object(tools, "requests") as req:
+            req.get.return_value = _resp({
+                "results": [{"title": "T1", "url": "https://a.com", "content": "c1"}],
+                "unresponsive_engines": [],
+            })
+            result = tools.search_internet("q")
+        assert "PARTIAL RESULTS" not in result
+
     def test_non_dict_payload_returns_unavailable(self, monkeypatch):
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:

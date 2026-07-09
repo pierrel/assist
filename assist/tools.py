@@ -275,6 +275,24 @@ def search_internet(
          "content": r.get("content", "")}
         for r in results[:max_results]
     ]
+    # Partial-results signal: results came back, but if some engines were rate-limited /
+    # unresponsive this set is INCOMPLETE. Surface it (the same `unresponsive_engines` list
+    # the zero-results branch trusts — a coarse, real, by-construction signal, not a
+    # heuristic) so the agent USES these results AND is honest about the gap, rather than
+    # treating them as complete or later giving up entirely. Distinct from
+    # _SEARCH_UNAVAILABLE_MESSAGE (which stays for zero-results-ever).
+    unresponsive = payload.get("unresponsive_engines", [])
+    if isinstance(unresponsive, list) and unresponsive:
+        engines = ", ".join(
+            str(e[0]) if isinstance(e, (list, tuple)) and e else str(e)
+            for e in unresponsive
+        )
+        return (
+            "PARTIAL RESULTS — some search engines were rate-limited and returned nothing "
+            f"({engines}). The results below are incomplete; use them to answer as best you "
+            "can and note the rate-limiting in your final answer.\n"
+            + str(normalized)
+        )
     return str(normalized)
 
 
