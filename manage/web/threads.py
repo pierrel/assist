@@ -902,9 +902,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # Turn-start origin for the elapsed badge + live WIP timer: reuse the started_at already
     # in status (a queued/paused/resumed turn keeps the original submit time, so elapsed
     # spans the queue wait + any pause) or stamp now for turns with no upstream setter
-    # (scheduled/SMS). Carried through every BUSY _set_status via pending_kwargs; the
-    # terminal ready/awaiting_approval writes omit pending_kwargs, so it clears and the
-    # live timer stops.
+    # (scheduled/SMS). Carried through every BUSY _set_status via pending_kwargs. The
+    # terminal `ready` write omits it → it clears and the live timer stops; `awaiting_approval`
+    # explicitly re-passes it (started_at=started_at below) so a HITL approve reuses the
+    # original submit time (awaiting_approval isn't BUSY, so no timer renders meanwhile).
     started_at = _get_status(tid).get("started_at") or _now_ms()
     pending_kwargs["started_at"] = started_at
     # The pending draft's sender, captured NOW before any _set_status below overwrites it —
