@@ -643,21 +643,23 @@ def create_research_agent(model: BaseChatModel,
     # The orchestrator DELEGATES searching to the research-agent (see its
     # prompt) — it does not search directly.  Giving it search_internet too
     # was redundant and doubled the over-search (orchestrator-direct +
-    # inner agent both ran capped search passes).  It keeps read_url for
-    # reading specific URLs while writing/fact-checking the report.
+    # inner agent both ran capped search passes).  It holds NO retrieval tools
+    # at all: it is a pure Manager (decompose -> dispatch searcher(s) ->
+    # synthesize the report), and the searcher + fact-check sub-agents are the
+    # only layers that read_url.  This removes the orchestrator's URL-fabrication
+    # surface entirely (it cannot 404-loop on a guessed URL if it has no read_url)
+    # and enforces clean delegation instead of the orchestrator doing worker work.
     agent = create_deep_agent(
         model=model,
-        tools=[read_url],
+        tools=[],
         checkpointer=checkpointer or InMemorySaver(),
         system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
                                       workspace_dir=workspace_dir),
         backend=backend,
-        # Same read_url guard pair as the sub-agents (see _read_url_guards): the
-        # orchestrator has its OWN read_url and would otherwise 404-loop on fabricated
-        # URLs under search-unavailable. Guidance (research_instructions.txt.j2) tells it
-        # to STOP when it has no sources rather than re-dispatch (what the old exclusion
-        # feared). logging_mw stays innermost/last.
-        middleware=base_mw + middleware + _read_url_guards() + [logging_mw],
+        # No _read_url_guards here: the orchestrator has no read_url to guard.
+        # The searcher + fact-check sub-agents carry those guards themselves.
+        # logging_mw stays innermost/last.
+        middleware=base_mw + middleware + [logging_mw],
         subagents=[critique_sub_agent,
                    research_sub_agent,
                    fact_check_sub_agent]

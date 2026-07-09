@@ -26,10 +26,13 @@ _SEARCH_HOST = "http://searxng.test"
 
 # A distinctive fact that only appears in the (mocked) real result, so the report can only
 # contain it if the agent actually USED the result instead of giving up. Synthetic persona.
-_RESULT = {"title": "Blackbird Roastery — remote-work guide",
-           "url": "https://www.example-guide.test/blackbird-roastery",
+# The URL/content must look like a REAL search hit — an obviously-fake host (example.test)
+# makes the small model distrust the result as "placeholder data" and give up for the wrong
+# reason, conflating fixture-distrust with the real rate-limit give-up we're testing.
+_RESULT = {"title": "Blackbird Roastery — best SF cafes for remote work",
+           "url": "https://remoteworkcafes.com/san-francisco/blackbird-roastery",
            "content": ("Blackbird Roastery on Fell Street has fast wifi, ample outlets, and "
-                       "quiet mornings — a top pick for remote work.")}
+                       "quiet mornings — a top pick for remote work in San Francisco.")}
 _PAGE = ("<article><h1>Blackbird Roastery</h1><p>Fast wifi, ample outlets, quiet mornings; "
          "a top remote-work pick on Fell Street.</p></article>")
 _ENGINES = [["brave", "too many requests"], ["duckduckgo", "CAPTCHA"]]
@@ -77,10 +80,18 @@ def _honest(res):
                                      "couldn't look", "could not look", "rate", "limited")))
 
 
-def _report_produced(root, res):
-    files = [f for f in os.listdir(os.path.join(root, "references"))
-             if f.endswith((".org", ".md"))]
-    return bool(files) or "blackbird" in res.lower()
+def _report_text(root, res):
+    """The real deliverable = the report FILE the general agent reads, not the
+    orchestrator's terse ``FINAL_REPORT: <file>`` handoff message. Combine any
+    report file written under ``root`` with ``res`` (the give-up path writes no
+    file, so its text lives only in ``res``) and assert on the union."""
+    parts = [res]
+    for dirpath, _, files in os.walk(root):
+        for f in files:
+            if f.endswith((".org", ".md")):
+                with open(os.path.join(dirpath, f)) as fh:
+                    parts.append(fh.read())
+    return "\n".join(parts).lower()
 
 
 _PROMPT = "Where's a good coffee shop for remote work in San Francisco? Write a short report."
@@ -101,10 +112,11 @@ class TestResearchPartialResults:
                 return _Resp(json_payload={"results": [], "unresponsive_engines": _ENGINES})  # then unavailable
             return _Resp(text=_PAGE)
         res, root = _run(mock_get, _PROMPT)
-        print(f"\n[mixed-burst] searches={calls[0]} report? {_report_produced(root, res)} "
-              f"honest? {_honest(res)}\n  {res[:400]!r}\n")
-        assert "blackbird" in res.lower(), "the first search's good result must reach the report, not be discarded"
-        assert _honest(res), "must honestly note that some searches couldn't complete"
+        report = _report_text(root, res)
+        print(f"\n[mixed-burst] searches={calls[0]} blackbird? {'blackbird' in report} "
+              f"honest? {_honest(report)}\n  {res[:400]!r}\n")
+        assert "blackbird" in report, "the first search's good result must reach the report, not be discarded"
+        assert _honest(report), "must honestly note that some searches couldn't complete"
 
     def test_all_unavailable_no_results_relays_and_does_not_fabricate(self):
         """The narrow give-up case must still work: EVERY search is fully unavailable and no
@@ -115,8 +127,8 @@ class TestResearchPartialResults:
                 return _Resp(json_payload={"results": [], "unresponsive_engines": _ENGINES})
             return _Resp(text=_PAGE)
         res, root = _run(mock_get, _PROMPT)
+        r = _report_text(root, res)
         print(f"\n[all-unavailable] {res[:400]!r}\n")
-        r = res.lower()
         assert any(k in r for k in ("couldn't look", "could not look", "couldn't complete",
                                     "unavailable", "couldn't find", "could not find")), \
             "must relay that it couldn't look this up"
