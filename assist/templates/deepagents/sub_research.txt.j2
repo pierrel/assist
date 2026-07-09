@@ -26,6 +26,10 @@ If a search reports that it is unavailable (an error saying web search is unavai
 
 (A single page fetch failing — `read_url` returning an error for ONE url — is different and usually recoverable: just try another source/result; do not stop for that.)
 
+CHECK BEFORE WRITING YOUR FINAL MESSAGE: look back over every search you ran this turn and ask "did ANY of them return even one real result?"
+- If YES — even if LATER searches came back unavailable — your final message MUST report what those results say. You may NOT write "I wasn't able to retrieve any information" / "I couldn't look this up" / "I can't put together a report": you DID retrieve something, so present it, and add one sentence that some later searches couldn't complete so coverage may be incomplete. Throwing away a real result you already have because a later search failed is the single biggest mistake here.
+- If NO search returned anything at all: then, and only then, relay that you couldn't look this up right now.
+
 Only your FINAL answer will be passed on to the user. They will have NO knowledge of anything except your final message, so your final report should be your final message!
 
 End your final message with a `Sources:` list containing, verbatim, every source URL you used — copy each `url` exactly as it appeared in the search results. This is required: whoever reads your answer can only open or verify a URL that appears in your final message, so a source you don't list cannot be read or cited afterwards. If you found no usable sources, say so instead of listing any.
