@@ -47,10 +47,13 @@ _SEARXNG_TIMEOUT_S = 10.0
 # wait out.
 _SEARCH_UNAVAILABLE_MESSAGE = (
     "Web search is unavailable — the search backend could not be reached or "
-    "returned an unusable response. STOP: do not search again, and do not "
-    "retry with a different query — it will keep failing the same way. Do NOT "
-    "answer from your own knowledge. Your final message must tell the user you "
-    "couldn't look this up because web search is currently unavailable."
+    "returned an unusable response. Do not search again (it will keep failing "
+    "the same way), and never answer from your own knowledge. What to do next "
+    "depends on what you already have: if an EARLIER search this turn already "
+    "returned real results, do NOT discard them — write your answer from those "
+    "results and add that some searches couldn't complete, so coverage may be "
+    "incomplete. Only if you have gathered NOTHING usable at all should your "
+    "final message say you couldn't look this up right now."
 )
 
 
