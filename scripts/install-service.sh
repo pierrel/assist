@@ -23,11 +23,13 @@ echo "Data directory: $ASSIST_THREADS_DIR"
 # still hold root-owned files inside (sandbox used to run as root);
 # without a recursive chown they'd silently fail
 # SandboxManager.get_sandbox_backend's "uid != 0" check on first
-# turn after deploy.  The recursive chown is idempotent — re-running
-# on already-migrated workspaces is a no-op — so it's safe to run
-# on every install, not just first install.
+# turn after deploy.  Non-recursive (the directory itself): the legacy
+# root-owned-workspace migration is long done and a fresh threads dir is
+# empty, so chowning the dir is enough — and it stays inside the
+# passwordless-sudo allowlist (a recursive `chown -R` isn't allowlisted
+# and would prompt for a password on every deploy-service).
 sudo mkdir -p "$ASSIST_THREADS_DIR"
-sudo chown -R $USER:$USER "$ASSIST_THREADS_DIR"
+sudo chown $USER:$USER "$ASSIST_THREADS_DIR"
 
 # Build environment variables section
 ENV_VARS=""

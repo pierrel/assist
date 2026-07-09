@@ -41,12 +41,6 @@ $USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p ${ASSIST_THREADS_DIR}
 $USER ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p ${ASSIST_THREADS_DIR}/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER ${ASSIST_THREADS_DIR}
 $USER ALL=(ALL) NOPASSWD: /usr/bin/chown $USER\\:$USER ${ASSIST_THREADS_DIR}/*
-# Recursive chown for migrating legacy thread workspaces to the
-# non-root sandbox layer (docs/2026-05-08-restrict-git-real-via-non-root-sandbox.org).
-# Idempotent — safe to re-run.  No-op for deploys whose threads dir
-# is already user-owned.
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER ${ASSIST_THREADS_DIR}
-$USER ALL=(ALL) NOPASSWD: /usr/bin/chown -R $USER\\:$USER ${ASSIST_THREADS_DIR}/*
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/systemd/system/${SERVICE_NAME}.service
 EOF
 
