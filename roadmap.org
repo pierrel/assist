@@ -730,3 +730,22 @@ middleware": the only deterministic guard left is exact-repeat detection
 (A/B).  Open question is whether even that can move to prompt/skill guidance or
 stay as a thin backstop.  Lower priority now that the aggressive, misfiring
 patterns are gone.
+
+* Web UI — thread list
+** TODO Thread list ordering by status then last-message age
+Sort the thread list by STATUS first, then by the age of the last message (most
+recent first) within each status band. Status ordering:
+1. urgent
+2. processing
+3. queued / waiting
+4. new
+5. everything else
+Merge status (unmerged / merged) has NO bearing on ordering — drop it as a sort
+key if it currently influences order. The status→rank map should live in one
+place (client and/or server, wherever the list is assembled). Ties within a band
+break on last-message recency.
+** TODO Thread list search — client-only, as-you-type, over descriptions
+Filter the thread list by a client-side substring match on the thread
+DESCRIPTIONS, which are ALREADY on the client. Match as the user types — NO
+server round-trip (no fetch/endpoint). Purely in-browser filter of the loaded
+list against the query.
