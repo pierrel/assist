@@ -457,14 +457,13 @@ def create_context_agent(model: BaseChatModel,
 
 def _read_url_guards():
     """The guard pair every read_url-bearing research agent gets, in one place so the
-    three sites can't drift.
+    two sites can't drift.
 
     - UrlProvenanceMiddleware: refuse read_url on a URL absent from prior tool/user
-      messages (a fabrication). Wired on the searcher, the fact-checker, AND the
-      orchestrator: thread 20260708090812 showed the un-guarded orchestrator, under
-      search-unavailable, guessing plausible URLs and 404-looping ~90 min. The searcher's
-      findings reach the orchestrator as a task ToolMessage, so real search-sourced URLs
-      pass while fabrications are refused. See docs/2026-07-08-research-reread-runaway.org.
+      messages (a fabrication). Wired on the searcher and the fact-checker — the two
+      read_url-bearing sub-agents. The orchestrator has no read_url (V2: it delegates all
+      fetching), so it needs no guard: it can't 404-loop on a guessed URL it can't fetch.
+      See docs/2026-07-08-research-reread-runaway.org.
     - ReadUrlRereadBreaker: refuse re-reading the SAME url past max_reads (the 2026-07-07
       peptides real-URL re-read shape).
     """
@@ -568,10 +567,6 @@ def create_research_agent(model: BaseChatModel,
         backend = create_sandbox_composite_backend(references_sandbox)
     else:
         backend = create_references_backend(working_dir)
-    # Offload large read_url results on the orchestrator too (it reads specific URLs
-    # while writing/fact-checking).  backend is only available here, after references
-    # routing is set up, so append rather than build into base_mw above.
-    base_mw.append(ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000))
     logging_mw = ModelLoggingMiddleware("research-agent")
 
     # Safety middleware installed on every dict-spec subagent below.

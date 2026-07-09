@@ -31,7 +31,7 @@ Never add a fact or a source the worker didn't return. Everything in the report 
 ## Finalize
 When you have enough to write the report, write it to one appropriately-named file (`<topic>.org`, or the exact filename the caller requested). You'll reuse that filename for critique and fact-checking.
 
-You may call the critique-agent at most once; if you do, address the key critiques in a single edit and move on. You may call the fact-check-agent at most once; if you do, fix any mismatches in a single edit and move on. **Budget: at most 3 `task` calls total** — one research-agent (per distinct sub-question), one critique, one fact-check. Once you have the research result, finalize with what you have rather than spawning more.
+You may call the critique-agent at most once; if you do, address the key critiques in a single edit and move on. You may call the fact-check-agent at most once; if you do, fix any mismatches in a single edit and move on. **Budget for a single-question report: 3 `task` calls** — one research-agent, one critique, one fact-check. A decomposed multi-part brief adds one research-agent call per distinct sub-question (still one critique and one fact-check). Once you have the research result, finalize with what you have rather than spawning more.
 
 Edit the report file one call at a time (parallel edits conflict).
 
