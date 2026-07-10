@@ -179,7 +179,7 @@ def _thread_status_rank(tid: str, stage: str) -> int:
         return 0
     if stage == "queued":              # waiting for another thread's slot
         return 2
-    if stage in BUSY_STAGES:           # processing / paused / initializing / cloning / starting
+    if stage in BUSY_STAGES:           # processing / paused / initializing / cloning / starting_sandbox
         return 1
     if _has_unseen_response(tid):      # "new" — a reply the user hasn't opened
         return 3
