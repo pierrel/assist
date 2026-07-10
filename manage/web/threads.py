@@ -169,8 +169,10 @@ _SHOWABLE_EXTS = (".org", ".md", ".pdf")
 
 
 # Thread-list ordering rank (lower sorts first). Per Pierre: STATUS first — urgent,
-# then processing/starting, then queued/waiting, then "new" (an unopened response),
-# then everything else (ready / error / unmerged / idle). Merge status has NO bearing.
+# then any busy stage except queued (processing / paused / initializing / cloning /
+# starting_sandbox), then queued (waiting for a slot), then "new" (an unopened
+# response), then everything else (ready / error / unmerged / idle). Merge status
+# has NO bearing.
 # The age tiebreak within a band is the caller's job (see render_index's sort).
 def _thread_status_rank(tid: str, stage: str) -> int:
     if _has_urgent(tid):
