@@ -80,7 +80,11 @@ _TRAILING = ".,;:!?)]}'\""
 # it back (ToolResultToFileMiddleware). That read is still read_url page content — the
 # untrusted channel, laundered through a file — so URLs in it must stay untrusted.
 _FILE_READ_TOOLS = {"read_file", "grep"}
-_OFFLOAD_MARK = "large_tool_results"   # the /large_tool_results/ offload path prefix
+# The offload-dir PATH form (with the trailing slash the real path/filename always has):
+# matches a /large_tool_results/<id> path in the read's args and in a grep-all's listed
+# filenames, but NOT a bare prose mention of "large_tool_results" (docs, a report) — so a
+# legitimate result that merely names the concept isn't misclassified as offloaded.
+_OFFLOAD_MARK = "large_tool_results/"
 # The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
 # a marker here means the read TARGETS offloaded content.
 _OFFLOAD_PATH_KEYS = ("path", "file_path", "glob")

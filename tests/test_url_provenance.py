@@ -153,6 +153,21 @@ class TestUrlProvenanceMiddleware(TestCase):
                           "a file read with no verifiable call must fail closed (untrusted)")
         self.assertEqual(result.status, "error")
 
+    def test_prose_mention_of_offload_dir_does_not_over_exclude(self):
+        # The marker is the PATH form (large_tool_results/), so a legit report that
+        # merely MENTIONS "large_tool_results" as prose (not a path) still trusts its
+        # URLs — no spurious refusal.
+        url = "https://docs.example/langgraph"
+        msgs = [
+            AIMessage(content="", tool_calls=[{
+                "name": "read_file", "id": "f2", "args": {"file_path": "references/notes.org"}}]),
+            ToolMessage(content=f"Note: the large_tool_results feature offloads big pages. See {url}",
+                        name="read_file", tool_call_id="f2"),
+        ]
+        result, handler = self._call(url, msgs)
+        self.assertIsNotNone(handler.called_with,
+                             "a prose mention of the offload dir (not a path) must not over-exclude")
+
     def test_allows_parenthesized_search_result_url(self):
         # A URL with a paren (Wikipedia disambiguation pages — a dominant research
         # source) must be captured WHOLE from the search result, so the model's
