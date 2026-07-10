@@ -81,6 +81,9 @@ _TRAILING = ".,;:!?)]}'\""
 # untrusted channel, laundered through a file — so URLs in it must stay untrusted.
 _FILE_READ_TOOLS = {"read_file", "grep"}
 _OFFLOAD_MARK = "large_tool_results"   # the /large_tool_results/ offload path prefix
+# The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
+# a marker here means the read TARGETS offloaded content.
+_OFFLOAD_PATH_KEYS = ("path", "file_path", "glob")
 
 
 def normalize_url(url: str) -> str:
@@ -108,16 +111,18 @@ def _message_text(message: Any) -> str:
     return content if isinstance(content, str) else str(content)
 
 
-def _reads_offloaded(tool_call: dict | None) -> bool:
-    """True if a ``read_file``/``grep`` call targets an OFFLOADED read_url result (a
-    path under /large_tool_results/). Reading that file surfaces read_url PAGE
-    content, so any URL in it stays untrusted — the same channel, laundered through
-    a file. Errs toward exclusion (fails closed): an over-match only makes the model
-    re-search, it never trusts more."""
-    if not tool_call:
-        return False
-    args = tool_call.get("args") or {}
-    return any(_OFFLOAD_MARK in str(v) for v in args.values())
+def _reads_offloaded(tool_call: dict | None, content: str) -> bool:
+    """True if a ``read_file``/``grep`` touched OFFLOADED read_url content — the same
+    untrusted page content laundered through a file. Two ways it shows up: the read's
+    TARGET PATH is under /large_tool_results/ (a targeted read_file/grep — checked on
+    the LOCATION args only, not the grep ``pattern``), OR the result names an offloaded
+    file (grep's default ``files_with_matches`` lists matching paths, so a grep-all that
+    hit the offload dir shows it in the output). Errs toward exclusion (fails closed):
+    an over-match only makes the model re-search, it never trusts more."""
+    args = (tool_call or {}).get("args") or {}
+    if any(_OFFLOAD_MARK in str(args.get(k, "")) for k in _OFFLOAD_PATH_KEYS):
+        return True
+    return _OFFLOAD_MARK in (content or "")
 
 
 def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
@@ -128,7 +133,8 @@ def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
     if name == _READ_TOOL:                       # direct read_url page content
         return True
     if name in _FILE_READ_TOOLS:                 # offloaded read_url content, via a file
-        return _reads_offloaded(calls_by_id.get(getattr(m, "tool_call_id", None)))
+        return _reads_offloaded(calls_by_id.get(getattr(m, "tool_call_id", None)),
+                                _message_text(m))
     return False
 
 
@@ -185,25 +191,25 @@ def _display_url(raw: str) -> str:
 
 
 def _correction(allowed: dict[str, str]) -> str:
-    # No sourced URLs in context yet. This branch is shared by all three read_url agents:
-    # the searcher HAS search_internet (so "search first" is the right nudge if it simply
-    # hasn't searched), while the orchestrator + fact-checker do NOT (an empty list there
-    # means search already came back empty/unavailable, so stop). Cover both without
-    # inspecting tool availability: search-if-you-can, otherwise stop — never keep guessing.
+    # No sourced URLs in context yet. Shared by both read_url agents: the searcher HAS
+    # search_internet (so "search first" is the right nudge if it simply hasn't searched),
+    # while the fact-checker does NOT (an empty list there means search already came back
+    # empty/unavailable, so stop). Cover both without inspecting tool availability:
+    # search-if-you-can, otherwise stop — never keep guessing.
     if not allowed:
         return (
-            "That URL was a guess: it appears in no search result, the question, or a "
-            "report you were given, so it would be a dead link. You have no sourced URLs "
-            "to read. Do NOT type URLs from memory or keep trying different guesses. If "
-            "you can run search_internet, do that first to find real URLs; if search has "
-            "already come back empty or unavailable, report that you could not find "
-            "reliable sources for this and stop."
+            "That URL was a guess: it appears in no search result, the question, or any "
+            "trusted source in your context, so it would be a dead link. You have no "
+            "sourced URLs to read. Do NOT type URLs from memory or keep trying different "
+            "guesses. If you can run search_internet, do that first to find real URLs; if "
+            "search has already come back empty or unavailable, report that you could not "
+            "find reliable sources for this and stop."
         )
     listed = sorted(allowed.values())[:_MAX_LISTED]
     urls = "\n".join(f"- {u}" for u in listed)
     return (
         "That URL was not fetched: it does not appear in any search result, the "
-        "question, or a report you were given, so it is a guess and would be a "
+        "question, or a trusted source in your context, so it is a guess and would be a "
         "dead link. Do NOT type URLs from memory. Read one of the URLs already in "
         "context instead:\n"
         f"{urls}"
