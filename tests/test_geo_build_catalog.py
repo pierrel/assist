@@ -91,6 +91,43 @@ def test_malformed_features_skipped(tmp_path):
     assert cat.is_allowed("good") and not cat.is_allowed("nogeo")
 
 
+def test_malformed_coordinates_dropped_not_fatal(tmp_path):
+    # a string coord, a None coord, and a non-iterable ring each drop their feature
+    # without aborting the whole build (the drop-per-entry contract)
+    bad_str = _feature("badstr", coords=[[[["x", "y"], [-114.0, 32.0]]]])
+    bad_none = _feature("badnone", coords=[[[[None, 1.0], [-114.0, 32.0]]]])
+    bad_ring = _feature("badring", coords=[123])
+    build(str(tmp_path), _index([bad_str, bad_none, bad_ring, _feature("good")] + _bulk(120)))
+    cat = Catalog(str(tmp_path))
+    assert cat.is_allowed("good") is True
+    assert not any(cat.is_allowed(s) for s in ("badstr", "badnone", "badring"))
+
+
+def test_nan_coordinates_never_reach_the_bbox(tmp_path):
+    import math
+    nan, inf = float("nan"), float("inf")
+    # all-non-finite geometry → no usable points → dropped
+    all_bad = _feature("allbad", coords=[[[[nan, nan], [inf, nan]]]])
+    # a NaN mixed with finite points → survives, but the bbox is built ONLY from the
+    # finite points (no NaN can reach it to scramble the smallest-first sort)
+    mixed = _feature("mixed", coords=[[[[nan, 32.0], [-114.0, 35.5], [-121.0, 33.0]]]])
+    build(str(tmp_path), _index([all_bad, mixed, _feature("good")] + _bulk(120)))
+    cat = Catalog(str(tmp_path))
+    assert not cat.is_allowed("allbad")
+    assert cat.is_allowed("mixed")
+    assert all(math.isfinite(x) for x in cat.get("mixed").bbox)
+
+
+def test_non_string_name_yields_string_display(tmp_path):
+    # a non-string index name must not be written through; display stays a str so a
+    # later search().lower() can't crash
+    build(str(tmp_path), _index([_feature("us/oregon", name=123)] + _bulk(120)))
+    cat = Catalog(str(tmp_path))
+    dn = cat.get("us/oregon").display_name
+    assert isinstance(dn, str) and dn == "Oregon"
+    assert [e.slug for e in cat.search("oregon")] == ["us/oregon"]   # no crash
+
+
 def test_fetch_index_pins_url():
     with pytest.raises(ValueError, match="must be https"):
         fetch_index("http://download.geofabrik.de/index-v1.json")

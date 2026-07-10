@@ -387,9 +387,10 @@ Why a dedicated file, not derived from =config.yml= + Nominatim: =config.yml=
 carries no bbox / display name / transit flag / date / import-state, and the geo
 page + trigger + delete path would each re-derive it. The ethos wants the "is this
 region loaded" question to have *one unambiguous answer* — a registry. Consistency
-is bounded by making the scripts the sole writers and flipping =state:ready= only
-after a validated import (the validate-before-swap discipline the refresh script
-already uses). All reads happen off the event loop (=run_in_threadpool=).
+is bounded by making =registry.py= the sole writer (the bash scripts write none —
+B1/C-registry) and flipping =state:ready= only after a validated import (the
+validate-before-swap discipline the refresh script already uses). All reads happen
+off the event loop (=run_in_threadpool=).
 
 ** Background-job architecture (event-loop-safe by construction)
 Web/agent only *enqueue*; a *thin* =Provisioner= (an executor, NOT a =Scheduler=

@@ -67,6 +67,17 @@ def test_malformed_entry_skipped(tmp_path):
     assert {e.slug for e in cat.all()} == {"socal"}
 
 
+def test_nan_bbox_entry_skipped_by_reader(tmp_path):
+    # a NaN in a stored catalog.json bbox must be rejected at read time too (not just
+    # at build), so it can't scramble smallest-first ordering; json emits NaN with
+    # allow_nan, and json.load accepts it
+    nan_entry = {"slug": "nan", "display_name": "NaN", "bbox": [float("nan"), 1.0, 2.0, 3.0],
+                 "url": "https://download.geofabrik.de/nan.osm.pbf"}
+    (tmp_path / CATALOG_FILE).write_text(json.dumps([_SOCAL, nan_entry]))
+    cat = Catalog(str(tmp_path))
+    assert {e.slug for e in cat.all()} == {"socal"}
+
+
 def test_mtime_cache_reloads_on_rebuild(tmp_path):
     _write(tmp_path, [_SOCAL])
     cat = Catalog(str(tmp_path))
