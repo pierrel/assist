@@ -1,6 +1,6 @@
 #+title: Geo download-on-demand + geo management page — PRD
 #+date: <2026-07-10>
-#+status: DESIGN — decisions settled + 5-lens design review folded in (2026-07-10); next: Pierre's ack on S1/S2, then Phase-2 implementation
+#+status: DESIGN COMPLETE — decisions + 5-lens review + S1/S2 all settled (2026-07-10); ready for Phase-2 implementation
 
 This is a *product-requirements / design doc for review*, not an as-built record.
 It captures the feature, the design the architect + a codebase exploration
@@ -54,14 +54,15 @@ size figure (see D-fixed).
 
 So instead of a hand-seeded shortlist, the *catalog is a pinned snapshot of the
 full-variant index* (the bbox derives from its geometry) stored in
-=$TRAVEL_INFRA_DIR= — refreshed by the weekly cron, which also =HEAD=-caches
-each region's size into the snapshot, so nothing is fetched live on the request
-path; the one live =HEAD= happens at proposal time, giving the approval message
-its exact current figure. The *curation happens at selection
-time, by intent*: the agent (guided by the travel skill) narrows the index to
-the region matching what you asked for ("do you cover Seattle?" →
-=us/washington=), and the =/geo/add= picker offers a searchable list rather
-than a fixed menu. The allowlist property is unchanged — a slug must be an
+=$TRAVEL_INFRA_DIR= — refreshed by the weekly cron, which caches each region's
+size into the snapshot, so the approval size comes from the snapshot with *no
+live request-path HEAD* (revised by review — T4; the earlier "one live HEAD at
+proposal time" was dropped as an SSRF + turn-slot-hang surface). The *curation
+happens at selection time, by intent*: the agent passes the place *as the user
+said it* to =find_regions= (B1), which resolves it to the matching index
+candidate(s) ("do you cover Seattle?" → =us/washington=) — the model never
+synthesizes the id. (A manual =/geo/add= browse-and-pick picker is *deferred* —
+S2.) The allowlist property is unchanged — a slug must be an
 index id and the URL always comes from the index entry, never from the caller.
 Prefer the *smallest extract covering the need* (sub-state over state over
 country) to bound import cost. The *transit-feed overlay stays hand-curated*
@@ -129,7 +130,7 @@ to match; this is the change record.
   end. *Fix (adopted):* a *dedicated pending-proposal record*, not the send_reply
   interrupt. The =propose_region_download= tool body records the proposal (slug +
   bbox + size) on the =/geo= machinery, emits the =path:= map block, and returns;
-  a plain =POST /geo/{slug}/approve= (like =/geo/add=) fires the provisioner. One
+  a plain =POST /geo/{slug}/approve= (like the other =/geo= POST routes) fires the provisioner. One
   HITL shape, no hot-path interrupt refactor, and the map/size (which need code to
   run *before* approval) fit naturally in the tool body — the interrupt-before-body
   model couldn't render them.
@@ -281,14 +282,16 @@ to match; this is the change record.
   upstream file; *catalog* = our pinned local artifact. A single =bbox_to_path_block=
   helper shared by the web picker + the agent proposal (don't reimplement in both).
 
-** Minor scope calls left for Pierre (everything else is adopted)
-- *S1 — =last_used_at= tracking (U3):* add it in v1 (a coarse stamp on the geocode/
-  route path) so "delete *unused*" is real, or defer it and ship "list + delete"?
-  Rec: add it — it's cheap and it's the word you chose.
-- *S2 — the manual =GET /geo/add= picker (searchable catalog):* you asked for
-  "list + delete" on the page and an *agent-driven* add; the manual picker is a third
-  surface. Keep it (cheap, reuses the snapshot) or defer per "keep scope down"? Rec:
-  defer to a later expand; v1 = agent-proposed add + page list/delete/transit.
+** Minor scope calls — settled (Pierre, 2026-07-10)
+- *S1 — =last_used_at= tracking (U3): ADD in v1.* A coarse stamp on the geocode/route
+  path when a query resolves inside a region's bbox; surfaced as "used N days ago" on
+  the =/geo= page so "delete *unused*" is real, not just "list + delete".
+- *S2 — the manual =GET /geo/add= picker: DEFER.* v1's only add path is
+  *agent-proposed* (find_regions → propose → HITL approve); the =/geo= page is
+  list + delete + transit-toggle. A manual browse-and-pick page over the ~555-region
+  catalog is a clean later expand (it reuses the same snapshot), not v1 — per "start
+  here, expand later." (Drop =GET /geo/add= from the v1 route list; keep =POST
+  /geo/{slug}/approve|delete|transit=.)
 
 * What you asked for (intent)
 - When asked for geo-specific info assist can't find in the current region, *offer
@@ -496,19 +499,19 @@ transit needs *discovery + transformation* instead of a fixed catalog.
 ** Geo management page
 A new submodule =manage/web/geo.py= (the schedules.py/evals.py registration
 pattern). Routes:
-- =GET /geo= — list regions from the registry, each with a *bbox map preview* (bbox
-  → encoded polyline → an existing =path:= map block), =state=, size, date,
-  =has_transit=, a delete button, and an "add transit" button when a feed is
-  configured and transit is off.
-- =GET /geo/add= — the catalog picker: a *searchable* list over the pinned
-  Geofabrik-index snapshot (D2), each region with a bbox map preview and the
-  download size the weekly refresh cached into the snapshot (no live fetch on
-  the request path).
-- =POST /geo/add= — enqueue (write =importing= + =Provisioner.submit=); 303
-  redirect. *Never* runs the import inline.
-- =POST /geo/{slug}/delete= — enqueue eviction; base region undeletable (guard);
-  UI confirm.
-- =POST /geo/{slug}/transit= — enqueue add-transit.
+All mutating routes are server-token-gated (T1). *(=GET /geo/add= manual picker is
+DEFERRED — S2; v1 adds regions only via the agent-proposed flow.)*
+- =GET /geo= — list regions from the registry, each with a *polygon map preview* (U1;
+  the index geometry → a =path:= block, bbox fallback), =state=, size,
+  =last_used_at= as "used N days ago" (S1/U3), =has_transit=, a delete button, and
+  an "add transit" button when a feed is configured and transit is off.
+- =POST /geo/{slug}/approve= — the HITL approval for an agent-proposed download
+  (B2); fires =Provisioner.submit("add", slug, origin_tid)=. 303 redirect, never
+  inline.
+- =POST /geo/{slug}/delete= — enqueue eviction (=submit("remove", slug)=); base
+  region undeletable (guard); server-side re-confirm (client =confirm()= is
+  cosmetic — T1).
+- =POST /geo/{slug}/transit= — enqueue add-transit (=submit("transit", slug)=).
 - A small status fragment polls =importing= → =ready= (like
   =/thread/{tid}/status=), so a heavy import is never on the loop.
 Map preview reuses the existing =path:= renderer — no new render type, no new
