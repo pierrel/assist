@@ -157,9 +157,9 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertEqual(result.status, "error")
 
     def test_prose_mention_of_offload_dir_does_not_over_exclude(self):
-        # The marker is the PATH form (large_tool_results/), so a legit report that
-        # merely MENTIONS "large_tool_results" as prose (not a path) still trusts its
-        # URLs — no spurious refusal.
+        # The marker is the specific untrusted path (large_tool_results/untrusted-), so a
+        # legit report that merely MENTIONS "large_tool_results" as prose (not the untrusted
+        # path) still trusts its URLs — no spurious refusal.
         url = "https://docs.example/langgraph"
         msgs = [
             AIMessage(content="", tool_calls=[{

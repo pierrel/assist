@@ -10,8 +10,8 @@ zero — the small model still slips. This middleware makes a fabricated fetch
 somewhere earlier in the conversation.
 
 A provenanced URL is one the agent could have *copied* rather than *invented*:
-one textually present in a SEARCH RESULT, a non-offloaded ``read_file`` report, or
-the USER's message. Three channels are deliberately NOT provenance sources, because
+one textually present in a SEARCH RESULT, a non-offloaded ``read_file``/``grep``
+result, or the USER's message. Three channels are deliberately NOT provenance sources, because
 their content is attacker-derivable: the model's OWN prior text (else it launders a
 fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
@@ -77,10 +77,10 @@ _MAX_LISTED = 8
 # ``…/Mercury_(element)`` and the model's copied ``…/Mercury_(element)`` both
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
-# File-read tools whose result can surface OFFLOADED untrusted content (read_url page, execute output): a large
-# read_url result is written to /large_tool_results/<id> and the model greps/read_files
-# it back (ToolResultToFileMiddleware). That read is still read_url page content — the
-# untrusted channel, laundered through a file — so URLs in it must stay untrusted.
+# File-read tools whose result can surface OFFLOADED untrusted content: a large read_url/
+# execute result is written to /large_tool_results/untrusted-<id> and the model greps/
+# read_files it back (ToolResultToFileMiddleware). That read is still the untrusted content,
+# laundered through a file — so URLs in it must stay untrusted.
 _FILE_READ_TOOLS = {"read_file", "grep"}
 # UNTRUSTED offloads (read_url/execute) are written at .../large_tool_results/untrusted-<id>
 # by ToolResultToFileMiddleware, which sets the untrusted-ness AT WRITE TIME (where it knows
@@ -162,9 +162,9 @@ def _seen_urls(messages: list) -> dict[str, str]:
     ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
     first, then fetching it (observed on Qwen3.6, 14 of 24 fetches slipped through this
     way); (2) ``read_url`` results — arbitrary, possibly attacker-controlled page
-    content; and (3) a ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute output) (under
-    /large_tool_results/) — the SAME page content laundered through a file
-    (ToolResultToFileMiddleware writes big pages there and the model greps them). So a
+    content; and (3) a ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page,
+    execute output) under /large_tool_results/untrusted- — the SAME content laundered through
+    a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted; to reach a new page the agent re-searches (the searcher prompt
     requires that). RESIDUAL: a model that FOLLOWS a multi-step injection to
