@@ -522,6 +522,11 @@ middleware lists every skill it finds there alongside the built-ins, and
 `load_skill(name="<skill-name>")` loads the body. (Skills are listed
 once per chat — add one and start a new chat to pick it up.)
 
+**Authoring one on request.** Ask the agent to "make a skill for X" and
+the `author-skill` built-in walks it through writing a correct
+`SKILL.md` into the domain repo's `.claude/skills/`. Press **Merge &
+Push** to land it on `main`, then a new chat discovers it.
+
 **Frontmatter — stay on the portable core.** Use only the open-standard
 keys, so the file works in every agent:
 
