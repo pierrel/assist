@@ -249,7 +249,7 @@ def render_index() -> str:
             _thread_status_rank(tid, stage),
             # data-desc carries the lowercased description for the client-side
             # search filter (filterThreads); html.escape keeps it attribute-safe.
-            f'<li data-desc="{html.escape(title.lower())}">'
+            f'<li data-desc="{html.escape(title.lower(), quote=True)}">'
             f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
             f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
             f'<button type="submit" class="del-btn" aria-label="Delete thread" '
