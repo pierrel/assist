@@ -8,7 +8,7 @@ Run by the weekly travel-data refresh (never on the request path)::
 
 Fetches ``index-v1.json`` (a GeoJSON FeatureCollection of ~555 extracts), and for each
 feature: validates the PBF URL is https on the Geofabrik host (T2 — a poisoned entry
-must not reach curl later), derives the bbox from the MultiPolygon geometry, derives a
+must not reach curl later), derives the bbox from the (Multi)Polygon geometry, derives a
 human display name (52/555 entries carry the raw id as their name — "us/new-york"
 becomes "New York", else ``find_regions("Washington")`` can't match), and merges the
 hand-curated transit overlay (``transit-overlay.json``, a separate file precisely so a
