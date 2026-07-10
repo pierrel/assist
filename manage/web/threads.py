@@ -1168,6 +1168,28 @@ async def index(q: str = "") -> str:
     return render_index(q)
 
 
+# A tiny inline SVG favicon — no static-file infra. Browsers auto-request
+# /favicon.ico, so this one route gives every page a tab icon; served as SVG
+# because modern browsers honour the content-type regardless of the .ico path.
+_FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="7" fill="#1f2937"/>'
+    '<text x="16" y="23" text-anchor="middle" fill="#f9fafb"'
+    ' font-family="-apple-system,Segoe UI,Roboto,sans-serif"'
+    ' font-size="21" font-weight="700">a</text>'
+    '</svg>'
+)
+
+
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    return Response(
+        content=_FAVICON_SVG,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.post("/threads")
 async def create_thread(domain: str | None = Form(None)):
     chat = MANAGER.new()
