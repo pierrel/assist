@@ -479,6 +479,20 @@ configured does it state "transit isn't available for <region> (driving, walking
 biking are)" — the data is already honest (=_plan_transit= returns =None= →
 "unavailable"); =has_transit= in tool output (A2) makes the region-naming checkable.
 
+*Future direction — agent-driven transit download (Pierre, 2026-07-10; deferred,
+to research during Copilot idle windows).* v1's transit overlay is *hand-curated*
+because there is no worldwide GTFS index. Pierre wants to graduate this: an
+*agent-driven* flow that (1) *researches* the transit-data options for a geo (where
+its feed comes from — regional/per-operator feeds, aggregators, transitland/mobility
+DBs) and (2) runs a *well-defined transform framework* to reconcile a heterogeneous
+feed into the GTFS shape MOTIS ingests. Open seam question: whether this lives in
+=assist= or hooks into *emacsos* (which embeds assist's agent via =AgentSpec=) —
+weigh value/cost + the right seam, not yet decided. *Design the v1 overlay file +
+=add-transit.sh= as the slot this future path plugs into* (the transform's output is
+a feed the overlay references; the research/discovery is what the agent adds). This
+is transit's distinct sub-problem: base download is bounded by Geofabrik's index,
+transit needs *discovery + transformation* instead of a fixed catalog.
+
 ** Geo management page
 A new submodule =manage/web/geo.py= (the schedules.py/evals.py registration
 pattern). Routes:
