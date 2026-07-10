@@ -77,8 +77,8 @@ class TestAuthorSkill(TestCase):
         create_filesystem(root, {
             "README.md": "Helpers for my writing workflows.",
         })
-        # A real domain repo is version-controlled, with an identity, so the
-        # skill's commit step has somewhere to land instead of erroring mid-turn.
+        # A real domain repo is version-controlled — mirror that so the agent
+        # sees a realistic environment (the host, not the agent, commits/pushes).
         # -b main: don't inherit the machine's init.defaultBranch (may be master);
         # the domain-repo world assumes main.
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)

@@ -39,8 +39,9 @@ Two fields between `---` fences:
 ## 4. PUBLISH
 - `read_file` the new file back and confirm the `---` fences, both fields, and the `# H1`
   first line are present.
-- Commit it: `execute("git -C /workspace add .claude/skills/<name> && git -C /workspace commit -m 'Add <name> skill'")`.
-- Tell the user the skill is written, and that to start using it they press **Merge & Push**
-  in the web UI — that lands it on `main`. You cannot push, and every new chat is cloned from
-  `main`, so the skill appears only after Merge & Push, and only in a NEW chat (this
-  conversation's skill list was fixed when it started).
+- You do NOT run git. Your file changes are committed and the thread branch is pushed for you
+  at the end of the turn.
+- Tell the user that to start using the skill they press **Merge & Push** in the web UI —
+  that lands it on `main`. You cannot push, and every new chat is cloned from `main`, so the
+  skill appears only after Merge & Push, and only in a NEW chat (this conversation's skill
+  list was fixed when it started).
