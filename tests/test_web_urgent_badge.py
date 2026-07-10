@@ -63,22 +63,22 @@ class TestUrgentBadge:
     def test_pill_appears(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee")
         state._mark_urgent("t1")
-        assert ">urgent<" in render_index("")
+        assert ">urgent<" in render_index()
 
     def test_pill_clears_on_clear(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee")
         state._mark_urgent("t1")
-        assert ">urgent<" in render_index("")
+        assert ">urgent<" in render_index()
         state._clear_urgent("t1")
-        assert ">urgent<" not in render_index("")
+        assert ">urgent<" not in render_index()
 
     def test_survives_restart_via_load_cache(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee")
         state._mark_urgent("t1")
         state._URGENT.clear()                 # simulate restart
-        assert ">urgent<" not in render_index("")
+        assert ">urgent<" not in render_index()
         state.load_urgent_cache()
-        assert ">urgent<" in render_index("")
+        assert ">urgent<" in render_index()
 
     def test_route_clears_on_open(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee")
@@ -102,7 +102,7 @@ class TestPrecedence:
         _make_thread(threads_root, "t1", "Coffee")
         state._mark_unseen_response("t1")   # also "new"
         state._mark_urgent("t1")
-        html = render_index("")
+        html = render_index()
         assert ">urgent<" in html
         assert ">new<" not in html
         assert ">unmerged<" not in html
@@ -111,6 +111,6 @@ class TestPrecedence:
         _make_thread(threads_root, "t1", "Coffee")
         state._set_status("t1", "error", error="boom")
         state._mark_urgent("t1")
-        html = render_index("")
+        html = render_index()
         assert ">error<" in html
         assert ">urgent<" not in html

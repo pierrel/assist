@@ -186,16 +186,10 @@ def _thread_status_rank(tid: str, stage: str) -> int:
     return 4                           # everything else — ready / error / unmerged / idle
 
 
-def render_index(query: str = "") -> str:
-    q = (query or "").strip()
-    ql = q.lower()
+def render_index() -> str:
     items = []
     for tid in MANAGER.list():
         title = _thread_title(tid)
-        # Search matches the displayed title (== the thread's description),
-        # case-insensitive substring — the text the user actually sees and types.
-        if ql and ql not in title.lower():
-            continue
         status = _get_status(tid)
         stage = status.get("stage", "ready")
         badge = ""
@@ -253,31 +247,23 @@ def render_index(query: str = "") -> str:
             )
         items.append((
             _thread_status_rank(tid, stage),
-            f'<li>'
+            # data-desc carries the lowercased description for the client-side
+            # search filter (filterThreads); html.escape keeps it attribute-safe.
+            f'<li data-desc="{html.escape(title.lower())}">'
             f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
             f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
             f'<button type="submit" class="del-btn" aria-label="Delete thread" '
             f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
             f'</form></li>'
         ))
-    matched = len(items)
     # Order by STATUS band first, then last-message age within the band. MANAGER.list()
     # already returns threads mtime-descending (newest activity first), and Python's sort
     # is STABLE, so sorting by the rank alone keeps that mtime order inside each band.
     items.sort(key=lambda t: t[0])
-    if items:
-        items_html = "\n".join(item_html for _, item_html in items)
-    else:
-        items_html = (
-            f'<li><em>No threads match &ldquo;{html.escape(q)}&rdquo;.</em> '
-            f'<a href="/">clear</a></li>'
-            if ql else "<li><em>No threads yet</em></li>"
-        )
-    search_status = (
-        f'<p style="font-size:.85rem; color:#6b7280; margin:.2rem 0 .6rem;">'
-        f'{matched} match{"" if matched == 1 else "es"} for '
-        f'&ldquo;{html.escape(q)}&rdquo; &middot; <a href="/">clear</a></p>'
-    ) if q else ""
+    items_html = (
+        "\n".join(item_html for _, item_html in items)
+        if items else "<li><em>No threads yet</em></li>"
+    )
     return f"""
     <html>
       <head>
@@ -343,13 +329,11 @@ def render_index(query: str = "") -> str:
           </div>
 
           <h2 style="font-size:1.2rem">Threads</h2>
-          <form method="get" action="/" style="margin:0 0 .6rem;">
-            <input type="search" name="q" value="{html.escape(q)}"
-                   placeholder="Search threads..." aria-label="Search threads"
-                   style="width:100%; box-sizing:border-box; padding:.7rem .8rem; font-size:16px; border:1px solid #e5e7eb; border-radius:6px;" />
-          </form>
-          {search_status}
-          <ul>
+          <input type="search" id="threadSearch" oninput="filterThreads(this.value)"
+                 placeholder="Search threads..." aria-label="Search threads"
+                 style="width:100%; box-sizing:border-box; padding:.7rem .8rem; font-size:16px; border:1px solid #e5e7eb; border-radius:6px; margin:0 0 .4rem;" />
+          <p id="threadSearchCount" style="font-size:.85rem; color:#6b7280; margin:.2rem 0 .6rem;"></p>
+          <ul id="threadList">
             {items_html}
           </ul>
         </div>
@@ -363,6 +347,20 @@ def render_index(query: str = "") -> str:
             }} else {{
               button.classList.remove('visible');
             }}
+          }}
+          // Client-only thread search: substring-filter the already-loaded list by
+          // each row's data-desc (the lowercased description). No server round-trip.
+          function filterThreads(q) {{
+            q = q.trim().toLowerCase();
+            const rows = document.querySelectorAll('#threadList li[data-desc]');
+            let shown = 0;
+            rows.forEach(function (li) {{
+              const match = !q || li.getAttribute('data-desc').indexOf(q) !== -1;
+              li.style.display = match ? '' : 'none';
+              if (match) shown++;
+            }});
+            document.getElementById('threadSearchCount').textContent =
+              q ? (shown + ' match' + (shown === 1 ? '' : 'es')) : '';
           }}
         </script>
         {_PULL_TO_REFRESH_SCRIPT}
@@ -1164,8 +1162,8 @@ def _capture_conversation(tid: str, reason: str) -> None:
 # --- Routes -------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def index(q: str = "") -> str:
-    return render_index(q)
+async def index() -> str:
+    return render_index()
 
 
 # A tiny inline SVG favicon — no static-file infra. Browsers auto-request

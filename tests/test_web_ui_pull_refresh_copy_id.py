@@ -29,7 +29,7 @@ def _make_thread(root, tid, title="A thread"):
 
 class TestPullToRefresh:
     def test_index_has_pull_to_refresh(self, threads_root):
-        html = render_index("")
+        html = render_index()
         assert "pull to refresh" in html and "location.reload()" in html
 
     def test_thread_page_has_pull_to_refresh(self, threads_root):
@@ -72,4 +72,4 @@ class TestCopyThreadId:
 
     def test_index_has_no_copy_id(self, threads_root):
         # copy-id is thread-scoped — not on the list page
-        assert "copyThreadId" not in render_index("")
+        assert "copyThreadId" not in render_index()
