@@ -63,6 +63,9 @@ class TestThreadSearch:
         assert "function filterThreads(" in html                 # the client filter
         assert 'oninput="filterThreads(this.value)"' in html      # wired to the input
         assert 'id="threadList"' in html                         # the list it filters
+        # filterThreads writes the count to this id; if it's renamed, getElementById
+        # returns null and the whole filter throws on every keystroke.
+        assert 'id="threadSearchCount"' in html
 
 
 class TestSetDescription:
