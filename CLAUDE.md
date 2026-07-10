@@ -62,6 +62,7 @@ The main Claude (you) writes the code, runs the evals, and ships. The code-revie
 | **Readability** | Can someone reading this fresh in three months understand what it does and why? Where are the load-bearing comments missing? Where are comments restating obvious code? |
 | **Existing patterns** | Does this follow conventions already established elsewhere in the repo (middleware shape, skill loading, eval style, threading model)? Is it reinventing something we already have? |
 | **Design adherence** | Does the diff implement what the Phase-1 plan committed to? Are deviations called out and justified, or did they slip in unannounced? |
+| **Docstring & comment alignment** *(its own pass, not folded in — required)* | After the change, sweep EVERY docstring (module/class/function), README/design-doc snippet, and inline comment that references anything the diff touched: does it still match the code NOW — the path/marker/filename it names, the param it documents, the tool set / return shape / trust boundary it describes, the channels/sources it enumerates? A stale doc is a real defect (it misleads the next reader **and the agent**), not cosmetic. Run hardest after a redesign, rename, path/marker change, or moved responsibility. Bit PR #193: ~5 review rounds of pure doc-drift because this wasn't a dedicated lens. |
 | **Refactoring opportunities** | Is there code outside the diff that this change makes easier to simplify? Note them — but do NOT widen the scope of this PR unless the user asks. |
 | **Shared logic & LOC reduction** | Treat every line as a liability — each LOC is a potential bug and a maintenance cost. Actively hunt for duplicated or near-duplicated logic (within the diff AND against existing modules) that could be extracted into one shared helper, and for parallel code that should reuse an existing function instead of reimplementing it. Prioritize consolidating **copy-pasted load-bearing logic** — the subtle kind that must stay in sync (id-preserving message edits, retry tuples, tool-call pairing) — since divergence there is a latent bug. Where a smaller diff covers the same ground, say so. This is the in-PR complement to *Refactoring opportunities* (which looks outward and defers scope): here, prefer the share/extract when it cuts total LOC without fighting the design. Bit PR #138: the breaker copy-pasted loop_detection's strip-and-terminate block and re-implemented its event pairing — both shared in review, net LOC down. |
 
@@ -97,7 +98,14 @@ A push to an existing PR may also auto-trigger a Copilot review even without an 
    - **Address it** if the concern is real and aligned with the design — fix the code, push, move on.
    - **Push back** if it's a false positive, already-addressed, or it would push the implementation away from the Phase-1 design. Stick to the design — Copilot has no context for the trade-offs your design team weighed.
    - Watch for **re-flagged false positives**: Copilot frequently keeps the same backlog of "concerns" across rounds even after the code addresses them. Verify in the current file (`grep -n` on the named identifier) and don't re-fix.
-4. After fixing, push and re-request Copilot for the next round.
+4. After fixing, push and re-request Copilot for the next round. **Before (or in
+   parallel with) each re-request, re-run the LOCAL code-review loop on the
+   changed areas — including the docstring/comment-alignment lens — until a local
+   round is clean.** The local review doesn't stop at PR time: every post-PR
+   change (a Copilot fix, a redesign, a marker/param/path change) is a *change*
+   and gets the local loop again, so drift is caught locally *before* Copilot
+   surfaces it round after round. (PR #193 spent ~5 Copilot rounds on pure
+   doc-drift the local docstring-alignment lens would have caught in one.)
 5. **Resolve & reply** to comments before moving on:
    - For comments that are addressed in code, resolve the conversation thread (GraphQL `resolveReviewThread`) so the PR view stays clean.
    - For comments you're declining (false positive, scope, design-aligned trade-off), post a short reply on the thread (`POST /repos/<owner>/<repo>/pulls/<PR#>/comments/<comment_id>/replies`) explaining the rationale, then resolve.
