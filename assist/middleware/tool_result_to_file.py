@@ -4,7 +4,8 @@ Some tools return a lot of text — ``read_url`` (a full web page), ``execute`` 
 long build/test log).  Left inline, a few of those flood the agent's context (the
 slow-zone the context work fights).  Truncating loses everything past the cap.
 Instead, for an opt-in set of tools, this middleware writes the full result to
-``/large_tool_results/<tool_call_id>`` (the prefix deepagents' built-in eviction
+``/large_tool_results/<tool_call_id>`` (or ``/large_tool_results/untrusted-<id>`` for an
+``untrusted=True`` instance — the prefix deepagents' built-in eviction
 uses, and which its filesystem system prompt already tells the model to
 ``grep``/``read_file``) and replaces the tool result with a short PREVIEW + the
 path + an explicit grep instruction.  Full content stays available; model-visible
@@ -94,7 +95,10 @@ class ToolResultToFileMiddleware(AgentMiddleware):
 
     ``tools`` is a POSITIVE allowlist — a tool not listed is never touched (containment
     by construction).  ``preview_style`` is per-instantiation: ``head`` for read_url
-    (proven), ``head_tail`` for execute (log tails hold the salient line).
+    (proven), ``head_tail`` for execute (log tails hold the salient line).  ``untrusted``
+    is per-instantiation too: when True the offload path is ``/large_tool_results/untrusted-<id>``
+    (see ``UNTRUSTED_OFFLOAD_MARK``) so ``UrlProvenanceMiddleware`` won't provenance a URL read
+    back from it; the default writes ``/large_tool_results/<id>``.
     """
 
     name = "ToolResultToFileMiddleware"
