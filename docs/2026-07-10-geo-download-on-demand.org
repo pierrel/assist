@@ -1,6 +1,6 @@
 #+title: Geo download-on-demand + geo management page — PRD
 #+date: <2026-07-10>
-#+status: DESIGN — decisions settled (PR #194 review, 2026-07-10); next: design-review team
+#+status: DESIGN — decisions settled + 5-lens design review folded in (2026-07-10); next: Pierre's ack on S1/S2, then Phase-2 implementation
 
 This is a *product-requirements / design doc for review*, not an as-built record.
 It captures the feature, the design the architect + a codebase exploration
@@ -96,6 +96,200 @@ via an HTTP =HEAD= (=Content-Length=) on the catalog's PBF URL at proposal time
 just isn't the source of it.) The later transit-add flow (its own action, outside
 this proposal) sizes its GTFS download the same =HEAD=-computed way.
 
+* Design-review outcomes (2026-07-10, 5-lens team + code-verified)
+A parallel design-review team ran all five Phase-1 lenses (simplicity, agentic/
+framework-fit, user-intention, clean-interfaces, threat-model). The three
+BLOCKERs and the two cross-lens design shifts were *verified against the actual
+code* before adoption. Net: the safety spine (HITL-before-import, allowlisted
+slug, off-loop provisioner, =path:=-render reuse) is sound; the changes below
+tighten it and cut ~250–350 LOC of over-build. Sections further down are revised
+to match; this is the change record.
+
+** BLOCKERs (verified, adopted)
+- *B1 — the agent can't obtain a valid slug → it would hallucinate Geofabrik ids*
+  (agentic-fit). =list_regions()= returns only *loaded* regions; nothing exposes
+  the ~555-entry catalog, yet =request_region_download(slug)= needs an id like
+  =us/washington= (country-prefixed, nested slash) vs =socal= (bare codename).
+  Qwen3.6 can't reproduce that scheme → allowlist-reject loop on the single LLM
+  slot. *Fix (adopted):* add a read-only =find_regions(query)= host tool — code
+  searches the pinned snapshot by display-name AND geocodes the query against each
+  region's bbox/polygon, returning candidate =\{slug, display_name, size_bytes,
+  bbox\}= ranked *smallest-extract-covering-first*. The model passes the place name
+  *as the user said it* (the existing =_geocode= name→resolve pattern); the commit
+  tool's slug *must originate from =find_regions= output* (a checkable arg-shape
+  constraint — the lever this model obeys). Bonus: makes "smallest extract" +
+  "size shown" code-enforced, and is the deferred D1 auto-detect existence check
+  for free (a name that geocodes to no catalog bbox ⇒ likely a typo ⇒ no proposal).
+- *B2 — "reuse the SMS-reply approval seam" is broken as wired* (agentic-fit +
+  clean-interfaces + threat-model). VERIFIED: =thread_manager.py:281=
+  =interrupt_on = _web_interrupt_on if triage else None= — the deepagents HITL
+  interrupt is armed *only on triage (inbound-SMS) turns*; a region proposal fires
+  on a *normal* chat turn where =interrupt_on= is =None=, so the interrupt cannot
+  fire there. =thread.py:253= =pending_reply()= is =send_reply=-specific end to
+  end. *Fix (adopted):* a *dedicated pending-proposal record*, not the send_reply
+  interrupt. The =propose_region_download= tool body records the proposal (slug +
+  bbox + size) on the =/geo= machinery, emits the =path:= map block, and returns;
+  a plain =POST /geo/{slug}/approve= (like =/geo/add=) fires the provisioner. One
+  HITL shape, no hot-path interrupt refactor, and the map/size (which need code to
+  run *before* approval) fit naturally in the tool body — the interrupt-before-body
+  model couldn't render them.
+- *B3 — the flock doesn't actually exclude* (threat-model). VERIFIED:
+  =refresh-travel-data.sh:61= locks =.refresh.lock=; the PRD's add-region locked a
+  *different* file =.provision.lock= → *no mutual exclusion*. An approved import
+  firing near the 03:00 refresh cron interleaves two destructive Nominatim rebuilds
+  (=docker volume rm= under an in-flight import + torn =config.yml=) → corrupted
+  geocoder. *Fix (adopted):* ONE shared lock path taken by refresh + add + remove +
+  transit (change the refresh script to it in the same PR); the Provisioner
+  acquires it non-blocking so a queued import waits out the cron.
+
+** Cross-lens design shifts (adopted)
+- *Provisioner is a thin executor, NOT a =Scheduler= clone* (simplicity +
+  clean-interfaces). This flow is event-driven (submit once on approval), not a
+  cron — drop the poll loop / =due= / =tick= / health-gate / in-flight-dedup
+  (=max_workers=1= + the shared flock + the =state:importing= pre-write already
+  serialize). It's ~40 lines: a module-level =ThreadPoolExecutor(max_workers=1)=, a
+  =submit(op, slug, origin_tid=None)= (=op ∈ \{add, remove, transit\}=; =origin_tid=
+  only for agent-proposed adds), and a startup =importing→failed= sweep. Coupling to
+  the web is *injected callbacks* (=Provisioner(registry, run_job, on_complete,
+  health_check)=), never imports up into =manage/web= — mirroring
+  =Scheduler(store, dispatch, health_check)= and =notify=. Saves ~100 LOC + a whole
+  daemon mental model.
+- *Registry: ONE writer, thinned fields* (clean-interfaces B1 + simplicity). The
+  doc contradicted itself (table said =registry.py= sole writer; body said the bash
+  scripts write it; step 1 had the Provisioner write it). Resolve toward the
+  =ScheduleStore= precedent: *=registry.py= is the sole reader+writer*; the bash
+  scripts write *nothing* to =regions.json= (they do data work only), the
+  Provisioner writes =importing= then =ready=/=failed= via =registry.py=. Thin the
+  record to what's actually read — =slug=, =state=, =has_transit=, =display_name=,
+  =bbox=, =last_used_at= (see U3), =completion_delivered= (D4 durability, below);
+  drop =geofabrik_url= / =osm_file= / =transit_source= / =job_log= (derivable from
+  the catalog-by-slug or a fixed log path). Every dropped field is one fewer
+  sync-divergence site.
+
+** IMPORTANT — user-intention (U)
+- *U1 — draw the real region polygon, not a bbox rectangle.* The snapshot's full
+  index variant already carries the region polygon (bbox derives from it), and the
+  =path:= renderer draws polylines — so the true outline costs nothing extra. A bbox
+  for =us/washington= is mostly ocean + neighboring states; it doesn't answer "what
+  am I downloading," the whole point of the preview. Encode the polygon ring as the
+  =path:= (cap points if payload-heavy); fall back to bbox only if geometry is
+  absent.
+- *U2 — put the degradation cost on the approval message, deterministically.* The
+  dominant cost isn't bytes — it's the hours-long *platform-wide geocoding
+  degradation* during the Nominatim rebuild (D3). That currently lives only in soft
+  agent prose — the exact shape Pierre rejected for size. Add a fixed, code-supplied
+  line to the approval message beside the size: e.g. "Adding a region rebuilds the
+  geocoder (up to a few hours); address lookups for all regions are degraded until
+  it finishes."
+- *U3 — "delete UNUSED" needs a usage signal.* The page shows add-date/size, never
+  last-used, so deletion is uninformed. Stamp a coarse =last_used_at= when a
+  geocode/route resolves inside a region's bbox and surface "used N days ago" on the
+  page. (If query-path tracking is judged too costly for v1, defer it *explicitly* —
+  don't silently reduce "unused" to "list".)
+- *U4 — transit: OFFER to add when a feed exists but isn't loaded.* Today the
+  guidance only ever says "unavailable," even when a feed is configured and transit
+  is one opt-in away. Branch the guidance on feed-configured: if addable, the agent
+  *offers* to add transit (its own HITL action), mirroring the download offer — this
+  is the "work transit in" Pierre asked for.
+- *U5 — label the proposal with the region =display_name=* (treated as untrusted —
+  see T6) and *state transit is a separate layer* on the page (one line).
+
+** IMPORTANT — agentic / small-model (A)
+- *A1 — code carries the original intent into the completion message.* A bare "the
+  <region> download finished" + thread history asks Qwen3.6 to re-locate + re-derive
+  the original intent (multi-hop over stale context — the small model drops this).
+  Store the originating request on the proposal record and interpolate it: "The
+  <region> data you were waiting on is loaded. The user originally asked: '<request>'.
+  Complete that now." This is NOT an auto-re-run (Pierre's steer holds — it's a
+  self-contained new turn naming the intent; the agent still decides *how*).
+- *A2 — =has_transit= must be in tool output* (=list_regions=/=find_regions=), so
+  "name transit unavailable for <region>" is checkable against a result, not model
+  memory. (Guidance-appropriate; no middleware.)
+- *A3 — typo over-proposal is eval-bounded, not middleware.* Expect the small model
+  to over-propose on typos; the HITL gate is the real protection (a spurious proposal
+  costs a decline), and =find_regions='s geocode (typo ⇒ no catalog bbox ⇒ no
+  proposal) is the by-construction damper. Do NOT add an ambiguous-signal middleware
+  guard. Prove the bound with evals (below).
+
+** IMPORTANT — threat-model (T) — [B3 above is the blocker; these are the rest]
+- *T1 — CSRF/auth on the destructive =/geo= routes.* VERIFIED: only =/inbound/sms=
+  authenticates (=X-Assist-SMS-Secret=, =threads.py:1423=); every other mutating
+  route relies on network posture. =POST /geo/\{slug\}/delete= triggers a destructive
+  Nominatim rebuild off one forgeable POST gated only by a client-side =confirm()=.
+  The whole safety model is "no import without a real human approval" — but on the
+  web path that approval *is* an unauthenticated POST. *Fix:* a server-side token
+  (reuse the =X-Assist-SMS-Secret= shape, or an anti-CSRF token) on =/geo/add=,
+  =/approve=, =/delete=, =/transit=; server-side re-confirm delete.
+- *T2 — the index PBF URL is a trusted-into-=curl= sink.* "URL always from the index"
+  contains the *caller*, not the third-party JSON. A poisoned/hand-edited snapshot
+  entry (=file://=, =http://169.254.169.254=, a redirect-following HEAD) reaches
+  =curl=. *Fix:* validate every catalog URL is =https://= on an allowlisted host
+  (=download.geofabrik.de=/known mirror) at snapshot-refresh AND before each fetch;
+  =curl --proto '=https'=; constrain redirect targets to the same host.
+- *T3 — enforce the size ceiling DURING download, not from the HEAD.* A hostile host
+  can advertise a small =Content-Length= then stream unboundedly (chunked omits it)
+  → disk fill → the documented fork()-denial. *Fix:* =curl --max-filesize <CEIL>
+  --max-time <T>=, THEN a post-download =stat= ≤ ceiling before import. One coarse
+  disk bound (region-count cap sized to the rebuild's transient peak ≈ several×
+  sum(PBF)), not three overlapping caps.
+- *T4 — resolve the live-HEAD ⇄ cached-size tension* (threat-model F4 said drop the
+  live HEAD; simplicity #3 said drop the weekly 555-HEAD cache — opposite). *Adopted
+  middle:* size comes from the snapshot (cached at refresh — but lazily / for
+  candidates, NOT 555 weekly HEADs), surfaced by =find_regions=; *no live HEAD on
+  the request path* (it held the =THREAD_QUEUE= turn slot + re-opened T2). If an
+  exact figure is ever required, a single off-loop HEAD in the tool body with the T2
+  host/scheme constraint + a tight timeout — never in the approval renderer, never
+  on the loop.
+- *T5 — detached Nominatim import vs registry state.* =reimport_nominatim= starts a
+  detached =docker run -d= and returns; the volume is destroyed up front and the
+  region isn't queryable until the async import finishes. *Fix:* the script blocks on
+  import completion + a =/status= 200 before flipping =state:ready= (a restart then
+  kills the blocking child → reconcile→failed is the correct consistent outcome), not
+  fire-and-forget.
+- *T6 — prompt injection via the index =display_name=.* The completion message +
+  =find_regions=/=list_regions= output must build agent-facing text from the *slug*
+  (bounded allowlist) + code copy, never interpolate the raw third-party
+  =display_name= into the prompt; if shown, confine it to the map label (already a
+  capped sandboxed text node).
+- *Nits:* slug→filename collision (store =osm_file= explicitly or reversible-encode);
+  =rm=/osmium =basename=-confine registry paths; the =/geo/add= picker must not render
+  ~555 Leaflet iframes (paginate/filter first, build HTML in =run_in_threadpool=);
+  transit-add token discipline (=curl -K= stdin, never argv; keep the fetch URL out of
+  the job log).
+
+** IMPORTANT — clean-interfaces (C)
+- *C1 — completion durability lives in the registry* (=completion_delivered:false=
+  on the =ready= entry), re-attempted health-gated — so a web restart between "import
+  done" and "LLM free" doesn't lose the D4 notification (no second in-memory queue).
+- *C2 — rename =request_region_download= → =propose_region_download=* (CQS: it
+  proposes; the Provisioner downloads, async — "download" is doubly misleading).
+  =list_regions= is an accurate query — keep.
+- *C3 — split the catalog Utility* into a refresh-time *builder* (fetch
+  =index-v1.json=, derive bbox from geometry, cache sizes → writes the pinned
+  snapshot) and a request-time side-effect-free *reader* (=catalog.get/search/
+  is_allowed=). Consequence: the *hand-curated transit overlay is a SEPARATE file the
+  builder merges in* — if transit is edited into the generated snapshot, the next
+  weekly regenerate silently clobbers it (real trap).
+- *C4 — three symmetric Engine scripts, not =--with-transit= into the heavy path.*
+  Adding transit to an already-loaded region is a cheap MOTIS-only reimport — a
+  different path from a fresh import. =add-region.sh= / =remove-region.sh= /
+  =add-transit.sh=, each one job, each taking the shared lock. (add-region + remove
+  share the heavy rebuild recipe — factor that into one sourced helper so it isn't
+  copy-pasted, per the shared-logic lens.)
+- *C5 — one term in code: "region"* (=Region=, =RegionRegistry=, =regions.json=,
+  =add-region.sh=); keep "Geo" to the page title only. Rule: *index* = Geofabrik's
+  upstream file; *catalog* = our pinned local artifact. A single =bbox_to_path_block=
+  helper shared by the web picker + the agent proposal (don't reimplement in both).
+
+** Minor scope calls left for Pierre (everything else is adopted)
+- *S1 — =last_used_at= tracking (U3):* add it in v1 (a coarse stamp on the geocode/
+  route path) so "delete *unused*" is real, or defer it and ship "list + delete"?
+  Rec: add it — it's cheap and it's the word you chose.
+- *S2 — the manual =GET /geo/add= picker (searchable catalog):* you asked for
+  "list + delete" on the page and an *agent-driven* add; the manual picker is a third
+  surface. Keep it (cheap, reuses the snapshot) or defer per "keep scope down"? Rec:
+  defer to a later expand; v1 = agent-proposed add + page list/delete/transit.
+
 * What you asked for (intent)
 - When asked for geo-specific info assist can't find in the current region, *offer
   to download* that region; when it's loaded, *let the agent know via a new
@@ -147,44 +341,44 @@ this proposal) sizes its GTFS download the same =HEAD=-computed way.
 ** Safety model — HITL approval gate before the import (the spine)
 A region import is expensive (D3) and privileged (spawns docker/curl). So it is
 modeled like an outbound side effect that requires approval:
-1. The agent *proposes* a download: =request_region_download(slug)= records a
-   *pending proposal* on the thread and renders the region's *bbox map preview*
-   plus the *total download size* — fetched by code via HTTP =HEAD= on the
-   catalog's PBF URL (deterministic, never an agent-supplied figure). Nothing
-   heavy runs.
-2. You *approve* through the existing approval flow (the same mechanism the
-   SMS-send reply uses — =awaiting_approval= + the thread's approve control). On
-   decline, the proposal is dropped.
+1. The agent *proposes* a download: =propose_region_download(slug)= (slug from
+   =find_regions=, per B1) records a *pending-proposal record* on the =/geo=
+   machinery and renders the region's *polygon map preview* (U1) plus the
+   *total download size* (from the snapshot cache — T4, no live request-path HEAD)
+   and the *code-supplied degradation warning* (U2). Nothing heavy runs.
+2. You *approve* via a plain =POST /geo/{slug}/approve= (server-token-gated — T1),
+   *not* the send_reply interrupt (which can't fire on a normal turn — B2). On
+   decline, the record is dropped.
 3. Only on approval does the =Provisioner= enqueue the import. This makes "an
    untrusted input caused a multi-hour disk-filling docker import" *unreachable by
    construction* — a chat message or an inbound text can at most produce a proposal
-   you must still approve.
-
-Open detail for implementation: reuse the reply-approval seam vs a small dedicated
-"pending download" approval. Recommend reusing the existing approval flow so
-there's one HITL pattern, not two.
+   you must still approve. (HITL mechanism resolved in B2: a dedicated proposal
+   record, one HITL shape, no hot-path interrupt refactor.)
 
 ** Component decomposition (Löwy roles)
 | Role            | Component                                              | Volatility encapsulated        |
 |-----------------+--------------------------------------------------------+--------------------------------|
 | Resource        | =regions.json= (infra dir); OSM/GTFS files; MOTIS =config.yml=; Nominatim volume | what data is loaded |
-| Resource Access | =assist/geo/registry.py= — sole reader/writer of =regions.json= | registry format + location |
-| Engine          | =scripts/add-region.sh=, =scripts/remove-region.sh= — heavy import/evict recipes | how a region is imported/evicted |
-| Manager         | =assist/geo/provisioner.py= — off-loop background worker (mirrors =Scheduler=) | job orchestration + liveness |
-| Client (web)    | =manage/web/geo.py= — =/geo= list/add/delete/transit routes | the management UI |
-| Client (agent)  | travel =SKILL.md= guidance + =list_regions()= + =request_region_download(slug)= | agent behavior |
-| Utility         | the *catalog* — a pinned snapshot of the Geofabrik index (slug → URL, bbox) + the hand-curated transit-feed overlay (D2) | the allowlist of what may be fetched |
+| Resource Access | =assist/geo/registry.py= — *sole reader+writer* of =regions.json= (bash writes none — B1/C-registry) | registry format + location |
+| Engine          | =scripts/add-region.sh= / =remove-region.sh= / =add-transit.sh= — one job each, shared lock (C4, B3) | how a region is imported/evicted |
+| Manager         | =assist/geo/provisioner.py= — thin off-loop executor (NOT a =Scheduler= clone — cross-lens shift); web coupling via injected callbacks (C1/C-provisioner) | job orchestration + liveness |
+| Client (web)    | =manage/web/geo.py= — =/geo= list/add/approve/delete/transit routes (server-token-gated — T1) | the management UI |
+| Client (agent)  | travel =SKILL.md= guidance + =list_regions()= + =find_regions(query)= (B1) + =propose_region_download(slug)= (C2) | agent behavior |
+| Utility (build) | catalog *builder* — fetch =index-v1.json=, derive bbox from geometry, cache sizes, merge the separate transit overlay → the pinned snapshot (C3) | how the catalog is built |
+| Utility (read)  | =assist/geo/catalog.py= — side-effect-free =get/search/is_allowed= over the snapshot (C3) | the allowlist + picker source |
 
 The trigger, the page, and the delete path all depend on the registry Resource-Access
 abstraction, not on MOTIS/Nominatim internals — so the architecture stays static.
 
 ** Regions registry — the unambiguous source of truth
-A dedicated =regions.json= in =$TRAVEL_INFRA_DIR=, written *only* by the
-provisioning scripts, read by everyone else via =assist/geo/registry.py=. Per
-region: =slug=, =display_name=, =bbox [minlon,minlat,maxlon,maxlat]=,
-=geofabrik_url=, =osm_file=, =has_transit=, =transit_source=, =size_bytes=,
-=added_at=, =state (ready|importing|failed)=, =job_log=. The base NorCal region is
-seeded =ready= / =has_transit:true= / =transit_source:"511:RG"=.
+A dedicated =regions.json= in =$TRAVEL_INFRA_DIR=, with *=assist/geo/registry.py=
+as the SOLE reader+writer* (the bash scripts write none — B1/C-registry resolve
+the earlier self-contradiction; the Provisioner writes =importing=→=ready=/=failed=
+via =registry.py=). Thinned record (only what a reader consumes): =slug=, =state
+(ready|importing|failed)=, =has_transit=, =display_name=, =bbox=, =last_used_at=
+(U3), =completion_delivered= (C1). Dropped as derivable/unread: =geofabrik_url=,
+=osm_file=, =transit_source=, =job_log=. The base NorCal region is seeded =ready= /
+=has_transit:true=.
 
 Why a dedicated file, not derived from =config.yml= + Nominatim: =config.yml=
 carries no bbox / display name / transit flag / date / import-state, and the geo
@@ -195,16 +389,21 @@ after a validated import (the validate-before-swap discipline the refresh script
 already uses). All reads happen off the event loop (=run_in_threadpool=).
 
 ** Background-job architecture (event-loop-safe by construction)
-Web/agent only *enqueue*; a =Provisioner= (mirroring =Scheduler=) runs the heavy
-work in a *subprocess*; on success it dispatches the completion notification.
-1. *Enqueue (on-loop-safe)*: on approval, =Provisioner.submit(slug, origin_tid)=
-   writes =state:importing= and does a non-blocking executor submit. No lock, no
-   subprocess, no sleep on the loop.
-2. *Execute (off-loop)*: a =ThreadPoolExecutor(max_workers=1)= (one import at a
-   time — disk-bound, and Nominatim can't overlap itself) + per-slug in-flight
-   dedup (the =Scheduler._claim/_release= pattern). The worker runs
-   =subprocess.run(["scripts/add-region.sh", slug])= — a detached, bounded child.
-   *Nothing heavy touches the loop, the THREAD_QUEUE, or the LLM slot.*
+Web/agent only *enqueue*; a *thin* =Provisioner= (an executor, NOT a =Scheduler=
+clone — see the cross-lens shift; no poll/due/tick/health-gate/dedup) runs the
+heavy work in a *subprocess*; on success it invokes the injected completion
+callback.
+1. *Enqueue (on-loop-safe)*: on approval, =Provisioner.submit(op, slug,
+   origin_tid=None)= (=op ∈ \{add, remove, transit\}=; =origin_tid= only for an
+   agent-proposed add) writes =state:importing= via =registry.py= and does a
+   non-blocking executor submit. No lock, no subprocess, no sleep on the loop.
+2. *Execute (off-loop)*: a module-level =ThreadPoolExecutor(max_workers=1)= (one
+   import at a time — disk-bound, Nominatim can't overlap itself; this plus the
+   shared flock + the =state:importing= pre-write is the serialization, so no
+   separate in-flight-dedup set). The worker runs =subprocess.run(["scripts/
+   add-region.sh", slug])= (or =remove-region.sh= / =add-transit.sh=) — a bounded
+   child that BLOCKS to completion (T5). *Nothing heavy touches the loop, the
+   THREAD_QUEUE, or the LLM slot.*
 3. *Status*: coarse registry states (=importing= → =ready= / =failed=) + a per-job
    log; no percent (imports give no clean progress). =/geo= polls the registry like
    =/thread/{tid}/status=.
@@ -230,17 +429,22 @@ Event-loop lens (Phase-2 test): hold the provisioning lock in another thread, as
 
 ** Trigger detection (per D1 — user-driven for v1)
 On a "couldn't find a place" result the agent does NOT silently fail and does NOT
-guess. Guided by =SKILL.md=, it calls =list_regions()= to state coverage, asks
-whether the place is elsewhere, and *proposes* a catalog region's download (map
-preview + size) — which you then approve (HITL). The auto-detect path (a
-planet/coarse existence check that names the region for you) is a deferred later
-refinement (D1); when it comes, the proposal → approval → import chain stays
-identical.
+guess a slug. Guided by =SKILL.md=, it calls =list_regions()= to state coverage,
+then passes the place *as the user said it* to =find_regions(query)= (B1) — code
+resolves name→candidate slug(s), so the model never synthesizes a Geofabrik id —
+and *proposes* the smallest covering candidate's download (polygon preview + size +
+degradation warning), which you approve (HITL). A query that geocodes to no catalog
+bbox ⇒ likely a typo ⇒ no proposal (A3). The auto-detect path (proactively naming
+the region without asking) is a deferred D1 refinement; the proposal → approval →
+import chain stays identical.
 
 ** Provisioning scripts (Engine)
-=scripts/add-region.sh <slug>= mirrors =refresh-travel-data.sh= (flock at
-=$TRAVEL_INFRA_DIR/.provision.lock=, validate-before-swap, argv-not-shell, atomic
-renames):
+=scripts/add-region.sh <slug>= mirrors =refresh-travel-data.sh= (validate-before-
+swap, argv-not-shell, atomic renames) and takes the *shared* lock —
+=$TRAVEL_INFRA_DIR/.travel-data.lock=, the SAME file =refresh-travel-data.sh=,
+=remove-region.sh=, and =add-transit.sh= take (B3 — the refresh script is changed
+off its current =.refresh.lock= to this shared path in the same PR, else the
+rebuilds don't exclude):
 1. *Validate slug against the catalog allowlist* (the security seam). Charset
    =[a-z0-9/-]= (index ids can nest, e.g. =us/washington=; no leading/trailing
    =/=, no =..=); slug must be an id in the pinned index snapshot; the download
@@ -262,15 +466,18 @@ the registry.
 
 ** Transit as a separate opt-in per-region layer
 A region records =has_transit= + =transit_source=. A fresh region is
-=has_transit:false=. Transit exists only where the *catalog* configures a feed for
-that region (operator id + URL/token pattern, like 511 =RG=) — there is no generic
-nationwide GTFS, so this is "transit only where a feed is configured." Opt-in:
-=scripts/add-region.sh <slug> --with-transit= (or a =/geo/{slug}/transit= button) —
-fetch the configured GTFS, add a MOTIS GTFS dataset, MOTIS reimport (cheap, no
-Nominatim touch), flip =has_transit:true=. If no feed is configured, the button is
-absent. The agent (guided) states plainly "transit isn't available for <region>
-(driving, walking, biking are)" — the data is already honest (=_plan_transit=
-returns =None= → "unavailable"); the guidance makes it *name the region*.
+=has_transit:false=. Transit exists only where the *transit overlay* (a separate
+hand-curated file, C3) configures a feed for that region (operator id + URL/token
+pattern, like 511 =RG=) — there is no generic nationwide GTFS. Opt-in via a
+*dedicated* =scripts/add-transit.sh <slug>= (C4 — a cheap MOTIS-only reimport, no
+OSM download, no Nominatim rebuild; NOT a =--with-transit= re-entry into the heavy
+path) reachable from a =/geo/{slug}/transit= button, which fetches the configured
+GTFS, adds a MOTIS GTFS dataset, MOTIS reimport, flips =has_transit:true=. Guidance
+(U4): if a feed IS configured but transit is off, the agent *offers to add it*
+(its own HITL action, mirroring the download offer); only if *no* feed is
+configured does it state "transit isn't available for <region> (driving, walking,
+biking are)" — the data is already honest (=_plan_transit= returns =None= →
+"unavailable"); =has_transit= in tool output (A2) makes the region-naming checkable.
 
 ** Geo management page
 A new submodule =manage/web/geo.py= (the schedules.py/evals.py registration
