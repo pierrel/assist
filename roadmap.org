@@ -54,7 +54,11 @@ Consider:
 1. URLs that do not work (404, etc)
 2. URLs that do not corroborate the information in the final report
 3. Better ways to search
-** TODO read_url: retrieval-on-demand instead of the 4000-char truncation cap
+** DONE read_url: retrieval-on-demand instead of the 4000-char truncation cap
+Shipped (commit 37892ca): read_url returns the FULL extracted content (no cap);
+=ToolResultToFileMiddleware= (assist/middleware/tool_result_to_file.py, wired at
+agent.py:591 for =tools={read_url}=) offloads a large result to
+=/large_tool_results/<id>= and hands the agent a preview + grep-able path. Moots #137.
 read_url currently returns =_extract_main_content(resp.text)[:4000]= — ~4000 chars ≈
 ~650-800 words ≈ ~1k tokens. A typical article body is 800-3000 words (references/docs
 far more), so the agent researches from page-TOPS and can't see anything deeper — a
@@ -732,7 +736,12 @@ stay as a thin backstop.  Lower priority now that the aggressive, misfiring
 patterns are gone.
 
 * Web UI — thread list
-** TODO Thread list ordering by status then last-message age
+** DONE Thread list ordering by status then last-message age
+Shipped: PR #188 (merged 2026-07-09). =_thread_status_rank= in
+manage/web/threads.py is the single status→rank map (urgent > busy > queued >
+new > else); a stable sort by rank alone preserves =MANAGER.list()='s
+mtime-descending order within each band, so age is the in-band tiebreak. Merge
+status dropped as a sort key.
 Sort the thread list by STATUS first, then by the age of the last message (most
 recent first) within each status band. Status ordering:
 1. urgent
