@@ -375,7 +375,7 @@ def create_agent(model: BaseChatModel,
             # context-flooder for the small model.  head_tail preview: a log's salient
             # line (the error/exit summary) is at the TAIL, not the head.
             ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
-                                       preview_style="head_tail"),
+                                       preview_style="head_tail", untrusted=True),
             skills_mw, memory_mw, ContextRiderMiddleware(), logging_mw],
         backend=backend,
         subagents=[context_sub, research_sub, critique_sub_agent],
@@ -588,7 +588,8 @@ def create_research_agent(model: BaseChatModel,
                 # Offload a large read_url result to /large_tool_results/ + hand the
                 # agent a preview + path to grep (full page reachable, context bounded).
                 # Sanitizes before writing, so it's order-independent vs the sanitizer.
-                ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000),
+                ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000,
+                                           untrusted=True),
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),

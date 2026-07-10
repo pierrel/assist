@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_FLOOR_CHARS = 4000   # below this, return inline — grepping a tiny file is worse
 _PREVIEW_CHARS = 600
+_OFFLOAD_DIR = "large_tool_results"   # deepagents' offload prefix (its grep guidance names it)
+# An UNTRUSTED offload (read_url page content / execute output — both attacker-influenceable)
+# is written under this exact path fragment, so a later read_file/grep of it is recognizable
+# to UrlProvenanceMiddleware, which imports THIS constant and never provenances a URL from such
+# a read. Single source of truth so the writer and the guard can't drift.
+UNTRUSTED_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/untrusted-"
 
 
 def _preview(content: str, style: str) -> str:
@@ -94,12 +100,16 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     name = "ToolResultToFileMiddleware"
 
     def __init__(self, backend, *, tools: frozenset[str] | set[str],
-                 floor_chars: int = _DEFAULT_FLOOR_CHARS, preview_style: str = "head"):
+                 floor_chars: int = _DEFAULT_FLOOR_CHARS, preview_style: str = "head",
+                 untrusted: bool = False):
         super().__init__()
         self.backend = backend
         self._tools = frozenset(tools)
         self._floor = floor_chars
         self._style = preview_style
+        # Marks offloads from this instance as untrusted content (see UNTRUSTED_OFFLOAD_MARK):
+        # the filename carries the marker so UrlProvenanceMiddleware won't trust its URLs.
+        self._untrusted = untrusted
 
     def _offload(self, request: ToolCallRequest, result):
         if request.tool_call.get("name") not in self._tools:
@@ -112,7 +122,12 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # Sanitize before persisting so a later grep/read_file can't re-inject raw
         # ANSI/control bytes (the BadRequest-outage class) from the offloaded file.
         content = _sanitize(content)
-        path = f"/large_tool_results/{sanitize_tool_call_id(result.tool_call_id)}"
+        fname = sanitize_tool_call_id(result.tool_call_id)
+        # Untrusted offloads land at /large_tool_results/untrusted-<id> so a later
+        # read_file/grep of them is recognizable to the provenance guard (no mixing of
+        # trusted and untrusted large results in the same namespace).
+        path = (f"/{UNTRUSTED_OFFLOAD_MARK}{fname}" if self._untrusted
+                else f"/{_OFFLOAD_DIR}/{fname}")
         write = self.backend.write(path, content)
         if getattr(write, "error", None):
             logger.warning("ToolResultToFile: write to %s failed: %s", path, write.error)

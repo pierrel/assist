@@ -16,7 +16,7 @@ their content is attacker-derivable: the model's OWN prior text (else it launder
 fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
-and a ``read_file``/``grep`` of OFFLOADED read_url content (under
+and a ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute output) (under
 /large_tool_results/) — the SAME page content laundered through a file. So a URL
 sourced only from fetched-page content, direct or offloaded, cannot be fetched; to
 reach a new page the agent re-searches. A URL sourced no other way — a pure
@@ -47,6 +47,8 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from assist.middleware.tool_result_to_file import UNTRUSTED_OFFLOAD_MARK
+
 logger = logging.getLogger(__name__)
 
 _READ_TOOL = "read_url"
@@ -75,16 +77,17 @@ _MAX_LISTED = 8
 # ``…/Mercury_(element)`` and the model's copied ``…/Mercury_(element)`` both
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
-# File-read tools whose result can surface OFFLOADED read_url page content: a large
+# File-read tools whose result can surface OFFLOADED untrusted content (read_url page, execute output): a large
 # read_url result is written to /large_tool_results/<id> and the model greps/read_files
 # it back (ToolResultToFileMiddleware). That read is still read_url page content — the
 # untrusted channel, laundered through a file — so URLs in it must stay untrusted.
 _FILE_READ_TOOLS = {"read_file", "grep"}
-# The offload-dir PATH form (with the trailing slash the real path/filename always has):
-# matches a /large_tool_results/<id> path in the read's args and in a grep-all's listed
-# filenames, but NOT a bare prose mention of "large_tool_results" (docs, a report) — so a
-# legitimate result that merely names the concept isn't misclassified as offloaded.
-_OFFLOAD_MARK = "large_tool_results/"
+# UNTRUSTED offloads (read_url/execute) are written at .../large_tool_results/untrusted-<id>
+# by ToolResultToFileMiddleware, which sets the untrusted-ness AT WRITE TIME (where it knows
+# the tool). We key on that exact fragment (imported, so writer + guard can't drift): a bare
+# prose mention of "large_tool_results" can't match it, and a normal (future-trusted) offload
+# at .../large_tool_results/<id> is NOT excluded — no mixing of trusted/untrusted.
+_OFFLOAD_MARK = UNTRUSTED_OFFLOAD_MARK
 # The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
 # a marker here means the read TARGETS offloaded content.
 _OFFLOAD_PATH_KEYS = ("path", "file_path", "glob")
@@ -117,7 +120,7 @@ def _message_text(message: Any) -> str:
 
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
     """True if a ``read_file``/``grep`` (whose originating call IS known) touched
-    OFFLOADED read_url content — the same untrusted page content laundered through a
+    OFFLOADED untrusted content (read_url page, execute output) — the same untrusted page content laundered through a
     file. Two ways it shows up: the read's TARGET PATH is under /large_tool_results/
     (checked on the LOCATION args only — path/file_path/glob, not the grep ``pattern``),
     OR the result names an offloaded file (grep's default ``files_with_matches`` lists
@@ -159,7 +162,7 @@ def _seen_urls(messages: list) -> dict[str, str]:
     ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
     first, then fetching it (observed on Qwen3.6, 14 of 24 fetches slipped through this
     way); (2) ``read_url`` results — arbitrary, possibly attacker-controlled page
-    content; and (3) a ``read_file``/``grep`` of OFFLOADED read_url content (under
+    content; and (3) a ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute output) (under
     /large_tool_results/) — the SAME page content laundered through a file
     (ToolResultToFileMiddleware writes big pages there and the model greps them). So a
     URL appearing only inside fetched-page content — direct or offloaded — never

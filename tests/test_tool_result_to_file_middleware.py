@@ -11,7 +11,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from assist.middleware.tool_result_to_file import (
-    ToolResultToFileMiddleware, _DEFAULT_FLOOR_CHARS, _PREVIEW_CHARS)
+    ToolResultToFileMiddleware, _DEFAULT_FLOOR_CHARS, _PREVIEW_CHARS, UNTRUSTED_OFFLOAD_MARK)
 
 
 class _StubBackend:
@@ -55,6 +55,28 @@ def test_large_result_offloaded_to_file_and_bounded():
     assert isinstance(out, ToolMessage)
     assert len(out.content) < _PREVIEW_CHARS + 500
     assert path in out.content and "grep(" in out.content
+
+
+def test_untrusted_offload_marks_the_path():
+    # untrusted=True writes to /large_tool_results/untrusted-<id> so UrlProvenanceMiddleware
+    # can recognize a later read/grep of it and never provenance its URLs. The model still
+    # gets the exact (untrusted-) path to grep.
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(backend, tools=frozenset({"read_url"}),
+                                    floor_chars=4000, untrusted=True)
+    out = _run(mw, _Req(), _msg("x" * 5000))
+    path = next(iter(backend.written))
+    assert path.startswith(f"/{UNTRUSTED_OFFLOAD_MARK}"), path
+    assert path in out.content and "grep(" in out.content
+
+
+def test_trusted_offload_has_no_untrusted_marker():
+    # Default (untrusted=False) keeps the plain /large_tool_results/<id> path — no mixing:
+    # a trusted large offload is NOT flagged as untrusted.
+    backend = _StubBackend()
+    out = _run(_mw(backend), _Req(), _msg("y" * 5000))
+    path = next(iter(backend.written))
+    assert path.startswith("/large_tool_results/") and "untrusted-" not in path, path
 
 
 def test_small_result_returned_inline():
