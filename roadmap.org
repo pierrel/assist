@@ -777,3 +777,24 @@ picks based on the question, instead of mixing everything into the general web s
 - *Others* as useful (news, etc.; maps/places already covered by the travel tool).
 Route by intent (the agent, or a thin classifier) → the right backend. Complements the
 general-web engine-rotation + keyed-API resilience work (see the rate-limiting roadmap item).
+
+* Travel & geo
+** TODO Download additional geos on demand + a geo management page
+Today the travel/geo stack is NorCal-only (Nominatim geocoder 127.0.0.1:8089 +
+MOTIS routing + 511 transit for the Bay Area). Let the agent extend it to other
+regions on demand:
+- *Detect + offer.* When the agent is asked for geo-specific info it CAN'T find
+  with the current geo data (address/POI not geocodable, region not loaded), it
+  offers to DOWNLOAD that geo, then RE-RUNS the original query against the new
+  data.
+- *Map preview.* When offering the download, display a MAP of the geo area (its
+  extent/bounds) so the user clearly sees what region is being downloaded.
+- *Management page.* List all downloaded geos and delete unused ones.
+- *Transit is a separate layer (the wrinkle).* A downloaded geo does NOT include
+  transit by default — transit (GTFS/511-style) is a different, region-specific
+  data source than the base geocode/routing (OSM/Nominatim/MOTIS). Design must
+  treat transit as an opt-in per-geo layer and tell the user when a geo has no
+  transit. (Pierre 2026-07-10.)
+Design surface: Nominatim per-region import, MOTIS routing graph per region, the
+per-geo transit layer, a download/extent picker + map preview in the web UI, and
+agent guidance for the "not-in-current-geo → offer download → re-run" flow.
