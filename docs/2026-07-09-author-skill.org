@@ -1,0 +1,61 @@
+#+title: author-skill — a skill for authoring skills
+#+date: <2026-07-09>
+
+* Goal
+Let a user ask the assist agent to *make a new skill* ("make a skill for X",
+"turn the way you just did that into a reusable skill") and have the agent
+produce a correct, discoverable ~SKILL.md~ without a developer in the loop.
+
+* Decision — runtime domain-skill authoring
+The new built-in ~author-skill~ (=assist/skills/author-skill/SKILL.md=) loads
+when the user asks to create/modify a skill and guides the agent to write a
+domain skill into the working repository's =.claude/skills/<name>/SKILL.md=.
+
+Chosen over the two alternatives:
+- *Dev-side authoring guide for built-ins* (output into =assist/skills/=,
+  committed + deployed by us). Rejected as the primary target: it is really
+  documentation-as-skill for the maintainer, not a capability for the user.
+- *Both paths in one skill.* Rejected for now — a longer body covering two
+  destinations and their deploy mechanics, for a second destination the user
+  rarely wants. Keep the body about the one path that works end-to-end at
+  runtime; a maintainer authoring a built-in can read the same rules.
+
+* Why a skill (not a scaffold script / middleware)
+Consistent with the project's guidance-first stance: authoring a skill is a
+model behaviour (write good prose with a specific frontmatter shape), not a
+deterministic transform. There is no existing scaffold to reuse; the source
+material (=README.md= "Writing a skill", =docs/2026-05-07-skill-description-format.org=,
+the =CLAUDE.md= gotcha bullets) is exactly what the skill body distills.
+
+* The skill contract (what the body enforces)
+1. *WHERE* — one folder, =.claude/skills/<name>/SKILL.md=; nothing else edited
+   to "register" it (the four-layer model: a correct description IS the
+   registration). ~name~ lowercase/hyphen, == folder name.
+2. *FRONTMATTER* — two required fields; the description shape
+   ={capability}. EXAMPLES — "…"; "…". MUST load before {trigger}.=; and the
+   load-bearing =: = colon-space trap that silently drops a skill.
+3. *BODY* — one-line ~# H1~, concrete rules + wrong-vs-right, no "when to use"
+   section, and the agent's own tool vocabulary (~read_file~/~write_file~/
+   ~edit_file~/~execute~/~ls~), never ~Bash~/~Edit~/~WebFetch~.
+4. *PUBLISH* — ~read_file~ it back to confirm the fences/fields/H1 (no fragile
+   in-shell ~python -c~ parse — it mangled on Qwen3.6 and sent the agent off the
+   rails), commit it, then tell the user to press *Merge & Push* in the web UI to
+   land it on ~main~ — only then does a new chat (cloned from ~main~) contain it.
+
+* Known limitation — create-then-use needs Merge & Push, then a fresh chat
+Two barriers, not one. (1) The agent cannot push (=git_push_blocker=), and every
+new chat clones a fresh working copy off =origin/main= — so a skill only
+*locally* committed on this thread's branch is physically ABSENT from a new
+chat's clone until the user presses *Merge & Push* (rebase→squash→push to main).
+(2) Even in a repo that already has it, =skills_metadata= is cached per session,
+so the authoring chat won't list it. The body routes the user through Merge &
+Push and tells them it appears in a *new* chat. Not worth invalidating the
+per-session cache or granting the agent push; both boundaries are cheap + clear.
+
+* Eval
+=edd/eval/test_author_skill.py= — two-assertion bar: (1) ~author-skill~ loaded,
+(2) a written ~SKILL.md~ that would actually load — valid YAML, name==folder,
+non-empty description, ~# H1~ body. The requested capability (shopping list by
+aisle) is deliberately absent from the skill's own EXAMPLES so a pass measures
+generalization, not lexical proximity. Cadence per =CLAUDE.md= (baseline N=3 →
+post-review N=5 → stability N=10).
