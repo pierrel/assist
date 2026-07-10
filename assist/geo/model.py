@@ -9,9 +9,10 @@ later catalog snapshot drops the id.
 
 ``CatalogEntry`` is a DOWNLOADABLE region from the pinned Geofabrik-index snapshot —
 the download allowlist + the picker/resolve source. ``url`` (the PBF) always comes
-from the index, never a caller; ``size_bytes`` is cached at snapshot-build time (no
-live request-path fetch); ``transit_feed`` is the hand-curated overlay's feed id for
-this region, or None where transit isn't configured.
+from the index, never a caller; ``size_bytes`` is NOT cached in the snapshot (None
+there) — the one deterministic size figure comes from a single constrained HEAD in
+the propose tool body (T4), which populates it; ``transit_feed`` is the hand-curated
+overlay's feed id for this region, or None where transit isn't configured.
 
 Both parse leniently: ``from_dict`` returns ``None`` on a malformed/short record so a
 single bad entry can't poison the whole file (the stores skip Nones), mirroring the
@@ -108,7 +109,7 @@ class CatalogEntry:
     display_name: str
     bbox: BBox
     url: str                                # the PBF download URL (from the index only)
-    size_bytes: int | None = None          # cached at snapshot-build time; None = unknown
+    size_bytes: int | None = None          # None in the snapshot; a propose-time HEAD supplies it (T4)
     transit_feed: str | None = None        # hand-curated overlay feed id, or None
 
     def to_dict(self) -> dict:

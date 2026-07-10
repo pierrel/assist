@@ -162,7 +162,7 @@ to match; this is the change record.
   scripts write *nothing* to =regions.json= (they do data work only), the
   Provisioner writes =importing= then =ready=/=failed= via =registry.py=. Thin the
   record to what's actually read — =slug=, =state=, =has_transit=, =display_name=,
-  =bbox=, =last_used_at= (see U3), =completion_delivered= (D4 durability, below);
+  =bbox=, =last_used_at= (see U3), =added_at=, =completion_delivered= (D4 durability, below);
   drop =geofabrik_url= / =osm_file= / =transit_source= / =job_log= (derivable from
   the catalog-by-slug or a fixed log path). Every dropped field is one fewer
   sync-divergence site.
@@ -379,7 +379,8 @@ as the SOLE reader+writer* (the bash scripts write none — B1/C-registry resolv
 the earlier self-contradiction; the Provisioner writes =importing=→=ready=/=failed=
 via =registry.py=). Thinned record (only what a reader consumes): =slug=, =state
 (ready|importing|failed)=, =has_transit=, =display_name=, =bbox=, =last_used_at=
-(U3), =completion_delivered= (C1). Dropped as derivable/unread: =geofabrik_url=,
+(U3), =added_at= (page display), =completion_delivered= (C1). Dropped as
+derivable/unread: =geofabrik_url=,
 =osm_file=, =transit_source=, =job_log=. The base NorCal region is seeded =ready= /
 =has_transit:true=.
 

@@ -7,6 +7,8 @@ Split by volatility (see docs/2026-07-10-geo-download-on-demand.org):
 - ``registry`` — ``RegionRegistry``, the SOLE reader+writer of ``regions.json``
   (what IS loaded + its state). A global single-file atomic-RMW store.
 - ``catalog``  — a side-effect-free reader over the pinned catalog snapshot (the
-  download allowlist + the picker/resolve source). The snapshot is BUILT elsewhere
-  (the weekly refresh), never on the request path.
+  download allowlist + the picker/resolve source), read-only on the request path.
+- ``build_catalog`` — the write-time half of the catalog: fetches the Geofabrik
+  index, derives bboxes, merges the transit overlay, and writes the pinned snapshot
+  atomically. Run by the weekly refresh, never on the request path.
 """
