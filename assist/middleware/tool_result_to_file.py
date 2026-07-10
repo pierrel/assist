@@ -107,8 +107,10 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         self._tools = frozenset(tools)
         self._floor = floor_chars
         self._style = preview_style
-        # Marks offloads from this instance as untrusted content (see UNTRUSTED_OFFLOAD_MARK):
-        # the filename carries the marker so UrlProvenanceMiddleware won't trust its URLs.
+        # When True, offloads from this instance are written to /large_tool_results/untrusted-<id>
+        # (see UNTRUSTED_OFFLOAD_MARK) so UrlProvenanceMiddleware recognizes a later read/grep of
+        # them and won't provenance their URLs — read_url page content / execute output is the
+        # untrusted channel even after it's offloaded to a file.
         self._untrusted = untrusted
 
     def _offload(self, request: ToolCallRequest, result):

@@ -16,8 +16,9 @@ their content is attacker-derivable: the model's OWN prior text (else it launder
 fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
-and a ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute output) (under
-/large_tool_results/) — the SAME page content laundered through a file. So a URL
+and a ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute
+output), written under /large_tool_results/untrusted- — the SAME content laundered
+through a file. So a URL
 sourced only from fetched-page content, direct or offloaded, cannot be fetched; to
 reach a new page the agent re-searches. A URL sourced no other way — a pure
 fabrication, or one planted in a page — is rejected. This keeps the guard a coarse,
@@ -121,7 +122,7 @@ def _message_text(message: Any) -> str:
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
     """True if a ``read_file``/``grep`` (whose originating call IS known) touched
     OFFLOADED untrusted content (read_url page, execute output) — the same untrusted page content laundered through a
-    file. Two ways it shows up: the read's TARGET PATH is under /large_tool_results/
+    file. Two ways it shows up: the read's TARGET PATH is under /large_tool_results/untrusted-
     (checked on the LOCATION args only — path/file_path/glob, not the grep ``pattern``),
     OR the result names an offloaded file (grep's default ``files_with_matches`` lists
     matching paths, so a grep-all that hit the offload dir shows it). Over-matches only
@@ -157,8 +158,8 @@ def _seen_urls(messages: list) -> dict[str, str]:
     (e.g. a stripped trailing paren on a Wikipedia URL).
 
     Scans ``HumanMessage`` content (a URL the user pasted) and TRUSTED ``ToolMessage``
-    content (search results, non-offloaded ``read_file`` reports). Three channels are
-    EXCLUDED because their content is attacker-derivable: (1) the model's own
+    content (search results, non-offloaded ``read_file``/``grep`` results). Three channels
+    are EXCLUDED because their content is attacker-derivable: (1) the model's own
     ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
     first, then fetching it (observed on Qwen3.6, 14 of 24 fetches slipped through this
     way); (2) ``read_url`` results — arbitrary, possibly attacker-controlled page
