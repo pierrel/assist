@@ -55,7 +55,9 @@ per-session cache or granting the agent push; both boundaries are cheap + clear.
 * Eval
 =edd/eval/test_author_skill.py= — two-assertion bar: (1) ~author-skill~ loaded,
 (2) a written ~SKILL.md~ that would actually load — valid YAML, name==folder,
-non-empty description, ~# H1~ body. The requested capability (shopping list by
-aisle) is deliberately absent from the skill's own EXAMPLES so a pass measures
-generalization, not lexical proximity. Cadence per =CLAUDE.md= (baseline N=3 →
-post-review N=5 → stability N=10).
+non-empty description, ~# H1~ body (parsed with the loader's own anchored
+frontmatter regex, so a non-loading skill can't mis-pass). The requested
+capability (write a limerick from a topic) is deliberately absent from the
+skill's own EXAMPLES AND overlaps no built-in skill, so a pass measures
+generalization, not lexical proximity or a disambiguation confound. Cadence per
+=CLAUDE.md= (baseline N=3 → post-review N=5 → stability N=10). Result: N=5 5/5.
