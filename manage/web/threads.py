@@ -1171,13 +1171,27 @@ async def index(q: str = "") -> str:
 # A tiny inline SVG favicon — no static-file infra. Browsers auto-request
 # /favicon.ico, so this one route gives every page a tab icon; served as SVG
 # because modern browsers honour the content-type regardless of the .ico path.
+# A psychedelic brain: a lobular brain body under a magenta->cyan->yellow
+# gradient, with dark fissure/gyri grooves, on a dark rounded square.
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
-    '<rect width="32" height="32" rx="7" fill="#1f2937"/>'
-    '<text x="16" y="23" text-anchor="middle" fill="#f9fafb"'
-    ' font-family="-apple-system,Segoe UI,Roboto,sans-serif"'
-    ' font-size="21" font-weight="700">a</text>'
-    '</svg>'
+    '<defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1">'
+    '<stop offset="0" stop-color="#ff2fb3"/>'
+    '<stop offset=".3" stop-color="#8a2be2"/>'
+    '<stop offset=".55" stop-color="#00c2ff"/>'
+    '<stop offset=".78" stop-color="#25e88a"/>'
+    '<stop offset="1" stop-color="#ffe14d"/>'
+    '</linearGradient></defs>'
+    '<rect width="32" height="32" rx="7" fill="#0b0b14"/>'
+    '<path d="M16 5C14 4 12 5 12 7C9 6 7 9 9 11C6 12 6 15 8 16'
+    'C7 19 10 22 13 21C14 23 18 23 19 21C22 22 25 19 24 16'
+    'C26 15 26 12 23 11C25 9 23 6 20 7C20 5 18 4 16 5Z" fill="url(#b)"/>'
+    '<g fill="none" stroke="#0b0b14" stroke-width="1.05"'
+    ' stroke-linecap="round" opacity=".5">'
+    '<path d="M16 6C15 9 17 11 16 14C15 17 17 19 16 21"/>'
+    '<path d="M12 9C10 10 10 12 12 13"/><path d="M10 14C9 15 10 17 12 17"/>'
+    '<path d="M20 9C22 10 22 12 20 13"/><path d="M22 14C23 15 22 17 20 17"/>'
+    '</g></svg>'
 )
 
 
