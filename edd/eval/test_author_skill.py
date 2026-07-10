@@ -59,7 +59,11 @@ class TestAuthorSkill(TestCase):
     def tearDown(self):
         strays = set(os.listdir(_BUILTIN_SKILLS_DIR)) - self._skills_before
         for name in strays:
-            shutil.rmtree(os.path.join(_BUILTIN_SKILLS_DIR, name), ignore_errors=True)
+            p = os.path.join(_BUILTIN_SKILLS_DIR, name)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
         self.assertEqual(
             strays, set(),
             f"Agent escaped the tempdir and wrote {strays} into the real "
@@ -75,7 +79,9 @@ class TestAuthorSkill(TestCase):
         })
         # A real domain repo is version-controlled, with an identity, so the
         # skill's commit step has somewhere to land instead of erroring mid-turn.
-        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        # -b main: don't inherit the machine's init.defaultBranch (may be master);
+        # the domain-repo world assumes main.
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.email", "t@t"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
