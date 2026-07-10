@@ -1,11 +1,11 @@
 #+title: Geo download-on-demand + geo management page — PRD
 #+date: <2026-07-10>
-#+status: DESIGN — awaiting Pierre's decisions (see § Decisions needed)
+#+status: DESIGN — decisions settled (PR #194 review, 2026-07-10); next: design-review team
 
 This is a *product-requirements / design doc for review*, not an as-built record.
 It captures the feature, the design the architect + a codebase exploration
-produced, and the open decisions. No code has been written. Once the decisions
-below are settled, a design-review team runs, then implementation (assist's
+produced, and the decisions (settled in PR #194's review, 2026-07-10). No code
+has been written. Next a design-review team runs, then implementation (assist's
 three-phase workflow).
 
 * Summary
@@ -13,10 +13,13 @@ Today the geo stack is *NorCal-only* (a self-hosted Nominatim geocoder + MOTIS
 routing/transit + the Bay-Area 511 GTFS feed). This feature lets assist *download
 additional geographic regions on demand*: when a query needs a place assist can't
 locate in the loaded region, the agent *proposes* downloading that region (showing
-a map of its extent); *you approve* through a human-in-the-loop gate (the same
-shape as approving an outbound text); a background job imports the region and then
-*re-runs your original question* against the new data. Plus a *geo management page*
-to list/delete loaded regions and add a per-region transit layer.
+a map of its extent *and the exact download size*); *you approve* through a
+human-in-the-loop gate (the same shape as approving an outbound text); a
+background job imports the region and, when it finishes, *notifies the agent via
+a new message on the originating thread* — the travel skill directs the agent to
+the appropriate next step, typically using the new geo to satisfy your original
+intent. There is *no automatic re-run* of the old prompt. Plus a *geo management
+page* to list/delete loaded regions and add a per-region transit layer.
 
 The load-bearing safety idea (Pierre's steer): the protection is the *HITL approval
 before the download fires* — a region import is expensive and privileged, so it
@@ -25,62 +28,82 @@ Whether the agent reaches the proposal user-driven ("which region?") or
 auto-detected is then a secondary UX question, because the approval gate protects
 either way.
 
-* Decisions needed from Pierre
-Numbered so you can reply "1a, 2b, ...". My recommendation is marked *(rec)*.
+* Decisions (settled in PR #194 review, 2026-07-10)
 
-** D1 — Trigger detection: how the agent notices a region is needed
+** D1 — Trigger detection: *user-driven for v1* (pre-review option 1a; "start here, expand later")
 The ambiguity: =_geocode= returns the *same empty result* for an out-of-region
-real place AND a typo/nonexistent place — locally we can't tell them apart.
-- *1a (rec)* — *User-driven for v1.* On "couldn't find that place," the agent
-  states what it covers ("I have Northern California"), asks whether the place is
-  in another region, and proposes a download only when you point it at one. No new
-  service. Auto-detect can be a later refinement.
-- *1b* — *Also build auto-detect now.* Stand up a worldwide existence/bbox lookup
-  so the agent proactively says "that's in Southern California — download it?"
-  without asking which. A new dependency to run + secure, and still probabilistic
-  (a typo near a real place resolves anyway).
-Either way the *approval gate* (D-fixed below) is the safety mechanism, so this is
-scope/UX, not safety.
+real place AND a typo/nonexistent place — locally we can't tell them apart. So
+for v1: on "couldn't find that place," the agent states what it covers ("I have
+Northern California"), asks whether the place is in another region, and proposes
+a download only when you point it at one. No new service. Auto-detect (a
+worldwide existence/bbox lookup that names the region proactively) is a later
+refinement. Either way the *approval gate* (D-fixed below) is the safety
+mechanism, so this was scope/UX, not safety.
 
-** D2 — The downloadable-region catalog (the allowlist AND the picker contents)
-Each catalog entry = a curated Geofabrik OSM URL + bounding box + optional transit
-feed. It is *both* the security allowlist (the only regions a download may fetch)
-*and* what the management page offers.
-- *2a (rec)* — *I seed a US shortlist, you edit.* I assemble a starter list (e.g.
-  SoCal, Pacific NW, a few major US metros) with bboxes; you trim/extend it.
-  Unblocks the build.
-- *2b* — *You specify the list now.* You give me the exact regions to expose.
+** D2 — Catalog = the *Geofabrik central index*, narrowed by user intent
+Pierre asked: is there no central index? There is. Geofabrik publishes a
+machine-readable index of *all* its extracts —
+=https://download.geofabrik.de/index-v1.json= (and a lighter =-nogeom= variant):
+~555 regions worldwide, each with a stable id (e.g. =norcal=, =socal=,
+=us/washington=), display name, parent, the official PBF download URL, and (in
+the full variant) the region polygon, from which the bbox derives. Verified
+2026-07-10. The index carries *no file sizes*; exact size comes from an HTTP
+=HEAD= on the PBF URL (=Content-Length=, after one redirect — e.g. SoCal ≈
+666 MB, verified) — which is also how the approval prompt gets its deterministic
+size figure (see D-fixed).
 
-** D3 — Geocoder rebuild cost
+So instead of a hand-seeded shortlist, the *catalog is a pinned snapshot of the
+full-variant index* (the bbox derives from its geometry) stored in
+=$TRAVEL_INFRA_DIR= — refreshed by the weekly cron, which also =HEAD=-caches
+each region's size into the snapshot, so nothing is fetched live on the request
+path; the one live =HEAD= happens at proposal time, giving the approval message
+its exact current figure. The *curation happens at selection
+time, by intent*: the agent (guided by the travel skill) narrows the index to
+the region matching what you asked for ("do you cover Seattle?" →
+=us/washington=), and the =/geo/add= picker offers a searchable list rather
+than a fixed menu. The allowlist property is unchanged — a slug must be an
+index id and the URL always comes from the index entry, never from the caller.
+Prefer the *smallest extract covering the need* (sub-state over state over
+country) to bound import cost. The *transit-feed overlay stays hand-curated*
+(only regions where we've configured a feed, e.g. 511 =RG= for the Bay Area) —
+there is no worldwide GTFS index to lean on.
+
+** D3 — Geocoder rebuild cost: *accept the full rebuild for v1* (pre-review option 3a; agreed)
 Adding a region requires a *full Nominatim rebuild* (its Docker image only imports
 into an empty DB): minutes–hours, and geocoding degrades platform-wide to MOTIS's
 weaker built-in geocoder *while the rebuild runs* (routing stays up). MOTIS routing
-itself is cheap-incremental — only geocoding has this cost. Because a rebuild now
-only ever fires *after* you approve a specific region (D-fixed), the cost is
-bounded to something you opted into.
-- *3a (rec)* — *Accept the full rebuild for v1.* Deterministic, reuses the working
-  refresh recipe; the agent warns you it takes a while.
-- *3b* — *Solve the cost first.* Investigate the incremental / multi-PBF import
-  path (community-reported flaky) before shipping, to avoid the degradation.
+itself is cheap-incremental — only geocoding has this cost. Because a rebuild only
+ever fires *after* you approve a specific region (D-fixed), the cost is bounded to
+something you opted into. Deterministic, reuses the working refresh recipe; the
+agent warns you it takes a while. The incremental / multi-PBF import path
+(community-reported flaky) stays a possible later optimization.
 
-** D4 — Re-run when the LLM is busy/down at import completion
+** D4 — Import finishes while the LLM is busy: *hold + retry the notification* (pre-review option 4a; agreed)
 The import can finish while the local LLM is saturated (e.g. the nightly eval).
-The re-run of your original question needs the LLM.
-- *4a (rec)* — *Hold + retry the re-run* until the LLM is free (we want this answer
-  delivered).
-- *4b* — *Drop it* (the schedule subsystem's default is no catch-up); you'd re-ask.
+The completion notification (see § Background-job architecture step 4 — a new
+message to the agent, *not* a blind re-run of the last prompt) needs the LLM, so
+it is held and retried until the LLM is free — we want the agent to pick the
+work back up, not drop it.
 
-** D-fixed (from your steer, not open) — always HITL before download
+** D-fixed (from Pierre's steer) — always HITL before download, *size shown*
 =request_region_download= never fires an import without your explicit approval,
 via the existing approval flow, with the region's map shown. No silent/auto
-provisioning. (This is your "the protection is HITL before download, like a text
-message send" — taken as decided.)
+provisioning. (This is the "protection is HITL before download, like a text
+message send" steer.) Additionally (PR #194): the approval message *must state
+the total download size*, and that figure is *deterministic* — computed by code
+via an HTTP =HEAD= (=Content-Length=) on the catalog's PBF URL at proposal time
+— never a number the agent supplies. (The agent isn't denied the information; it
+just isn't the source of it.) The later transit-add flow (its own action, outside
+this proposal) sizes its GTFS download the same =HEAD=-computed way.
 
 * What you asked for (intent)
 - When asked for geo-specific info assist can't find in the current region, *offer
-  to download* that region, then *re-run the original query* once it's loaded.
-- When offering, *display a map* of the region's extent so you see what's being
-  downloaded.
+  to download* that region; when it's loaded, *let the agent know via a new
+  message* so it takes the appropriate next step (typically: use the new geo to
+  satisfy the original intent). Not an automatic re-run of the old prompt.
+- When offering, *display a map* of the region's extent and *state the total
+  download size* (computed deterministically, not agent-supplied) so you see
+  what's being downloaded and what it costs.
 - A *geo management page*: list all loaded regions, delete unused ones.
 - *Transit is not bundled by default* — GTFS/511 is a separate, region-specific
   source than base OSM geocode/routing. A fresh region gives addresses +
@@ -125,8 +148,10 @@ message send" — taken as decided.)
 A region import is expensive (D3) and privileged (spawns docker/curl). So it is
 modeled like an outbound side effect that requires approval:
 1. The agent *proposes* a download: =request_region_download(slug)= records a
-   *pending proposal* on the thread and renders the region's *bbox map preview*.
-   Nothing heavy runs.
+   *pending proposal* on the thread and renders the region's *bbox map preview*
+   plus the *total download size* — fetched by code via HTTP =HEAD= on the
+   catalog's PBF URL (deterministic, never an agent-supplied figure). Nothing
+   heavy runs.
 2. You *approve* through the existing approval flow (the same mechanism the
    SMS-send reply uses — =awaiting_approval= + the thread's approve control). On
    decline, the proposal is dropped.
@@ -148,7 +173,7 @@ there's one HITL pattern, not two.
 | Manager         | =assist/geo/provisioner.py= — off-loop background worker (mirrors =Scheduler=) | job orchestration + liveness |
 | Client (web)    | =manage/web/geo.py= — =/geo= list/add/delete/transit routes | the management UI |
 | Client (agent)  | travel =SKILL.md= guidance + =list_regions()= + =request_region_download(slug)= | agent behavior |
-| Utility         | the downloadable-region *catalog* (slug → Geofabrik URL, bbox, optional transit) | the allowlist of what may be fetched |
+| Utility         | the *catalog* — a pinned snapshot of the Geofabrik index (slug → URL, bbox) + the hand-curated transit-feed overlay (D2) | the allowlist of what may be fetched |
 
 The trigger, the page, and the delete path all depend on the registry Resource-Access
 abstraction, not on MOTIS/Nominatim internals — so the architecture stays static.
@@ -171,10 +196,10 @@ already uses). All reads happen off the event loop (=run_in_threadpool=).
 
 ** Background-job architecture (event-loop-safe by construction)
 Web/agent only *enqueue*; a =Provisioner= (mirroring =Scheduler=) runs the heavy
-work in a *subprocess*; on success it dispatches the re-run turn.
-1. *Enqueue (on-loop-safe)*: on approval, =Provisioner.submit(slug, origin_tid,
-   original_query)= writes =state:importing= and does a non-blocking executor
-   submit. No lock, no subprocess, no sleep on the loop.
+work in a *subprocess*; on success it dispatches the completion notification.
+1. *Enqueue (on-loop-safe)*: on approval, =Provisioner.submit(slug, origin_tid)=
+   writes =state:importing= and does a non-blocking executor submit. No lock, no
+   subprocess, no sleep on the loop.
 2. *Execute (off-loop)*: a =ThreadPoolExecutor(max_workers=1)= (one import at a
    time — disk-bound, and Nominatim can't overlap itself) + per-slug in-flight
    dedup (the =Scheduler._claim/_release= pattern). The worker runs
@@ -183,39 +208,47 @@ work in a *subprocess*; on success it dispatches the re-run turn.
 3. *Status*: coarse registry states (=importing= → =ready= / =failed=) + a per-job
    log; no percent (imports give no clean progress). =/geo= polls the registry like
    =/thread/{tid}/status=.
-4. *Re-run when done*: on child exit 0, dispatch =_scheduled_dispatch(origin_tid,
-   "The <region> region is now loaded. <original_query>", tz)= + =_mark_urgent=.
-   The chat turn ended long ago, so this is a fresh turn — exactly the scheduled-
-   prompt model. On exit≠0 → =state:failed= + a "download failed" notice (no blind
-   retry). (D4 decides the LLM-busy-at-completion behavior.)
+4. *Tell the agent when done* (no automatic re-run — PR #194): on child exit 0,
+   dispatch =_scheduled_dispatch(origin_tid, "<completion message>", tz)= +
+   =_mark_urgent= — a new human-style message on the originating thread stating
+   that the <region> download finished. The travel =SKILL.md= directs the agent's
+   next step: usually, use the newly loaded geo to satisfy the user's original
+   intent (the thread history carries that intent — the message does NOT replay
+   the old prompt). The chat turn ended long ago, so this is a fresh turn —
+   exactly the scheduled-prompt model. On exit≠0 → =state:failed= + a "download
+   failed" notice (no blind retry). Per D4, if the LLM is busy/down at completion
+   the dispatch is held + retried until it's free.
 
 Why in-process Provisioner-runs-a-subprocess over =systemd-run= / cron: it reuses
-the proven Scheduler + script shapes and the re-run seam is already wired — one
-moving part. Its one weakness (a web restart mid-import orphans the job) is handled
+the proven Scheduler + script shapes and the completion-dispatch seam is already
+wired — one moving part. Its one weakness (a web restart mid-import orphans the job) is handled
 by a startup *reconcile* (mirror =Scheduler.reconcile=): any =importing= entry with
 no live job → =failed=; validate-before-swap means nothing half-built is ever served.
 
 Event-loop lens (Phase-2 test): hold the provisioning lock in another thread, assert
 =POST /geo/add= still returns promptly.
 
-** Trigger detection (per D1)
+** Trigger detection (per D1 — user-driven for v1)
 On a "couldn't find a place" result the agent does NOT silently fail and does NOT
 guess. Guided by =SKILL.md=, it calls =list_regions()= to state coverage, asks
 whether the place is elsewhere, and *proposes* a catalog region's download (map
-preview) — which you then approve (HITL). D1 decides whether we also build the
-auto-detect path (a planet/coarse existence check that names the region for you).
-Either way the proposal → approval → import chain is identical.
+preview + size) — which you then approve (HITL). The auto-detect path (a
+planet/coarse existence check that names the region for you) is a deferred later
+refinement (D1); when it comes, the proposal → approval → import chain stays
+identical.
 
 ** Provisioning scripts (Engine)
 =scripts/add-region.sh <slug>= mirrors =refresh-travel-data.sh= (flock at
 =$TRAVEL_INFRA_DIR/.provision.lock=, validate-before-swap, argv-not-shell, atomic
 renames):
 1. *Validate slug against the catalog allowlist* (the security seam). Charset
-   =[a-z0-9-]=; slug must be a catalog key; the Geofabrik URL comes from the
-   catalog, never the caller.
+   =[a-z0-9/-]= (index ids can nest, e.g. =us/washington=; no leading/trailing
+   =/=, no =..=); slug must be an id in the pinned index snapshot; the download
+   URL comes from the index entry, never the caller. On-disk names flatten =/=
+   to =-= (=us-washington.osm.pbf=) so a slug never forms a path.
 2. *Download* the extract → validate PBF (size floor AND ceiling + =OSMHeader=,
    the refresh script's checks).
-3. *MOTIS (cheap)*: drop =<slug>.osm.pbf= into =input/=, append a dataset to
+3. *MOTIS (cheap)*: drop =<flattened-slug>.osm.pbf= into =input/=, append a dataset to
    =config.yml=, =motis import= in-place, restart on success (=reimport_motis=).
 4. *Nominatim (heavy, destructive)*: re-merge all region PBFs (osmium) or pass the
    multi-PBF path, then full rebuild into a fresh volume (extend
@@ -246,8 +279,10 @@ pattern). Routes:
   → encoded polyline → an existing =path:= map block), =state=, size, date,
   =has_transit=, a delete button, and an "add transit" button when a feed is
   configured and transit is off.
-- =GET /geo/add= — the catalog picker: downloadable regions, each with a bbox map
-  preview.
+- =GET /geo/add= — the catalog picker: a *searchable* list over the pinned
+  Geofabrik-index snapshot (D2), each region with a bbox map preview and the
+  download size the weekly refresh cached into the snapshot (no live fetch on
+  the request path).
 - =POST /geo/add= — enqueue (write =importing= + =Provisioner.submit=); 303
   redirect. *Never* runs the import inline.
 - =POST /geo/{slug}/delete= — enqueue eviction; base region undeletable (guard);
@@ -265,8 +300,9 @@ only (NOT the SMS-triage set):
   a place miss, on "what areas do you cover," and before saying transit is
   unavailable. Deterministic, cheap, no import.
 - =request_region_download(slug)= — validates =slug= against the catalog allowlist,
-  records a *pending proposal* (HITL) with the map preview; the import fires only on
-  your approval. *The agent's only path to an import* — the slug is allowlisted, so
+  records a *pending proposal* (HITL) with the map preview and the *code-computed
+  download size* (HTTP =HEAD=, per D-fixed); the import fires only on your
+  approval. *The agent's only path to an import* — the slug is allowlisted, so
   untrusted input never reaches a free-form URL/shell.
 Small model → checkable structure over prose (=CLAUDE.md=: "the instruction's shape
 matters more than its content"). =SKILL.md= gains a "Regions" section with checkable
@@ -280,13 +316,18 @@ probes cases the wording doesn't telegraph.
 Untrusted inputs: a user chat message, an agent-filled =slug= arg, a =POST
 /geo/add= body. Sinks: the provisioning subprocess (docker, curl, osmium, rm).
 Containment by construction:
-1. *Slug → allowlist, always* (tool + route). Charset =[a-z0-9-]=; the Geofabrik
-   URL is the catalog's, never caller-supplied; slug passed as argv, never
-   shell-interpolated. Untrusted value never reaches the fetch URL or a shell.
+1. *Slug → allowlist, always* (tool + route). Charset =[a-z0-9/-]= with no
+   leading/trailing =/= and no =..= (index ids nest, e.g. =us/washington=);
+   slug must be an id in the pinned index snapshot; the download URL is the
+   index entry's, never caller-supplied; on-disk names flatten =/= to =-= so a
+   slug never forms a path; slug passed as argv, never shell-interpolated.
+   Untrusted value never reaches the fetch URL, a filesystem path, or a shell.
 2. *HITL gate*: even a valid slug only yields a *proposal*; the import needs your
    approval — so an inbound text can't trigger a multi-hour import / disk fill.
 3. *Disk exhaustion*: cap total loaded regions + total bytes; validate download size
-   floor AND ceiling; one import at a time; the catalog only lists bounded extracts.
+   floor AND ceiling (the index includes continent-scale extracts, so the ceiling —
+   checked against the =HEAD= size before approval AND enforced at download — is
+   what keeps them unloadable); one import at a time.
 4. *Delete the wrong data*: slug allowlist + registry lookup; base region
    undeletable; the script removes only registry-owned files under =input/= — no
    path from input to an arbitrary =rm=.
@@ -301,8 +342,8 @@ Containment by construction:
 - *Nominatim rebuild degrades the whole geocoder* while any region is added/removed
   — falls back to MOTIS for all regions until done. Message the user; accept (D3).
   Biggest user-visible wart.
-- *Originating thread deleted before import finishes* → the re-run dispatch no-ops
-  on a missing thread (guard).
+- *Originating thread deleted before import finishes* → the completion-message
+  dispatch no-ops on a missing thread (guard).
 - *Web restart mid-import* → startup reconcile marks stuck =importing= → =failed=.
 - *Two requests for the same region* → per-slug in-flight dedup.
 - =config.yml= *concurrent edit* (weekly refresh cron vs add-region) → both take the
@@ -317,14 +358,15 @@ Containment by construction:
 
 * Eval plan
 - New geo eval cases: place-in-loaded-region (no proposal), place-in-catalog-region
-  (proposal + approval → re-run), typo (NO proposal), "what do you cover"
+  (proposal with size + approval → import → completion message → the agent uses
+  the new geo for the original intent), typo (NO proposal), "what do you cover"
   (=list_regions=), transit-unavailable-in-region (agent names it). Mock the
   provisioning subprocess + the registry (unit-fast); never actually import.
 - Travel-suite regression baseline vs =main= before/after (the region-awareness
   guidance must not regress existing routing/geocoding behavior).
 
 * Status / next steps
-1. *Pierre's decisions* (§ Decisions needed) — this PR.
+1. +Pierre's decisions+ — settled in this PR's review (2026-07-10), § Decisions.
 2. Design-review team (simplicity, agentic-fit, user-intention, clean-interfaces,
    *threat-model* — run heavy: this adds untrusted-input-reaching-docker surface).
 3. Implement per assist's three-phase workflow; evals; then PR + Copilot loop.
