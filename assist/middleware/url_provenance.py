@@ -10,15 +10,18 @@ zero — the small model still slips. This middleware makes a fabricated fetch
 somewhere earlier in the conversation.
 
 A provenanced URL is one the agent could have *copied* rather than *invented*:
-one textually present in a TOOL RESULT or the USER's message — search-result
-URLs, links inside a page the agent already fetched (legitimate link-following),
-or a URL the user pasted in the question. The model's OWN prior text does NOT
-count (else it launders a fabricated URL by writing it into its reasoning, then
-fetching it — see ``_seen_urls``). Only a URL that appears in no tool/user
-message — a pure fabrication — is rejected. This keeps the guard a coarse,
-unambiguous bound (a substring/membership check on tool+user text, not a fuzzy
-"looks invented" heuristic), and it does not end the turn: it returns a
-corrective tool result so the model retries with a real URL.
+one textually present in a SEARCH RESULT, a ``read_file`` report, or the USER's
+message. Two channels are deliberately NOT provenance sources: the model's OWN
+prior text (else it launders a fabricated URL by writing it into its reasoning,
+then fetching it — see ``_seen_urls``), and ``read_url`` PAGE CONTENT — that is
+the untrusted channel, so a URL appearing only inside a fetched page cannot be
+fetched (an injected page can't name an exfil URL and have a follow-up read of
+it pass — a read-becomes-write). To reach a new page the agent re-searches. A
+URL sourced no other way — a pure fabrication, or one planted in a page — is
+rejected. This keeps the guard a coarse, unambiguous bound (a substring/
+membership check on trusted text, not a fuzzy "looks invented/malicious"
+heuristic), and it does not end the turn: it returns a corrective tool result so
+the model retries with a real URL.
 
 Scope: all three ``read_url``-bearing research agents — the SEARCHER, the
 FACT-CHECKER, and the ORCHESTRATOR. Each should only ever fetch a URL already in
@@ -104,18 +107,28 @@ def _seen_urls(messages: list) -> dict[str, str]:
     the correction message so it never surfaces a normalize_url-truncated form
     (e.g. a stripped trailing paren on a Wikipedia URL).
 
-    Scans ``ToolMessage`` content (search results + pages the agent already
-    fetched, so legitimate link-following is preserved) and ``HumanMessage``
-    content (a URL the user pasted in the question). It deliberately EXCLUDES the
-    model's own ``AIMessage`` content: otherwise the model launders a fabricated
-    URL by writing it into its reasoning first, then fetching it — observed on
-    Qwen3.6 (14 of 24 fetches slipped through this way against the provenance
-    eval). A copied-from-search URL is still allowed because it also appears in
-    the search ``ToolMessage``; only a URL invented in the model's own text and
-    present in no tool/user message is rejected."""
+    Scans ``HumanMessage`` content (a URL the user pasted) and NON-``read_url``
+    ``ToolMessage`` content (search results, ``read_file`` reports). Two channels
+    are EXCLUDED by design: (1) the model's own ``AIMessage`` — else it launders a
+    fabricated URL by writing it into its reasoning first, then fetching it
+    (observed on Qwen3.6, 14 of 24 fetches slipped through this way against the
+    provenance eval); and (2) ``read_url`` results — arbitrary, possibly
+    attacker-controlled page content, so a URL that appears ONLY inside a fetched
+    page never becomes trusted (an injected page can't name an exfil URL and have
+    a follow-up fetch of it pass). A copied-from-search URL is still allowed
+    because it also appears in the search ``ToolMessage``; to reach a new page the
+    agent re-searches (the searcher prompt already requires that)."""
     seen: dict[str, str] = {}
     for m in messages:
         if not isinstance(m, (HumanMessage, ToolMessage)):
+            continue
+        # A read_url result is the ONE untrusted channel: arbitrary, possibly
+        # attacker-controlled page content. A URL present ONLY inside a fetched
+        # page must not become trusted — else an injected page names an exfil URL
+        # and a follow-up read_url of it passes (a read-becomes-write). Search
+        # results, read_file reports, and the user's message stay trusted; to
+        # reach a NEW page the agent re-searches (the searcher prompt requires it).
+        if isinstance(m, ToolMessage) and getattr(m, "name", None) == _READ_TOOL:
             continue
         for raw in _URL_RE.findall(_message_text(m)):
             seen.setdefault(normalize_url(raw), _display_url(raw))
@@ -143,7 +156,7 @@ def _correction(allowed: dict[str, str]) -> str:
     if not allowed:
         return (
             "That URL was a guess: it appears in no search result, the question, or a "
-            "page you already read, so it would be a dead link. You have no sourced URLs "
+            "report you were given, so it would be a dead link. You have no sourced URLs "
             "to read. Do NOT type URLs from memory or keep trying different guesses. If "
             "you can run search_internet, do that first to find real URLs; if search has "
             "already come back empty or unavailable, report that you could not find "
@@ -153,7 +166,7 @@ def _correction(allowed: dict[str, str]) -> str:
     urls = "\n".join(f"- {u}" for u in listed)
     return (
         "That URL was not fetched: it does not appear in any search result, the "
-        "question, or a page you already read, so it is a guess and would be a "
+        "question, or a report you were given, so it is a guess and would be a "
         "dead link. Do NOT type URLs from memory. Read one of the URLs already in "
         "context instead:\n"
         f"{urls}"
