@@ -39,8 +39,10 @@ the =CLAUDE.md= gotcha bullets) is exactly what the skill body distills.
    ~edit_file~/~execute~/~ls~), never ~Bash~/~Edit~/~WebFetch~.
 4. *PUBLISH* — ~read_file~ it back to confirm the fences/fields/H1 (no fragile
    in-shell ~python -c~ parse — it mangled on Qwen3.6 and sent the agent off the
-   rails), commit it, then tell the user to press *Merge & Push* in the web UI to
-   land it on ~main~ — only then does a new chat (cloned from ~main~) contain it.
+   rails). The agent runs NO git: =DomainManager.sync= host-commits the turn's
+   writes + pushes the thread branch automatically (domain_manager.py:427). So
+   the agent just tells the user to press *Merge & Push* in the web UI to land it
+   on ~main~ — only then does a new chat (cloned from ~main~) contain it.
 
 * Known limitation — create-then-use needs Merge & Push, then a fresh chat
 Two barriers, not one. (1) The agent cannot push (=git_push_blocker=), and every
