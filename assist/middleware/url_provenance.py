@@ -10,30 +10,32 @@ zero — the small model still slips. This middleware makes a fabricated fetch
 somewhere earlier in the conversation.
 
 A provenanced URL is one the agent could have *copied* rather than *invented*:
-one textually present in a SEARCH RESULT, a ``read_file`` report, or the USER's
-message. Two channels are deliberately NOT provenance sources: the model's OWN
-prior text (else it launders a fabricated URL by writing it into its reasoning,
-then fetching it — see ``_seen_urls``), and ``read_url`` PAGE CONTENT — that is
-the untrusted channel, so a URL appearing only inside a fetched page cannot be
-fetched (an injected page can't name an exfil URL and have a follow-up read of
-it pass — a read-becomes-write). To reach a new page the agent re-searches. A
-URL sourced no other way — a pure fabrication, or one planted in a page — is
-rejected. This keeps the guard a coarse, unambiguous bound (a substring/
-membership check on trusted text, not a fuzzy "looks invented/malicious"
-heuristic), and it does not end the turn: it returns a corrective tool result so
-the model retries with a real URL.
+one textually present in a SEARCH RESULT, a non-offloaded ``read_file`` report, or
+the USER's message. Three channels are deliberately NOT provenance sources, because
+their content is attacker-derivable: the model's OWN prior text (else it launders a
+fabricated URL by writing it into its reasoning, then fetching it — see
+``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
+can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
+and a ``read_file``/``grep`` of OFFLOADED read_url content (under
+/large_tool_results/) — the SAME page content laundered through a file. So a URL
+sourced only from fetched-page content, direct or offloaded, cannot be fetched; to
+reach a new page the agent re-searches. A URL sourced no other way — a pure
+fabrication, or one planted in a page — is rejected. This keeps the guard a coarse,
+unambiguous bound (a substring/membership check on trusted text, not a fuzzy "looks
+invented/malicious" heuristic), and it does not end the turn: it returns a corrective
+tool result so the model retries with a real URL. RESIDUAL: a model that FOLLOWS a
+multi-step injection to ``write_file`` an arbitrary URL then ``read_file`` it can
+self-launder — gated by behavioral injection-resistance, not this guard.
 
-Scope: all three ``read_url``-bearing research agents — the SEARCHER, the
-FACT-CHECKER, and the ORCHESTRATOR. Each should only ever fetch a URL already in
-its context: the searcher's own search results; the fact-checker's cited URLs
-(which live in the report ``ToolMessage`` it is handed); the orchestrator's
-search-sourced URLs (which reach it as the searcher's ``task`` result
-``ToolMessage``) and any prior-report URLs it loaded via ``read_file``. The
-orchestrator was originally excluded for fear of re-dispatch thrash, but thread
-20260708090812 showed the opposite failure — under search-unavailable it had no
-sourced URLs, fabricated plausible ones, and 404-looped ~90 min. Guidance now
-tells it to STOP (not re-dispatch) when it has no sources, so the guard is safe
-here too. See docs/2026-07-08-research-reread-runaway.org.
+Scope: the two ``read_url``-bearing research agents — the SEARCHER and the
+FACT-CHECKER. Each should only ever fetch a URL already trusted in its context: the
+searcher's own search results; the fact-checker's cited URLs (which reach it via the
+report ``read_file``/initial message it is handed). The V2 orchestrator holds no
+``read_url`` (it delegates all fetching), so the guard doesn't run there — an earlier
+version guarded it after thread 20260708090812 fabricated URLs under
+search-unavailable and 404-looped ~90 min. Guidance now tells the orchestrator to STOP
+(not re-dispatch) when it has no sources, so removing it there is safe.
+See docs/2026-07-08-research-reread-runaway.org.
 """
 import logging
 import re
@@ -73,6 +75,12 @@ _MAX_LISTED = 8
 # ``…/Mercury_(element)`` and the model's copied ``…/Mercury_(element)`` both
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
+# File-read tools whose result can surface OFFLOADED read_url page content: a large
+# read_url result is written to /large_tool_results/<id> and the model greps/read_files
+# it back (ToolResultToFileMiddleware). That read is still read_url page content — the
+# untrusted channel, laundered through a file — so URLs in it must stay untrusted.
+_FILE_READ_TOOLS = {"read_file", "grep"}
+_OFFLOAD_MARK = "large_tool_results"   # the /large_tool_results/ offload path prefix
 
 
 def normalize_url(url: str) -> str:
@@ -100,35 +108,64 @@ def _message_text(message: Any) -> str:
     return content if isinstance(content, str) else str(content)
 
 
+def _reads_offloaded(tool_call: dict | None) -> bool:
+    """True if a ``read_file``/``grep`` call targets an OFFLOADED read_url result (a
+    path under /large_tool_results/). Reading that file surfaces read_url PAGE
+    content, so any URL in it stays untrusted — the same channel, laundered through
+    a file. Errs toward exclusion (fails closed): an over-match only makes the model
+    re-search, it never trusts more."""
+    if not tool_call:
+        return False
+    args = tool_call.get("args") or {}
+    return any(_OFFLOAD_MARK in str(v) for v in args.values())
+
+
+def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
+    """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
+    read_url page content directly, or a ``read_file``/``grep`` of OFFLOADED read_url
+    content."""
+    name = getattr(m, "name", None)
+    if name == _READ_TOOL:                       # direct read_url page content
+        return True
+    if name in _FILE_READ_TOOLS:                 # offloaded read_url content, via a file
+        return _reads_offloaded(calls_by_id.get(getattr(m, "tool_call_id", None)))
+    return False
+
+
 def _seen_urls(messages: list) -> dict[str, str]:
-    """Every URL in a TOOL RESULT or the USER's message: a map from the normalized
-    form (the membership key) to the ORIGINAL as it appeared (first seen). The
-    normalized keys are the sources the model cannot fabricate; the originals feed
-    the correction message so it never surfaces a normalize_url-truncated form
+    """Every URL in a TRUSTED tool result or the USER's message: a map from the
+    normalized form (the membership key) to the ORIGINAL as it appeared (first seen).
+    The normalized keys are the sources the model cannot fabricate; the originals
+    feed the correction message so it never surfaces a normalize_url-truncated form
     (e.g. a stripped trailing paren on a Wikipedia URL).
 
-    Scans ``HumanMessage`` content (a URL the user pasted) and NON-``read_url``
-    ``ToolMessage`` content (search results, ``read_file`` reports). Two channels
-    are EXCLUDED by design: (1) the model's own ``AIMessage`` — else it launders a
-    fabricated URL by writing it into its reasoning first, then fetching it
-    (observed on Qwen3.6, 14 of 24 fetches slipped through this way against the
-    provenance eval); and (2) ``read_url`` results — arbitrary, possibly
-    attacker-controlled page content, so a URL that appears ONLY inside a fetched
-    page never becomes trusted (an injected page can't name an exfil URL and have
-    a follow-up fetch of it pass). A copied-from-search URL is still allowed
-    because it also appears in the search ``ToolMessage``; to reach a new page the
-    agent re-searches (the searcher prompt already requires that)."""
+    Scans ``HumanMessage`` content (a URL the user pasted) and TRUSTED ``ToolMessage``
+    content (search results, non-offloaded ``read_file`` reports). Three channels are
+    EXCLUDED because their content is attacker-derivable: (1) the model's own
+    ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
+    first, then fetching it (observed on Qwen3.6, 14 of 24 fetches slipped through this
+    way); (2) ``read_url`` results — arbitrary, possibly attacker-controlled page
+    content; and (3) a ``read_file``/``grep`` of OFFLOADED read_url content (under
+    /large_tool_results/) — the SAME page content laundered through a file
+    (ToolResultToFileMiddleware writes big pages there and the model greps them). So a
+    URL appearing only inside fetched-page content — direct or offloaded — never
+    becomes trusted; to reach a new page the agent re-searches (the searcher prompt
+    requires that). RESIDUAL: a model that FOLLOWS a multi-step injection to
+    ``write_file`` an arbitrary URL then ``read_file`` it can still self-launder —
+    that path is gated by the model's behavioral injection-resistance, not this guard."""
+    # Map tool_call_id -> the call, so a file read can be traced to its TARGET path
+    # (to tell an offloaded-read_url read from a legitimate report read).
+    calls_by_id: dict[str, dict] = {}
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            cid = tc.get("id")
+            if cid:
+                calls_by_id[cid] = tc
     seen: dict[str, str] = {}
     for m in messages:
         if not isinstance(m, (HumanMessage, ToolMessage)):
             continue
-        # A read_url result is the ONE untrusted channel: arbitrary, possibly
-        # attacker-controlled page content. A URL present ONLY inside a fetched
-        # page must not become trusted — else an injected page names an exfil URL
-        # and a follow-up read_url of it passes (a read-becomes-write). Search
-        # results, read_file reports, and the user's message stay trusted; to
-        # reach a NEW page the agent re-searches (the searcher prompt requires it).
-        if isinstance(m, ToolMessage) and getattr(m, "name", None) == _READ_TOOL:
+        if isinstance(m, ToolMessage) and _is_untrusted_result(m, calls_by_id):
             continue
         for raw in _URL_RE.findall(_message_text(m)):
             seen.setdefault(normalize_url(raw), _display_url(raw))
