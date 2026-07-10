@@ -1,4 +1,4 @@
-"""Tests for thread search (index filter) and thread rename (description edit).
+"""Tests for thread search (client-side filter wiring) and thread rename (description edit).
 
 No model/GPU: titles are seeded into DESCRIPTION_CACHE (or description.txt is
 pre-written), so neither MANAGER.get nor chat.description() is exercised.
@@ -30,34 +30,39 @@ def _make_thread(root, tid, title):
 
 
 class TestThreadSearch:
-    def test_filters_by_title_substring_case_insensitive(self, threads_root):
+    """Search is a CLIENT-side filter (no server round-trip). The server renders
+    EVERY thread with a ``data-desc`` the browser matches on, plus the input +
+    script wiring; the filtering itself is ``filterThreads()`` in JS, live-verified."""
+
+    def test_renders_all_threads_no_server_filter(self, threads_root):
         _make_thread(threads_root, "t1", "Apple pie recipe")
         _make_thread(threads_root, "t2", "Banana bread")
-        _make_thread(threads_root, "t3", "apple cider notes")
-        html = render_index("apple")
+        html = render_index()
+        # No server-side query drops any thread — the client filters the full set.
         assert "Apple pie recipe" in html
-        assert "apple cider notes" in html
-        assert "Banana bread" not in html
-
-    def test_empty_query_shows_all(self, threads_root):
-        _make_thread(threads_root, "t1", "Apple pie")
-        _make_thread(threads_root, "t2", "Banana bread")
-        html = render_index("")
-        assert "Apple pie" in html
         assert "Banana bread" in html
 
-    def test_no_match_shows_message_and_no_rows(self, threads_root):
-        _make_thread(threads_root, "t1", "Apple pie")
-        html = render_index("zzzznope")
-        assert "No threads match" in html
-        assert "Apple pie" not in html
+    def test_each_row_carries_lowercased_data_desc(self, threads_root):
+        _make_thread(threads_root, "t1", "Apple PIE Recipe")
+        html = render_index()
+        # Lowercased so the client's lowercased-substring match is case-insensitive.
+        assert 'data-desc="apple pie recipe"' in html
 
-    def test_query_is_escaped_in_search_box(self, threads_root):
-        _make_thread(threads_root, "t1", "Apple")
-        html = render_index('foo<bar"')
-        # The raw query must not appear unescaped (XSS via the value attribute).
+    def test_data_desc_is_escaped(self, threads_root):
+        _make_thread(threads_root, "t1", 'foo<bar" & baz')
+        html = render_index()
+        # The description reaches an HTML attribute — must be escaped so it can't
+        # break out of data-desc.
         assert 'foo<bar"' not in html
         assert "foo&lt;bar" in html
+        assert "&quot;" in html
+
+    def test_filter_wiring_present(self, threads_root):
+        _make_thread(threads_root, "t1", "Apple")
+        html = render_index()
+        assert "function filterThreads(" in html                 # the client filter
+        assert 'oninput="filterThreads(this.value)"' in html      # wired to the input
+        assert 'id="threadList"' in html                         # the list it filters
 
 
 class TestSetDescription:

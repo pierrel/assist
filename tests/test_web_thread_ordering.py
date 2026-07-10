@@ -46,7 +46,7 @@ class TestThreadListOrdering:
         state._set_status("t_proc", "processing")
         _mk(threads_root, "t_queued")
         state._set_status("t_queued", "queued")
-        html = render_index("")
+        html = render_index()
         pos = _positions(html, ["t_urgent", "t_proc", "t_queued", "t_new", "t_else"])
         assert pos == sorted(pos), f"not in status order: {pos}"
 
@@ -55,7 +55,7 @@ class TestThreadListOrdering:
         _mk(threads_root, "t_new2")
         os.utime(threads_root / "t_old", (1000, 1000))
         os.utime(threads_root / "t_new2", (2000, 2000))  # newer -> first within the else band
-        html = render_index("")
+        html = render_index()
         assert html.index("/thread/t_new2") < html.index("/thread/t_old")
 
     def test_merge_status_has_no_bearing(self, threads_root, monkeypatch):
@@ -66,5 +66,5 @@ class TestThreadListOrdering:
         state._URGENT.add("t_urgent")
         os.utime(threads_root / "t_unmerged", (2000, 2000))  # newer, but else band
         os.utime(threads_root / "t_urgent", (1000, 1000))    # older, but urgent -> still first
-        html = render_index("")
+        html = render_index()
         assert html.index("/thread/t_urgent") < html.index("/thread/t_unmerged")

@@ -1,0 +1,48 @@
+#+title: Thread-list search — client-only, as-you-type
+#+date: <2026-07-09>
+
+* Goal (roadmap: Web UI — thread list)
+Filter the thread list by a substring match on thread DESCRIPTIONS as the user
+types, with NO server round-trip. Purely an in-browser filter of the
+already-loaded list.
+
+* Current state
+=render_index(query)= filters server-side: the =/= route passes =?q=<query>=,
+the loop skips threads whose lowercased title doesn't contain =ql=, and a
+match-count =search_status= line renders. The search box (=<form method="get">=)
+reloads the whole page on every search. That's a round-trip per keystroke-worth
+of intent — the opposite of what we want.
+
+* Decision — replace the server round-trip with a client filter (delete > add)
+The list already renders EVERY thread (no pagination), so the whole searchable
+set is on the client. So:
+1. =render_index= renders ALL threads — drop the =query= param and the
+   server-side skip + =search_status=. Each =<li>= carries
+   =data-desc="<lowercased description>"= for reliable matching (independent of
+   the badge text inside the link).
+2. The search box becomes a plain =<input oninput=…>= (no form submit). A small
+   inline =filterThreads()= lowercases the query, toggles each
+   =li[data-desc]='s display on =data-desc.includes(q)=, and updates a live
+   "N matches / no matches" line. Empty query → all shown.
+3. The =/= route stops passing =q=; =index()= takes no arg.
+
+Why delete the server path rather than keep both: the roadmap says client-only,
+the data is already fully present, and two search paths would drift. Net LOC
+down. (No-JS fallback dropped deliberately — single-user app, JS always on.)
+
+* Non-goals / notes
+- Ordering is untouched — the filter only hides =<li>=s; survivors keep their
+  =_thread_status_rank= order.
+- Matching is on the DESCRIPTION (=data-desc=), not the badge/status text.
+- Blast radius is client-side only: no locks, no event loop, no server logic
+  beyond "render all + emit data-desc". So the heavy server lenses
+  (event-loop-liveness, adversarial-server-security) don't apply; the review
+  focuses on simplicity, XSS-safety of the emitted attribute, and existing
+  patterns.
+
+* Test
+pytest can't run the browser filter, so: (a) a server-side test that
+=render_index()= renders every thread with a correct =data-desc= (the client's
+prerequisite) and no longer server-filters; (b) XSS check — =data-desc= is
+=html.escape=-d; (c) live-verify the as-you-type filter in the browser after
+deploy (Pierre tests in parallel).

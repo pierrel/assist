@@ -35,27 +35,27 @@ class TestBadgeAppearsAndClears:
     def test_badge_appears_when_unseen(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee thread")
         state._mark_unseen_response("t1")
-        assert ">new<" in render_index("")
+        assert ">new<" in render_index()
 
     def test_no_badge_when_seen(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee thread")
         # never marked unseen -> no "new"
-        assert ">new<" not in render_index("")
+        assert ">new<" not in render_index()
 
     def test_badge_clears_after_clear(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee thread")
         state._mark_unseen_response("t1")
-        assert ">new<" in render_index("")
+        assert ">new<" in render_index()
         state._clear_unseen_response("t1")
-        assert ">new<" not in render_index("")
+        assert ">new<" not in render_index()
 
     def test_marker_survives_restart_via_load_cache(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee thread")
         state._mark_unseen_response("t1")     # writes the marker FILE
         state._UNSEEN.clear()                 # simulate a restart (cache lost)
-        assert ">new<" not in render_index("")
+        assert ">new<" not in render_index()
         state.load_unseen_cache()             # rebuild from disk
-        assert ">new<" in render_index("")
+        assert ">new<" in render_index()
 
     def test_clear_removes_file_so_reload_doesnt_resurrect(self, threads_root):
         _make_thread(threads_root, "t1", "Coffee thread")
@@ -63,7 +63,7 @@ class TestBadgeAppearsAndClears:
         state._clear_unseen_response("t1")     # removes set entry AND file
         state._UNSEEN.clear()
         state.load_unseen_cache()
-        assert ">new<" not in render_index("")
+        assert ">new<" not in render_index()
 
     def test_load_cache_is_true_rebuild_drops_stale(self, threads_root):
         # a stale in-memory entry with no marker file must be dropped on reload.
@@ -103,7 +103,7 @@ class TestPrecedence:
         monkeypatch.setattr("manage.web.threads._has_unmerged_changes", lambda tid: True)
         _make_thread(threads_root, "t1", "Coffee thread")
         state._mark_unseen_response("t1")
-        html = render_index("")
+        html = render_index()
         assert ">new<" in html
         assert ">unmerged<" not in html
 
@@ -111,7 +111,7 @@ class TestPrecedence:
         _make_thread(threads_root, "t1", "Coffee thread")
         state._set_status("t1", "error", error="boom")   # does not mark
         state._mark_unseen_response("t1")                # mark separately
-        html = render_index("")
+        html = render_index()
         assert ">error<" in html
         assert ">new<" not in html
 
@@ -119,7 +119,7 @@ class TestPrecedence:
         _make_thread(threads_root, "t1", "Coffee thread")
         state._set_status("t1", "processing")
         state._mark_unseen_response("t1")
-        html = render_index("")
+        html = render_index()
         assert ">new<" not in html   # a busy/process-state badge wins
 
 
