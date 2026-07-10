@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 from urllib.parse import urlparse
@@ -41,29 +42,38 @@ TRANSIT_OVERLAY_FILE = "transit-overlay.json"
 _FETCH_TIMEOUT_S = 60
 
 
-def _display_name(entry_id: str, name: str | None) -> str:
+def _display_name(entry_id: str, name) -> str:
     """The index's ``name`` is human for most entries but the raw id for 52/555
-    (all US states among them). Derive one from the id's last segment when so."""
-    if name and name != entry_id:
+    (all US states among them). Derive one from the id's last segment when the name
+    is the id, missing, or (defensively — third-party input) not a string."""
+    if isinstance(name, str) and name and name != entry_id:
         return name
     return entry_id.rsplit("/", 1)[-1].replace("-", " ").title()
 
 
 def _bbox_of(geometry: dict) -> list[float] | None:
-    """(min_lon, min_lat, max_lon, max_lat) over a (Multi)Polygon's coordinates."""
-    coords = geometry.get("coordinates")
-    if geometry.get("type") == "Polygon":
-        rings = coords or []
-    elif geometry.get("type") == "MultiPolygon":
-        rings = [ring for poly in (coords or []) for ring in poly]
-    else:
+    """(min_lon, min_lat, max_lon, max_lat) over a (Multi)Polygon's coordinates.
+    Geometry is untrusted third-party input: a non-numeric/non-finite coordinate or a
+    malformed ring drops the feature (return None), never aborts the whole build."""
+    try:
+        coords = geometry.get("coordinates")
+        gtype = geometry.get("type")
+        if gtype == "Polygon":
+            rings = coords or []
+        elif gtype == "MultiPolygon":
+            rings = [ring for poly in (coords or []) for ring in poly]
+        else:
+            return None
+        lons, lats = [], []
+        for ring in rings:
+            for pt in ring:
+                if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    lon, lat = float(pt[0]), float(pt[1])
+                    if math.isfinite(lon) and math.isfinite(lat):
+                        lons.append(lon)
+                        lats.append(lat)
+    except (TypeError, ValueError):
         return None
-    lons, lats = [], []
-    for ring in rings:
-        for pt in ring:
-            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                lons.append(float(pt[0]))
-                lats.append(float(pt[1]))
     if not lons:
         return None
     return [min(lons), min(lats), max(lons), max(lats)]

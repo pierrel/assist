@@ -101,3 +101,14 @@ def test_corrupt_json_reads_empty(tmp_path):
     (tmp_path / REGISTRY_FILE).write_text("{not valid json")
     reg = RegionRegistry(str(tmp_path))
     assert reg.all() == []
+
+
+def test_unknown_state_fails_closed_to_failed(tmp_path):
+    # a corrupt/forward-version state must NOT promote to ready (fail-open on the
+    # "validated import completed" gate) — it reads as failed, not loaded
+    rec = _region(state=STATE_READY).to_dict()
+    rec["state"] = "updating"   # not a known state
+    (tmp_path / REGISTRY_FILE).write_text(json.dumps({"socal": rec}))
+    reg = RegionRegistry(str(tmp_path))
+    assert reg.get("socal").state == STATE_FAILED
+    assert reg.is_loaded("socal") is False

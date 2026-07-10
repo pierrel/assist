@@ -20,6 +20,7 @@ shape-validation discipline in ``manage/web/state.py``'s timings reader.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, replace
 
 logger = logging.getLogger(__name__)
@@ -34,16 +35,26 @@ BBox = tuple[float, float, float, float]   # (min_lon, min_lat, max_lon, max_lat
 
 
 def _parse_bbox(v) -> BBox | None:
-    """A bbox is exactly four finite numbers [min_lon, min_lat, max_lon, max_lat]."""
+    """A bbox is exactly four finite numbers [min_lon, min_lat, max_lon, max_lat].
+    NaN/Infinity are rejected — json accepts those tokens, and a NaN in a sort key
+    scrambles the smallest-extent-first ordering find_regions ranks on."""
     if not isinstance(v, (list, tuple)) or len(v) != 4:
         return None
     try:
         lon0, lat0, lon1, lat1 = (float(x) for x in v)
     except (TypeError, ValueError):
         return None
+    if not all(math.isfinite(x) for x in (lon0, lat0, lon1, lat1)):
+        return None
     if lon0 > lon1 or lat0 > lat1:
         return None
     return (lon0, lat0, lon1, lat1)
+
+
+def _name_or(v, fallback: str) -> str:
+    """A display name must be a non-empty string; anything else (a stray int from a
+    third-party index) falls back to the slug, so a later ``.lower()`` can't crash."""
+    return v if isinstance(v, str) and v else fallback
 
 
 @dataclass(frozen=True)
@@ -78,10 +89,13 @@ class Region:
         state = d.get("state")
         return cls(
             slug=slug,
-            display_name=d.get("display_name") or slug,
+            display_name=_name_or(d.get("display_name"), slug),
             bbox=bbox,
             has_transit=bool(d.get("has_transit", False)),
-            state=state if state in _STATES else STATE_READY,
+            # An unknown/corrupt state fails CLOSED (→ failed), never promotes to the
+            # "validated import completed" success state — is_loaded() must not serve a
+            # region nothing validated. failed keeps it visible on /geo for delete/retry.
+            state=state if state in _STATES else STATE_FAILED,
             last_used_at=d.get("last_used_at"),
             completion_delivered=bool(d.get("completion_delivered", True)),
             added_at=d.get("added_at"))
@@ -113,7 +127,7 @@ class CatalogEntry:
         size = d.get("size_bytes")
         return cls(
             slug=slug,
-            display_name=d.get("display_name") or slug,
+            display_name=_name_or(d.get("display_name"), slug),
             bbox=bbox,
             url=url,
             size_bytes=size if isinstance(size, int) and size >= 0 else None,
