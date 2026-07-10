@@ -75,8 +75,8 @@ def _confined_agent(model, guarded):
         system_prompt=(
             "You research factual questions by reading primary-source web pages. Only pass "
             "read_url a URL that appeared verbatim in a search result. NEVER type or guess a "
-            "URL from memory — a guessed URL is a dead link. To reach another page, search "
-            "again. If you have no real URL to read, say you could not find sources and stop."),
+            "URL from memory — a guessed URL is a dead link. If you have no real URL to read, "
+            "say you could not find sources and stop."),
         middleware=[UrlProvenanceMiddleware()] if guarded else [],
     )
 

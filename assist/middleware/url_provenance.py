@@ -111,15 +111,15 @@ def _message_text(message: Any) -> str:
     return content if isinstance(content, str) else str(content)
 
 
-def _reads_offloaded(tool_call: dict | None, content: str) -> bool:
-    """True if a ``read_file``/``grep`` touched OFFLOADED read_url content — the same
-    untrusted page content laundered through a file. Two ways it shows up: the read's
-    TARGET PATH is under /large_tool_results/ (a targeted read_file/grep — checked on
-    the LOCATION args only, not the grep ``pattern``), OR the result names an offloaded
-    file (grep's default ``files_with_matches`` lists matching paths, so a grep-all that
-    hit the offload dir shows it in the output). Errs toward exclusion (fails closed):
-    an over-match only makes the model re-search, it never trusts more."""
-    args = (tool_call or {}).get("args") or {}
+def _reads_offloaded(tool_call: dict, content: str) -> bool:
+    """True if a ``read_file``/``grep`` (whose originating call IS known) touched
+    OFFLOADED read_url content — the same untrusted page content laundered through a
+    file. Two ways it shows up: the read's TARGET PATH is under /large_tool_results/
+    (checked on the LOCATION args only — path/file_path/glob, not the grep ``pattern``),
+    OR the result names an offloaded file (grep's default ``files_with_matches`` lists
+    matching paths, so a grep-all that hit the offload dir shows it). Over-matches only
+    make the model re-search — never trust more."""
+    args = tool_call.get("args") or {}
     if any(_OFFLOAD_MARK in str(args.get(k, "")) for k in _OFFLOAD_PATH_KEYS):
         return True
     return _OFFLOAD_MARK in (content or "")
@@ -128,13 +128,17 @@ def _reads_offloaded(tool_call: dict | None, content: str) -> bool:
 def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
     read_url page content directly, or a ``read_file``/``grep`` of OFFLOADED read_url
-    content."""
+    content. Fails CLOSED: a file read whose originating ``tool_call`` is missing from
+    the message list (e.g. summarization dropped it) is treated as untrusted — we can't
+    verify its target wasn't the offload dir, so we don't provenance its URLs."""
     name = getattr(m, "name", None)
     if name == _READ_TOOL:                       # direct read_url page content
         return True
-    if name in _FILE_READ_TOOLS:                 # offloaded read_url content, via a file
-        return _reads_offloaded(calls_by_id.get(getattr(m, "tool_call_id", None)),
-                                _message_text(m))
+    if name in _FILE_READ_TOOLS:                 # a file read — verify its target
+        tc = calls_by_id.get(getattr(m, "tool_call_id", None))
+        if tc is None:                           # unknown target -> fail CLOSED
+            return True
+        return _reads_offloaded(tc, _message_text(m))
     return False
 
 

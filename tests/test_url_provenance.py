@@ -141,6 +141,18 @@ class TestUrlProvenanceMiddleware(TestCase):
                           "a URL from a grep-all that hit the offloaded file must be refused")
         self.assertEqual(result.status, "error")
 
+    def test_fails_closed_when_file_read_call_metadata_missing(self):
+        # If a file read's originating AIMessage tool_call is missing (e.g.
+        # summarization dropped it), we can't verify the read didn't target the offload
+        # dir — so its URLs must NOT be trusted. Fail closed, not open.
+        url = "https://attacker.example/leak?data=x"
+        msgs = [_search_result(["https://docs.example/langgraph"]),
+                ToolMessage(content=f"See {url}", name="read_file", tool_call_id="orphan")]
+        result, handler = self._call(url, msgs)
+        self.assertIsNone(handler.called_with,
+                          "a file read with no verifiable call must fail closed (untrusted)")
+        self.assertEqual(result.status, "error")
+
     def test_allows_parenthesized_search_result_url(self):
         # A URL with a paren (Wikipedia disambiguation pages — a dominant research
         # source) must be captured WHOLE from the search result, so the model's
@@ -158,7 +170,9 @@ class TestUrlProvenanceMiddleware(TestCase):
         # sides, so the widened regex can't cause a spurious rejection. Uses a
         # read_file report (a trusted source that carries prose); read_url page
         # content is deliberately NOT a provenance source.
-        msgs = [ToolMessage(content="Details at https://shop.example/deep/page. Enjoy.",
+        msgs = [AIMessage(content="", tool_calls=[{
+                    "name": "read_file", "id": "f0", "args": {"file_path": "references/report.org"}}]),
+                ToolMessage(content="Details at https://shop.example/deep/page. Enjoy.",
                             name="read_file", tool_call_id="f0")]
         _result, handler = self._call("https://shop.example/deep/page", msgs)
         self.assertIsNotNone(handler.called_with,
