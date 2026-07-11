@@ -163,3 +163,18 @@ def test_propose_without_thread_refuses(tmp_path):
     with patch("assist.geo.tools._thread_id", lambda: None):
         out = propose("us/washington", "x")
     assert "no active thread" in out and props.all() == []
+
+
+def test_propose_coerces_uuid_thread_id(tmp_path):
+    # the run config can carry a UUID object (AgentHarness) — origin_tid must land as a
+    # JSON-serializable string, or the proposal write crashes the tool
+    import uuid
+    propose, props = _propose(tmp_path)
+    tid = uuid.uuid4()
+    with patch("assist.geo.tools.requests.head", lambda url, **kw: _Head(url)), \
+         patch("assist.geo.tools.get_config",
+               lambda: {"configurable": {"thread_id": tid}}):
+        out = propose("us/washington", "directions in Tacoma")
+    p = props.get("us/washington")
+    assert p is not None and p.origin_tid == str(tid) and isinstance(p.origin_tid, str)
+    assert "~700 MB" in out

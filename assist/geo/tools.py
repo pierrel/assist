@@ -47,9 +47,12 @@ DEGRADATION_WARNING = ("Adding a region downloads map data and rebuilds the geoc
 
 def _thread_id() -> str | None:
     try:
-        return ((get_config() or {}).get("configurable") or {}).get("thread_id")
+        tid = ((get_config() or {}).get("configurable") or {}).get("thread_id")
     except RuntimeError:   # outside a langgraph runtime (direct call in a test)
         return None
+    # coerce to str: the config may carry a UUID object (AgentHarness), and origin_tid
+    # is persisted as JSON + passed to the dispatch callback — both want a string.
+    return str(tid) if tid is not None else None
 
 
 def _fmt_size(n: int | None) -> str:

@@ -11,22 +11,36 @@ handful of downloadable ones. The contract:
 - an already-covered ask ("San Francisco?") → answers yes from ``list_regions``, does NOT
   over-offer a download (the typo/over-propose damper — A3).
 
-Prompts avoid the SKILL's example wording (probe generalization, not lexical proximity).
-The propose/approve step is a later increment, so these assert up to the OFFER only.
+- the user CONFIRMS the offer → ``propose_region_download`` with the EXACT id from the
+  ``find_regions`` result (the B1 sink contract) + the reply says it awaits approval —
+  a proposal is not a download.
+
+Prompts avoid the SKILL's example wording (probe generalization, not lexical
+proximity). The size HEAD is mocked (no real network). The web approve/import flow is
+a later increment; the agent's contract ends at the recorded proposal.
 """
 import json
 import tempfile
 from unittest import TestCase
+from unittest.mock import patch
 
 from assist.agent import AgentHarness, create_agent
 from assist.geo.catalog import CATALOG_FILE, Catalog
 from assist.geo.model import Region, STATE_READY
+from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
 from assist.geo.tools import geo_tools
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
 from .utils import stub_research_subagent
+
+
+class _FakeHead:
+    """No real network in the eval: a canned HEAD (on-host, 700 MB)."""
+    def __init__(self, url, **kw):
+        self.url = url
+        self.headers = {"Content-Length": "700000000"}
 
 # A small deterministic catalog (subset of the real Geofabrik index ids/bboxes).
 _CATALOG = [
@@ -47,7 +61,8 @@ class TestGeoAgent(TestCase):
         cls.model = select_assistant_model(0.1)
 
     def _agent(self):
-        """An agent with the geo tools over fixture stores: only NorCal loaded."""
+        """An agent with the geo tools over fixture stores: only NorCal loaded.
+        Returns (harness, proposal_store) so tests can assert what got recorded."""
         root = tempfile.mkdtemp()
         geo_dir = tempfile.mkdtemp()
         reg = RegionRegistry(geo_dir)
@@ -55,14 +70,16 @@ class TestGeoAgent(TestCase):
                        bbox=(-124.5, 36.0, -119.0, 42.1), has_transit=True, state=STATE_READY))
         with open(f"{geo_dir}/{CATALOG_FILE}", "w") as f:
             json.dump(_CATALOG, f)
-        spec = AgentSpec(tools=tuple(geo_tools(reg, Catalog(geo_dir))))
-        return AgentHarness(create_agent(self.model, root, spec=spec))
+        props = ProposalStore(geo_dir)
+        spec = AgentSpec(tools=tuple(geo_tools(reg, Catalog(geo_dir), props)))
+        return AgentHarness(create_agent(self.model, root, spec=spec)), props
 
     def _calls(self, agent):
         out = []
         for m in agent.all_messages():
             for c in (getattr(m, "tool_calls", None) or []):
-                if c.get("name") in ("list_regions", "find_regions"):
+                if c.get("name") in ("list_regions", "find_regions",
+                                     "propose_region_download"):
                     out.append((c["name"], c.get("args") or {}))
         return out
 
@@ -81,7 +98,7 @@ class TestGeoAgent(TestCase):
 
     def test_coverage_question_calls_list_regions(self):
         with stub_research_subagent():   # coverage prompts shouldn't research; mock per policy
-            agent = self._agent()
+            agent, _ = self._agent()
             reply = agent.message("Which parts of the world can you actually look up trips "
                                   "and routes for right now?")
         calls = self._calls(agent)
@@ -93,7 +110,7 @@ class TestGeoAgent(TestCase):
         # Portland → Oregon: a city the SKILL does NOT name (it worked-examples Seattle /
         # San Diego), so this probes the model's own city→state inference, not recall.
         with stub_research_subagent():
-            agent = self._agent()
+            agent, _ = self._agent()
             reply = agent.message("I'm going to be spending a week in Portland and I'll "
                                   "need help getting around town — can you do that?")
         calls = self._calls(agent)
@@ -110,9 +127,28 @@ class TestGeoAgent(TestCase):
         self.assertIn("oregon", self._text(reply).lower(),
                       f"expected it to resolve + offer Oregon; got: {self._text(reply)[:300]}")
 
+    def test_user_confirms_then_propose_with_exact_id(self):
+        # Two turns: the offer (as above), then the user's yes → the model must call
+        # propose_region_download with the EXACT id find_regions returned (us/oregon),
+        # and present the result as awaiting approval — not as a started download.
+        with stub_research_subagent(), \
+             patch("assist.geo.tools.requests.head", _FakeHead):
+            agent, props = self._agent()
+            agent.message("I'm going to be spending a week in Portland and I'll "
+                          "need help getting around town — can you do that?")
+            reply = agent.message("Yes please, go ahead and set that up.")
+        proposes = [a for n, a in self._calls(agent) if n == "propose_region_download"]
+        self.assertTrue(proposes, f"expected propose_region_download after the user's "
+                                  f"yes; got {[n for n, _ in self._calls(agent)]}")
+        self.assertEqual(str(proposes[-1].get("region_id", "")).strip(), "us/oregon",
+                         f"expected the exact find_regions id; got {proposes[-1]}")
+        self.assertIsNotNone(props.get("us/oregon"), "proposal was not recorded")
+        self.assertIn("approv", self._text(reply).lower(),
+                      f"reply should say it awaits approval; got: {self._text(reply)[:300]}")
+
     def test_already_covered_does_not_over_offer(self):
         with stub_research_subagent():
-            agent = self._agent()
+            agent, _ = self._agent()
             reply = agent.message("If I'm in San Francisco, can you give me a hand getting "
                                   "around?")
         text = self._text(reply).lower()
