@@ -24,7 +24,7 @@ def _proposal(slug="us/oregon", name="Oregon", size=700_000_000):
 
 
 def test_fmt_size():
-    assert geo._fmt_size(None) == "" and geo._fmt_size(0) == ""
+    assert geo._fmt_size(None) == "size unknown" and geo._fmt_size(0) == "size unknown"
     assert geo._fmt_size(700_000_000) == "~700 MB"
     assert geo._fmt_size(3_500_000_000) == "~3.5 GB"
 

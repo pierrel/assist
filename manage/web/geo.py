@@ -20,7 +20,7 @@ from starlette.concurrency import run_in_threadpool
 
 from assist.geo.model import STATE_READY
 from manage.web.app import app
-from manage.web.state import GEO_CATALOG, GEO_PROPOSALS, GEO_REGISTRY
+from manage.web.state import GEO_PROPOSALS, GEO_REGISTRY
 from manage.web.threads import _PROVISIONER, _PULL_TO_REFRESH_SCRIPT
 
 # One app-lifetime token (single-user app). Embedded in every mutating form + required on
@@ -40,7 +40,7 @@ def _check_csrf(token: str | None):
 
 def _fmt_size(n: int | None) -> str:
     if not n:
-        return ""
+        return "size unknown"   # HEAD couldn't determine it — say so, don't render blank
     mb = n / 1e6
     return f"~{mb / 1000:.1f} GB" if mb >= 1000 else f"~{mb:.0f} MB"
 

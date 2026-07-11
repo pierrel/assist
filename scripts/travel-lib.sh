@@ -12,8 +12,9 @@
 #
 # Every mutation VALIDATES before it swaps, and rebuilds the engines the same way the
 # weekly refresh does: MOTIS in-place (never stops serving; restart only on import
-# success), Nominatim wipe+reimport (degrades geocoding to MOTIS's built-in fallback —
-# NOT an outage — until the import finishes).
+# success), Nominatim wipe+reimport (name/address geocoding is UNAVAILABLE until the
+# import finishes — assist's _geocode raises when Nominatim is down; routing and
+# coordinate/"from here" queries are unaffected).
 #
 # Config via env (the caller/cron sets TRAVEL_INFRA_DIR; the rest default to the standard
 # single-box deploy):
