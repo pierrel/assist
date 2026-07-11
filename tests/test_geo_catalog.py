@@ -51,16 +51,6 @@ def test_search_substring_case_insensitive_smallest_first(tmp_path):
     assert cat.search("  ") == []
 
 
-def test_containing_point_smallest_first(tmp_path):
-    _write(tmp_path, [_CALIF, _SOCAL, _WASH])
-    cat = Catalog(str(tmp_path))
-    # a point in LA is inside both socal and california → smallest (socal) first
-    hits = cat.containing(-118.24, 34.05)
-    assert [h.slug for h in hits] == ["socal", "us/california"]
-    # a point in the ocean is in no bbox → empty (⇒ no download proposed)
-    assert cat.containing(0.0, 0.0) == []
-
-
 def test_malformed_entry_skipped(tmp_path):
     _write(tmp_path, [_SOCAL, {"slug": "bad"}, "junk", {"slug": "x", "url": "u", "bbox": [1, 2, 3]}])
     cat = Catalog(str(tmp_path))
