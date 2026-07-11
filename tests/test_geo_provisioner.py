@@ -39,8 +39,14 @@ class _Harness:
 
     def submit_and_wait(self, op, slug):
         out = self.prov.submit(op, slug)
-        self.prov._executor.shutdown(wait=True)   # drain the single worker
+        self.drain()
         return out
+
+    def drain(self):
+        # flush the single worker without shutting it down (so deliver_pending, which
+        # may enqueue, still works afterwards): a no-op task completes only after all
+        # prior submitted tasks on the single worker.
+        self.prov._executor.submit(lambda: None).result()
 
 
 def test_add_full_lifecycle(tmp_path):
@@ -155,6 +161,26 @@ def test_transit_failure_keeps_flag_off_and_ready(tmp_path):
     h.submit_and_wait("transit", "norcal")
     r = h.registry.get("norcal")
     assert r.has_transit is False and r.state == STATE_READY
+
+
+def test_transit_refused_on_non_ready_region(tmp_path):
+    # a FAILED (or importing) region can't take transit — and it must NOT be flipped
+    # out of its state for a transit job
+    h = _Harness(tmp_path)
+    h.registry.put(Region(slug="socal", display_name="SoCal", bbox=_BBOX,
+                          state=STATE_FAILED, has_transit=False))
+    assert "can't add transit" in h.prov.submit("transit", "socal")
+    assert h.registry.get("socal").state == STATE_FAILED and not h.jobs
+
+
+def test_remove_failure_restores_prior_failed_not_ready(tmp_path):
+    # removing a FAILED region whose job returns failure must restore FAILED, never
+    # promote a never-validated region to READY
+    h = _Harness(tmp_path, job_ok=False)
+    h.registry.put(Region(slug="socal", display_name="SoCal", bbox=_BBOX,
+                          state=STATE_FAILED))
+    h.submit_and_wait("remove", "socal")
+    assert h.registry.get("socal").state == STATE_FAILED
 
 
 def test_run_job_exception_is_failure_not_crash(tmp_path):
