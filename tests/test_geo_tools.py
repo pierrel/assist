@@ -106,11 +106,17 @@ _WA = [-124.8, 45.5, -116.9, 49.1]
 
 
 class _Head:
-    """A fake requests.head response."""
-    def __init__(self, url, length="700000000", status=200):
-        self.url = url
+    """A fake requests.head response (manual-redirect aware, like requests.Response)."""
+    _REDIRECT = {301, 302, 303, 307, 308}
+
+    def __init__(self, length="700000000", status=200, location=None):
         self.status_code = status
-        self.headers = {"Content-Length": length} if length else {}
+        self.headers = {}
+        if location is not None:
+            self.headers["Location"] = location
+        if length:
+            self.headers["Content-Length"] = length
+        self.is_redirect = status in self._REDIRECT and location is not None
 
 
 def _propose(tmp_path, regions=(), tid="t1"):
@@ -130,7 +136,7 @@ def test_propose_rejects_non_catalog_id(tmp_path):
 def test_propose_records_with_size_and_warning(tmp_path):
     propose, props = _propose(tmp_path)
     with patch("assist.geo.tools.requests.head",
-               lambda url, **kw: _Head(url)), \
+               lambda url, **kw: _Head()), \
          patch("assist.geo.tools._thread_id", lambda: "t1"):
         out = propose("us/washington", "directions in Tacoma")
     assert "~700 MB" in out and "rebuilds the geocoder" in out
@@ -150,21 +156,37 @@ def test_propose_already_loaded_short_circuits(tmp_path):
 
 def test_propose_size_unknown_on_offhost_redirect(tmp_path):
     propose, props = _propose(tmp_path)
-    # the HEAD follows Geofabrik's redirect, but it landed on a MIRROR host (large files
-    # redirect off download.geofabrik.de) → the size can't be trusted → size unknown
+    # a 302 whose target is an off-host MIRROR (large files redirect off
+    # download.geofabrik.de): the redirect is refused BEFORE any HEAD to the mirror is
+    # issued (the request-following boundary) → size unknown, no off-host request
     with patch("assist.geo.tools.requests.head",
-               lambda url, **kw: _Head("https://ftp5.gwdg.de/x.osm.pbf")), \
+               lambda url, **kw: _Head(status=302, location="https://ftp5.gwdg.de/x.osm.pbf", length=None)), \
          patch("assist.geo.tools._thread_id", lambda: "t1"):
         out = propose("us/washington", "x")
     assert "size unknown" in out
     assert props.get("us/washington").size_bytes is None
 
 
+def test_propose_follows_geofabrik_same_host_redirect(tmp_path):
+    # the legitimate case: -latest 302s ONCE to a dated file on the same host; the size
+    # comes from that validated second hop
+    propose, props = _propose(tmp_path)
+    base = "https://download.geofabrik.de/us-washington.osm.pbf"
+    dated = "https://download.geofabrik.de/us-washington-230101.osm.pbf"
+    responses = {base: _Head(status=302, location=dated, length=None),
+                 dated: _Head(length="700000000")}
+    with patch("assist.geo.tools.requests.head", lambda url, **kw: responses[url]), \
+         patch("assist.geo.tools._thread_id", lambda: "t1"):
+        out = propose("us/washington", "directions")
+    assert "~700 MB" in out
+    assert props.get("us/washington").size_bytes == 700_000_000
+
+
 def test_propose_size_unknown_on_non_2xx_head(tmp_path):
     # a 404/500 HEAD may carry a Content-Length (its error-page size) — not the file size
     propose, props = _propose(tmp_path)
     with patch("assist.geo.tools.requests.head",
-               lambda url, **kw: _Head(url, length="512", status=404)), \
+               lambda url, **kw: _Head(status=404, length="512")), \
          patch("assist.geo.tools._thread_id", lambda: "t1"):
         out = propose("us/washington", "x")
     assert "size unknown" in out and props.get("us/washington").size_bytes is None
@@ -192,7 +214,7 @@ def test_propose_coerces_uuid_thread_id(tmp_path):
     import uuid
     propose, props = _propose(tmp_path)
     tid = uuid.uuid4()
-    with patch("assist.geo.tools.requests.head", lambda url, **kw: _Head(url)), \
+    with patch("assist.geo.tools.requests.head", lambda url, **kw: _Head()), \
          patch("assist.geo.tools.get_config",
                lambda: {"configurable": {"thread_id": tid}}):
         out = propose("us/washington", "directions in Tacoma")

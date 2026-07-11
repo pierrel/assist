@@ -67,7 +67,8 @@ case "$FEED" in
             || die "511 GTFS download failed"
         ;;
     https://*)
-        log "downloading GTFS from $FEED ..."
+        feed_host="${FEED#https://}"; feed_host="${feed_host%%/*}"
+        log "downloading GTFS from $feed_host ..."   # host only — a URL query token must not reach the log
         curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 3 --max-time 600 \
             --max-filesize "$TRAVEL_MAX_DOWNLOAD_BYTES" \
             -o "$out" "$FEED" || die "GTFS download failed"

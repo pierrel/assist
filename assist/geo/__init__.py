@@ -10,7 +10,8 @@ Split by volatility (see docs/2026-07-10-geo-download-on-demand.org):
   download allowlist + the picker/resolve source), read-only on the request path.
 - ``build_catalog`` — the write-time half of the catalog: fetches the Geofabrik
   index, derives bboxes, merges the transit overlay, and writes the pinned snapshot
-  atomically. Run by the weekly refresh, never on the request path.
+  atomically. Run from the assist venv at setup + periodically (NOT the docker-only
+  ``refresh-travel-data.sh``, which has no venv), never on the request path.
 - ``proposals`` — pending download proposals (the HITL gate's durable record: the
   agent proposes, the user approves the recorded slug).
 - ``provisioner`` — the thin off-loop executor that runs approved jobs (via an
