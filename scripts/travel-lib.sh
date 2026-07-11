@@ -88,6 +88,7 @@ merge_regions() {
     # Mount the whole infra dir so both the sources (input/…) and the output (a temp file
     # under $TRAVEL_INFRA_DIR) are visible; use paths RELATIVE to that mount so osmium's
     # -o lands where the caller validates it, not in input/.
+    case "$out" in "$TRAVEL_INFRA_DIR"/*) ;; *) die "merge output must be under $TRAVEL_INFRA_DIR: $out";; esac
     local out_rel="${out#"$TRAVEL_INFRA_DIR"/}"
     log "merging ${#sources[@]} region source(s): ${sources[*]}"
     docker run --rm --user "$(id -u):$(id -g)" -v "$TRAVEL_INFRA_DIR:/data" -w /data \
@@ -102,6 +103,7 @@ merge_regions() {
 set_config_osm() {
     local rel="input/$MERGED_OSM"
     grep -q "^osm: $rel$" "$CONFIG" && return 0
+    grep -q "^osm:" "$CONFIG" || die "config.yml has no 'osm:' line to update"
     local tmp; tmp="$(mktemp "$CONFIG.XXXXXX")"
     sed "0,/^osm:.*/s|^osm:.*|osm: $rel|" "$CONFIG" > "$tmp" && mv -f "$tmp" "$CONFIG"
     log "config osm -> $rel"

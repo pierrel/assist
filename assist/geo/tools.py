@@ -76,6 +76,8 @@ def _head_size(url: str) -> int | None:
         return None
     try:
         resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=False)
+        if resp.status_code // 100 != 2:   # a 3xx/4xx/5xx Content-Length is not the file size
+            return None
         n = int(resp.headers.get("Content-Length", ""))
         return n if n > 0 else None
     except (requests.RequestException, ValueError):

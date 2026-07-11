@@ -37,9 +37,10 @@ from .utils import stub_research_subagent
 
 
 class _FakeHead:
-    """No real network in the eval: a canned HEAD (on-host, 700 MB)."""
+    """No real network in the eval: a canned HEAD (on-host, 200, 700 MB)."""
     def __init__(self, url, **kw):
         self.url = url
+        self.status_code = 200
         self.headers = {"Content-Length": "700000000"}
 
 # A small deterministic catalog (subset of the real Geofabrik index ids/bboxes).
