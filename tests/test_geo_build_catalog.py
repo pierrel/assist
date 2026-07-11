@@ -141,6 +141,17 @@ def test_display_name_sanitized_and_capped(tmp_path):
     assert Catalog(str(tmp_path)).get("us/nevada").display_name == "Nevada"
 
 
+def test_invalid_slug_dropped(tmp_path):
+    # a catalog slug is an allowlist id + a script argv + a filename — reject bad charsets
+    bad = [_feature("Weird/../Id"), _feature("UPPER"), _feature("has space"),
+           _feature("a//b"), _feature("/leading")]
+    build(str(tmp_path), _index([_feature("us/oregon"), _feature("socal")] + bad + _bulk(120)))
+    cat = Catalog(str(tmp_path))
+    assert cat.is_allowed("us/oregon") and cat.is_allowed("socal")
+    for b in ("Weird/../Id", "UPPER", "has space", "a//b", "/leading"):
+        assert not cat.is_allowed(b)
+
+
 def test_fetch_index_pins_url():
     with pytest.raises(ValueError, match="must be https"):
         fetch_index("http://download.geofabrik.de/index-v1.json")
