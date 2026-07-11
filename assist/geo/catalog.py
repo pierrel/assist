@@ -81,11 +81,17 @@ class Catalog:
         return slug in self._entries()
 
     def search(self, query: str) -> list[CatalogEntry]:
-        """Case-insensitive substring match on display name or slug, smallest-extent
-        first (prefer the tightest region covering the need — bounds import cost)."""
+        """Match a place query to catalog regions, smallest-extent first (prefer the
+        tightest region covering the need). Matches either way: the query is part of a
+        region's name/slug (a partial query like "washing"), OR a region's name is named
+        INSIDE the query (the common "<place>, <country/state>" shape the model produces,
+        e.g. "Berlin, Germany" → the "Berlin" region, "Portland, Oregon" → "Oregon")."""
         q = query.strip().lower()
         if not q:
             return []
-        hits = [e for e in self._entries().values()
-                if q in e.display_name.lower() or q in e.slug.lower()]
+        hits = []
+        for e in self._entries().values():
+            name, slug = e.display_name.lower(), e.slug.lower()
+            if q in name or q in slug or (len(name) >= 4 and name in q):
+                hits.append(e)
         return sorted(hits, key=lambda e: _area(e.bbox))
