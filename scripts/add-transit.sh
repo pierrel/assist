@@ -36,9 +36,21 @@ PY
 
 take_lock
 tmpdir="$(mktemp -d "$TRAVEL_INFRA_DIR/.transit-tmp.XXXXXX")"
-trap 'rm -rf "$tmpdir"' EXIT
 gtfs_name="$(printf '%s' "$SLUG" | tr '/' '-')-gtfs.zip"
 out="$tmpdir/$gtfs_name"
+# Transactional: a non-zero exit must leave NO change (else config.yml + the GTFS zip
+# desync from the registry's has_transit). Stash the config; on any failure before
+# commit, restore it and remove the just-added GTFS.
+cp -f "$CONFIG" "$tmpdir/config.bak"
+committed=0
+cleanup() {
+    if [ "$committed" = 0 ]; then
+        [ -f "$tmpdir/config.bak" ] && mv -f "$tmpdir/config.bak" "$CONFIG"
+        rm -f "$INPUT_DIR/$gtfs_name"
+    fi
+    rm -rf "$tmpdir"
+}
+trap cleanup EXIT
 
 case "$FEED" in
     511:*)
@@ -83,4 +95,5 @@ yaml.safe_dump(cfg, open(cfg_path, "w"), sort_keys=False)
 PY
 log "registered transit dataset for '$SLUG'; reimporting MOTIS..."
 reimport_motis || die "MOTIS reimport failed"
+committed=1   # config + GTFS + engine all succeeded — keep them
 log "transit added for '$SLUG'."

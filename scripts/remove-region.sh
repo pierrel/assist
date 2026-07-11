@@ -44,6 +44,9 @@ mv -f "$tmpdir/$MERGED_OSM" "$INPUT_DIR/$MERGED_OSM"
 set_config_osm
 reimport_motis || die "MOTIS reimport failed (region restored)"
 reimport_nominatim || die "Nominatim reimport failed"
-rm -f "$stash"   # committed — don't restore on the trap
-wait_nominatim_ready || die "Nominatim import did not complete after removal"
+# Keep the stashed source until the WHOLE removal (incl. the geocoder coming back) has
+# succeeded — a wait failure then restores it via the trap, so the source is recoverable
+# rather than lost while the script reports failure.
+wait_nominatim_ready || die "Nominatim import did not complete after removal (region source kept)"
+rm -f "$stash"   # committed only after full success — don't restore on the trap
 log "region '$SLUG' removed and the geocoder is live again."

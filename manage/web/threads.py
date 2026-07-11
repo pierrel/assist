@@ -1512,13 +1512,27 @@ def _run_region_job(op: str, slug: str) -> bool:
     script = _GEO_SCRIPTS.get(op)
     if script is None or GEO_DIR is None:
         return False
-    proc = subprocess.run(
-        [os.path.join(_SCRIPTS_DIR, script), slug],
-        env={**os.environ, "TRAVEL_INFRA_DIR": GEO_DIR},
-        capture_output=True, text=True)
+    # Write the script's output to a per-job file, NOT an in-memory buffer: a region
+    # import emits a lot (MOTIS/osmium progress over minutes-to-hours), so capture_output
+    # would grow unboundedly in the web worker. On failure, log just the tail.
+    logpath = os.path.join(GEO_DIR, f".job-{op}-{slug.replace('/', '-')}.log")
+    try:
+        with open(logpath, "w") as logf:
+            proc = subprocess.run(
+                [os.path.join(_SCRIPTS_DIR, script), slug],
+                env={**os.environ, "TRAVEL_INFRA_DIR": GEO_DIR},
+                stdout=logf, stderr=subprocess.STDOUT)
+    except OSError:
+        logging.exception("geo %s %s: could not run the provisioning script", op, slug)
+        return False
     if proc.returncode != 0:
-        logging.warning("geo %s %s failed (rc=%s): %s",
-                        op, slug, proc.returncode, (proc.stderr or "")[-800:])
+        try:
+            with open(logpath) as f:
+                tail = f.read()[-1000:]
+        except OSError:
+            tail = "(log unavailable)"
+        logging.warning("geo %s %s failed (rc=%s); log tail:\n%s",
+                        op, slug, proc.returncode, tail)
     return proc.returncode == 0
 
 

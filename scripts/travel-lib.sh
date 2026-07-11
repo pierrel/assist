@@ -137,8 +137,8 @@ reimport_nominatim() {
         -v "$NOMINATIM_VOLUME:/var/lib/postgresql/16/main" \
         -p "127.0.0.1:$NOMINATIM_PORT:8080" --restart unless-stopped --shm-size=1g \
         "$NOMINATIM_IMAGE" >/dev/null \
-        || { log "Nominatim re-create FAILED — geocoding stays on the MOTIS fallback"; return 1; }
-    log "Nominatim re-import started (serves once /status is 200; geocoding uses MOTIS fallback meanwhile)"
+        || { log "Nominatim re-create FAILED — name/address geocoding is DOWN until it re-imports (routing unaffected)"; return 1; }
+    log "Nominatim re-import started (serves once /status is 200); name/address geocoding is UNAVAILABLE meanwhile (routing + 'from here' coords unaffected)"
 }
 
 # Block until the (detached) Nominatim import finishes and the geocoder answers /status

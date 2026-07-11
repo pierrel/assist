@@ -47,8 +47,33 @@ take_lock
 
 REGION_FILE="$(region_file "$SLUG")"
 tmpdir="$(mktemp -d "$TRAVEL_INFRA_DIR/.add-tmp.XXXXXX")"
-# On --check (or any early failure) leave input/ exactly as we found it.
-cleanup() { [ "$CHECK_ONLY" = 1 ] && rm -f "$REGION_FILE"; rm -rf "$tmpdir"; }
+cp -f "$CONFIG" "$tmpdir/config.bak"
+# If the region is already present (a re-add / a manual --check), stash its source (fast
+# mv, same fs) so the rollback restores it instead of deleting it; the download recreates
+# REGION_FILE.
+[ -f "$REGION_FILE" ] && mv -f "$REGION_FILE" "$tmpdir/region.bak"
+committed=0
+# Transactional: --check and any FAILURE leave input/ + config exactly as found, so a
+# non-zero exit never leaves a region source (seed_registry would else mark it READY), a
+# stale config, or a half-swapped combined OSM.
+_restore_region() {
+    if [ -f "$tmpdir/region.bak" ]; then mv -f "$tmpdir/region.bak" "$REGION_FILE"
+    else rm -f "$REGION_FILE"; fi
+}
+cleanup() {
+    if [ "$CHECK_ONLY" = 1 ]; then
+        _restore_region
+    elif [ "$committed" = 0 ]; then
+        _restore_region
+        mv -f "$tmpdir/config.bak" "$CONFIG" 2>/dev/null || true
+        if [ -f "$tmpdir/combined.bak" ]; then
+            mv -f "$tmpdir/combined.bak" "$INPUT_DIR/$MERGED_OSM"
+        else
+            rm -f "$INPUT_DIR/$MERGED_OSM"
+        fi
+    fi
+    rm -rf "$tmpdir"
+}
 trap cleanup EXIT
 
 if [ -f "$REGION_FILE" ] && [ "$CHECK_ONLY" = 0 ]; then
@@ -74,10 +99,13 @@ if [ "$CHECK_ONLY" = 1 ]; then
     exit 0   # cleanup removes the region file + tmp
 fi
 
-# Swap the merged OSM in atomically (same filesystem), point config at it, rebuild.
+# Swap the merged OSM in atomically (same filesystem), stashing the prior combined so a
+# later failure rolls back to it; point config at it; rebuild.
+[ -f "$INPUT_DIR/$MERGED_OSM" ] && mv -f "$INPUT_DIR/$MERGED_OSM" "$tmpdir/combined.bak"
 mv -f "$tmpdir/$MERGED_OSM" "$INPUT_DIR/$MERGED_OSM"
 set_config_osm
 reimport_motis || die "MOTIS reimport failed"
 reimport_nominatim || die "Nominatim reimport failed"
 wait_nominatim_ready || die "Nominatim import did not complete"
+committed=1   # source + combined + config + both engines all succeeded — keep them
 log "region '$SLUG' added and live (MOTIS + Nominatim cover it)."
