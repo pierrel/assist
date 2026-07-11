@@ -1,5 +1,5 @@
-"""Geo regions: the loaded-region registry, the downloadable-region catalog, and
-(later) the provisioner that imports them.
+"""Geo regions: the loaded-region registry, the downloadable-region catalog, the
+provisioner that imports approved regions, and the agent tools.
 
 Split by volatility (see docs/2026-07-10-geo-download-on-demand.org):
 - ``model``    — the ``Region`` (a loaded region's operational state) and

@@ -64,6 +64,24 @@ def test_add_full_lifecycle(tmp_path):
     assert h.proposals.get("us/washington") is None                # consumed
 
 
+def test_reclick_approve_after_ready_keeps_held_completion(tmp_path):
+    # add finished while LLM down → READY, completion_delivered=False, proposal held for
+    # retry. A re-clicked approve must NOT drop that proposal (deliver_pending needs it).
+    h = _Harness(tmp_path, healthy=False)
+    h.proposals.put(_proposal())
+    h.submit_and_wait("add", "us/washington")
+    assert h.registry.get("us/washington").completion_delivered is False
+    assert h.proposals.get("us/washington") is not None
+    # re-click approve on the now-READY region
+    assert "already loaded" in h.prov.submit("add", "us/washington")
+    assert h.proposals.get("us/washington") is not None    # NOT orphaned
+    # LLM back → the held completion still delivers
+    h.healthy = True
+    h.prov.deliver_pending()
+    assert len(h.completions) == 1
+    assert h.proposals.get("us/washington") is None
+
+
 def test_add_without_proposal_refused(tmp_path):
     h = _Harness(tmp_path)
     out = h.prov.submit("add", "us/washington")

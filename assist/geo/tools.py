@@ -13,10 +13,11 @@ state.
 scheme (``us/washington`` vs the bare ``socal``), so it never types an id — it passes a
 place/region NAME as the user said it (or the state it inferred a city is in, e.g.
 "Seattle" → "Washington"), and code returns the exact canonical id(s).
-``propose_region_download`` is the matching by-construction sink: the id must be a
-catalog id (``is_allowed``), and its body only RECORDS a proposal — the import fires
-only from the user's approval on the recorded slug, so a hallucinated id or an injected
-"download X" can never start a download. None of these raise into the loop.
+``propose_region_download`` is the matching by-construction sink: the id must resolve to
+a catalog entry (``catalog.get`` — the allowlist by construction), and its body only
+RECORDS a proposal — the import fires only from the user's approval on the recorded slug,
+so a hallucinated id or an injected "download X" can never start a download. None of
+these raise into the loop.
 """
 from __future__ import annotations
 

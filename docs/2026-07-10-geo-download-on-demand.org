@@ -132,11 +132,12 @@ to match; this is the change record.
   fire there. =thread.py:253= =pending_reply()= is =send_reply=-specific end to
   end. *Fix (adopted):* a *dedicated pending-proposal record*, not the send_reply
   interrupt. The =propose_region_download= tool body records the proposal (slug +
-  bbox + size) on the =/geo= machinery, emits the =path:= map block, and returns;
-  a plain =POST /geo/{slug}/approve= (like the other =/geo= POST routes) fires the provisioner. One
-  HITL shape, no hot-path interrupt refactor, and the map/size (which need code to
-  run *before* approval) fit naturally in the tool body — the interrupt-before-body
-  model couldn't render them.
+  bbox + size, via the =ProposalStore=) and returns the size + degradation warning;
+  a plain =POST /geo/{slug}/approve= (like the other =/geo= POST routes) fires the
+  provisioner. One HITL shape, no hot-path interrupt refactor. *As-built (increment
+  3):* the *map preview moved to the =/geo= approval UI* (not the tool body — the
+  reply is text-only) — the tool records + returns the size/warning, the approval page
+  renders the =path:= polygon preview.
 - *B3 — the flock doesn't actually exclude* (threat-model). VERIFIED:
   =refresh-travel-data.sh:61= locks =.refresh.lock=; the PRD's add-region locked a
   *different* file =.provision.lock= → *no mutual exclusion*. An approved import
@@ -157,7 +158,13 @@ to match; this is the change record.
   the web is *injected callbacks* (=Provisioner(registry, run_job, on_complete,
   health_check)=), never imports up into =manage/web= — mirroring
   =Scheduler(store, dispatch, health_check)= and =notify=. Saves ~100 LOC + a whole
-  daemon mental model.
+  daemon mental model. *As-built (increment 3):* the ctor also takes =proposals=
+  (=Provisioner(registry, proposals, run_job, on_complete, health_check)=);
+  =origin_tid= + the user request ride the *proposal record*, not =submit=; there IS
+  one in-memory dedup set (=_transit_active= — transit must NOT enter =importing= or a
+  restart would falsely fail a served region); and after the security fold it's ~200
+  lines with two locks (=_submit_lock= atomic check→claim→enqueue, =_deliver_lock=
+  one-completion-dispatch). Still a thin executor — no poll/cron.
 - *Registry: ONE writer, thinned fields* (clean-interfaces B1 + simplicity). The
   doc contradicted itself (table said =registry.py= sole writer; body said the bash
   scripts write it; step 1 had the Provisioner write it). Resolve toward the

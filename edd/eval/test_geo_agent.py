@@ -1,8 +1,8 @@
 """Eval: the agent uses the geo tools to answer coverage and resolve a region to add.
 
-Real-LLM eval (small model) — deploy venv. Tests increment 2's read-only behavior with
-fixture stores (no MOTIS/geocoder): NorCal is the only loaded region; the catalog holds a
-handful of downloadable ones. The contract:
+Real-LLM eval (small model) — deploy venv. Tests the agent-facing geo contract
+(increments 2-3) with fixture stores (no MOTIS/geocoder): NorCal is the only loaded
+region; the catalog holds a handful of downloadable ones. The contract:
 
 - a COVERAGE question → call ``list_regions`` and answer from it (don't guess).
 - an out-of-region ask ("cover Seattle?") → the model states what's covered, resolves the
