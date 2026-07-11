@@ -7,8 +7,9 @@ and the **resolve/picker source** (``get`` / ``search`` — how ``find_regions``
 place the user named to a canonical id, so the small model never synthesizes a
 Geofabrik id).
 
-No network here: the snapshot is BUILT by the weekly refresh (fetch the Geofabrik
-index, derive bboxes, merge the transit overlay) and only READ on the request path.
+No network here: the snapshot is BUILT by ``build_catalog`` from the assist venv (fetch
+the Geofabrik index, derive bboxes, merge the transit overlay) and only READ on the
+request path.
 A small mtime cache avoids re-parsing ~555 entries per call; the builder writes
 atomically (tmp+rename), so a reader sees the old or the new file, never a torn one.
 """

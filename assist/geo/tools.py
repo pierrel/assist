@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from langgraph.config import get_config
@@ -66,21 +66,29 @@ def _fmt_size(n: int | None) -> str:
 
 def _head_size(url: str) -> int | None:
     """The one deterministic download-size figure (T4): a single bounded HEAD on the
-    catalog's PBF URL. The URL is validated https-on-Geofabrik BEFORE the request; the
-    redirect IS followed (Geofabrik's -latest URLs 302 to a dated file — else the size
-    always comes back empty), but the FINAL hop must ALSO be https-on-Geofabrik (T2) or
-    the size is ignored. A non-2xx (a 404/500 error-page length isn't the file size) or
-    any failure → None (size unknown), never a raise."""
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.netloc != _ALLOWED_PBF_HOST:
-        logger.warning("geo: refusing size HEAD to off-host url %s", url)
+    catalog's PBF URL. Redirects are handled MANUALLY, at most one hop, with each target
+    validated https-on-Geofabrik (T2) BEFORE the request to it is issued — so no HEAD is
+    ever sent to an off-host redirect target (a request-following boundary, not an
+    after-the-fact check). Geofabrik's -latest URLs 302 once to a dated file on the same
+    host (else the size always comes back empty). A non-2xx (a 404/500 error-page length
+    isn't the file size) or any failure → None (size unknown), never a raise."""
+    def _validated(u: str) -> str | None:
+        p = urlparse(u)
+        if p.scheme != "https" or p.netloc != _ALLOWED_PBF_HOST:
+            logger.warning("geo: refusing size HEAD to off-host url %s", u)
+            return None
+        return u
+    if _validated(url) is None:
         return None
     try:
-        resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=True)
-        final = urlparse(resp.url)
-        if final.scheme != "https" or final.netloc != _ALLOWED_PBF_HOST:
-            logger.warning("geo: size HEAD redirected off-host (%s); ignoring", resp.url)
-            return None
+        resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=False)
+        if resp.is_redirect:                     # the one legitimate -latest 302
+            nxt = _validated(urljoin(url, resp.headers.get("Location", "")))
+            if nxt is None:
+                return None
+            resp = requests.head(nxt, timeout=_HEAD_TIMEOUT_S, allow_redirects=False)
+            if resp.is_redirect:                 # a second hop is not expected — refuse the chain
+                return None
         if resp.status_code // 100 != 2:   # a 3xx/4xx/5xx Content-Length is not the file size
             return None
         n = int(resp.headers.get("Content-Length", ""))
