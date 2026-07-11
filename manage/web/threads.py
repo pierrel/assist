@@ -1586,19 +1586,37 @@ class _ResumeScheduler:
 _RESUME_SCHEDULER = _ResumeScheduler()
 
 
+_GEO_DELIVER_INTERVAL_S = 120   # retry held completions (D4) roughly every 2 min
+
+
+def _geo_startup() -> None:
+    """Seed + reconcile once, then periodically deliver held completions. Runs on its OWN
+    thread — NEVER the asyncio lifespan thread — because delivery goes through
+    ``_scheduled_dispatch`` → ``_process_message`` (a full agent turn) + a blocking
+    health probe, which would stall uvicorn startup on the loop. The retry loop makes D4
+    real: an LLM-down-at-completion is held and re-attempted until the LLM is back (a
+    cheap no-op when nothing is held)."""
+    try:
+        base = os.getenv("ASSIST_GEO_BASE_SLUG", "norcal")
+        base_entry = GEO_CATALOG.get(base) if GEO_CATALOG else None
+        seed_registry(GEO_REGISTRY, GEO_CATALOG, os.path.join(GEO_DIR, "input"),
+                      base, base_entry.transit_feed if base_entry else None)
+        _PROVISIONER.reconcile()        # orphaned importing → failed
+    except Exception:
+        logging.exception("geo: startup seed/reconcile failed")
+    while True:
+        try:
+            _PROVISIONER.deliver_pending()   # any completion held (restart/LLM-down) — C1/D4
+        except Exception:
+            logging.exception("geo: deliver_pending failed")
+        time.sleep(_GEO_DELIVER_INTERVAL_S)
+
+
 def start_scheduler() -> None:
     _SCHEDULER.start()
     _RESUME_SCHEDULER.start()
     if _PROVISIONER is not None and GEO_DIR is not None:
-        try:
-            base = os.getenv("ASSIST_GEO_BASE_SLUG", "norcal")
-            base_entry = GEO_CATALOG.get(base) if GEO_CATALOG else None
-            seed_registry(GEO_REGISTRY, GEO_CATALOG, os.path.join(GEO_DIR, "input"),
-                          base, base_entry.transit_feed if base_entry else None)
-            _PROVISIONER.reconcile()        # orphaned importing → failed
-            _PROVISIONER.deliver_pending()  # any completion held over a restart (C1/D4)
-        except Exception:
-            logging.exception("geo: startup seed/reconcile failed")
+        threading.Thread(target=_geo_startup, name="geo-startup", daemon=True).start()
 
 
 def stop_scheduler() -> None:

@@ -40,6 +40,9 @@ ENV_VARS=""
 [ -n "$TAVILY_API_KEY" ] && ENV_VARS="${ENV_VARS}Environment=\"TAVILY_API_KEY=$TAVILY_API_KEY\"\n"
 [ -n "$ASSIST_ROUTING_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_ROUTING_URL=$ASSIST_ROUTING_URL\"\n"
 [ -n "$ASSIST_GEOCODER_URL" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_GEOCODER_URL=$ASSIST_GEOCODER_URL\"\n"
+# TRAVEL_INFRA_DIR enables the geo region-download feature (registry/catalog/proposals +
+# the provisioning scripts). Unset → the geo tools + /geo page are simply absent.
+[ -n "$TRAVEL_INFRA_DIR" ] && ENV_VARS="${ENV_VARS}Environment=\"TRAVEL_INFRA_DIR=$TRAVEL_INFRA_DIR\"\n"
 [ -n "$ASSIST_SSL_CERT" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_CERT=$ASSIST_SSL_CERT\"\n"
 [ -n "$ASSIST_SSL_KEY" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_KEY=$ASSIST_SSL_KEY\"\n"
 [ -n "$ASSIST_SMS_SECRET" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SMS_SECRET=$ASSIST_SMS_SECRET\"\n"
