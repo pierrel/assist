@@ -2,9 +2,18 @@
 of the catalog (the read-time half is ``catalog.py``; see the C3 builder/reader split
 in docs/2026-07-10-geo-download-on-demand.org).
 
-Run by the weekly travel-data refresh (never on the request path)::
+Run at travel-infra setup and periodically to refresh the pinned snapshot — from the
+assist venv (it imports the ``assist`` package), NEVER on the request path and NOT from
+the docker-only weekly ``refresh-travel-data.sh`` (that script has no venv)::
 
     python -m assist.geo.build_catalog "$TRAVEL_INFRA_DIR"
+
+``catalog.json`` is operator-provisioned data living in ``$TRAVEL_INFRA_DIR`` alongside
+``regions.json`` / ``proposals.json``; when it is missing ``add-region.sh`` dies with this
+exact command, and ``find_regions`` simply matches nothing (the reader treats an absent
+file as an empty catalog). The Geofabrik index is stable, so the snapshot is pinned on
+purpose — a periodic rebuild (an operator cron beside the refresh, if wanted) only picks
+up new/removed extracts.
 
 Fetches ``index-v1.json`` (a GeoJSON FeatureCollection of ~555 extracts), and for each
 feature: validates the PBF URL is https on the Geofabrik host (T2 — a poisoned entry

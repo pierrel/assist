@@ -122,6 +122,11 @@ INBOUND_LOG = InboundLog(ROOT)
 # so prod behaviour is unchanged. The Provisioner is built in threads.py (it needs the
 # dispatch/urgent/health callbacks that live there — the Scheduler precedent).
 GEO_DIR = os.getenv("TRAVEL_INFRA_DIR")
+if GEO_DIR and not os.path.isdir(GEO_DIR):
+    # Fail fast on a mis-set path rather than register tools that crash on first write
+    # (ProposalStore.put → FileNotFoundError mid-turn). Disable geo, log loudly.
+    logging.error("TRAVEL_INFRA_DIR=%s is not a directory — geo disabled", GEO_DIR)
+    GEO_DIR = None
 GEO_REGISTRY = RegionRegistry(GEO_DIR) if GEO_DIR else None
 GEO_CATALOG = Catalog(GEO_DIR) if GEO_DIR else None
 GEO_PROPOSALS = ProposalStore(GEO_DIR) if GEO_DIR else None

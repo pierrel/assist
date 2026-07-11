@@ -85,8 +85,10 @@ log "downloading $SLUG from $URL ..."
 # keeps every hop https; --max-redirs bounds the chain; validate_pbf (OSMHeader) is the
 # backstop against a wrong target.
 curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 3 --max-time 1800 \
+    --max-filesize "$TRAVEL_MAX_DOWNLOAD_BYTES" \
     -o "$tmpdir/region.osm.pbf" "$URL" \
     || die "download failed for $SLUG"
+check_download_size "$tmpdir/region.osm.pbf"
 validate_pbf "$tmpdir/region.osm.pbf" || die "downloaded PBF failed validation"
 log "downloaded $SLUG ($(du -h "$tmpdir/region.osm.pbf" | cut -f1))"
 
