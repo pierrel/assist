@@ -279,6 +279,7 @@ def render_index() -> str:
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>Assist Web</title>
+        {_FAVICON_LINKS}
         <style>
           :root {{ --pad: 1rem; }}
           body {{ font-family: sans-serif; margin: 0; -webkit-tap-highlight-color: rgba(0,0,0,0.05); }}
@@ -750,6 +751,7 @@ def render_thread(
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{html.escape(title)}</title>
+        {_FAVICON_LINKS}
         <style>
           :root {{ --pad: 1rem; }}
           body {{ font-family: sans-serif; margin: 0; -webkit-tap-highlight-color: rgba(0,0,0,0.05); }}
@@ -1231,11 +1233,16 @@ async def index() -> str:
     return render_index()
 
 
-# A tiny inline SVG favicon — no static-file infra. Browsers auto-request
-# /favicon.ico, so this one route gives every page a tab icon; served as SVG
-# because modern browsers honour the content-type regardless of the .ico path.
-# A psychedelic brain: a lobular brain body under a magenta->cyan->yellow
-# gradient, with dark fissure/gyri grooves, on a dark rounded square.
+# Favicon set — a psychedelic brain (a lobular body under a magenta->cyan->yellow
+# gradient with dark gyri grooves, on a dark rounded square). Two renditions, because
+# no single format covers every browser:
+#  - an inline SVG served at /favicon.ico for browsers that render SVG favicons
+#    (Firefox/Chrome) — crisp and tiny;
+#  - a rasterized PNG (manage/web/apple-touch-icon.png, the one committed image asset)
+#    served at /apple-touch-icon.png, because iOS Safari does NOT render SVG favicons and
+#    needs a raster image; iOS also auto-requests that well-known path.
+# Each page head carries explicit <link> tags (_FAVICON_LINKS) so a browser picks the
+# format it supports — Safari the PNG (its tab favicon + home-screen icon).
 _FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
     '<defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1">'
@@ -1257,12 +1264,34 @@ _FAVICON_SVG = (
     '</g></svg>'
 )
 
+# Raster rendition for iOS Safari (which doesn't render SVG favicons). Read once at
+# import; the PNG is a committed asset that rsyncs with the code.
+with open(os.path.join(os.path.dirname(__file__), "apple-touch-icon.png"), "rb") as _f:
+    _FAVICON_PNG = _f.read()
+
+# <link> tags for every page head: SVG where supported, PNG for Safari's tab favicon,
+# apple-touch-icon for the iOS home screen. They point at the two routes below.
+_FAVICON_LINKS = (
+    '<link rel="icon" type="image/svg+xml" href="/favicon.ico">'
+    '<link rel="icon" type="image/png" sizes="180x180" href="/apple-touch-icon.png">'
+    '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+)
+
 
 @app.get("/favicon.ico")
 async def favicon() -> Response:
     return Response(
         content=_FAVICON_SVG,
         media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/apple-touch-icon.png")
+async def apple_touch_icon() -> Response:
+    return Response(
+        content=_FAVICON_PNG,
+        media_type="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
     )
 

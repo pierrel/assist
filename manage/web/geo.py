@@ -21,7 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from assist.geo.model import STATE_READY
 from manage.web.app import app
 from manage.web.state import GEO_CSRF, GEO_PROPOSALS, GEO_REGISTRY
-from manage.web.threads import _PROVISIONER, _PULL_TO_REFRESH_SCRIPT
+from manage.web.threads import _FAVICON_LINKS, _PROVISIONER, _PULL_TO_REFRESH_SCRIPT
 
 
 def _require_geo():
@@ -76,6 +76,7 @@ def _render(regions, proposals) -> str:
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         "<title>Geo regions</title>"
+        f"{_FAVICON_LINKS}"
         "<style>body{font-family:system-ui;margin:1rem;max-width:760px}"
         "table{width:100%;border-collapse:collapse;margin:.5rem 0}"
         "td,th{text-align:left;padding:.4rem;border-bottom:1px solid #ddd}"
