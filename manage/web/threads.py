@@ -54,12 +54,14 @@ from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
 from assist.geo.provisioner import Provisioner
 from assist.geo.seed import seed_registry
+from assist.geo.tools import DEGRADATION_WARNING, _fmt_size
 from manage.web.state import (
     BUSY_STAGES,
     DESCRIPTION_CACHE,
     DOMAIN_MANAGERS,
     DOMAINS,
     GEO_CATALOG,
+    GEO_CSRF,
     GEO_DIR,
     GEO_PROPOSALS,
     GEO_REGISTRY,
@@ -681,6 +683,36 @@ def render_thread(
           </form>
         </div>"""
 
+    # A pending geo download proposal for THIS thread renders an inline approve/decline
+    # card (like the send_reply approval) so the user acts without leaving the chat.
+    geo_banner = ""
+    if GEO_PROPOSALS is not None:
+        try:
+            prop = next((p for p in GEO_PROPOSALS.all() if p.origin_tid == tid), None)
+        except Exception:
+            prop = None
+        if prop is not None:
+            s = html.escape(prop.slug)
+            t = html.escape(tid)
+            geo_banner = f"""
+        <div class="approval-banner">
+          <div><strong>Download proposal awaiting your approval</strong></div>
+          <div>Add <b>{html.escape(prop.display_name)}</b> ({_fmt_size(prop.size_bytes)}).
+               {html.escape(DEGRADATION_WARNING)}</div>
+          <div class="approval-actions">
+            <form action="/geo/{s}/approve" method="post" style="display:inline">
+              <input type="hidden" name="token" value="{GEO_CSRF}">
+              <input type="hidden" name="redirect" value="/thread/{t}">
+              <button class="btn merge-btn" type="submit">Approve download</button>
+            </form>
+            <form action="/geo/{s}/decline" method="post" style="display:inline">
+              <input type="hidden" name="token" value="{GEO_CSRF}">
+              <input type="hidden" name="redirect" value="/thread/{t}">
+              <button class="btn btn-secondary" type="submit">Decline</button>
+            </form>
+          </div>
+        </div>"""
+
     # Disable the input form during the initial setup phase
     form_disabled = "disabled" if is_init else ""
     form_note = (
@@ -813,6 +845,7 @@ def render_thread(
           {rename_form}
           {_thread_domain_html(tid)}
           {status_banner}
+          {geo_banner}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           {"<div class='success-msg'>Merged to main and pushed to origin!</div>" if merged else ""}
           {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}

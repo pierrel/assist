@@ -109,8 +109,10 @@ or a coverage question about somewhere you don't have):
    `find_regions` — not the street address, not the bare city if it isn't itself a
    region. If `find_regions` returns nothing, you named the wrong area — ask the user
    which state/region it's in and try again.
-3. **Offer to add** the best (smallest covering) candidate it returns: name the
-   region and note that adding it takes a while (it downloads and rebuilds map data).
+3. **Offer to add the SMALLEST covering candidate.** `find_regions` lists them
+   smallest-first, so offer the TOP result — e.g. "Berlin", NOT the whole of "Germany";
+   "Oregon", not "us-west". A smaller region imports much faster and still covers the
+   place. Name it and note that adding it takes a while (downloads + rebuilds map data).
 4. **Only when the user confirms**, call
    `propose_region_download(region_id, user_request)` — `region_id` is the exact id
    from the `find_regions` result; `user_request` is what the user originally asked

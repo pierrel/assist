@@ -38,7 +38,7 @@ def test_render_lists_regions_with_actions():
     assert "transit" in html and "no transit" in html
     # a ready region without transit offers add-transit + delete; the CSRF token is embedded
     assert "/geo/us/oregon/transit" in html and "/geo/us/oregon/delete" in html
-    assert geo._CSRF in html
+    assert geo.GEO_CSRF in html
     # a transit-having region offers no add-transit
     assert "/geo/norcal/transit" not in html
 
@@ -56,7 +56,7 @@ def test_render_importing_region_has_no_delete_button():
 
 
 def test_check_csrf():
-    geo._check_csrf(geo._CSRF)                    # correct token passes
+    geo._check_csrf(geo.GEO_CSRF)                    # correct token passes
     for bad in (None, "", "wrong"):
         with pytest.raises(HTTPException) as e:
             geo._check_csrf(bad)

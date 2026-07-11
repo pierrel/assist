@@ -20,12 +20,8 @@ from starlette.concurrency import run_in_threadpool
 
 from assist.geo.model import STATE_READY
 from manage.web.app import app
-from manage.web.state import GEO_PROPOSALS, GEO_REGISTRY
+from manage.web.state import GEO_CSRF, GEO_PROPOSALS, GEO_REGISTRY
 from manage.web.threads import _PROVISIONER, _PULL_TO_REFRESH_SCRIPT
-
-# One app-lifetime token (single-user app). Embedded in every mutating form + required on
-# the POST; rotates on restart (reload the page to get the new one).
-_CSRF = secrets.token_urlsafe(16)
 
 
 def _require_geo():
@@ -34,7 +30,7 @@ def _require_geo():
 
 
 def _check_csrf(token: str | None):
-    if not token or not secrets.compare_digest(token, _CSRF):
+    if not token or not secrets.compare_digest(token, GEO_CSRF):
         raise HTTPException(status_code=403, detail="bad or missing form token")
 
 
@@ -47,7 +43,7 @@ def _fmt_size(n: int | None) -> str:
 
 def _btn(action: str, label: str, cls: str = "btn-secondary") -> str:
     return (f'<form method="post" action="{action}" style="display:inline">'
-            f'<input type="hidden" name="token" value="{_CSRF}">'
+            f'<input type="hidden" name="token" value="{GEO_CSRF}">'
             f'<button class="btn {cls}" type="submit">{label}</button></form>')
 
 
@@ -98,34 +94,46 @@ async def geo_view():
     return HTMLResponse(await run_in_threadpool(_render, regions, proposals))
 
 
+def _next(form) -> str:
+    """Where to redirect after the action — a local path from the form's `redirect`
+    (so the in-thread approve/decline returns to the thread), else the /geo page. Only a
+    local path (leading '/', no '//') is honored — never an open redirect."""
+    dest = form.get("redirect") or ""
+    return dest if dest.startswith("/") and not dest.startswith("//") else "/geo"
+
+
 @app.post("/geo/{slug:path}/approve")
 async def geo_approve(slug: str, request: Request):
     _require_geo()
-    _check_csrf((await request.form()).get("token"))
+    form = await request.form()
+    _check_csrf(form.get("token"))
     # fire the RECORDED slug's add (submit refuses without a pending proposal)
     await run_in_threadpool(_PROVISIONER.submit, "add", slug)
-    return RedirectResponse("/geo", status_code=303)
+    return RedirectResponse(_next(form), status_code=303)
 
 
 @app.post("/geo/{slug:path}/decline")
 async def geo_decline(slug: str, request: Request):
     _require_geo()
-    _check_csrf((await request.form()).get("token"))
+    form = await request.form()
+    _check_csrf(form.get("token"))
     await run_in_threadpool(GEO_PROPOSALS.remove, slug)
-    return RedirectResponse("/geo", status_code=303)
+    return RedirectResponse(_next(form), status_code=303)
 
 
 @app.post("/geo/{slug:path}/delete")
 async def geo_delete(slug: str, request: Request):
     _require_geo()
-    _check_csrf((await request.form()).get("token"))
+    form = await request.form()
+    _check_csrf(form.get("token"))
     await run_in_threadpool(_PROVISIONER.submit, "remove", slug)
-    return RedirectResponse("/geo", status_code=303)
+    return RedirectResponse(_next(form), status_code=303)
 
 
 @app.post("/geo/{slug:path}/transit")
 async def geo_transit(slug: str, request: Request):
     _require_geo()
-    _check_csrf((await request.form()).get("token"))
+    form = await request.form()
+    _check_csrf(form.get("token"))
     await run_in_threadpool(_PROVISIONER.submit, "transit", slug)
-    return RedirectResponse("/geo", status_code=303)
+    return RedirectResponse(_next(form), status_code=303)

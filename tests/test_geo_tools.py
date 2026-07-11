@@ -148,13 +148,12 @@ def test_propose_already_loaded_short_circuits(tmp_path):
     assert "already loaded" in out and props.all() == []
 
 
-def test_propose_size_unknown_on_redirect(tmp_path):
+def test_propose_size_unknown_on_offhost_redirect(tmp_path):
     propose, props = _propose(tmp_path)
-    # a redirect (302, non-2xx since allow_redirects=False) → size unknown
-    class _Redirect:
-        status_code = 302
-        headers = {}                      # no Content-Length on a redirect response
-    with patch("assist.geo.tools.requests.head", lambda url, **kw: _Redirect()), \
+    # the HEAD follows Geofabrik's redirect, but it landed on a MIRROR host (large files
+    # redirect off download.geofabrik.de) → the size can't be trusted → size unknown
+    with patch("assist.geo.tools.requests.head",
+               lambda url, **kw: _Head("https://ftp5.gwdg.de/x.osm.pbf")), \
          patch("assist.geo.tools._thread_id", lambda: "t1"):
         out = propose("us/washington", "x")
     assert "size unknown" in out
