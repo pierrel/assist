@@ -1,6 +1,6 @@
 ---
 name: travel
-description: Real-world travel between places — time and distance by car/bike/walk/transit, AND step-by-step directions (turns, which bus or train), across a metro area and nearby cities. EXAMPLES — "how long from home to the Ferry Building"; "is it faster to bike or take the train"; "drive time to the airport"; "how far is the office"; "directions to City Hall"; "how do I get to the museum"; "which bus do I take"; "walk me through biking there". MUST load before answering any question about travel time, distance, the fastest mode, OR how to get from one place to another.
+description: Real-world travel between places — time and distance by car/bike/walk/transit, AND step-by-step directions (turns, which bus or train), across a metro area and nearby cities, PLUS which geographic areas are covered and adding new ones on request. EXAMPLES — "how long from home to the Ferry Building"; "is it faster to bike or take the train"; "drive time to the airport"; "how far is the office"; "directions to City Hall"; "which bus do I take"; "what areas do you cover"; "can you do directions in Seattle"; "download the Los Angeles area". MUST load before answering any question about travel time, distance, the fastest mode, how to get from one place to another, OR which regions are covered / adding a region.
 ---
 
 # Travel & directions — real map data, two tools
@@ -74,14 +74,46 @@ When a result is degraded, NOTICE it and tell the user — and when more informa
 would likely fix it, ASK for that:
 
 - **No route / unavailable / "couldn't find a place"** → say so plainly (never
-  substitute an estimate or route from memory), and ask for what would resolve it:
-  a more specific address or a nearby landmark, the city/area, or a different mode.
+  substitute an estimate or route from memory). This often means the place is
+  **outside the loaded regions** — follow *Regions & coverage* below (state what you
+  cover, and offer to add the region) rather than only asking for a better address.
 - **A resolved place name looks wrong** (the echoed name isn't what the user meant)
   → point it out and offer to retry with a more specific place.
-- **A mode comes back `unavailable`** (e.g. no transit there) → name it, and suggest
-  a mode that did work.
+- **Transit comes back `unavailable`** → don't just say "unavailable". Call
+  `list_regions` to see which region the trip is in and whether it has transit; if
+  that region shows **no transit**, tell the user transit data isn't loaded for
+  *that named region* (car/bike/walk still work). Name the region, not a generic
+  "unavailable".
 - **Approximate street turns** → it's fine to hedge; don't present an approximate
   turn as exact.
+
+## Regions & coverage
+
+Travel/directions/geocoding only work inside the **loaded regions**. Two tools let
+you answer coverage questions and add regions on request:
+
+- **`list_regions()`** — the regions currently loaded and whether each has transit.
+- **`find_regions(query)`** — resolve a place NAME to the exact downloadable region
+  id(s). **You never type a region id yourself** — pass a name and use the id it
+  returns.
+
+**When the user asks what you cover** ("what areas do you cover", "can you do
+Seattle") → call `list_regions()` and answer from it.
+
+**When a place can't be found** (a `travel`/`directions` "couldn't find a place",
+or a coverage question about somewhere you don't have):
+
+1. Call `list_regions()` and tell the user what you *do* cover.
+2. Work out the **US state or larger region** the place is in (e.g. Seattle → the
+   state of Washington; a San Diego address → Southern California) and pass THAT name
+   to `find_regions` — not the street address, not the bare city if it isn't itself a
+   region. If `find_regions` returns nothing, you named the wrong area — ask the user
+   which state/region it's in and try again.
+3. **Offer to add** the best (smallest covering) candidate it returns: name the
+   region and note that adding it takes a while (it downloads and rebuilds map data).
+   Only add it if the user confirms — never start an add on your own.
+
+Don't guess a region id, and don't claim to have added a region you haven't.
 
 ## When NOT to use
 
