@@ -66,16 +66,21 @@ def _fmt_size(n: int | None) -> str:
 
 def _head_size(url: str) -> int | None:
     """The one deterministic download-size figure (T4): a single bounded HEAD on the
-    catalog's PBF URL. The URL is validated https-on-Geofabrik BEFORE the request, and
-    redirects are NOT followed (T2 — a redirect would fire a request at an unvalidated
-    host; the Geofabrik PBFs serve directly, so a redirect just yields no size). Any
-    failure/redirect → None (size unknown), never a raise."""
+    catalog's PBF URL. The URL is validated https-on-Geofabrik BEFORE the request; the
+    redirect IS followed (Geofabrik's -latest URLs 302 to a dated file — else the size
+    always comes back empty), but the FINAL hop must ALSO be https-on-Geofabrik (T2) or
+    the size is ignored. A non-2xx (a 404/500 error-page length isn't the file size) or
+    any failure → None (size unknown), never a raise."""
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.netloc != _ALLOWED_PBF_HOST:
         logger.warning("geo: refusing size HEAD to off-host url %s", url)
         return None
     try:
-        resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=False)
+        resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=True)
+        final = urlparse(resp.url)
+        if final.scheme != "https" or final.netloc != _ALLOWED_PBF_HOST:
+            logger.warning("geo: size HEAD redirected off-host (%s); ignoring", resp.url)
+            return None
         if resp.status_code // 100 != 2:   # a 3xx/4xx/5xx Content-Length is not the file size
             return None
         n = int(resp.headers.get("Content-Length", ""))
@@ -130,8 +135,9 @@ def geo_tools(registry: RegionRegistry, catalog: Catalog,
                  f"{' — already loaded' if e.slug in loaded else ''}"
                  for e in hits[:_MAX_CANDIDATES]]
         more = "" if len(hits) <= _MAX_CANDIDATES else f"\n(+{len(hits) - _MAX_CANDIDATES} more; refine the name)"
-        return ("Matching downloadable regions (use the exact id when proposing a "
-                "download):\n" + "\n".join(lines) + more)
+        return ("Matching downloadable regions, SMALLEST AREA FIRST — prefer the TOP "
+                "(smallest) one that covers the place (a city or state, not a whole "
+                "country) unless the user asks for a wider area:\n" + "\n".join(lines) + more)
 
     def propose_region_download(region_id: str, user_request: str) -> str:
         """Record a proposal to download a new geographic region, for the user to

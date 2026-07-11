@@ -12,6 +12,7 @@ import html
 import json
 import logging
 import os
+import secrets
 import sys
 import tempfile
 import threading
@@ -124,6 +125,10 @@ GEO_DIR = os.getenv("TRAVEL_INFRA_DIR")
 GEO_REGISTRY = RegionRegistry(GEO_DIR) if GEO_DIR else None
 GEO_CATALOG = Catalog(GEO_DIR) if GEO_DIR else None
 GEO_PROPOSALS = ProposalStore(GEO_DIR) if GEO_DIR else None
+# One app-lifetime token embedded in the geo approve/decline/delete/transit forms (in the
+# /geo page AND the in-thread proposal banner) + required on the POST — a cross-origin
+# forge can't read a page to obtain it, so it can't fire a destructive rebuild (T1).
+GEO_CSRF = secrets.token_urlsafe(16)
 _geo_tools = (geo_tools(GEO_REGISTRY, GEO_CATALOG, GEO_PROPOSALS)
               if GEO_DIR else [])
 
