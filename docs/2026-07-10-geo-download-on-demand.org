@@ -54,11 +54,14 @@ size figure (see D-fixed).
 
 So instead of a hand-seeded shortlist, the *catalog is a pinned snapshot of the
 full-variant index* (the bbox derives from its geometry) stored in
-=$TRAVEL_INFRA_DIR= — refreshed by the weekly cron, which caches each region's
-size into the snapshot, so the approval size comes from the snapshot with *no
-live request-path HEAD* (revised by review — T4; the earlier "one live HEAD at
-proposal time" was dropped as an SSRF + turn-slot-hang surface). The *curation
-happens at selection time, by intent*: the agent passes the place *as the user
+=$TRAVEL_INFRA_DIR=, refreshed by the weekly cron. *As-built (increment 3):* the
+builder caches NO sizes (pre-sizing 555 regions weekly was reviewed out as
+gold-plating) — the approval size is T4's sanctioned fallback: a *single bounded
+HEAD in the propose tool body*, off the event loop, with the URL validated
+https-on-Geofabrik BEFORE the request and =allow_redirects=False= (a redirect ⇒
+no size ⇒ "size unknown"), so the SSRF/turn-slot-hang the earlier "no live HEAD"
+wording feared is closed by construction rather than by removing the HEAD. The
+*curation happens at selection time, by intent*: the agent passes the place *as the user
 said it* to =find_regions= (B1), which resolves it to the matching index
 candidate(s) ("do you cover Seattle?" → =us/washington=) — the model never
 synthesizes the id. (A manual =/geo/add= browse-and-pick picker is *deferred* —
@@ -248,10 +251,13 @@ to match; this is the change record.
   kills the blocking child → reconcile→failed is the correct consistent outcome), not
   fire-and-forget.
 - *T6 — prompt injection via the index =display_name=.* The completion message +
-  =find_regions=/=list_regions= output must build agent-facing text from the *slug*
-  (bounded allowlist) + code copy, never interpolate the raw third-party
-  =display_name= into the prompt; if shown, confine it to the map label (already a
-  capped sandboxed text node).
+  =find_regions=/=list_regions= output + the propose reply all interpolate the
+  region name. *As-built (increment 3):* rather than build every one from the slug,
+  the name is *sanitized at the single build-time chokepoint* (=build_catalog._display_name=:
+  a benign charset =[A-Za-z0-9 ,.()'\-/&]=, single line, capped 64 chars, else the
+  slug-derived name) — so every downstream interpolation, including the completion
+  turn dispatched as a fresh message, is over a bounded value by construction. The
+  raw third-party name never reaches a prompt.
 - *Nits:* slug→filename collision (store =osm_file= explicitly or reversible-encode);
   =rm=/osmium =basename=-confine registry paths; the =/geo/add= picker must not render
   ~555 Leaflet iframes (paginate/filter first, build HTML in =run_in_threadpool=);
@@ -344,11 +350,12 @@ to match; this is the change record.
 ** Safety model — HITL approval gate before the import (the spine)
 A region import is expensive (D3) and privileged (spawns docker/curl). So it is
 modeled like an outbound side effect that requires approval:
-1. The agent *proposes* a download: =propose_region_download(slug)= (slug from
-   =find_regions=, per B1) records a *pending-proposal record* on the =/geo=
-   machinery and renders the region's *polygon map preview* (U1) plus the
-   *total download size* (from the snapshot cache — T4, no live request-path HEAD)
-   and the *code-supplied degradation warning* (U2). Nothing heavy runs.
+1. The agent *proposes* a download: =propose_region_download(region_id, user_request)=
+   (id from =find_regions=, per B1) records a *pending-proposal record* (the
+   =ProposalStore=) and returns the region's size + the *code-supplied degradation
+   warning* (U2) for the reply; the =/geo= approval UI renders the *polygon map
+   preview* (U1). The size is a *single bounded, host-validated, no-redirect HEAD in
+   the tool body* (T4 fallback — see D2 as-built), off the loop. Nothing heavy runs.
 2. You *approve* via a plain =POST /geo/{slug}/approve= (server-token-gated — T1),
    *not* the send_reply interrupt (which can't fire on a normal turn — B2). On
    decline, the record is dropped.

@@ -147,15 +147,25 @@ def test_propose_already_loaded_short_circuits(tmp_path):
     assert "already loaded" in out and props.all() == []
 
 
-def test_propose_size_unknown_on_offhost_redirect_or_error(tmp_path):
+def test_propose_size_unknown_on_redirect(tmp_path):
     propose, props = _propose(tmp_path)
-    # redirect landed off-host → Content-Length untrusted → size unknown
-    with patch("assist.geo.tools.requests.head",
-               lambda url, **kw: _Head("https://evil.example.com/x.pbf")), \
+    # a redirect (302, no Content-Length since allow_redirects=False) → size unknown
+    class _Redirect:
+        headers = {}                      # no Content-Length on a redirect response
+    with patch("assist.geo.tools.requests.head", lambda url, **kw: _Redirect()), \
          patch("assist.geo.tools._thread_id", lambda: "t1"):
         out = propose("us/washington", "x")
     assert "size unknown" in out
     assert props.get("us/washington").size_bytes is None
+
+
+def test_propose_refused_while_importing(tmp_path):
+    from assist.geo.model import STATE_IMPORTING
+    importing = [_region("us/washington", "Washington", state=STATE_IMPORTING)]
+    propose, props = _propose(tmp_path, regions=importing)
+    with patch("assist.geo.tools._thread_id", lambda: "t1"):
+        out = propose("us/washington", "x")
+    assert "already downloading" in out and props.all() == []   # no overwrite of the pending record
 
 
 def test_propose_without_thread_refuses(tmp_path):

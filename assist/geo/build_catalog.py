@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 from urllib.parse import urlparse
 
@@ -42,13 +43,27 @@ TRANSIT_OVERLAY_FILE = "transit-overlay.json"
 _FETCH_TIMEOUT_S = 60
 
 
-def _display_name(entry_id: str, name) -> str:
-    """The index's ``name`` is human for most entries but the raw id for 52/555
-    (all US states among them). Derive one from the id's last segment when the name
-    is the id, missing, or (defensively — third-party input) not a string."""
-    if isinstance(name, str) and name and name != entry_id:
-        return name
+# Display names are third-party index text but land in agent-facing prompts (find_regions
+# / list_regions output, the propose reply, and — highest trust — the completion turn
+# dispatched as a fresh message). Sanitize at this one build-time chokepoint (T6) so every
+# downstream interpolation is over a bounded value: a benign charset, single line, capped.
+_NAME_OK = re.compile(r"[^A-Za-z0-9 ,.()'\-/&]")
+_NAME_MAX = 64
+
+
+def _slug_derived_name(entry_id: str) -> str:
     return entry_id.rsplit("/", 1)[-1].replace("-", " ").title()
+
+
+def _display_name(entry_id: str, name) -> str:
+    """A safe human name: the index ``name`` when it's a clean string different from the
+    id, else derived from the id's last segment (the id-as-name case is 52/555 — all US
+    states). Untrusted input is stripped to a benign charset + capped (T6)."""
+    if isinstance(name, str) and name and name != entry_id:
+        cleaned = _NAME_OK.sub("", name).strip()[:_NAME_MAX].strip()
+        if cleaned:
+            return cleaned
+    return _slug_derived_name(entry_id)
 
 
 def _bbox_of(geometry: dict) -> list[float] | None:

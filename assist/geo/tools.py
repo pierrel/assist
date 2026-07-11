@@ -2,11 +2,12 @@
 place the user named → the exact downloadable-region id), and
 ``propose_region_download`` (record a HITL download proposal; never downloads).
 
-Wired into the web ``AgentSpec`` NORMAL tool set (like ``notify``) — NOT the untrusted
+Intended for the web ``AgentSpec`` NORMAL tool set (like ``notify``) — NOT the untrusted
 SMS-triage set (an inbound text must not drive region logic) and not a core built-in
 (the registry/catalog live in the web deployment's travel-infra dir; emacsos/CLI have
-neither). Built by ``geo_tools(registry, catalog, proposals)`` closing over the injected
-stores so this module imports no web state.
+neither). That wiring lands with the web increment. Built by ``geo_tools(registry,
+catalog, proposals)`` closing over the injected stores so this module imports no web
+state.
 
 ``find_regions`` is the B1 fix: the small model can't reliably reproduce Geofabrik's id
 scheme (``us/washington`` vs the bare ``socal``), so it never types an id — it passes a
@@ -27,7 +28,7 @@ import requests
 from langgraph.config import get_config
 
 from assist.geo.catalog import Catalog
-from assist.geo.model import STATE_READY
+from assist.geo.model import STATE_IMPORTING, STATE_READY
 from assist.geo.proposals import Proposal, ProposalStore
 from assist.geo.registry import RegionRegistry
 
@@ -64,14 +65,16 @@ def _fmt_size(n: int | None) -> str:
 
 def _head_size(url: str) -> int | None:
     """The one deterministic download-size figure (T4): a single bounded HEAD on the
-    catalog's PBF URL. Trust the Content-Length only if the redirect chain stayed on
-    the Geofabrik host (T2); any failure → None (size unknown), never a raise."""
+    catalog's PBF URL. The URL is validated https-on-Geofabrik BEFORE the request, and
+    redirects are NOT followed (T2 — a redirect would fire a request at an unvalidated
+    host; the Geofabrik PBFs serve directly, so a redirect just yields no size). Any
+    failure/redirect → None (size unknown), never a raise."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.netloc != _ALLOWED_PBF_HOST:
+        logger.warning("geo: refusing size HEAD to off-host url %s", url)
+        return None
     try:
-        resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=True)
-        final = urlparse(resp.url)
-        if final.scheme != "https" or final.netloc != _ALLOWED_PBF_HOST:
-            logger.warning("geo: size HEAD redirected off-host (%s); ignoring", resp.url)
-            return None
+        resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=False)
         n = int(resp.headers.get("Content-Length", ""))
         return n if n > 0 else None
     except (requests.RequestException, ValueError):
@@ -145,8 +148,14 @@ def geo_tools(registry: RegionRegistry, catalog: Catalog,
         if entry is None:
             return (f"\"{slug}\" is not a downloadable region id. Call find_regions "
                     "with the place's name and use the exact id it returns.")
-        if registry.is_loaded(slug):
+        existing = registry.get(slug)
+        if existing is not None and existing.state == STATE_READY:
             return f"{entry.display_name} is already loaded — no download needed."
+        if existing is not None and existing.state == STATE_IMPORTING:
+            # already approved + downloading — re-proposing would overwrite the pending
+            # record's thread/request (a TOCTOU on the approval), and the "awaiting
+            # approval" reply would be false.
+            return f"{entry.display_name} is already downloading — no new proposal needed."
         tid = _thread_id()
         if not tid:
             return "Couldn't record the proposal: no active thread."
