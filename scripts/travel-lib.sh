@@ -118,9 +118,11 @@ reimport_motis() {
 }
 
 # Nominatim: the mediagis image imports into an EMPTY DB, so re-import wipes the volume —
-# the old geocoder is gone before the new one finishes (geocoding falls back to MOTIS
-# meanwhile; travel still ROUTES). Catch image-unavailable BEFORE destroying the working
-# instance. Loads the MERGED OSM.
+# the old geocoder is gone before the new one finishes. During the rebuild, name/address
+# geocoding via Nominatim is UNAVAILABLE (assist's _geocode raises → "unavailable"; it only
+# falls back to MOTIS's weaker geocoder if ASSIST_GEOCODER_URL is unset, which it isn't).
+# Coordinate/"from here" routing is UNAFFECTED (no geocode). Catch image-unavailable BEFORE
+# destroying the working instance. Loads the MERGED OSM.
 reimport_nominatim() {
     local osmfile="$INPUT_DIR/$MERGED_OSM"
     [ -f "$osmfile" ] || { log "merged OSM missing ($osmfile) — refusing Nominatim reimport"; return 1; }

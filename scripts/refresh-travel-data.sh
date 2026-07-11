@@ -32,15 +32,14 @@
 #
 set -euo pipefail
 
-# Required (no host-specific default) — the repo convention for ops scripts; the
-# cron passes it explicitly. Holds input/, config.yml, and the MOTIS data/ graph.
-: "${TRAVEL_INFRA_DIR:?set TRAVEL_INFRA_DIR to the travel infra dir (input/, config.yml, data/)}"
-MOTIS_CONTAINER="${MOTIS_CONTAINER:-motis-travel}"
-MOTIS_IMAGE="${MOTIS_IMAGE:-ghcr.io/motis-project/motis:latest}"
-NOMINATIM_CONTAINER="${NOMINATIM_CONTAINER:-nominatim-geocoder}"
-NOMINATIM_VOLUME="${NOMINATIM_VOLUME:-nominatim-geocoder-data}"
-NOMINATIM_IMAGE="${NOMINATIM_IMAGE:-mediagis/nominatim:4.5}"
-NOMINATIM_PORT="${NOMINATIM_PORT:-8089}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=travel-lib.sh
+source "$HERE/travel-lib.sh"   # TRAVEL_INFRA_DIR check + container/merge/reimport defaults
+                               # + shared functions (log/die, take_lock, merge_regions,
+                               # set_config_osm, reimport_motis, reimport_nominatim).
+
+# Refresh-specific config (everything else — containers, INPUT_DIR, MERGED_OSM, the lock,
+# the reimport/merge functions — is in travel-lib.sh, shared with add/remove/transit):
 OSM_URL="${OSM_URL:-https://download.geofabrik.de/north-america/us/california/norcal-latest.osm.pbf}"
 OSM_FILE="${OSM_FILE:-norcal.osm.pbf}"
 OSM_MAX_AGE_DAYS="${OSM_MAX_AGE_DAYS:-30}"
@@ -51,15 +50,8 @@ TOKEN_FILE="${TOKEN_FILE:-$TRAVEL_INFRA_DIR/.511-token}"
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
-INPUT_DIR="$TRAVEL_INFRA_DIR/input"
-log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S%z')] $*"; }
-die() { log "ERROR: $*"; exit 1; }
-
 [ -d "$INPUT_DIR" ] || die "input dir not found: $INPUT_DIR"
-
-# Single-run lock so a slow run can't overlap the next cron tick.
-exec 9>"$TRAVEL_INFRA_DIR/.refresh.lock"
-flock -n 9 || die "another refresh is already running"
+take_lock   # shared .travel-data.lock — mutually exclusive with add/remove/transit (B3)
 
 # Temp dir on the SAME filesystem as INPUT_DIR so the swaps below are atomic
 # renames, not a cross-device copy+truncate that could leave a partial file.
@@ -117,7 +109,9 @@ osm_is_stale() {
 refresh_osm() {
     local out="$tmpdir/$OSM_FILE"
     log "downloading OSM extract..."
-    curl -fsS --max-time 1800 -o "$out" "$OSM_URL" \
+    # -L: Geofabrik's -latest URLs 302 to a dated file (same host); https-only, bounded.
+    curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 3 --max-time 1800 \
+        -o "$out" "$OSM_URL" \
         || { log "OSM download failed — keeping current"; return 1; }
     # Validate: a PBF starts with a 4-byte big-endian header length then "OSMHeader",
     # and a NorCal extract is hundreds of MB — guard against a truncated/HTML body.
@@ -139,44 +133,10 @@ refresh_osm() {
     return 0
 }
 
-# --- engine rebuilds -----------------------------------------------------------
-reimport_motis() {
-    # Import IN-PLACE while the running container keeps serving its already-loaded
-    # data, then restart ONLY on success.  The container is never stopped, so a
-    # failed/killed import (reboot/OOM/timeout) can never leave routing down, and a
-    # restart never lands on a half-written graph (it happens only after import
-    # exits 0).  MOTIS keys artifacts by content hash, so an OSM-unchanged run only
-    # rebuilds the timetable -> ~seconds.
-    log "re-importing MOTIS (in-place; restart on success)..."
-    docker run --rm --user "$(id -u):$(id -g)" -v "$TRAVEL_INFRA_DIR:/work" -w /work \
-        --entrypoint /motis "$MOTIS_IMAGE" import \
-        || { log "MOTIS import FAILED — keeping the running engine on its current data"; return 1; }
-    docker restart "$MOTIS_CONTAINER" >/dev/null || die "MOTIS restart failed after import"
-    log "MOTIS restarted"
-}
-
-reimport_nominatim() {
-    # The mediagis image only imports into an EMPTY DB, so re-import must wipe the
-    # volume — the old instance is gone before the new one finishes building. A
-    # rebuild failure therefore degrades geocoding to MOTIS's built-in fallback
-    # (travel still ROUTES — not an outage) until the next run re-imports from the
-    # on-disk OSM. (A clean container-swap isn't practical here: empty-volume import
-    # + Docker can't rename volumes.) Catch the most likely failure — image
-    # unavailable — BEFORE destroying the working instance.
-    log "re-importing Nominatim (OSM changed)..."
-    docker image inspect "$NOMINATIM_IMAGE" >/dev/null 2>&1 || docker pull "$NOMINATIM_IMAGE" >/dev/null \
-        || { log "Nominatim image unavailable — keeping the current geocoder"; return 1; }
-    docker rm -f "$NOMINATIM_CONTAINER" >/dev/null 2>&1 || true
-    docker volume rm "$NOMINATIM_VOLUME" >/dev/null 2>&1 || true
-    docker run -d --name "$NOMINATIM_CONTAINER" \
-        -e PBF_PATH=/data/"$OSM_FILE" -e NOMINATIM_PASSWORD=nominatim -e IMPORT_WIKIPEDIA=false \
-        -v "$INPUT_DIR/$OSM_FILE:/data/$OSM_FILE:ro" \
-        -v "$NOMINATIM_VOLUME:/var/lib/postgresql/16/main" \
-        -p "127.0.0.1:$NOMINATIM_PORT:8080" --restart unless-stopped --shm-size=1g \
-        "$NOMINATIM_IMAGE" >/dev/null \
-        || { log "Nominatim re-create FAILED — geocoding stays on the MOTIS fallback"; return 1; }
-    log "Nominatim re-import started (serves once /status is 200; geocoding uses MOTIS fallback meanwhile)"
-}
+# (reimport_motis / reimport_nominatim / merge_regions / set_config_osm live in
+# travel-lib.sh — shared with add/remove/transit so the load-bearing rebuild recipe
+# stays in ONE place. The lib's reimport_nominatim loads the MERGED osm, so a refresh
+# must re-merge first when the OSM changed; see below.)
 
 # --- run -----------------------------------------------------------------------
 log "travel-data refresh starting (infra=$TRAVEL_INFRA_DIR, check_only=$CHECK_ONLY)"
@@ -191,6 +151,18 @@ fi
 if [ "$gtfs_changed" = 0 ] && [ "$osm_changed" = 0 ]; then
     log "nothing changed — skipping rebuilds"; exit 0
 fi
-reimport_motis
-[ "$osm_changed" = 1 ] && reimport_nominatim || true
+
+# When the OSM changed, re-merge every loaded region (norcal + any added regions) into
+# the combined OSM both engines load, point config at it, and rebuild both. When only the
+# GTFS changed, a MOTIS timetable reimport suffices (Nominatim ignores GTFS).
+if [ "$osm_changed" = 1 ]; then
+    tmp_merge="$(mktemp "$TRAVEL_INFRA_DIR/.refresh-merge.XXXXXX")"
+    merge_regions "$tmp_merge" && mv -f "$tmp_merge" "$INPUT_DIR/$MERGED_OSM" \
+        || die "merge failed — keeping the current combined OSM"
+    set_config_osm
+    reimport_motis
+    reimport_nominatim
+else
+    reimport_motis   # gtfs-only
+fi
 log "travel-data refresh done (gtfs_changed=$gtfs_changed osm_changed=$osm_changed)"
