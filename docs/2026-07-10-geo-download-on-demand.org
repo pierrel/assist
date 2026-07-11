@@ -1,6 +1,10 @@
 #+title: Geo download-on-demand + geo management page — PRD
 #+date: <2026-07-10>
-#+status: DESIGN COMPLETE — decisions + 5-lens review + S1/S2 all settled (2026-07-10); ready for Phase-2 implementation
+#+status: SHIPPED + DEPLOYED 2026-07-11 (PR #194, branch geo-download-on-demand). Five
+#+status: increments, each locally reviewed (data layer / tools+SKILL / HITL+Provisioner /
+#+status: provisioning scripts / web wiring). Increment 4 validated live (really added
+#+status: us/rhode-island; norcal+RI both geocode). Deployed to assist-web with
+#+status: TRAVEL_INFRA_DIR set; /geo live. NOT merged to main (awaiting Pierre).
 
 This is a *product-requirements / design doc for review*, not an as-built record.
 It captures the feature, the design the architect + a codebase exploration

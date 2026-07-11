@@ -779,7 +779,19 @@ Route by intent (the agent, or a thin classifier) → the right backend. Complem
 general-web engine-rotation + keyed-API resilience work (see the rate-limiting roadmap item).
 
 * Travel & geo
-** TODO Download additional geos on demand + a geo management page
+** DONE Download additional geos on demand + a geo management page
+Shipped PR #194 (branch geo-download-on-demand), deployed 2026-07-11. Five increments:
+data layer (registry/catalog/builder) → agent tools (list_regions/find_regions/
+propose_region_download) + travel-SKILL guidance → HITL propose→approve + a thin
+off-loop Provisioner → the provisioning scripts (osmium-merge multi-region OSM; MOTIS
++ Nominatim rebuild; merge-aware weekly refresh) → the /geo web page + wiring. Validated
+live: really added us/rhode-island (norcal+RI both geocode). As-built vs the plan below:
+the download is user-driven + catalog-gated (Geofabrik index, not auto-detect — D1); the
+"re-run" became a completion MESSAGE the agent acts on, not an automatic replay (Pierre);
+the map preview lives on the /geo approval UI (a later polish — the propose reply is text
++ size + warning). Transit stays an opt-in per-region layer (add-transit.sh, feed-gated).
+Design doc docs/2026-07-10-geo-download-on-demand.org.
+
 Today the travel/geo stack is NorCal-only (Nominatim geocoder 127.0.0.1:8089 +
 MOTIS routing + 511 transit for the Bay Area). Let the agent extend it to other
 regions on demand:
