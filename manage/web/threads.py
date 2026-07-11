@@ -52,6 +52,7 @@ from assist.thread_queue import THREAD_QUEUE, ThreadPauseRequested
 
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
+from assist.geo.model import STATE_FAILED, STATE_IMPORTING
 from assist.geo.provisioner import Provisioner
 from assist.geo.seed import seed_registry
 from assist.geo.tools import DEGRADATION_WARNING, _fmt_size
@@ -692,12 +693,26 @@ def render_thread(
         except Exception:
             prop = None
         if prop is not None:
-            s = html.escape(prop.slug)
-            t = html.escape(tid)
-            geo_banner = f"""
+            name = html.escape(prop.display_name)
+            reg = GEO_REGISTRY.get(prop.slug) if GEO_REGISTRY is not None else None
+            state = reg.state if reg is not None else None
+            if state == STATE_IMPORTING:
+                # already approved + downloading — show progress, no buttons (the proposal
+                # record lingers until the completion message is delivered)
+                geo_banner = (f'<div class="approval-banner"><div><strong>Downloading '
+                              f'{name}…</strong> This takes a while (map data + a geocoder '
+                              f'rebuild); you\'ll get a message here when it\'s ready — '
+                              f'nothing to do.</div></div>')
+            elif state == STATE_FAILED:
+                geo_banner = (f'<div class="approval-banner"><div><strong>{name} download '
+                              f'failed.</strong> Ask me to try again.</div></div>')
+            else:
+                s = html.escape(prop.slug)
+                t = html.escape(tid)
+                geo_banner = f"""
         <div class="approval-banner">
           <div><strong>Download proposal awaiting your approval</strong></div>
-          <div>Add <b>{html.escape(prop.display_name)}</b> ({_fmt_size(prop.size_bytes)}).
+          <div>Add <b>{name}</b> ({_fmt_size(prop.size_bytes)}).
                {html.escape(DEGRADATION_WARNING)}</div>
           <div class="approval-actions">
             <form action="/geo/{s}/approve" method="post" style="display:inline">
