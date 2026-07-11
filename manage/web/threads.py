@@ -689,9 +689,10 @@ def render_thread(
     geo_banner = ""
     if GEO_PROPOSALS is not None:
         try:
-            prop = next((p for p in GEO_PROPOSALS.all() if p.origin_tid == tid), None)
+            mine = [p for p in GEO_PROPOSALS.all() if p.origin_tid == tid]
         except Exception:
-            prop = None
+            mine = []
+        prop = mine[0] if mine else None
         if prop is not None:
             name = html.escape(prop.display_name)
             reg = GEO_REGISTRY.get(prop.slug) if GEO_REGISTRY is not None else None
@@ -727,6 +728,15 @@ def render_thread(
             </form>
           </div>
         </div>"""
+            # The banner surfaces one proposal at a time (the rest surface here as each
+            # resolves); when >1 is pending for this thread, point at /geo so none stays
+            # hidden until then.
+            if len(mine) > 1:
+                geo_banner += (
+                    '<div class="approval-banner"><div>'
+                    f'+{len(mine) - 1} more region proposal(s) pending for this thread — '
+                    '<a href="/geo">review them on the regions page</a>.'
+                    '</div></div>')
 
     # Disable the input form during the initial setup phase
     form_disabled = "disabled" if is_init else ""

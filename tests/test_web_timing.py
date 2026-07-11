@@ -69,6 +69,37 @@ def _two_turns():
     ]
 
 
+def test_geo_banner_flags_extra_pending_proposals(thread_env, monkeypatch):
+    # One pending proposal for the thread → the approval card, no "+N more" note; a second
+    # pending for the SAME thread → the extra is surfaced with a /geo link (the banner only
+    # renders one at a time, so it must point at /geo or the rest stay hidden until the
+    # first resolves).
+    from assist.geo.proposals import Proposal
+
+    def _p(slug, name):
+        return Proposal(slug=slug, display_name=name, bbox=(-1.0, -1.0, 1.0, 1.0),
+                        size_bytes=700_000_000, origin_tid="t1", user_request="x",
+                        created_at="2026-07-11T00:00:00+00:00")
+
+    class _Props:
+        def __init__(self, items): self._i = items
+        def all(self): return self._i
+
+    class _Reg:
+        def get(self, slug): return None   # not yet loaded → awaiting-approval card
+
+    st._set_status("t1", "ready")
+    monkeypatch.setattr(th, "GEO_REGISTRY", _Reg())
+    monkeypatch.setattr(th, "GEO_PROPOSALS", _Props([_p("berlin", "Berlin")]))
+    one = render_thread("t1", _FakeThread(_two_turns()))
+    assert "Berlin" in one and "more region proposal" not in one
+
+    monkeypatch.setattr(th, "GEO_PROPOSALS",
+                        _Props([_p("berlin", "Berlin"), _p("munich", "Munich")]))
+    two = render_thread("t1", _FakeThread(_two_turns()))
+    assert "+1 more region proposal(s) pending" in two and 'href="/geo"' in two
+
+
 def test_badge_lands_on_the_correct_assistant_bubble(thread_env):
     st._set_status("t1", "ready")
     st._append_timing("t1", 1, 14)
