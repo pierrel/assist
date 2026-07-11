@@ -1527,8 +1527,10 @@ def _run_region_job(op: str, slug: str) -> bool:
         return False
     if proc.returncode != 0:
         try:
-            with open(logpath) as f:
-                tail = f.read()[-1000:]
+            size = os.path.getsize(logpath)
+            with open(logpath, "rb") as f:   # seek to the tail — don't read a huge log into memory
+                f.seek(max(0, size - 1000))
+                tail = f.read().decode("utf-8", "replace")
         except OSError:
             tail = "(log unavailable)"
         logging.warning("geo %s %s failed (rc=%s); log tail:\n%s",

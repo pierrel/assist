@@ -164,7 +164,9 @@ def geo_tools(registry: RegionRegistry, catalog: Catalog,
         proposals.put(Proposal(
             slug=slug, display_name=entry.display_name, bbox=entry.bbox,
             size_bytes=size, origin_tid=tid,
-            user_request=str(user_request or "")[:500],
+            # collapse whitespace/newlines to a single line — it's later interpolated as a
+            # quoted string into the completion turn; control chars would garble it
+            user_request=" ".join(str(user_request or "").split())[:500],
             created_at=datetime.now(timezone.utc).isoformat()))
         return (f"Proposed downloading {entry.display_name} ({_fmt_size(size)}). "
                 f"{DEGRADATION_WARNING} Nothing downloads until the user approves the "

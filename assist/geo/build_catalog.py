@@ -49,6 +49,15 @@ _FETCH_TIMEOUT_S = 60
 # downstream interpolation is over a bounded value: a benign charset, single line, capped.
 _NAME_OK = re.compile(r"[^A-Za-z0-9 ,.()'\-/&]")
 _NAME_MAX = 64
+# A catalog slug becomes the download allowlist + a script argv + an on-disk filename, so
+# constrain it here (the same rule as travel-lib.sh:valid_slug): lowercase a-z0-9, '-',
+# nested '/', no leading/trailing '/', no '..' or '//', ≤64 chars.
+_SLUG_OK = re.compile(r"^[a-z0-9]([a-z0-9/-]*[a-z0-9])?$")
+
+
+def _valid_slug(s: str) -> bool:
+    return (isinstance(s, str) and 0 < len(s) <= 64
+            and bool(_SLUG_OK.match(s)) and ".." not in s and "//" not in s)
 
 
 def _slug_derived_name(entry_id: str) -> str:
@@ -101,6 +110,9 @@ def _entry_from_feature(feature: dict, transit: dict[str, str]) -> dict | None:
     pbf = (props.get("urls") or {}).get("pbf")
     if not isinstance(entry_id, str) or not entry_id or not isinstance(pbf, str):
         logger.warning("catalog build: feature without id/pbf skipped: %r", props)
+        return None
+    if not _valid_slug(entry_id):
+        logger.warning("catalog build: id %r fails the slug charset, DROPPED", entry_id)
         return None
     parsed = urlparse(pbf)
     if parsed.scheme != "https" or parsed.netloc != ALLOWED_PBF_HOST:
