@@ -31,11 +31,6 @@ def _area(bbox: BBox) -> float:
     return (lon1 - lon0) * (lat1 - lat0)
 
 
-def _contains(bbox: BBox, lon: float, lat: float) -> bool:
-    lon0, lat0, lon1, lat1 = bbox
-    return lon0 <= lon <= lon1 and lat0 <= lat <= lat1
-
-
 class Catalog:
     """Read-only view of the pinned catalog snapshot. ``geo_dir`` is the travel-infra
     dir shared with the registry."""
@@ -93,12 +88,4 @@ class Catalog:
             return []
         hits = [e for e in self._entries().values()
                 if q in e.display_name.lower() or q in e.slug.lower()]
-        return sorted(hits, key=lambda e: _area(e.bbox))
-
-    def containing(self, lon: float, lat: float) -> list[CatalogEntry]:
-        """Catalog regions whose bbox contains the point, smallest-extent first — how
-        ``find_regions`` turns a geocoded place into candidate downloadable regions
-        (the tightest covering region first bounds the import). A point in no bbox ⇒
-        empty ⇒ likely a typo / truly-unavailable place ⇒ no download proposed."""
-        hits = [e for e in self._entries().values() if _contains(e.bbox, lon, lat)]
         return sorted(hits, key=lambda e: _area(e.bbox))
