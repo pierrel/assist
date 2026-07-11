@@ -128,13 +128,15 @@ class TestGeoAgent(TestCase):
                       f"expected it to resolve + offer Oregon; got: {self._text(reply)[:300]}")
 
     def test_user_confirms_then_propose_with_exact_id(self):
-        # Two turns: the offer (as above), then the user's yes → the model must call
+        # Two turns: the offer, then the user's yes → the model must call
         # propose_region_download with the EXACT id find_regions returned (us/oregon),
         # and present the result as awaiting approval — not as a started download.
+        # Eugene (not a SKILL example; unambiguously Oregon) so the confirm flow isn't
+        # confounded by a legit "which Portland, OR or ME?" disambiguation.
         with stub_research_subagent(), \
              patch("assist.geo.tools.requests.head", _FakeHead):
             agent, props = self._agent()
-            agent.message("I'm going to be spending a week in Portland and I'll "
+            agent.message("I'm going to be spending a week in Eugene and I'll "
                           "need help getting around town — can you do that?")
             reply = agent.message("Yes please, go ahead and set that up.")
         proposes = [a for n, a in self._calls(agent) if n == "propose_region_download"]
