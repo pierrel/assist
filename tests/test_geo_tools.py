@@ -150,8 +150,9 @@ def test_propose_already_loaded_short_circuits(tmp_path):
 
 def test_propose_size_unknown_on_redirect(tmp_path):
     propose, props = _propose(tmp_path)
-    # a redirect (302, no Content-Length since allow_redirects=False) → size unknown
+    # a redirect (302, non-2xx since allow_redirects=False) → size unknown
     class _Redirect:
+        status_code = 302
         headers = {}                      # no Content-Length on a redirect response
     with patch("assist.geo.tools.requests.head", lambda url, **kw: _Redirect()), \
          patch("assist.geo.tools._thread_id", lambda: "t1"):
