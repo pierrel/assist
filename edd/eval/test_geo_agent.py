@@ -26,6 +26,8 @@ from assist.geo.tools import geo_tools
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
+from .utils import stub_research_subagent
+
 # A small deterministic catalog (subset of the real Geofabrik index ids/bboxes).
 _CATALOG = [
     {"slug": "norcal", "display_name": "Northern California",
@@ -64,43 +66,55 @@ class TestGeoAgent(TestCase):
                     out.append((c["name"], c.get("args") or {}))
         return out
 
+    # AgentHarness.message() returns the final message's .content directly (a str, or a
+    # list of content blocks for the reasoning model) — NOT the message object.
+    _CATALOG_SLUGS = frozenset({"norcal", "socal", "us/washington", "us/oregon"})
+
     @staticmethod
-    def _text(msg) -> str:
-        c = getattr(msg, "content", "")
-        if isinstance(c, str):
-            return c
-        # a list of content blocks → concatenate the text parts
-        return " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in c)
+    def _text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(b.get("text", "") if isinstance(b, dict) else str(b)
+                            for b in content)
+        return str(content or "")
 
     def test_coverage_question_calls_list_regions(self):
-        agent = self._agent()
-        reply = agent.message("Which parts of the world can you actually look up trips "
-                              "and routes for right now?")
+        with stub_research_subagent():   # coverage prompts shouldn't research; mock per policy
+            agent = self._agent()
+            reply = agent.message("Which parts of the world can you actually look up trips "
+                                  "and routes for right now?")
         calls = self._calls(agent)
         self.assertTrue(any(n == "list_regions" for n, _ in calls),
                         f"expected list_regions; got {[n for n, _ in calls]}")
         self.assertIn("california", self._text(reply).lower())   # from the loaded set, not invented
 
     def test_out_of_region_resolves_and_offers(self):
-        agent = self._agent()
-        reply = agent.message("I'm going to be wandering around Seattle next week — can "
-                              "you help me get around there?")
+        # Portland → Oregon: a city the SKILL does NOT name (it worked-examples Seattle /
+        # San Diego), so this probes the model's own city→state inference, not recall.
+        with stub_research_subagent():
+            agent = self._agent()
+            reply = agent.message("I'm going to be spending a week in Portland and I'll "
+                                  "need help getting around town — can you do that?")
         calls = self._calls(agent)
         finds = [a for n, a in calls if n == "find_regions"]
         self.assertTrue(finds, f"expected find_regions to resolve the region; got "
                                f"{[n for n, _ in calls]}")
-        # the model passes a NAME (Washington/Seattle), NEVER a Geofabrik id like us/washington
+        # B1: the model passes a NAME ("Oregon"/"Portland"), never a Geofabrik id — a
+        # query EQUAL to a catalog slug (e.g. "us/oregon") means it typed an id.
         for a in finds:
-            q = str(a.get("query", "")).lower()
-            self.assertNotIn("us/", q, f"model typed a region id instead of a name: {a}")
-        text = self._text(reply).lower()
-        self.assertTrue("washington" in text or "add" in text or "download" in text,
-                        f"expected an offer to add Washington; got: {self._text(reply)[:300]}")
+            q = str(a.get("query", "")).strip().lower()
+            self.assertNotIn(q, self._CATALOG_SLUGS,
+                             f"model typed a region id instead of a name: {a}")
+        # the resolved region name must actually appear (not just a magic word like "add")
+        self.assertIn("oregon", self._text(reply).lower(),
+                      f"expected it to resolve + offer Oregon; got: {self._text(reply)[:300]}")
 
     def test_already_covered_does_not_over_offer(self):
-        agent = self._agent()
-        reply = agent.message("If I'm in San Francisco, can you give me a hand getting "
-                              "around?")
+        with stub_research_subagent():
+            agent = self._agent()
+            reply = agent.message("If I'm in San Francisco, can you give me a hand getting "
+                                  "around?")
         text = self._text(reply).lower()
         # NorCal covers SF → should say yes, not propose downloading a region
         self.assertNotIn("download", text,

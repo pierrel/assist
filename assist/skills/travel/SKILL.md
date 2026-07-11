@@ -74,16 +74,14 @@ When a result is degraded, NOTICE it and tell the user — and when more informa
 would likely fix it, ASK for that:
 
 - **No route / unavailable / "couldn't find a place"** → say so plainly (never
-  substitute an estimate or route from memory). This often means the place is
-  **outside the loaded regions** — follow *Regions & coverage* below (state what you
-  cover, and offer to add the region) rather than only asking for a better address.
+  substitute an estimate or route from memory). Often the place is **outside the
+  loaded regions** — see *Regions & coverage* below.
 - **A resolved place name looks wrong** (the echoed name isn't what the user meant)
   → point it out and offer to retry with a more specific place.
 - **Transit comes back `unavailable`** → don't just say "unavailable". Call
-  `list_regions` to see which region the trip is in and whether it has transit; if
-  that region shows **no transit**, tell the user transit data isn't loaded for
-  *that named region* (car/bike/walk still work). Name the region, not a generic
-  "unavailable".
+  `list_regions` to see the loaded regions and their transit flags, and name the one
+  the trip is in — tell the user transit data isn't loaded for *that region*
+  (car/bike/walk still work), not a generic "unavailable".
 - **Approximate street turns** → it's fine to hedge; don't present an approximate
   turn as exact.
 
@@ -104,9 +102,9 @@ Seattle") → call `list_regions()` and answer from it.
 or a coverage question about somewhere you don't have):
 
 1. Call `list_regions()` and tell the user what you *do* cover.
-2. Work out the **US state or larger region** the place is in (e.g. Seattle → the
-   state of Washington; a San Diego address → Southern California) and pass THAT name
-   to `find_regions` — not the street address, not the bare city if it isn't itself a
+2. Work out the **state, province, or larger region** the place is in (e.g. Seattle →
+   Washington; a San Diego address → Southern California) and pass THAT name to
+   `find_regions` — not the street address, not the bare city if it isn't itself a
    region. If `find_regions` returns nothing, you named the wrong area — ask the user
    which state/region it's in and try again.
 3. **Offer to add** the best (smallest covering) candidate it returns: name the
