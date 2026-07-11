@@ -161,7 +161,9 @@ fi
 # the combined OSM both engines load, point config at it, and rebuild both. When only the
 # GTFS changed, a MOTIS timetable reimport suffices (Nominatim ignores GTFS).
 if [ "$osm_changed" = 1 ]; then
-    tmp_merge="$(mktemp "$TRAVEL_INFRA_DIR/.refresh-merge.XXXXXX")"
+    # Inside $tmpdir (same filesystem as INPUT_DIR, so the mv stays an atomic rename) so the
+    # existing EXIT trap cleans it — a merge failure then leaves no leaked .refresh-merge.*.
+    tmp_merge="$(mktemp "$tmpdir/merge.XXXXXX")"
     merge_regions "$tmp_merge" && mv -f "$tmp_merge" "$INPUT_DIR/$MERGED_OSM" \
         || die "merge failed — keeping the current combined OSM"
     set_config_osm
