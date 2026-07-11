@@ -87,13 +87,15 @@ would likely fix it, ASK for that:
 
 ## Regions & coverage
 
-Travel/directions/geocoding only work inside the **loaded regions**. Two tools let
+Travel/directions/geocoding only work inside the **loaded regions**. Three tools let
 you answer coverage questions and add regions on request:
 
 - **`list_regions()`** — the regions currently loaded and whether each has transit.
 - **`find_regions(query)`** — resolve a place NAME to the exact downloadable region
   id(s). **You never type a region id yourself** — pass a name and use the id it
   returns.
+- **`propose_region_download(region_id, user_request)`** — record a download proposal
+  for the user to approve (step 4 below). It does NOT download; it awaits approval.
 
 **When the user asks what you cover** ("what areas do you cover", "can you do
 Seattle") → call `list_regions()` and answer from it.

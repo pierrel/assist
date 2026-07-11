@@ -6,10 +6,11 @@ recorded slug (the approve action fires the Provisioner with THIS record's slug)
 The *region* is swap-proof — approve fires the recorded key, and ``display_name`` /
 ``bbox`` / the PBF URL re-derive from the catalog for that slug — so the agent can't
 substitute region B for the region A the user saw. (The record's ``user_request`` is
-replaceable until approval; propose refuses to overwrite once a region is importing,
-and increment 5's approve can pin ``created_at`` if needed.) Dedicated record, NOT the
-send_reply interrupt: that interrupt is only armed on triage turns and can't fire on a
-normal chat turn (design doc B2).
+replaceable until approval; propose refuses to overwrite once a region is importing.)
+``created_at`` follows the record-shape convention of the sibling stores and gives the
+approval UI a "proposed N min ago". Dedicated record, NOT the send_reply interrupt:
+that interrupt is only armed on triage turns and can't fire on a normal chat turn
+(design doc B2).
 
 One ``proposals.json`` per deploy in the geo dir (same single-file atomic-RMW shape
 as ``regions.json``), keyed by slug. A proposal also carries what the completion
@@ -74,7 +75,12 @@ class Proposal:
 
 
 class ProposalStore:
-    """Disk-backed proposal store; sole reader+writer of ``proposals.json``."""
+    """Disk-backed proposal store; sole reader+writer of ``proposals.json``.
+
+    Shares the slug-keyed single-file atomic-RMW shape with ``RegionRegistry`` (lock +
+    lenient read + tmp+os.replace). Two small shape-frozen copies are left un-extracted
+    on purpose; a THIRD such store is the trigger to factor a shared base.
+    """
 
     def __init__(self, geo_dir: str):
         self._path = os.path.join(geo_dir, PROPOSALS_FILE)

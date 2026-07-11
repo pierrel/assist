@@ -4,10 +4,15 @@ Deliberately a THIN executor, not a ``Scheduler`` clone (design doc, cross-lens 
 region jobs are event-driven — submitted exactly once, on the user's approval — so
 there is no poll loop and no cron math. Serialization: ``_submit_lock`` makes the
 whole check→claim→enqueue atomic (no double-enqueue from a double-clicked approve),
-``max_workers=1`` runs one job at a time, and the scripts' shared flock excludes the
-weekly refresh cron. Add/remove claim via the persisted ``state:importing``; transit
-claims in memory only (it never changes serveability, so it must not risk a
-reconcile→failed on a restart).
+``max_workers=1`` runs one job at a time, and the provisioning scripts (increment 4)
+take a shared flock with the weekly refresh cron. Add/remove claim via the persisted
+``state:importing``; transit claims in memory only (it never changes serveability, so
+it must not risk a reconcile→failed on a restart).
+
+Wiring (its own increment): the web builds this with ``run_job`` = a blocking
+``subprocess.run`` of the provisioning script, ``on_complete`` = ``_scheduled_dispatch``
++ ``_mark_urgent``, ``health_check`` = the LLM-reachable probe, and drives
+``reconcile`` / ``deliver_pending`` at startup + on a tick.
 
 All web coupling is INJECTED callables (the ``Scheduler(store, dispatch, health_check)``
 / ``notify_tools(mark_urgent)`` precedent — this module never imports ``manage.web``):
@@ -114,7 +119,12 @@ class Provisioner:
                 if p is None:
                     return f"no pending proposal for {slug}"
                 if current is not None and current.state == STATE_READY:
-                    self._proposals.remove(slug)
+                    # already loaded → the proposal is moot; drop it, UNLESS its
+                    # completion is still owed (an add that finished while the LLM was
+                    # down keeps completion_delivered=False + the proposal for
+                    # deliver_pending to retry — removing it here orphans that delivery).
+                    if current.completion_delivered:
+                        self._proposals.remove(slug)
                     return f"{slug} is already loaded"
                 self._registry.put(Region(
                     slug=slug, display_name=p.display_name, bbox=p.bbox,
