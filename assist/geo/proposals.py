@@ -71,7 +71,8 @@ class Proposal:
                    origin_tid=tid,
                    user_request=d.get("user_request") if isinstance(d.get("user_request"), str)
                    else "",
-                   created_at=d.get("created_at") or _now_iso())
+                   created_at=d.get("created_at") if isinstance(d.get("created_at"), str)
+                   and d.get("created_at") else _now_iso())
 
 
 class ProposalStore:

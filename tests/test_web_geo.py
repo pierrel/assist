@@ -55,6 +55,16 @@ def test_render_importing_region_has_no_delete_button():
     assert "/geo/us/oregon/delete" not in html   # can't delete mid-import
 
 
+def test_next_only_honors_bare_local_paths():
+    n = lambda dest: geo._next({"redirect": dest})
+    assert n("/thread/20260711-abc") == "/thread/20260711-abc"   # same-site path honored
+    assert n("/geo?x=1") == "/geo?x=1"                           # a query string is fine
+    assert n("") == "/geo"                                       # missing → /geo
+    # open-redirect / header-injection shapes all fall back to /geo
+    for bad in ("//evil.com", "/\\evil.com", "https://evil.com", "/ok\r\nSet-Cookie: a=b"):
+        assert n(bad) == "/geo", bad
+
+
 def test_check_csrf():
     geo._check_csrf(geo.GEO_CSRF)                    # correct token passes
     for bad in (None, "", "wrong"):
