@@ -52,17 +52,24 @@ from assist.thread_queue import THREAD_QUEUE, ThreadPauseRequested
 
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
+from assist.geo.provisioner import Provisioner
+from assist.geo.seed import seed_registry
 from manage.web.state import (
     BUSY_STAGES,
     DESCRIPTION_CACHE,
     DOMAIN_MANAGERS,
     DOMAINS,
+    GEO_CATALOG,
+    GEO_DIR,
+    GEO_PROPOSALS,
+    GEO_REGISTRY,
     INBOUND_LOG,
     INIT_STAGES,
     MANAGER,
     MERGE_LOCK,
     SCHEDULE_STORE,
     SUBSCRIPTION_STORE,
+    _mark_urgent,
     STAGE_LABELS,
     LIST_STAGE_LABELS,
     _append_timing,
@@ -1478,6 +1485,54 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
 # the lifespan, which imports start/stop lazily to avoid an import cycle.
 _SCHEDULER = Scheduler(SCHEDULE_STORE, _scheduled_dispatch, _llm_reachable)
 
+# --- geo region provisioner ---------------------------------------------------------
+# Region imports run OFF the event loop: a web worker enqueues (submit), the Provisioner's
+# single executor runs the provisioning script as a subprocess, and on completion re-enters
+# the originating thread as a fresh turn (like a scheduled prompt) + marks it urgent. Built
+# only when the geo stores exist (TRAVEL_INFRA_DIR configured for the web service).
+_SCRIPTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "scripts")
+_GEO_SCRIPTS = {"add": "add-region.sh", "remove": "remove-region.sh",
+                "transit": "add-transit.sh"}
+
+
+def _local_tz() -> str:
+    try:
+        return os.readlink("/etc/localtime").split("zoneinfo/")[-1]
+    except OSError:
+        return "UTC"
+
+
+_GEO_TZ = os.getenv("ASSIST_TZ") or _local_tz()
+
+
+def _run_region_job(op: str, slug: str) -> bool:
+    """run_job: block on the provisioning script (add/remove/transit) as a subprocess.
+    Runs on the Provisioner's executor thread (never the loop). Returns success."""
+    script = _GEO_SCRIPTS.get(op)
+    if script is None or GEO_DIR is None:
+        return False
+    proc = subprocess.run(
+        [os.path.join(_SCRIPTS_DIR, script), slug],
+        env={**os.environ, "TRAVEL_INFRA_DIR": GEO_DIR},
+        capture_output=True, text=True)
+    if proc.returncode != 0:
+        logging.warning("geo %s %s failed (rc=%s): %s",
+                        op, slug, proc.returncode, (proc.stderr or "")[-800:])
+    return proc.returncode == 0
+
+
+def _geo_on_complete(tid: str, message: str) -> None:
+    """on_complete: deliver the region-ready (or -failed) message into the thread as a
+    fresh turn + mark it urgent, so the agent picks the original request back up."""
+    _scheduled_dispatch(tid, message, _GEO_TZ)
+    _mark_urgent(tid)
+
+
+_PROVISIONER = (
+    Provisioner(GEO_REGISTRY, GEO_PROPOSALS, _run_region_job, _geo_on_complete, _llm_reachable)
+    if GEO_REGISTRY is not None else None)
+
 
 class _ResumeScheduler:
     """One dedicated thread that dispatches fair-scheduling resumes SERIALLY.
@@ -1534,6 +1589,16 @@ _RESUME_SCHEDULER = _ResumeScheduler()
 def start_scheduler() -> None:
     _SCHEDULER.start()
     _RESUME_SCHEDULER.start()
+    if _PROVISIONER is not None and GEO_DIR is not None:
+        try:
+            base = os.getenv("ASSIST_GEO_BASE_SLUG", "norcal")
+            base_entry = GEO_CATALOG.get(base) if GEO_CATALOG else None
+            seed_registry(GEO_REGISTRY, GEO_CATALOG, os.path.join(GEO_DIR, "input"),
+                          base, base_entry.transit_feed if base_entry else None)
+            _PROVISIONER.reconcile()        # orphaned importing → failed
+            _PROVISIONER.deliver_pending()  # any completion held over a restart (C1/D4)
+        except Exception:
+            logging.exception("geo: startup seed/reconcile failed")
 
 
 def stop_scheduler() -> None:

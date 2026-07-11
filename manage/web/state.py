@@ -32,6 +32,10 @@ from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.notify import notify_tools
 from assist.events.inbound import InboundLog
+from assist.geo.catalog import Catalog
+from assist.geo.proposals import ProposalStore
+from assist.geo.registry import RegionRegistry
+from assist.geo.tools import geo_tools
 from assist.thread_manager import (
     ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on)
 
@@ -111,8 +115,20 @@ INBOUND_LOG = InboundLog(ROOT)
 # lookup to tool-call time.  (Do not "simplify" it away.)
 # Lands in the NORMAL tool set ONLY — never the triage set — so an untrusted inbound
 # SMS can't force an urgent badge on Pierre's phone.
+# geo (region download-on-demand) — wired only when the travel-infra dir is configured
+# for the web service (holds regions.json / catalog.json / proposals.json + input/). When
+# unset (the default until the deploy passes it), the geo stores + tools are simply absent,
+# so prod behaviour is unchanged. The Provisioner is built in threads.py (it needs the
+# dispatch/urgent/health callbacks that live there — the Scheduler precedent).
+GEO_DIR = os.getenv("TRAVEL_INFRA_DIR")
+GEO_REGISTRY = RegionRegistry(GEO_DIR) if GEO_DIR else None
+GEO_CATALOG = Catalog(GEO_DIR) if GEO_DIR else None
+GEO_PROPOSALS = ProposalStore(GEO_DIR) if GEO_DIR else None
+_geo_tools = (geo_tools(GEO_REGISTRY, GEO_CATALOG, GEO_PROPOSALS)
+              if GEO_DIR else [])
+
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
-              + notify_tools(lambda tid: _mark_urgent(tid)))
+              + notify_tools(lambda tid: _mark_urgent(tid)) + _geo_tools)
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")
