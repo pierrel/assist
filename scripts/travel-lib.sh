@@ -26,6 +26,14 @@ NOMINATIM_VOLUME="${NOMINATIM_VOLUME:-nominatim-geocoder-data}"
 NOMINATIM_IMAGE="${NOMINATIM_IMAGE:-mediagis/nominatim:4.5}"
 NOMINATIM_PORT="${NOMINATIM_PORT:-8089}"
 OSMIUM_IMAGE="${OSMIUM_IMAGE:-stefda/osmium-tool:latest}"
+# Coarse ceiling on any single download (a Geofabrik extract, a GTFS feed). Bounds a
+# mistaken/oversized approval or a misconfigured URL from filling the disk and taking the
+# box down. 8 GiB clears any single regional extract we'd load while stopping a
+# continent/planet-sized fetch. Enforced two ways: curl --max-filesize aborts up front
+# when the server announces an over-cap size (Geofabrik sends Content-Length), and
+# check_download_size is the post-fetch backstop for a response with no announced size
+# (otherwise bounded only by --max-time).
+TRAVEL_MAX_DOWNLOAD_BYTES="${TRAVEL_MAX_DOWNLOAD_BYTES:-8589934592}"
 # The merged OSM both engines load. A slug never forms this name (it's fixed), and it is
 # EXCLUDED from the region-source glob so it never merges into itself.
 MERGED_OSM="${MERGED_OSM:-combined.osm.pbf}"
@@ -39,6 +47,16 @@ LOCK_FILE="$TRAVEL_INFRA_DIR/.travel-data.lock"
 
 log() { echo "[$(date '+%Y-%m-%dT%H:%M:%S%z')] $*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# Post-fetch size backstop for the download cap (see TRAVEL_MAX_DOWNLOAD_BYTES). Catches a
+# response that curl couldn't bound up front (no Content-Length). The tmp file is removed
+# by the caller's EXIT trap on die, so an over-cap fetch never survives.
+check_download_size() {
+    local f="$1" sz
+    sz="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+    [ "$sz" -le "$TRAVEL_MAX_DOWNLOAD_BYTES" ] \
+        || die "download is ${sz}B, over the ${TRAVEL_MAX_DOWNLOAD_BYTES}-byte cap: $f"
+}
 
 # Take the shared lock on fd 9 (the caller keeps it for the whole run). Non-blocking:
 # refuse rather than queue, so a stuck run can't pile up.

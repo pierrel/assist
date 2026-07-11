@@ -111,11 +111,16 @@ refresh_osm() {
     log "downloading OSM extract..."
     # -L: Geofabrik's -latest URLs 302 to a dated file (same host); https-only, bounded.
     curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 3 --max-time 1800 \
+        --max-filesize "$TRAVEL_MAX_DOWNLOAD_BYTES" \
         -o "$out" "$OSM_URL" \
         || { log "OSM download failed — keeping current"; return 1; }
     # Validate: a PBF starts with a 4-byte big-endian header length then "OSMHeader",
     # and a NorCal extract is hundreds of MB — guard against a truncated/HTML body.
+    # Upper bound (TRAVEL_MAX_DOWNLOAD_BYTES) backstops --max-filesize for a no-Content-
+    # Length response; unlike add-region this keeps current rather than dying (unattended
+    # cron — a bad fetch must never replace good data, but also must not wedge the run).
     local sz; sz=$(stat -c %s "$out")
+    [ "$sz" -le "$TRAVEL_MAX_DOWNLOAD_BYTES" ] || { log "OSM download over ${TRAVEL_MAX_DOWNLOAD_BYTES}B cap (${sz}B) — keeping current"; return 1; }
     [ "$sz" -ge 100000000 ] || { log "OSM download too small (${sz}B) — keeping current"; return 1; }
     grep -qa "OSMHeader" <(head -c 64 "$out") || { log "OSM file not a PBF — keeping current"; return 1; }
     log "OSM valid ($(du -h "$out" | cut -f1))"

@@ -62,16 +62,19 @@ case "$FEED" in
         log "downloading 511 GTFS (operator=$local_op)..."
         # token via a stdin curl config, never argv (not exposed in ps/proc)
         printf 'url = "https://api.511.org/transit/datafeeds?api_key=%s&operator_id=%s"\n' \
-            "$token" "$local_op" | curl -fsS --max-time 300 -o "$out" -K - \
+            "$token" "$local_op" | curl -fsS --max-time 300 \
+            --max-filesize "$TRAVEL_MAX_DOWNLOAD_BYTES" -o "$out" -K - \
             || die "511 GTFS download failed"
         ;;
     https://*)
         log "downloading GTFS from $FEED ..."
         curl -fsSL --proto '=https' --proto-redir '=https' --max-redirs 3 --max-time 600 \
+            --max-filesize "$TRAVEL_MAX_DOWNLOAD_BYTES" \
             -o "$out" "$FEED" || die "GTFS download failed"
         ;;
     *) die "unrecognized transit_feed form: '$FEED'" ;;
 esac
+check_download_size "$out"
 
 # Validate: a real GTFS zip with the core files (511 can produce a zip unzip chokes on).
 python3 - "$out" <<'PY' || die "downloaded GTFS failed validation"
