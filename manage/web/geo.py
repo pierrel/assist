@@ -95,11 +95,15 @@ async def geo_view():
 
 
 def _next(form) -> str:
-    """Where to redirect after the action — a local path from the form's `redirect`
-    (so the in-thread approve/decline returns to the thread), else the /geo page. Only a
-    local path (leading '/', no '//') is honored — never an open redirect."""
+    """Where to redirect after the action — a same-site path from the form's `redirect`
+    (so the in-thread approve/decline returns to the thread), else the /geo page. Honored
+    only as a Location header, so it must be a bare local path: a single leading '/' (no
+    '//' or '/\\' protocol-relative open redirect) and no control chars (no CR/LF header
+    splitting). Anything else falls back to /geo — never an open/injected redirect."""
     dest = form.get("redirect") or ""
-    return dest if dest.startswith("/") and not dest.startswith("//") else "/geo"
+    ok = (dest.startswith("/") and not dest.startswith("//") and "\\" not in dest
+          and not any(ord(c) < 0x20 for c in dest))
+    return dest if ok else "/geo"
 
 
 @app.post("/geo/{slug:path}/approve")
