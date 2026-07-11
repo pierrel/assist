@@ -1,13 +1,17 @@
-"""Unit tests for the read-only geo tools (list_regions / find_regions).
+"""Unit tests for the geo tools (list_regions / find_regions / propose_region_download).
 
-Real registry + catalog over a tmp dir (no LLM, no network): asserts the model-facing
-strings — coverage listing (ready only, transit flag), name→exact-id resolution
-(smallest-first, already-loaded marker, cap+more), and the no-match clarify path.
+Real registry + catalog + proposal store over a tmp dir (no LLM; the size HEAD is
+mocked): asserts the model-facing strings — coverage listing (ready only, transit
+flag), name→exact-id resolution (smallest-first, already-loaded marker, cap+more), the
+no-match clarify path, and the propose sink (is_allowed gate, size + degradation
+warning, proposal recorded with the thread + request).
 """
 import json
+from unittest.mock import patch
 
 from assist.geo.catalog import CATALOG_FILE, Catalog
 from assist.geo.model import Region, STATE_IMPORTING, STATE_READY
+from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
 from assist.geo.tools import geo_tools
 
@@ -22,13 +26,17 @@ def _catalog_entry(slug, name, bbox):
             "url": f"https://download.geofabrik.de/{slug.replace('/', '-')}.osm.pbf"}
 
 
-def _tools(tmp_path, regions=(), catalog_entries=()):
+def _all_tools(tmp_path, regions=(), catalog_entries=()):
     reg = RegionRegistry(str(tmp_path))
     for r in regions:
         reg.put(r)
     (tmp_path / CATALOG_FILE).write_text(json.dumps(list(catalog_entries)))
-    cat = Catalog(str(tmp_path))
-    list_regions, find_regions = geo_tools(reg, cat)
+    props = ProposalStore(str(tmp_path))
+    return geo_tools(reg, Catalog(str(tmp_path)), props), reg, props
+
+
+def _tools(tmp_path, regions=(), catalog_entries=()):
+    (list_regions, find_regions, _), _, _ = _all_tools(tmp_path, regions, catalog_entries)
     return list_regions, find_regions
 
 
@@ -90,3 +98,68 @@ def test_find_regions_caps_candidates(tmp_path):
     out = find_regions("test region")
     assert out.count("[id: region-") == 8            # capped at _MAX_CANDIDATES
     assert "+4 more" in out
+
+
+# --- propose_region_download (the HITL sink) -------------------------------------
+
+_WA = [-124.8, 45.5, -116.9, 49.1]
+
+
+class _Head:
+    """A fake requests.head response."""
+    def __init__(self, url, length="700000000"):
+        self.url = url
+        self.headers = {"Content-Length": length} if length else {}
+
+
+def _propose(tmp_path, regions=(), tid="t1"):
+    entries = [_catalog_entry("us/washington", "Washington", _WA)]
+    (tools, reg, props) = _all_tools(tmp_path, regions=regions, catalog_entries=entries)
+    _, _, propose = tools
+    return propose, props
+
+
+def test_propose_rejects_non_catalog_id(tmp_path):
+    propose, props = _propose(tmp_path)
+    out = propose("us/wa-typo", "directions in Tacoma")
+    assert "not a downloadable region id" in out and "find_regions" in out
+    assert props.all() == []                         # nothing recorded — the sink held
+
+
+def test_propose_records_with_size_and_warning(tmp_path):
+    propose, props = _propose(tmp_path)
+    with patch("assist.geo.tools.requests.head",
+               lambda url, **kw: _Head(url)), \
+         patch("assist.geo.tools._thread_id", lambda: "t1"):
+        out = propose("us/washington", "directions in Tacoma")
+    assert "~700 MB" in out and "rebuilds the geocoder" in out
+    assert "until the user approves" in out           # proposes, never downloads
+    p = props.get("us/washington")
+    assert p.origin_tid == "t1" and p.user_request == "directions in Tacoma"
+    assert p.size_bytes == 700_000_000 and p.bbox == tuple(_WA)
+
+
+def test_propose_already_loaded_short_circuits(tmp_path):
+    loaded = [_region("us/washington", "Washington")]
+    propose, props = _propose(tmp_path, regions=loaded)
+    with patch("assist.geo.tools._thread_id", lambda: "t1"):
+        out = propose("us/washington", "x")
+    assert "already loaded" in out and props.all() == []
+
+
+def test_propose_size_unknown_on_offhost_redirect_or_error(tmp_path):
+    propose, props = _propose(tmp_path)
+    # redirect landed off-host → Content-Length untrusted → size unknown
+    with patch("assist.geo.tools.requests.head",
+               lambda url, **kw: _Head("https://evil.example.com/x.pbf")), \
+         patch("assist.geo.tools._thread_id", lambda: "t1"):
+        out = propose("us/washington", "x")
+    assert "size unknown" in out
+    assert props.get("us/washington").size_bytes is None
+
+
+def test_propose_without_thread_refuses(tmp_path):
+    propose, props = _propose(tmp_path)
+    with patch("assist.geo.tools._thread_id", lambda: None):
+        out = propose("us/washington", "x")
+    assert "no active thread" in out and props.all() == []

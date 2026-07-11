@@ -11,4 +11,10 @@ Split by volatility (see docs/2026-07-10-geo-download-on-demand.org):
 - ``build_catalog`` — the write-time half of the catalog: fetches the Geofabrik
   index, derives bboxes, merges the transit overlay, and writes the pinned snapshot
   atomically. Run by the weekly refresh, never on the request path.
+- ``proposals`` — pending download proposals (the HITL gate's durable record: the
+  agent proposes, the user approves the recorded slug).
+- ``provisioner`` — the thin off-loop executor that runs approved jobs (via an
+  injected ``run_job``) and delivers the completion message back to the thread.
+- ``tools`` — the agent tools: ``list_regions`` / ``find_regions`` /
+  ``propose_region_download``.
 """
