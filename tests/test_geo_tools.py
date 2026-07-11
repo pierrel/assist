@@ -107,8 +107,9 @@ _WA = [-124.8, 45.5, -116.9, 49.1]
 
 class _Head:
     """A fake requests.head response."""
-    def __init__(self, url, length="700000000"):
+    def __init__(self, url, length="700000000", status=200):
         self.url = url
+        self.status_code = status
         self.headers = {"Content-Length": length} if length else {}
 
 
@@ -157,6 +158,16 @@ def test_propose_size_unknown_on_redirect(tmp_path):
         out = propose("us/washington", "x")
     assert "size unknown" in out
     assert props.get("us/washington").size_bytes is None
+
+
+def test_propose_size_unknown_on_non_2xx_head(tmp_path):
+    # a 404/500 HEAD may carry a Content-Length (its error-page size) — not the file size
+    propose, props = _propose(tmp_path)
+    with patch("assist.geo.tools.requests.head",
+               lambda url, **kw: _Head(url, length="512", status=404)), \
+         patch("assist.geo.tools._thread_id", lambda: "t1"):
+        out = propose("us/washington", "x")
+    assert "size unknown" in out and props.get("us/washington").size_bytes is None
 
 
 def test_propose_refused_while_importing(tmp_path):

@@ -29,7 +29,7 @@ _CSRF = secrets.token_urlsafe(16)
 
 
 def _require_geo():
-    if GEO_REGISTRY is None or _PROVISIONER is None:
+    if GEO_REGISTRY is None or GEO_PROPOSALS is None or _PROVISIONER is None:
         raise HTTPException(status_code=404, detail="geo is not configured")
 
 
