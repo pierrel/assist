@@ -51,6 +51,22 @@ def test_search_substring_case_insensitive_smallest_first(tmp_path):
     assert cat.search("  ") == []
 
 
+def test_search_matches_region_named_inside_a_place_query(tmp_path):
+    # the model produces "<place>, <country/state>" queries — the region name is INSIDE
+    # the query (not the query inside the name). Regression for the live Berlin miss:
+    # find_regions('Berlin, Germany') found nothing because the whole query wasn't a
+    # substring of "Berlin".
+    berlin = {"slug": "berlin", "display_name": "Berlin", "bbox": [13.0, 52.3, 13.8, 52.7],
+              "url": "https://download.geofabrik.de/berlin.osm.pbf"}
+    _write(tmp_path, [_CALIF, _SOCAL, berlin])
+    cat = Catalog(str(tmp_path))
+    assert [h.slug for h in cat.search("Berlin, Germany")] == ["berlin"]
+    # "Los Angeles, California" names the California region (socal doesn't appear)
+    assert "us/california" in [h.slug for h in cat.search("Los Angeles, California")]
+    # a place that is NOT itself a region still returns nothing (the model must name the region)
+    assert cat.search("Berkeley") == []
+
+
 def test_malformed_entry_skipped(tmp_path):
     _write(tmp_path, [_SOCAL, {"slug": "bad"}, "junk", {"slug": "x", "url": "u", "bbox": [1, 2, 3]}])
     cat = Catalog(str(tmp_path))
