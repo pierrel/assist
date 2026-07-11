@@ -65,6 +65,17 @@ def test_find_regions_marks_already_loaded(tmp_path):
     assert "[id: us/washington] — already loaded" in out
 
 
+def test_find_regions_failed_import_is_not_already_loaded(tmp_path):
+    # a region whose import FAILED (or is still importing) must NOT read as "already
+    # loaded" — else the agent tells the user they're covered when they're not
+    from assist.geo.model import STATE_FAILED
+    entries = [_catalog_entry("us/washington", "Washington", [-124.8, 45.5, -116.9, 49.1])]
+    regions = [_region("us/washington", "Washington", state=STATE_FAILED)]
+    _, find_regions = _tools(tmp_path, regions=regions, catalog_entries=entries)
+    out = find_regions("washington")
+    assert "[id: us/washington]" in out and "already loaded" not in out
+
+
 def test_find_regions_no_match_asks_to_clarify(tmp_path):
     entries = [_catalog_entry("us/washington", "Washington", [-124.8, 45.5, -116.9, 49.1])]
     _, find_regions = _tools(tmp_path, catalog_entries=entries)

@@ -45,10 +45,10 @@ def geo_tools(registry: RegionRegistry, catalog: Catalog) -> list:
     def find_regions(query: str) -> str:
         """Find DOWNLOADABLE geographic regions matching a place, so you can offer to add
         one. Pass a region/state/area NAME as the user said it, or — for a city or
-        address you can't locate — the US state or region it is in that you infer (e.g.
-        for "Seattle" pass "Washington"; for "a cafe in San Diego" pass "Southern
-        California" or "California"). NEVER type a region id yourself — pass a name and
-        use the exact id from the result.
+        address you can't locate — the state, province, or region it is in that you
+        infer (e.g. for "Seattle" pass "Washington"; for "a cafe in San Diego" pass
+        "Southern California" or "California"). NEVER type a region id yourself — pass a
+        name and use the exact id from the result.
 
         Returns candidate regions, each with its exact id (and whether it's already
         loaded), smallest area first (prefer the tightest region covering the need). If
@@ -59,7 +59,10 @@ def geo_tools(registry: RegionRegistry, catalog: Catalog) -> list:
         if not hits:
             return (f"No downloadable region matches \"{query}\". Ask the user which US "
                     "state or larger region the place is in, then search that.")
-        loaded = {r.slug for r in registry.all()}
+        # READY only — matches list_regions/is_loaded; a failed/importing region must
+        # NOT read as "already loaded" (else the agent tells the user they're covered
+        # when they're not, and won't re-offer the download).
+        loaded = {r.slug for r in registry.all() if r.state == STATE_READY}
         lines = [f"- {e.display_name} [id: {e.slug}]"
                  f"{' — already loaded' if e.slug in loaded else ''}"
                  for e in hits[:_MAX_CANDIDATES]]

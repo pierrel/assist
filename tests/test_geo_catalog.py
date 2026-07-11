@@ -1,8 +1,8 @@
 """Unit tests for Catalog — the read-only view of the pinned downloadable-region snapshot.
 
-Covers the allowlist (is_allowed), resolve helpers (get/search/containing with
-smallest-first ordering), malformed-entry tolerance, missing-file empty, and the mtime
-cache picking up a rebuilt snapshot.
+Covers the allowlist (is_allowed), resolve helpers (get/search with smallest-first
+ordering), malformed-entry tolerance, missing-file empty, and the mtime cache picking
+up a rebuilt snapshot.
 """
 import json
 import os

@@ -3,9 +3,9 @@ snapshot (``<geo_dir>/catalog.json``).
 
 Two jobs: the download **allowlist** (``is_allowed`` — a slug the agent/route asks to
 download MUST be a snapshot id; the PBF URL then comes from the entry, never a caller)
-and the **resolve/picker source** (``get`` / ``search`` / ``containing`` — how
-``find_regions`` maps a place the user named to a canonical id, so the small model
-never synthesizes a Geofabrik id).
+and the **resolve/picker source** (``get`` / ``search`` — how ``find_regions`` maps a
+place the user named to a canonical id, so the small model never synthesizes a
+Geofabrik id).
 
 No network here: the snapshot is BUILT by the weekly refresh (fetch the Geofabrik
 index, derive bboxes, merge the transit overlay) and only READ on the request path.
