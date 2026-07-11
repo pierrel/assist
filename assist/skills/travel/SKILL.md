@@ -109,9 +109,16 @@ or a coverage question about somewhere you don't have):
    which state/region it's in and try again.
 3. **Offer to add** the best (smallest covering) candidate it returns: name the
    region and note that adding it takes a while (it downloads and rebuilds map data).
-   Only add it if the user confirms — never start an add on your own.
+4. **Only when the user confirms**, call
+   `propose_region_download(region_id, user_request)` — `region_id` is the exact id
+   from the `find_regions` result; `user_request` is what the user originally asked
+   for, verbatim. This only *records a proposal*: tell the user it's awaiting their
+   approval, and that once approved and loaded you'll pick their request back up.
+   Never call it without the user's confirmation.
 
-Don't guess a region id, and don't claim to have added a region you haven't.
+Don't guess a region id, don't claim a region is downloading or added when it isn't
+(a proposal is not a download), and don't re-propose a region that's awaiting
+approval.
 
 ## When NOT to use
 
