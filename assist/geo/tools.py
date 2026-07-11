@@ -1,30 +1,84 @@
-"""The read-only geo agent tools — ``list_regions`` (what's covered) and
-``find_regions`` (resolve a place the user named → the exact downloadable-region id).
+"""The geo agent tools — ``list_regions`` (what's covered), ``find_regions`` (resolve a
+place the user named → the exact downloadable-region id), and
+``propose_region_download`` (record a HITL download proposal; never downloads).
 
 Wired into the web ``AgentSpec`` NORMAL tool set (like ``notify``) — NOT the untrusted
 SMS-triage set (an inbound text must not drive region logic) and not a core built-in
 (the registry/catalog live in the web deployment's travel-infra dir; emacsos/CLI have
-neither). Built by ``geo_tools(registry, catalog)`` closing over the injected stores so
-this module imports no web state.
+neither). Built by ``geo_tools(registry, catalog, proposals)`` closing over the injected
+stores so this module imports no web state.
 
 ``find_regions`` is the B1 fix: the small model can't reliably reproduce Geofabrik's id
 scheme (``us/washington`` vs the bare ``socal``), so it never types an id — it passes a
-place/region NAME as the user said it (or the US state it inferred a city is in, e.g.
-"Seattle" → "Washington"), and code returns the exact canonical id(s) to use when
-proposing a download. Both tools are pure queries (CQS) that never raise into the loop.
+place/region NAME as the user said it (or the state it inferred a city is in, e.g.
+"Seattle" → "Washington"), and code returns the exact canonical id(s).
+``propose_region_download`` is the matching by-construction sink: the id must be a
+catalog id (``is_allowed``), and its body only RECORDS a proposal — the import fires
+only from the user's approval on the recorded slug, so a hallucinated id or an injected
+"download X" can never start a download. None of these raise into the loop.
 """
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+import requests
+from langgraph.config import get_config
+
 from assist.geo.catalog import Catalog
 from assist.geo.model import STATE_READY
+from assist.geo.proposals import Proposal, ProposalStore
 from assist.geo.registry import RegionRegistry
 
+logger = logging.getLogger(__name__)
+
 _MAX_CANDIDATES = 8
+_HEAD_TIMEOUT_S = 10
+_ALLOWED_PBF_HOST = "download.geofabrik.de"   # matches the builder's T2 gate
+
+# U2: the cost the user consents to isn't bytes — it's the geocoder rebuild. A fixed,
+# code-supplied line (never agent prose) shown with every proposal; the web approval
+# UI reuses it.
+DEGRADATION_WARNING = ("Adding a region downloads map data and rebuilds the geocoder "
+                       "(can take up to a few hours); address lookups for all regions "
+                       "are degraded until it finishes.")
 
 
-def geo_tools(registry: RegionRegistry, catalog: Catalog) -> list:
-    """Return [list_regions, find_regions], closing over the loaded-region registry and
-    the downloadable-region catalog."""
+def _thread_id() -> str | None:
+    try:
+        return ((get_config() or {}).get("configurable") or {}).get("thread_id")
+    except RuntimeError:   # outside a langgraph runtime (direct call in a test)
+        return None
+
+
+def _fmt_size(n: int | None) -> str:
+    if n is None:
+        return "size unknown"
+    mb = n / 1e6
+    return f"~{mb / 1000:.1f} GB" if mb >= 1000 else f"~{mb:.0f} MB"
+
+
+def _head_size(url: str) -> int | None:
+    """The one deterministic download-size figure (T4): a single bounded HEAD on the
+    catalog's PBF URL. Trust the Content-Length only if the redirect chain stayed on
+    the Geofabrik host (T2); any failure → None (size unknown), never a raise."""
+    try:
+        resp = requests.head(url, timeout=_HEAD_TIMEOUT_S, allow_redirects=True)
+        final = urlparse(resp.url)
+        if final.scheme != "https" or final.netloc != _ALLOWED_PBF_HOST:
+            logger.warning("geo: size HEAD redirected off-host (%s); ignoring", resp.url)
+            return None
+        n = int(resp.headers.get("Content-Length", ""))
+        return n if n > 0 else None
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def geo_tools(registry: RegionRegistry, catalog: Catalog,
+              proposals: ProposalStore) -> list:
+    """Return [list_regions, find_regions, propose_region_download], closing over the
+    loaded-region registry, the downloadable-region catalog, and the proposal store."""
 
     def list_regions() -> str:
         """List the geographic regions currently loaded — the areas you can do travel /
@@ -70,4 +124,37 @@ def geo_tools(registry: RegionRegistry, catalog: Catalog) -> list:
         return ("Matching downloadable regions (use the exact id when proposing a "
                 "download):\n" + "\n".join(lines) + more)
 
-    return [list_regions, find_regions]
+    def propose_region_download(region_id: str, user_request: str) -> str:
+        """Record a proposal to download a new geographic region, for the user to
+        approve. This does NOT download anything — the download and import only start
+        after the user approves the proposal themselves.
+
+        Call this only after the user confirms they want the region added.
+        ``region_id`` must be the exact id from a ``find_regions`` result (e.g.
+        "us/washington") — never one you typed yourself. ``user_request`` is the user's
+        original ask, verbatim (e.g. "directions in Portland next week"), so it can be
+        picked back up once the region is ready.
+        """
+        slug = str(region_id or "").strip()
+        # The by-construction sink (B1): only a catalog id is proposable; a typed /
+        # hallucinated / injected id dies here, before any record exists.
+        entry = catalog.get(slug)
+        if entry is None:
+            return (f"\"{slug}\" is not a downloadable region id. Call find_regions "
+                    "with the place's name and use the exact id it returns.")
+        if registry.is_loaded(slug):
+            return f"{entry.display_name} is already loaded — no download needed."
+        tid = _thread_id()
+        if not tid:
+            return "Couldn't record the proposal: no active thread."
+        size = _head_size(entry.url)
+        proposals.put(Proposal(
+            slug=slug, display_name=entry.display_name, bbox=entry.bbox,
+            size_bytes=size, origin_tid=tid,
+            user_request=str(user_request or "")[:500],
+            created_at=datetime.now(timezone.utc).isoformat()))
+        return (f"Proposed downloading {entry.display_name} ({_fmt_size(size)}). "
+                f"{DEGRADATION_WARNING} Nothing downloads until the user approves the "
+                "proposal; tell them it's awaiting their approval.")
+
+    return [list_regions, find_regions, propose_region_download]
