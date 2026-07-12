@@ -300,6 +300,15 @@ def _build_openai_chat_model(
     kwargs = {
         "model": model,
         "temperature": temperature,
+        # Cap a single generation. Without it, a model that loops/narrates instead of
+        # emitting EOS streams tokens to the 128k context limit — a ~20-min wedge that the
+        # httpx timeout can't catch (a continuously-emitting stream never trips a read
+        # timeout). 16k tokens is far above any real answer or tool-call/report write, so
+        # it doesn't truncate legitimate work; it bounds a runaway to a few minutes (then a
+        # truncated response the retry/json-validation layers recover from) instead of a
+        # 20-min hang. This is the wall-clock backstop for a runaway generation on any hard
+        # turn (a compound "recommend + map" ask surfaced it, but it's general).
+        "max_tokens": 16384,
         # max_retries=0 disables the OpenAI Python SDK's built-in
         # retry layer.  The single retry layer for transient errors
         # is ModelRetryMiddleware in assist/agent.py — keeping retries

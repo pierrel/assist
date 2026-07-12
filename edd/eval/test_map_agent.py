@@ -30,12 +30,11 @@ _RENDER_SKILLS_DIR = os.path.join(
 
 # A ```render block whose body declares type: map.
 _MAP_BLOCK = re.compile(r"```render\b(.*?)```", re.S | re.I)
-# A pin line: `pin: [<color>] <lat>,<lon> <label>` — an OPTIONAL leading color word.
-_COLORS = "green|blue|red|orange|purple"
-_PIN = re.compile(rf"^\s*pin:\s*(?:(?:{_COLORS})\s+)?(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s+\S",
+# A pin line: `pin: [origin] <lat>,<lon> <label>` — an OPTIONAL leading `origin` marker.
+_PIN = re.compile(r"^\s*pin:\s*(?:origin\s+)?(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s+\S",
                   re.M | re.I)
-# A green pin = the user's origin / current location, per the color convention.
-_GREEN_PIN = re.compile(r"^\s*pin:\s*green\s+-?\d+\.\d+\s*,\s*-?\d+\.\d+", re.M | re.I)
+# An origin pin = the user's location (the renderer colors it green).
+_ORIGIN_PIN = re.compile(r"^\s*pin:\s*origin\s+-?\d+\.\d+\s*,\s*-?\d+\.\d+", re.M | re.I)
 _PATH = re.compile(r"^\s*path:\s*\S+\s+\S", re.M)
 
 
@@ -103,18 +102,18 @@ class TestMapAgent(TestCase):
                       "so I can see where they are relative to each other.")
         self._assert_wellformed(self._map_blocks(agent))
 
-    def test_recommendation_renders_colored_map_with_green_origin(self):
-        """The updated guidance: when RECOMMENDING places (NOT explicitly asked to
-        map), the model still renders a map — with the user's current location as a
-        GREEN pin and the places as (blue) pins. Places are named so no research runs."""
+    def test_recommendation_renders_map_with_origin_pin(self):
+        """The updated guidance: when RECOMMENDING places (NOT explicitly asked to map),
+        the model still renders a map — and marks the user's current location with the
+        `origin` prefix (the renderer colors it green). Places are named so no research
+        runs; the model doesn't pick colors, only marks the origin."""
         agent = self._agent()
-        self._ask(agent, 
+        self._ask(agent,
             "[Message context: sent from ~37.7749, -122.4194] "
-            "Which is the best spot to sit with a laptop for a couple hours: Four "
-            "Barrel Coffee, Ritual Coffee, or Haus Coffee? They're all near Valencia "
-            "Street in San Francisco.")
+            "Recommend a couple of these for a laptop session and map them: Four Barrel "
+            "Coffee, Ritual Coffee, and Haus Coffee — all near Valencia Street, SF.")
         blocks = self._map_blocks(agent)
         self._assert_wellformed(blocks)     # a map appeared without being asked to "map it"
         self.assertTrue(
-            any(_GREEN_PIN.search(b) for b in blocks),
-            f"expected a GREEN pin for the user's current location; blocks: {blocks}")
+            any(_ORIGIN_PIN.search(b) for b in blocks),
+            f"expected an `origin`-marked pin for the user's location; blocks: {blocks}")

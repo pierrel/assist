@@ -59,10 +59,7 @@ If the user **names a mode**, pass it. If they **don't**, ask which mode they wa
 
 ## Presenting the result
 
-- **Show it on a map.** When you recommend places or present a route, also render a
-  map (see the `render` skill): a `blue` pin per place, the user's origin / current
-  location as a `green` pin (unless it's in a different city, where it just zooms the
-  map out), and the route's polyline. Get coordinates from `map_data` first.
+- **Show it on a map** — see the `render` skill (mark the user's location `origin`).
 - **travel:** lead with the mode asked about ("driving is ~25 min"); else compare
   briefly. Round naturally. If a mode is `unavailable`, say so — don't fill a guess.
 - **directions:** relay the numbered steps. For **street** routes (car/bike/walk)

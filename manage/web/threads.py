@@ -2087,25 +2087,23 @@ def _as_lines(value) -> list:
 # Pin colors: an agent-authored color NAME maps to a fixed (stroke, fill) hex pair
 # here — the untrusted block never puts a raw color string into the marker options.
 # Convention (see the render skill): origin/current location green, other points blue.
-_PIN_COLORS = {
-    "blue":   ("#1d4ed8", "#3b82f6"),   # default
-    "green":  ("#15803d", "#22c55e"),
-    "red":    ("#b91c1c", "#ef4444"),
-    "orange": ("#c2410c", "#f97316"),
-    "purple": ("#6d28d9", "#8b5cf6"),
-}
+# The AGENT never picks a color — it only marks whether a pin is the user's ORIGIN /
+# current location (leading ``origin`` token). The renderer owns the presentation: the
+# origin is green, every other place is the default blue.
+_ORIGIN_COLOR, _ORIGIN_FILL = "#15803d", "#22c55e"    # user's origin / current location
+_DEFAULT_COLOR, _DEFAULT_FILL = "#1d4ed8", "#3b82f6"   # every other place
 
 
 def _parse_pin(line: str) -> dict | None:
-    """``[color] lat,lon label`` -> ``{lat, lon, label, color, fill}``; None if
-    malformed / out of range (dropped, so one bad pin doesn't sink the map).  An
-    optional leading color word (a key of ``_PIN_COLORS``; anything else or absent
-    -> blue) sets the marker color — origin/current location green, others blue."""
+    """``[origin] lat,lon label`` -> ``{lat, lon, label, color, fill}``; None if
+    malformed / out of range (dropped, so one bad pin doesn't sink the map).  An optional
+    leading ``origin`` token marks the user's location (rendered green); every other pin is
+    the default (blue).  Semantics from the agent, color from here — the agent never picks a
+    color."""
     line = line.strip()
     first, _, rest = line.partition(" ")
-    color = "blue"
-    if "," not in first and first.lower() in _PIN_COLORS:  # coords always have a comma
-        color = first.lower()
+    is_origin = "," not in first and first.lower() == "origin"  # coords always have a comma
+    if is_origin:
         line = rest.strip()
     coord, _, label = line.partition(" ")
     lat_s, _, lon_s = coord.partition(",")
@@ -2115,9 +2113,9 @@ def _parse_pin(line: str) -> dict | None:
         return None
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
         return None
-    stroke, fill = _PIN_COLORS[color]
+    color, fill = (_ORIGIN_COLOR, _ORIGIN_FILL) if is_origin else (_DEFAULT_COLOR, _DEFAULT_FILL)
     return {"lat": lat, "lon": lon, "label": label.strip()[:_MAP_MAX_LABEL],
-            "color": stroke, "fill": fill}
+            "color": color, "fill": fill}
 
 
 def _parse_path(line: str) -> dict | None:

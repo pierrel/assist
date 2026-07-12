@@ -64,15 +64,15 @@ class TestRenderMapBlock(TestCase):
         self.assertIsNotNone(html)
         self.assertIn("37.7", html)
 
-    def test_pin_color_token(self):
-        # An optional leading color word sets the marker color (origin green, others
-        # blue); a color name maps to a fixed hex, never a raw agent string.
+    def test_pin_origin_marker(self):
+        # The agent only marks the ORIGIN; the renderer owns the color (origin green,
+        # every other pin the default blue). No color is ever read from agent text.
         from manage.web.threads import _parse_pin
-        self.assertEqual(_parse_pin("green 37.77,-122.42 You are here")["color"], "#15803d")
-        self.assertEqual(_parse_pin("37.78,-122.41 Blue Bottle")["color"], "#1d4ed8")  # default
-        self.assertIsNone(_parse_pin("nonsense-color 37.7,-122.4 x"))  # unknown word -> not coords
-        # the green hex reaches the data island the map JS reads
-        html = _render_map_block("t", _block("type: map\npin: green 37.77,-122.42 Home"))
+        self.assertEqual(_parse_pin("origin 37.77,-122.42 You are here")["color"], "#15803d")  # green
+        self.assertEqual(_parse_pin("37.78,-122.41 Blue Bottle")["color"], "#1d4ed8")          # default blue
+        self.assertIsNone(_parse_pin("green 37.7,-122.4 x"))  # color words are NOT special -> bad coord -> dropped
+        # the origin pin's green hex reaches the data island the map JS reads
+        html = _render_map_block("t", _block("type: map\npin: origin 37.77,-122.42 Home"))
         self.assertIn("#15803d", html)
 
     def test_count_caps(self):
