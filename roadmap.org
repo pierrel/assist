@@ -5,6 +5,23 @@ Make it expandable from the main web ui. Not always expanded.
 ** TODO Fix cli
 * Vision
 ** TODO Test a single vision experiment
+** TODO Enable the vision model behind a vision-specific subagent
+The local model is text-only today (no mmproj); an image reaching it 500s ("image input is
+not supported"). Guarded for now by =ImageInputGuardMiddleware= (strips image blocks -> a
+text note before the model call) + text-only guidance in general_instructions. Pierre: it's
+possible, we should enable it. Plan when we pick this up:
+- *Isolate in a vision-specific subagent.* A full-res image is ~hundreds-2k+ vision tokens;
+  the main 128k window must not carry that. The subagent sees the image, hands the main
+  agent a text description. Route images there instead of stripping them.
+- *Model:* needs a Qwen3-VL variant + its mmproj (a model SWAP, not a flag — llama.cpp
+  already has qwen3vl support built: =llama-qwen2vl-cli=, =src/models/qwen3vl.cpp=).
+- *VRAM is the binding constraint — and a VOICE MODEL is already loaded; factor it in.* The
+  24GB 3090 sits at ~19.7GB used by the text llama-server. Don't forget the voice model's
+  footprint on top when budgeting. A VL model + vision encoder almost certainly won't
+  co-reside with text + voice at Q4 — likely needs load/unload (a swap the vision subagent
+  triggers), a smaller VL model, or a second GPU.
+- When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
+  subagent rather than strip).
 * Architecture
 ** DONE Refactor assist into a framework (deepagents / assist / client boundary)
 Shipped 2026-06-12: the =AgentSpec= embedder contract
