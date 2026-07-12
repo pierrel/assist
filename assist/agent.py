@@ -37,6 +37,7 @@ from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
 from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
 from assist.middleware.context_rider_middleware import ContextRiderMiddleware
+from assist.middleware.image_input_guard import ImageInputGuardMiddleware
 from assist.env import env_int
 
 
@@ -196,6 +197,10 @@ def _hardening_middleware():
     # Innermost wrap_model_call middleware — recovers from empty terminal
     # AIMessages after every outer retry/sanitization layer has had its turn.
     empty_response_recovery_mw = EmptyResponseRecoveryMiddleware()
+    # Strip image content blocks right before the model call — the local model is
+    # text-only (no mmproj), so an image asset read into context would 500 the request.
+    # Innermost so it runs immediately before the handler on every (re)try.
+    image_guard_mw = ImageInputGuardMiddleware()
 
     # Note: context-aware compaction is delegated to deepagents 0.6.1's
     # built-in SummarizationMiddleware (trigger fraction=0.85, offloads
@@ -210,7 +215,7 @@ def _hardening_middleware():
              OutputSanitizationMiddleware(),
              write_collision_mw, git_push_blocker_mw,
              loop_detection_mw, ThreadQueueMiddleware(),
-             empty_response_recovery_mw]
+             empty_response_recovery_mw, image_guard_mw]
     return stack, (retry_middle, json_validation_mw, tool_name_mw)
 
 
