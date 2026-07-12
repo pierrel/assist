@@ -74,6 +74,33 @@ def stub_research_subagent(findings="(stubbed research findings)"):
         yield
 
 
+@contextmanager
+def real_search_env():
+    """⚠ LIVE SEARCH — only for an eval whose whole POINT is real web search.
+
+    Almost every eval must MOCK search via ``stub_research_subagent()``. conftest strips
+    ``TAVILY_API_KEY`` from the default eval env precisely so an un-mocked search fails loud
+    instead of silently hitting the network — so DO NOT set the key unless it is absolutely
+    necessary. This restores it (from ``.dev.env``) for the rare eval — today ONLY
+    ``test_research_agent`` — that verifies the agent actually searches the live web and
+    cites real sources. If you're reaching for this, first ask whether you should be mocking
+    with ``stub_research_subagent`` instead. (``ASSIST_SEARCH_URL`` is untouched — it stays
+    set so SearXNG fails fast rather than grinding.)
+    """
+    from dotenv import dotenv_values, find_dotenv
+    key = dotenv_values(find_dotenv(".dev.env")).get("TAVILY_API_KEY")
+    saved = os.environ.get("TAVILY_API_KEY")
+    if key:
+        os.environ["TAVILY_API_KEY"] = key
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("TAVILY_API_KEY", None)
+        else:
+            os.environ["TAVILY_API_KEY"] = saved
+
+
 class AgentTestMixin:
     """
     Mixin for TestCase classes that adds agent-specific assertions.

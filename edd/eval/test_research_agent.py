@@ -5,7 +5,7 @@ from unittest import TestCase
 from assist.agent import create_research_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import read_file, create_filesystem, files_in_directory
+from .utils import read_file, create_filesystem, files_in_directory, real_search_env
 
 # debug logging by default
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -25,6 +25,12 @@ class TestResearchAgent(TestCase):
     
     def setUp(self):
         self.model = select_assistant_model(0.1)
+        # ⚠ This is the ONE eval that does LIVE web search (no mock) — it verifies the
+        # research agent actually searches and cites real sources. real_search_env restores
+        # TAVILY_API_KEY (conftest strips it) so search survives SearXNG throttling. Every
+        # OTHER eval must MOCK via stub_research_subagent — do NOT copy this pattern unless
+        # live search is genuinely the thing under test.
+        self.enterContext(real_search_env())
         
     def test_follows_result_guidance(self):
         # research-agent is confined to <root>/references/, so the
