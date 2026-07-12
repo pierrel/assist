@@ -458,20 +458,40 @@ def _first_usable_hit(hits, place: str) -> dict | None:
     return None
 
 
+def _geocode_variants(place: str) -> list[str]:
+    """The query plus a fallback for an over-specified "Name, Street Number, City" string:
+    its first comma-separated segment (the most identifying part — the POI name or street).
+    Nominatim often returns NOTHING for the verbose combined string while the region-scoped
+    geocoder resolves that fragment fine — e.g. "Moxy Berlin Ostbahnhof, Andreasstrasse
+    76-78, Berlin" found nothing though "Moxy Berlin Ostbahnhof" does. Order-preserving,
+    deduped; only adds the fragment when it actually differs."""
+    variants = [place]
+    head = place.split(",")[0].strip()
+    if head and head != place.strip():
+        variants.append(head)
+    return variants
+
+
 def _nominatim_geocode(place: str) -> dict | None:
     """Geocode a place NAME via the self-hosted Nominatim search API.  The loaded
-    OSM extract IS the region, so no country/viewbox filter is needed.  Raises
-    _TravelBackendError if Nominatim is unreachable/errors (callers -> unavailable)."""
+    OSM extract IS the region, so no country/viewbox filter is needed.  Tries the full
+    string, then a simpler fragment if the over-specified string finds nothing (see
+    _geocode_variants).  Raises _TravelBackendError if Nominatim is unreachable/errors
+    (callers -> unavailable)."""
     base = os.getenv("ASSIST_GEOCODER_URL")
-    try:
-        resp = requests.get(base.rstrip("/") + "/search",
-                            params={"q": place, "format": "jsonv2", "limit": 5},
-                            timeout=_TRAVEL_TIMEOUT_S)
-        resp.raise_for_status()
-        hits = resp.json()
-    except Exception as e:
-        raise _TravelBackendError(f"Nominatim /search failed: {e}") from e
-    return _first_usable_hit(hits, place)
+    for q in _geocode_variants(place):
+        try:
+            resp = requests.get(base.rstrip("/") + "/search",
+                                params={"q": q, "format": "jsonv2", "limit": 5},
+                                timeout=_TRAVEL_TIMEOUT_S)
+            resp.raise_for_status()
+            hits = resp.json()
+        except Exception as e:
+            raise _TravelBackendError(f"Nominatim /search failed: {e}") from e
+        hit = _first_usable_hit(hits, place)
+        if hit:
+            return hit
+    return None
 
 
 def _parse_coord_string(place: str) -> dict | None:

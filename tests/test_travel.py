@@ -260,3 +260,25 @@ def test_geocode_passes_through_coord_string():
         assert tools._parse_coord_string(name) is None
     # out-of-range numbers are not coords
     assert tools._parse_coord_string("200,200") is None
+
+
+def test_geocode_falls_back_from_overspecified_address(monkeypatch):
+    """A verbose "Name, Street Number, City" destination the loaded region CAN find, but
+    Nominatim returns nothing for the full combined string — the bug that broke walking
+    directions to "Moxy Berlin Ostbahnhof, Andreasstrasse 76-78, Berlin" (the POI resolves
+    fine on its own, and so does "Andreasstrasse 76 Berlin"). _geocode must retry a simpler
+    query instead of reporting the place "not found"."""
+    monkeypatch.setenv("ASSIST_GEOCODER_URL", "http://nominatim")
+    full = "Moxy Berlin Ostbahnhof, Andreasstrasse 76-78, Berlin"
+    hit = {"display_name": "Moxy Berlin Ostbahnhof, Andreasstraße, Berlin",
+           "lat": "52.5101", "lon": "13.4335"}
+
+    def fake_get(url, params=None, timeout=None, **kw):
+        q = (params or {}).get("q", "").strip()
+        # Nominatim finds the bare POI name, but NOT the over-specified full string.
+        return _Resp([hit] if q == "Moxy Berlin Ostbahnhof" else [])
+
+    with patch.object(tools.requests, "get", fake_get):
+        got = tools._geocode(full)
+    assert got is not None, "over-specified address must fall back to a simpler query"
+    assert abs(got["lat"] - 52.5101) < 1e-4 and abs(got["lon"] - 13.4335) < 1e-4
