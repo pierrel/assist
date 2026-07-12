@@ -2057,7 +2057,7 @@ _MAP_INIT_JS = """
   var layers = [];
   (d.pins||[]).forEach(function(p){
     var m = L.circleMarker([p.lat, p.lon],
-      {radius:7, color:'#1d4ed8', fillColor:'#3b82f6', fillOpacity:0.9, weight:2});
+      {radius:7, color:p.color||'#1d4ed8', fillColor:p.fill||'#3b82f6', fillOpacity:0.9, weight:2});
     popup(m, p.label); m.addTo(map); layers.push(m);
   });
   (d.paths||[]).forEach(function(pa){
@@ -2084,10 +2084,30 @@ def _as_lines(value) -> list:
     return [value] if isinstance(value, str) else [s for s in value if s]
 
 
+# Pin colors: an agent-authored color NAME maps to a fixed (stroke, fill) hex pair
+# here — the untrusted block never puts a raw color string into the marker options.
+# Convention (see the render skill): origin/current location green, other points blue.
+_PIN_COLORS = {
+    "blue":   ("#1d4ed8", "#3b82f6"),   # default
+    "green":  ("#15803d", "#22c55e"),
+    "red":    ("#b91c1c", "#ef4444"),
+    "orange": ("#c2410c", "#f97316"),
+    "purple": ("#6d28d9", "#8b5cf6"),
+}
+
+
 def _parse_pin(line: str) -> dict | None:
-    """``lat,lon label`` -> ``{lat, lon, label}``; None if malformed / out of
-    range (dropped, so one bad pin doesn't sink the map)."""
-    coord, _, label = line.strip().partition(" ")
+    """``[color] lat,lon label`` -> ``{lat, lon, label, color, fill}``; None if
+    malformed / out of range (dropped, so one bad pin doesn't sink the map).  An
+    optional leading color word (a key of ``_PIN_COLORS``; anything else or absent
+    -> blue) sets the marker color — origin/current location green, others blue."""
+    line = line.strip()
+    first, _, rest = line.partition(" ")
+    color = "blue"
+    if "," not in first and first.lower() in _PIN_COLORS:  # coords always have a comma
+        color = first.lower()
+        line = rest.strip()
+    coord, _, label = line.partition(" ")
     lat_s, _, lon_s = coord.partition(",")
     try:
         lat, lon = float(lat_s), float(lon_s)
@@ -2095,7 +2115,9 @@ def _parse_pin(line: str) -> dict | None:
         return None
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
         return None
-    return {"lat": lat, "lon": lon, "label": label.strip()[:_MAP_MAX_LABEL]}
+    stroke, fill = _PIN_COLORS[color]
+    return {"lat": lat, "lon": lon, "label": label.strip()[:_MAP_MAX_LABEL],
+            "color": stroke, "fill": fill}
 
 
 def _parse_path(line: str) -> dict | None:

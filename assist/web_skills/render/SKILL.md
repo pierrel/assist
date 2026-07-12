@@ -87,15 +87,26 @@ plain text (above).
 When the discussion involves real-world **locations or routes** — coffee shops
 near a spot, "how far is A from B", "map these places", businesses with
 addresses — show them on a map, **in addition to** your normal written answer.
-Emit a **map render block**:
+**Whenever you recommend or list real-world places, render a map of them** (don't
+wait to be asked). Emit a **map render block**:
 
 ```render
 type: map
-pin: <lat>,<lon> <label>
+pin: <color> <lat>,<lon> <label>
 path: <encoded-polyline> <label>
 ```
 
-- One `pin:` line per place: its `latitude,longitude` then a short label.
+- One `pin:` line per place: an OPTIONAL **color** (`green` / `blue` / `red` /
+  `orange` / `purple`), then its `latitude,longitude`, then a short label. Omit the
+  color for the default (blue).
+- **Color convention: the user's origin / current location pin is `green`; every
+  recommended/other place is `blue`.** Example: `pin: green 37.77,-122.42 You are here`
+  and `pin: blue 37.78,-122.41 Blue Bottle`.
+- **Include the user's location as a green pin when you can** — their current location
+  from the message context (`[Message context: … from ~<lat>, <lon>]`, usable directly
+  as a coordinate) or a stated origin — so they see where they are relative to the
+  places. **Omit it if it's far from the places (a different city)**, where it would
+  just zoom the map out uselessly.
 - One `path:` line per route: the route's encoded polyline then a label.
 - A map may have many pins and paths; emit **one** `type: map` block per reply.
 
