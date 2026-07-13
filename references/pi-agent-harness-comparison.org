@@ -1,0 +1,402 @@
+* Agent Framework Comparison: Pi Agent Harness, DeepAgents, and LangChain/LangGraph
+
+**Introduction**
+
+The AI agent landscape in 2025-2026 has seen a rapid evolution from simple chatbot wrappers to sophisticated, production-grade agent harnesses. This report examines three prominent frameworks that represent different philosophies in agent development: Pi Agent Harness (a minimal, terminal-first harness), DeepAgents (LangChain's opinionated long-horizon agent framework), and LangChain/LangGraph (the broader ecosystem powering DeepAgents). Each takes a distinct approach to the fundamental problem of building agents that can plan, execute, and iterate on complex tasks.
+
+**Pi Agent Harness**
+
+***Overview***
+
+Pi is a minimal, terminal-first AI coding agent harness — an open-source toolkit providing scaffolding for building and running AI coding agents. Rather than being a feature-complete product, Pi is designed as composable building blocks that developers reshape around their own workflows. Its tagline captures the philosophy: "Adapt Pi to your workflows, not the other way around." [[https://github.com/earendil-works/pi][Pi GitHub Repository]]
+
+Pi provides a coding agent CLI (~pi~), a tool-calling agent runtime, a unified multi-provider LLM API, terminal UI (TUI) components, and a package/extension system. It deliberately excludes built-in MCP, sub-agents, plan mode, permission popups, built-in todos, and background bash — those are meant to be added via extensions or external tools. [[https://silenceper.com/en/article/2026-05-27-pi-coding-agent-harness][Pi Coding Agent Harness Overview]]
+
+***Creator and Organization***
+
+Pi was created by Mario Zechner (also known as ~badlogic~), an Austrian software engineer best known for creating libGDX (a cross-platform game development framework) and for his work on RoboVM and Spine. Pi is now under Earendil (Earendil Works), a company co-founded by Armin Ronacher (creator of Flask and Sentry) and Colin (ex-finance). Mario joined Earendil in April 2026 and remains in charge of all Pi technical decisions. [[https://mariozechner.at/posts/2026-04-08-ive-sold-out][Mario Zechner's "I've sold out" Blog Post]]
+
+Key collaborators include Peter Steinberger (creator of OpenClaw, which is built on Pi) and Armin Ronacher (heavy Pi user). The group is informally known as the "Vienna School of Agentic Coding." [[https://lucumr.pocoo.org/2026/1/31/pi][Armin Ronacher on Pi]]
+
+***Architecture***
+
+Pi is structured as a monorepo with four core packages:
+
+- ~@earendil-works/pi-ai~ — Unified multi-provider LLM API supporting OpenAI, Anthropic, Google, Azure, Bedrock, Mistral, Groq, Cerebras, xAI, Hugging Face, OpenRouter, Ollama, and more
+- ~@earendil-works/pi-agent-core~ — Agent runtime with tool calling and state management
+- ~@earendil-works/pi-coding-agent~ — Interactive coding agent CLI
+- ~@earendil-works/pi-tui~ — Terminal UI library with differential rendering
+
+The architecture layers (bottom to top):
+1. ~pi-ai~ — Streaming, models, multi-provider LLM communication
+2. ~pi-agent-core~ — Agent loop, tool execution, events
+3. ~pi-coding-agent~ — Sessions, tools, extensions
+4. ~pi-tui~ — Terminal UI, markdown, editor
+
+[[https://explainx.ai/blog/pi-minimal-agent-harness-mario-zechner-guide-2026][Pi Architecture Guide]]
+
+***Key Features***
+
+- Four built-in tools: ~read~, ~write~, ~edit~, ~bash~ (plus ~grep~, ~find~, ~ls~)
+- Shortest system prompt of any major coding agent (under 1,000 tokens)
+- Tree-structured sessions — branch, rewind, and navigate within a session; export as HTML
+- Hot-reloading TypeScript extensions — the agent can write code, reload, and test in a loop
+- Skills — on-demand capability instructions and tool constraints
+- Prompt templates — reusable prompts
+- Pi packages — bundled extensions, skills, prompts, and themes installable via ~pi install npm:...~ or ~pi install git:...~
+- Four runtime modes: Interactive TUI, print/JSON, RPC, SDK (embeddable)
+- Full cost tracking per session
+- Multi-model sessions — sessions can contain messages from different model providers
+- No SaaS backend — runs entirely locally in the terminal
+
+***Adoption and Status***
+
+As of July 2026, Pi has reached 70.5k GitHub stars and 8.7k forks, with 243 releases. The latest release is v0.80.6 (July 9, 2026). Pi is written primarily in TypeScript (93.7%) and licensed under MIT. [[https://github.com/earendil-works/pi][Pi GitHub Repository]]
+
+***Timeline***
+
+- Late 2025: Mario started building Pi after frustration with Claude Code's feature bloat
+- January 2026: Armin Ronacher wrote about Pi being the engine behind OpenClaw
+- March 2026: Mario gave a talk at AI Engineer London
+- April 2026: Mario joined Earendil; featured on The Pragmatic Engineer podcast
+- May 2026: Pi moved to the ~earendil-works~ GitHub organization; v0.74.0 first release under new scope
+- May 2026: Featured on Hacker News (608 points, 306 comments)
+- July 2026: Latest release v0.80.6
+
+[[https://pi.dev/news/2026/5/7/pi-has-a-new-home][Pi News: New Home]]
+
+**DeepAgents**
+
+***Overview***
+
+DeepAgents is an open-source "agent harness" — an opinionated, batteries-included framework for building AI agents that handle long-horizon, multi-step, complex tasks. It is a standalone Python library (installable via ~pip install deepagents~) built on top of LangChain's core building blocks and powered by the LangGraph runtime for durable execution, streaming, and human-in-the-loop workflows. [[https://github.com/langchain-ai/deepagents][DeepAgents GitHub Repository]]
+
+DeepAgents treats context as a systems problem, giving agents a workspace, a planning surface, and a control model — rather than forcing all work into one growing conversation history. [[https://docs.langchain.com/oss/python/deepagents/overview][DeepAgents Documentation]]
+
+***Creator and Organization***
+
+DeepAgents was developed by the LangChain team at LangChain, Inc. LangChain was founded by Harrison Chase (who started it as a side project in late 2022) and co-founder Ankush Gola in early 2023. The company is headquartered in San Francisco, with offices in New York, Boston, and Amsterdam. LangChain has crossed 1 billion open-source downloads, works with 35% of the Fortune 500, and is a unicorn valued at $1.25 billion. [[https://www.langchain.com/about][LangChain About Page]]
+
+***Architecture***
+
+DeepAgents is structured as an agent harness with the following built-in capabilities:
+
+- *Tools*: Custom functions, APIs, databases, and full Model Context Protocol (MCP) support
+- *Virtual Filesystem*: Pluggable backends (in-memory, local disk, LangGraph store, composite, custom) with tools for ~ls~, ~read_file~, ~write_file~, ~edit_file~, ~delete~, ~glob~, ~grep~, and ~execute~
+- *Filesystem Permissions*: Declarative access control with glob patterns
+- *Code Execution*: Sandbox backends for shell commands + in-process JavaScript interpreter (QuickJS)
+- *Streaming*: Typed event streams for messages, tool calls, values, and delegated tasks
+- *Skills*: On-demand domain knowledge loaded progressively from ~SKILL.md~ files (Agent Skills standard)
+- *Memory*: Persistent instructions/preferences via ~AGENTS.md~ files, carried across sessions
+- *Summarization & Context Offloading*: Automatic compression of conversation history and large tool results
+- *Prompt Caching*: Automatic caching of static prompt sections for Anthropic/Bedrock models
+- *Task Planning*: Built-in ~write_todos~ tool for structured task tracking
+- *Subagents*: Ephemeral child agents with isolated context windows for parallel, long-running subtasks
+- *Human-in-the-Loop*: LangGraph interrupts for approval on sensitive tool calls
+
+[[https://docs.langchain.com/oss/python/deepagents/overview][DeepAgents Documentation]]
+
+***Key Features***
+
+- Opinionated defaults tuned for long-horizon, multi-step work
+- Extensible — override or replace any piece without forking
+- Model-agnostic — works with any LLM supporting tool calling
+- Production-ready — built on LangGraph with first-class tracing, evaluation, and deployment via LangSmith
+- Deep Agents Code (~dcode~) — a pre-built terminal coding agent scoring ~42.5% on Terminal Bench 2.0 (powered by Sonnet 4.5), comparable to Claude Code
+
+[[https://www.langchain.com/blog/evaluating-deepagents-cli-on-terminal-bench-2-0][Terminal Bench Evaluation]]
+
+***Adoption and Status***
+
+As of mid-2026, DeepAgents has reached 26.2k GitHub stars and 3.7k forks, with 2,718 commits and 214 releases. The latest release is ~deepagents==0.6.12~ (June 25, 2026). A JavaScript/TypeScript port is available at ~deepagents.js~. [[https://github.com/langchain-ai/deepagents][DeepAgents GitHub Repository]]
+
+***Timeline***
+
+- November 2025: LangChain published "What are Deep Agents?" YouTube video (38,444 views)
+- March 2026: MarkTechPost published detailed article on DeepAgents
+- 2026: LangChain Academy offers free "Deep Agents with LangGraph" course
+- 2026: ContextHubBackend introduced — filesystem backend backed by LangSmith Hub
+- 2026: New event streaming API (v3, beta) with content-block-centric protocol
+
+[[https://www.marktechpost.com/2026/03/15/langchain-releases-deep-agents-a-structured-runtime-for-planning-memory-and-context-isolation-in-multi-step-ai-agents][MarkTechPost: DeepAgents Article]]
+
+**LangChain and LangGraph**
+
+***Current State of LangChain***
+
+LangChain reached its v1.0 milestone on October 22, 2025, with alpha releases announced September 2, 2025. The 1.0 release commits to no breaking changes until 2.0. The latest version as of July 2026 is ~langchain-core 1.4.9~. [[https://www.langchain.com/blog/langchain-langgraph-1dot0][LangChain 1.0 Blog Post]]
+
+Major features of LangChain 1.x:
+- ~create_agent~ abstraction — the new core API for building agents with any model provider, built on top of the LangGraph runtime
+- Middleware system — hooks into the agent loop for fine-grained customization (human-in-the-loop, summarization, PII redaction)
+- Standard Content Blocks — provider-agnostic spec for consistent content types across providers
+- Structured Output Generation — incorporated into the main model-to-tools loop
+- Streamlined package surface area — legacy functionality moved to ~langchain-classic~
+
+[[https://www.langchain.com/blog/langchain-langchain-1-0-alpha-releases][LangChain 1.0 Alpha Blog Post]]
+
+***LangGraph Architecture***
+
+LangGraph is a low-level agent orchestration framework for building stateful, long-running AI agents. It models agent workflows as directed graphs where nodes represent processing steps (LLM calls, tool execution, deterministic logic) and edges control flow with conditional logic.
+
+Core building blocks:
+- *StateGraph* — the core building block; nodes share a single state object that flows through the graph
+- *Nodes* — functions or LLM calls that read/modify state
+- *Edges* — conditional routing logic between nodes
+- *State Schema* — defined via ~TypedDict~, ~dataclass~, or ~Pydantic BaseModel~ (Pydantic v3 recommended)
+- *Reducers* — merge functions for parallel node execution
+- *Checkpointers* — persistence backends: ~MemorySaver~ (dev), ~SqliteSaver~ (prototype), ~PostgresSaver~ (production)
+- *Thread IDs* — isolate multi-user/multi-session state
+
+[[https://www.langchain.com/langgraph][LangGraph Product Page]]
+
+***Agent Orchestration***
+
+LangGraph provides comprehensive orchestration:
+- Graph-based execution model with conditional branching via ~add_conditional_edges()~
+- Parallel execution with reducer functions merging results
+- Subgraph composition for complex projects
+- Supervisor pattern via ~langgraph-supervisor~ library for hierarchical multi-agent systems
+- SAGA pattern support for distributed transaction compensation
+- Interrupt/Resume API for pausing agent execution at any node
+
+[[https://reference.langchain.com/python/langgraph-supervisor][langgraph-supervisor Reference]]
+
+***Observability: LangSmith***
+
+LangSmith is the default observability backend for LangChain/LangGraph:
+- *Tracing* — captures every LLM call, tool invocation, and intermediate reasoning step
+- *Evaluation* — offline dataset-driven evals and online LLM-as-judge evaluators
+- *LangSmith Studio* — specialized agent IDE with graph mode and chat mode
+- *LangGraph Studio* — visual graph topology display with time-travel debugging
+- *LangSmith Fleet* — enterprise deployment for agents across the organization
+- *LangSmith Sandboxes* — safely run agent-generated code
+- *LangSmith Engine* — autonomous agent improvement
+
+Free tier: 5,000 traces/month (14-day retention). Plus: $39/seat/month with 10,000 traces. [[https://www.langchain.com/langsmith-platform][LangSmith Platform]] [[https://www.langchain.com/langsmith/observability][LangSmith Observability]]
+
+***Community and Adoption***
+
+- ~langchain-ai/langchain~: ~142K GitHub stars
+- ~langchain-ai/langgraph~: 37.2K stars, 6.2K forks, 295 contributors, 41.3K dependent repositories
+- 90M monthly downloads across the ecosystem
+- Used in production by Uber, LinkedIn, Klarna, JP Morgan, BlackRock, Cisco, Rippling, Vanta, Lyft, Harvey, Elastic, Workday, Cloudflare, ServiceNow, and others
+- Series B: $125M (November 20, 2025), led by IVP
+
+[[https://github.com/langchain-ai/langchain][LangChain GitHub]]
+
+***Production Readiness***
+
+LangGraph 1.2+ includes:
+- ~RetryPolicy~ — automatic retries with exponential backoff and jitter
+- ~TimeoutPolicy~ — wall-clock and idle-based caps on node execution
+- ~error_handler~ — recovery function after retries exhausted
+- Durable execution with automatic state persistence at every node
+- Content-block-centric streaming API (v3) with typed, per-channel projections
+- LangSmith Deployment for managed, standardized agent deployment
+
+[[https://www.langchain.com/blog/fault-tolerance-in-langgraph][Fault Tolerance in LangGraph]]
+
+**Relationship Between the Frameworks**
+
+Before comparing, it is important to clarify the relationship between these frameworks. DeepAgents is not an independent competitor to LangGraph — it is a higher-level package built on top of LangGraph and LangChain. DeepAgents uses LangGraph as its execution runtime and inherits LangSmith for observability. This means:
+
+- DeepAgents = LangChain core + LangGraph runtime + opinionated agent harness (planning, context management, subagents, memory)
+- LangGraph = the underlying graph runtime that powers DeepAgents
+- Pi = a completely independent, TypeScript-based project with no LangChain/LangGraph dependency
+
+The comparison below treats them as three distinct options a developer might choose, but readers should understand that choosing DeepAgents implicitly means choosing LangGraph underneath. Pi stands alone as the only framework in this comparison that is not part of the LangChain ecosystem.
+
+**Comparison**
+
+***Agent Orchestration Capabilities***
+
+Pi provides a minimal agent loop with tool execution and event handling. Its orchestration is intentionally simple — a single agent loop that iterates between model calls and tool execution. Complex orchestration patterns are left to extensions. The tree-structured session system allows branching and rewinding within a session, which is unique among the three.
+
+DeepAgents provides opinionated orchestration with built-in task planning (~write_todos~), subagent delegation, and context management. It sits between LangChain's minimal ~create_agent~ and LangGraph's low-level graph runtime, offering a ready-to-use harness for long-horizon tasks.
+
+LangGraph provides the most comprehensive orchestration with its graph-based execution model, conditional branching, parallel execution, subgraph composition, supervisor patterns, and SAGA support. It is the lowest-level and most flexible of the three, but also requires the most setup.
+
+| Capability | Pi | DeepAgents | LangGraph |
+|---|---|---|---|
+| Graph-based orchestration | No | Yes (via LangGraph) | Yes (native) |
+| Conditional branching | No | Yes (via LangGraph) | Yes |
+| Parallel execution | No | Yes (via LangGraph) | Yes |
+| Subgraph composition | No | Yes (via LangGraph) | Yes |
+| Supervisor pattern | No | No (can use LangGraph) | Yes (via langgraph-supervisor) |
+| Session branching/rewinding | Yes (tree-structured) | No | No (checkpoint-based) |
+| Task planning | No (by design) | Yes (built-in) | No (custom) |
+
+***Tool/Function Calling***
+
+Pi provides four built-in tools (~read~, ~write~, ~edit~, ~bash~) plus ~grep~, ~find~, and ~ls~. Additional tools are added via extensions. Pi's tool-calling is straightforward and model-agnostic through its unified LLM API.
+
+DeepAgents provides a rich tool ecosystem including custom functions, APIs, databases, full MCP support, a virtual filesystem with pluggable backends, code execution sandboxes, and declarative filesystem permissions. It also supports the Agent Skills standard via ~SKILL.md~ files.
+
+LangGraph supports tool calling through LangChain's standardized tool-calling interface, with middleware hooks for customizing tool call behavior. It integrates with MCP and supports filesystem tools with configurable allowlists.
+
+| Feature | Pi | DeepAgents | LangGraph |
+|---|---|---|---|
+| Built-in tools | 4 core + 3 utility | Full filesystem + execute + MCP | Via LangChain tools |
+| MCP support | No (by design) | Yes (full) | Yes |
+| Custom tools | Via extensions | Yes (custom functions) | Yes (middleware) |
+| Code sandbox | No | Yes (QuickJS + shell) | Via LangSmith Sandboxes |
+| Skills system | Yes (built-in) | Yes (SKILL.md) | No (custom) |
+
+***Multi-Agent Patterns***
+
+Pi does not include built-in multi-agent support. Its philosophy is that complex features like sub-agents should be built via extensions. The hot-reloading extension system allows agents to write and load their own tools, enabling a form of self-modification.
+
+DeepAgents includes built-in subagent support with ephemeral child agents that have isolated context windows. Subagents can run in parallel for long-running subtasks, and the parent agent manages task delegation through the ~write_todos~ tool.
+
+LangGraph supports the most comprehensive multi-agent patterns: supervisor/worker hierarchies via ~langgraph-supervisor~, tool-calling multi-agent (agents as tools), subgraph-based multi-agent, and parallel agent execution with state merging.
+
+| Pattern | Pi | DeepAgents | LangGraph |
+|---|---|---|---|
+| Sub-agents | No (by design) | Yes (built-in) | Yes (subgraphs) |
+| Supervisor/worker | No | No (can use LangGraph) | Yes |
+| Parallel agents | No | Yes (via LangGraph) | Yes |
+| Agent-to-agent protocols | No | Yes (via subagents) | Yes (shared state) |
+| Self-modification | Yes (hot-reload extensions) | No | No |
+
+***State Management***
+
+Pi uses tree-structured sessions with branching and rewinding capabilities. State is managed within the agent loop and can be exported as HTML. Multi-model sessions allow messages from different providers within a single session.
+
+DeepAgents manages state through LangGraph's checkpointing system underneath, with additional layers for context management: skills (on-demand domain knowledge), memory (persistent ~AGENTS.md~ files), summarization (automatic compression), and prompt caching.
+
+LangGraph provides the most sophisticated state management: a shared state object flowing through graph nodes, incremental updates, reducer functions for parallel merging, three schema options (~TypedDict~, ~dataclass~, ~Pydantic BaseModel~), and multiple persistence backends (~MemorySaver~, ~SqliteSaver~, ~PostgresSaver~) with thread ID isolation.
+
+| Feature | Pi | DeepAgents | LangGraph |
+|---|---|---|---|
+| State persistence | Session-based | LangGraph checkpoints | Checkpointers (Memory/SQLite/Postgres) |
+| Context management | Minimal | Skills + Memory + Summarization | Custom (via nodes) |
+| Session branching | Yes (tree-structured) | No | No |
+| Thread isolation | No | Yes (via LangGraph) | Yes (thread IDs) |
+| Cross-session memory | No | Yes (~AGENTS.md~) | Via custom nodes |
+
+***Observability and Debugging***
+
+Pi provides full cost tracking per session and HTML export of session trees. It has no built-in observability platform — debugging is done through the terminal UI and session exports.
+
+DeepAgents inherits LangSmith's full observability stack: tracing, evaluation, LangSmith Studio, LangGraph Studio with time-travel debugging, and deployment tools. This is its strongest advantage for production use.
+
+LangGraph/LangChain has the most mature observability ecosystem with LangSmith providing tracing, evaluation, prompt management, Studio IDE, Fleet deployment, Sandboxes, and Engine for autonomous improvement. LangGraph Studio offers visual graph topology and time-travel debugging.
+
+| Feature | Pi | DeepAgents | LangGraph/LangSmith |
+|---|---|---|---|
+| Tracing | No | Yes (LangSmith) | Yes (LangSmith) |
+| Evaluation | No | Yes (LangSmith) | Yes (LangSmith) |
+| Visual debugging | Session HTML export | LangGraph Studio | LangGraph Studio |
+| Time-travel debugging | Session rewinding | Yes | Yes |
+| Cost tracking | Yes (built-in) | Via LangSmith | Via LangSmith |
+| CI/CD integration | No | Yes | Yes |
+
+Note: DeepAgents inherits all LangSmith observability features from its LangGraph runtime. The LangSmith column represents the full platform capabilities available to both DeepAgents and custom LangGraph applications.
+
+***Community and Ecosystem***
+
+Pi has a rapidly growing community with 70.5k GitHub stars and 8.7k forks. Its ecosystem includes community packages (pi-annotate, pi-messenger, etc.), OpenClaw (built on Pi), and the "Vienna School of Agentic Coding" community. Pi is written in TypeScript.
+
+DeepAgents benefits from LangChain's massive ecosystem with 26.2k GitHub stars of its own. It has a dedicated forum section, LangChain Academy courses, and a JavaScript/TypeScript port. It is written in Python.
+
+LangChain/LangGraph has the largest ecosystem by far: ~87K stars for LangChain, 30K+ for LangGraph, 90M monthly downloads, 41.3K dependent repositories, and adoption by 35% of the Fortune 500. It has the most extensive documentation, community forums, courses, and third-party integrations.
+
+| Metric | Pi | DeepAgents | LangChain/LangGraph |
+|---|---|---|---|
+| GitHub stars | 70.5K | 26.2K | ~142K (LangChain), 37.2K (LangGraph) |
+| Monthly downloads | N/A | Part of 90M ecosystem | 90M+ |
+| Enterprise adoption | Early | Growing | 35% Fortune 500 |
+| Documentation | Good | Excellent | Excellent |
+| Courses | None | LangChain Academy | LangChain Academy |
+| Language | TypeScript | Python | Python + TypeScript |
+
+***Ease of Use***
+
+Pi is the easiest to get started with for coding tasks. Its minimal design means less configuration and fewer concepts to learn. The terminal-first approach is familiar to developers, and the extension system is straightforward. However, building complex agent workflows requires writing custom extensions.
+
+DeepAgents provides the best balance of ease and capability. Its opinionated defaults handle most long-horizon use cases out of the box, while still being extensible. The ~write_todos~ tool, built-in subagents, and context management reduce boilerplate significantly.
+
+LangGraph requires the most effort to use effectively. Its graph-based model is powerful but has a steep learning curve. Users must define state schemas, nodes, edges, and reducers manually. The ~create_agent~ abstraction in LangChain 1.0 simplifies basic agent creation, but complex workflows still require deep LangGraph knowledge.
+
+| Aspect | Pi | DeepAgents | LangGraph |
+|---|---|---|---|
+| Learning curve | Low | Medium | High |
+| Setup complexity | Minimal | Moderate | Complex |
+| Default behavior | Minimal (extend yourself) | Opinionated (works out of box) | None (build yourself) |
+| Customization | High (extensions) | High (override anything) | Highest (full control) |
+
+***Production Readiness***
+
+Pi is production-ready for coding agent use cases but lacks enterprise features like observability, evaluation, and deployment tooling. Its local-first design means no SaaS dependency, which is both a strength (privacy) and limitation (no managed infrastructure).
+
+DeepAgents is production-ready with full LangSmith integration for observability, evaluation, and deployment. It includes fault tolerance through LangGraph's checkpointing, human-in-the-loop support, and sandboxed code execution. The ContextHubBackend provides versioned agent files.
+
+LangGraph/LangChain is the most production-ready overall. It offers fault tolerance primitives (~RetryPolicy~, ~TimeoutPolicy~, ~error_handler~), durable execution, streaming APIs, human-in-the-loop patterns, LangSmith Deployment, LangGraph Cloud, Agent Server API, PII redaction middleware, and enterprise-grade observability.
+
+| Feature | Pi | DeepAgents | LangGraph |
+|---|---|---|---|
+| Fault tolerance | No | Yes (via LangGraph) | Yes (RetryPolicy, TimeoutPolicy) |
+| Durable execution | No | Yes (via LangGraph) | Yes (checkpointers) |
+| Human-in-the-loop | No | Yes (via LangGraph) | Yes (interrupt API) |
+| Observability | Cost tracking only | Full (LangSmith) | Full (LangSmith) |
+| Deployment | Local only | LangSmith Deployment | LangSmith + LangGraph Cloud |
+| Security | Local-first | Sandboxes + PII redaction | Sandboxes + PII redaction |
+| SaaS dependency | None | Optional (LangSmith) | Optional (LangSmith) |
+
+Note: DeepAgents inherits all production features from its LangGraph runtime. The LangGraph column represents the full platform capabilities.
+
+**Summary**
+
+The three frameworks represent fundamentally different approaches to agent development:
+
+- *Pi Agent Harness* is a minimal, terminal-first coding agent harness that prioritizes extensibility and developer control. It is completely independent of the LangChain ecosystem. It is ideal for developers who want a lean, TypeScript-based foundation they can build upon, particularly for coding workflows. Its tree-structured sessions and hot-reloading extensions are unique strengths. It lacks enterprise features but compensates with simplicity and a local-first design.
+
+- *DeepAgents* is LangChain's opinionated agent harness for long-horizon, multi-step tasks. It sits between LangChain's minimal ~create_agent~ and LangGraph's low-level graph runtime, providing built-in planning, context management, subagent delegation, and memory. It inherits all of LangGraph's orchestration capabilities and LangSmith's observability. It is the best choice for developers who need production-ready agents with minimal setup while still having access to LangChain's full ecosystem.
+
+- *LangChain/LangGraph* is the most comprehensive and flexible platform, offering graph-based orchestration, sophisticated state management, multi-agent patterns, and enterprise-grade observability through LangSmith. It has the steepest learning curve but provides the most control and the largest ecosystem. It is the best choice for complex, production-grade agent systems that require fine-grained control over execution flow.
+
+The choice depends on the use case: Pi for lean coding agents with maximum developer control, DeepAgents for production-ready long-horizon agents with opinionated defaults, and raw LangGraph for complex multi-agent systems requiring maximum flexibility. Developers choosing DeepAgents or LangGraph are choosing the same underlying runtime — the difference is whether they want opinionated defaults (DeepAgents) or full control (LangGraph).
+
+***Sources***
+
+[1] Pi GitHub Repository: https://github.com/earendil-works/pi
+[2] Pi Official Website: https://pi.dev
+[3] Pi News: New Home: https://pi.dev/news/2026/5/7/pi-has-a-new-home
+[4] Pi Documentation: https://pi.dev/docs/latest
+[5] Pi Coding Agent Harness Overview: https://silenceper.com/en/article/2026-05-27-pi-coding-agent-harness
+[6] Pi Architecture Guide: https://explainx.ai/blog/pi-minimal-agent-harness-mario-zechner-guide-2026
+[7] Mario Zechner's "I've sold out" Blog Post: https://mariozechner.at/posts/2026-04-08-ive-sold-out
+[8] Armin Ronacher on Pi: https://lucumr.pocoo.org/2026/1/31/pi
+[9] Pragmatic Engineer Podcast: https://newsletter.pragmaticengineer.com/p/building-pi-and-what-makes-self-modifying
+[10] Hacker News Discussion: https://news.ycombinator.com/item?id=47143754
+[11] DeepAgents GitHub Repository: https://github.com/langchain-ai/deepagents
+[12] DeepAgents Documentation: https://docs.langchain.com/oss/python/deepagents/overview
+[13] LangChain About Page: https://www.langchain.com/about
+[14] LangChain Product Page (Deep Agents): https://www.langchain.com/deep-agents
+[15] Terminal Bench Evaluation: https://www.langchain.com/blog/evaluating-deepagents-cli-on-terminal-bench-2-0
+[16] MarkTechPost: DeepAgents Article: https://www.marktechpost.com/2026/03/15/langchain-releases-deep-agents-a-structured-runtime-for-planning-memory-and-context-isolation-in-multi-step-ai-agents
+[17] LangChain Academy Course: https://academy.langchain.com/courses/deep-agents-with-langgraph
+[18] LangChain 1.0 Blog Post: https://www.langchain.com/blog/langchain-langgraph-1dot0
+[19] LangChain 1.0 Alpha Blog Post: https://www.langchain.com/blog/langchain-langchain-1-0-alpha-releases
+[20] LangGraph Product Page: https://www.langchain.com/langgraph
+[21] LangSmith Platform: https://www.langchain.com/langsmith-platform
+[22] LangSmith Observability: https://www.langchain.com/langsmith/observability
+[23] LangGraph Studio Blog: https://www.langchain.com/blog/langgraph-studio-the-first-agent-ide
+[24] LangChain GitHub: https://github.com/langchain-ai/langchain
+[25] LangGraph GitHub: https://github.com/langchain-ai/langgraph
+[26] Fault Tolerance in LangGraph: https://www.langchain.com/blog/fault-tolerance-in-langgraph
+[27] LangGraph Fault Tolerance Docs: https://docs.langchain.com/oss/python/langgraph/fault-tolerance
+[28] langgraph-supervisor Reference: https://reference.langchain.com/python/langgraph-supervisor
+[29] LangChain Changelog: https://docs.langchain.com/oss/python/releases/changelog
+[30] LangGraph State Management Guide: https://eastondev.com/blog/en/posts/ai/20260424-langgraph-agent-architecture
+[31] LangChain LinkedIn: https://www.linkedin.com/company/langchain
+[32] DeepAgents Code Docs: https://docs.langchain.com/oss/python/deepagents/code/overview
+[33] LangChain Forum (Deep Agents): https://forum.langchain.com/c/oss-product-help-lc-and-lg/deep-agents/18
+[34] DeepAgents JS/TS Port: https://github.com/langchain-ai/deepagentsjs
+[35] LangSmith Studio Docs: https://docs.langchain.com/langsmith/studio
+[36] LangChain Homepage: https://www.langchain.com
+[37] Earendil: https://earendil.com
+[38] Pi YouTube: "I Hated Every Coding Agent": https://www.youtube.com/watch?v=Dli5slNaJu0
+[39] Pi YouTube: Architecture Explained: https://www.youtube.com/watch?v=gTeujlv8qK0
+[40] DeepAgents YouTube: "What are Deep Agents?": https://www.youtube.com/watch?v=IVts6ztrkFg
