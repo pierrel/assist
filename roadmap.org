@@ -372,6 +372,21 @@ or escape-then-markdown for the tool/assistant text while keeping the render-blo
 pipeline. Eval/verify: a message containing =<img onerror>= must not execute.
 
 * Reliability
+** TODO Bound a runaway generation by TIME, not tokens (replace the blanket max_tokens cap)
+A model that loops/narrates instead of emitting EOS streams tokens to the 128k context
+limit — a ~20-min hang that holds the single =--parallel 1= LLM slot (the httpx read-timeout
+can't catch a continuously-emitting stream). Stop-gap shipped: =max_tokens=32768= in
+=model_manager.select_chat_model= (bounds it to ~5 min). But max_tokens is the wrong lever —
+it can't tell a runaway from a legit large =write_file= (the whole file is one tool-call
+argument = one generation; FilesystemMiddleware carries 20k/50k-token payloads), so an
+extreme (>32k) single write TRUNCATES with =finish_reason="length"=, the partial args are
+invalid JSON, and the tool call is DROPPED with no recovery (JsonValidation only reads
+=tool_calls=; BadRequestRetry only catches exceptions; EmptyResponseRecovery summarizes).
+By-construction fix: a wall-clock GENERATION deadline (bound time, not tokens — a legit write
+finishes in reasonable time; a runaway hits the deadline), OR detect =finish_reason="length"=
+and continue/re-issue the truncated call, OR a per-flow cap (low for answer/render, generous
+for write-heavy dev/research/summarization). Then drop or raise the blanket cap. Surfaced by
+a compound "recommend + map" turn (post-answer narration ramble), but it's general.
 ** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
 

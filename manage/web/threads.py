@@ -2084,10 +2084,8 @@ def _as_lines(value) -> list:
     return [value] if isinstance(value, str) else [s for s in value if s]
 
 
-# Pin colors: an agent-authored color NAME maps to a fixed (stroke, fill) hex pair
-# here — the untrusted block never puts a raw color string into the marker options.
-# Convention (see the render skill): origin/current location green, other points blue.
-# The AGENT never picks a color — it only marks whether a pin is the user's ORIGIN /
+# Pin colors are owned HERE, never by the agent: the untrusted render block carries no raw
+# color string into the marker options — it only marks whether a pin is the user's ORIGIN /
 # current location (leading ``origin`` token). The renderer owns the presentation: the
 # origin is green, every other place is the default blue.
 _ORIGIN_COLOR, _ORIGIN_FILL = "#15803d", "#22c55e"    # user's origin / current location
@@ -2096,15 +2094,17 @@ _DEFAULT_COLOR, _DEFAULT_FILL = "#1d4ed8", "#3b82f6"   # every other place
 
 def _parse_pin(line: str) -> dict | None:
     """``[origin] lat,lon label`` -> ``{lat, lon, label, color, fill}``; None if
-    malformed / out of range (dropped, so one bad pin doesn't sink the map).  An optional
-    leading ``origin`` token marks the user's location (rendered green); every other pin is
-    the default (blue).  Semantics from the agent, color from here — the agent never picks a
-    color."""
+    malformed / out of range (dropped, so one bad pin doesn't sink the map).  A leading
+    ``origin`` token marks the user's location (rendered green); every other pin is the
+    default (blue).  Any OTHER leading non-coord word (a legacy/hallucinated color like
+    ``blue``/``green``) is stripped and the pin rendered as a default — a stray word never
+    drops a valid coordinate.  Semantics from the agent, color from here — never the agent."""
     line = line.strip()
     first, _, rest = line.partition(" ")
-    is_origin = "," not in first and first.lower() == "origin"  # coords always have a comma
-    if is_origin:
-        line = rest.strip()
+    is_origin = False
+    if "," not in first:                 # a leading marker word (coords always have a comma)
+        is_origin = first.lower() == "origin"
+        line = rest.strip()              # consume it; a legacy color word -> default pin
     coord, _, label = line.partition(" ")
     lat_s, _, lon_s = coord.partition(",")
     try:
