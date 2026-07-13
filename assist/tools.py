@@ -864,9 +864,11 @@ def map_data(places: str = "", routes: str = "") -> str:
     a map (a ``type: map`` render block — see the render skill).  Get the exact lat,lon of
     each place and the polyline of each route FIRST — never guess coordinates.
 
-    ``places``: the place names/addresses to look up — several are fine in one call,
-        separated by a comma or semicolon, e.g.
-        places="Four Barrel Coffee SF, Ritual Coffee SF, Haus Coffee SF".
+    ``places``: the place names/addresses to look up — several are fine in one call.
+        They split on ';' when any ';' is present, else on ',', e.g.
+        places="Four Barrel Coffee SF, Ritual Coffee SF, Haus Coffee SF".  Use ';' to
+        separate places whose addresses contain commas, so the commas aren't read as
+        separators: places="Four Barrel Coffee, 1915 Valencia St SF; Ritual, 1026 Valencia St SF".
     ``routes``: OPTIONAL semicolon-separated ``"ORIGIN -> DESTINATION"`` walking routes,
         e.g. routes="Fellow Barber SF -> Haus Coffee SF".
 

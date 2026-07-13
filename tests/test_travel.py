@@ -77,19 +77,18 @@ class TestMapData:
         semicolons as separators -> commas INSIDE each place (address). So split on ';'
         when present, else ',' — each form yields the right places. This is the fix for
         the batch collapsing to one wrong coord."""
-        def geo(p):
-            return {"lat": 37.76, "lon": -122.42, "name": p}
-        with patch.object(tools, "_geocode", side_effect=geo):
-            # comma separators, comma-free names
-            seen = []
-            with patch.object(tools, "_geocode", side_effect=lambda p: seen.append(p) or {"lat": 1.0, "lon": 2.0, "name": p}):
-                tools.map_data(places="Four Barrel Coffee Valencia SF, Ritual Coffee SF, Haus Coffee SF")
-            assert seen == ["Four Barrel Coffee Valencia SF", "Ritual Coffee SF", "Haus Coffee SF"]
-            # semicolon separators with internal address commas -> split on ';' only
-            seen2 = []
-            with patch.object(tools, "_geocode", side_effect=lambda p: seen2.append(p) or {"lat": 1.0, "lon": 2.0, "name": p}):
-                tools.map_data(places="Four Barrel Coffee, Valencia St SF; Ritual Coffee, Valencia St SF")
-            assert seen2 == ["Four Barrel Coffee, Valencia St SF", "Ritual Coffee, Valencia St SF"]
+        # comma separators, comma-free names -> split on ','
+        seen = []
+        with patch.object(tools, "_geocode",
+                          side_effect=lambda p: seen.append(p) or {"lat": 1.0, "lon": 2.0, "name": p}):
+            tools.map_data(places="Four Barrel Coffee Valencia SF, Ritual Coffee SF, Haus Coffee SF")
+        assert seen == ["Four Barrel Coffee Valencia SF", "Ritual Coffee SF", "Haus Coffee SF"]
+        # semicolon separators with internal address commas -> split on ';' only
+        seen2 = []
+        with patch.object(tools, "_geocode",
+                          side_effect=lambda p: seen2.append(p) or {"lat": 1.0, "lon": 2.0, "name": p}):
+            tools.map_data(places="Four Barrel Coffee, Valencia St SF; Ritual Coffee, Valencia St SF")
+        assert seen2 == ["Four Barrel Coffee, Valencia St SF", "Ritual Coffee, Valencia St SF"]
 
     def test_route_unresolvable_endpoint_is_named(self):
         """A route whose endpoint can't be geocoded is named as unlocatable, not
