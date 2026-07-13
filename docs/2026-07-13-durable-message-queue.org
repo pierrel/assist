@@ -1,0 +1,209 @@
+#+title: Durable queued/pending messages — survive a web restart
+#+date: <2026-07-13>
+#+author: design doc (for review)
+
+* Problem
+
+When a thread is busy and the user sends follow-up messages, the backlog lives
+*only in in-memory structures*. A web restart (deploy, crash, =systemd restart=)
+drops it. Two failure modes:
+
+1. A *paused* fair-scheduling turn is orphaned — its work is durable in the
+   checkpoint, but nothing re-enqueues the resume, and the startup reconcile
+   *actively flips it to =error=*.
+2. *Queued follow-up messages are silently lost* with no trace, because
+   =status.json= records only the one in-flight message.
+
+Goal: make the follow-up backlog durable and recover it (plus the paused-turn
+resume) on startup — exactly-once, in submit order — without violating
+event-loop liveness or the "fail-fast, don't heal-and-retry" rule.
+
+This is the durability half. Surfacing the backlog in the UI is a separate
+design (feature #1). This ships independently.
+
+* Current behavior — what exactly is lost (verified, file:line)
+
+- Submit =post_message= (=threads.py:1729=): =paused= → =_RESUME_SCHEDULER.submit_message=
+  → in-memory =queue.Queue= (=_ResumeScheduler._q=, :1654); else
+  =background_tasks.add_task(_process_message,…)= (:1744), where a 2nd message to a
+  =processing= thread *parks a threadpool worker in =cond.wait=* (=thread_queue.py:197=).
+  Both purely in-memory.
+- =_mark_pending= (:1377) no-ops when busy (:1411); =status.json= holds a *single*
+  =pending_message= (:1418). So 2nd/3rd follow-ups are recorded *nowhere durable*.
+- Pause (=_process_message= =except ThreadPauseRequested= :1150): enqueues an
+  in-memory =submit_resume= (:1164), writes =status="paused"= (:1166). The mid-turn
+  state IS durable (langgraph =SqliteSaver=/=threads.db=, =thread_manager.py:120=);
+  the *resume trigger* is not.
+- Startup reconcile (=state.py:595=): marks *every* =BUSY_STAGES= thread —
+  including =paused= — to =error=. So a restart converts a resumable paused turn
+  into a dead =error=.
+
+| Item | Durable today | Lost on restart |
+|------+---------------+-----------------|
+| Paused turn mid-flight state | yes (checkpoint) | orphaned (resume trigger gone; forced to =error=) |
+| Paused turn resume trigger | no (=_q=) | *lost* |
+| Follow-up to a paused thread | no (=_q=) | *lost* (silent) |
+| Follow-up(s) to a processing thread | no (parked waiter) | *lost* (silent, no trace) |
+| The in-flight (1st) message | yes (=status.pending_message=) | surfaced in =error= banner; user re-sends |
+
+*Precedent to reuse:* =PerThreadJsonStore= (=assist/record_store.py=) — lock-
+serialized, atomic tmp+rename, disk-is-truth, per-thread, =all()=-scans-every-thread,
+dies with the thread dir. Already backs =ScheduleStore= and =SubscriptionStore=.
+
+* Proposed durable data model
+
+No new infrastructure, no new DB, no =threads.db= writes on the hot path.
+
+** Follow-up backlog (new)
+Per-thread =pending_messages.json= via a =Backlog(PerThreadJsonStore)= subclass
+(mirrors =ScheduleStore= exactly). Each record:
+: { "id": <uuid>, "text": str, "sender": str|null,
+:   "rider": {"sent_at","tz","lat","lon"}|null, "enqueued_at": <iso> }
+FIFO by list order. Per-thread (dies with the thread on =hard_delete= =rmtree=,
+=thread_manager.py:222=; no eviction hook). =CAP= bounds runaway growth like
+=ScheduleStore.CAP_PER_THREAD=. =rider= stores the four raw form fields so recovery
+reconstructs the =ContextRider= via the existing =_build_rider= (:1421). Reusing
+=PerThreadJsonStore= gives lock-serialized atomic RMW, no partial file, and
+=all()= for the startup scan — deleting fragility by composing a stable block.
+
+** Paused-turn resume durability (no new file)
+Extend the existing =status="paused"= write (:1166) with the resume params
+carried only in-memory today: =accumulated_active_ms= (the =carry=, :1158), plus
+=resume_sender= / =resume_rider= (so a paused *triage* turn resumes with the right
+=send_reply= target + context). =status="paused"= + the checkpoint then fully
+describe the resume — no separate resume journal.
+
+* On-startup recovery flow
+
+1. *Change the BUSY→error reconcile* (=state.py:595=) to *exclude =paused=*. It
+   still errors the genuinely-interrupted stages
+   {=initializing=,=cloning=,=starting_sandbox=,=processing=,=queued=} (container
+   gone, not a clean boundary), carrying =pending_message= into the error banner.
+2. *Recover paused resumes.* For each =tid= with =status=="paused"=: enqueue a
+   resume job (params from the extended =status.json=; =accumulated_active_ms=
+   defaults 0, so pre-feature paused threads still resume).
+3. *Recover queued follow-ups.* Scan =BACKLOG.all()=; for each tid with a
+   non-empty backlog, enqueue its entries *in list order*, after that tid's resume
+   job (recovery controls order: resume first, then messages — preserving the
+   current "message runs after the resume" invariant).
+4. *Start the single serial worker* (the generalized =_ResumeScheduler=), which
+   drains one job at a time. Per-tid order preserved; cross-tid order irrelevant.
+
+* Exactly-once / ordering — claim-before-run
+
+The serial worker *pops* a backlog entry (=PerThreadJsonStore.remove=, under its
+lock) *before* starting the turn, not after success:
+- Crash *after claim, mid-run*: entry already gone → *not replayed* (satisfies "a
+  crash mid-processing must not replay a half-done turn"). Partial work is in the
+  checkpoint; the thread surfaces =error=/=ready=; user re-sends if needed.
+- Crash *before claim*: replayed exactly once.
+
+Single serial worker + FIFO head-claim = strict submit order per thread.
+
+* Reconciling "fail-fast / don't heal-and-retry" with durability
+
+The line is *unstarted work* vs *an interrupted turn*:
+- *Unstarted queued follow-ups* never began a turn → running them once is
+  delivering an accepted-but-unprocessed message, not a retry. *Recover.*
+- *The paused turn's resume* reached a clean, designed pause point
+  (=ThreadPauseRequested= fires only at a superstep boundary with a
+  =durability="sync"= checkpoint). =status=="paused"= is durable proof. Re-enqueuing
+  is durability of a non-terminated turn, not heal-and-retry. *Recover.*
+- *A =processing=/=starting_sandbox= turn* interrupted by the crash is NOT at a
+  clean boundary and its per-turn sandbox is gone. Auto-resuming *would* be
+  heal-and-retry. *Keep erroring it*; user re-sends. Its unstarted backlog
+  follow-ups are still recovered (independent unprocessed messages).
+
+* Event-loop safety of the durable write
+
+=post_message= runs on the single-worker loop. Two liveness-safe options;
+recommend *A*:
+- *A (recommended):* =post_message= is =async def= → append via
+  =await run_in_threadpool(BACKLOG.add, rec)=. The write + store lock run in a pool
+  thread, never on the loop, for *milliseconds* (a bounded file write) — different
+  in kind from the resume-scheduler's forbidden park-for-a-quantum pattern, so no
+  2026-06-10-class pool exhaustion. Loop stays strictly lock-free.
+- *B:* append inline on the loop like =_mark_pending='s =_set_status= write. Simpler,
+  but takes the store lock on the loop. Rejected in favor of A.
+Off-loop writers (pause path, worker claim/pop, completion drain) append directly.
+
+* Dispatch model — two shippable steps
+
+- *Step 1 — Journal (smaller blast radius, ship first):* keep today's live
+  dispatch; make the backlog a durable *journal* — append on submit, claim-pop
+  when the turn starts. Read only at startup. Fully durable + recovered; minimal
+  change to the concurrency hot path.
+- *Step 2 — Single source of truth (recommended end state):* the durable backlog
+  becomes the *only* representation of a queued follow-up — a follow-up to a busy
+  thread is appended, NOT parked as a =THREAD_QUEUE= waiter; the serial worker
+  drains the next entry at turn completion. *Deletes* the in-memory
+  park-per-follow-up fragility rather than shadowing it. One race to resolve in
+  detailed design (a follow-up appended at the instant of the terminal
+  drain-check → by-construction: submit re-checks =status= and kicks the drain if
+  idle). Full three-phase (touches the submit path + the queue).
+
+The serial worker is the existing =_ResumeScheduler= (already owns =submit_resume=
++ =submit_message=) — generalize/rename it. No new component.
+
+* Seam with feature #1 (UI surfacing)
+
+Feature #1 reads =BACKLOG.for_thread(tid)= (=record_store.py:69=) to render "N
+queued" rows, with the same event-loop-safe read discipline as =_get_status=
+(bare read, missing/corrupt → empty). This design owns no rendering.
+*Independently shippable:* without #1 the backlog is invisible but durable +
+recovered; the existing single =pending_message= bubble still renders (no
+regression, no dependency either way). Keep the record shape (=id=, =text=,
+=enqueued_at=) stable as #1's contract. (Note: feature #1 ships first on an
+in-memory mirror; when this lands, #1 re-sources its read from the backlog.)
+
+* Risks / edge cases
+
+- Restart mid-write: tmp+=os.replace= (=record_store.py:60=) is atomic — whole-old
+  or whole-new, never partial.
+- *Corrupt backlog:* =_read= degrades =JSONDecodeError= to =[]= today — that would
+  *silently drop* messages. Since atomic replace makes partial writes impossible,
+  a parse failure = real corruption; mitigation: *log at ERROR* and don't
+  overwrite the file (leave for inspection). Accepted limit.
+- Thread deleted with a backlog: =rmtree= takes the file; startup scan skips
+  =.deleted= → never replayed. No orphan.
+- Double-run: prevented by claim-before-run pop.
+- Paused *triage* turn resumed without =sender=: avoided by persisting
+  =resume_sender= (D2).
+- Runaway growth: bounded by =CAP=.
+- Two uvicorn workers: out of scope by construction (single worker, documented).
+
+* Test plan (symptom-level, un-mocked where risk lives)
+
+Real =PerThreadJsonStore= over a tmp dir + the real route/=_process_message=
+(extend =tests/test_web_process_message_e2e.py=).
+1. *Restart recovery — exactly once, in order:* enqueue 2 follow-ups, drop all
+   in-memory state, run lifespan recovery + =start_scheduler= → both process in
+   submit order; each entry popped exactly once; backlog empty at end.
+2. *No replay of a half-done turn:* backlog entry marked claimed/popped (turn
+   started), crash before completion, recover → *not* re-dispatched.
+3. *Paused resume survives restart:* =status="paused"= + params, no in-memory =_q=,
+   recover → a resume job (=input=None=) enqueued and =paused= *not* flipped to
+   =error=; a =processing= thread *is* flipped.
+4. *Ordering vs resume:* paused thread + one follow-up → resume enqueued before
+   the follow-up.
+5. *Deleted-thread backlog never replayed.*
+6. *Event-loop liveness (un-mocked):* under =PYTHONASYNCIODEBUG=1=, hold the store
+   lock in another thread and POST a follow-up → =post_message= returns promptly
+   (Option A: append is off-loop).
+7. *Durable append atomic under concurrency:* two near-simultaneous follow-ups →
+   both land (no lost update).
+8. *Corrupt backlog is loud:* truncated file → recovery logs ERROR, doesn't crash,
+   leaves the file.
+
+* Decisions to flag for Pierre
+
+- *D0 (scope):* ship Step 1 (durable journal + recovery) first; Step 2 (backlog as
+  single source of truth) as a follow-up full-three-phase change. Confirm.
+- *D1 (mid-flight policy):* recover =paused= resumes + unstarted follow-ups; keep
+  erroring =processing=-and-earlier. Sub-question: auto-run recovered follow-ups
+  behind an errored head turn (default yes), or hold them?
+- *D2 (resume params in status):* persist =accumulated_active_ms= (2h-cap
+  accounting across restart) + =resume_sender=/=resume_rider=. Confirm the rider is
+  worth persisting vs resuming with =rider=None=.
+- *D3 (append placement):* Option A (=run_in_threadpool=, recommended) vs B (inline).
+- *D4 (cap):* per-thread backlog =CAP= value + over-cap behavior.
