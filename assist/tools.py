@@ -860,37 +860,41 @@ def directions(origin: str, destination: str, mode: str) -> str:
 
 
 def map_data(places: str = "", routes: str = "") -> str:
-    """Look up map coordinates for real-world places and routes, so you can draw
-    them on a map (via a ``type: map`` render block — see the render skill).  Call
-    this to get the exact lat,lon of each place and the encoded polyline of each
-    route FIRST — never guess coordinates.
+    """Look up map coordinates for real-world places and routes, so you can draw them on
+    a map (a ``type: map`` render block — see the render skill).  Get the exact lat,lon of
+    each place and the polyline of each route FIRST — never guess coordinates.
 
-    ``places``: a SEMICOLON-separated list of place names/addresses.  Example call:
-        map_data(places="Four Barrel Coffee, San Francisco; Haus Coffee, San Francisco")
-    ``routes``: OPTIONAL semicolon-separated ``"ORIGIN -> DESTINATION"`` walking
-        routes, e.g. routes="Fellow Barber SF -> Haus Coffee SF".
+    ``places``: the place names/addresses to look up — several are fine in one call,
+        separated by a comma or semicolon, e.g.
+        places="Four Barrel Coffee SF, Ritual Coffee SF, Haus Coffee SF".
+    ``routes``: OPTIONAL semicolon-separated ``"ORIGIN -> DESTINATION"`` walking routes,
+        e.g. routes="Fellow Barber SF -> Haus Coffee SF".
 
-    Returns one ``"name: lat,lon"`` per place and one ``"route (...): <encoded
-    polyline>"`` per route — copy those into the ``pin:``/``path:`` lines of the
-    map block.  Fail-loud-but-returned (like ``travel``): an unplaceable spot is
-    named, never raised.
+    Returns one ``"name: lat,lon"`` per place and one ``"route (...): <encoded polyline>"``
+    per route — copy those into the ``pin:``/``path:`` lines of the map block.
+    Fail-loud-but-returned (like ``travel``): an unplaceable spot is NAMED, never raised.
     """
     cache: dict = {}
 
-    def geocode(place: str) -> dict | None:
-        """_geocode, but a backend-down (_TravelBackendError) yields None instead
-        of raising — map_data's contract is fail-loud-but-RETURNED (an unplaceable
-        spot is NAMED, never raised into the agent loop, like ``travel``).  Memoized
-        per call, so a place named in ``places`` and reused as a route endpoint hits
-        the geocoder ONCE."""
-        if place not in cache:
+    def geocode(spot: str) -> dict | None:
+        # _geocode, but a backend-down (_TravelBackendError) yields None instead of raising
+        # — map_data's contract is fail-loud-but-RETURNED (an unplaceable spot is NAMED).
+        # Memoized per call (a place reused as a route endpoint geocodes once).
+        if spot not in cache:
             try:
-                cache[place] = _geocode(place)
+                cache[spot] = _geocode(spot)
             except _TravelBackendError:
-                cache[place] = None
-        return cache[place]
+                cache[spot] = None
+        return cache[spot]
 
-    place_list = [p.strip() for p in (places or "").split(";") if p.strip()]
+    # The small model batches places into ONE string (it ignores a singular/list arg
+    # shape) using EITHER separator, and the two co-vary: with semicolons it puts commas
+    # INSIDE a place ("Four Barrel Coffee, Valencia St SF; Ritual..., Valencia St SF"),
+    # and with commas as the separator the places are comma-free names ("Four Barrel
+    # Coffee Valencia SF, Ritual Coffee SF"). So: split on ';' when present, else on ','.
+    raw = places or ""
+    sep = ";" if ";" in raw else ","
+    place_list = [p.strip() for p in raw.split(sep) if p.strip()]
     route_list = [r.strip() for r in (routes or "").split(";") if r.strip()]
     if not place_list and not route_list:
         return "No places given — call map_data with places set to the place names."

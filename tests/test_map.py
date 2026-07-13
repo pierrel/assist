@@ -74,6 +74,11 @@ class TestRenderMapBlock(TestCase):
         # (not dropped) — a stray word never drops a valid coordinate; and it's not origin.
         self.assertEqual(_parse_pin("green 37.7,-122.4 x")["color"], "#1d4ed8")   # default, not green
         self.assertIsNone(_parse_pin("origin nope label"))                        # no valid coord -> dropped
+        # the model may copy the message-context location ("sent from ~37.77, -122.42")
+        # verbatim — a leading ~ and a space after the comma must still parse, else the
+        # origin pin (the user's own location) is silently dropped.
+        tilde = _parse_pin("origin ~37.77, -122.42 Home")
+        self.assertEqual((tilde["lat"], tilde["lon"], tilde["color"]), (37.77, -122.42, "#15803d"))
         # the origin pin's green hex reaches the data island the map JS reads
         html = _render_map_block("t", _block("type: map\npin: origin 37.77,-122.42 Home"))
         self.assertIn("#15803d", html)

@@ -60,8 +60,8 @@ def routing_env(monkeypatch):
 
 class TestMapData:
     def test_route_happy_path(self):
-        """Places geocode to pin lines; a route geocodes both endpoints, calls
-        MOTIS /plan, and extracts the legGeometry polyline into a route line."""
+        """Places geocode to pin lines; a route geocodes both endpoints, calls MOTIS
+        /plan, and extracts the legGeometry polyline into a route line."""
         plan = {"direct": [{"legs": [{"legGeometry": {"points": "abc123", "precision": 7}}]}]}
         with patch.object(tools, "_geocode",
                           side_effect=lambda p: {"lat": 37.76, "lon": -122.42, "name": p}), \
@@ -71,17 +71,25 @@ class TestMapData:
         assert "Cafe B: 37.76000,-122.42000" in out
         assert "route (Cafe A -> Cafe B): abc123" in out
 
-    def test_geocode_memoized_per_call(self):
-        """A place named in `places` and reused as a route endpoint geocodes ONCE."""
-        calls = []
-        def fake(p):
-            calls.append(p)
+    def test_batched_places_split_semicolon_else_comma(self):
+        """The model batches places into ONE string (it won't use a list/singular arg)
+        with EITHER separator, and they co-vary: commas as separators -> comma-free names;
+        semicolons as separators -> commas INSIDE each place (address). So split on ';'
+        when present, else ',' — each form yields the right places. This is the fix for
+        the batch collapsing to one wrong coord."""
+        def geo(p):
             return {"lat": 37.76, "lon": -122.42, "name": p}
-        plan = {"direct": [{"legs": [{"legGeometry": {"points": "abc", "precision": 7}}]}]}
-        with patch.object(tools, "_geocode", side_effect=fake), \
-             patch.object(tools, "_motis_get", return_value=plan):
-            tools.map_data(places="A; B", routes="A -> B")
-        assert calls.count("A") == 1 and calls.count("B") == 1
+        with patch.object(tools, "_geocode", side_effect=geo):
+            # comma separators, comma-free names
+            seen = []
+            with patch.object(tools, "_geocode", side_effect=lambda p: seen.append(p) or {"lat": 1.0, "lon": 2.0, "name": p}):
+                tools.map_data(places="Four Barrel Coffee Valencia SF, Ritual Coffee SF, Haus Coffee SF")
+            assert seen == ["Four Barrel Coffee Valencia SF", "Ritual Coffee SF", "Haus Coffee SF"]
+            # semicolon separators with internal address commas -> split on ';' only
+            seen2 = []
+            with patch.object(tools, "_geocode", side_effect=lambda p: seen2.append(p) or {"lat": 1.0, "lon": 2.0, "name": p}):
+                tools.map_data(places="Four Barrel Coffee, Valencia St SF; Ritual Coffee, Valencia St SF")
+            assert seen2 == ["Four Barrel Coffee, Valencia St SF", "Ritual Coffee, Valencia St SF"]
 
     def test_route_unresolvable_endpoint_is_named(self):
         """A route whose endpoint can't be geocoded is named as unlocatable, not

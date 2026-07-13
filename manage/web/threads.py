@@ -2090,6 +2090,11 @@ def _as_lines(value) -> list:
 # origin is green, every other place is the default blue.
 _ORIGIN_COLOR, _ORIGIN_FILL = "#15803d", "#22c55e"    # user's origin / current location
 _DEFAULT_COLOR, _DEFAULT_FILL = "#1d4ed8", "#3b82f6"   # every other place
+# A pin's coordinate, tolerant of how the model copies the message-context location
+# ("sent from ~37.77, -122.42"): an OPTIONAL leading ~ on either number and whitespace
+# after the comma. Without this, a verbatim-copied origin coord fails float() and the pin
+# (the user's own location — the whole point of the origin marker) is silently dropped.
+_COORD_RE = re.compile(r"~?\s*(-?\d+(?:\.\d+)?)\s*,\s*~?\s*(-?\d+(?:\.\d+)?)")
 
 
 def _parse_pin(line: str) -> dict | None:
@@ -2098,19 +2103,20 @@ def _parse_pin(line: str) -> dict | None:
     ``origin`` token marks the user's location (rendered green); every other pin is the
     default (blue).  Any OTHER leading non-coord word (a legacy/hallucinated color like
     ``blue``/``green``) is stripped and the pin rendered as a default — a stray word never
-    drops a valid coordinate.  Semantics from the agent, color from here — never the agent."""
+    drops a valid coordinate.  The coordinate itself tolerates a leading ``~`` and a space
+    after the comma (the model may copy the message-context ``~<lat>, <lon>`` verbatim).
+    Semantics from the agent, color from here — never the agent."""
     line = line.strip()
     first, _, rest = line.partition(" ")
     is_origin = False
     if "," not in first:                 # a leading marker word (coords always have a comma)
         is_origin = first.lower() == "origin"
         line = rest.strip()              # consume it; a legacy color word -> default pin
-    coord, _, label = line.partition(" ")
-    lat_s, _, lon_s = coord.partition(",")
-    try:
-        lat, lon = float(lat_s), float(lon_s)
-    except ValueError:
+    m = _COORD_RE.match(line)
+    if m is None:
         return None
+    lat, lon = float(m.group(1)), float(m.group(2))
+    label = line[m.end():]
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
         return None
     color, fill = (_ORIGIN_COLOR, _ORIGIN_FILL) if is_origin else (_DEFAULT_COLOR, _DEFAULT_FILL)
