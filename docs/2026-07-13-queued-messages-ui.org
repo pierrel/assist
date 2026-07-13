@@ -1,0 +1,156 @@
+#+title: Surface all queued messages in the web UI
+#+date: <2026-07-13>
+#+author: design doc (for review)
+
+* Problem
+
+Send a second (or third) message to a thread that is already busy
+(=processing= / =queued= / =paused=) and the extra messages are accepted and
+will run, but the UI shows *at most one* pending bubble. The rest are invisible
+until each is individually picked up, so the user can't tell their message
+landed — they retype, or assume it was dropped. This is the bug behind
+"I sent two prompts in quick succession and only the last one is in the list."
+
+Goal: render every accepted-but-not-yet-processed message as a distinct
+*Queued* bubble, without breaking the single-message common case, pause/resume
+ordering, or event-loop liveness.
+
+Scope: the *display* gap only. Making the backlog survive a restart is a
+separate design (feature #2, durable queue). This ships independently on the
+current in-memory state.
+
+* Current behavior (verified, file:line)
+
+- =post_message= (=manage/web/threads.py:1729=): validates the tid, calls
+  =_mark_pending(tid, text)=, then routes — =paused= → =_RESUME_SCHEDULER.submit_message=
+  (:1742), else =background_tasks.add_task(_process_message, …)= (:1744) — and returns a 303.
+- =_mark_pending= (=threads.py:1377=): *no-op when the stage is already in
+  =BUSY_STAGES=* (:1411); otherwise writes a *single* =pending_message= into
+  =status.json= (:1418). =BUSY_STAGES = INIT_STAGES | {processing, queued, paused}=
+  (=state.py:345=). So a second message to a busy thread never updates status —
+  only the message that flipped idle→busy is ever recorded.
+- =render_thread= (=threads.py:444=): reads the one =pending_message= (:525),
+  appends one user bubble if busy and not already persisted (:530), renders
+  newest-at-top (:594). Only one pending bubble is structurally possible.
+- Two *invisible* queued paths, both in-memory, both holding tids (not text): a
+  processing thread's 2nd message parks as a FIFO =THREAD_QUEUE= waiter inside its
+  background task (=thread_queue.py:199=); a paused thread's messages go to
+  =_ResumeScheduler._q=, an in-memory =queue.Queue= (=threads.py:1653=).
+- *No polling.* The thread page renders once on the redirect-GET; even today's
+  single in-progress bubble only resolves to the persisted message on a manual
+  refresh.
+- *Latent clobber:* a follow-up's background task fires =cb("queued")= while it
+  waits (=thread_queue.py:197=) → =on_queue_wait= → =_set_status(tid,"queued",
+  pending_message=<its own text>)=, overwriting the actively-processing
+  message's pending. Which message the single bubble shows is racy. Fixed here.
+- *Event-loop constraint:* =_mark_pending= / =post_message= / =render_thread=
+  run on the asyncio loop. =peek_holder()= is the deliberately lock-free read
+  (=thread_queue.py:365=); =current_handle()= / =waiter_count()= take the queue
+  lock and are forbidden on the loop (the 2026-06-10 deadlock).
+
+* Proposed design
+
+Mirror the existing =_UNSEEN= pattern (=state.py:437=): a module-level,
+GIL-atomic, *lock-free, no-loop-I/O* structure written by background threads and
+read by the loop — the sanctioned shape for exactly this.
+
+** Data model
+=state.py=: =_QUEUED: dict[str, deque[str]]= — per-tid FIFO of accepted-but-not-yet-active
+message texts. Access only through four helpers (the seam for feature #2):
+=_enqueue_pending(tid,text)=, =_dequeue_pending(tid,text)= (idempotent), =_peek_queued(tid)=
+(snapshot copy), and a drop in =forget_thread= (=state.py:319=, mirroring =_UNSEEN.discard=).
+
+** Submit (on-loop)
+=_mark_pending=: replace the busy no-op =return= with =_enqueue_pending(tid, text)=.
+The idle/common single-message branch is untouched. No status.json write on the
+loop in the busy case — strictly cheaper and safer than today.
+
+** Render (on-loop)
+After the existing pending-bubble block, append each =_peek_queued(tid)= entry
+as a bubble (reusing the existing dedup against =pending_message= and persisted
+messages), tagged =queued=. The reversed render loop places them newest-first at
+the top, above the in-progress "…" placeholder. A =queued= bubble renders with a
+distinct *Queued* pill / muted styling — reads as "accepted and waiting", not
+"sent and answered". Dedup means an entry that just became active or completed
+self-hides even before it's removed from =_QUEUED=.
+
+** Transition queued → in-progress → real message
+- *Consume (off-loop):* in =_process_message=, right after =THREAD_QUEUE.acquire()=
+  returns (=threads.py:1037=) — the moment it stops waiting and holds the slot —
+  call =_dequeue_pending(tid, text)= (guarded =text is not None=; a resume carries
+  =text=None=). It then becomes the in-progress bubble as today. Idempotent removal
+  makes the error/pause exit paths safe.
+- *Suppress the clobber:* in =on_queue_wait=, skip the status write while the
+  message is still a queued follow-up (=stage=="queued" and text in _peek_queued(tid)=).
+  The primary (idle→busy) message is never in =_QUEUED=, so it still writes its
+  own pending as today.
+- *No new polling:* a queued bubble resolves on the next render (refresh/nav),
+  identical to how today's single in-progress bubble already resolves.
+
+* Key decisions / alternatives
+
+1. *In-memory =_QUEUED= vs a =queued_messages= array in status.json.* Chosen
+   in-memory: status.json is written by both the loop (submit) and background
+   threads (=_process_message=); a shared list would suffer lost updates
+   (=_atomic_write= prevents torn reads, not lost updates) and adds loop I/O. The
+   deque is GIL-atomic, lock-free, reuses the =_UNSEEN= precedent.
+2. *Reconstruct from the queue* (=THREAD_QUEUE= waiters / =_ResumeScheduler._q=).
+   Rejected: =waiter_count()= takes the lock (loop-forbidden); the queues hold
+   tids, not text, and exclude not-yet-parked tasks. Submit is the only place
+   with the text at the right time.
+3. *Fix the =on_queue_wait= clobber here* (two-line guard). It's a prerequisite
+   for the in-progress bubble to stay correct once multiple messages exist, and
+   removes a latent race.
+
+Trade-off accepted: remove-first-text-match can pick the "wrong" entry when two
+queued messages are byte-identical — cosmetic only (the bubbles are identical).
+
+* Seam with feature #2 (durable queue)
+
+=_QUEUED= mirrors exactly the ephemeral state feature #2 makes durable. Both are
+already lost on restart today, so =_QUEUED= has *identical* durability to the
+messages it represents — no new inconsistency. All access is behind the four
+helpers; when #2 lands a durable store, =_peek_queued= re-sources from it and
+=_QUEUED= retires, with no change to =render_thread= / =_mark_pending= /
+=on_queue_wait=. Independently shippable.
+
+* Risks / edge cases
+
+- Rapid submits / double-click → N distinct bubbles; append/remove are GIL-atomic.
+- Ordering: FIFO waiters + submit-order tasks → remove-first-match tracks processing order.
+- A message that errors before "processing": removal is *after acquire, before
+  sandbox start*, so no phantom bubble lingers.
+- Pause/resume ordering preserved by construction (follow-up still routes to the
+  resume scheduler; the resume, =text=None=, never touches =_QUEUED=).
+- Event-loop liveness: submit = append, render = list copy, guard = read;
+  =peek_holder= stays lock-free. No new lock, no new loop I/O.
+- Deleted threads: =forget_thread= drops =_QUEUED[tid]=.
+- Common single-message case: idle branch + single-bubble render untouched.
+
+* Test plan (assert the symptom)
+
+1. RENDER: busy + =pending_message="A"=, enqueue "B","C", GET the page → all
+   three appear, B/C carry the =Queued= marker, newest-at-top (C,B,A). Asserts
+   HTML, not a status field.
+2. Submit accumulates: =processing=, call =_mark_pending= twice → =_peek_queued=
+   is =[t1,t2]= and =pending_message= unchanged (replaces the old
+   =test_mark_pending_noop_when_thread_already_busy=, which pinned the drop).
+3. POST end-to-end: busy thread, POST a 2nd message (=_process_message= stubbed) →
+   redirect-GET HTML shows it as a Queued bubble.
+4. Transition: enqueue "B", run =_dequeue_pending= at acquire, set
+   =pending_message="B"= → B renders in-progress, not doubled.
+5. Event-loop liveness (don't mock the risk): hold =THREAD_QUEUE._cond= in another
+   thread; assert =_mark_pending= / =render_thread= return promptly; run web suite
+   with =PYTHONASYNCIODEBUG=1=.
+6. Clobber regression: =on_queue_wait("queued")= for a text in =_QUEUED= → pending unchanged.
+7. Cleanup: =forget_thread= drops the entry.
+
+* For Pierre to decide
+
+1. *Live transition vs refresh* — accept "queued bubbles resolve on next page
+   load" (matches today's no-poll UX, zero new machinery — recommended), or a
+   minimal poll/meta-refresh (a separable follow-up extending =/thread/{tid}/status=)?
+2. *Affordance* — a "Queued" pill / muted bubble; show queue position ("2nd in
+   line")? Recommend a label, no position number.
+3. *Cap* on bubbles shown (collapse ">N queued")? Probably unnecessary at your
+   volume; default to showing all.
