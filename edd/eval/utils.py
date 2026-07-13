@@ -179,6 +179,20 @@ class AgentTestMixin:
 
         self.assertIn(subagent_name, calls, msg)
 
+    def message_with_mocked_research(self, build_agent, msg,
+                                     findings="(stubbed research findings)"):
+        """Build the agent and send ``msg`` with the research subagent mocked — BOTH
+        inside the stub.  ``create_agent`` binds the subagent at CONSTRUCTION, so the
+        stub must wrap construction too (see ``stub_research_subagent``'s USAGE
+        CONSTRAINT); wrapping only ``.message()`` leaves the REAL subagent bound and the
+        turn hits (throttled) SearXNG.  ``build_agent`` is a zero-arg callable returning a
+        fresh ``AgentHarness``; the agent is returned so callers can assert on its
+        messages.  Use for eval prompts that trigger research but don't test search."""
+        with stub_research_subagent(findings):
+            agent = build_agent()
+            agent.message(msg)
+        return agent
+
 
 def assertToolCall(test_case, agent, tool_name: str, msg: str = None):
     """

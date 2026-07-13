@@ -300,19 +300,6 @@ def _build_openai_chat_model(
     kwargs = {
         "model": model,
         "temperature": temperature,
-        # Bound a single generation so a model that loops/narrates instead of emitting EOS
-        # can't stream to the 128k context limit — a ~20-min hang that holds the single LLM
-        # slot (the httpx read-timeout can't catch a continuously-emitting stream). 32768 is
-        # comfortably above the ~20k-token payloads the FilesystemMiddleware carries (its
-        # eviction thresholds are 20k tool-result / 50k human-message), so a realistic
-        # write_file / synthesis fits; it bounds a runaway to ~5 min instead of ~20.
-        # RESIDUAL (named, not recovered): a single generation larger than this truncates
-        # with finish_reason="length"; if that lands mid-tool-call the partial args are
-        # invalid JSON and the tool call is DROPPED — no middleware re-issues it, so an
-        # extreme (>32k-token) single write would be silently lost. Rare, but real. Do NOT
-        # lower below the eviction thresholds. The by-construction fix (a per-flow cap or a
-        # wall-clock generation deadline that bounds TIME not tokens) is a roadmap item.
-        "max_tokens": 32768,
         # max_retries=0 disables the OpenAI Python SDK's built-in
         # retry layer.  The single retry layer for transient errors
         # is ModelRetryMiddleware in assist/agent.py — keeping retries

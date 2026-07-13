@@ -23,7 +23,7 @@ from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
-from .utils import create_filesystem, stub_research_subagent
+from .utils import create_filesystem, AgentTestMixin
 
 _RENDER_SKILLS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "assist", "web_skills")
@@ -38,7 +38,7 @@ _ORIGIN_PIN = re.compile(r"^\s*pin:\s*origin\s+-?\d+\.\d+\s*,\s*-?\d+\.\d+", re.
 _PATH = re.compile(r"^\s*path:\s*\S+\s+\S", re.M)
 
 
-class TestMapAgent(TestCase):
+class TestMapAgent(AgentTestMixin, TestCase):
     def setUp(self):
         self.model = select_assistant_model(0.1)
 
@@ -50,13 +50,6 @@ class TestMapAgent(TestCase):
         # map_data is a real general-agent built-in now (no tools= wiring here).
         return AgentHarness(create_agent(self.model, root,
                                          spec=AgentSpec(skill_sources=skills)))
-
-    def _ask(self, agent, msg):
-        # Mock the research subagent (policy): these prompts name the places, so no real
-        # search is needed — and real SearXNG throttles/derails the turn (was the cause of
-        # spurious map-eval failures). We test map EMISSION, not search.
-        with stub_research_subagent():
-            agent.message(msg)
 
     def _map_blocks(self, agent) -> list:
         from langchain_core.messages import AIMessage
@@ -81,8 +74,8 @@ class TestMapAgent(TestCase):
     def test_emits_map_block_for_places(self):
         """The core gate: 'show me these places on a map' → the model calls
         map_data then emits a well-formed type:map block with pin: lines."""
-        agent = self._agent()
-        self._ask(agent, "Show me these coffee shops on a map: Four Barrel, Ritual "
+        agent = self.message_with_mocked_research(self._agent,
+                      "Show me these coffee shops on a map: Four Barrel, Ritual "
                       "Coffee, and Haus Coffee — all on or near Valencia Street in "
                       "San Francisco.")
         self._assert_wellformed(self._map_blocks(agent))
@@ -90,15 +83,15 @@ class TestMapAgent(TestCase):
     def test_emits_map_with_route(self):
         """Pins + a path: 'how far to walk, map it' → a pin per place AND a path
         line for the route."""
-        agent = self._agent()
-        self._ask(agent, "How far is it to walk from Fellow Barber on Valencia Street "
+        agent = self.message_with_mocked_research(self._agent,
+                      "How far is it to walk from Fellow Barber on Valencia Street "
                       "to Haus Coffee in San Francisco? Show it on a map.")
         self._assert_wellformed(self._map_blocks(agent), need_path=True)
 
     def test_emits_map_alternate_wording(self):
         """Generality — wording the skill doesn't telegraph ('plot', no 'map')."""
-        agent = self._agent()
-        self._ask(agent, "Plot Dolores Park and the Ferry Building in San Francisco "
+        agent = self.message_with_mocked_research(self._agent,
+                      "Plot Dolores Park and the Ferry Building in San Francisco "
                       "so I can see where they are relative to each other.")
         self._assert_wellformed(self._map_blocks(agent))
 
@@ -107,13 +100,12 @@ class TestMapAgent(TestCase):
         the model still renders a map — and marks the user's current location with the
         `origin` prefix (the renderer colors it green). Places are named so no research
         runs; the model doesn't pick colors, only marks the origin."""
-        agent = self._agent()
-        self._ask(agent,
+        agent = self.message_with_mocked_research(self._agent,
             "[Message context: sent from ~37.7749, -122.4194] "
-            "Recommend a couple of these for a laptop session and map them: Four Barrel "
-            "Coffee, Ritual Coffee, and Haus Coffee — all near Valencia Street, SF.")
+            "Which of these is best for a laptop session for a couple hours: Four Barrel "
+            "Coffee, Ritual Coffee, or Haus Coffee? They're all near Valencia Street, SF.")
         blocks = self._map_blocks(agent)
-        self._assert_wellformed(blocks)     # a map appeared without being asked to "map it"
+        self._assert_wellformed(blocks)     # a map appeared though the user never said "map it"
         self.assertTrue(
             any(_ORIGIN_PIN.search(b) for b in blocks),
             f"expected an `origin`-marked pin for the user's location; blocks: {blocks}")
