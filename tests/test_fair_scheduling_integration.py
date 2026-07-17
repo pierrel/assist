@@ -51,6 +51,10 @@ def wired(tmp_path, monkeypatch):
 
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(web.MANAGER, "thread_dir", lambda t: str(tmp_path / t))
+    # The follow-up journal lives under the thread root — repoint it with MANAGER
+    # (post_message journals a message to a busy thread before dispatching it).
+    from manage.web.state import MESSAGE_BACKLOG
+    monkeypatch.setattr(MESSAGE_BACKLOG, "_root", str(tmp_path))
     monkeypatch.setattr(web.MANAGER, "thread_default_working_dir",
                         lambda t: str(tmp_path / t))
     monkeypatch.setattr(web.MANAGER, "touch", lambda t: None)
@@ -104,8 +108,10 @@ def test_new_message_while_paused_routes_through_scheduler(wired, monkeypatch):
     _set_status(tid, "paused", pending_message="hello")
 
     submitted = []
-    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
-                        lambda t, text, rider, sender: submitted.append((t, text)))
+    monkeypatch.setattr(
+        threads._RESUME_SCHEDULER, "submit_message",
+        lambda t, text, rider, sender, backlog_id=None:
+            submitted.append((t, text, backlog_id)))
     spawned = []
     monkeypatch.setattr(threads.BackgroundTasks, "add_task",
                         lambda self, fn, *a, **k: spawned.append(fn))
@@ -115,6 +121,11 @@ def test_new_message_while_paused_routes_through_scheduler(wired, monkeypatch):
                              follow_redirects=False)
 
     # The new message was routed to the serial scheduler (runs AFTER the resume),
-    # NOT spawned as a competing BackgroundTask onto a mid-flight checkpoint.
-    assert submitted == [(tid, "follow-up")]
+    # NOT spawned as a competing BackgroundTask onto a mid-flight checkpoint —
+    # and it was journaled first (durable follow-up), with its entry id carried
+    # so the turn claims it when it starts.
+    from manage.web.state import MESSAGE_BACKLOG
+    recs = MESSAGE_BACKLOG.for_thread(tid)
+    assert [r.text for r in recs] == ["follow-up"]
+    assert submitted == [(tid, "follow-up", recs[0].id)]
     assert threads._process_message not in spawned

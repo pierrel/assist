@@ -33,6 +33,7 @@ from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.notify import notify_tools
 from assist.events.inbound import InboundLog
+from assist.backlog import MessageBacklog
 from assist.geo.catalog import Catalog
 from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
@@ -106,6 +107,10 @@ SCHEDULE_STORE = ScheduleStore(ROOT)
 SUBSCRIPTION_STORE = SubscriptionStore(ROOT)
 # Durable inbound-message log (records before the 200; dedup by content-hash message_id).
 INBOUND_LOG = InboundLog(ROOT)
+# Durable follow-up journal: a message accepted while its thread is busy is journaled
+# here at submit and claimed (removed by id) when its turn starts, so a restart can't
+# silently drop it — startup recovery re-dispatches whatever is still journaled.
+MESSAGE_BACKLOG = MessageBacklog(ROOT)
 # Normal turns get the config tools (schedule + subscription). A TRIAGE turn (untrusted
 # inbound SMS) gets ONLY send_reply, HITL-gated — never the host-effect config tools — so an
 # injected text can't plant/delete a subscription or schedule (MANAGER.get(triage=True)).
@@ -589,18 +594,31 @@ async def lifespan(app: FastAPI):
     # Ensure thread root exists at startup
     os.makedirs(ROOT, exist_ok=True)
 
-    # Recover any threads left mid-init by a previous server crash.
-    # Their background task is no longer running, so mark them errored
-    # so the user gets feedback instead of a forever-spinning page.
+    # Recover threads a previous server run left busy, instead of erroring them:
+    # every turn's work is durable (the checkpoint at each superstep, the message
+    # in status.json / the backlog journal), so the serial worker can resume or
+    # re-dispatch it. Here on the loop we do only cheap file ops — rewrite the
+    # stage and enqueue a recover job; the checkpoint read + resume-vs-redispatch
+    # decision runs on the worker thread (see _recover_thread in threads.py).
+    #
+    # The stage-rewrite to "paused" is load-bearing, not cosmetic: post_message
+    # routes a new live message through the serial worker ONLY when the stage is
+    # "paused" — without the rewrite, a message sent right after restart to a
+    # still-"processing" thread would park as a THREAD_QUEUE waiter and could run
+    # BEFORE the recovery resume, on the killed turn's mid-flight checkpoint.
+    # Enqueuing pre-yield (the worker queue accepts puts before its thread
+    # starts) guarantees no live submit can outrun a recovery job.
+    from manage.web.threads import start_scheduler, stop_scheduler, submit_recovery
     for tid in MANAGER.list():
         status = _get_status(tid)
         if status.get("stage") in BUSY_STAGES:
-            _set_status(
-                tid,
-                "error",
-                error="Server restarted while this thread was being set up.",
-                pending_message=status.get("pending_message", ""),
-            )
+            _set_status(tid, "paused",
+                        **{k: v for k, v in status.items() if k != "stage"})
+            submit_recovery(tid)
+        elif MESSAGE_BACKLOG.for_thread(tid):
+            # Not busy, but journaled follow-ups survive (e.g. a crash after the
+            # head turn finished but before its follow-ups started).
+            submit_recovery(tid)
 
     # Populate description cache at startup
     for tid in MANAGER.list():
@@ -609,8 +627,7 @@ async def lifespan(app: FastAPI):
     # scheduled/SMS response's badge survives a restart.
     load_unseen_cache()
     load_urgent_cache()
-    # Start the schedule poll loop (local import breaks the state<->threads cycle).
-    from manage.web.threads import start_scheduler, stop_scheduler
+    # Start the schedule poll loop + the serial worker that drains recovery jobs.
     start_scheduler()
     try:
         yield

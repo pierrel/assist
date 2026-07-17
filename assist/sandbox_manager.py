@@ -404,3 +404,29 @@ class SandboxManager:
             except Exception as e:
                 logger.warning("Container cleanup failed for %s: %s", path, e)
         cls._containers.clear()
+
+    @classmethod
+    def reap_orphans(cls) -> None:
+        """Kill every ``assist.sandbox`` container by DOCKER LABEL, not the
+        in-memory registry. After a web-process crash ``_containers`` is empty,
+        but the containers survive — and a ``docker exec``'d tool command keeps
+        running inside one, mutating the host-bind-mounted /workspace that a
+        recovery resume's FRESH container mounts too, for up to the 3h backstop
+        TTL. Startup recovery calls this before dispatching any resume so a
+        zombie writer can never share a workspace with a resumed turn.
+        Best-effort: docker being down must not block recovery (turns will fail
+        fail-fast on their own if docker stays down)."""
+        try:
+            client = cls._get_docker_client()
+            orphans = client.containers.list(
+                filters={"label": "assist.sandbox=true"})
+        except Exception as e:
+            logger.warning("orphan-sandbox reap skipped (docker unavailable): %s", e)
+            return
+        for container in orphans:
+            try:
+                container.kill()
+                logger.info("Reaped orphaned sandbox %s", container.id[:12])
+            except Exception as e:
+                logger.warning("orphan reap failed for %s: %s", container.id[:12], e)
+        cls._containers.clear()

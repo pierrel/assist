@@ -122,6 +122,18 @@ def invoke_with_rollback(
                 original_history = list(
                     agent.get_state_history(current_config)
                 )
+                # Bound the walk to the CURRENT turn: get_state_history spans the
+                # whole thread, and rolling past this turn's input checkpoint
+                # lands on the PREVIOUS turn's terminal state — invoking
+                # input=None there returns immediately with the old answer, so
+                # the failing turn would silently "succeed" stale. This bites
+                # hardest on a crash-recovery resume, whose depth-0 point is
+                # often early in the turn. Truncate at (and include) the first
+                # checkpoint carrying this turn's input.
+                for i, snap in enumerate(original_history):
+                    if (snap.metadata or {}).get("source") == "input":
+                        original_history = original_history[: i + 1]
+                        break
                 logger.warning(
                     "Rollback[%s]: %s on first attempt, "
                     "%d checkpoints available (max_depth=%d, retries_per_step=%d)",

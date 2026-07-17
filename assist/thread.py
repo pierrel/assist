@@ -231,9 +231,12 @@ class Thread:
 
     def resume(self) -> str:
         """Resume this thread's in-flight turn from its durable checkpoint (``input=None``)
-        after a fair-scheduling quantum pause. Completed supersteps (incl. any mid-flight
-        sub-agent) are in the checkpoint under ``durability="sync"``, so no work is redone —
-        see ``docs/2026-07-08-fair-scheduling.org`` + ``tests/test_subagent_durable_resume.py``."""
+        — after a fair-scheduling quantum pause, or after a server restart killed the turn
+        mid-flight (startup recovery; docs/2026-07-13-durable-message-queue.org). Completed
+        supersteps (incl. any mid-flight sub-agent) are in the checkpoint under
+        ``durability="sync"``, so no completed work is redone; only the superstep in flight
+        at an uncooperative kill re-runs — see ``docs/2026-07-08-fair-scheduling.org`` +
+        ``tests/test_subagent_durable_resume.py`` + ``tests/test_restart_recovery.py``."""
         return self._run(None)
 
     def pending_reply(self) -> dict | None:

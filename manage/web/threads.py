@@ -41,6 +41,11 @@ from assist.domain_manager import (
     OriginAdvancedError,
 )
 from langgraph.errors import GraphRecursionError
+import anyio
+import anyio.to_thread
+from langchain_core.messages import HumanMessage
+
+from assist.backlog import PendingMessage
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.events.reply import SMS_SENDER_KEY
 from assist.schedule.scheduler import Scheduler
@@ -70,6 +75,7 @@ from manage.web.state import (
     INIT_STAGES,
     MANAGER,
     MERGE_LOCK,
+    MESSAGE_BACKLOG,
     SCHEDULE_STORE,
     SUBSCRIPTION_STORE,
     _mark_urgent,
@@ -981,7 +987,8 @@ _SUPERSEDE_RIDER = (
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None,
                      resume: bool = False, accumulated_active_ms: float = 0.0,
-                     pending_text: str | None = None) -> None:
+                     pending_text: str | None = None,
+                     backlog_id: str | None = None) -> None:
     # `sender` (set only for an inbound-message triage turn) rides the run config as
     # ``sms_sender`` so send_reply knows who to reply to; a normal turn passes None.
     # `resume_decision` (set only when approving/rejecting a pending send_reply) resumes the
@@ -994,8 +1001,23 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # placeholder bubble while processing (cleared once status==ready). On a resume
     # (text=None) the original message is carried via `pending_text` so the bubble
     # survives the pause window instead of vanishing until the turn completes.
+    # `backlog_id` (set only for a journaled follow-up) names this turn's entry in the
+    # durable MESSAGE_BACKLOG; it is claimed (removed) after the first busy status write
+    # inside the queue acquire — see the claim below.
     _pending_msg = text if text else pending_text
     pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
+    # Persist the turn's sender + rider in EVERY busy status write, so a restart can
+    # recover this turn faithfully whatever stage it dies at: a triage (inbound-SMS)
+    # turn resumed without its sender would rebuild as a FULL-privilege non-triage
+    # agent with no reply target — the sender is what keeps the reduced tool surface
+    # + HITL gate on recovery. The rider's raw fields let recovery rebuild it via
+    # _build_rider.
+    if sender:
+        pending_kwargs["sender"] = sender
+    if rider is not None:
+        pending_kwargs["rider"] = {
+            "sent_at": rider.sent_at.isoformat() if rider.sent_at else None,
+            "tz": rider.tz, "lat": rider.lat, "lon": rider.lon}
     # Turn-start origin for the elapsed badge + live WIP timer: reuse the started_at already
     # in status (a queued/paused/resumed turn keeps the original submit time, so elapsed
     # spans the queue wait + any pause) or stamp now for turns with no upstream setter
@@ -1016,7 +1038,13 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # flow below sets the more specific "starting_sandbox" →
         # "processing" statuses itself, so the "running" callback is
         # intentionally ignored.
-        if stage == "queued":
+        #
+        # A journaled follow-up (backlog_id set) writes NOTHING while it waits:
+        # the same-tid turn it waits behind owns status.json (its text/sender/
+        # rider must stay durable there for crash recovery), and the follow-up
+        # itself is durable in MESSAGE_BACKLOG. Writing here would clobber the
+        # running turn's recovery info with the waiter's.
+        if stage == "queued" and backlog_id is None:
             _set_status(tid, "queued", **pending_kwargs)
 
     try:
@@ -1035,7 +1063,17 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # double-callback.
         with THREAD_QUEUE.acquire(tid, on_state_change=on_queue_wait,
                                   accumulated_active_ms=accumulated_active_ms):
-            _set_status(tid, "starting_sandbox", **pending_kwargs)
+            if backlog_id:
+                # This journaled follow-up now OWNS the slot: take over status.json
+                # (its text/sender/rider + the claimed entry id), THEN pop the journal
+                # entry — status-first, so the message is durable in at least one store
+                # at every instant. A crash between the two leaves it in both; recovery
+                # dedupes by claimed_id. claim() is idempotent.
+                _set_status(tid, "starting_sandbox", claimed_id=backlog_id,
+                            **pending_kwargs)
+                MESSAGE_BACKLOG.claim(tid, backlog_id)
+            else:
+                _set_status(tid, "starting_sandbox", **pending_kwargs)
             try:
                 # Inside the try so the `finally` reaps even if sandbox
                 # creation registers a container and then raises — cleanup
@@ -1163,7 +1201,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
         _RESUME_SCHEDULER.submit_resume(
             tid, rider, sender, carry, pending_kwargs.get("pending_message"))
-        _set_status(tid, "paused", **pending_kwargs)
+        # accumulated_active_ms rides the status write so a restart-recovered resume
+        # keeps its 2h-cap accounting (the in-memory submit_resume above is lost with
+        # the process; sender/rider are already in pending_kwargs). A crash of a
+        # PROCESSING turn has no carry to persist — its resumed slice restarts the
+        # cap at 0, accepted (the cap is a runaway backstop, not billing).
+        _set_status(tid, "paused", accumulated_active_ms=carry, **pending_kwargs)
         return
     except SandboxContainerLostError as e:
         # Distinct status message: a dead container is recoverable —
@@ -1400,7 +1443,8 @@ def _mark_pending(tid: str, text: str) -> None:
     message.
 
     No-op when this thread is already busy, so a second message to a mid-turn
-    thread doesn't clobber the in-flight turn's status.
+    thread doesn't clobber the in-flight turn's status — that follow-up is made
+    durable by the caller instead (post_message journals it in MESSAGE_BACKLOG).
 
     Runs on the asyncio event-loop thread, so it must never block: it uses
     ``THREAD_QUEUE.peek_holder()`` (a lock-free read), NOT ``current_handle()``
@@ -1483,7 +1527,17 @@ def _dispatch_event(sender: str, text: str) -> None:
     if sub is None:
         logging.info("inbound message from %s matched no subscription; recorded only", sender)
         return
-    _process_message(sub.thread_id, sub.render(sender, text), sender=sender)
+    rendered = sub.render(sender, text)
+    if _get_status(sub.thread_id).get("stage") in BUSY_STAGES:
+        # A follow-up to a busy thread — journal it (runs off-loop here, so a
+        # direct add) so a restart can't drop it; the turn claims the entry when
+        # it starts, exactly like a web follow-up.
+        rec = MESSAGE_BACKLOG.add(PendingMessage(
+            thread_id=sub.thread_id, text=rendered, sender=sender,
+            enqueued_at=datetime.now(timezone.utc).isoformat()))
+        _process_message(sub.thread_id, rendered, sender=sender, backlog_id=rec.id)
+    else:
+        _process_message(sub.thread_id, rendered, sender=sender)
 
 
 def _sms_secret_state(provided: str | None):
@@ -1637,8 +1691,125 @@ _PROVISIONER = (
     if GEO_REGISTRY is not None else None)
 
 
+def _recovery_prep(q: "queue.Queue") -> None:
+    """One-time worker-thread prep before draining recovery jobs (no-op cost when
+    none are queued). (a) Reap orphaned sandbox containers BY LABEL: a killed web
+    process reaps nothing, and a ``docker exec``'d tool command keeps mutating the
+    host-bind-mounted /workspace for up to the 3h TTL — a resumed turn's fresh
+    container must never share a workspace with a zombie writer. (b) Wait
+    (bounded) for the model endpoint: on a cold boot llamacpp loads for minutes
+    after assist-web is up, and erroring every recovered thread against a
+    still-loading model would defeat recovery."""
+    if q.empty():
+        return
+    SandboxManager.reap_orphans()
+    base = os.getenv("ASSIST_MODEL_URL")
+    if not base:
+        return
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            requests.get(f"{base.rstrip('/')}/models", timeout=3)
+            return
+        except requests.RequestException:
+            time.sleep(10)
+    logging.warning("recovery: model endpoint still unreachable after bounded wait; "
+                    "proceeding (recovered turns fail fast if it stays down)")
+
+
+def _rider_from_fields(fields: dict | None) -> ContextRider | None:
+    """Rebuild a turn's ContextRider from the raw fields persisted in status.json /
+    a journal entry (the same four the submit form carries)."""
+    if not fields:
+        return None
+    return _build_rider(fields.get("sent_at"), fields.get("tz"),
+                        fields.get("lat"), fields.get("lon"))
+
+
+def _recovery_decision(tid: str, pending_message: str) -> str:
+    """Resume-vs-redispatch for one recovered thread, decided by GRAPH STATE (not
+    text equality — a re-sent duplicate text or the supersede prefix would fool a
+    text compare in both directions):
+    - ``snap.next`` or ``snap.interrupts`` non-empty → the turn is mid-flight in
+      the checkpoint → "resume" (input=None re-runs only the unpersisted work).
+    - otherwise, if the latest checkpointed human message contains
+      ``pending_message`` → the turn COMPLETED before the kill (the crash landed
+      in post-invoke bookkeeping) → "finalize" (containment, not equality: the
+      supersede fold prefixes the checkpointed copy).
+    - otherwise the message never reached the checkpoint → "redispatch" it fresh.
+    Built without a sandbox and without any model call (lazy graph build — the
+    same shape as the pending_reply read)."""
+    try:
+        chat = MANAGER.get(tid, sandbox_backend=None)
+        snap = chat.agent.get_state(chat.runconfig)
+    except Exception:
+        logging.error("recovery: state read failed for %s", tid, exc_info=True)
+        return "error"
+    if (getattr(snap, "next", None) or ()) or (getattr(snap, "interrupts", None) or ()):
+        return "resume"
+    latest_human = ""
+    for m in reversed((snap.values or {}).get("messages", [])):
+        if isinstance(m, HumanMessage):
+            latest_human = m.content if isinstance(m.content, str) else str(m.content)
+            break
+    if pending_message and pending_message in latest_human:
+        return "finalize"
+    return "redispatch"
+
+
+def _recover_thread(tid: str) -> None:
+    """Serial-worker recovery of one thread after a restart. Order: dedupe the
+    claimed journal entry (if the crash landed between the status-claim write and
+    the pop, the entry is in both stores — status owns it), decide by graph
+    state, run the head turn (resume / finalize / re-dispatch), then dispatch the
+    thread's remaining journaled follow-ups in submit order."""
+    status = _get_status(tid)
+    pending = status.get("pending_message") or ""
+    sender = status.get("sender") or None
+    rider = _rider_from_fields(status.get("rider"))
+    claimed = status.get("claimed_id")
+    if claimed:
+        MESSAGE_BACKLOG.claim(tid, claimed)
+
+    decision = _recovery_decision(tid, pending)
+    logging.info("recovery: %s -> %s", tid, decision)
+    if decision == "resume":
+        _process_message(
+            tid, None, rider=rider, sender=sender, resume=True,
+            accumulated_active_ms=float(status.get("accumulated_active_ms") or 0.0),
+            pending_text=pending or None)
+    elif decision == "finalize":
+        _set_status(tid, "ready")
+    elif decision == "redispatch" and pending:
+        # Skip when a journal entry carries this same text — the on_queue_wait skip
+        # keeps status owned by the running turn, but a legacy/edge write could
+        # leave a follow-up's text here while its entry is still journaled; the
+        # journal dispatch below delivers it exactly once.
+        if any(r.text == pending for r in MESSAGE_BACKLOG.for_thread(tid)):
+            _set_status(tid, "ready")
+        else:
+            _process_message(tid, pending, rider=rider, sender=sender)
+    else:
+        _set_status(tid, "error",
+                    error=("Server restarted and this thread's turn could not be "
+                           "recovered. Send the message again."),
+                    pending_message=pending)
+
+    for rec in MESSAGE_BACKLOG.for_thread(tid):
+        _process_message(tid, rec.text, rider=_rider_from_fields(rec.rider),
+                         sender=rec.sender, backlog_id=rec.id)
+
+
+def submit_recovery(tid: str) -> None:
+    """Lifespan entry point: enqueue a thread's post-restart recovery on the serial
+    worker (a cheap queue.put — safe on the event loop, and accepted before the
+    worker thread starts)."""
+    _RESUME_SCHEDULER.submit_recover(tid)
+
+
 class _ResumeScheduler:
-    """One dedicated thread that dispatches fair-scheduling resumes SERIALLY.
+    """One dedicated thread that dispatches fair-scheduling resumes — and, at
+    startup, post-restart RECOVERY jobs — SERIALLY.
 
     A paused turn resumes by re-running ``_process_message(..., resume=True)``, which
     re-acquires the LLM slot and parks in the queue's ``cond.wait`` until its turn comes
@@ -1648,7 +1819,11 @@ class _ResumeScheduler:
     starve the pool and stall request handling (a 2026-06-10-class outage). This thread
     owns the parking instead, consuming ZERO pool tokens. Serial is correct: the LLM slot
     is ``--parallel 1``, so only one resume can run at a time anyway. A resume that pauses
-    again simply re-submits itself here (round-robin, back of the queue)."""
+    again simply re-submits itself here (round-robin, back of the queue).
+
+    Recovery jobs (``submit_recover``, enqueued by the lifespan BEFORE serving
+    starts) ride the same queue, so a live submit can never outrun a thread's
+    recovery — see ``_recover_thread`` and docs/2026-07-13-durable-message-queue.org."""
 
     def __init__(self) -> None:
         self._q: "queue.Queue[dict]" = queue.Queue()
@@ -1664,23 +1839,41 @@ class _ResumeScheduler:
     def submit_resume(self, tid: str, rider, sender, accumulated_active_ms: float,
                       pending_text: str | None) -> None:
         """Continue a paused turn from its checkpoint (input=None)."""
-        self._q.put({"tid": tid, "text": None, "rider": rider, "sender": sender,
-                     "resume": True, "acc": accumulated_active_ms, "pending": pending_text})
+        self._q.put({"kind": "turn", "tid": tid, "text": None, "rider": rider,
+                     "sender": sender, "resume": True, "acc": accumulated_active_ms,
+                     "pending": pending_text, "backlog_id": None})
 
-    def submit_message(self, tid: str, text: str, rider, sender) -> None:
+    def submit_message(self, tid: str, text: str, rider, sender,
+                       backlog_id: str | None = None) -> None:
         """Run a NEW message for a tid that has an in-flight (paused) turn — routed here
         so it runs AFTER the resume on this serial thread, never on the paused turn's
-        mid-flight checkpoint (fix-by-construction ordering; no priority needed)."""
-        self._q.put({"tid": tid, "text": text, "rider": rider, "sender": sender,
-                     "resume": False, "acc": 0.0, "pending": None})
+        mid-flight checkpoint (fix-by-construction ordering; no priority needed).
+        ``backlog_id`` names the message's durable journal entry (claimed when the
+        turn starts)."""
+        self._q.put({"kind": "turn", "tid": tid, "text": text, "rider": rider,
+                     "sender": sender, "resume": False, "acc": 0.0, "pending": None,
+                     "backlog_id": backlog_id})
+
+    def submit_recover(self, tid: str) -> None:
+        """Recover one thread after a restart: decide resume-vs-redispatch from the
+        durable checkpoint state, run it, then drain the thread's journaled
+        follow-ups — all serially on this worker (the lifespan enqueues these
+        BEFORE serving starts, so no live submit can outrun them)."""
+        self._q.put({"kind": "recover", "tid": tid})
 
     def _loop(self) -> None:
+        _recovery_prep(self._q)
         while True:
             it = self._q.get()
             try:
-                _process_message(it["tid"], it["text"], rider=it["rider"],
-                                 sender=it["sender"], resume=it["resume"],
-                                 accumulated_active_ms=it["acc"], pending_text=it["pending"])
+                if it.get("kind") == "recover":
+                    _recover_thread(it["tid"])
+                else:
+                    _process_message(it["tid"], it["text"], rider=it["rider"],
+                                     sender=it["sender"], resume=it["resume"],
+                                     accumulated_active_ms=it["acc"],
+                                     pending_text=it["pending"],
+                                     backlog_id=it.get("backlog_id"))
             except Exception:
                 logging.error("fair-scheduling dispatch failed for %s", it["tid"],
                               exc_info=True)
@@ -1726,20 +1919,54 @@ def stop_scheduler() -> None:
     _SCHEDULER.stop()
 
 
+# Private capacity for the backlog append — NOT the shared threadpool: every follow-up
+# to a processing thread parks a shared-pool worker in cond.wait (up to wait_timeout),
+# so under exactly the backlog-heavy load this journal exists for, a run_in_threadpool
+# append could starve behind the parkers and the POST would hang pre-303 with the
+# message not yet durable. A dedicated limiter is immune to that. Created lazily —
+# anyio primitives must be constructed inside a running loop.
+_backlog_limiter: anyio.CapacityLimiter | None = None
+
+
+def _get_backlog_limiter() -> anyio.CapacityLimiter:
+    global _backlog_limiter
+    if _backlog_limiter is None:
+        _backlog_limiter = anyio.CapacityLimiter(4)
+    return _backlog_limiter
+
+
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks,
                        text: str = Form(...),
                        sent_at: str | None = Form(None), tz: str | None = Form(None),
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
+    # Read the stage BEFORE _mark_pending: for an idle thread _mark_pending flips it
+    # busy (that first message is durable via status.pending_message); a message to an
+    # ALREADY-busy thread is a follow-up, journaled below so a restart can't drop it.
+    prior_stage = _get_status(tid).get("stage")
     _mark_pending(tid, text)
     rider = _build_rider(sent_at, tz, lat, lon)
-    if _get_status(tid).get("stage") == "paused":
-        # A turn is paused mid-flight (its resume is already queued on the scheduler).
-        # Route this new message through the SAME serial scheduler so it runs AFTER the
-        # resume — never on the paused turn's mid-flight checkpoint. This only sets the
-        # flag off-loop-safely (a plain queue.put); the loop stays lock-free.
-        _RESUME_SCHEDULER.submit_message(tid, text, rider, None)
+    if prior_stage in BUSY_STAGES:
+        rec = PendingMessage(
+            thread_id=tid, text=text,
+            rider=({"sent_at": sent_at, "tz": tz, "lat": lat, "lon": lon}
+                   if (sent_at or tz or lat or lon) else None),
+            enqueued_at=datetime.now(timezone.utc).isoformat())
+        # Durable BEFORE the 303 — off-loop (file write + store lock never on the
+        # event loop), on the private limiter (see above).
+        await anyio.to_thread.run_sync(MESSAGE_BACKLOG.add, rec,
+                                       limiter=_get_backlog_limiter())
+        if prior_stage == "paused":
+            # A turn is paused mid-flight (its resume is already queued on the
+            # scheduler). Route this new message through the SAME serial scheduler so
+            # it runs AFTER the resume — never on the paused turn's mid-flight
+            # checkpoint. This only sets the flag off-loop-safely (a plain queue.put);
+            # the loop stays lock-free.
+            _RESUME_SCHEDULER.submit_message(tid, text, rider, None, rec.id)
+        else:
+            background_tasks.add_task(_process_message, tid, text, rider,
+                                      backlog_id=rec.id)
     else:
         background_tasks.add_task(_process_message, tid, text, rider)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
