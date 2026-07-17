@@ -1557,8 +1557,8 @@ def _dispatch_event(sender: str, text: str) -> None:
         logging.info("inbound message from %s matched no subscription; recorded only", sender)
         return
     rendered = sub.render(sender, text)
-    if (_get_status(sub.thread_id).get("stage") in BUSY_STAGES
-            or THREAD_QUEUE.peek_holder() == sub.thread_id):
+    stage = _get_status(sub.thread_id).get("stage")
+    if stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == sub.thread_id:
         # A follow-up to a busy thread (busy status, or holding the slot with no
         # busy status written yet) — journal it (runs off-loop here, so a direct
         # add) so a restart can't drop it; the turn claims the entry when it
@@ -1566,7 +1566,16 @@ def _dispatch_event(sender: str, text: str) -> None:
         rec = MESSAGE_BACKLOG.add(PendingMessage(
             thread_id=sub.thread_id, text=rendered, sender=sender,
             enqueued_at=datetime.now(timezone.utc).isoformat()))
-        _process_message(sub.thread_id, rendered, sender=sender, backlog_id=rec.id)
+        if stage == "paused":
+            # A paused thread has RELEASED the slot — dispatching directly would
+            # acquire immediately and run on the mid-flight checkpoint. Route
+            # through the serial worker, behind the queued resume/recovery
+            # (same as post_message).
+            _RESUME_SCHEDULER.submit_message(sub.thread_id, rendered, None,
+                                             sender, rec.id)
+        else:
+            _process_message(sub.thread_id, rendered, sender=sender,
+                             backlog_id=rec.id)
     else:
         _process_message(sub.thread_id, rendered, sender=sender)
 

@@ -406,8 +406,8 @@ async def post_review(tid: str, background_tasks: BackgroundTasks, payload: str 
     # submitted to a BUSY thread is a follow-up — journal it durably (off-loop,
     # private limiter) and skip the status write (the running turn owns
     # status.json); the turn claims the entry when it starts.
-    busy = (_get_status(tid).get("stage") in BUSY_STAGES
-            or THREAD_QUEUE.peek_holder() == tid)
+    prior_stage = _get_status(tid).get("stage")
+    busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
     _threads._mark_pending(tid, message, busy)
     backlog_id = None
     if busy:
@@ -417,6 +417,14 @@ async def post_review(tid: str, background_tasks: BackgroundTasks, payload: str 
                            enqueued_at=datetime.now(timezone.utc).isoformat()),
             limiter=_threads._get_backlog_limiter())
         backlog_id = rec.id
-    background_tasks.add_task(_threads._process_message, tid, message,
-                              backlog_id=backlog_id)
+    if prior_stage == "paused":
+        # A paused thread has RELEASED the slot, so a BackgroundTask waiter would
+        # acquire immediately and run on the mid-flight checkpoint. Route through
+        # the serial worker so it runs AFTER the queued resume/recovery — same as
+        # post_message.
+        _threads._RESUME_SCHEDULER.submit_message(tid, message, None, None,
+                                                  backlog_id)
+    else:
+        background_tasks.add_task(_threads._process_message, tid, message,
+                                  backlog_id=backlog_id)
     return RedirectResponse(url=f"/thread/{tid}?reviewed=1", status_code=303)

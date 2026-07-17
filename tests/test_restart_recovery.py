@@ -430,6 +430,57 @@ def test_corrupt_backlog_is_loud_not_silent(tmp_path, caplog):
     assert [r.text for r in store.for_thread("t1")] == ["after"]
 
 
+def test_sms_follow_up_to_paused_thread_routes_through_worker(wired, monkeypatch):
+    """An inbound-SMS follow-up to a PAUSED thread must go to the serial worker
+    (behind the queued resume), never dispatch directly — a paused thread has
+    released the slot, so a direct dispatch would acquire immediately and run on
+    the mid-flight checkpoint (Copilot #197 rd1)."""
+    tid, _ = wired
+    _set_status(tid, "paused", pending_message="mid-flight")
+    sub = SimpleNamespace(thread_id=tid, render=lambda s, t: f"[{s}] {t}")
+    monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda s: sub)
+    ran, submitted = [], []
+    monkeypatch.setattr(threads, "_process_message",
+                        lambda *a, **k: ran.append(a))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
+                        lambda t, text, rider, sender, backlog_id=None:
+                            submitted.append((t, text, sender, backlog_id)))
+
+    threads._dispatch_event("+15550001111", "hey")
+
+    assert ran == []                                  # no direct dispatch
+    recs = MESSAGE_BACKLOG.for_thread(tid)
+    assert len(recs) == 1 and recs[0].sender == "+15550001111"
+    assert submitted == [(tid, "[+15550001111] hey", "+15550001111", recs[0].id)]
+
+
+def test_review_to_paused_thread_routes_through_worker(wired, monkeypatch):
+    """A /review submission to a PAUSED thread routes through the serial worker
+    with its journal id, mirroring post_message (Copilot #197 rd1)."""
+    import json as _json
+    from fastapi.testclient import TestClient
+    tid, _ = wired
+    _set_status(tid, "paused", pending_message="mid-flight")
+    monkeypatch.setattr("manage.web.review._get_domain_manager", lambda t: None)
+    ran, submitted = [], []
+    monkeypatch.setattr(threads.BackgroundTasks, "add_task",
+                        lambda self, fn, *a, **k: ran.append(fn))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
+                        lambda t, text, rider, sender, backlog_id=None:
+                            submitted.append((t, backlog_id)))
+
+    r = TestClient(web.app).post(
+        f"/thread/{tid}/review",
+        data={"payload": _json.dumps({"overall": "LGTM", "lines": []})},
+        follow_redirects=False)
+
+    assert r.status_code == 303
+    assert threads._process_message not in ran        # no BackgroundTask dispatch
+    recs = MESSAGE_BACKLOG.for_thread(tid)
+    assert len(recs) == 1
+    assert submitted == [(tid, recs[0].id)]
+
+
 def test_claim_is_idempotent(tmp_path):
     store = MessageBacklog(str(tmp_path))
     (tmp_path / "t1").mkdir()
