@@ -14,12 +14,16 @@ from __future__ import annotations
 import html
 import json
 import os
+from datetime import datetime, timezone
 
+import anyio.to_thread
 from fastapi import BackgroundTasks, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from assist.backlog import PendingMessage
 from assist.domain_manager import Change
 from assist.thread import Thread
+from assist.thread_queue import THREAD_QUEUE
 
 from manage.web import threads as _threads
 from manage.web.app import app
@@ -27,6 +31,7 @@ from manage.web.diff import _DIFF_CSS, _rename_pair, render_file_diff
 from manage.web.state import (
     BUSY_STAGES,
     MANAGER,
+    MESSAGE_BACKLOG,
     _get_domain_manager,
     _get_status,
     _thread_title,
@@ -395,9 +400,23 @@ async def post_review(tid: str, background_tasks: BackgroundTasks, payload: str 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Set a busy+pending status synchronously (same race fix as the
-    # /message route) so the redirect render shows the submission instead of
-    # losing it to the background task.
-    _threads._mark_pending(tid, message)
-    background_tasks.add_task(_threads._process_message, tid, message)
+    # Set a busy+pending status synchronously (same race fix as the /message
+    # route) so the redirect render shows the submission instead of losing it to
+    # the background task. Same single busy sample as post_message: a review
+    # submitted to a BUSY thread is a follow-up — journal it durably (off-loop,
+    # private limiter) and skip the status write (the running turn owns
+    # status.json); the turn claims the entry when it starts.
+    busy = (_get_status(tid).get("stage") in BUSY_STAGES
+            or THREAD_QUEUE.peek_holder() == tid)
+    _threads._mark_pending(tid, message, busy)
+    backlog_id = None
+    if busy:
+        rec = await anyio.to_thread.run_sync(
+            MESSAGE_BACKLOG.add,
+            PendingMessage(thread_id=tid, text=message,
+                           enqueued_at=datetime.now(timezone.utc).isoformat()),
+            limiter=_threads._get_backlog_limiter())
+        backlog_id = rec.id
+    background_tasks.add_task(_threads._process_message, tid, message,
+                              backlog_id=backlog_id)
     return RedirectResponse(url=f"/thread/{tid}?reviewed=1", status_code=303)

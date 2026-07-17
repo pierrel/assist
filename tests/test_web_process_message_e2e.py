@@ -303,7 +303,7 @@ def test_mark_pending_sets_queued_when_another_thread_holds_slot(client, monkeyp
     monkeypatch.setattr(
         threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
     )
-    threads._mark_pending("thread-e2e", "hello there")
+    threads._mark_pending("thread-e2e", "hello there", busy=False)
     st = _get_status("thread-e2e")
     assert st.get("stage") == "queued", st
     assert st.get("pending_message") == "hello there", st
@@ -314,7 +314,7 @@ def test_mark_pending_sets_processing_when_slot_free(client, monkeypatch):
     # thread's history and input must stay visible on the redirect render.
     from manage.web.state import INIT_STAGES
     monkeypatch.setattr(threads.THREAD_QUEUE, "peek_holder", lambda: None)
-    threads._mark_pending("thread-e2e", "hello")
+    threads._mark_pending("thread-e2e", "hello", busy=False)
     st = _get_status("thread-e2e")
     assert st.get("stage") == "processing", st
     assert st.get("stage") not in INIT_STAGES, st
@@ -322,12 +322,11 @@ def test_mark_pending_sets_processing_when_slot_free(client, monkeypatch):
 
 
 def test_mark_pending_noop_when_thread_already_busy(client, monkeypatch):
-    # An in-flight turn must not be clobbered by a second submission.
+    # An in-flight turn must not be clobbered by a second submission: the
+    # caller's busy sample (True here — the same sample that journals the
+    # follow-up) makes this a no-op.
     _set_status("thread-e2e", "processing", pending_message="first turn")
-    monkeypatch.setattr(
-        threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
-    )
-    threads._mark_pending("thread-e2e", "second turn")
+    threads._mark_pending("thread-e2e", "second turn", busy=True)
     st = _get_status("thread-e2e")
     assert st.get("stage") == "processing", st
     assert st.get("pending_message") == "first turn", st

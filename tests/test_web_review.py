@@ -343,7 +343,7 @@ class TestPostReviewRoute:
     def test_303_and_schedules_background_task(self, client, monkeypatch):
         scheduled: list[tuple[str, str]] = []
 
-        def fake_process(tid, text):
+        def fake_process(tid, text, backlog_id=None):
             scheduled.append((tid, text))
 
         # Patch the modules where these names are defined; route
@@ -375,7 +375,8 @@ class TestPostReviewRoute:
         from manage.web import threads
         from manage.web.state import _get_status
 
-        monkeypatch.setattr("manage.web.threads._process_message", lambda tid, text: None)
+        monkeypatch.setattr("manage.web.threads._process_message",
+                            lambda tid, text, backlog_id=None: None)
         monkeypatch.setattr("manage.web.review._get_domain_manager", lambda tid: None)
         # Another thread holds the LLM slot -> expect "queued".
         monkeypatch.setattr(

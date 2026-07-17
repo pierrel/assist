@@ -89,12 +89,14 @@ class MessageBacklog(PerThreadJsonStore[PendingMessage]):
             return []
         except json.JSONDecodeError:
             logger.error("message backlog for %s is unreadable — its queued "
-                         "messages will NOT be recovered; moved to %s.corrupt "
-                         "for inspection", tid, path, exc_info=True)
+                         "messages will NOT be recovered", tid, exc_info=True)
             try:
                 os.replace(path, f"{path}.corrupt")
+                logger.error("corrupt backlog moved to %s.corrupt for inspection",
+                             path)
             except OSError:
-                pass
+                logger.error("corrupt backlog could NOT be moved aside; left at %s",
+                             path)
             return []
         return [self._from_dict(d) for d in data]
 

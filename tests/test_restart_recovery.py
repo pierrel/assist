@@ -3,9 +3,10 @@
 Pins the contracts of docs/2026-07-13-durable-message-queue.org (Step 1): a
 message accepted while its thread is busy is journaled durably BEFORE the POST
 returns; the turn claims (removes) its entry status-first when it starts; and
-startup recovery delivers every journaled message exactly once and resumes /
-re-dispatches / finalizes the interrupted head turn by GRAPH STATE, not text
-equality. The kill-shaped test exercises a real langgraph SqliteSaver abandoned
+startup recovery delivers every journaled message exactly once and handles the
+interrupted head turn — resume-vs-rest decided by GRAPH STATE, with "finalize"
+requiring an EXACT match of the checkpointed message (as sent, or with the
+supersede prefix). The kill-shaped test exercises a real langgraph SqliteSaver abandoned
 mid-run and reopened in a fresh "process" — the crash shape, not the cooperative
 pause shape.
 """
@@ -443,34 +444,47 @@ def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
     it): hold the journal store's lock in another thread while a busy-thread POST
     is in flight. The POST's append must run OFF the event loop (private
     CapacityLimiter), so the loop stays live — a concurrent GET completes promptly
-    while the POST is still blocked on the lock."""
+    while the POST is still blocked on the lock.
+
+    The client MUST be context-managed: only ``__enter__`` pins ONE portal (one
+    event loop) shared by both requests — the no-ctx form spins a fresh loop per
+    request, which would pass even if the append regressed to running inline on
+    the loop (a vacuous test). The lifespan that entering runs is neutralized
+    (recovery scan / scheduler / manager close are process-level, not under test)."""
     import threading as _threading
     import time as _time
     from fastapi.testclient import TestClient
+    from manage.web import state as st_mod
 
     tid, _ = wired
     _set_status(tid, "processing", pending_message="head")
     monkeypatch.setattr(threads.BackgroundTasks, "add_task",
                         lambda self, fn, *a, **k: None)
+    monkeypatch.setattr(st_mod, "_recover_interrupted_threads", lambda: None)
+    monkeypatch.setattr(threads, "start_scheduler", lambda: None)
+    monkeypatch.setattr(threads, "stop_scheduler", lambda: None)
+    monkeypatch.setattr(web.MANAGER, "close", lambda: None)
 
-    client = TestClient(web.app)      # one portal = one event loop for both requests
-    MESSAGE_BACKLOG._lock.acquire()
-    post_done = _threading.Event()
-    try:
-        t = _threading.Thread(
-            target=lambda: (client.post(f"/thread/{tid}/message",
-                                        data={"text": "follow-up"},
-                                        follow_redirects=False),
-                            post_done.set()),
-            daemon=True)
-        t.start()
-        _time.sleep(0.3)
-        assert not post_done.is_set(), "POST should be blocked on the held store lock"
-        start = _time.monotonic()
-        status = client.get(f"/thread/{tid}/status")
-        elapsed = _time.monotonic() - start
-        assert status.status_code == 200
-        assert elapsed < 2.0, f"loop blocked: GET took {elapsed:.1f}s under a held store lock"
-    finally:
-        MESSAGE_BACKLOG._lock.release()
-    assert post_done.wait(5.0), "POST must complete once the lock is released"
+    with TestClient(web.app) as client:   # ctx-managed: ONE portal/loop for both
+        MESSAGE_BACKLOG._lock.acquire()
+        post_done = _threading.Event()
+        try:
+            t = _threading.Thread(
+                target=lambda: (client.post(f"/thread/{tid}/message",
+                                            data={"text": "follow-up"},
+                                            follow_redirects=False),
+                                post_done.set()),
+                daemon=True)
+            t.start()
+            _time.sleep(0.3)
+            assert not post_done.is_set(), \
+                "POST should be blocked on the held store lock"
+            start = _time.monotonic()
+            status = client.get(f"/thread/{tid}/status")
+            elapsed = _time.monotonic() - start
+            assert status.status_code == 200
+            assert elapsed < 2.0, \
+                f"loop blocked: GET took {elapsed:.1f}s under a held store lock"
+        finally:
+            MESSAGE_BACKLOG._lock.release()
+        assert post_done.wait(5.0), "POST must complete once the lock is released"

@@ -1080,8 +1080,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # delivered.
                 if not any(r.id == backlog_id
                            for r in MESSAGE_BACKLOG.for_thread(tid)):
-                    logging.info("follow-up %s on %s already delivered; skipping "
-                                 "duplicate dispatch", backlog_id, tid)
+                    logging.info("follow-up %s on %s not in the journal (already "
+                                 "delivered, or the journal was unreadable); "
+                                 "skipping this dispatch", backlog_id, tid)
                     return
                 # This journaled follow-up now OWNS the slot: take over status.json
                 # (its text/sender/rider + the claimed entry id), THEN pop the journal
@@ -1436,7 +1437,7 @@ async def thread_status(tid: str):
     return JSONResponse(_get_status(tid))
 
 
-def _mark_pending(tid: str, text: str) -> None:
+def _mark_pending(tid: str, text: str, busy: bool) -> None:
     """Record an inbound message as busy+pending *synchronously*, before the
     POST handler returns its redirect.
 
@@ -1461,9 +1462,12 @@ def _mark_pending(tid: str, text: str) -> None:
     input — which is wrong for a thread that's just received a follow-up
     message.
 
-    No-op when this thread is already busy, so a second message to a mid-turn
-    thread doesn't clobber the in-flight turn's status — that follow-up is made
-    durable by the caller instead (post_message journals it in MESSAGE_BACKLOG).
+    No-op when ``busy`` — the CALLER's single busy sample (status stage OR
+    holder==tid), which also drives its journal decision — so a second message
+    to a mid-turn thread doesn't clobber the in-flight turn's status; that
+    follow-up is made durable in MESSAGE_BACKLOG instead. One shared sample
+    keeps the two decisions consistent (independent samples could straddle a
+    turn's acquire: journal skipped AND status skipped = durable nowhere).
 
     Runs on the asyncio event-loop thread, so it must never block: it uses
     ``THREAD_QUEUE.peek_holder()`` (a lock-free read), NOT ``current_handle()``
@@ -1471,14 +1475,15 @@ def _mark_pending(tid: str, text: str) -> None:
     the queue and freeze the whole server whenever that lock is held by a
     long-running turn.
     """
-    holder_tid = THREAD_QUEUE.peek_holder()
-    # Busy = a busy status OR this tid already holding the LLM slot: a
-    # direct-dispatch turn (scheduled/geo/SMS) acquires the queue BEFORE its
-    # first busy status write, and writing our pending here in that gap would
-    # be clobbered by that turn's writes — while the caller, seeing "not busy",
-    # would also skip journaling. Treat holder==tid as busy (lock-free read).
-    if _get_status(tid).get("stage") in BUSY_STAGES or holder_tid == tid:
+    if busy:
+        # The caller's single busy sample (status stage OR holder==tid) decided
+        # this message is a journaled follow-up — write nothing: the running
+        # turn owns status.json, and a write here would be clobbered by its
+        # writes while the journal already holds this message durably. One
+        # sample drives BOTH the journal decision and this skip, so they can't
+        # disagree (two samples could straddle a turn's acquire).
         return
+    holder_tid = THREAD_QUEUE.peek_holder()
     stage = "queued" if (holder_tid is not None and holder_tid != tid) else "processing"
     # Stamp the turn-start origin at submit (this is the idle→busy edge — the guard above
     # returns for an already-busy thread, so we never reset a mid-turn turn's clock).
@@ -1719,8 +1724,9 @@ _PROVISIONER = (
 
 def _recovery_prep(q: "queue.Queue") -> None:
     """One-time worker-thread prep before draining recovery jobs (no-op cost when
-    none are queued). (a) Reap orphaned sandbox containers BY LABEL: a killed web
-    process reaps nothing, and a ``docker exec``'d tool command keeps mutating the
+    none are queued). (a) Reap THIS deployment's orphaned sandbox containers (by
+    label + /workspace-mount scope — see ``reap_orphans``): a killed web process
+    reaps nothing, and a ``docker exec``'d tool command keeps mutating the
     host-bind-mounted /workspace for up to the 3h TTL — a resumed turn's fresh
     container must never share a workspace with a zombie writer. (b) Wait
     (bounded) for the model endpoint: on a cold boot llamacpp loads for minutes
@@ -1766,10 +1772,12 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
     text compare in both directions):
     - ``snap.next`` or ``snap.interrupts`` non-empty → the turn is mid-flight in
       the checkpoint → "resume" (input=None re-runs only the unpersisted work).
-    - otherwise, if the latest checkpointed human message contains
-      ``pending_message`` → the turn COMPLETED before the kill (the crash landed
-      in post-invoke bookkeeping) → "finalize" (containment, not equality: the
-      supersede fold prefixes the checkpointed copy).
+    - otherwise, if the latest checkpointed human message EXACTLY equals
+      ``pending_message`` (as sent, or as the supersede fold checkpoints it —
+      ``_SUPERSEDE_RIDER`` + text) → the turn COMPLETED before the kill (the
+      crash landed in post-invoke bookkeeping) → "finalize". Exact only:
+      containment/suffix would misread a short pending found inside the
+      PREVIOUS turn's message as completed and silently drop it.
     - otherwise the message never reached the checkpoint → "redispatch" it fresh.
     A failed state read returns "error" (the caller surfaces the restart-error
     banner rather than guessing). Built without a sandbox and without any model
@@ -2001,7 +2009,7 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
     # its task parks behind that turn (peek_holder is the lock-free read).
     prior_stage = _get_status(tid).get("stage")
     busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
-    _mark_pending(tid, text)
+    _mark_pending(tid, text, busy)   # the ONE busy sample drives both decisions
     rider = _build_rider(sent_at, tz, lat, lon)
     backlog_id = None
     if busy:

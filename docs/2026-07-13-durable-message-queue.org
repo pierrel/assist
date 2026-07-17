@@ -120,10 +120,12 @@ checkpoint, discarding its pending work):
    model call, no sandbox start; degrade to the =error= banner if unreadable).
 2. =snap.next= non-empty *or* =snap.interrupts= non-empty → *resume*
    (=input=None=, fresh sandbox — same path as a fair-scheduling resume).
-3. =next= empty *and* the latest checkpointed human message contains
-   =pending_message= → the turn actually COMPLETED before the kill (the crash
-   landed in the post-invoke bookkeeping window) → finalize: mark =ready=, no
-   re-run.
+3. =next= empty *and* the latest checkpointed human message EXACTLY equals
+   =pending_message= (as sent, or with the supersede-fold prefix the checkpoint
+   carries) → the turn actually COMPLETED before the kill (the crash landed in
+   the post-invoke bookkeeping window) → finalize: mark =ready=, no re-run.
+   Exact only — containment/suffix would misread a short pending found inside
+   the PREVIOUS turn's message as completed and silently drop it.
 4. Otherwise (message never reached the checkpoint) → *re-dispatch*
    =pending_message= as a fresh message (=domain= threads re-enter via their
    init path). Nothing ran, so this is delivering, not retrying.
@@ -266,15 +268,27 @@ in-memory mirror; when this lands, #1 re-sources its read from the backlog.)
   the odds; small fix in =checkpoint_rollback.py=).
 - Two uvicorn workers: out of scope by construction (single worker, documented).
 - Dispatch-path coverage (as-built): the SMS path (=_dispatch_event=) journals
-  follow-ups like the web path; scheduler/geo turns still call
-  =_process_message= directly with no journal (a missed schedule refires by
-  design — =next_fire_at= only advances on success — so they need none), and a
-  due schedule at startup could still race a recovery job's ORDER (the queue
-  serializes the turns themselves). Same-tid waiter clobber of the running
-  turn's status is closed via the lock-free =peek_holder= skip; the residual is
-  a direct-dispatch waiter behind a same-tid turn that is itself queued behind
-  another thread (rare double-nesting). Step 2's single-source dispatch
-  subsumes all of these.
+  follow-ups like the web path; scheduler/geo turns carry no journal entry
+  (their prompts are regenerable and mid-turn crashes are covered by head
+  recovery via =pending_message= — note the scheduler is advance-persist-THEN-
+  dispatch, so a fire crashed pre-turn is lost until the next cadence by its
+  own no-catch-up design, not refired).
+- *NAMED RESIDUAL (direct-dispatch vs recovery, Step 1):* a due schedule / geo
+  completion at startup fires as soon as =_llm_reachable= passes — the same
+  probe recovery's bounded wait polls — so it can win the recovery window on
+  the exact cold-boot-after-crash timing. If it does, its status writes REPLACE
+  the recovered thread's (=pending_message=/=sender=/=claimed_id= clobbered)
+  and the recover job then sees stage ≠ "paused" → the head decision is
+  *silently skipped*: the interrupted head turn is neither resumed nor
+  re-dispatched and no banner surfaces. Journaled follow-ups still recover
+  (the drain doesn't depend on the stage). Accepted for Step 1 as a rare,
+  compound-timing loss — named, not "fixed" — because closing it here means a
+  clobber-proof recovery marker outside status.json; Step 2's single-source
+  dispatch closes it by construction. Similarly narrowed-not-closed: the
+  same-tid waiter clobber is gated by the lock-free =peek_holder= skip and a
+  SINGLE busy sample in =post_message= (journal + status decisions can't
+  disagree), but a direct-dispatch waiter behind a same-tid turn that is
+  itself queued behind another thread still writes (rare double-nesting).
 - Ordering under a re-paused recovery resume: the drain SUBMITS follow-ups to
   the serial worker rather than running them inline, so a head resume that hits
   its quantum again re-queues ahead of them — the never-on-a-mid-flight-
