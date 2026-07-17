@@ -60,65 +60,100 @@ Per-thread =pending_messages.json= via a =Backlog(PerThreadJsonStore)= subclass
 : { "id": <uuid>, "text": str, "sender": str|null,
 :   "rider": {"sent_at","tz","lat","lon"}|null, "enqueued_at": <iso> }
 FIFO by list order. Per-thread (dies with the thread on =hard_delete= =rmtree=,
-=thread_manager.py:222=; no eviction hook). =CAP= bounds runaway growth like
-=ScheduleStore.CAP_PER_THREAD=. =rider= stores the four raw form fields so recovery
-reconstructs the =ContextRider= via the existing =_build_rider= (:1421). Reusing
+=thread_manager.py:222=; no eviction hook). No =CAP= (design review: no observed
+runaway exists and inflow is human-paced — a cap is theoretical-only machinery,
+and over-cap behavior would mean 500ing a user's message). =sender= is real, not
+dead weight: the append hooks BOTH =post_message= (web) *and* =_dispatch_event=
+(inbound SMS, =threads.py:1486= — SMS follow-ups to a busy thread are equally
+lost today). =rider= stores the four raw form fields; recovery reconstructs the
+=ContextRider= via the existing =_build_rider= (:1421). Reusing
 =PerThreadJsonStore= gives lock-serialized atomic RMW, no partial file, and
-=all()= for the startup scan — deleting fragility by composing a stable block.
+=all()= for the startup scan; record =id= is required by the store's
+=remove(id)= and is what the claim keys on.
 
-** Paused-turn resume durability (no new file)
-Extend the existing =status="paused"= write (:1166) with the resume params
-carried only in-memory today: =accumulated_active_ms= (the =carry=, :1158), plus
-=resume_sender= / =resume_rider= (so a paused *triage* turn resumes with the right
-=send_reply= target + context). =status="paused"= + the checkpoint then fully
-describe the resume — no separate resume journal.
+** In-flight turn durability (uniform, every turn — not paused-only)
+(Design review found the paused-only version broken: a *triage* turn killed at
+=processing= would recover with =sender=None= → =MANAGER.get(..., triage=False)=
+→ the FULL tool surface with no HITL gate on =send_reply= — a security
+regression — and no reply target. The fix is uniformity, and it's ~2 lines:)
+carry =sender= + the rider fields in =pending_kwargs= so the FIRST busy
+=_set_status= of *every* turn persists them — every busy stage then has what
+recovery needs, paused or killed. The =paused= write additionally records
+=accumulated_active_ms= (the carry, :1158) so a clean pause keeps its 2h-cap
+accounting; a crash resets the cap for the resumed slice (accepted — it's a
+runaway backstop, not billing).
 
 * On-startup recovery flow
 
-1. *Replace the BUSY→error reconcile* (=state.py:595=) with recovery for every
-   busy stage (per Pierre's review: in-progress turns are recoverable too — the
-   checkpoint is durable at every superstep, not just at pauses). The
-   resume-vs-redispatch rule per thread is:
-   - =paused= → *resume* (=input=None=; params from the extended =status.json=;
-     =accumulated_active_ms= defaults 0, so pre-feature paused threads still resume).
-   - =processing= → *resume from the last checkpoint* — the restart killed the
-     turn mid-flight, but =durability="sync"= means every completed superstep is
-     already persisted (=thread.py:288-302=); the resume path already builds a
-     fresh sandbox (=_get_sandbox_backend= runs for =resume=True= too,
-     =threads.py:1043=), so the dead container is a non-issue — a new one is
-     created exactly as a fair-scheduling resume does. *Guard:* resume only if
-     the turn's human message is already IN the checkpoint (compare the
-     checkpoint's latest human message to =status.pending_message=). A crash
-     *before the first checkpoint* of the turn means =input=None= would re-invoke
-     on the PREVIOUS turn's final state — a spurious turn; in that case fall
-     through to re-dispatch below.
-   - =queued= / =starting_sandbox= / =initializing= / =cloning= (turn never
-     started, or pre-first-checkpoint) → *re-dispatch* =status.pending_message=
-     as a fresh message (it's durable in status.json today). Nothing ran, so
-     this is delivering, not retrying.
-   - Only a thread whose state can't support either (no pending_message, no
-     checkpoint match) falls back to the =error= banner.
-2. *Recovery jobs go onto the serial worker* in the same per-tid order rule as
-   below (resume/re-dispatch first, then backlog follow-ups).
-3. *Recover queued follow-ups.* Scan =BACKLOG.all()=; for each tid with a
-   non-empty backlog, enqueue its entries *in list order*, after that tid's resume
-   job (recovery controls order: resume first, then messages — preserving the
-   current "message runs after the resume" invariant).
-4. *Start the single serial worker* (the generalized =_ResumeScheduler=), which
-   drains one job at a time. Per-tid order preserved; cross-tid order irrelevant.
+(Revised by the design-review team: the per-stage matrix collapsed to ONE
+state-based guard decided off-loop; the lifespan does only cheap enqueues; and
+two ordering/consistency holes are closed by construction.)
 
-* Exactly-once / ordering — claim-before-run
+*Lifespan (on-loop, pre-=yield=, cheap file ops only):* replace the BUSY→error
+reconcile (=state.py:595=) with, per busy-stage tid (and any tid with a
+non-empty backlog):
+1. *Rewrite the stage to =paused=* (a bare =_set_status=, same cost as the old
+   error write). This is load-bearing, not cosmetic: =post_message= routes new
+   live messages through the serial worker ONLY when =stage=="paused"= (:1737) —
+   without the rewrite, a user message sent right after restart to a
+   still-=processing= thread would park as a THREAD_QUEUE waiter and could run
+   *before* the recovery resume, on the killed turn's mid-flight checkpoint
+   (review BLOCKER). With it, the existing routing sends live follow-ups behind
+   the recovery jobs, and the UI honestly shows "paused" instead of a dead
+   "processing".
+2. *Enqueue one =recover(tid)= job* on the serial worker (a =queue.Queue=
+   accepts puts before its thread starts). Enqueuing pre-=yield= guarantees no
+   live submit can outrun a recovery job. No checkpoint I/O here — the decision
+   runs on the worker.
 
-The serial worker *pops* a backlog entry (=PerThreadJsonStore.remove=, under its
-lock) *before* starting the turn, not after success:
-- Crash *after claim, mid-run*: the backlog entry is already gone → *not
-  replayed as a fresh message*. Instead the thread's turn is by then =processing=
-  with that text in =status.pending_message=, so the in-progress recovery path
-  (resume-from-checkpoint, or re-dispatch via the first-checkpoint guard) covers
-  it — exactly one delivery path applies, never both.
-- Crash *before claim*: replayed exactly once from the backlog.
+*Serial worker (off-loop), first once:* reap orphaned sandbox containers by
+label (=assist.sandbox=true=) before draining any job — a hard-killed web
+process reaps nothing, and a =docker exec='d tool command (e.g. a runaway
+=pytest=) keeps mutating the host-bind-mounted =/workspace= for up to the 3h TTL
+while the resumed turn's fresh container mounts the same dir (review finding).
+Then per =recover(tid)= job, decide by *graph state*, not text equality (review
+BLOCKER — text matching fails BOTH ways: a re-sent short message ("ok") matching
+an older one → false resume → the crashed turn silently dropped; the supersede
+fold prefixes the checkpointed text (:1102) → false re-dispatch onto a mid-flight
+checkpoint, discarding its pending work):
+1. Read the thread's checkpoint state (=get_state= — the graph built lazily, no
+   model call, no sandbox start; degrade to the =error= banner if unreadable).
+2. =snap.next= non-empty *or* =snap.interrupts= non-empty → *resume*
+   (=input=None=, fresh sandbox — same path as a fair-scheduling resume).
+3. =next= empty *and* the latest checkpointed human message contains
+   =pending_message= → the turn actually COMPLETED before the kill (the crash
+   landed in the post-invoke bookkeeping window) → finalize: mark =ready=, no
+   re-run.
+4. Otherwise (message never reached the checkpoint) → *re-dispatch*
+   =pending_message= as a fresh message (=domain= threads re-enter via their
+   init path). Nothing ran, so this is delivering, not retrying.
+5. Then dispatch that tid's backlog entries in list order (resume/re-dispatch
+   first, then follow-ups — preserving the "message runs after the resume"
+   invariant).
 
-Single serial worker + FIFO head-claim = strict submit order per thread.
+The worker waits (bounded) for the model endpoint to respond before draining —
+on a cold boot llamacpp loads for minutes after assist-web is up, and erroring
+every recovered thread against a still-loading model would defeat the feature.
+
+* Exactly-once / ordering — claim by id, status-first, inside the acquire
+
+(Hardened per review: head-pop and pop-early both had loss/duplication windows.)
+The claim is *by record id* (carried with the dispatch — head-pop can cross
+records: two same-tid background tasks park in unguaranteed order, so the wrong
+turn could pop the other's entry and a crash would then "recover" a message that
+already ran). Placement: *inside* =THREAD_QUEUE.acquire=, and *status-write
+first* —
+1. the turn's first busy =_set_status= lands (carrying the text in
+   =pending_message= + the claimed entry id),
+2. *then* the entry is removed from the backlog by id.
+A crash between the two leaves the entry in BOTH stores momentarily; recovery
+dedupes by the claimed id in status (the in-progress path owns that message —
+drop the matching backlog entry, apply the state guard). A crash while still
+waiting in the queue leaves the entry safely journaled → replayed. So at every
+instant the message is durable in at least one store and recovery delivers it
+via exactly one path.
+
+Single serial worker + submit-order records = strict per-thread order.
 
 * Reconciling "fail-fast / don't heal-and-retry" with durability
 
@@ -137,28 +172,34 @@ Single serial worker + FIFO head-claim = strict submit order per thread.
   only that the turn didn't get to a chosen boundary first. *Recover, with the
   first-checkpoint guard* (a turn whose human message never reached the
   checkpoint is re-dispatched as a fresh message instead).
-- *Named residual (honest):* the interrupted superstep re-runs on resume, so a
-  side-effectful tool call in flight at the kill (a notify, a web request)
-  executes again. In-sandbox effects are consistent by construction — the old
-  container's state is gone with it; =send_reply= is HITL-gated so a duplicate
-  SMS can't fire unattended. Accepted: restarts are rare, operator-initiated,
-  and one re-run superstep beats losing the turn.
+- *Named residual (honest, broadened per review):* on resume, ANY tool call of
+  the interrupted superstep whose writes hadn't flushed re-runs — not just the
+  one in flight: per-task writes go through a background executor even under
+  =durability="sync"= (which gates the superstep checkpoint put, not the task-
+  write flush), so a completed-but-unflushed tool's effects repeat too. State
+  stays consistent (the writes never landed). In-sandbox effects are consistent
+  because recovery *reaps the orphaned container by label first* (it is NOT
+  automatically gone — see the recovery flow); =send_reply= is HITL-gated so a
+  duplicate SMS can't fire unattended. Accepted: restarts are rare,
+  operator-initiated, and re-running one superstep beats losing the turn.
 - The fail-fast rule still governs *turn-internal* failures (sandbox vanished
   mid-turn, cap breach): those terminate, no heal-and-retry. Recovery here is
   strictly about surviving a process restart.
 
 * Event-loop safety of the durable write
 
-=post_message= runs on the single-worker loop. Two liveness-safe options;
-recommend *A*:
-- *A (recommended):* =post_message= is =async def= → append via
-  =await run_in_threadpool(BACKLOG.add, rec)=. The write + store lock run in a pool
-  thread, never on the loop, for *milliseconds* (a bounded file write) — different
-  in kind from the resume-scheduler's forbidden park-for-a-quantum pattern, so no
-  2026-06-10-class pool exhaustion. Loop stays strictly lock-free.
-- *B:* append inline on the loop like =_mark_pending='s =_set_status= write. Simpler,
-  but takes the store lock on the loop. Rejected in favor of A.
-Off-loop writers (pause path, worker claim/pop, completion drain) append directly.
+=post_message= runs on the single-worker loop. The append runs off-loop — but
+NOT via the shared threadpool (review IMPORTANT): =run_in_threadpool= draws from
+the same 40-token anyio pool that Step 1's live dispatch saturates (every
+follow-up to a =processing= thread parks a pool worker in =cond.wait= for up to
+4h), so under exactly the backlog-heavy load this feature exists for, the
+durability write could starve behind the parkers — the POST hangs pre-303 and a
+restart in that window loses the message. Fix is one line:
+=anyio.to_thread.run_sync(BACKLOG.add, rec, limiter=<private CapacityLimiter>)=
+— a dedicated limiter, immune to pool exhaustion. The loop itself stays strictly
+lock-free either way. (Step 2 deletes the parking and dissolves the contention.)
+Off-loop writers (=_dispatch_event= append, worker claim/pop, pause-path status)
+run directly on their own threads.
 
 * Dispatch model — two shippable steps
 
@@ -172,16 +213,24 @@ Off-loop writers (pause path, worker claim/pop, completion drain) append directl
   drains the next entry at turn completion. *Deletes* the in-memory
   park-per-follow-up fragility rather than shadowing it. One race to resolve in
   detailed design (a follow-up appended at the instant of the terminal
-  drain-check → by-construction: submit re-checks =status= and kicks the drain if
-  idle). Full three-phase (touches the submit path + the queue).
+  drain-check) — sound ONLY with this exact order (review NIT): drain side
+  *write =ready= → check backlog*; submit side *append → check status*. That
+  makes the stranded interleaving a contradiction; either pair inverted strands
+  an entry until the next restart. Full three-phase (touches the submit path +
+  the queue).
 
 The serial worker is the existing =_ResumeScheduler= (already owns =submit_resume=
-+ =submit_message=) — generalize/rename it. No new component.
++ =submit_message=); a =recover= job is one more small method. No rename in
+Step 1 (churn without payoff — revisit in Step 2 if it earns it).
 
 * Seam with feature #1 (UI surfacing)
 
-Feature #1 reads =BACKLOG.for_thread(tid)= (=record_store.py:69=) to render "N
-queued" rows, with the same event-loop-safe read discipline as =_get_status=
+Feature #1 reads the backlog to render "N queued" rows — via a *lock-free bare
+read* (mirroring =peek_holder='s discipline), NOT =for_thread= (review
+IMPORTANT: =for_thread=/=all()= take the process-wide store lock — =all()= holds
+it while scanning every thread dir — and a lock acquire on the loop thread is
+the bright-line liveness rule; since =_write= is atomic tmp+rename, a reader
+needs no lock at all). Same read discipline as =_get_status=
 (bare read, missing/corrupt → empty). This design owns no rendering.
 *Independently shippable:* without #1 the backlog is invisible but durable +
 recovered; the existing single =pending_message= bubble still renders (no
@@ -199,11 +248,29 @@ in-memory mirror; when this lands, #1 re-sources its read from the backlog.)
   overwrite the file (leave for inspection). Accepted limit.
 - Thread deleted with a backlog: =rmtree= takes the file; startup scan skips
   =.deleted= → never replayed. No orphan.
-- Double-run: prevented by claim-before-run pop.
-- Paused *triage* turn resumed without =sender=: avoided by persisting
-  =resume_sender= (D2).
-- Runaway growth: bounded by =CAP=.
+- Double-run: prevented by the by-id, status-first claim.
+- *Triage* turn (any busy stage) recovered without =sender=: avoided by carrying
+  =sender=/rider in EVERY turn's first busy status write (see data model) — the
+  paused-only version left the =processing=-crash path resuming full-privilege.
+- *=awaiting_approval= (HITL):* not in =BUSY_STAGES= → recovery correctly skips
+  it (the interrupt is durable; =reply_decision= works after restart). The
+  kill-between-invoke-and-status-write window leaves stage =processing= with a
+  durable pending interrupt — the state guard resumes it, the interrupt
+  re-fires, and the resume path re-checks =pending_reply()= → converges (given
+  the uniform sender persistence above).
+- *=invoke_with_rollback= on a crash resume:* its =BadRequestError= rollback
+  walks =get_state_history= across TURNS — from an early-turn resume point it
+  can land in the PREVIOUS turn, whose terminal checkpoint returns immediately →
+  the turn silently "succeeds" stale. Bound the rollback at the current turn's
+  =source="input"= checkpoint (pre-existing exposure, but crash resume raises
+  the odds; small fix in =checkpoint_rollback.py=).
 - Two uvicorn workers: out of scope by construction (single worker, documented).
+- Scheduler/geo/SMS dispatch paths call =_process_message= directly with no
+  stage check (=threads.py:1466,1475,1628=) — a due schedule at startup could
+  race a recovery job. Accepted for Step 1 (pre-existing exposure, narrow
+  window, the queue serializes the turns themselves — worst case is turn ORDER,
+  and the stage-rewrite closes the main user-facing path); Step 2's
+  single-source dispatch subsumes it.
 
 * Test plan (symptom-level, un-mocked where risk lives)
 
@@ -216,13 +283,22 @@ Real =PerThreadJsonStore= over a tmp dir + the real route/=_process_message=
    started, text now in =pending_message=), crash before completion, recover →
    not re-dispatched from the backlog; exactly one recovery path (the in-progress
    resume) handles it.
-3. *Busy stages survive restart:* (a) =status="paused"= + params, no in-memory
-   =_q= → a resume job (=input=None=) enqueued, not flipped to =error=. (b)
-   =status="processing"= with the turn's human message IN the checkpoint → a
-   resume job enqueued (fresh sandbox), not errored. (c) =processing= with the
-   message NOT yet checkpointed (crash pre-first-checkpoint) → re-dispatched as a
-   fresh message, not resumed (the spurious-turn guard). (d) =queued= /
-   =starting_sandbox= → re-dispatched from =pending_message=.
+3. *Busy stages survive restart (the state guard, all four windows):* (a)
+   =status="paused"= + params, no in-memory =_q= → resume (=input=None=), not
+   =error=. (b) =processing= with =snap.next= non-empty → resume (fresh
+   sandbox). (c) =processing=, =next= empty, message never checkpointed →
+   re-dispatched as a fresh message (spurious-turn guard). (d) =processing=,
+   =next= empty, latest human matches =pending_message= (turn completed in the
+   bookkeeping window) → finalized =ready=, NOT re-run. Plus: a re-sent
+   duplicate text ("ok" twice in history) must not fool the guard (state-based,
+   not text-equality).
+3b. *Kill-shaped resume (un-mocked):* abandon a real graph mid-superstep
+   (don't raise a cooperative exception — drop the loop), reopen the SqliteSaver
+   in a fresh "process", resume =input=None= → completed-superstep work is
+   preserved, the turn finishes. Pins the crash shape, not just the pause shape.
+3c. *Triage recovery keeps triage:* a triage turn (sender set) killed at
+   =processing= → recovery resumes with =triage=True= + the sender in
+   configurable (assert the reduced tool surface + HITL gate).
 4. *Ordering vs resume:* paused thread + one follow-up → resume enqueued before
    the follow-up.
 5. *Deleted-thread backlog never replayed.*
@@ -234,22 +310,39 @@ Real =PerThreadJsonStore= over a tmp dir + the real route/=_process_message=
 8. *Corrupt backlog is loud:* truncated file → recovery logs ERROR, doesn't crash,
    leaves the file.
 
-* Decisions to flag for Pierre
+* Decisions (resolved 2026-07-17 — Pierre's go-ahead + design-review team)
 
-- *D0 (scope):* ship Step 1 (durable journal + recovery) first; Step 2 (backlog as
-  single source of truth) as a follow-up full-three-phase change. Confirm.
-- *D1 (mid-flight policy) — RESOLVED by Pierre's review:* recover in-progress
-  turns too — resume =processing= from the last checkpoint (fresh sandbox, like a
-  fair-scheduling resume), re-dispatch never-started stages from
-  =pending_message=, with the first-checkpoint guard deciding between the two.
-  Residual named: the interrupted superstep re-runs (side-effectful tool calls
-  may execute twice; =send_reply= stays HITL-gated). Remaining sub-question: the
-  2h-cap accounting for a resumed =processing= turn — its in-memory
-  =accumulated_active_ms= is lost on crash, so the resumed slice restarts the cap
-  at 0 unless we also persist the carry periodically (recommend: accept the
-  reset; a restart is rare and the cap is a runaway backstop, not billing).
-- *D2 (resume params in status):* persist =accumulated_active_ms= (2h-cap
-  accounting across restart) + =resume_sender=/=resume_rider=. Confirm the rider is
-  worth persisting vs resuming with =rider=None=.
-- *D3 (append placement):* Option A (=run_in_threadpool=, recommended) vs B (inline).
-- *D4 (cap):* per-thread backlog =CAP= value + over-cap behavior.
+- *D0 (scope):* CONFIRMED — Step 1 (durable journal + recovery) now; Step 2
+  (backlog as single source of truth) as a follow-up full-three-phase change.
+- *D1 (mid-flight policy):* RESOLVED (Pierre) — recover in-progress turns via
+  resume-from-last-checkpoint. Refined by the design-review team: the per-stage
+  matrix collapsed to ONE graph-state guard (=snap.next=/=interrupts= → resume;
+  turn-completed → finalize; else re-dispatch), decided on the worker. 2h-cap
+  carry: accept the reset on crash (the clean-pause path still persists its
+  carry in the =paused= status).
+- *D2 (resume params):* RESOLVED — persist =sender= + rider fields in EVERY
+  turn's first busy status write (uniform; the paused-only version was a
+  security hole for crashed triage turns). =accumulated_active_ms= on the
+  =paused= write only.
+- *D3 (append placement):* RESOLVED — off-loop via a *private
+  =CapacityLimiter=* (=anyio.to_thread.run_sync=), not the shared threadpool
+  (which Step 1's parked waiters can saturate).
+- *D4 (cap):* RESOLVED — no cap (theoretical-only; inflow is human-paced; the
+  store default is uncapped).
+
+* Design-review round (2026-07-17) — summary
+
+Three lenses (event-loop liveness, langgraph checkpoint/resume fit, simplicity)
+on the post-Pierre-review design. 3 BLOCKERs found and folded in: (1) recovered
+=processing= threads bypassed the paused-only serial routing → live messages
+could run on a mid-flight checkpoint (fix: stage-rewrite to =paused= at scan);
+(2) the text-equality first-checkpoint guard failed both directions (fix:
+graph-state guard); (3) crashed triage turns resumed full-privilege (fix:
+uniform sender/rider persistence). Majors: private limiter for the append;
+by-id status-first claim inside the acquire; lifespan-enqueue/worker-decide
+split; orphaned-container reap-by-label; =invoke_with_rollback= current-turn
+bound; lock-free feature-#1 read. Simplifications: stage matrix → one guard;
+CAP/D4 cut; rider decision made uniform; no scheduler rename. The core
+mechanism (journal + claim + state-based resume) was verified against the
+deployed langgraph source: =input=None= resume is checkpoint-consistent for an
+arbitrary kill, identical to the proven cooperative-pause path.
