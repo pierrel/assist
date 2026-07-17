@@ -345,8 +345,10 @@ def _evict_caches(tid: str) -> None:
 #   ready             - idle, accepting input
 #   error             - something failed; see status["error"]
 INIT_STAGES = {"initializing", "cloning", "starting_sandbox"}
-# `paused` is BUSY (not INIT): the turn is mid-flight and will resume, so the page
-# renders history + keeps input enabled, and _mark_pending won't clobber it.
+# `paused` is BUSY (not INIT): the turn is mid-flight and will resume — yielded at
+# its fair-scheduling quantum, OR awaiting restart recovery (the lifespan rewrites
+# every interrupted busy thread to `paused`) — so the page renders history + keeps
+# input enabled, and _mark_pending won't clobber it.
 BUSY_STAGES = INIT_STAGES | {"processing", "queued", "paused"}
 
 STAGE_LABELS = {
@@ -355,7 +357,7 @@ STAGE_LABELS = {
     "starting_sandbox": "Starting sandbox container...",
     "queued": "Waiting for another thread to finish...",
     "processing": "Processing your message...",
-    "paused": "Paused for a quicker turn — will resume...",
+    "paused": "Paused — will resume...",
 }
 
 # Single-word variants for the compact thread-LIST page only. The in-thread banner
@@ -589,26 +591,25 @@ def set_description(tid: str, description: str) -> None:
     DESCRIPTION_CACHE[tid] = description
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Ensure thread root exists at startup
-    os.makedirs(ROOT, exist_ok=True)
+def _recover_interrupted_threads() -> None:
+    """Startup recovery scan (runs on the loop, pre-yield — cheap file ops only):
+    every turn's work is durable (the checkpoint at each superstep, the message in
+    status.json / the backlog journal), so instead of erroring busy threads,
+    rewrite each to "paused" and enqueue a recover job; the checkpoint read + the
+    resume-vs-redispatch decision run on the serial worker (threads.py
+    _recover_thread).
 
-    # Recover threads a previous server run left busy, instead of erroring them:
-    # every turn's work is durable (the checkpoint at each superstep, the message
-    # in status.json / the backlog journal), so the serial worker can resume or
-    # re-dispatch it. Here on the loop we do only cheap file ops — rewrite the
-    # stage and enqueue a recover job; the checkpoint read + resume-vs-redispatch
-    # decision runs on the worker thread (see _recover_thread in threads.py).
-    #
-    # The stage-rewrite to "paused" is load-bearing, not cosmetic: post_message
-    # routes a new live message through the serial worker ONLY when the stage is
-    # "paused" — without the rewrite, a message sent right after restart to a
-    # still-"processing" thread would park as a THREAD_QUEUE waiter and could run
-    # BEFORE the recovery resume, on the killed turn's mid-flight checkpoint.
-    # Enqueuing pre-yield (the worker queue accepts puts before its thread
-    # starts) guarantees no live submit can outrun a recovery job.
-    from manage.web.threads import start_scheduler, stop_scheduler, submit_recovery
+    The stage-rewrite to "paused" is load-bearing, not cosmetic: post_message
+    routes a new live message through the serial worker ONLY when the stage is
+    "paused" — without the rewrite, a message sent right after restart to a
+    still-"processing" thread would park as a THREAD_QUEUE waiter and could run
+    BEFORE the recovery resume, on the killed turn's mid-flight checkpoint. It is
+    also _recover_thread's marker for "this thread has an interrupted HEAD turn"
+    (a journal-only recovery must not touch the head — e.g. a durable HITL
+    interrupt awaiting approval). Enqueuing pre-yield (the worker queue accepts
+    puts before its thread starts) guarantees no live submit can outrun a
+    recovery job."""
+    from manage.web.threads import submit_recovery
     for tid in MANAGER.list():
         status = _get_status(tid)
         if status.get("stage") in BUSY_STAGES:
@@ -619,6 +620,17 @@ async def lifespan(app: FastAPI):
             # Not busy, but journaled follow-ups survive (e.g. a crash after the
             # head turn finished but before its follow-ups started).
             submit_recovery(tid)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure thread root exists at startup
+    os.makedirs(ROOT, exist_ok=True)
+
+    # Recover threads a previous server run left busy, instead of erroring them
+    # (extracted so the test pins the REAL scan, not a copy).
+    from manage.web.threads import start_scheduler, stop_scheduler
+    _recover_interrupted_threads()
 
     # Populate description cache at startup
     for tid in MANAGER.list():

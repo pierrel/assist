@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 
@@ -76,17 +77,24 @@ class MessageBacklog(PerThreadJsonStore[PendingMessage]):
         """The base read swallows a parse failure to [] — here that would
         SILENTLY drop user messages, so make it loud: atomic tmp+rename makes a
         partial write impossible, meaning a parse failure is real disk
-        corruption. Still returns [] (recovery proceeds for other threads); the
-        file is left in place for inspection."""
+        corruption. The corrupt file is moved aside to ``<name>.corrupt`` for
+        inspection (a later ``add``'s read-modify-write would otherwise replace
+        it, destroying the evidence), and [] is returned so recovery proceeds
+        for other threads."""
+        path = self._path(tid)
         try:
-            with open(self._path(tid)) as f:
+            with open(path) as f:
                 data = json.load(f)
         except FileNotFoundError:
             return []
         except json.JSONDecodeError:
             logger.error("message backlog for %s is unreadable — its queued "
-                         "messages will NOT be recovered; file left for "
-                         "inspection", tid, exc_info=True)
+                         "messages will NOT be recovered; moved to %s.corrupt "
+                         "for inspection", tid, path, exc_info=True)
+            try:
+                os.replace(path, f"{path}.corrupt")
+            except OSError:
+                pass
             return []
         return [self._from_dict(d) for d in data]
 

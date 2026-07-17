@@ -265,12 +265,27 @@ in-memory mirror; when this lands, #1 re-sources its read from the backlog.)
   =source="input"= checkpoint (pre-existing exposure, but crash resume raises
   the odds; small fix in =checkpoint_rollback.py=).
 - Two uvicorn workers: out of scope by construction (single worker, documented).
-- Scheduler/geo/SMS dispatch paths call =_process_message= directly with no
-  stage check (=threads.py:1466,1475,1628=) — a due schedule at startup could
-  race a recovery job. Accepted for Step 1 (pre-existing exposure, narrow
-  window, the queue serializes the turns themselves — worst case is turn ORDER,
-  and the stage-rewrite closes the main user-facing path); Step 2's
-  single-source dispatch subsumes it.
+- Dispatch-path coverage (as-built): the SMS path (=_dispatch_event=) journals
+  follow-ups like the web path; scheduler/geo turns still call
+  =_process_message= directly with no journal (a missed schedule refires by
+  design — =next_fire_at= only advances on success — so they need none), and a
+  due schedule at startup could still race a recovery job's ORDER (the queue
+  serializes the turns themselves). Same-tid waiter clobber of the running
+  turn's status is closed via the lock-free =peek_holder= skip; the residual is
+  a direct-dispatch waiter behind a same-tid turn that is itself queued behind
+  another thread (rare double-nesting). Step 2's single-source dispatch
+  subsumes all of these.
+- Ordering under a re-paused recovery resume: the drain SUBMITS follow-ups to
+  the serial worker rather than running them inline, so a head resume that hits
+  its quantum again re-queues ahead of them — the never-on-a-mid-flight-
+  checkpoint ordering holds through recovery. (The live round-robin path's
+  equivalent inversion — a queued message job ahead of a re-queued resume — is
+  pre-existing and unchanged; a =snap.next= guard in the message path is the
+  by-construction fix if it's ever observed. Step 2 territory.)
+- A spam caveat: the journal is uncapped and recovery faithfully replays it, so
+  a network-local spammer's backlog now SURVIVES a restart (before, a restart
+  cleared it). Same trust boundary as the rest of the auth-less web app
+  (wg/LAN); the parked-waiter pool remains the binding constraint.
 
 * Test plan (symptom-level, un-mocked where risk lives)
 

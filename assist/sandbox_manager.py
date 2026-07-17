@@ -406,24 +406,39 @@ class SandboxManager:
         cls._containers.clear()
 
     @classmethod
-    def reap_orphans(cls) -> None:
-        """Kill every ``assist.sandbox`` container by DOCKER LABEL, not the
-        in-memory registry. After a web-process crash ``_containers`` is empty,
-        but the containers survive — and a ``docker exec``'d tool command keeps
-        running inside one, mutating the host-bind-mounted /workspace that a
-        recovery resume's FRESH container mounts too, for up to the 3h backstop
-        TTL. Startup recovery calls this before dispatching any resume so a
-        zombie writer can never share a workspace with a resumed turn.
-        Best-effort: docker being down must not block recovery (turns will fail
-        fail-fast on their own if docker stays down)."""
+    def reap_orphans(cls, root_dir: str) -> None:
+        """Kill THIS INSTANCE's surviving sandbox containers — by docker label
+        plus workspace mount, not the in-memory registry. After a web-process
+        crash ``_containers`` is empty, but the containers survive — and a
+        ``docker exec``'d tool command keeps running inside one, mutating the
+        host-bind-mounted /workspace that a recovery resume's FRESH container
+        mounts too, for up to the 3h backstop TTL. Startup recovery calls this
+        before dispatching any resume so a zombie writer can never share a
+        workspace with a resumed turn.
+
+        Scoped to containers whose /workspace bind-mount lives under
+        ``root_dir`` (this deployment's threads root): the label alone is
+        host-global, and prod + eval/dev sandboxes share ONE docker daemon on
+        this box — a bare-label reap would kill a concurrently running eval's
+        LIVE containers mid-turn. The mount filter needs no new create-time
+        labeling, so it also covers orphans from pre-existing code. Best-effort:
+        docker being down must not block recovery (turns fail fast on their own
+        if it stays down)."""
+        root = os.path.realpath(root_dir) + os.sep
         try:
             client = cls._get_docker_client()
-            orphans = client.containers.list(
+            candidates = client.containers.list(
                 filters={"label": "assist.sandbox=true"})
         except Exception as e:
             logger.warning("orphan-sandbox reap skipped (docker unavailable): %s", e)
             return
-        for container in orphans:
+        for container in candidates:
+            mounts = (container.attrs or {}).get("Mounts", [])
+            ours = any(m.get("Destination") == "/workspace"
+                       and os.path.realpath(m.get("Source", "")).startswith(root)
+                       for m in mounts)
+            if not ours:
+                continue
             try:
                 container.kill()
                 logger.info("Reaped orphaned sandbox %s", container.id[:12])

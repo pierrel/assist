@@ -169,12 +169,19 @@ def test_recovery_decision_matrix(wired, monkeypatch):
     # Durable HITL interrupt -> resume (it re-fires).
     snap_holder["snap"] = _snap(interrupts=(object(),))
     assert threads._recovery_decision(tid, "hello") == "resume"
-    # Turn completed before the kill -> finalize (containment: supersede prefix).
-    snap_holder["snap"] = _snap(messages=[HumanMessage("PREFIX hello"), AIMessage("hi")])
+    # Turn completed before the kill -> finalize. EXACT match only — as sent, or
+    # as the supersede fold checkpoints it (_SUPERSEDE_RIDER prefix)...
+    snap_holder["snap"] = _snap(messages=[
+        HumanMessage(threads._SUPERSEDE_RIDER + "hello"), AIMessage("hi")])
     assert threads._recovery_decision(tid, "hello") == "finalize"
-    # Message never reached the checkpoint -> redispatch. The duplicate-text trap:
-    # an OLDER "ok" in history must NOT read as this turn's — but state decides
-    # first: with no pending superstep and no match on the LATEST human, redispatch.
+    # ...but a pending that merely appears inside/at-the-end of the PREVIOUS
+    # turn's message (crash pre-input-checkpoint) must NOT finalize — that would
+    # silently drop the message.
+    snap_holder["snap"] = _snap(messages=[HumanMessage("ok, book it"), AIMessage("hi")])
+    assert threads._recovery_decision(tid, "ok") == "redispatch"
+    snap_holder["snap"] = _snap(messages=[HumanMessage("can you book it"), AIMessage("hi")])
+    assert threads._recovery_decision(tid, "book it") == "redispatch"
+    # Message never reached the checkpoint at all -> redispatch.
     snap_holder["snap"] = _snap(messages=[HumanMessage("ok"), AIMessage("done"),
                                           HumanMessage("different")])
     assert threads._recovery_decision(tid, "ok") == "redispatch"
@@ -186,6 +193,22 @@ def test_recovery_decision_matrix(wired, monkeypatch):
 
 # --- _recover_thread: exactly-once end-to-end ---------------------------------
 
+def _drain_worker_queue(calls_expected_tid):
+    """Run any turn jobs the recovery submitted to the serial worker, the way
+    _ResumeScheduler._loop would (synchronously, in order)."""
+    while True:
+        try:
+            it = threads._RESUME_SCHEDULER._q.get_nowait()
+        except Exception:
+            return
+        assert it["tid"] == calls_expected_tid
+        threads._process_message(it["tid"], it["text"], rider=it["rider"],
+                                 sender=it["sender"], resume=it["resume"],
+                                 accumulated_active_ms=it["acc"],
+                                 pending_text=it["pending"],
+                                 backlog_id=it.get("backlog_id"))
+
+
 def test_recover_redispatches_head_and_drains_backlog_in_order(wired, monkeypatch):
     tid, _ = wired
     calls = []
@@ -196,9 +219,48 @@ def test_recover_redispatches_head_and_drains_backlog_in_order(wired, monkeypatc
     MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="f2"))
 
     threads._recover_thread(tid)
+    # The head ran inline; the follow-ups were SUBMITTED to the serial worker
+    # (behind any resume the head might have re-queued) — run them as the worker.
+    _drain_worker_queue(tid)
 
     assert calls == [("message", "head"), ("message", "f1"), ("message", "f2")]
     assert MESSAGE_BACKLOG.for_thread(tid) == []   # each entry claimed exactly once
+
+
+def test_duplicate_dispatchers_deliver_exactly_once(wired, monkeypatch):
+    """The exactly-once gate: a live job submitted during recovery and the
+    recovery drain can BOTH target the same journal entry — whichever runs second
+    must find the entry claimed and skip, not run a second turn."""
+    tid, _ = wired
+    calls = []
+    _wire_chat(monkeypatch, tid, calls)
+    rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="once"))
+
+    threads._process_message(tid, "once", backlog_id=rec.id)   # first dispatcher
+    threads._process_message(tid, "once", backlog_id=rec.id)   # duplicate
+
+    assert calls == [("message", "once")]          # exactly one turn ran
+
+
+def test_journal_only_recovery_skips_head_and_stays_healthy(wired, monkeypatch):
+    """A ready thread with surviving follow-ups (crash after the head turn
+    finished): recovery must NOT touch the head — no resume, no spurious
+    'could not be recovered' error — just submit the journaled follow-ups."""
+    tid, _ = wired
+    calls = []
+    _wire_chat(monkeypatch, tid, calls)
+    decisions = []
+    monkeypatch.setattr(threads, "_recovery_decision",
+                        lambda t, p: decisions.append(t) or "resume")
+    _set_status(tid, "ready")
+    MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="leftover"))
+
+    threads._recover_thread(tid)
+
+    assert decisions == []                          # head decision never ran
+    assert _get_status(tid)["stage"] == "ready"     # no error banner
+    _drain_worker_queue(tid)
+    assert calls == [("message", "leftover")]
 
 
 def test_recover_resumes_and_preserves_triage_sender(wired, monkeypatch):
@@ -276,14 +338,9 @@ def test_lifespan_rewrites_busy_to_paused_and_enqueues_recovery(wired, monkeypat
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_recover",
                         lambda t: recovered.append(t))
 
-    # The lifespan's recovery block, run directly (the full lifespan needs the app).
-    from manage.web import state as st_mod
-    for t in web.MANAGER.list():
-        status = _get_status(t)
-        if status.get("stage") in st_mod.BUSY_STAGES:
-            _set_status(t, "paused",
-                        **{k: v for k, v in status.items() if k != "stage"})
-            threads.submit_recovery(t)
+    # The REAL scan the lifespan calls (extracted so this test can't drift from it).
+    from manage.web.state import _recover_interrupted_threads
+    _recover_interrupted_threads()
 
     st = _get_status(tid)
     assert st["stage"] == "paused"
@@ -362,8 +419,14 @@ def test_corrupt_backlog_is_loud_not_silent(tmp_path, caplog):
     with caplog.at_level(_logging.ERROR):
         assert store.for_thread("t1") == []
     assert any("unreadable" in r.message for r in caplog.records)
-    # left for inspection, not overwritten
-    assert (tmp_path / "t1" / "pending_messages.json").read_text() == '[{"truncated'
+    # Moved aside for inspection — a later add()'s read-modify-write would
+    # otherwise replace the corrupt file and destroy the evidence.
+    assert (tmp_path / "t1" / "pending_messages.json.corrupt").read_text() \
+        == '[{"truncated'
+    assert not (tmp_path / "t1" / "pending_messages.json").exists()
+    # And a follow-up add works cleanly after the move-aside.
+    store.add(PendingMessage(thread_id="t1", text="after"))
+    assert [r.text for r in store.for_thread("t1")] == ["after"]
 
 
 def test_claim_is_idempotent(tmp_path):
@@ -373,3 +436,41 @@ def test_claim_is_idempotent(tmp_path):
     store.claim("t1", rec.id)
     store.claim("t1", rec.id)          # double-claim: no raise
     assert store.for_thread("t1") == []
+
+
+def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
+    """The un-mocked contended-lock test (repo rule: exercise the risk, don't mock
+    it): hold the journal store's lock in another thread while a busy-thread POST
+    is in flight. The POST's append must run OFF the event loop (private
+    CapacityLimiter), so the loop stays live — a concurrent GET completes promptly
+    while the POST is still blocked on the lock."""
+    import threading as _threading
+    import time as _time
+    from fastapi.testclient import TestClient
+
+    tid, _ = wired
+    _set_status(tid, "processing", pending_message="head")
+    monkeypatch.setattr(threads.BackgroundTasks, "add_task",
+                        lambda self, fn, *a, **k: None)
+
+    client = TestClient(web.app)      # one portal = one event loop for both requests
+    MESSAGE_BACKLOG._lock.acquire()
+    post_done = _threading.Event()
+    try:
+        t = _threading.Thread(
+            target=lambda: (client.post(f"/thread/{tid}/message",
+                                        data={"text": "follow-up"},
+                                        follow_redirects=False),
+                            post_done.set()),
+            daemon=True)
+        t.start()
+        _time.sleep(0.3)
+        assert not post_done.is_set(), "POST should be blocked on the held store lock"
+        start = _time.monotonic()
+        status = client.get(f"/thread/{tid}/status")
+        elapsed = _time.monotonic() - start
+        assert status.status_code == 200
+        assert elapsed < 2.0, f"loop blocked: GET took {elapsed:.1f}s under a held store lock"
+    finally:
+        MESSAGE_BACKLOG._lock.release()
+    assert post_done.wait(5.0), "POST must complete once the lock is released"

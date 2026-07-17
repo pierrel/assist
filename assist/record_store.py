@@ -1,5 +1,5 @@
-"""Per-thread JSON record store — the disk-is-truth persistence shared by schedules and
-message-event subscriptions.
+"""Per-thread JSON record store — the disk-is-truth persistence shared by schedules,
+message-event subscriptions, and the pending-message backlog.
 
 Each thread's records live in ``<root_dir>/<tid>/<FILENAME>`` (atomic tmp+rename, like
 ``status.json``), so they survive restart and die with the thread via the thread dir's

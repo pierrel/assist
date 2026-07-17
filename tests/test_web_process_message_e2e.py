@@ -342,7 +342,7 @@ def test_post_message_writes_busy_status_synchronously(client, monkeypatch):
         threads.THREAD_QUEUE, "peek_holder", lambda: "other-thread",
     )
     monkeypatch.setattr("manage.web.threads._process_message",
-                        lambda tid, text, rider=None: None)
+                        lambda tid, text, rider=None, backlog_id=None: None)
 
     r = client.post(
         "/thread/thread-e2e/message",
