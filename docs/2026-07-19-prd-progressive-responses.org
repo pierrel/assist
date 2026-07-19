@@ -1,0 +1,148 @@
+#+title: PRD — Progressive responses: answer now, keep working
+#+date: <2026-07-19>
+#+author: product requirements (for review) — companion: 2026-07-19-prd-mid-turn-interjection.org
+
+* Problem
+
+The agent's turn model is all-or-nothing: one user message, one (eventually)
+complete answer. When a request fans out into fast local work and slow external
+work, the fast results are held hostage by the slow ones.
+
+Motivating example (thread =20260719093654-420cc404=, first turn): "Are there
+any bicycle parts or accessories that I need?" The agent dispatched the
+context-agent (search my files) AND the research-agent (search the web) in
+parallel, then synthesized one combined answer. Total wait: *34 minutes*. The
+context-agent's findings — my own =bike.org= listing the front light and the
+specific part I'd already noted — were available within the first couple of
+minutes and would have been immediately useful. The research added value but
+did not deserve to gate the part I already had.
+
+The conversation should feel like talking to a competent assistant: they tell
+you what they know now, tell you what they're going to go find out, and come
+back when they have it.
+
+* Product behavior
+
+When a turn involves both quickly-available results and slower follow-on work,
+the agent:
+1. Completes the fast work and *responds with those results immediately*, in a
+   normal assistant message.
+2. Says explicitly what it will do next ("I'll do some additional research to
+   see what else you might need — I'll follow up here.").
+3. Continues the slow work *in the background* — the thread is not blocked; the
+   user can read, leave, or send a new message.
+4. Delivers the follow-on results as a *new assistant message on the same
+   thread* when done, marked so the user notices it landed (the existing
+   unseen-response badge).
+
+* User stories
+
+** US-1: Fast results first (the bike story)
+As Pierre, when I ask a question that my own files partly answer, I want the
+agent to give me the from-your-files answer as soon as it has it, and tell me
+research is continuing — so that I can act on what I already own without
+waiting half an hour.
+- GIVEN a request the agent plans to serve with a context lookup plus research
+- WHEN the context lookup completes
+- THEN an assistant message with the context-derived answer appears, ending
+  with a short, concrete statement of what background work continues
+- AND the research results arrive later as a separate assistant message
+- AND the combined latency to the FIRST useful message is bounded by the fast
+  path alone (minutes, not the research's tens of minutes).
+
+** US-2: The thread stays alive during background work
+As Pierre, after receiving the first partial answer, I want the thread to be
+usable — reading history, opening files, sending a new message — so that the
+background research doesn't hold the conversation hostage.
+- GIVEN a turn that returned intermediate results with background work running
+- WHEN I open the thread
+- THEN I see the partial answer as a completed message plus a visible, honest
+  indicator that follow-up work is still running ("researching — will follow
+  up"), not a generic spinner
+- AND if I send a new message, it is accepted (per the existing queueing rules;
+  see the interjection PRD for steering the background work itself).
+
+** US-3: The follow-up lands loudly, not silently
+As Pierre, when the background work completes, I want the result delivered
+where I asked the question, flagged as new — so that I don't have to poll the
+thread to know the research finished.
+- GIVEN background work completes (successfully or not)
+- WHEN I next look at the thread list
+- THEN the thread carries the unseen-response badge, and the new assistant
+  message reads as a continuation ("Following up on the research…"), not a
+  non-sequitur
+- AND if the background work FAILED, the follow-up message says so honestly
+  ("I wasn't able to complete the research: …") — silence is not an outcome.
+
+** US-4: The split is judged, not mechanical
+As Pierre, I want the agent to split only when splitting helps — so that quick
+turns don't get chattier and slow-but-atomic turns don't return a useless "I'm
+working on it" stub.
+- GIVEN a request that is fast end-to-end (a single lookup, a file edit)
+- THEN the agent answers in one message as today (no forced split)
+- GIVEN a request where the whole value is in the slow work (pure research)
+- THEN the agent MAY send a brief acknowledgment with an honest ETA feel, but
+  never a content-free partial that merely restates the question
+- AND the first message must stand on its own: correct, useful, and clearly
+  scoped ("from your files…"), never speculation to fill space.
+
+** US-5: Multiple stages degrade gracefully
+As Pierre, when the slow work itself has stages (research, then geocoding, then
+a map), I want at most a few well-chosen messages, not a play-by-play — so that
+progressive delivery reads as helpfulness, not noise.
+- GIVEN a turn with several sequential background stages
+- THEN the agent groups them into at most ~2 follow-up messages per turn
+  (first-results + final), unless a stage produces something independently
+  actionable.
+
+* Non-goals (v1)
+
+- Token-level streaming of the in-progress answer into the web UI (separate,
+  purely-rendering concern; emacsos already streams over its own channel).
+- Parallel background turns racing each other on one thread — background work
+  serializes through the existing queue like everything else.
+- Changing the eval contract for existing single-answer behaviors: turns that
+  don't split must behave exactly as today.
+- Cross-thread fan-out (the background work posts back only to its own thread).
+
+* Intersections with existing machinery (constraints, not design)
+
+- *The single LLM slot & fair scheduling*: background work competes for the
+  same =--parallel 1= slot; the quantum pause already arbitrates. A background
+  continuation must be a good citizen (pausable, queued, capped) — it is, if it
+  rides the existing turn machinery rather than a new execution path.
+- *Delivery & badges*: the geo feature already solved "background job finishes
+  → message lands on the thread + unseen badge + urgent" (completion delivery,
+  restart-held retries). The follow-up delivery should feel identical.
+- *Durability (#197, merged)*: a restart must not orphan promised background
+  work — "I'll follow up" is a commitment; the continuation must be recoverable
+  the way queued messages now are, or the failure surfaced (US-3).
+- *Queued-messages UI (PR #196, open design)*: the "follow-up pending" indicator
+  and #196's queued-message bubbles are siblings in one visual language for
+  "this thread has more coming" — the designs should land coherently.
+- *Small-model reality*: Qwen3.6's proactive behaviors move on structural
+  levers, not prose (the auto-map lesson). Expect the split decision to need a
+  structural expression (how the turn/sub-agent graph is shaped), not a prompt
+  nudge — and expect eval-first development with partial pass rates.
+- *emacsos*: the phone consumes assist through the embedder contract; follow-up
+  messages must arrive as ordinary channel messages there (no web-only path).
+
+* Success measures
+
+- The bike-story shape (context + research): time-to-first-useful-message drops
+  from ~34 min to the context path's latency (target: under ~3 min), measured
+  on a captured eval of that turn shape.
+- Zero "silent stall" outcomes: every "I'll follow up" is eventually followed by
+  a follow-up or an honest failure message (evals assert the pair).
+- No regression in single-answer turns (existing eval suites stay at their
+  baselines).
+
+* Open questions for Pierre
+
+1. When you've already read the partial answer and the research lands, should
+   the follow-up push a notification (the notify tool / PWA badge), or is the
+   unseen badge enough?
+2. Is one background continuation per turn enough for v1 (US-5 caps at ~2
+   follow-ups), or do you want chained continuations?
+3. Should the agent ask before starting long background work it *invented*
+   (research you didn't explicitly request), or always proceed and follow up?

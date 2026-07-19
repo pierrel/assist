@@ -1,0 +1,154 @@
+#+title: PRD — Mid-turn interjection: steer work in flight
+#+date: <2026-07-19>
+#+author: product requirements (for review) — companion: 2026-07-19-prd-progressive-responses.org
+
+* Problem
+
+Once a turn is running, the user is locked out. A message sent to a busy thread
+becomes a *separate follow-up turn* that runs only after the current turn
+finishes (durably queued since #197, soon visible per PR #196) — it can never
+influence the work in flight. If the agent is 5 minutes into researching the
+wrong thing, the choices today are: wait it out, or let two turns burn the LLM
+slot back-to-back.
+
+A natural conversation allows interjection: "actually, only look at road
+bikes", "skip the research, the files answer is enough", "also check tubeless
+options while you're at it". The main loop should *see* the interjection at its
+next opportunity and decide — change direction, fold it in, or finish what it's
+doing and address it after.
+
+* Product behavior
+
+When the user sends a message while a turn is running on that thread:
+1. The message is accepted and durably recorded (as today, via the journal).
+2. The *running turn* is made aware of it at its next safe decision point —
+   not after it finishes.
+3. The agent decides, visibly, what to do with it:
+   - *Redirect*: abandon or reshape the remaining work ("Switching to road
+     bikes only.")
+   - *Incorporate*: fold the addition into the in-flight work ("I'll include
+     tubeless options in the research.")
+   - *Defer*: finish the current work first, then handle it as its own turn
+     ("I'll finish the current lookup, then get to that.") — i.e., today's
+     queueing becomes a *choice* rather than the only possibility.
+4. The user can tell, from the thread, that the interjection was *seen* (vs
+   still queued unseen) and which of the three happened.
+
+* User stories
+
+** US-1: Course-correct a running research turn
+As Pierre, when I realize mid-turn that the agent is researching the wrong
+thing (or something I no longer need), I want to say so and have the running
+turn change course — so that I don't wait out a long wrong answer and pay for a
+second turn to fix it.
+- GIVEN a turn is mid-research and I send "actually just tell me what's in my
+  files, skip the web research"
+- WHEN the turn reaches its next decision point
+- THEN it stops the remaining research and completes with the files answer
+- AND the final message acknowledges the redirect explicitly.
+
+** US-2: Add scope without restarting
+As Pierre, when I remember an addition mid-turn ("also check what tires fit"),
+I want it folded into the work in flight — so that one turn produces one
+coherent answer instead of two overlapping ones.
+- GIVEN a turn is mid-flight and my interjection is additive and compatible
+- THEN the remaining work incorporates it and the final answer covers both
+- AND nothing already-completed is redone from scratch.
+
+** US-3: The agent may sensibly decline to swerve
+As Pierre, I want the agent to defer my interjection when swerving would waste
+nearly-finished work — so that interjection is steering, not a footgun.
+- GIVEN a turn that is nearly complete when my interjection arrives
+- THEN the agent may finish and then address the interjection as its own turn
+- AND the thread shows that choice ("Finishing the current answer first — your
+  follow-up is next."), so deferral is visible, never silent.
+
+** US-4: I can see whether I was heard
+As Pierre, after interjecting, I want the thread to show my message's state —
+seen-and-redirecting / seen-and-incorporated / seen-and-deferred / not yet
+seen — so that I'm not left wondering whether to repeat myself.
+- GIVEN I interject during a running turn
+- WHEN I look at the thread
+- THEN my message renders immediately (per PR #196's queued-bubble language)
+  and transitions to a "seen" presentation once the turn consumes it
+- AND if the turn finishes without consuming it (it ran as a normal follow-up
+  turn instead), that is indistinguishable from today's behavior — never lost.
+
+** US-5: Interjections are safe under contention and restart
+As Pierre, I want interjections to obey the same durability and ordering rules
+as everything else — so that steering never costs correctness.
+- GIVEN an interjection is recorded and the server restarts before it is seen
+- THEN it survives (journal) and is handled after recovery — as an interjection
+  if the turn resumes, as a follow-up turn otherwise
+- AND an interjection can never cause the mid-flight-checkpoint corruption the
+  queueing rules exist to prevent (it rides the same safe injection points).
+
+** US-6: Stop means stop
+As Pierre, the simplest interjection is "stop / never mind" — I want it honored
+promptly — so that I can cancel work I no longer want without waiting for it to
+finish being wrong.
+- GIVEN a running turn and my message "stop" (or equivalent)
+- THEN the turn winds down at the next decision point with a short
+  acknowledgment (no long synthesis of abandoned work)
+- AND the thread returns to ready, usable immediately.
+
+* Non-goals (v1)
+
+- Hard preemption (killing a turn mid-tool-call instantly); interjections take
+  effect at safe boundaries — "promptly", not "instantaneously". The existing
+  fail-fast caps still govern runaways.
+- Editing/retracting an interjection after it is seen.
+- Interjecting into another thread's turn (same-thread only).
+- Voice/emacsos-specific input affordances (the phone sends messages through
+  the same channel; the behavior applies, the UI work here is web-first).
+
+* Intersections with existing machinery (constraints, not design)
+
+- *The follow-up journal (#197, merged)*: the interjection channel already
+  exists as the durable message backlog — today it feeds post-turn follow-up
+  turns. This feature is about letting the RUNNING turn consume a journaled
+  message at a safe point, with "run as a follow-up turn" remaining both the
+  fallback (unseen by turn end) and the deferral outcome (US-3). Exactly-once
+  rules (claim semantics) must hold whichever path consumes it.
+- *Safe boundaries exist already*: the fair-scheduling machinery pauses turns
+  cooperatively at superstep boundaries with a durable checkpoint; the
+  supersede flow already folds a newer message into an interrupted reply.
+  Those are the natural "next decision point" hooks — the PRD requires only
+  that such points exist frequently enough to make steering feel responsive
+  (a boundary every LLM call, not every ten minutes).
+- *Queued-messages UI (PR #196, open design)*: US-4's seen/queued distinction
+  extends #196's bubble language; the two should be designed as one vocabulary
+  (queued → seen → redirect/incorporate/defer).
+- *Small-model reality*: the redirect/incorporate/defer decision is the
+  small model reading an injected message mid-context — expect this to need
+  structural support (how the interjection is presented in state) and
+  eval-first tuning; prose-only steering guidance historically underperforms.
+- *HITL/approval flows*: an interjection while a reply awaits approval already
+  has semantics (supersede). This feature must not create a second, conflicting
+  path — one interjection story across processing and awaiting_approval.
+- *Progressive responses (companion PRD)*: an interjection during a background
+  continuation should steer or cancel that continuation the same way
+  (US-1/US-6 apply to background work identically).
+
+* Success measures
+
+- A steering eval suite: for each of redirect / incorporate / defer / stop, the
+  turn's final output reflects the interjection appropriately at a stable pass
+  rate, with zero lost messages across N trials (the message either shaped the
+  turn or ran as a follow-up — asserted mechanically).
+- Median time from interjection to visible acknowledgment bounded by one LLM
+  call/tool round-trip, not by turn length — measured in the eval.
+- No regression in the queueing/durability suites (the interjection path
+  degrades to today's behavior when unconsumed).
+
+* Open questions for Pierre
+
+1. Default bias: when in doubt, should the agent lean *redirect* (your latest
+   word wins) or *defer* (protect in-flight work)? My read of your usage says
+   redirect, but it changes the feel a lot.
+2. Should "stop" discard the partial work silently, or always leave a one-line
+   summary of what was done before stopping?
+3. Do interjections apply to SMS-triage turns too (an inbound text steering a
+   running triage turn), or web-only for v1?
+4. One interjection at a time, or should rapid multiple interjections coalesce
+   (the model sees all unconsumed ones at the next boundary)?
