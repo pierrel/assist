@@ -1,18 +1,22 @@
-"""Durable follow-up message backlog — messages accepted while a thread is busy.
+"""Durable pending-work journal — the thread's job queue.
 
-A follow-up sent to a busy thread used to live only in-memory (a parked
-BackgroundTask waiter, or the resume scheduler's queue) — a web restart silently
-dropped it. Each such message is now journaled to
-``<root_dir>/<tid>/pending_messages.json`` at submit and removed (claimed, by
-id) when its turn actually starts, so at every instant it is durable in at
-least one place: this journal while waiting, ``status.json``'s
-``pending_message`` once its turn runs. Startup recovery re-dispatches whatever
-is still journaled, in submit order. See
-``docs/2026-07-13-durable-message-queue.org``.
+An entry is a turn that has been accepted but not yet started. Two origins:
+- ``origin=None`` — a USER follow-up sent while the thread was busy (used to
+  live only in-memory; a restart silently dropped it).
+- ``origin="continuation"`` — AGENT-scheduled background work (the
+  ``continue_later`` tool; docs/2026-07-19-progressive-responses-design.org),
+  bounded by the 5-per-user-message chain cap enforced at that tool.
+
+Entries live in ``<root_dir>/<tid>/pending_messages.json``, journaled before
+the accepting call returns and removed (claimed, by id) when the turn actually
+starts — so at every instant the work is durable in at least one place: this
+journal while waiting, ``status.json``'s ``pending_message`` once it runs.
+Startup recovery re-dispatches whatever is still journaled, in submit order.
+See ``docs/2026-07-13-durable-message-queue.org`` (durability/recovery) and the
+blank-slate assessment doc (this journal is the nascent job queue).
 
 The first message of an idle thread is NOT journaled — ``_mark_pending`` makes
-it durable in ``status.json`` before the POST returns; the journal is
-follow-ups only.
+it durable in ``status.json`` before the POST returns.
 """
 from __future__ import annotations
 
@@ -35,21 +39,24 @@ class PendingMessageNotFound(RecordNotFound):
 
 @dataclass
 class PendingMessage:
-    """One accepted-but-not-yet-started follow-up. ``rider`` holds the four raw
-    submit-form fields (sent_at/tz/lat/lon) so recovery rebuilds the ContextRider
-    with the existing ``_build_rider``; ``sender`` is set for inbound-SMS
-    follow-ups (it decides triage on re-dispatch)."""
+    """One accepted-but-not-yet-started unit of work. ``rider`` holds the four
+    raw submit-form fields (sent_at/tz/lat/lon) so recovery rebuilds the
+    ContextRider with the existing ``_build_rider``; ``sender`` is set for
+    inbound-SMS follow-ups (it decides triage on re-dispatch); ``origin`` is
+    ``None`` for a user follow-up or ``"continuation"`` for agent-scheduled
+    background work (render + dispatch key on it)."""
     thread_id: str
     text: str
     sender: str | None = None
     rider: dict | None = None
     enqueued_at: str = ""
+    origin: str | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def to_dict(self) -> dict:
         return {"id": self.id, "thread_id": self.thread_id, "text": self.text,
                 "sender": self.sender, "rider": self.rider,
-                "enqueued_at": self.enqueued_at}
+                "enqueued_at": self.enqueued_at, "origin": self.origin}
 
     @staticmethod
     def from_dict(d: dict) -> "PendingMessage":
@@ -57,14 +64,17 @@ class PendingMessage:
             thread_id=str(d.get("thread_id", "")), text=str(d.get("text", "")),
             sender=d.get("sender") or None, rider=d.get("rider") or None,
             enqueued_at=str(d.get("enqueued_at", "")),
+            origin=d.get("origin") or None,
             id=str(d.get("id") or uuid.uuid4().hex))
 
 
 class MessageBacklog(PerThreadJsonStore[PendingMessage]):
-    """Disk-backed follow-up journal. ``root_dir`` is the thread root
-    (``MANAGER.root_dir``), matching ScheduleStore/SubscriptionStore. Uncapped on
-    purpose: inflow is human-paced, and an over-cap behavior would mean refusing
-    a user's message."""
+    """Disk-backed pending-work journal (see the module docstring for the two
+    origins). ``root_dir`` is the thread root (``MANAGER.root_dir``), matching
+    ScheduleStore/SubscriptionStore. No store-level cap: USER follow-ups are
+    human-paced and refusing one would mean 500ing a message, while the
+    model-authored continuation inflow is bounded upstream by ``continue_later``'s
+    5-per-user-message chain cap (the tool is the only continuation writer)."""
 
     FILENAME = BACKLOG_FILE
     NOTFOUND_EXC = PendingMessageNotFound

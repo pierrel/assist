@@ -32,6 +32,7 @@ from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.notify import notify_tools
+from assist.events.continuations import continuation_tools
 from assist.events.inbound import InboundLog
 from assist.backlog import MessageBacklog
 from assist.geo.catalog import Catalog
@@ -142,8 +143,27 @@ GEO_CSRF = secrets.token_urlsafe(16)
 _geo_tools = (geo_tools(GEO_REGISTRY, GEO_CATALOG, GEO_PROPOSALS)
               if GEO_DIR else [])
 
+# continue_later (progressive responses): callbacks live in threads.py beside the
+# dispatch machinery, so the lambdas DEFER the import to tool-call time (the notify
+# pattern — threads.py imports this module, a top-level import here would cycle).
+# NORMAL tool set only, never triage: an untrusted inbound SMS must not be able to
+# schedule agent-invented background work.
+
+
+def _continuation_journal(tid, task):
+    from manage.web.threads import _journal_continuation
+    _journal_continuation(tid, task)
+
+
+def _continuation_chain(tid):
+    from manage.web.threads import _continuation_chain_len
+    return _continuation_chain_len(tid)
+
+
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
-              + notify_tools(lambda tid: _mark_urgent(tid)) + _geo_tools)
+              + notify_tools(lambda tid: _mark_urgent(tid))
+              + continuation_tools(_continuation_journal, _continuation_chain)
+              + _geo_tools)
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")
