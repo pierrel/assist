@@ -155,6 +155,33 @@ user-submit, recovery of a journaled continuation, render keying (agent-note
 not user bubble; list badge; origin-aware error + unseen), marker round-trip.
 Cadence: baseline N=3 → post-impl N=3 → N=5 → N=10.
 
+* Why not deepagents' own async mechanism (Pierre's question, examined)
+
+deepagents 0.6.1 ships =AsyncSubAgentMiddleware= (=middleware/async_subagents.py=)
+— =start_async_task= / =check_async_task= / =update_async_task= tools that
+launch a subagent as a background run. The right *shape*, rejected for this
+deployment on three structural grounds:
+1. *Requires a remote server*: the subagent must be a deployed graph on a
+   LangGraph Platform / self-hosted langgraph server reached via
+   =langgraph_sdk= — a new always-on service and a SECOND execution path with
+   its own persistence and recovery semantics, exactly what #197 unified away.
+2. *Bypasses the slot machinery*: a remote background run hits the same
+   =--parallel 1= llama.cpp endpoint CONCURRENTLY with foreground turns,
+   outside THREAD_QUEUE — KV-affinity thrash and unfairness by construction
+   (the queue exists because interleaved agents pay O(T²) prefill).
+3. *Pull delivery vs the PRD's push*: its own prompt mandates "check once per
+   user request... if running, report and stop — do not poll". The follow-up
+   never LANDS unprompted; US-3's unseen-badge delivery would still require
+   building this design's entire dispatch/delivery/recovery layer on top.
+No lighter config exists: the built-in =task= tool is strictly blocking
+(=await subagent.ainvoke=), and langgraph's execution model keeps all work
+inside the graph run. So =continue_later= is not a reinvention — it is the
+~40-line adapter from the model's "answer now, continue later" decision to OUR
+turn machinery. Two things to carry forward: if assist ever runs multi-box,
+=AsyncSubAgentMiddleware= is the growth path; and its =update_async_task=
+(interrupt + re-instruct a running task) is validated prior art for the
+interjection design.
+
 * Cut from the v1 plan (design review)
 Engine module (→ notify-style factory) · =announce= arg (→ task doubles) ·
 counter sidecar + corrupt-handling (→ derived from checkpoint) · dispatcher cap

@@ -1,0 +1,119 @@
+#+title: Architecture assessment — blank slate vs incremental for full-duplex conversation
+#+date: <2026-07-19>
+#+author: analysis for Pierre's question: "what would this look like from scratch — is our architecture preventing something more generic?"
+
+* The blank-slate design (what the industry converged on)
+
+If we designed assist from zero today for progressive responses + interjection,
+the natural architecture is *thread-as-event-log + runs-as-jobs*:
+
+- A thread is an append-only event log (user messages, assistant messages,
+  tool events, job lifecycle events), not a linear request/response transcript.
+- A *run* (job) is a first-class resource decoupled from any HTTP request:
+  created, queued, executed by a scheduler, and able to APPEND messages to its
+  thread at any point — including before it finishes, and after the request
+  that spawned it is long gone.
+- Clients SUBSCRIBE (SSE/websocket) to the log; delivery is push.
+- User input is just another event append; running jobs observe new events at
+  step boundaries.
+
+In that world both PRDs are nearly free: progressive responses = a run that
+appends a message mid-run (or spawns a sibling run); interjection = an event
+the running job reads at its next boundary. This is precisely the model behind
+LangGraph Platform's runs API — which is why deepagents'
+=AsyncSubAgentMiddleware= exists and why it assumes such a server.
+
+* What in OUR architecture prevents the generic mechanism
+
+Three deliberate commitments — not accidents — make the turn the atom:
+
+1. *Checkpoint-as-conversation.* The langgraph checkpoint IS the thread; there
+   is no separate event log. A "response" is the final message of a completed
+   graph run. Nothing can append to a thread except a run, and langgraph's
+   execution model keeps all work inside a run (=invoke()= returns when the
+   graph completes; nothing outlives it).
+2. *Turn-atomic scheduling.* One GPU, =--parallel 1=: THREAD_QUEUE serializes
+   whole turns for KV-cache affinity and O(T) prefill; fairness is the
+   per-turn quantum; the 2h cap, the sandbox lifetime, and recovery semantics
+   are all per-turn. The turn is the unit of fairness AND containment.
+3. *Pull rendering.* The web UI renders the checkpoint + one status file, once
+   per page load. There is no push channel for "a message appeared".
+
+The generic mechanism assumes the opposite of all three. That is why adopting
+it isn't a configuration flag.
+
+* Are those commitments load-bearing, or historical baggage?
+
+Mostly load-bearing, for THIS deployment:
+
+- (2) is physics: one llama.cpp slot shared by everything. ANY architecture we
+  pick must serialize LLM work turn-ishly or pay O(T²) prefill thrash — a
+  langgraph server running "background runs" concurrently against our endpoint
+  would need a global slot semaphore bolted on, i.e. THREAD_QUEUE rebuilt
+  inside someone else's server. Fairness/affinity is OURS to own on this
+  hardware no matter what.
+- Sandbox-per-turn containment (the per-turn container == turn age invariant)
+  hangs off (2) and would be custom work in any runtime.
+- (1) is partly langgraph's model (runs don't outlive invoke anywhere) and
+  partly our simplicity choice: one durable truth, evals defined against it,
+  #197's recovery built on it. It costs us mid-run message delivery.
+- (3) is the most genuinely incidental of the three — a page that renders once
+  is just where the UI stopped, not a principle. An SSE/poll channel would not
+  violate anything.
+
+* The convergence observation (why the incremental path isn't a dead end)
+
+What we have been building the last two features IS the blank-slate design
+materializing incrementally inside those constraints:
+
+| Blank-slate concept        | Our incremental equivalent                     |
+|----------------------------+------------------------------------------------|
+| Durable job queue          | MESSAGE_BACKLOG journal (#197)                 |
+| Job scheduler              | _ResumeScheduler serial worker (#197)          |
+| Jobs spawning jobs         | continue_later → journaled continuation (this) |
+| Typed/attributed events    | origin field + marker prefix (this)            |
+| Crash-safe job recovery    | startup recovery (#197)                        |
+| Push delivery              | unseen badge (pull-ish; the gap that remains)  |
+| Observe-events-at-boundary | interjection PRD (next)                        |
+
+The journal is becoming the job table; the serial worker is becoming the
+scheduler. Each step has shipped value on its own and kept the single-process,
+one-truth, eval-tested properties. The endgame — if we keep walking — is that
+"turn" quietly generalizes to "job" without a rewrite.
+
+* The three options, priced
+
+1. *Incremental (current design)* — ship =continue_later= v1 (~a day of code:
+   40-line tool + dispatch + render keying), then interjection on the same
+   journal. Cost: each feature is an adapter into the turn machinery. Risk:
+   low; everything reuses tested paths.
+2. *Adopt langgraph server as the runtime* — runs-as-resources + async
+   middleware + SSE come free. Cost: a second always-on service with postgres;
+   the slot-fairness and sandbox layers REBUILT inside it (the hard 20% stays
+   ours); evals and #197's recovery semantics rewritten against a new
+   persistence; self-hosting/licensing surface. Rough order: weeks, for a
+   deployment of one user on one box. Rejected for now — it buys generality we
+   can't use before it buys back what we'd re-implement.
+3. *Blank-slate event-log refactor in-house* — introduce a thread event log +
+   push channel + job abstraction over the existing queue. This is the honest
+   "do it generically" middle path, and the convergence table shows we are ~60%
+   there. But done as a big-bang refactor it is exactly the second-execution-
+   path risk #197 killed. The right version of this option is: keep shipping
+   increments, and when the UI needs push (it will — US-2's live indicator and
+   interjection's "seen" feedback both want it), add the SSE/poll channel as
+   its own small feature. The "event log" may never need to exist as a separate
+   store: checkpoint + journal + status already partition the roles.
+
+* Recommendation
+
+Stay incremental (option 1), with two blank-slate-informed adjustments:
+- Treat the journal explicitly as the nascent JOB QUEUE in naming and docs
+  (origin-typed entries are job types), so each feature keeps converging
+  instead of accreting adapters.
+- Pull the push channel (SSE or light polling of a thread-events endpoint)
+  forward as a named small feature — it is the one incidental constraint (3)
+  whose removal makes progressive UX and interjection feedback natural, and it
+  is UI-only (no execution-model change).
+Re-evaluate option 2 only if the deployment shape changes (multi-box,
+multi-user, or a second model server) — the triggers are physical, not
+feature-driven.
