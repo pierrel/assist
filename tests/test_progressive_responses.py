@@ -278,8 +278,12 @@ def test_persisted_continuation_message_renders_as_agent_note(wired, monkeypatch
 
 def test_busy_banner_and_title_for_continuation_turn(wired, monkeypatch):
     from fastapi.testclient import TestClient
+    from manage.web import state as st_mod
     tid, _ = wired
     _wire_chat(monkeypatch, tid, [])
+    # The continuation title path reads the CACHE/file only (never the
+    # generating path — it runs on the loop while the slot is busy).
+    monkeypatch.setitem(st_mod.DESCRIPTION_CACHE, tid, "real description")
     R = threads._CONTINUATION_RIDER
     _set_status(tid, "processing", origin="continuation",
                 pending_message=R + "research bike accessories")

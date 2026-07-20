@@ -144,7 +144,7 @@ _geo_tools = (geo_tools(GEO_REGISTRY, GEO_CATALOG, GEO_PROPOSALS)
               if GEO_DIR else [])
 
 # continue_later (progressive responses): callbacks live in threads.py beside the
-# dispatch machinery, so the lambdas DEFER the import to tool-call time (the notify
+# dispatch machinery, so the deferred imports inside these defs resolve at tool-call time (the notify
 # pattern — threads.py imports this module, a top-level import here would cycle).
 # NORMAL tool set only, never triage: an untrusted inbound SMS must not be able to
 # schedule agent-invented background work.
@@ -577,9 +577,19 @@ def _thread_title(tid: str) -> str:
     if status.get("stage") in BUSY_STAGES:
         if status.get("origin") == "continuation":
             # A background follow-up turn: the pending text is the AGENT's task
-            # note, not the user's words — keep the thread's real description so
-            # the list row doesn't read as if the user asked something new.
-            return get_cached_description(tid)
+            # note, not the user's words — show the thread's real description.
+            # CACHE/FILE READ ONLY, never get_cached_description's generating
+            # path: this runs on the event loop while the single LLM slot is
+            # GUARANTEED busy (the continuation turn holds it) — a cache-miss
+            # generation here would park the whole server behind that turn.
+            if tid in DESCRIPTION_CACHE:
+                return DESCRIPTION_CACHE[tid]
+            try:
+                with open(os.path.join(MANAGER.thread_dir(tid),
+                                       "description.txt")) as f:
+                    return f.read()
+            except OSError:
+                return "Following up..."
         pending = (status.get("pending_message") or "").strip()
         if pending:
             short = pending.splitlines()[0]

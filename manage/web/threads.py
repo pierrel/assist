@@ -49,7 +49,7 @@ from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
 from assist.events.continuations import CHAIN_CAP
-from assist.events.thread_log import append_event, read_events
+from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.events.reply import SMS_SENDER_KEY
 from assist.schedule.scheduler import Scheduler
@@ -1054,7 +1054,9 @@ def _continuation_chain_len(tid: str) -> int:
     checkpoint, newest-first until the first non-marker human message — a user
     or scheduled message breaks the run) plus journaled-but-unstarted
     continuations. Derived, so it cannot desync; raw checkpoint read (no agent
-    build, no model call). Unreadable state counts as cap-reached — fail closed."""
+    build, no model call). An unreadable CHECKPOINT counts as cap-reached —
+    fail closed (a corrupt journal degrades to zero pending, moved aside
+    loudly by the store)."""
     pending = sum(1 for r in MESSAGE_BACKLOG.for_thread(tid)
                   if r.origin == "continuation")
     try:
@@ -1104,15 +1106,32 @@ def _dispatch_continuations(tid: str, rider: ContextRider | None) -> None:
 
 
 def _clear_pending_continuations(tid: str) -> None:
-    """A USER message supersedes the agent's queued plan (redirect bias): remove
-    this thread's unclaimed continuation entries — the agent can re-schedule in
-    its answer if still warranted. The RUNNING turn is not preempted (that's the
+    """An OWNER message (never an untrusted inbound SMS — the caller gates on
+    sender) supersedes the agent's queued plan (redirect bias): remove this
+    thread's unclaimed continuation entries — the agent can re-schedule in its
+    answer if still warranted. The RUNNING turn is not preempted (that's the
     interjection feature); only not-yet-started work is cancelled."""
     for rec in MESSAGE_BACKLOG.for_thread(tid):
         if rec.origin == "continuation":
             MESSAGE_BACKLOG.claim(tid, rec.id)
             append_event(MANAGER.thread_dir(tid), "continuation_cancelled",
                          id=rec.id, reason="superseded by a user message")
+
+
+def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
+    """An erroring turn cancels the continuations IT journaled (entries not in
+    the turn-start snapshot): they have no dispatcher until the ready exit that
+    never came, so leaving them would strand a visible "will follow up" promise
+    until a surprise restart fire — the silent stall the PRD forbids. Returns
+    how many were cancelled so the error text can say so."""
+    n = 0
+    for rec in MESSAGE_BACKLOG.for_thread(tid):
+        if rec.origin == "continuation" and rec.id not in pre_turn_ids:
+            MESSAGE_BACKLOG.claim(tid, rec.id)
+            append_event(MANAGER.thread_dir(tid), "continuation_cancelled",
+                         id=rec.id, reason="the scheduling turn failed")
+            n += 1
+    return n
 
 
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
@@ -1144,12 +1163,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # the marker without carrying it: the prefix travels with the text into the
         # pending bubble, the checkpoint, and the chain-length derivation.
         text = _CONTINUATION_RIDER + text
-    if origin is None and text is not None and resume_decision is None and not resume:
-        # A genuine USER message (web/SMS/review — scheduled and geo turns pass
-        # origin="system") supersedes the agent's queued plan: clear unclaimed
-        # continuations (redirect bias; the agent can re-schedule in its answer).
-        # Off the loop here, so the store/event writes are safe.
-        _clear_pending_continuations(tid)
+    # A genuine OWNER message (web/review — NOT an untrusted inbound SMS: a
+    # spoofable sender must not be able to cancel promised work, and a
+    # reply-only triage turn couldn't re-schedule what it cleared) supersedes
+    # the agent's queued plan. The clear itself runs INSIDE the acquire below —
+    # serialized after any still-running turn's journal write, so a stale plan
+    # journaled while this message waited is cleared too (redirect bias).
+    _clears_plan = (origin is None and sender is None and text is not None
+                    and resume_decision is None and not resume)
     _pending_msg = text if text else pending_text
     pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
     # Persist the turn's sender + rider in EVERY busy status write, so a restart can
@@ -1176,6 +1197,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # The pending draft's sender, captured NOW before any _set_status below overwrites it —
     # used by the supersede path to decide whether a new message folds into the pending reply.
     prior_pending_sender = _get_status(tid).get("pending_sender") or ""
+
+    # Set inside the acquire (turn start); initialized here so the error
+    # handlers below can reference it even when the failure precedes the
+    # snapshot (e.g. a queue-wait timeout).
+    _pre_turn_conts: set = set()
 
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
@@ -1214,19 +1240,34 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # double-callback.
         with THREAD_QUEUE.acquire(tid, on_state_change=on_queue_wait,
                                   accumulated_active_ms=accumulated_active_ms):
-            if origin == "continuation" and MANAGER.get(
-                    tid, sandbox_backend=None).pending_reply():
-                # A HITL reply is awaiting approval. The supersede flow below exists
+            if _clears_plan:
+                _clear_pending_continuations(tid)
+            # Snapshot pre-existing continuation entries: ones THIS turn journals
+            # (the delta) have no dispatcher until the ready exit, so an error
+            # exit must cancel them (not strand a visible "will follow up"
+            # promise until a surprise restart fire) — while never touching
+            # pre-existing entries, which have live dispatchers of their own.
+            _pre_turn_conts.update(r.id for r in MESSAGE_BACKLOG.for_thread(tid)
+                                   if r.origin == "continuation")
+            if origin == "continuation" and not resume and resume_decision is None:
+                # A HITL reply awaiting approval: the supersede flow below exists
                 # for a NEWER USER message and would silently REJECT the pending
                 # draft — a continuation must never do that; nor may it run on the
                 # interrupted graph (langgraph would drop its message). Return
                 # WITHOUT claiming: the entry stays journaled and the approve/reject
                 # resume's own ready exit re-dispatches it. Safe from racing: a
                 # pending reply can only appear from a turn on THIS thread, and we
-                # hold the slot.
-                logging.info("continuation on %s deferred: a reply is awaiting "
-                             "approval", tid)
-                return
+                # hold the slot. (Resumes skip this check — a paused continuation
+                # must always be able to continue.)
+                try:
+                    _has_pending_reply = bool(
+                        MANAGER.get(tid, sandbox_backend=None).pending_reply())
+                except FileNotFoundError:
+                    return   # thread deleted while queued — silent skip like every path
+                if _has_pending_reply:
+                    logging.info("continuation on %s deferred: a reply is awaiting "
+                                 "approval", tid)
+                    return
             if backlog_id:
                 # Exactly-once gate: the journal entry is the run ticket. A message can
                 # acquire TWO dispatchers — its live-submitted job/task plus a recovery
@@ -1390,7 +1431,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # Enqueue the resume BEFORE advertising `paused`, so a new message that races in
         # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
         _RESUME_SCHEDULER.submit_resume(
-            tid, rider, sender, carry, pending_kwargs.get("pending_message"))
+            tid, rider, sender, carry, pending_kwargs.get("pending_message"),
+            origin=origin)
         # accumulated_active_ms rides the status write so a restart-recovered resume
         # keeps its 2h-cap accounting (the in-memory submit_resume above is lost with
         # the process; sender/rider are already in pending_kwargs). A crash of a
@@ -1408,11 +1450,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # turn's container; just drop the cached domain manager so a retry
         # re-checks cleanly instead of poking at the corpse of the old one.
         DOMAIN_MANAGERS.pop(tid, None)
+        _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
         _set_status(
             tid, "error",
             error=("The sandbox container for this thread was lost mid-run. "
                    "Your last message was not completed. Send the message "
-                   "again to retry in a fresh sandbox."),
+                   "again to retry in a fresh sandbox."
+                   + (" A follow-up this turn had scheduled was cancelled."
+                      if _cancelled else "")),
             **pending_kwargs,
         )
     except GraphRecursionError as e:
@@ -1421,15 +1466,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # transient fault, and retrying the same request would just run away
         # again — so suggest narrowing/splitting, NOT "send again to retry".
         logging.warning("Recursion limit hit for thread %s: %s", tid, e)
+        _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
         _set_status(
             tid, "error",
             error=("This request grew too large to complete — it hit the internal "
                    "step limit and was stopped. Try narrowing it or splitting it "
-                   "into smaller parts."),
+                   "into smaller parts."
+                   + (" A follow-up this turn had scheduled was cancelled."
+                      if _cancelled else "")),
             **pending_kwargs,
         )
     except Exception as e:
         logging.error("Message processing failed for thread %s: %s", tid, e, exc_info=True)
+        _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
         if origin == "continuation":
             # Origin-aware failure (US-3: silence is not an outcome): the generic
             # banner would misattribute ("Couldn't process your message" — the
@@ -1444,7 +1493,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                          error=str(e)[:300])
             _mark_unseen_response(tid)
         else:
-            _set_status(tid, "error", error=str(e), **pending_kwargs)
+            _set_status(tid, "error",
+                        error=str(e) + (" A follow-up this turn had scheduled "
+                                        "was cancelled." if _cancelled else ""),
+                        **pending_kwargs)
     finally:
         # Drain this turn's persisted active-hold on any TERMINAL exit (success/error)
         # so it can't leak — the pause path already popped it (to carry) and returned,
@@ -2095,11 +2147,16 @@ class _ResumeScheduler:
         self._thread.start()
 
     def submit_resume(self, tid: str, rider, sender, accumulated_active_ms: float,
-                      pending_text: str | None) -> None:
-        """Continue a paused turn from its checkpoint (input=None)."""
+                      pending_text: str | None,
+                      origin: str | None = None) -> None:
+        """Continue a paused turn from its checkpoint (input=None). ``origin``
+        MUST carry the paused turn's origin: a resumed continuation that lost it
+        would rebuild with the WRONG tool surface (door instead of
+        research-agent — unable to do its research, able to chain) and drop
+        every origin-keyed render/failure behavior."""
         self._q.put({"kind": "turn", "tid": tid, "text": None, "rider": rider,
                      "sender": sender, "resume": True, "acc": accumulated_active_ms,
-                     "pending": pending_text, "backlog_id": None})
+                     "pending": pending_text, "backlog_id": None, "origin": origin})
 
     def submit_message(self, tid: str, text: str, rider, sender,
                        backlog_id: str | None = None,

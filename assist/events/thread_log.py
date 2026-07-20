@@ -1,8 +1,9 @@
 """Per-thread durable event log — the job system's internal PUSH target.
 
 Runs push events here as they act (a continuation scheduled / dispatched /
-completed / failed); readers PULL on their own schedule — the web render on
-each page refresh, the CLI, recovery diagnostics. This is the "push
+completed / failed); readers PULL on their own schedule (currently offline
+diagnostics — ``read_events`` is the read API; the web render reads the
+journal + status directly today). This is the "push
 architecture with a pull UI" decision (docs/2026-07-19-blank-slate-assessment
 .org): event production is decoupled from run completion with zero UI push
 machinery. Division of truth: the checkpoint holds MESSAGES, the message

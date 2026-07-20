@@ -19,7 +19,9 @@ Wired like ``notify_tools``: thread-scoped via the run config, callbacks
 injected (this module never imports web state), NORMAL web tool set only —
 deliberately NOT the untrusted SMS-triage set (an inbound text must not be
 able to schedule agent-invented background work). Never raises into the agent
-loop — every outcome is a corrective/directive string.
+loop from its own logic — every outcome is a corrective/directive string
+(a store-level disk fault in an injected callback surfaces as a turn error,
+like any infrastructure failure).
 """
 from __future__ import annotations
 

@@ -371,9 +371,9 @@ def create_agent(model: BaseChatModel,
             description=(
                 "Delegate research to run AFTER this turn, in the background: "
                 "the research is performed later and its findings are posted to "
-                "this conversation as a follow-up message. Use this INSTEAD of "
-                "research-agent when the user already has a useful answer from "
-                "local context and the external lookup can follow up. The task "
+                "this conversation as a follow-up message. Use this instead of "
+                "researching synchronously in this turn, whenever the user "
+                "already has a useful answer from local context. The task "
                 "must be complete and self-contained — your future self will not "
                 "remember this turn's plan."),
             runnable=RunnableLambda(_background_research),
@@ -417,7 +417,6 @@ def create_agent(model: BaseChatModel,
             # and capability cannot skew.
             continue_later=any(
                 getattr(t, "__name__", None) == "continue_later"
-                or getattr(t, "name", None) == "continue_later"
                 for t in spec.tools),
         ),
         middleware=mw + [
