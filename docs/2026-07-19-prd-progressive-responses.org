@@ -34,6 +34,9 @@ the agent:
 4. Delivers the follow-on results as a *new assistant message on the same
    thread* when done, marked so the user notices it landed (the existing
    unseen-response badge).
+5. Never runs away with itself: at most *5 agent-initiated turns between user
+   messages* (a hard mechanical cap, per Pierre) — a chain that wants more ends
+   honestly and waits for the user.
 
 * User stories
 
@@ -124,8 +127,10 @@ progressive delivery reads as helpfulness, not noise.
   levers, not prose (the auto-map lesson). Expect the split decision to need a
   structural expression (how the turn/sub-agent graph is shaped), not a prompt
   nudge — and expect eval-first development with partial pass rates.
-- *emacsos*: the phone consumes assist through the embedder contract; follow-up
-  messages must arrive as ordinary channel messages there (no web-only path).
+- *Every client surface, not just web*: emacsos consumes assist through the
+  embedder contract and the CLI drives threads directly — follow-up messages
+  must arrive as ordinary thread messages on ALL of them (web UI, emacsos
+  channel, CLI); no web-only delivery path. (Pierre: the CLI path is important.)
 
 * Success measures
 
@@ -137,12 +142,16 @@ progressive delivery reads as helpfulness, not noise.
 - No regression in single-answer turns (existing eval suites stay at their
   baselines).
 
-* Open questions for Pierre
+* Decisions (resolved 2026-07-19, Pierre's review)
 
-1. When you've already read the partial answer and the research lands, should
-   the follow-up push a notification (the notify tool / PWA badge), or is the
-   unseen badge enough?
-2. Is one background continuation per turn enough for v1 (US-5 caps at ~2
-   follow-ups), or do you want chained continuations?
-3. Should the agent ask before starting long background work it *invented*
-   (research you didn't explicitly request), or always proceed and follow up?
+1. *Delivery loudness*: the unseen badge is enough. No notification changes
+   from this feature — whether something is urgent stays the agent's call via
+   the existing notify/urgent machinery, exactly as today.
+2. *Chaining*: chained continuations are allowed — with a *hard cap on
+   agent-initiated turns between user messages: 5*. The cap is a mechanical
+   bound (like recursion_limit), not guidance; hitting it ends the chain with
+   an honest "there's more to do — say the word" message. (US-5's ~2-message
+   grouping remains the taste target within that bound.)
+3. *No approval gate*: the agent starts invented background work (research the
+   user didn't explicitly request) without asking — start relaxed, tighten
+   later only if real usage shows over-eager background work.

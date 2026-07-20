@@ -83,13 +83,16 @@ as everything else — so that steering never costs correctness.
 - AND an interjection can never cause the mid-flight-checkpoint corruption the
   queueing rules exist to prevent (it rides the same safe injection points).
 
-** US-6: Stop means stop
-As Pierre, the simplest interjection is "stop / never mind" — I want it honored
-promptly — so that I can cancel work I no longer want without waiting for it to
-finish being wrong.
+** US-6: Stop means stop — but always account for what was done
+As Pierre, the simplest interjection is "stop / never mind" — I want future
+work halted promptly AND a brief account of what already happened — so that I
+can cancel without losing visibility into completed side effects (files
+written, messages sent).
 - GIVEN a running turn and my message "stop" (or equivalent)
-- THEN the turn winds down at the next decision point with a short
-  acknowledgment (no long synthesis of abandoned work)
+- THEN the turn stops future work at the next decision point and *always
+  returns a short summary of what was completed* before stopping (per Pierre:
+  never a silent discard — just no NEW work)
+- AND any background continuations (companion PRD) are cancelled the same way
 - AND the thread returns to ready, usable immediately.
 
 * Non-goals (v1)
@@ -101,6 +104,9 @@ finish being wrong.
 - Interjecting into another thread's turn (same-thread only).
 - Voice/emacsos-specific input affordances (the phone sends messages through
   the same channel; the behavior applies, the UI work here is web-first).
+  NOTE: SMS-triage turns ARE in scope (per Pierre) — an inbound text steers a
+  running triage turn the same way; only client-specific UI affordances are
+  deferred.
 
 * Intersections with existing machinery (constraints, not design)
 
@@ -141,14 +147,14 @@ finish being wrong.
 - No regression in the queueing/durability suites (the interjection path
   degrades to today's behavior when unconsumed).
 
-* Open questions for Pierre
+* Decisions (resolved 2026-07-19, Pierre's review)
 
-1. Default bias: when in doubt, should the agent lean *redirect* (your latest
-   word wins) or *defer* (protect in-flight work)? My read of your usage says
-   redirect, but it changes the feel a lot.
-2. Should "stop" discard the partial work silently, or always leave a one-line
-   summary of what was done before stopping?
-3. Do interjections apply to SMS-triage turns too (an inbound text steering a
-   running triage turn), or web-only for v1?
-4. One interjection at a time, or should rapid multiple interjections coalesce
-   (the model sees all unconsumed ones at the next boundary)?
+1. *Default bias: REDIRECT* — when in doubt, the user's latest word wins over
+   protecting in-flight work. Defer remains available where swerving would
+   clearly waste nearly-finished work (US-3), but the tie goes to redirect.
+2. *Stop semantics*: always return a brief account of what was completed; only
+   FUTURE work stops (no silent discard). Folded into US-6.
+3. *Scope*: applies to SMS-triage turns as well, not web-only. Folded into the
+   scope notes.
+4. *Coalescing*: rapid multiple interjections COALESCE — the model sees all
+   unconsumed interjections at the next boundary, not one at a time.
