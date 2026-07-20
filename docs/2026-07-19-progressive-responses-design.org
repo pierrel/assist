@@ -121,6 +121,33 @@ messages, enforced at the tool (the only writer), counted at journal time.
   bottom-band error is the "silent stall" the PRD forbids). Soft failures are
   prompt-mandated honest text in the follow-up message itself.
 
+** AS BUILT (2026-07-19, eval-driven deviation from the plan below)
+
+The pre-named escalation ladder ran, one change at a time: prose guidance 0/3 →
+the =continue_later= tool verb alone 0/4 (the model never chose the novel
+proactive verb) → a =background-research-agent= subagent "door" WITH the
+habitual research-agent still registered 0/3 (the model kept dispatching sync
+research — delegation habits are immovable, per the standing memory) → *the
+lever that worked: tool-list construction*. When the spec carries
+=continue_later=, the fast turn's agent registers the background door *instead
+of* the synchronous research-agent — the model's research habit lands on the
+only research-shaped affordance, which journals the continuation and directs
+it to answer now. 3/3 focal eval; no-split guard holds; first useful answer
+~55s (was 34 min).
+
+Consequences vs the plan:
+- The =continue_later= TOOL remains the mechanism (cap, journal, corrective
+  strings) but the model reaches it through the door subagent, not directly.
+- *US-4 change*: a PURELY-external request also goes background — the turn
+  answers with an honest "looking into it — results will follow" and the
+  research follows up. (The plan kept sync research for that case; with the
+  lever, sync research doesn't exist in the fast turn. The PRD's US-4 already
+  permits a brief acknowledgment for slow-but-atomic work.)
+- *No chaining in v1*: the continuation turn runs with the inverse config
+  (=MANAGER.get(continuation=True)= drops the tool → research-agent restored,
+  door absent), so a background turn cannot schedule further background turns.
+  The 5-cap still bounds the tool path; chaining returns post-v1 if wanted.
+
 ** Prompt (refocus, not add)
 - =general_instructions.md.j2= Step 2: context-first; when research is also
   needed AND context yields a useful partial answer → answer and
