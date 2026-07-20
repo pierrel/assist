@@ -108,7 +108,21 @@ class MessageBacklog(PerThreadJsonStore[PendingMessage]):
                 logger.error("corrupt backlog could NOT be moved aside; left at %s",
                              path)
             return []
-        return [self._from_dict(d) for d in data]
+        # Parseable-but-wrong-shaped ENTRIES are skipped loudly, never raised:
+        # this store's readers run inside turn error handlers and dispatch paths
+        # where a raise would mask the original failure and strand the thread
+        # busy. Good entries are preserved (unlike the whole-file move-aside).
+        out = []
+        for d in data:
+            try:
+                rec = self._from_dict(d)
+                if not rec.text:
+                    raise ValueError("entry has no text — meaningless work")
+                out.append(rec)
+            except Exception:
+                logger.error("malformed backlog entry for %s skipped: %.120r",
+                             tid, d)
+        return out
 
     def peek(self, tid: str) -> list[PendingMessage]:
         """LOCK-FREE, side-effect-free read for the event-loop thread (the web

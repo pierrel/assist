@@ -345,3 +345,19 @@ def test_ready_thread_shows_will_follow_up_note(wired, monkeypatch):
                                        origin="continuation"))
     html_out = TestClient(web.app).get(f"/thread/{tid}").text
     assert "will follow up: find tire sizes" in html_out
+
+
+def test_locked_read_skips_malformed_entries_keeps_good(tmp_path):
+    """The LOCKED readers (for_thread — used inside turn error handlers) must
+    never raise on wrong-shaped entries: a raise there masks the original turn
+    failure and strands the thread busy. Bad entries skip loudly; good ones
+    survive (Copilot #198 rd3)."""
+    import json as _json
+    from assist.backlog import MessageBacklog, PendingMessage
+    store = MessageBacklog(str(tmp_path))
+    (tmp_path / "t1").mkdir()
+    good = PendingMessage(thread_id="t1", text="keep me").to_dict()
+    (tmp_path / "t1" / "pending_messages.json").write_text(
+        _json.dumps([1, "junk", good, {"weird": True}]))
+    recs = store.for_thread("t1")
+    assert [r.text for r in recs] == ["keep me"]

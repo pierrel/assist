@@ -1121,14 +1121,22 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
     the turn-start snapshot): they have no dispatcher until the ready exit that
     never came, so leaving them would strand a visible "will follow up" promise
     until a surprise restart fire — the silent stall the PRD forbids. Returns
-    how many were cancelled so the error text can say so."""
+    how many were cancelled so the error text can say so.
+
+    BEST-EFFORT by contract: this runs INSIDE turn error handlers — a raise
+    here would mask the original failure and leave the thread stuck busy (the
+    error status write after the call would never run)."""
     n = 0
-    for rec in MESSAGE_BACKLOG.for_thread(tid):
-        if rec.origin == "continuation" and rec.id not in pre_turn_ids:
-            MESSAGE_BACKLOG.claim(tid, rec.id)
-            append_event(MANAGER.thread_dir(tid), "continuation_cancelled",
-                         id=rec.id, reason="the scheduling turn failed")
-            n += 1
+    try:
+        for rec in MESSAGE_BACKLOG.for_thread(tid):
+            if rec.origin == "continuation" and rec.id not in pre_turn_ids:
+                MESSAGE_BACKLOG.claim(tid, rec.id)
+                append_event(MANAGER.thread_dir(tid), "continuation_cancelled",
+                             id=rec.id, reason="the scheduling turn failed")
+                n += 1
+    except Exception:
+        logging.error("continuation cancel sweep failed for %s (original turn "
+                      "error still surfaces)", tid, exc_info=True)
     return n
 
 
