@@ -1449,7 +1449,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
         _RESUME_SCHEDULER.submit_resume(
             tid, rider, sender, carry, pending_kwargs.get("pending_message"),
-            origin=origin)
+            origin=origin, backlog_id=backlog_id)
         # accumulated_active_ms rides the status write so a restart-recovered resume
         # keeps its 2h-cap accounting (the in-memory submit_resume above is lost with
         # the process; sender/rider are already in pending_kwargs). A crash of a
@@ -2165,7 +2165,8 @@ class _ResumeScheduler:
 
     def submit_resume(self, tid: str, rider, sender, accumulated_active_ms: float,
                       pending_text: str | None,
-                      origin: str | None = None) -> None:
+                      origin: str | None = None,
+                      backlog_id: str | None = None) -> None:
         """Continue a paused turn from its checkpoint (input=None). ``origin``
         MUST carry the paused turn's origin: a resumed continuation that lost it
         would rebuild with the WRONG tool surface (door instead of
@@ -2173,7 +2174,8 @@ class _ResumeScheduler:
         every origin-keyed render/failure behavior."""
         self._q.put({"kind": "turn", "tid": tid, "text": None, "rider": rider,
                      "sender": sender, "resume": True, "acc": accumulated_active_ms,
-                     "pending": pending_text, "backlog_id": None, "origin": origin})
+                     "pending": pending_text, "backlog_id": backlog_id,
+                     "origin": origin})
 
     def submit_message(self, tid: str, text: str, rider, sender,
                        backlog_id: str | None = None,

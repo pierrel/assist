@@ -134,7 +134,9 @@ class MessageBacklog(PerThreadJsonStore[PendingMessage]):
         try:
             with open(self._path(tid)) as f:
                 data = json.load(f)
-            return [self._from_dict(d) for d in data]
+            # same textless-entry filter as the locked read — a blank record
+            # must not render as an empty "will follow up" line
+            return [r for r in (self._from_dict(d) for d in data) if r.text]
         except Exception:
             # Maximally defensive — this runs on the event loop's render path,
             # where a wrong-shaped-but-parseable value (a non-dict entry) must
