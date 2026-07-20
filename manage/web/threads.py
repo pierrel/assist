@@ -1406,7 +1406,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "ready")
             if origin == "continuation":
                 append_event(MANAGER.thread_dir(tid), "continuation_completed",
-                             claimed=backlog_id or "")
+                             id=backlog_id or "")
             # Dispatch any continuations this turn scheduled (or that were deferred
             # behind an approval) — at the READY exit ONLY: never at
             # awaiting_approval (a continuation must not enter the supersede path),
@@ -1493,7 +1493,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                "completed. Ask me to retry it."),
                         **pending_kwargs)
             append_event(MANAGER.thread_dir(tid), "continuation_failed",
-                         error=str(e)[:300])
+                         id=backlog_id or "", error=str(e)[:300])
             _mark_unseen_response(tid)
         else:
             _set_status(tid, "error",

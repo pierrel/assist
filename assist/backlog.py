@@ -120,9 +120,13 @@ class MessageBacklog(PerThreadJsonStore[PendingMessage]):
         try:
             with open(self._path(tid)) as f:
                 data = json.load(f)
-        except (OSError, json.JSONDecodeError, self.NOTFOUND_EXC):
+            return [self._from_dict(d) for d in data]
+        except Exception:
+            # Maximally defensive — this runs on the event loop's render path,
+            # where a wrong-shaped-but-parseable value (a non-dict entry) must
+            # degrade to "nothing to show", never a 500. The locked readers
+            # keep the strict path + the corrupt-file move-aside.
             return []
-        return [self._from_dict(d) for d in data]
 
     def claim(self, tid: str, rid: str) -> None:
         """Remove a journaled message whose turn is now running (claim by id).

@@ -74,9 +74,14 @@ Once the sub-agents return, pick the action pattern that fits.
 **Questions answerable from local files:**
 → Answer from the context-agent's response and reference the relevant files
 
-**Anything that needed external knowledge** (you dispatched the {{ research_name }}):
+{% if continue_later %}
+**Anything that needed external knowledge** (you dispatched the background-research-agent):
+→ It returns a scheduling confirmation, NOT findings — there is no report to read in this turn. Answer from local context, state plainly what the background research will add, and end the turn. NEVER fill the external part from your own knowledge while waiting.
+{% else %}
+**Anything that needed external knowledge** (you dispatched the research-agent):
 → Read and understand the report, then use it for whatever you dispatched it for — answer the question, fill in the TODO/document, build the plan. Address what the task actually needs; don't just paste a summary of the report.
 → Ground everything you produce in the report — NEVER your own knowledge. When you cite or show sources, make them **clickable links** (`[Title](https://…)`). If the report notes coverage was partial / rate-limited, carry that caveat honestly.
+{% endif %}
 
 **Requests to create, update, or plan something** (e.g., "create a plan for...", "update my..."):
 → Combine what the context-agent found (existing file, format conventions) with what the {{ research_name }} found (facts, ideas)
@@ -84,12 +89,14 @@ Once the sub-agents return, pick the action pattern that fits.
 → Follow the exact heading/formatting conventions already in the file
 → Always write results into files — do not just respond verbally
 
-**The {{ research_name }} returned findings but noted search was PARTIAL / rate-limited** (it has real results plus a caveat that some searches couldn't complete):
+{% if not continue_later %}
+**The research-agent returned findings but noted search was PARTIAL / rate-limited** (it has real results plus a caveat that some searches couldn't complete):
 → This is NOT a failure. Answer the question from the findings it DID return, cite their sources, and carry the caveat honestly (coverage may be incomplete). Do NOT discard a real report because it was partial.
 
-**The {{ research_name }} reports it found NOTHING because web search was fully unavailable** (no results at all — it says it couldn't look this up):
+**The research-agent reports it found NOTHING because web search was fully unavailable** (no results at all — it says it couldn't look this up):
 → STOP. Do NOT re-dispatch that sub-agent, and do NOT fall back to answering from your own knowledge. A confident answer from memory is worse than no answer here — the user asked you to look it up precisely because they don't want a guess.
 → Tell the user plainly that you couldn't retrieve the information because web search is currently unavailable, and end the turn.
+{% endif %}
 
 ### Step 4: Clean Up
 - Mark your internal todos as complete

@@ -203,6 +203,10 @@ def test_peek_is_side_effect_free_on_corruption(tmp_path):
     assert store.peek("t1") == []
     assert (tmp_path / "t1" / "pending_messages.json").exists()
     assert not (tmp_path / "t1" / "pending_messages.json.corrupt").exists()
+    # parseable-but-wrong-shaped entries must also degrade to [] on the render
+    # path, never raise (Copilot #198 rd2)
+    (tmp_path / "t1" / "pending_messages.json").write_text('[1, "x", {"weird": 1}]')
+    assert store.peek("t1") == []
 
 
 def test_continuation_turn_does_not_redispatch_siblings(wired, monkeypatch):
