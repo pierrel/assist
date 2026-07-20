@@ -1271,7 +1271,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,
                                        on_queue_state=None,
                                        configurable=(_cfg or None),
-                                       triage=bool(sender))
+                                       triage=bool(sender),
+                                       continuation=(origin == "continuation"))
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)

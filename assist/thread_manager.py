@@ -268,7 +268,8 @@ class ThreadManager:
             sandbox_backend=None,
             on_queue_state: Callable[[str], None] | None = None,
             configurable: dict | None = None,
-            triage: bool = False) -> Thread:
+            triage: bool = False,
+            continuation: bool = False) -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
@@ -277,7 +278,15 @@ class ThreadManager:
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
         # the reply HITL gate; a normal turn gets the full config tools and no HITL.
+        # A CONTINUATION turn (agent-scheduled background work) drops continue_later:
+        # without the tool in its spec, create_agent registers the SYNCHRONOUS
+        # research-agent (not the background door), so the background turn actually
+        # DOES the research — the inverse of the fast turn's tool-list construction.
+        # v1: no chaining from background turns (the door is absent there too).
         tools = _web_triage_tools if triage else _web_tools
+        if continuation:
+            tools = tuple(t for t in tools
+                          if getattr(t, "__name__", None) != "continue_later")
         interrupt_on = _web_interrupt_on if triage else None
         return Thread(working_dir,
                       thread_id=thread_id,

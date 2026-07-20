@@ -120,7 +120,7 @@ def test_post_message_runs_process_message_without_crashing(
 
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False: _FakeChat(),
     )
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
 
@@ -174,7 +174,7 @@ def _stub_happy_path(monkeypatch, chat):
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: chat,
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False: chat,
     )
     monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
@@ -371,7 +371,7 @@ def test_pending_message_renders_at_top_as_latest(client, monkeypatch):
             ]
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False: _FakeChat(),
     )
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
 
@@ -404,7 +404,7 @@ def test_pending_bubble_not_duplicated_when_already_persisted(client, monkeypatc
             return [{"role": "user", "content": persisted}]
     monkeypatch.setattr(
         web.MANAGER, "get",
-        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False: _FakeChat(),
+        lambda tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False: _FakeChat(),
     )
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
 
@@ -436,7 +436,7 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
         def get_messages(self):
             return [{"role": "user", "content": "hi"}]
 
-    def _get(tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False):
+    def _get(tid, sandbox_backend=None, on_queue_state=None, configurable=None, triage=False, continuation=False):
         captured["configurable"] = configurable
         return _FakeChat()
 

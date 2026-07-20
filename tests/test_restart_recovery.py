@@ -73,7 +73,7 @@ class _Chat:
 
 def _wire_chat(monkeypatch, tid, calls, triage_seen=None):
     def get(t, sandbox_backend=None, on_queue_state=None, configurable=None,
-            triage=False):
+            triage=False, continuation=False):
         if triage_seen is not None:
             triage_seen.append((triage, (configurable or {})))
         return _Chat(t, calls)

@@ -61,7 +61,7 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(
         web.MANAGER, "get",
         lambda t, sandbox_backend=None, on_queue_state=None, configurable=None,
-        triage=False: chat)
+        triage=False, continuation=False: chat)
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend",
                         lambda t, tz=None: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda t: None)

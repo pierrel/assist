@@ -4,7 +4,8 @@ import logging
 
 from deepagents import create_deep_agent, CompiledSubAgent
 from deepagents.backends.protocol import BackendProtocol
-from langchain.messages import AIMessage, AnyMessage
+from langchain.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
@@ -343,6 +344,41 @@ def create_agent(model: BaseChatModel,
                                        sandbox_backend=sandbox_backend)
     )
 
+    # Progressive responses: the continuation "door" the small model actually
+    # walks through. Registered ONLY when the spec carries continue_later (the
+    # web deployment). The model reliably IGNORES a novel proactive tool verb
+    # (0/4 in evals) but fluently SELECTS among task-dispatchable subagents —
+    # its strongest habit — so scheduling background research is exposed as a
+    # sibling of research-agent: dispatching it journals the task via the
+    # continue_later callback and returns immediately with the answer-now
+    # directive. Same journal, same cap, two doors.
+    _continue_later_fn = next(
+        (t for t in spec.tools if getattr(t, "__name__", None) == "continue_later"),
+        None)
+    background_sub = None
+    if _continue_later_fn is not None:
+        def _background_research(state):
+            msgs = state.get("messages", [])
+            task_text = ""
+            for m in reversed(msgs):
+                if isinstance(m, HumanMessage):
+                    task_text = m.content if isinstance(m.content, str) else str(m.content)
+                    break
+            return {"messages": list(msgs)
+                    + [AIMessage(content=_continue_later_fn(task_text))]}
+        background_sub = CompiledSubAgent(
+            name="background-research-agent",
+            description=(
+                "Delegate research to run AFTER this turn, in the background: "
+                "the research is performed later and its findings are posted to "
+                "this conversation as a follow-up message. Use this INSTEAD of "
+                "research-agent when the user already has a useful answer from "
+                "local context and the external lookup can follow up. The task "
+                "must be complete and self-contained — your future self will not "
+                "remember this turn's plan."),
+            runnable=RunnableLambda(_background_research),
+        )
+
     critique_sub_agent = {
         "name": "critique-agent",
         "description": "Reviews code diffs for bugs, missing tests, style issues, and security concerns. Provide the full git diff output when calling this agent.",
@@ -393,7 +429,18 @@ def create_agent(model: BaseChatModel,
                                        preview_style="head_tail", untrusted=True),
             skills_mw, memory_mw, ContextRiderMiddleware(), logging_mw],
         backend=backend,
-        subagents=[context_sub, research_sub, critique_sub_agent],
+        # Tool-list construction is the lever that actually moves delegation on
+        # this model (prose demonstrably doesn't — 0/7 eval trials ignored both
+        # the continue_later verb AND the background door while research-agent
+        # was present): when the spec carries continue_later, the fast turn's
+        # agent has NO synchronous research-agent — its research habit lands on
+        # the background door, the only research-shaped affordance. The
+        # CONTINUATION turn runs with the inverse spec (research-agent present,
+        # no door — see thread_manager continuation=True), so the background
+        # turn does the actual research.
+        subagents=([context_sub, background_sub, critique_sub_agent]
+                   if background_sub is not None
+                   else [context_sub, research_sub, critique_sub_agent]),
         # `travel` (time/distance), `directions` (turn-by-turn steps), and
         # `map_data` (lat,lon + route polylines for a map render block) are
         # built-ins: direct deterministic real-world lookups the main agent answers

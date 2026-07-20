@@ -66,7 +66,7 @@ def _wire_chat(monkeypatch, tid, calls, reply=None):
     monkeypatch.setattr(
         web.MANAGER, "get",
         lambda t, sandbox_backend=None, on_queue_state=None, configurable=None,
-        triage=False: _Chat(t, calls, reply))
+        triage=False, continuation=False: _Chat(t, calls, reply))
 
 
 # --- the event log ------------------------------------------------------------
