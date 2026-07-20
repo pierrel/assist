@@ -1169,6 +1169,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # the marker without carrying it: the prefix travels with the text into the
         # pending bubble, the checkpoint, and the chain-length derivation.
         text = _CONTINUATION_RIDER + text
+    elif origin != "continuation" and text and text.startswith(_CONTINUATION_RIDER):
+        # A NON-continuation message that happens to start with the marker (a user
+        # pasting/quoting it) must not be misattributed as an agent note or count
+        # toward the chain run — a leading space breaks the startswith keying
+        # while leaving the visible text effectively unchanged.
+        text = " " + text
     # A genuine OWNER message (web/review — NOT an untrusted inbound SMS: a
     # spoofable sender must not be able to cancel promised work, and a
     # reply-only triage turn couldn't re-schedule what it cleared) supersedes

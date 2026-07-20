@@ -361,3 +361,15 @@ def test_locked_read_skips_malformed_entries_keeps_good(tmp_path):
         _json.dumps([1, "junk", good, {"weird": True}]))
     recs = store.for_thread("t1")
     assert [r.text for r in recs] == ["keep me"]
+
+
+def test_user_message_with_marker_prefix_is_neutralized(wired, monkeypatch):
+    """A user pasting/quoting the continuation marker must not be misattributed
+    as an agent note or count toward the chain (Copilot #198 rd4): a leading
+    space breaks the startswith keying."""
+    tid, _ = wired
+    calls = []
+    _wire_chat(monkeypatch, tid, calls)
+    R = threads._CONTINUATION_RIDER
+    threads._process_message(tid, R + "just quoting you", origin=None)
+    assert calls == [("message", " " + R + "just quoting you")]

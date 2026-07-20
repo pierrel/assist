@@ -364,8 +364,12 @@ def create_agent(model: BaseChatModel,
                 if isinstance(m, HumanMessage):
                     task_text = m.content if isinstance(m.content, str) else str(m.content)
                     break
-            return {"messages": list(msgs)
-                    + [AIMessage(content=_continue_later_fn(task_text))]}
+            # Return ONLY the new message (the delta convention): deepagents
+            # builds the parent's ToolMessage from the LAST message and excludes
+            # `messages` from subagent state propagation, so echoing history is
+            # inert — but a bare delta is smaller and can never be mistaken for
+            # the id-less re-append hazard the middleware docs warn about.
+            return {"messages": [AIMessage(content=_continue_later_fn(task_text))]}
         background_sub = CompiledSubAgent(
             name="background-research-agent",
             description=(
