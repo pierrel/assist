@@ -224,10 +224,24 @@ def render_index() -> str:
                 f' margin-right:.4rem;">{html.escape(LIST_STAGE_LABELS.get(stage, stage))}</span>'
             )
         elif stage in BUSY_STAGES:
-            badge = (
+            label = LIST_STAGE_LABELS.get(stage, stage)
+            new_pill = ""
+            if status.get("origin") == "continuation":
+                # A background follow-up turn, not the user's message — and it
+                # must not MASK a first answer the user hasn't read yet: keep
+                # the "new" pill visible alongside (the whole point of the
+                # progressive answer is that it's ready to read now).
+                label = "following up"
+                if _has_unseen_response(tid):
+                    new_pill = (
+                        '<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
+                        ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
+                        ' margin-right:.4rem;">new</span>'
+                    )
+            badge = new_pill + (
                 f'<span style="font-size:.7rem; color:#6b7280; background:#fafafa;'
                 f' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
-                f' margin-right:.4rem;">{html.escape(LIST_STAGE_LABELS.get(stage, stage))}</span>'
+                f' margin-right:.4rem;">{html.escape(label)}</span>'
             )
         elif stage == "error":
             badge = (
@@ -617,6 +631,19 @@ def render_thread(
             # blocks).  Render them as such so the user sees the same
             # structure the agent receives, instead of escaped backticks.
             content_html = markdown.markdown(raw, extensions=_MD_EXTENSIONS)
+        elif role == "user" and raw.startswith(_CONTINUATION_RIDER):
+            # A continuation self-message: AGENT-authored (the marker prefix is
+            # its durable attribution) — it must never render as words the user
+            # wrote, transiently (the pending bubble) or in the persisted
+            # history. Styled as a compact agent-note instead.
+            task_txt = html.escape(" ".join(
+                raw[len(_CONTINUATION_RIDER):].split())[:500])
+            bubble = (f'<div class="msg continuation" style="opacity:.75; '
+                      f'font-size:.85rem;"><div class="role">assistant '
+                      f'(background)</div><div class="content">↻ following up: '
+                      f'{task_txt}</div></div>')
+            rendered.append(bubble)
+            continue
         else:
             # Human/user content is plain text with basic escaping
             content_html = html.escape(raw).replace("\n", "<br/>")
@@ -653,6 +680,11 @@ def render_thread(
     status_banner = ""
     if busy:
         label = STAGE_LABELS.get(stage, "Working...")
+        if status.get("origin") == "continuation" and stage == "processing":
+            # Not the user's message — say what's actually happening.
+            task_txt = " ".join(pending[len(_CONTINUATION_RIDER):].split())[:120] \
+                if pending.startswith(_CONTINUATION_RIDER) else ""
+            label = f"Following up: {task_txt}" if task_txt else "Following up..."
         elapsed_span = ""
         started_at = status.get("started_at")
         if started_at:
@@ -695,6 +727,25 @@ def render_thread(
             </div>
           </form>
         </div>"""
+
+    # Scheduled-but-not-started background work: an honest "will follow up" line so
+    # the promise stays visible after the answering turn ends (the ready state alone
+    # would look like nothing more is coming). LOCK-FREE bare read of the journal
+    # (atomic-replace file ⇒ whole-old-or-new; the _get_status discipline — the
+    # store's locking for_thread() must never run on the event loop).
+    continuation_note = ""
+    try:
+        pending_conts = [r for r in MESSAGE_BACKLOG._read(tid)
+                         if r.origin == "continuation"]
+    except Exception:
+        pending_conts = []
+    if pending_conts:
+        items = "".join(
+            f'<div>↻ will follow up: {html.escape(" ".join(r.text.split())[:200])}</div>'
+            for r in pending_conts)
+        continuation_note = (f'<div class="continuation-note" style="color:#6b7280; '
+                             f'font-size:.85rem; margin:.4rem 0;">{items}</div>')
+    status_banner += continuation_note
 
     # A pending geo download proposal for THIS thread renders an inline approve/decline
     # card (like the send_reply approval) so the user acts without leaving the chat.

@@ -575,6 +575,11 @@ def _thread_title(tid: str) -> str:
     """Display title for a thread; placeholder if still initializing."""
     status = _get_status(tid)
     if status.get("stage") in BUSY_STAGES:
+        if status.get("origin") == "continuation":
+            # A background follow-up turn: the pending text is the AGENT's task
+            # note, not the user's words — keep the thread's real description so
+            # the list row doesn't read as if the user asked something new.
+            return get_cached_description(tid)
         pending = (status.get("pending_message") or "").strip()
         if pending:
             short = pending.splitlines()[0]

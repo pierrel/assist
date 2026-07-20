@@ -373,6 +373,16 @@ def create_agent(model: BaseChatModel,
             "deepagents/general_instructions.md.j2",
             workspace_dir=workspace_dir,
             references_dir=references_dir,
+            # Progressive-responses guidance renders ONLY when the embedder's spec
+            # actually carries the continue_later tool (the web deployment) — an
+            # agent whose host can't dispatch continuations (bare CLI, emacsos)
+            # keeps today's prompt and structurally cannot promise a follow-up.
+            # Derived from spec.tools membership, never a separate flag, so prompt
+            # and capability cannot skew.
+            continue_later=any(
+                getattr(t, "__name__", None) == "continue_later"
+                or getattr(t, "name", None) == "continue_later"
+                for t in spec.tools),
         ),
         middleware=mw + [
             # Offload a large execute result (a long build/test log) to a file +
