@@ -32,12 +32,14 @@ EVENTS_FILE = "events.jsonl"
 def append_event(thread_dir: str, kind: str, **fields) -> None:
     """Append one event. Best-effort: the log is observability, and a log
     failure must never fail the run pushing to it."""
-    line = json.dumps({"ts": datetime.now(timezone.utc).isoformat(),
-                       "kind": kind, **fields})
     try:
+        # dumps inside the guard: a non-serializable field must degrade to a
+        # logged warning, not fail the run — per this function's contract.
+        line = json.dumps({"ts": datetime.now(timezone.utc).isoformat(),
+                           "kind": kind, **fields}, default=str)
         with open(os.path.join(thread_dir, EVENTS_FILE), "a") as f:
             f.write(line + "\n")
-    except OSError:
+    except Exception:
         logger.warning("event log append failed for %s (%s)", thread_dir, kind,
                        exc_info=True)
 
