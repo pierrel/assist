@@ -1,0 +1,172 @@
+#+title: Design — Progressive responses (v2, post design-review team)
+#+date: <2026-07-19>
+#+author: design doc — PRD: 2026-07-19-prd-progressive-responses.org
+
+* Shape (one paragraph)
+
+The model expresses "answer now, keep working" by calling a new
+*=continue_later(task)=* tool (single arg — the arg-shape lesson). The tool
+journals a continuation: a =PendingMessage= with =origin="continuation"= in the
+existing durable =MESSAGE_BACKLOG= — so durability, exactly-once claim, restart
+recovery, queue fairness, sandbox-per-turn, and unseen-badge delivery are all
+inherited from the #197 machinery with no new execution path. At the turn's
+*=ready= exit only*, the web layer submits journaled continuations through the
+serial worker as ordinary self-message turns whose text is prefixed with a fixed
+*continuation marker* — the one mechanism that provides durable in-transcript
+attribution (audit), render keying (UX), derived chain counting (no sidecar),
+and recovery exact-match fidelity. Hard cap: 5 continuation turns between user
+messages, enforced at the tool (the only writer), counted at journal time.
+
+* Components
+
+** Tool: =continue_later(task)= (~40 lines, notify-tools pattern)
+- =assist/events/continuations.py=: =continuation_tools(journal_cb, count_cb)= —
+  factory closing over injected callbacks (never imports web), sibling of
+  =notify_tools=. No engine module (design review: not earning its existence).
+- =task= must be self-contained (docstring arg-shape constraint; the geo
+  completion-message lesson: carry the original ask). It doubles as the
+  user-visible pending-work text (escaped + whitespace-collapsed + capped ~500
+  when rendered — the geo =_fmt= precedent).
+- Returns a directive string: cap-ok → "Scheduled. Now answer from what you
+  have and tell the user you'll follow up."; cap-hit → "Cap reached — do NOT
+  promise more background work; end honestly and wait for the user."
+- Wired via =set_web_tools= ONLY — *not* the triage set (by-construction
+  containment, notify precedent). Never raises (corrective strings).
+
+** Journal + marker
+- =PendingMessage= gains =origin: str | None= (="continuation"=; =None= = user
+  follow-up — the #196 seam). The =announce= field from the v1 plan is CUT.
+- Dispatch prepends =_CONTINUATION_RIDER= (a fixed bracketed prefix, e.g.
+  "[Continuing my earlier work] ") to the self-message text — the supersede
+  =_SUPERSEDE_RIDER= pattern. Consequences, all load-bearing:
+  - *Attribution*: the checkpointed HumanMessage is durably marked as
+    agent-authored — it can never read as something Pierre typed (audit +
+    render keying).
+  - *Derived cap count*: chain length = trailing marker-prefixed HumanMessages
+    in the checkpoint (=chat.get_messages()=) + unclaimed continuation journal
+    entries. No sidecar file, no corrupt-counter branch; reset-on-user-message
+    falls out (any non-marker message breaks the run). A scheduled/geo turn
+    also breaks the run — accepted accounting reset (the cap is a runaway
+    backstop, not billing; existing precedent).
+  - *Recovery fidelity*: the recovery decision's exact-match finalize applies
+    unchanged (prefix-exact, like supersede).
+- =backlog.py= docstrings updated in the SAME diff: "follow-ups only" and
+  "human-paced inflow" claims become false with a model-authored writer (the
+  cap is the replacement argument). Doc-drift is a defect (#193).
+
+** Dispatch (3 lines + one guard)
+- At =_process_message='s =ready= exit ONLY: submit each unclaimed
+  =origin="continuation"= entry via =_RESUME_SCHEDULER.submit_message(...)=.
+  NOT at the =awaiting_approval= exit; NOT at tool time (the running turn holds
+  the queue — a serial-worker park would starve every thread's resumes: the
+  2026-06-10 class).
+- *Origin-aware supersede guard (review BLOCKER)*: a continuation turn checks
+  =pending_reply()= BEFORE claiming its entry; if a HITL draft is pending, it
+  returns without claiming (entry stays journaled; the approve-resume's own
+  =ready= exit re-dispatches). The supersede reject-the-draft flow is for a
+  NEWER USER message, never for agent-authored input — without this guard an
+  interleaved triage approval would be silently discarded.
+- =_process_message= gains =origin= (persisted in =pending_kwargs= like
+  =sender=) so a crashed continuation recovers as one.
+- *Rider*: dispatch stamps a fresh time-only rider (originating turn's tz,
+  =sent_at= at DISPATCH time — the chain can queue for hours), the
+  =_scheduled_dispatch= precedent; a rider-less turn degrades tz-dependent
+  tools mid-chain.
+
+** Cap (tool-side only)
+- Counted at journal time (five =continue_later= calls in one turn consume the
+  whole budget). The tool is the only writer and turns serialize per thread,
+  so a dispatcher-side backstop is unreachable — CUT (no theoretical-only
+  code; also dissolves the silent-broken-promise path it would have created).
+
+** Stop-a-chain (v1, by construction)
+- A USER-origin submit clears the thread's unclaimed =origin="continuation"=
+  journal entries: your message supersedes the agent's plan; the agent can
+  re-schedule in its answer if still warranted. (Redirect-bias — consistent
+  with the interjection PRD's resolved default; the running turn is not
+  preempted, matching that PRD's safe-boundary rule.) Without this, the only
+  brake on a regretted chain is thread deletion.
+
+** Render (all surfaces keyed on origin/marker — UX blockers)
+- *Pending bubble + persisted message*: a marker-prefixed message renders as a
+  styled agent-note ("↻ following up: <task>"), NEVER a user bubble —
+  transiently (from =status.origin=) and permanently (from the prefix).
+- *Busy banner*: =origin="continuation"= → "Following up: <task snippet>" (not
+  "Processing your message...").
+- *Thread list*: when busy on a continuation, keep the thread's real
+  description as the title (not the task snippet) and show a "following up"
+  badge; the first useful answer's =new= badge must not be masked for the
+  whole chain (list rank: new-with-following-up ranks as new).
+- *Ready with pending continuations*: an in-thread indicator line from the
+  journal ("↻ will follow up: <task>"), honest text not a spinner.
+- *Failure*: a hard-crashed continuation writes an origin-aware error ("The
+  follow-up work I promised failed — ask me to retry.") — not "Couldn't
+  process your message" — and MARKS UNSEEN so the badge fires (a silent
+  bottom-band error is the "silent stall" the PRD forbids). Soft failures are
+  prompt-mandated honest text in the follow-up message itself.
+
+** Prompt (refocus, not add)
+- =general_instructions.md.j2= Step 2: context-first; when research is also
+  needed AND context yields a useful partial answer → answer and
+  =continue_later= the research instead of same-turn dispatch; pure-research
+  keeps today's synchronous path (US-4 judgment stays with the model). Held to
+  the refocus-not-add bar.
+- Spec-conditional block: ={% if %}= keyed on actual =continue_later=
+  membership in =spec.tools= (first template conditional; system prompt is
+  re-rendered per turn, so existing threads pick it up next turn — no
+  checkpoint caching gotcha; deploy prompt+code together, .j2 hot-reloads but
+  .py needs restart).
+- *Known antagonist + pre-named escalation (review)*: deepagents' TodoList
+  pressure ("execute each step") may push the model to do the slow work anyway
+  after calling the tool (double-doing — the worst outcome). Ladder: (1)
+  tool-result directive + Step-2 wording (this design); (2) =continue_later=
+  updates the todo state so deferred items stop applying pressure; (3)
+  deterministic turn-shaping middleware in the breaker mold
+  (SearchUnavailableBreaker precedent) — only on eval evidence. Evals assert
+  "turn ends promptly after the tool call", not merely "tool called".
+
+* Threat model (named)
+- New persistence vector: injected content steering =continue_later= is the
+  SAME class as steering =create_schedule= today (model-authored, persistent,
+  self-firing future turn with the full web tool surface) — strictly LESS
+  persistent (bounded 5 vs indefinitely recurring). Named residual, no new sink.
+- Visibility beats hiding: pending continuations render attributed (task text,
+  agent-badged) rather than being filtered out of every surface — a schedule
+  has /schedules; a continuation has the thread indicator.
+- Worst-case bound, named: one user message can trigger ≤5 chained turns × 2h
+  cumulative-active cap each (≤~12h compute); quantum fairness (600s) keeps
+  other threads interleaving — no cross-thread starvation (verified).
+- Triage turns: no =continue_later= (tool-list construction). Residual: SMS
+  text archived in history steering a LATER web turn — existing class.
+- =task= rendering: =html.escape= + collapse + cap (geo precedent).
+
+* Evals (4 real; the rest unit)
+1. *Bike-shape split*: files+research request (stubbed research) → first turn's
+   answer contains the context findings, NO research-agent dispatch, a
+   continuation journaled, and the turn ENDS promptly post-tool-call.
+2. *No-split regression*: fast/pure-local prompts → zero =continue_later=
+   calls; existing suites at baseline.
+3. *Failure honesty*: stubbed research failure → the follow-up message admits
+   it plainly.
+4. *Anti-telegraphing*: request shapes the prompt doesn't echo.
+Unit: cap counting/reset from the checkpoint, five-in-one-turn budget, ready-
+exit dispatch ordering vs a parked user follow-up, supersede guard, clear-on-
+user-submit, recovery of a journaled continuation, render keying (agent-note
+not user bubble; list badge; origin-aware error + unseen), marker round-trip.
+Cadence: baseline N=3 → post-impl N=3 → N=5 → N=10.
+
+* Cut from the v1 plan (design review)
+Engine module (→ notify-style factory) · =announce= arg (→ task doubles) ·
+counter sidecar + corrupt-handling (→ derived from checkpoint) · dispatcher cap
+backstop (theoretical) · tailored-error-only failure path (→ + unseen marking) ·
+cap/lands LLM evals (→ unit tests).
+
+* Needs Pierre (one item)
+*CLI scoping*: v1 ships the dispatch host web-only; the tool is spec-gated off
+for bare-CLI/emacsos agents (they structurally can't promise what their host
+can't deliver), and follow-up MESSAGES are client-agnostic (ordinary checkpoint
+messages, visible to CLI/emacsos readers). But a continuation *scheduled from a
+web turn* only runs while the web service runs — true background delivery FOR
+CLI-initiated turns needs a small CLI drain increment (named follow-up). Given
+"the CLI path is important": is web-hosted-v1 + CLI-drain-follow-up acceptable
+sequencing?
