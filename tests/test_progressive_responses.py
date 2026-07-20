@@ -191,6 +191,45 @@ def test_continuation_turn_gets_marker_and_agent_note_render(wired, monkeypatch)
     assert MESSAGE_BACKLOG.for_thread(tid) == []   # claimed
 
 
+def test_peek_is_side_effect_free_on_corruption(tmp_path):
+    """The loop-side read (render) must never mutate: a corrupt journal returns
+    [] from peek() with the file left untouched — the move-aside belongs to the
+    LOCKED read path only (Copilot #198 rd1)."""
+    import os
+    from assist.backlog import MessageBacklog
+    store = MessageBacklog(str(tmp_path))
+    (tmp_path / "t1").mkdir()
+    (tmp_path / "t1" / "pending_messages.json").write_text('[{bad')
+    assert store.peek("t1") == []
+    assert (tmp_path / "t1" / "pending_messages.json").exists()
+    assert not (tmp_path / "t1" / "pending_messages.json.corrupt").exists()
+
+
+def test_continuation_turn_does_not_redispatch_siblings(wired, monkeypatch):
+    """A continuation turn's ready exit must not re-submit still-queued sibling
+    entries — they already have dispatchers from the scheduling turn; re-adding
+    jobs is redundant traffic + duplicate dispatched events (Copilot #198 rd1)."""
+    tid, tmp_path = wired
+    calls = []
+    _wire_chat(monkeypatch, tid, calls)
+    # sibling B still journaled (its job queued elsewhere) while continuation A runs
+    a = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="job A",
+                                           origin="continuation"))
+    MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="job B",
+                                       origin="continuation"))
+    submitted = []
+    monkeypatch.setattr(
+        threads._RESUME_SCHEDULER, "submit_message",
+        lambda t, text, rider, sender, backlog_id=None, origin=None:
+            submitted.append(backlog_id))
+
+    threads._process_message(tid, "job A", backlog_id=a.id, origin="continuation")
+
+    assert submitted == []          # no re-dispatch from the continuation turn
+    kinds = [e["kind"] for e in read_events(str(tmp_path / tid))]
+    assert kinds.count("continuation_dispatched") == 0
+
+
 def test_user_message_clears_unclaimed_continuations(wired, monkeypatch):
     tid, tmp_path = wired
     calls = []

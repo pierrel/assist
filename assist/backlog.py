@@ -110,6 +110,20 @@ class MessageBacklog(PerThreadJsonStore[PendingMessage]):
             return []
         return [self._from_dict(d) for d in data]
 
+    def peek(self, tid: str) -> list[PendingMessage]:
+        """LOCK-FREE, side-effect-free read for the event-loop thread (the web
+        render): atomic tmp+rename writes mean a bare read sees whole-old or
+        whole-new, never partial — the ``_get_status`` discipline. A corrupt
+        file returns [] WITHOUT the move-aside (that mutation belongs to the
+        locked ``_read`` path; the next locked reader preserves the evidence).
+        Never call the locking APIs (``for_thread``/``all``) on the loop."""
+        try:
+            with open(self._path(tid)) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError, self.NOTFOUND_EXC):
+            return []
+        return [self._from_dict(d) for d in data]
+
     def claim(self, tid: str, rid: str) -> None:
         """Remove a journaled message whose turn is now running (claim by id).
         Idempotent — a recovery dedupe or a double-claim finds it already gone."""

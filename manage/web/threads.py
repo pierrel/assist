@@ -730,15 +730,13 @@ def render_thread(
 
     # Scheduled-but-not-started background work: an honest "will follow up" line so
     # the promise stays visible after the answering turn ends (the ready state alone
-    # would look like nothing more is coming). LOCK-FREE bare read of the journal
-    # (atomic-replace file ⇒ whole-old-or-new; the _get_status discipline — the
-    # store's locking for_thread() must never run on the event loop).
+    # would look like nothing more is coming). peek() is the store's dedicated
+    # LOCK-FREE, side-effect-free loop read (atomic-replace file ⇒ whole-old-or-new;
+    # the _get_status discipline — the locking for_thread() must never run on the
+    # event loop, and the corrupt-file move-aside belongs to locked readers only).
     continuation_note = ""
-    try:
-        pending_conts = [r for r in MESSAGE_BACKLOG._read(tid)
-                         if r.origin == "continuation"]
-    except Exception:
-        pending_conts = []
+    pending_conts = [r for r in MESSAGE_BACKLOG.peek(tid)
+                     if r.origin == "continuation"]
     if pending_conts:
         items = "".join(
             f'<div>↻ will follow up: {html.escape(" ".join(r.text.split())[:200])}</div>'
@@ -1415,7 +1413,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # and never at tool time (the running turn holds the queue; parking the
             # serial worker for the rest of the turn would starve every thread's
             # resumes). Crash-before-dispatch is covered by the recovery drain.
-            _dispatch_continuations(tid, rider)
+            # A CONTINUATION turn skips this: it cannot journal (no door/tool in
+            # its config), and its queued siblings were already submitted by the
+            # scheduling turn — re-submitting them is redundant worker traffic +
+            # duplicate dispatched events (the gate makes it harmless, not clean).
+            if origin != "continuation":
+                _dispatch_continuations(tid, rider)
     except ThreadPauseRequested:
         # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
         # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
