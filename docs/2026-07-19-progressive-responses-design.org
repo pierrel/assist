@@ -87,6 +87,22 @@ messages, enforced at the tool (the only writer), counted at journal time.
   preempted, matching that PRD's safe-boundary rule.) Without this, the only
   brake on a regretted chain is thread deletion.
 
+** Thread event log (Pierre's internal-push decision)
+- New per-thread append-only =events.jsonl= (one JSON object per line:
+  =ts=, =kind=, kind-specific fields). The internal PUSH target: the job
+  system appends; every reader (web render on refresh, CLI, debugging,
+  future interjection-"seen" state) pulls from it. No UI push machinery.
+- v1 kinds: =continuation_scheduled= {id, task} · =continuation_dispatched=
+  {id} · =continuation_completed= {id} · =continuation_failed= {id, error}.
+- Write discipline: appended off-loop by the paths that already run there
+  (the tool via its callback, dispatch, the turn's exit paths); O_APPEND
+  single-write lines; readers tolerate a torn final line by skipping it.
+  Dies with the thread dir like every sidecar.
+- The render surfaces below READ the log (+ journal for pending entries)
+  instead of accreting more bespoke status keys — the convergence adjustment
+  made real: checkpoint = messages, journal = pending work, status = live
+  banner, event log = durable job history.
+
 ** Render (all surfaces keyed on origin/marker — UX blockers)
 - *Pending bubble + persisted message*: a marker-prefixed message renders as a
   styled agent-note ("↻ following up: <task>"), NEVER a user bubble —

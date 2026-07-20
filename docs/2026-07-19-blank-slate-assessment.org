@@ -104,16 +104,24 @@ one-truth, eval-tested properties. The endgame — if we keep walking — is tha
    its own small feature. The "event log" may never need to exist as a separate
    store: checkpoint + journal + status already partition the roles.
 
-* Recommendation
+* Recommendation (DECIDED 2026-07-19 — Pierre)
 
 Stay incremental (option 1), with two blank-slate-informed adjustments:
 - Treat the journal explicitly as the nascent JOB QUEUE in naming and docs
   (origin-typed entries are job types), so each feature keeps converging
   instead of accreting adapters.
-- Pull the push channel (SSE or light polling of a thread-events endpoint)
-  forward as a named small feature — it is the one incidental constraint (3)
-  whose removal makes progressive UX and interjection feedback natural, and it
-  is UI-only (no execution-model change).
+- *Internal durable push, pull UI* (Pierre's sharpening of the original
+  "push channel" suggestion — no UI push feature at all): runs PUSH events to
+  a durable per-thread *event log* — the internal push target — and the UI
+  simply READS that log on each refresh, exactly as it renders today. This
+  keeps every architectural benefit of the push model (event production
+  decoupled from run completion; one durable, append-only record that web,
+  CLI, emacsos, and recovery can all consume; a home for job lifecycle,
+  attribution, and future interjection-"seen" events) with zero UI machinery
+  — SSE/websockets explicitly rejected as having no use here.
+Division of truth that results: the checkpoint remains the MESSAGE truth,
+the journal remains the pending-WORK queue, status.json remains the live
+banner, and the event log is the durable HISTORY of what the job system did.
 Re-evaluate option 2 only if the deployment shape changes (multi-box,
 multi-user, or a second model server) — the triggers are physical, not
 feature-driven.
