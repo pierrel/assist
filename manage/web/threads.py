@@ -694,10 +694,11 @@ def render_thread(
             '</div>',
         )
     # Journaled-but-unconsumed user messages (origin=None) render as QUEUED
-    # user bubbles above the running turn's placeholder — visible from the
-    # moment of send (the design's visibility blocker: an invisible
-    # interjection gets resent). One lock-free peek, reused by the
-    # continuation note below (same discipline as documented there). Oldest
+    # user bubbles at the top of the page (above the running turn's
+    # placeholder when one is shown; a ready thread's not-yet-dispatched
+    # entries render the same way) — visible from the moment of send (the
+    # design's visibility blocker: an invisible interjection gets resent).
+    # One lock-free peek, reused by the continuation note below. Oldest
     # first + insert(0) ⇒ newest ends up topmost, matching the page order.
     # Seen wins over queued: an injected entry is checkpointed (its "seen
     # mid-turn" bubble above) a full superstep before the claim removes its
