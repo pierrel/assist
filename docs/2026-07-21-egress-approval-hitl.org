@@ -1,0 +1,305 @@
+#+title: Design — Egress approval HITL: request-to-approve for sandbox network access
+#+date: <2026-07-21>
+#+author: design doc (architect + 4-lens design review: threat-model, simplicity/interfaces, UX/intent, agentic/liveness)
+
+* Problem & requirement
+
+Pierre, verbatim: "we have a proxy now that denies connect requests. i want it
+(or something very locked down like that) but instead of denying outright it
+should request the user to approve. it should be clear to the user exactly
+what is being done and at what end point."
+
+Today (docs/2026-05-08 sandbox-egress work): the sandbox's only route out is
+=assist-egress-proxy= — one shared, dual-homed container enforcing an
+exact-match hostname allowlist frozen from =dockerfiles/egress-allowlist.conf=
+at container create; anything else gets a 403. Deny-by-default and fail-closed
+stay; this design adds a locked-down approval path on top.
+
+* Shape (one paragraph)
+
+The proxy keeps denying fast. The AGENT turns a denial into a request: a new
+=request_egress(host, port, task)= tool records a proposal (the geo
+=propose_region_download= shape — records only, opens nothing), and an inline
+approval card renders in the origin thread showing the exact host and port
+(mechanical, validated fields) beside the agent's stated purpose (quoted,
+marked unverified). Approve grants =host:port= exactly, for 1 hour, delivered
+to the running proxy via a read-only bind-mounted projection file it re-reads
+only on allowlist miss — no restart, fail-closed on every malformed input, and
+a resolved-address private-range guard so an approved hostname can never be
+DNS-pointed at loopback/LAN/metadata targets. When the thread's pending
+requests are all resolved, one retry turn dispatches with the agent's own
+recorded task text. Durable access remains exactly one thing: a git-audited
+edit to the committed allowlist.
+
+* Threat model (this deliberately weakens a boundary — reviewed hard)
+
+What the feature newly trusts, and how each input is contained:
+
+- *The approved hostname is attacker-influenceable* (the agent picks the
+  string; the user can be socially engineered past the card). Two
+  by-construction guards:
+  1. *Resolved-address private-range guard* (the review's one BLOCKER,
+     adopted): for approved (non-base) hosts the proxy resolves first, vets
+     the address, and connects to the vetted IP — rejecting loopback,
+     link-local/metadata (169.254/16), RFC1918, ULA/fe80, =::1=. Without it,
+     one approved card + attacker DNS (TTL 0) = an hour-long SSRF window into
+     the web app (:5050), llama (:8000), and the LAN. Base-conf entries are
+     exempt (deliberately private, operator-curated). Resolving once and
+     connecting to the vetted IP also closes the check/connect TOCTOU and
+     subsumes exotic IP-literal encodings (=0x7f.0.0.1=, octal) that lexical
+     validation can't reliably catch.
+  2. Tool validation is *advisory only* (fullmatch-anchored lowercase ASCII
+     =[a-z0-9.-]=, ≥1 dot, length caps, port 1–65535; URL-tolerant: a pasted
+     =https://api.foo.com/v1/x= parses to its hostname; string ports
+     coerced). It also refuses the base-infra names (=host.docker.internal=,
+     =10.0.0.1=, bare =.internal= labels) — they're already granted;
+     proposing them only creates a foothold.
+- *The agent's purpose text is narrative-only*: it cannot change what opens
+  (host/port are separate mechanical fields), and the card frames it as "the
+  agent's stated reason (not verified)". Residual, named: the user can still
+  be talked into approving a bad host — TTL-bounded, revocable.
+- *Approve fires the STORED record* (keyed =host:port=, the geo swap-proof
+  property) — never re-derived state. The approvals projection is written
+  only by the approve/revoke handlers.
+- *Scope honesty (review F3)*: an approval is global-per-hour — any turn in
+  ANY thread can use it while it lives (the proxy cannot attribute
+  connections to threads). The card copy says so ("any agent activity for
+  the next hour"). Thread-scoping is a named non-goal for v1 (it would need
+  per-connection attribution machinery in the proxy).
+- *TTL enforcement is proxy-side and fail-closed*: missing / naive /
+  unparseable =expires_at= ⇒ entry skipped (never treat-as-permanent);
+  writer emits =+00:00= aware UTC; containers share the kernel clock (no
+  skew). A compromised web process writing far-future expiries is out of
+  scope (host compromise is game over) — stated to keep the boundary
+  explicit.
+- *The approvals file as proxy input*: read-only mount of a dedicated
+  subdir holding only the projection file (proposal state, incl. agent free
+  text, never reaches the proxy); ≤64KB size cap (hygiene, not load-bearing);
+  any parse/shape problem ⇒ base allowlist only. The sandbox has NO route to
+  the approvals dir (verified: sandbox mounts are exactly
+  =work_dir→/workspace= and its sibling =tmp=; the egress dir is outside
+  both) — and a startup guard REFUSES an approvals dir under the thread root
+  (the =TRAVEL_INFRA_DIR= fail-fast precedent), so a mis-set env var can't
+  silently hand a sandbox write access to its own approvals.
+- *Flood/fatigue*: pending caps counted on the durable store under its write
+  lock (keys, not calls — re-requests of a pending host:port don't eat the
+  cap): 3 pending per thread, 10 global; over-cap returns a corrective
+  string. The agent cannot delete proposals (approve/decline are
+  user-actions), so it can't reset its own count. The cap bounds pending
+  CARDS; a user-gated request→approve→request cycle remains possible —
+  named, acceptable.
+- *SMS/triage cannot reach the tool* (verified): =request_egress= joins the
+  NORMAL web toolset only; the triage set stays reply-only.
+- *Fail-closed inventory*: atomic same-dir tmp + =os.replace= writes;
+  DIRECTORY bind mount, never single-file (a file mount pins the pre-replace
+  inode — silent approval freeze); schema-version marker folded into the
+  allowlist hash so deployed proxies recreate once post-deploy and gain the
+  mount; =main()='s empty-base-allowlist refusal untouched; the proxy never
+  starts on approvals alone.
+
+* Decisions
+
+** D1 — Async, deny-fast; no proxy-side wait
+A held CONNECT pins the turn (single LLM slot) and a proxy thread; in-sandbox
+commands run under =timeout=; build tools hit many non-allowlisted hosts
+incidentally, so holding every denied CONNECT stalls every turn for zero
+approvals. The proxy 403s immediately, as today.
+
+Steering cannot ride the 403 body on the HTTPS path (curl discards CONNECT
+response bodies). Two delivery points instead:
+- =_EGRESS_DENIED_GUIDANCE= — an exact module-level constant prepended by
+  =DockerSandboxBackend.execute= when output matches the denial signature
+  (nonzero exit + "403" AND one of "proxy"/"CONNECT"/"tunnel" — verified
+  against curl/pip/wget/git phrasings; an origin server's own 403 carries no
+  proxy token and correctly misses). Constant-shaped so a future breaker can
+  equality-count it in the message tail (the =_SEARCH_UNAVAILABLE_MESSAGE=
+  pattern) — escape hatch pre-wired, zero code now.
+- The HTTP-path 403 body (which plain-HTTP clients DO surface, exit 0 — the
+  execute matcher never fires there) carries the same call-=request_egress=
+  directive, not just an explanation.
+Known residual: a proxy-unaware tool on the internal network gets a
+route-less timeout, no 403, no hint — guidance-only coverage via the dev
+skill line; named.
+
+** D2 — The AGENT creates the request (a tool), not the proxy — with the intent fork flagged
+=request_egress(host, port, task)= records a proposal; nothing opens until
+the user approves the record. Proxy-side auto-proposals from raw denials are
+rejected: approval fatigue is itself a security failure (telemetry/CDN noise
+→ junk cards → rubber-stamping), every proxy→host channel adds surface, and
+a raw CONNECT carries no "what is being done" — only the agent can satisfy
+that clause of the requirement.
+
+*Flagged for Pierre (the one intent fork):* under this design a denial the
+agent doesn't act on produces NO approval request — the user sees a plain
+failure and never learns approval was possible. Offered backstop if wanted:
+a READ-ONLY "recent denials" list on the management page (no cards, no
+buttons — visibility without fatigue), fed by a proxy deny-spool. Deferred
+unless Pierre wants it in v1.
+
+** D3 — Scope: exact host + exact port, 1-hour TTL; committed conf stays the only durable path
+No wildcards anywhere. Approvals are port-scoped (stricter than the base
+conf's host-any-port — an approval for =:443= does not open =:22=; the HTTP
+path's port-80 default composes fail-closed). One-shot-per-connection
+rejected (pip opens many); per-thread rejected (no proxy attribution);
+durable rejected (standing exfil channel). TTL starts at approve, enforced
+by the proxy per request. Revoke = delete the projection entry, effective
+next connection. The card says: for permanent access, add the host to the
+committed allowlist (git-audited, unchanged mechanics).
+
+** D4 — Delivery: ro bind-mounted subdir; proxy re-reads the projection on allowlist miss only
+Recreate-on-approve rejected (kills every open tunnel of concurrent
+sandboxes; wrong cadence for expiry/revoke). Control channel rejected (new
+admin listener). The base-allowlist hot path never touches the file. The
+proxy stays one stdlib file (~240 lines after the change); the one new trust
+input is the size-capped, exact-match, fail-closed projection.
+
+** D5 — Storage: ONE store + a dumb projection (review simplification, adopted)
+A single =EgressStore= (records keyed =host:port=; state machine
+=pending= → =approved=+=expires_at= / =declined=) — not two stores (the plan's
+original two would have been instances #3 and #4 of the single-file
+atomic-RMW shape while the geo store's own comment says #3 triggers
+extraction; review of that extraction happens at implementation).
+=approved-hosts.json= is a projection regenerated whole on each mutation:
+one writer (the web app, serialized under the store lock), one reader (the
+proxy), no lock, no RMW — and the wire-format separation keeps agent free
+text out of the proxy's parser. The =declined= state is load-bearing (D7).
+Config seam: =ASSIST_EGRESS_APPROVALS_DIR= is deployment-set (=.deploy.env=)
+and read independently by =state.py= and =sandbox_manager.py= — unset ⇒
+feature dormant everywhere (prod-safe default; embedders inherit dormancy).
+No import-time =os.environ= writes (the plan's original export was a hidden
+coupling; rejected in review).
+
+** D6 — UX: the card, the retry, the page
+- The card renders in the ORIGIN thread (top of page, above the newest
+  answer — verified position; the geo lesson: approval lands where the user
+  is), from code-supplied copy only: =host:port= in a code block
+  (html-escaped; =xn--= labels get a visible punycode warning), "requested N
+  min ago", the agent's task text quoted as its unverified words, the exact
+  scope sentence ("this exact host and port only, for 1 hour, usable by any
+  agent activity in that window; traffic is end-to-end encrypted — contents
+  are not inspected"), and — required copy (review) — *"Approving lets the
+  agent retry automatically."* Buttons: Approve for 1 hour / Decline (CSRF +
+  redirect back to the thread). All of a thread's pending cards render
+  inline (≤3 by cap; no "+N more" indirection).
+- *Retry dispatch fires when the thread's pending set EMPTIES* (last approve
+  or decline), not per-approval — so the agent can batch ("request all the
+  hosts you need before ending the turn" rides the tool docstring), the user
+  approves A and B, and ONE retry turn runs with the outcomes enumerated
+  ("A approved; B declined"). Named edge: approve A, ignore B ⇒ no retry
+  until B is resolved — B's card is still showing, prompting resolution.
+  The retry prompt is the agent's own recorded task text (self-injection at
+  continuation trust, whitespace-collapsed, capped) + "if already done, just
+  confirm" (covers approve-while-origin-turn-still-running; the approvals
+  file is live immediately and a mid-turn retry-success is fine).
+- *Decline closes the loop* (review: geo's silent decline is the wrong
+  precedent here — send_reply's reject-with-reason is the right one): the
+  record moves to =declined=; a re-request of a declined host:port returns a
+  corrective string ("the user declined this — do not re-ask; proceed
+  without it"); the resolution-dispatch prompt enumerates declines so the
+  agent acknowledges in its own voice. No LLM turn burns at decline time.
+- *Management page /egress*: v1 is revoke-only — active approvals with
+  remaining TTL + a Revoke button (a live exfil-capable grant needs a kill
+  switch; TTL alone leaves a ≤1h regret window). Pending approval lives
+  in-thread only (the page's approve half was duplicate surface — cut).
+- Web-only v1 (the card exists only in the web render; =egress_tools= joins
+  only the web toolset). Stated in Deferred.
+
+** D7 — Idempotence + event trail
+Re-request of a pending key: corrective "already recorded — awaiting
+approval; stop retrying" (distinct from the first directive). Events:
+=egress_requested= / =approved= / =declined= / =revoked= (+ host, port) via
+=append_event= — the durable audit history beside the proxy's own
+ALLOW/=ALLOW-APPROVED=/DENY stdout log.
+
+* Event-loop liveness (single-worker uvicorn)
+
+The thread-page card read gets a lock-free =peek()= on the store (atomic
+writes ⇒ whole-old-or-new; the =MESSAGE_BACKLOG.peek= discipline) — NOT a
+clone of the geo banner's =GEO_PROPOSALS.all()=, which takes a
+=threading.Lock= + file I/O on the loop (a pre-existing latent smell the
+review caught; fixing the geo banner the same way is a noted follow-up,
+out of scope here). The =/egress= page and every approve/decline/revoke
+handler run their whole chain (record read → state write → projection
+regen → resolution dispatch + =_mark_urgent=) inside ONE threadpool
+callable (=_scheduled_dispatch= off-loop use is the established Provisioner
+contract). The proxy's per-miss file read runs on the proxy container's own
+connection threads — never the web loop.
+
+* Implementation plan (numbered; sequencing: 1–2 ∥ 3–4, then 5–9, then 10–11)
+
+1. =assist/egress/store.py=: =EgressRequest= (frozen: host, port, task,
+   origin_tid, created_at, state, expires_at) + =EgressStore= (single file
+   =egress-requests.json=, atomic RMW, lenient reads, lazy expiry-prune) +
+   =write_projection()= regenerating =approvals/approved-hosts.json= whole.
+   Startup guard: refuse an approvals dir under the thread root.
+2. =assist/egress/tools.py=: =egress_tools(store, caps)= →
+   =[request_egress]=; URL-tolerant host parse, fullmatch validation,
+   base-infra-name refusal, port coercion, single combined =task= string
+   (the =continue_later= contract voice: "a complete instruction for your
+   future self"; "request every host you need before ending the turn"),
+   pending/declined-aware corrective returns, caps counted on the store
+   under its lock.
+3. =dockerfiles/egress-proxy.py=: =load_approvals()= consulted at BOTH miss
+   sites; exact =(host, port)= + aware-UTC unexpired match, every parse
+   failure ⇒ skip; *resolved-address private-range guard for approved hosts*
+   (resolve → vet → connect to the vetted IP); distinct =ALLOW-APPROVED=
+   log; deny() gains a plaintext body carrying the =request_egress=
+   directive.
+4. =assist/sandbox_manager.py=: ro volume of the approvals SUBDIR into the
+   proxy at =/approvals=; schema-version marker in the allowlist hash
+   (one-time recreate post-deploy); =ASSIST_EGRESS_APPROVALS_DIR= read here
+   independently (unset ⇒ no mount ⇒ dormant).
+5. =assist/sandbox.py=: =_EGRESS_DENIED_GUIDANCE= constant + the
+   signature-gated prepend in =execute=.
+6. =manage/web/state.py=: store + CSRF token (=EGRESS_CSRF=; 2nd instance of
+   the pattern — the 3rd triggers a shared helper) + =egress_tools= into the
+   NORMAL web toolset only.
+7. =manage/web/egress.py=: =/egress= (revoke-only page) + POST
+   approve/decline/revoke; CSRF; one-threadpool-callable handlers;
+   =_next=-style redirect validation; deleted-origin-thread ⇒ refuse + drop.
+8. =manage/web/threads.py=: pending cards in the thread render via the
+   lock-free =peek()=; resolution-dispatch on pending-set-empty.
+9. Events per D7.
+10. Guidance sweep: tool docstring (primary); one generic dev-skill line
+    about restricted egress + the request flow.
+11. Tests + smoke + doc reconciliation.
+
+* Test plan
+
+- *Unit*: store round-trips / corrupt / atomic / expiry-prune / projection
+  regen; tool validation matrix (URL parse, IDN reject, IP-literal reject,
+  base-infra refusal, bad ports, caps-by-key, pending/declined correctives);
+  proxy pure functions imported by path — =load_approvals= fail-closed
+  matrix (missing/corrupt/non-dict/oversized/bad-or-missing-expiry/expired/
+  valid) + the private-range vet table (loopback, 169.254, RFC1918, ULA,
+  =::1=, public-pass) + base-decision-unaffected-by-any-approvals-content;
+  route tests (CSRF, approve-writes-exactly-the-record, decline/revoke,
+  redirect validation, deleted-thread refusal, 404-unconfigured); render
+  test (card fields, punycode flag, scope + auto-retry copy, card gone
+  after approve/decline).
+- *Live proxy* (extend =dockerfiles/test-sandbox-egress.sh=): unapproved ⇒
+  403 (existing cases stay green); write approval ⇒ reachable; same host
+  different port ⇒ 403; expired ⇒ 403; corrupt projection ⇒ base still
+  allowed + dynamic denied; write-after-start visibility (the inode-pin
+  check); a private-resolving approved host ⇒ 403.
+- *Behavioral eval* (mocked, N=3 cadence): (a) denial signature in execute
+  output ⇒ agent calls =request_egress= with the right host, tells the
+  user, does not retry-loop; (b) negative: no gratuitous requests for hosts
+  it doesn't need; (c) the resume half (review addition): seed the
+  conversation with the denial + recorded request, dispatch the stored
+  resolution prompt, assert the agent re-executes and completes rather than
+  re-asking.
+
+* Known limitations & deferred
+
+- Silent-denial residual (D2) — flagged decision; read-only recent-denials
+  list is the offered backstop (needs a proxy deny-spool: v1.1 unless
+  Pierre wants it now).
+- Approval is global-for-1h, not task/thread-scoped (named in the card).
+- Web-only v1; emacsos approval surface deferred (its embed doesn't run the
+  sandbox egress path today — verify before building anything).
+- Cross-thread same-host:port re-request overwrites the earlier pending
+  record (its card moves threads) — single-operator acceptable, named.
+- Deny-spool evidence on cards; eTLD+1 visual emphasis; shared
+  single-file-store base extraction (decide at implementation, the geo
+  store comment's own rule); geo-banner lock-free fix (separate follow-up).
