@@ -822,7 +822,8 @@ def render_thread(
             egress_banner += (
                 f'<div class="approval-banner">'
                 f'<div><strong>Network access request</strong> — the agent asks to '
-                f'reach <code>{_eh}:{_er.port}</code> from this thread.</div>'
+                f'reach <code>{_eh}:{_er.port}</code> from this thread'
+                + (f' ({_age})' if _age else '') + '.</div>'
                 f'{_puny}'
                 f'<div style="margin:.3rem 0; color:#6b7280">The agent\'s stated '
                 f'reason (not verified): \u201c{html.escape(_er.task[:300])}\u201d</div>'
@@ -2291,7 +2292,9 @@ def _dispatch_egress_resolution(tid: str) -> None:
     can approve A and B before a single retry burns the slot. The prompt
     enumerates the thread's grants and declines with the agent's own recorded
     task text (self-injection at continuation trust, the geo completion-turn
-    shape). Runs on the approve handler's threadpool thread."""
+    shape). Runs as a post-response BackgroundTask on a threadpool thread
+    (the reply_decision precedent) — never the event loop, and never where
+    the HTTP response waits."""
     if EGRESS_STORE is None:
         return
     # take_undispatched: exactly THIS batch's resolutions, never re-announcing

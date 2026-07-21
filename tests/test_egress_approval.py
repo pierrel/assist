@@ -359,6 +359,7 @@ def test_thread_card_renders_and_clears(wired_web, monkeypatch):
                         task="fetch the <catalog>"))
     html_out = TestClient(web.app).get(f"/thread/{tid}").text
     assert "Network access request" in html_out
+    assert "requested just now" in html_out          # D6's request-age line
     assert "xn--bcher-kva.example:443" in html_out
     assert "punycode" in html_out                       # IDN warning
     assert "&lt;catalog&gt;" in html_out                # task text escaped

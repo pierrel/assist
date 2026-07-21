@@ -51,7 +51,10 @@ def approvals_dir_is_safe(egress_dir: str) -> bool:
     the thread root would sit inside some thread's rw ``/workspace`` bind
     mount, letting a prompt-injected sandbox write its own grants
     (self-approval with no tool, no card, no user). A guard applied on only
-    one path is theater — the exploit rides whichever reader skipped it."""
+    one path is theater — the exploit rides whichever reader skipped it.
+    Residual, named: the comparison uses the env-derived thread root; a
+    ThreadManager rooted programmatically without the env var is out of this
+    guard's scope."""
     root = os.path.realpath(
         os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads"))
     try:
@@ -215,6 +218,10 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
         now = datetime.now(timezone.utc)
         with self._lock:
             recs = self._load()
+            # Consumed even if the process dies before the turn runs — at-most-
+            # once by design (re-running an approved grant's task on retry
+            # would be worse than losing one announcement; the BackgroundTask-
+            # turn precedent already accepts crash loss).
             batch = [r for r in recs.values()
                      if r.origin_tid == tid and not r.dispatched
                      and (r.state == "declined"
@@ -224,17 +231,6 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
             if batch:
                 self._mutate(recs)
             return batch
-
-    def drop(self, key: str) -> bool:
-        """Projection-safe removal of ANY record (the deleted-thread cleanup
-        path) — unlike the base class, every mutation regenerates the
-        projection."""
-        with self._lock:
-            recs = self._load()
-            if recs.pop(key, None) is None:
-                return False
-            self._mutate(recs)
-            return True
 
     def remove_thread(self, tid: str) -> int:
         """Thread deletion: a grant never outlives its scope."""
