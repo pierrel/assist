@@ -53,18 +53,24 @@ def _parse_host_port(host, port):
     """Normalize the model's habitual arg shapes: a full URL in ``host``, a
     string port, a ``host:port``. Returns (host, port, error_string)."""
     raw = str(host or "").strip().lower()
+    default_port = 443
     if "//" in raw:
         u = urlsplit(raw if "://" in raw else f"//{raw}")
         raw = u.hostname or ""
         if port in (None, "", 0) and u.port:
             port = u.port
+        if u.scheme == "http":
+            # an http:// URL's implied port is 80 — a :443 grant would not
+            # match the command the agent retries
+            default_port = 80
     elif raw.count(":") == 1:
         raw, _, p = raw.partition(":")
         if port in (None, "", 0):
             port = p
     raw = raw.rstrip(".")
     try:
-        port = int(port) if port not in (None, "") else 443
+        # 0 means "unset" everywhere in this function, incl. here
+        port = int(port) if port not in (None, "", 0) else default_port
     except (TypeError, ValueError):
         return None, None, f"'{port}' is not a valid port number."
     if not (0 < port < 65536):

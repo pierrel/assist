@@ -103,6 +103,8 @@ def test_corrupt_files_degrade_not_raise(tmp_path):
 
 @pytest.mark.parametrize("host,port,want", [
     ("https://api.github.com/repos/x/releases", None, ("api.github.com", 443)),
+    ("http://legacy.example.com/data", None, ("legacy.example.com", 80)),
+    ("http://legacy.example.com/data", 0, ("legacy.example.com", 80)),
     ("api.github.com:8443", None, ("api.github.com", 8443)),
     ("API.Example.COM.", "443", ("api.example.com", 443)),
     ("xn--bcher-kva.example", 443, ("xn--bcher-kva.example", 443)),
