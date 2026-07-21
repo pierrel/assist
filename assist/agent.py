@@ -2,7 +2,9 @@ import os
 import uuid
 import logging
 
-from deepagents import create_deep_agent, CompiledSubAgent
+from deepagents import (create_deep_agent, CompiledSubAgent,
+                        GeneralPurposeSubagentProfile, HarnessProfile,
+                        register_harness_profile)
 from deepagents.backends.protocol import BackendProtocol
 from langchain.messages import AIMessage, AnyMessage, HumanMessage
 from langchain_core.runnables import RunnableLambda
@@ -44,6 +46,22 @@ from assist.env import env_int
 
 
 logger = logging.getLogger(__name__)
+
+# No auto-added `general-purpose` subagent, anywhere assist builds a deep
+# agent. Evidence (prod logs, 2026-07-21): every observed general-purpose
+# dispatch was misrouted work belonging to a NAMED agent — context-agent
+# exploration, critique-agent report reviews, and "fact-check" requests that
+# GP cannot actually perform (it inherits the orchestrator's tools, which
+# deliberately carry no read_url/search — so a GP "fact-check" pattern-matches
+# plausibility while LOOKING like verification). Removing the target is the
+# repo's structural-lever pattern (don't register what shouldn't be invoked):
+# a habitual task(general-purpose) call now gets the corrective error listing
+# the real agents, which the model observably follows. Registered
+# provider-wide ("openai" is every assist model's provider) so the main
+# graph, the research pipeline, and the eval harness all agree.
+register_harness_profile("openai", HarnessProfile(
+    general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)))
+
 
 def _has_domain_skills(backend: BackendProtocol) -> bool:
     """True iff the domain repo defines skills at ``/.claude/skills/``.
