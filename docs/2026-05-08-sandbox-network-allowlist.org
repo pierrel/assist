@@ -251,3 +251,11 @@ Inspecting blocks in prod:
 # Proxy logs every ALLOW/DENY decision
 docker logs assist-egress-proxy 2>&1 | tail -50
 #+end_src
+
+* Update 2026-07-21
+
+User-approved per-thread grants now layer on top of this allowlist: the
+agent can request exact host:port access, the user approves in-thread, and
+the proxy honors the grant for that thread only (1 hour or until revoked).
+This file's list remains the only permanent, thread-independent path. See
+docs/2026-07-21-egress-approval-hitl.org.

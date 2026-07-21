@@ -16,13 +16,12 @@ from __future__ import annotations
 import html
 import os
 import secrets
-from datetime import datetime, timezone
 
-from fastapi import HTTPException, Request
+from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
-from assist.egress.store import REVOKED_ONLY, request_key
+from assist.egress.store import remaining_lifetime, request_key
 from manage.web.app import app
 from manage.web.state import EGRESS_CSRF, EGRESS_STORE, MANAGER
 from manage.web.threads import (_FAVICON_LINKS, _PULL_TO_REFRESH_SCRIPT,
@@ -48,17 +47,6 @@ def _next(form) -> str:
     return dest if ok else "/egress"
 
 
-def _fmt_left(rec) -> str:
-    if rec.expires_at == REVOKED_ONLY:
-        return "until revoked or the thread is deleted"
-    try:
-        mins = max(0, int((datetime.fromisoformat(rec.expires_at)
-                           - datetime.now(timezone.utc)).total_seconds() // 60))
-        return f"~{mins} min left"
-    except Exception:
-        return "expiring"
-
-
 def _render(grants) -> str:
     rows = ""
     for r in sorted(grants, key=lambda r: (r.origin_tid, r.host, r.port)):
@@ -66,7 +54,7 @@ def _render(grants) -> str:
         rows += (
             f"<tr><td><code>{html.escape(r.host)}:{r.port}</code></td>"
             f"<td><a href='/thread/{tid}'>{tid}</a></td>"
-            f"<td>{html.escape(_fmt_left(r))}</td>"
+            f"<td>{html.escape(remaining_lifetime(r))}</td>"
             f"<td><form method='post' action='/egress/revoke' style='display:inline'>"
             f"<input type='hidden' name='token' value='{EGRESS_CSRF}'>"
             f"<input type='hidden' name='tid' value='{tid}'>"
@@ -100,27 +88,32 @@ async def egress_view():
     return HTMLResponse(await run_in_threadpool(_render, grants))
 
 
-def _resolve_and_maybe_dispatch(tid: str, host: str, port: int, decision: str):
-    """The whole approve/decline chain in ONE threadpool callable: resolve
-    the STORED record (never re-derived state), then — when the thread's
-    pending set has emptied — dispatch the single resolution turn."""
+def _resolve_record(tid: str, host: str, port: int, decision: str) -> bool:
+    """The FAST half of approve/decline, awaited so the redirect renders the
+    card already gone: resolve the STORED record (never re-derived state) +
+    the event. Returns True when the thread's pending set has emptied — the
+    caller then dispatches the resolution TURN as a BackgroundTask (the
+    reply_decision precedent): a full agent turn must never run where the
+    HTTP response waits (it acquires THREAD_QUEUE — behind a running turn
+    that's up to the 2h hold before the browser would get its 303)."""
     if not os.path.isdir(MANAGER.thread_dir(tid)):
-        # Thread deleted between request and approval: no consumer — drop the
-        # record instead of granting access nothing can use.
-        EGRESS_STORE.remove(request_key(tid, host, port))
-        return
+        # Thread deleted between request and approval: no consumer — drop ALL
+        # the dead thread's records (projection-safe; also mops up anything
+        # _evict_egress missed) instead of granting access nothing can use.
+        EGRESS_STORE.remove_thread(tid)
+        return False
     rec = EGRESS_STORE.resolve(request_key(tid, host, port), decision)
     if rec is None:
-        return   # unknown / already resolved (double-click) — no-op
+        return False   # unknown / already resolved (double-click) — no-op
     from assist.events.thread_log import append_event
     kind = ("egress_declined" if decision == "decline" else "egress_approved")
     append_event(MANAGER.thread_dir(tid), kind, host=host, port=port)
-    if not any(r.state == "pending" for r in EGRESS_STORE.for_thread(tid)):
-        _dispatch_egress_resolution(tid)
+    return not any(r.state == "pending" for r in EGRESS_STORE.for_thread(tid))
 
 
 @app.post("/egress/{decision}")
-async def egress_action(decision: str, request: Request):
+async def egress_action(decision: str, request: Request,
+                        background_tasks: BackgroundTasks):
     _require_egress()
     if decision not in ("hour", "always", "decline", "revoke"):
         raise HTTPException(status_code=404, detail="unknown action")
@@ -143,6 +136,8 @@ async def egress_action(decision: str, request: Request):
                 append_event, MANAGER.thread_dir(tid), "egress_revoked",
                 host=host, port=port)
     else:
-        await run_in_threadpool(
-            _resolve_and_maybe_dispatch, tid, host, port, decision)
+        batch_ready = await run_in_threadpool(
+            _resolve_record, tid, host, port, decision)
+        if batch_ready:
+            background_tasks.add_task(_dispatch_egress_resolution, tid)
     return RedirectResponse(_next(form), status_code=303)

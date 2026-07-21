@@ -28,14 +28,13 @@ from urllib.parse import urlsplit
 
 from langgraph.config import get_config
 
-from assist.egress.store import (EgressRequest, EgressStore, REVOKED_ONLY,
-                                 request_key)
+from assist.egress.store import (EgressRequest, EgressStore,
+                                 remaining_lifetime, request_key)
 
 _HOST_RE = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
 # Base-infra names never proposable: already granted host-wide, and a grant
 # record for them would only be a rebinding-adjacent foothold.
 _INFRA_HOSTS = {"host.docker.internal", "10.0.0.1"}
-PER_THREAD_PENDING_CAP = 3
 
 
 def _thread_id() -> str | None:
@@ -84,8 +83,18 @@ def _parse_host_port(host, port):
     return raw, port, None
 
 
-def egress_tools(store: EgressStore, base_hosts: frozenset[str]) -> list:
-    """Build the three tools over the store + the committed base allowlist."""
+def egress_tools(store: EgressStore, base_hosts: frozenset[str],
+                 thread_dir=None) -> list:
+    """Build the three tools over the store + the committed base allowlist.
+    ``thread_dir(tid) -> path`` (optional, the notify_tools factory shape)
+    enables the event trail (egress_requested / egress_revoked); absent —
+    CLI/evals — events are skipped."""
+
+    def _event(tid, kind, **fields):
+        if thread_dir is None:
+            return
+        from assist.events.thread_log import append_event
+        append_event(thread_dir(tid), kind, **fields)
 
     def request_egress(host: str, port: int, task: str) -> str:
         """Ask the user to approve outbound network access to one exact host
@@ -124,16 +133,19 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str]) -> list:
                         "not re-ask; proceed without it.")
             return (f"{h}:{p} is already approved for this thread — just "
                     "retry your command.")
-        pending = sum(1 for r in existing.values() if r.state == "pending")
-        if pending >= PER_THREAD_PENDING_CAP:
-            return (f"This thread already has {pending} requests awaiting "
-                    "approval — tell the user, and don't request more until "
-                    "those are resolved.")
-        store.add_pending(EgressRequest(
+        refused = store.add_pending(EgressRequest(
             host=h, port=p,
             task=" ".join(str(task or "").split())[:500],
             origin_tid=tid,
             created_at=datetime.now(timezone.utc).isoformat()))
+        if refused == "thread-cap":
+            return ("This thread already has several requests awaiting "
+                    "approval — tell the user, and don't request more until "
+                    "those are resolved.")
+        if refused == "global-cap":
+            return ("Too many requests are already awaiting approval across "
+                    "threads — tell the user and don't request more for now.")
+        _event(tid, "egress_requested", host=h, port=p)
         return (f"Recorded — access to {h}:{p} now awaits the user's "
                 "approval in this thread. Finish your answer, tell the user "
                 "approval is needed, and do NOT retry until approved.")
@@ -146,20 +158,11 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str]) -> list:
         lines = [f"- {h} (any port; base allowlist, operator-managed)"
                  for h in sorted(base_hosts)]
         if tid:
-            now = datetime.now(timezone.utc)
             for r in sorted(store.for_thread(tid), key=lambda r: r.key):
                 if r.state != "approved":
                     continue
-                if r.expires_at == REVOKED_ONLY:
-                    left = "until removed or this thread is deleted"
-                else:
-                    try:
-                        mins = max(0, int((datetime.fromisoformat(r.expires_at)
-                                           - now).total_seconds() // 60))
-                        left = f"~{mins} min left"
-                    except Exception:
-                        left = "expiring"
-                lines.append(f"- {r.host}:{r.port} (this thread's grant, {left})")
+                lines.append(f"- {r.host}:{r.port} (this thread's grant, "
+                             f"{remaining_lifetime(r)})")
         return "Hosts reachable from this thread:\n" + "\n".join(lines)
 
     def remove_allowed_host(host: str, port: int) -> str:
@@ -177,6 +180,7 @@ def egress_tools(store: EgressStore, base_hosts: frozenset[str]) -> list:
         if not tid:
             return "No active thread."
         if store.revoke(request_key(tid, h, p)):
+            _event(tid, "egress_revoked", host=h, port=p)
             return f"Removed this thread's access to {h}:{p}."
         return f"This thread has no grant for {h}:{p} — nothing to remove."
 

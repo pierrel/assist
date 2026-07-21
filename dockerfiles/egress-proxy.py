@@ -8,7 +8,7 @@ through the same gate.
 
 Why custom Python instead of tinyproxy / squid:
   - The codebase prefers small, audit-friendly pieces (see the C git
-    shim that replaced a bash version).  ~150 lines of stdlib Python
+    shim that replaced a bash version).  One small stdlib-Python file
     is shorter than the tinyproxy config that gets the regex semantics
     right.
   - Exact-string match is the security property we want.  A regex
@@ -146,8 +146,10 @@ def vet_resolved(host: str, port: int) -> str | None:
             ip = ipaddress.ip_address(addr)
         except ValueError:
             continue
-        if not (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        # is_global is the one-predicate tight form: everything not globally
+        # routable — RFC1918, loopback, link-local/metadata, ULA, v4-mapped
+        # private, AND CGNAT 100.64/10 (which is_private misses) — is refused.
+        if ip.is_global:
             return addr
     return None
 

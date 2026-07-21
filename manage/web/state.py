@@ -35,7 +35,7 @@ from assist.events.notify import notify_tools
 from assist.events.continuations import continuation_tools
 from assist.events.inbound import InboundLog
 from assist.backlog import MessageBacklog
-from assist.egress.store import EgressStore
+from assist.egress.store import EgressStore, approvals_dir_is_safe
 from assist.egress.tools import egress_tools
 from assist.sandbox_manager import _load_egress_allowlist
 from assist.geo.catalog import Catalog
@@ -153,15 +153,13 @@ _geo_tools = (geo_tools(GEO_REGISTRY, GEO_CATALOG, GEO_PROPOSALS)
 # thread's work_dir rw, so an approvals dir inside the root could hand a
 # sandbox write access to its own grants (self-approval).
 EGRESS_DIR = os.getenv("ASSIST_EGRESS_APPROVALS_DIR")
-if EGRESS_DIR:
-    _thread_root = os.path.realpath(MANAGER.root_dir)
-    if os.path.commonpath(
-            [os.path.realpath(EGRESS_DIR), _thread_root]) == _thread_root:
-        logging.error(
-            "ASSIST_EGRESS_APPROVALS_DIR=%s is under the thread root %s — a "
-            "sandbox could reach it; egress approvals DISABLED",
-            EGRESS_DIR, _thread_root)
-        EGRESS_DIR = None
+if EGRESS_DIR and not approvals_dir_is_safe(EGRESS_DIR):
+    # The same shared predicate guards the sandbox layer's proxy mount +
+    # client-map writes — both readers refuse, or the guard is theater.
+    logging.error(
+        "ASSIST_EGRESS_APPROVALS_DIR=%s is under the thread root — a sandbox "
+        "could reach it; egress approvals DISABLED", EGRESS_DIR)
+    EGRESS_DIR = None
 EGRESS_STORE = EgressStore(EGRESS_DIR) if EGRESS_DIR else None
 EGRESS_CSRF = secrets.token_urlsafe(16)
 # The committed base allowlist, for the list tool + already-allowed
@@ -169,7 +167,8 @@ EGRESS_CSRF = secrets.token_urlsafe(16)
 # which restarts this process.
 EGRESS_BASE_HOSTS = (frozenset(_load_egress_allowlist())
                      if EGRESS_STORE else frozenset())
-_egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS)
+_egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
+                              thread_dir=MANAGER.thread_dir)
                  if EGRESS_STORE else [])
 
 # continue_later (progressive responses): callbacks live in threads.py beside the

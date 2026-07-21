@@ -48,6 +48,8 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
+from assist.egress.store import resolution_prompt
+from starlette.concurrency import run_in_threadpool
 from assist.middleware.interjection import (collect_interjection_ids,
                                             register_interjection_callbacks)
 from assist.events.continuations import CHAIN_CAP
@@ -801,6 +803,13 @@ def render_thread(
                            if r.origin_tid == tid and r.state == "pending"),
                           key=lambda r: r.created_at):
             _eh = html.escape(_er.host)
+            try:
+                _mins = int((datetime.now(timezone.utc)
+                             - datetime.fromisoformat(_er.created_at)
+                             ).total_seconds() // 60)
+                _age = f"requested {_mins} min ago" if _mins >= 1 else "requested just now"
+            except Exception:
+                _age = ""
             _puny = ('<div style="color:#b45309">Internationalized domain '
                      'shown as punycode — verify it is the site you expect.'
                      '</div>' if _er.host.startswith("xn--") or ".xn--" in _er.host
@@ -2285,21 +2294,11 @@ def _dispatch_egress_resolution(tid: str) -> None:
     shape). Runs on the approve handler's threadpool thread."""
     if EGRESS_STORE is None:
         return
-    lines = []
-    for r in EGRESS_STORE.for_thread(tid):
-        if r.state == "approved":
-            lines.append(f"- {r.host}:{r.port} APPROVED. Your recorded task: "
-                         f"\"{r.task}\"")
-        elif r.state == "declined":
-            lines.append(f"- {r.host}:{r.port} DECLINED — do not re-ask; "
-                         "proceed without it.")
-    if not lines:
+    # take_undispatched: exactly THIS batch's resolutions, never re-announcing
+    # an old decline or re-running a long-lived grant's task on later batches.
+    prompt = resolution_prompt(EGRESS_STORE.take_undispatched(tid))
+    if prompt is None:
         return
-    prompt = ("[Egress requests resolved] The user has resolved this "
-              "thread's network access requests:\n" + "\n".join(lines)
-              + "\nFor approved hosts, carry out the recorded task now — "
-              "if the work already succeeded, just confirm the result. "
-              "Acknowledge any declined hosts in your answer.")
     _scheduled_dispatch(tid, prompt, _GEO_TZ)
     _mark_urgent(tid)
 
@@ -3254,7 +3253,10 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
 @app.post("/thread/{tid}/delete")
 async def delete_thread(tid: str):
     _existing_thread_dir(tid)
-    MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
+    # Off-loop: hard_delete does rmtree + sqlite deletes, and _evict_egress
+    # takes the egress store lock — none of it belongs on the event loop.
+    await run_in_threadpool(MANAGER.hard_delete, tid,
+                            on_delete=[_evict_caches, _evict_egress])
     return RedirectResponse(url="/", status_code=303)
 
 

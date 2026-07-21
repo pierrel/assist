@@ -79,8 +79,10 @@ class ProposalStore:
     """Disk-backed proposal store; sole reader+writer of ``proposals.json``.
 
     Shares the slug-keyed single-file atomic-RMW shape with ``RegionRegistry`` (lock +
-    lenient read + tmp+os.replace). Two small shape-frozen copies are left un-extracted
-    on purpose; a THIRD such store is the trigger to factor a shared base.
+    lenient read + tmp+os.replace). The shared base now exists
+    (``assist/keyed_store.py``, factored when ``EgressStore`` became the third
+    instance); this store and ``RegionRegistry`` stay un-migrated on purpose
+    (behavior-frozen; migration is a mechanical follow-up).
     """
 
     def __init__(self, geo_dir: str):

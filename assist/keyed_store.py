@@ -1,8 +1,8 @@
 """Shared base for the single-file keyed JSON stores.
 
 The repo grew two shape-frozen copies of this pattern (``assist/geo/``'s
-``RegionRegistry`` and ``ProposalStore``) whose comments name the trigger:
-a THIRD instance factors a shared base. ``EgressStore`` is the third — this
+``RegionRegistry`` and ``ProposalStore``) — ``ProposalStore``'s comment named
+the trigger: a THIRD instance factors a shared base. ``EgressStore`` is the third — this
 is that base. The two geo stores stay un-migrated for now (behavior-frozen;
 migrating them is a mechanical follow-up, out of the egress feature's scope).
 
@@ -86,21 +86,10 @@ class KeyedJsonStore(Generic[T]):
         with self._lock:
             return self._load().get(key)
 
-    def put(self, rec: T) -> T:
-        """Insert or replace by key."""
-        with self._lock:
-            recs = self._load()
-            recs[self._key(rec)] = rec
-            self._write(recs)
-            return rec
-
-    def remove(self, key: str) -> bool:
-        with self._lock:
-            recs = self._load()
-            if recs.pop(key, None) is None:
-                return False
-            self._write(recs)
-            return True
+    # NOTE: no generic put()/remove() — subclasses own mutation semantics
+    # (EgressStore must regenerate its projection under the same lock; a
+    # generic mutator silently bypassing that is how the projection drifts).
+    # Add generic mutators back if/when the geo stores migrate here.
 
     def peek(self) -> list[T]:
         """LOCK-FREE, side-effect-free read for the event-loop render path
