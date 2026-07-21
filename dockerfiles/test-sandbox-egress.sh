@@ -21,6 +21,8 @@
 NETWORK="assist-egress-smoke-$$"
 PROXY="assist-egress-proxy-smoke-$$"
 HOST_DIR=$(mktemp -d)
+APPROVALS_DIR=$(mktemp -d)
+SANDBOX2="assist-egress-smoke-sb-$$"
 
 # Mount the real requirements.txt + pyproject.toml + assist source so
 # the positive case probes EXACTLY what dev-agent's eval install does
@@ -53,9 +55,9 @@ chmod 0755 "$HOST_DIR"
 chmod -R a+rX "$HOST_DIR"
 
 cleanup() {
-    docker rm -f "$PROXY" >/dev/null 2>&1
+    docker rm -f "$PROXY" "$SANDBOX2" >/dev/null 2>&1
     docker network rm "$NETWORK" >/dev/null 2>&1
-    rm -rf "$HOST_DIR"
+    rm -rf "$HOST_DIR" "$APPROVALS_DIR"
 }
 trap cleanup EXIT
 
@@ -74,6 +76,7 @@ docker run -d \
     --network bridge \
     --add-host=host.docker.internal:host-gateway \
     -e EGRESS_ALLOWLIST="pypi.org,files.pythonhosted.org,pip.pypa.io" \
+    -v "$APPROVALS_DIR":/approvals:ro \
     assist-egress-proxy >/dev/null || {
     echo "FAIL: proxy container did not start"; exit 1
 }
@@ -201,4 +204,61 @@ if [ $EXIT -ne 0 ] || ! echo "$OUTPUT" | grep -q "^PASS$"; then
     echo "----------------------"
     exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# Phase 2: user-approved grants (docs/2026-07-21-egress-approval-hitl.org).
+# A NAMED sandbox (we need its IP for the client map) + host-side writes to
+# the mounted approvals dir. Writing AFTER the proxy started also proves the
+# directory-mount visibility property (a single-file mount would pin the
+# pre-write inode and silently freeze approvals).
+# ---------------------------------------------------------------------------
+echo "→ Phase 2: approval grants (thread-scoped, fail-closed)"
+docker run -d --name "$SANDBOX2" --network "$NETWORK" \
+    -e HTTPS_PROXY="http://${PROXY}:8888" -e https_proxy="http://${PROXY}:8888" \
+    assist-sandbox sleep 300 >/dev/null || { echo "FAIL: sandbox2 start"; exit 1; }
+SB_IP=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$NETWORK\").IPAddress}}" "$SANDBOX2")
+[ -n "$SB_IP" ] || { echo "FAIL: no sandbox2 IP"; exit 1; }
+
+EXP_OK=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%M:%S+00:00)
+EXP_OLD=$(date -u -d "-1 hour" +%Y-%m-%dT%H:%M:%S+00:00)
+cat > "$APPROVALS_DIR/client-map.json" <<EOF
+{"$SB_IP": "t-smoke"}
+EOF
+cat > "$APPROVALS_DIR/approved-hosts.json" <<EOF
+{"t-smoke:example.com:443": {"host": "example.com", "port": 443, "origin_tid": "t-smoke", "expires_at": "$EXP_OK"},
+ "t-smoke:httpbin.org:443": {"host": "httpbin.org", "port": 443, "origin_tid": "t-smoke", "expires_at": "$EXP_OLD"},
+ "t-other:example.net:443": {"host": "example.net", "port": 443, "origin_tid": "t-other", "expires_at": "$EXP_OK"},
+ "t-smoke:host.docker.internal:443": {"host": "host.docker.internal", "port": 443, "origin_tid": "t-smoke", "expires_at": "$EXP_OK"}}
+EOF
+
+probe() { docker exec "$SANDBOX2" curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$1" 2>/dev/null; }
+
+s1=$(probe https://example.com/)
+case "$s1" in 2*|3*) echo "ok  (8) approved example.com reachable ($s1)";;
+    *) echo "FAIL: approved example.com not reachable ($s1)"; docker logs "$PROXY" | tail -20; exit 1;; esac
+
+s2=$(docker exec "$SANDBOX2" curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com:8443/ 2>/dev/null)
+case "$s2" in 2*|3*) echo "FAIL: port 8443 reachable despite 443-only grant"; exit 1;;
+    *) echo "ok  (9) approved host, other port blocked ($s2)";; esac
+
+s3=$(probe https://httpbin.org/)
+case "$s3" in 2*|3*) echo "FAIL: EXPIRED grant reachable ($s3)"; exit 1;;
+    *) echo "ok (10) expired grant blocked ($s3)";; esac
+
+s4=$(probe https://example.net/)
+case "$s4" in 2*|3*) echo "FAIL: OTHER thread's grant usable ($s4)"; exit 1;;
+    *) echo "ok (11) wrong-thread grant blocked ($s4)";; esac
+
+s5=$(probe https://host.docker.internal/)
+case "$s5" in 2*|3*) echo "FAIL: private-resolving approved host reachable ($s5)"; exit 1;;
+    *) echo "ok (12) private-resolving approved host blocked ($s5)";; esac
+
+echo "{corrupt" > "$APPROVALS_DIR/approved-hosts.json"
+s6=$(probe https://example.com/)
+s7=$(probe https://pypi.org/)
+case "$s6" in 2*|3*) echo "FAIL: corrupt approvals still grants ($s6)"; exit 1;; esac
+case "$s7" in 2*|3*) echo "ok (13) corrupt approvals: base allowed, grants denied";;
+    *) echo "FAIL: corrupt approvals broke the BASE allowlist ($s7)"; exit 1;; esac
+
+echo "PASS (approvals phase)"
 exit 0
