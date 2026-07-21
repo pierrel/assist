@@ -150,16 +150,44 @@ follow-up-ran — never neither. Latency measured on the research shape.
 Regression: durable-queue + progressive-responses suites at baseline;
 anti-telegraphing phrasings. Cadence N=3 → 3 → 5 → 10.
 
-* Needs Pierre
+* Decisions (resolved 2026-07-20 — Pierre's PR #199 review)
 
-1. *Defer-as-continuation*: deferral now consumes chain-cap budget and renders
-   as a "will follow up" note — confirm that shape (it is the visible, capped,
-   honest version of "I'll get to it next").
-2. *Fate-sharing*: a claimed interjection dies with a later terminal turn
-   error like the head message (error banner; no auto re-run machinery).
-   Recommend yes (no-theoretical-code).
-3. *Web "stop" into a running triage turn*: the account-of-work reply arrives
-   as the triage turn's HITL-gated draft — confirm that surface.
-4. *#196 supersede note*: this feature ships the queued-bubble slice on the
-   durable journal; PR #196's remaining scope (its in-memory mirror design)
-   should be re-based on this or closed — your call at review time.
+1. *Four outcomes are DESCRIPTIVE, not an interface.* Redirect / incorporate /
+   defer / stop name the model's behavior for humans and evals; no downstream
+   code branches on the choice (an outcome label was rejected as machinery
+   with no consumer). Evals assert outcomes via mechanical proxies: defer ⇒ a
+   continuation entry exists; stop ⇒ no post-boundary tool calls + an account;
+   redirect/incorporate ⇒ answer content. If code ever needs the outcome, that
+   is a new design conversation, not a hidden contract.
+2. *The claim invariant is EXPLICIT and tested.* Invariant: "an interjection's
+   journal id, carried in its injected message's =additional_kwargs=, must be
+   recoverable from the durable checkpoint at every claim site." Pinned by
+   unit tests: (a) =additional_kwargs= round-trips the SqliteSaver (verified
+   empirically at design time; the test makes it permanent); (b) the
+   history-editing middleware in the stack (=tool_name_sanitization=; the
+   deepagents summarization) preserves =additional_kwargs= on HumanMessages —
+   and a comment in the middleware pins the non-mutating-history assumption
+   against a future summarizer swap (langchain's own rewrites history).
+3. *Cleared continuations are ENUMERATED to the model.* The consume callback
+   returns the cleared records, and the injected framing lists their task
+   texts verbatim ("Cleared scheduled follow-ups — recreate with
+   =continue_later= if still wanted, or revise deliberately: 1. <task> …").
+   The model recreates or intentionally drops each; nothing relies on its
+   memory of what it had planned. (Pierre's suggested shape, adopted.)
+4. *Defer via =continue_later=*: confirmed (reuse over a second mechanism).
+5. *Fate-sharing REVERSED (Pierre's push-back, adopted): claimed interjections
+   SURVIVE a terminal turn error.* Rationale: a user often interjects
+   precisely because the turn looks like it is failing — losing that steering
+   intent with the failed turn would destroy the exact message that mattered
+   most. Mechanism (symmetric with the shipped continuation cancel-sweep): the
+   turn tracks the ids it claimed (turn-scoped set); terminal error exits
+   re-journal those entries (same id, same text) and submit them to the serial
+   worker as follow-up turns. The framed copy left in the dead turn's context
+   is duplicate EXPOSURE when the follow-up runs — benign, named. The error
+   banner + the re-run follow-up together tell the honest story.
+6. *Web "stop" into a running triage turn*: confirmed — the account-of-work
+   arrives as the triage turn's HITL-gated draft; nothing external sends.
+
+Still open (not blocking implementation): PR #196's remaining scope (this
+feature ships the queued-bubble slice on the durable journal) — close as
+superseded or rebase, Pierre's call.
