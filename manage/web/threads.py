@@ -1316,10 +1316,15 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
             fresh = MESSAGE_BACKLOG.add(PendingMessage(
                 thread_id=rec.thread_id, text=rec.text, sender=rec.sender,
                 rider=rec.rider, enqueued_at=rec.enqueued_at))
+            # The retried turn keeps the ORIGINAL message's context rider
+            # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
+            # like the restart drain); fall back to a fresh rider with the
+            # dead turn's tz only when the entry never carried one.
             _RESUME_SCHEDULER.submit_message(
                 tid, fresh.text,
-                _build_rider(datetime.now(timezone.utc).isoformat(),
-                             rider.tz if rider else None),
+                _rider_from_fields(fresh.rider)
+                or _build_rider(datetime.now(timezone.utc).isoformat(),
+                                rider.tz if rider else None),
                 fresh.sender, fresh.id)
             n += 1
     except Exception:
