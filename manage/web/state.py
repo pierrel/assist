@@ -35,6 +35,9 @@ from assist.events.notify import notify_tools
 from assist.events.continuations import continuation_tools
 from assist.events.inbound import InboundLog
 from assist.backlog import MessageBacklog
+from assist.egress.store import EgressStore
+from assist.egress.tools import egress_tools
+from assist.sandbox_manager import _load_egress_allowlist
 from assist.geo.catalog import Catalog
 from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
@@ -143,6 +146,32 @@ GEO_CSRF = secrets.token_urlsafe(16)
 _geo_tools = (geo_tools(GEO_REGISTRY, GEO_CATALOG, GEO_PROPOSALS)
               if GEO_DIR else [])
 
+# Egress approval HITL (docs/2026-07-21-egress-approval-hitl.org) — wired only
+# when the approvals dir is configured; unset ⇒ tools/routes/cards absent and
+# the proxy runs exactly as before (dormant, prod-safe default). The startup
+# guard refuses a dir under the thread root: a sandbox bind-mounts its
+# thread's work_dir rw, so an approvals dir inside the root could hand a
+# sandbox write access to its own grants (self-approval).
+EGRESS_DIR = os.getenv("ASSIST_EGRESS_APPROVALS_DIR")
+if EGRESS_DIR:
+    _thread_root = os.path.realpath(MANAGER.root_dir)
+    if os.path.commonpath(
+            [os.path.realpath(EGRESS_DIR), _thread_root]) == _thread_root:
+        logging.error(
+            "ASSIST_EGRESS_APPROVALS_DIR=%s is under the thread root %s — a "
+            "sandbox could reach it; egress approvals DISABLED",
+            EGRESS_DIR, _thread_root)
+        EGRESS_DIR = None
+EGRESS_STORE = EgressStore(EGRESS_DIR) if EGRESS_DIR else None
+EGRESS_CSRF = secrets.token_urlsafe(16)
+# The committed base allowlist, for the list tool + already-allowed
+# correctives. Read once at startup — the conf only changes with a deploy,
+# which restarts this process.
+EGRESS_BASE_HOSTS = (frozenset(_load_egress_allowlist())
+                     if EGRESS_STORE else frozenset())
+_egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS)
+                 if EGRESS_STORE else [])
+
 # continue_later (progressive responses): callbacks live in threads.py beside the
 # dispatch machinery, so the deferred imports inside these defs resolve at tool-call time (the notify
 # pattern — threads.py imports this module, a top-level import here would cycle).
@@ -163,7 +192,7 @@ def _continuation_chain(tid):
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
               + continuation_tools(_continuation_journal, _continuation_chain)
-              + _geo_tools)
+              + _geo_tools + _egress_tools)
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")

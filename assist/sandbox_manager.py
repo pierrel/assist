@@ -73,6 +73,16 @@ def _load_egress_allowlist() -> list[str]:
         })
 
 
+def _egress_proxy_config_hash(allowlist_csv: str, approvals_dir: str | None) -> str:
+    """The proxy's config fingerprint (a container label): allowlist content
+    plus the approvals-mount schema/path, so a change to EITHER recreates the
+    proxy on the next sandbox start. The version marker exists so proxies
+    started before the approvals feature recreate once and gain the mount."""
+    return hashlib.sha256(
+        (allowlist_csv + "|v2-approvals:" + (approvals_dir or "")).encode()
+    ).hexdigest()[:16]
+
+
 class SandboxManager:
     """Manages Docker sandbox container lifecycle.
 
@@ -121,7 +131,19 @@ class SandboxManager:
 
         allowlist = _load_egress_allowlist()
         allowlist_csv = ",".join(allowlist)
-        allowlist_hash = hashlib.sha256(allowlist_csv.encode()).hexdigest()[:16]
+        # The approvals mount (user-approved egress grants — docs/
+        # 2026-07-21-egress-approval-hitl.org): a read-only mount of the
+        # approvals SUBDIR only (projection + client map; proposal state and
+        # agent free text stay host-side). Unset env ⇒ no mount ⇒ the
+        # feature is dormant and the proxy runs exactly as before. The
+        # schema marker rides the hash so an already-running proxy from
+        # before this feature is recreated once and gains the mount.
+        approvals_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR") or None
+        if approvals_dir:
+            from assist.egress.store import APPROVALS_SUBDIR
+            approvals_dir = os.path.join(approvals_dir, APPROVALS_SUBDIR)
+            os.makedirs(approvals_dir, exist_ok=True)
+        allowlist_hash = _egress_proxy_config_hash(allowlist_csv, approvals_dir)
 
         with cls._egress_lock:
             try:
@@ -170,17 +192,25 @@ class SandboxManager:
                 except APIError as e:
                     logger.warning("Could not remove existing egress proxy: %s", e)
 
+            from assist.egress.guidance import EGRESS_DENY_BODY
             proxy = client.containers.run(
                 EGRESS_PROXY_IMAGE,
                 name=EGRESS_PROXY_NAME,
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
                 extra_hosts={"host.docker.internal": "host-gateway"},
-                environment={"EGRESS_ALLOWLIST": allowlist_csv},
+                # EGRESS_DENY_BODY: the 403 body text, centralized in
+                # assist/egress/guidance.py and delivered here so no
+                # guidance prose lives in proxy code (Pierre, PR #200).
+                environment={"EGRESS_ALLOWLIST": allowlist_csv,
+                             "EGRESS_DENY_BODY": EGRESS_DENY_BODY},
                 labels={
                     "assist.egress-proxy": "true",
                     "assist.egress-allowlist-hash": allowlist_hash,
                 },
+                **({"volumes": {approvals_dir: {"bind": "/approvals",
+                                                "mode": "ro"}}}
+                   if approvals_dir else {}),
             )
             try:
                 egress_net.connect(proxy)
@@ -363,11 +393,50 @@ class SandboxManager:
             )
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             cls._containers[work_dir] = container
+            cls._record_egress_client(container, work_dir)
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(container)
         except DockerException as e:
             logger.warning("Docker sandbox unavailable: %s", e)
             return None
+
+    # work_dir -> egress-network IP for the client-attribution map (thread-
+    # scoped egress grants; docs/2026-07-21-egress-approval-hitl.org).
+    _egress_client_ips: dict[str, str] = {}
+
+    @classmethod
+    def _record_egress_client(cls, container, work_dir: str) -> None:
+        """Map this sandbox's egress-network IP to its thread in the proxy's
+        client-map. Best-effort by contract: a failure only costs this turn
+        its thread-scoped grants (the proxy denies fail-closed on an unknown
+        IP) — it must never fail the sandbox start. Dormant when the
+        approvals dir env is unset. The thread id is work_dir's parent dir
+        name (work_dir is ``<root>/<tid>/<subdir>`` — the
+        ``thread_default_working_dir`` layout)."""
+        egress_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR")
+        if not egress_dir:
+            return
+        try:
+            container.reload()
+            ip = (container.attrs["NetworkSettings"]["Networks"]
+                  [EGRESS_NETWORK]["IPAddress"])
+            tid = os.path.basename(os.path.dirname(work_dir))
+            if ip and tid:
+                from assist.egress.client_map import record_client
+                record_client(egress_dir, ip, tid)
+                cls._egress_client_ips[work_dir] = ip
+        except Exception:
+            logger.warning("egress client-map record failed for %s (thread-"
+                           "scoped grants deny this turn)", work_dir,
+                           exc_info=True)
+
+    @classmethod
+    def _forget_egress_client(cls, work_dir: str) -> None:
+        egress_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR")
+        ip = cls._egress_client_ips.pop(work_dir, None)
+        if egress_dir and ip:
+            from assist.egress.client_map import forget_client
+            forget_client(egress_dir, ip)
 
     @classmethod
     def cleanup(cls, work_dir: str) -> None:
@@ -382,6 +451,7 @@ class SandboxManager:
         path (and the same applies to thread-delete and shutdown).
         """
         container = cls._containers.pop(work_dir, None)
+        cls._forget_egress_client(work_dir)
         if container:
             try:
                 container.kill()
@@ -398,6 +468,7 @@ class SandboxManager:
         strictly better than burning 5s per container on the event loop.
         """
         for path, container in list(cls._containers.items()):
+            cls._forget_egress_client(path)
             try:
                 container.kill()
                 logger.info("Cleaned up container for %s", path)

@@ -28,6 +28,8 @@ from deepagents.backends.protocol import (
 )
 from docker.errors import NotFound as DockerNotFound
 
+from assist.egress.guidance import EGRESS_DENIED_GUIDANCE
+
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 100_000
@@ -47,6 +49,18 @@ EXEC_TIMEOUT_SECONDS = int(os.getenv("ASSIST_SANDBOX_EXEC_TIMEOUT", "600"))
 # period. 5s gives a well-behaved process room to flush; an unkillable
 # busy loop hits SIGKILL and surfaces as exit 137.
 EXEC_KILL_GRACE_SECONDS = 5
+
+
+def _looks_like_egress_denial(output: str) -> bool:
+    """The proxy-denial signature across real clients (verified: curl
+    "CONNECT tunnel failed, response 403" / "Received HTTP code 403 from
+    proxy", pip/requests "Tunnel connection failed: 403", wget "Proxy
+    tunneling failed", git = libcurl). An origin server's own 403 carries no
+    proxy/tunnel token and correctly misses. False positives are harmless —
+    the prepend is guidance text."""
+    low = output.lower()
+    return (("403" in low or "forbidden" in low)
+            and ("proxy" in low or "tunnel" in low))
 
 
 _TIMEOUT_GUIDANCE = (
@@ -247,6 +261,13 @@ class DockerSandboxBackend(BaseSandbox):
             output = _TIMEOUT_GUIDANCE.format(timeout=EXEC_TIMEOUT_SECONDS) + (
                 output if output else "(no output)"
             )
+        elif exit_code != 0 and _looks_like_egress_denial(output):
+            # The egress proxy denied a host. curl discards CONNECT response
+            # bodies on the HTTPS path, so the agent would otherwise see an
+            # opaque failure and misread restricted egress as "no internet"
+            # (observed live 2026-07-21). The guidance text is the
+            # centralized infra↔agent contract (assist/egress/guidance.py).
+            output = EGRESS_DENIED_GUIDANCE + output
 
         truncated = len(output) > MAX_OUTPUT_CHARS
         if truncated:
