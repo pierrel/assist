@@ -100,12 +100,17 @@ class EgressRequest:
             host, port, tid = str(d["host"]), int(d["port"]), str(d["origin_tid"])
             if not (host and tid and 0 < port < 65536):
                 return None
+            state = d.get("state", "pending")
+            if state not in ("pending", "approved", "declined"):
+                return None     # unknown state: skip, don't persist garbage
             return EgressRequest(
                 host=host, port=port, task=str(d.get("task", "")),
                 origin_tid=tid, created_at=str(d.get("created_at", "")),
-                state=str(d.get("state", "pending")),
+                state=state,
                 expires_at=str(d.get("expires_at", "")),
-                dispatched=bool(d.get("dispatched", False)))
+                # strict identity check: bool("false") is True — only a real
+                # JSON true may mark a record announced/prunable
+                dispatched=(d.get("dispatched") is True))
         except Exception:
             logger.warning("egress: malformed request record skipped: %.120r", d)
             return None
@@ -165,13 +170,27 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
                 if not (r.state == "approved" and not _grant_live(r, now))
                 and not _stale_decline(r)}
         self._write(live)
-        tmp = f"{self._projection}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            json.dump({k: {"host": r.host, "port": r.port,
-                           "origin_tid": r.origin_tid,
-                           "expires_at": r.expires_at}
-                       for k, r in live.items() if r.state == "approved"}, f)
-        os.replace(tmp, self._projection)
+        try:
+            tmp = f"{self._projection}.{os.getpid()}.tmp"
+            with open(tmp, "w") as f:
+                json.dump({k: {"host": r.host, "port": r.port,
+                               "origin_tid": r.origin_tid,
+                               "expires_at": r.expires_at}
+                           for k, r in live.items() if r.state == "approved"}, f)
+            os.replace(tmp, self._projection)
+        except OSError:
+            # Fail CLOSED, not stale: a projection the store can't rewrite
+            # (disk full, permissions) could keep honoring a just-revoked
+            # grant. Remove it — the proxy degrades to base-allowlist-only —
+            # then surface the failure to the caller.
+            try:
+                os.remove(self._projection)
+            except OSError:
+                pass
+            logger.error("egress projection write failed — removed so the "
+                         "proxy fails closed to the base allowlist",
+                         exc_info=True)
+            raise
 
     # --- API ----------------------------------------------------------------
     PER_THREAD_PENDING_CAP = 3

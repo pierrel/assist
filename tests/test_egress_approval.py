@@ -443,3 +443,11 @@ def test_stale_announced_declines_pruned(tmp_path):
     with st._lock:
         st._mutate(recs)
     assert [r.host for r in st.all()] == ["new.example.com"]
+
+
+def test_from_dict_strict_dispatched_and_state():
+    base = {"host": "a.example.com", "port": 443, "origin_tid": "t1"}
+    assert EgressRequest.from_dict({**base, "dispatched": "false"}).dispatched is False
+    assert EgressRequest.from_dict({**base, "dispatched": 1}).dispatched is False
+    assert EgressRequest.from_dict({**base, "dispatched": True}).dispatched is True
+    assert EgressRequest.from_dict({**base, "state": "granted"}) is None
