@@ -22,16 +22,42 @@ Allowlist source:
   EGRESS_ALLOWLIST env var (comma-separated) — set by
   SandboxManager._ensure_egress_proxy_running at container-create time.
   No file fallback; the env var is the wire protocol from host to proxy.
+
+User-approved grants (docs/2026-07-21-egress-approval-hitl.org):
+  On a base-allowlist MISS only, /approvals (a read-only host mount) is
+  re-read: approved-hosts.json maps grant keys to {host, port, origin_tid,
+  expires_at} and client-map.json maps sandbox egress-network IPs to thread
+  ids. A connection is granted iff an entry matches the exact (host, port),
+  its origin_tid equals the CONNECTING CLIENT's thread (grants are
+  thread-scoped), and its duration marker is live — an aware-UTC future
+  expires_at, or the literal "revoked-only". Every parse problem, unknown
+  client IP, or odd marker is a skip/deny: the files can only ever ADD
+  narrowly, never remove or re-match base entries, and the proxy runs
+  unchanged (base list only) when the mount is absent.
+
+  Approved (non-base) hosts additionally pass a RESOLVED-ADDRESS guard:
+  resolve, reject private/loopback/link-local/metadata space, and connect
+  to the vetted IP — a user-approved hostname is attacker-influenceable
+  (DNS rebinding), unlike the operator-curated base entries, so it must
+  never be able to point into the host or LAN. The 403 body text arrives
+  via EGRESS_DENY_BODY (centralized in assist/egress/guidance.py — no
+  guidance prose lives here).
 """
+import ipaddress
+import json
 import os
 import select
 import socket
 import sys
 import threading
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "8888"))
 PIPE_TIMEOUT = 600  # seconds of idle on a tunnel before tearing down
+APPROVALS_DIR = os.environ.get("APPROVALS_DIR", "/approvals")
+APPROVALS_MAX_BYTES = 65536
+REVOKED_ONLY = "revoked-only"
 
 
 def load_allowlist() -> frozenset[str]:
@@ -40,6 +66,7 @@ def load_allowlist() -> frozenset[str]:
 
 
 ALLOWLIST = load_allowlist()
+DENY_BODY = os.environ.get("EGRESS_DENY_BODY", "").encode("utf-8")
 
 
 def log(msg: str) -> None:
@@ -51,11 +78,78 @@ def deny(client: socket.socket, host: str, reason: str) -> None:
     try:
         client.sendall(
             b"HTTP/1.1 403 Forbidden\r\n"
-            b"Content-Length: 0\r\n"
-            b"Connection: close\r\n\r\n"
+            b"Content-Type: text/plain\r\n"
+            + f"Content-Length: {len(DENY_BODY)}\r\n".encode()
+            + b"Connection: close\r\n\r\n" + DENY_BODY
         )
     except OSError:
         pass
+
+
+def _read_small_json(name: str) -> dict:
+    """Fail-closed read of one /approvals file: any problem — missing,
+    oversized, unparseable, wrong shape — is an empty dict (base list only)."""
+    path = os.path.join(APPROVALS_DIR, name)
+    try:
+        if os.path.getsize(path) > APPROVALS_MAX_BYTES:
+            log(f"ignoring oversized {name}")
+            return {}
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _grant_live(expires_at) -> bool:
+    if expires_at == REVOKED_ONLY:
+        return True
+    try:
+        exp = datetime.fromisoformat(str(expires_at))
+        return exp.tzinfo is not None and exp > datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def approved_target(host: str, port: int, client_ip: str) -> bool:
+    """True iff a live, thread-matching grant covers (host, port) for the
+    thread that owns the connecting sandbox. Every lookup is fail-closed."""
+    tid = _read_small_json("client-map.json").get(client_ip)
+    if not tid:
+        return False
+    for entry in _read_small_json("approved-hosts.json").values():
+        try:
+            if (str(entry["host"]).lower() == host
+                    and int(entry["port"]) == port
+                    and str(entry["origin_tid"]) == str(tid)
+                    and _grant_live(entry.get("expires_at"))):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def vet_resolved(host: str, port: int) -> str | None:
+    """Resolve an APPROVED host and return an address safe to connect to, or
+    None. Rejects any private/loopback/link-local/metadata result: a
+    user-approved hostname is attacker-influenceable via DNS, so it must
+    never reach the host gateway, the LAN, or cloud-metadata space.
+    Connecting to the vetted IP (not re-resolving) closes the check/connect
+    TOCTOU."""
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return None
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if not (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return addr
+    return None
 
 
 def pipe(a: socket.socket, b: socket.socket) -> None:
@@ -121,15 +215,26 @@ def handle(client: socket.socket, addr) -> None:
             except ValueError:
                 deny(client, target, "bad port")
                 return
+            approved_ip = None
             if host not in ALLOWLIST:
-                deny(client, host, "not in allowlist")
-                return
+                if not approved_target(host, port, addr[0]):
+                    deny(client, host, "not in allowlist")
+                    return
+                approved_ip = vet_resolved(host, port)
+                if approved_ip is None:
+                    deny(client, host,
+                         "approved host resolves to private/reserved space")
+                    return
             try:
-                upstream = socket.create_connection((host, port), timeout=10)
+                upstream = socket.create_connection(
+                    (approved_ip or host, port), timeout=10)
             except OSError as e:
                 deny(client, host, f"upstream connect failed: {e}")
                 return
-            log(f"ALLOW CONNECT {host}:{port}")
+            if approved_ip:
+                log(f"ALLOW-APPROVED CONNECT {host}:{port} via {approved_ip}")
+            else:
+                log(f"ALLOW CONNECT {host}:{port}")
             client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             client.settimeout(None)
             upstream.settimeout(None)
@@ -149,9 +254,16 @@ def handle(client: socket.socket, addr) -> None:
         u = urlparse(target)
         host = (u.hostname or "").lower()
         port = u.port or 80
+        approved_ip = None
         if host not in ALLOWLIST:
-            deny(client, host, f"not in allowlist (HTTP {method})")
-            return
+            if not approved_target(host, port, addr[0]):
+                deny(client, host, f"not in allowlist (HTTP {method})")
+                return
+            approved_ip = vet_resolved(host, port)
+            if approved_ip is None:
+                deny(client, host,
+                     "approved host resolves to private/reserved space")
+                return
         path = u.path or "/"
         if u.query:
             path += "?" + u.query
@@ -171,11 +283,15 @@ def handle(client: socket.socket, addr) -> None:
             new_request += h + "\r\n"
         new_request += "\r\n"
         try:
-            upstream = socket.create_connection((host, port), timeout=10)
+            upstream = socket.create_connection(
+                (approved_ip or host, port), timeout=10)
         except OSError as e:
             deny(client, host, f"upstream connect failed: {e}")
             return
-        log(f"ALLOW {method} {host}:{port}{path}")
+        if approved_ip:
+            log(f"ALLOW-APPROVED {method} {host}:{port}{path} via {approved_ip}")
+        else:
+            log(f"ALLOW {method} {host}:{port}{path}")
         upstream.sendall(new_request.encode("latin-1") + body)
         client.settimeout(None)
         upstream.settimeout(None)

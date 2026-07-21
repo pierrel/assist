@@ -72,6 +72,8 @@ from manage.web.state import (
     DESCRIPTION_CACHE,
     DOMAIN_MANAGERS,
     DOMAINS,
+    EGRESS_CSRF,
+    EGRESS_STORE,
     GEO_CATALOG,
     GEO_CSRF,
     GEO_DIR,
@@ -787,6 +789,49 @@ def render_thread(
 
     # A pending geo download proposal for THIS thread renders an inline approve/decline
     # card (like the send_reply approval) so the user acts without leaving the chat.
+    # Pending egress approval cards for THIS thread (docs/2026-07-21-egress-
+    # approval-hitl.org): the user approves exact host:port network access
+    # where they are — in the chat. Lock-free peek (KeyedJsonStore.peek — the
+    # MESSAGE_BACKLOG.peek discipline); code-supplied copy only, the agent's
+    # task text quoted + escaped as its unverified words. All of a thread's
+    # pending cards render (<=3 by the tool's cap).
+    egress_banner = ""
+    if EGRESS_STORE is not None:
+        for _er in sorted((r for r in EGRESS_STORE.peek()
+                           if r.origin_tid == tid and r.state == "pending"),
+                          key=lambda r: r.created_at):
+            _eh = html.escape(_er.host)
+            _puny = ('<div style="color:#b45309">Internationalized domain '
+                     'shown as punycode — verify it is the site you expect.'
+                     '</div>' if _er.host.startswith("xn--") or ".xn--" in _er.host
+                     else "")
+            _fields = (f'<input type="hidden" name="token" value="{EGRESS_CSRF}">'
+                       f'<input type="hidden" name="tid" value="{html.escape(tid)}">'
+                       f'<input type="hidden" name="host" value="{_eh}">'
+                       f'<input type="hidden" name="port" value="{_er.port}">'
+                       f'<input type="hidden" name="redirect" value="/thread/{html.escape(tid)}">')
+            egress_banner += (
+                f'<div class="approval-banner">'
+                f'<div><strong>Network access request</strong> — the agent asks to '
+                f'reach <code>{_eh}:{_er.port}</code> from this thread.</div>'
+                f'{_puny}'
+                f'<div style="margin:.3rem 0; color:#6b7280">The agent\'s stated '
+                f'reason (not verified): \u201c{html.escape(_er.task[:300])}\u201d</div>'
+                f'<div style="margin:.3rem 0; font-size:.85rem">Approving opens this '
+                f'exact host and port, for this thread only. The hour starts when you '
+                f'approve. Traffic is end-to-end encrypted; contents are not '
+                f'inspected. Approving lets the agent retry automatically once all '
+                f'requests are resolved. For permanent access, add the host to the '
+                f'committed allowlist instead.</div>'
+                f'<div class="approval-actions">'
+                f'<form method="post" action="/egress/hour" style="display:inline">{_fields}'
+                f'<button class="btn merge-btn" type="submit">Approve for 1 hour</button></form> '
+                f'<form method="post" action="/egress/always" style="display:inline">{_fields}'
+                f'<button class="btn btn-secondary" type="submit">Always allow for this thread</button></form> '
+                f'<form method="post" action="/egress/decline" style="display:inline">{_fields}'
+                f'<button class="btn btn-secondary" type="submit">Decline</button></form>'
+                f'</div></div>')
+
     geo_banner = ""
     if GEO_PROPOSALS is not None:
         try:
@@ -973,6 +1018,7 @@ def render_thread(
           {_thread_domain_html(tid)}
           {status_banner}
           {geo_banner}
+          {egress_banner}
           {"<div class='success-msg'>Conversation capture started! This will complete in the background.</div>" if captured else ""}
           {"<div class='success-msg'>Merged to main and pushed to origin!</div>" if merged else ""}
           {"<div class='success-msg'>Review submitted. The agent will respond in this thread.</div>" if reviewed else ""}
@@ -2219,6 +2265,45 @@ def _run_region_job(op: str, slug: str) -> bool:
     return proc.returncode == 0
 
 
+def _evict_egress(tid: str) -> None:
+    """on_delete callback: a thread's egress grants + pending requests die
+    with the thread — a grant never outlives its scope (design D3)."""
+    if EGRESS_STORE is not None:
+        try:
+            EGRESS_STORE.remove_thread(tid)
+        except Exception:
+            logging.warning("egress cleanup failed for deleted thread %s", tid,
+                            exc_info=True)
+
+
+def _dispatch_egress_resolution(tid: str) -> None:
+    """One resolution turn once a thread's pending egress requests have ALL
+    been resolved (last approve or decline) — not per-approval, so the user
+    can approve A and B before a single retry burns the slot. The prompt
+    enumerates the thread's grants and declines with the agent's own recorded
+    task text (self-injection at continuation trust, the geo completion-turn
+    shape). Runs on the approve handler's threadpool thread."""
+    if EGRESS_STORE is None:
+        return
+    lines = []
+    for r in EGRESS_STORE.for_thread(tid):
+        if r.state == "approved":
+            lines.append(f"- {r.host}:{r.port} APPROVED. Your recorded task: "
+                         f"\"{r.task}\"")
+        elif r.state == "declined":
+            lines.append(f"- {r.host}:{r.port} DECLINED — do not re-ask; "
+                         "proceed without it.")
+    if not lines:
+        return
+    prompt = ("[Egress requests resolved] The user has resolved this "
+              "thread's network access requests:\n" + "\n".join(lines)
+              + "\nFor approved hosts, carry out the recorded task now — "
+              "if the work already succeeded, just confirm the result. "
+              "Acknowledge any declined hosts in your answer.")
+    _scheduled_dispatch(tid, prompt, _GEO_TZ)
+    _mark_urgent(tid)
+
+
 def _geo_on_complete(tid: str, message: str) -> None:
     """on_complete: deliver the region-ready (or -failed) message into the thread as a
     fresh turn + mark it urgent, so the agent picks the original request back up."""
@@ -3169,7 +3254,7 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
 @app.post("/thread/{tid}/delete")
 async def delete_thread(tid: str):
     _existing_thread_dir(tid)
-    MANAGER.hard_delete(tid, on_delete=[_evict_caches])
+    MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
     return RedirectResponse(url="/", status_code=303)
 
 

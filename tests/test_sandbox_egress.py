@@ -93,9 +93,11 @@ class TestEnsureEgressProxy(TestCase):
         return client
 
     def _allowlist_hash(self):
-        allowlist = _load_egress_allowlist()
-        csv = ",".join(allowlist)
-        return hashlib.sha256(csv.encode()).hexdigest()[:16]
+        # single-sourced from the prod formula so the two can't drift
+        from assist.sandbox_manager import _egress_proxy_config_hash
+        return _egress_proxy_config_hash(
+            ",".join(_load_egress_allowlist()),
+            None)   # ASSIST_EGRESS_APPROVALS_DIR unset in tests
 
     def test_creates_network_if_missing(self):
         client = self._make_client(network_exists=False)
@@ -217,10 +219,10 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         client.networks.get.return_value = MagicMock()
         proxy = MagicMock()
         proxy.status = "running"
+        from assist.sandbox_manager import _egress_proxy_config_hash
         proxy.labels = {"assist.egress-allowlist-hash":
-                        hashlib.sha256(
-                            ",".join(_load_egress_allowlist()).encode()
-                        ).hexdigest()[:16]}
+                        _egress_proxy_config_hash(
+                            ",".join(_load_egress_allowlist()), None)}
         proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()
@@ -258,10 +260,10 @@ class TestSandboxBackendUsesEgressProxy(TestCase):
         client.networks.get.return_value = MagicMock()
         proxy = MagicMock()
         proxy.status = "running"
+        from assist.sandbox_manager import _egress_proxy_config_hash
         proxy.labels = {"assist.egress-allowlist-hash":
-                        hashlib.sha256(
-                            ",".join(_load_egress_allowlist()).encode()
-                        ).hexdigest()[:16]}
+                        _egress_proxy_config_hash(
+                            ",".join(_load_egress_allowlist()), None)}
         proxy.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
         client.containers.get.return_value = proxy
         sandbox_container = MagicMock()
