@@ -113,20 +113,23 @@ def _grant_live(expires_at) -> bool:
 
 def approved_target(host: str, port: int, client_ip: str) -> bool:
     """True iff a live, thread-matching grant covers (host, port) for the
-    thread that owns the connecting sandbox. Every lookup is fail-closed."""
+    thread that owns the connecting sandbox. Direct key lookup (the
+    projection is keyed ``tid:host:port``), but the ENTRY's own fields are
+    the authority — the key is never trusted on its own. Fail-closed on
+    every parse problem."""
     tid = _read_small_json("client-map.json").get(client_ip)
     if not tid:
         return False
-    for entry in _read_small_json("approved-hosts.json").values():
-        try:
-            if (str(entry["host"]).lower() == host
-                    and int(entry["port"]) == port
-                    and str(entry["origin_tid"]) == str(tid)
-                    and _grant_live(entry.get("expires_at"))):
-                return True
-        except Exception:
-            continue
-    return False
+    entry = _read_small_json("approved-hosts.json").get(f"{tid}:{host}:{port}")
+    if not isinstance(entry, dict):
+        return False
+    try:
+        return (str(entry["host"]).lower() == host
+                and int(entry["port"]) == port
+                and str(entry["origin_tid"]) == str(tid)
+                and _grant_live(entry.get("expires_at")))
+    except Exception:
+        return False
 
 
 def vet_resolved(host: str, port: int) -> str | None:
