@@ -32,6 +32,10 @@ from assist.egress.store import (EgressRequest, EgressStore,
                                  remaining_lifetime, request_key)
 
 _HOST_RE = re.compile(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?")
+# Per-label shape (RFC 1035-ish): no empty labels (a..b), ≤63 chars, no
+# leading/trailing hyphen — an unresolvable host would only make a confusing
+# approval card.
+_LABEL_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 # Base-infra names never proposable: already granted host-wide, and a grant
 # record for them would only be a rebinding-adjacent foothold.
 _INFRA_HOSTS = {"host.docker.internal", "10.0.0.1"}
@@ -65,7 +69,8 @@ def _parse_host_port(host, port):
         return None, None, f"'{port}' is not a valid port number."
     if not (0 < port < 65536):
         return None, None, f"port {port} is out of range (1-65535)."
-    if not raw or "." not in raw or not _HOST_RE.fullmatch(raw):
+    if (not raw or "." not in raw or not _HOST_RE.fullmatch(raw)
+            or not all(_LABEL_RE.fullmatch(lbl) for lbl in raw.split("."))):
         return None, None, (
             f"'{raw or host}' is not a valid hostname. Give the bare "
             "lowercase DNS name, e.g. api.example.com (internationalized "
