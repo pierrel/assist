@@ -148,8 +148,8 @@ def test_owner_interjection_enumerates_then_clears_at_claim(wired):
     threads._TURN_INTERJECTION[tid] = ctx
     frame = threads._frame_interjection(rec)
     assert "1. find tire sizes" in frame and "2. check tubeless" in frame
-    # framing alone clears NOTHING (a turn dying pre-checkpoint must leave
-    # the promised follow-ups intact)
+    # framing only snapshots ids — it removes nothing from the journal (a
+    # turn dying pre-checkpoint must leave the promised follow-ups intact)
     assert ctx["cleared_ids"] == {c1.id, c2.id}
     assert sum(1 for r in MESSAGE_BACKLOG.for_thread(tid)
                if r.origin == "continuation") == 2
