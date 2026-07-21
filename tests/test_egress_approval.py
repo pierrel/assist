@@ -396,3 +396,14 @@ def test_take_undispatched_batches_once(tmp_path):
     assert [r.host for r in batch2] == ["c.example.com"]
     prompt2 = resolution_prompt(batch2)
     assert "task A" not in prompt2 and "DECLINED" in prompt2
+
+
+def test_malformed_tid_is_400_not_500(wired_web):
+    from fastapi.testclient import TestClient
+    from manage import web
+    from manage.web import egress as egress_routes
+    c = TestClient(web.app)
+    r = c.post("/egress/hour", data={"token": egress_routes.EGRESS_CSRF,
+                                     "tid": "../escape", "host": "a.example.com",
+                                     "port": "443"})
+    assert r.status_code == 400

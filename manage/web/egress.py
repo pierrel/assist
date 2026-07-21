@@ -129,6 +129,14 @@ async def egress_action(decision: str, request: Request,
         raise HTTPException(status_code=400, detail="bad port")
     if not (tid and host and 0 < port < 65536):
         raise HTTPException(status_code=400, detail="missing fields")
+    try:
+        # Validate the id shape up front (thread_dir raises InvalidThreadId on
+        # path-escaping ids) so a malformed POST is a 400, not a 500 later in
+        # the handler. append_event itself is best-effort by contract — a
+        # DELETED-but-valid tid can't 500 anything below.
+        MANAGER.thread_dir(tid)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad thread id")
     if decision == "revoke":
         from assist.events.thread_log import append_event
         removed = await run_in_threadpool(
