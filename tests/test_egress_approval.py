@@ -398,10 +398,15 @@ def test_take_undispatched_batches_once(tmp_path):
     assert "task A" not in prompt2 and "DECLINED" in prompt2
 
 
-def test_malformed_tid_is_400_not_500(wired_web):
+def test_malformed_tid_is_400_not_500(wired_web, monkeypatch):
     from fastapi.testclient import TestClient
     from manage import web
     from manage.web import egress as egress_routes
+    from assist.thread_manager import ThreadManager
+    # the fixture stubs thread_dir without validation — restore the real
+    # validating implementation (bound to the patched root) for this test
+    monkeypatch.setattr(web.MANAGER, "thread_dir",
+                        lambda t: ThreadManager.thread_dir(web.MANAGER, t))
     c = TestClient(web.app)
     r = c.post("/egress/hour", data={"token": egress_routes.EGRESS_CSRF,
                                      "tid": "../escape", "host": "a.example.com",
