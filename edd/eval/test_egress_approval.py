@@ -14,7 +14,7 @@ import tempfile
 from unittest import TestCase, mock
 
 from deepagents.backends.filesystem import FilesystemBackend
-from deepagents.backends.protocol import SandboxBackendProtocol
+from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 
 from assist.agent import create_agent, AgentHarness
 from assist.egress.guidance import EGRESS_DENIED_GUIDANCE
@@ -40,6 +40,7 @@ class _DenyNetBackend(FilesystemBackend, SandboxBackendProtocol):
 
     def __init__(self, root_dir):
         super().__init__(root_dir=root_dir, virtual_mode=False)
+        self.work_dir = root_dir      # the sandbox-backend contract create_agent reads
         self.allow = False
         self.net_attempts = []
 
@@ -47,10 +48,11 @@ class _DenyNetBackend(FilesystemBackend, SandboxBackendProtocol):
         if any(t in command for t in _NET_TOKENS):
             self.net_attempts.append(command)
             if self.allow:
-                return {"command": command, "exit_code": 0,
-                        "output": '{"tag_name": "v9.3.1", "name": "Release 9.3.1"}'}
-            return {"command": command, "exit_code": 56, "output": _DENIAL}
-        return {"command": command, "exit_code": 0, "output": ""}
+                return ExecuteResponse(
+                    output='{"tag_name": "v9.3.1", "name": "Release 9.3.1"}',
+                    exit_code=0)
+            return ExecuteResponse(output=_DENIAL, exit_code=56)
+        return ExecuteResponse(output="", exit_code=0)
 
 
 class TestEgressApproval(TestCase):
@@ -126,9 +128,17 @@ class TestEgressApproval(TestCase):
                 f"- api.github.com:443 APPROVED. Your recorded task: \"{rec.task}\"\n"
                 "For approved hosts, carry out the recorded task now — if the "
                 "work already succeeded, just confirm the result.")
-        answer = final_answer(agent).lower()
-        self.assertIn("9.3.1", answer,
-                      f"resolution turn never completed the fetch: {answer[:400]}")
+        # Search ALL assistant text, not just the last message: the model may
+        # (correctly!) follow the fetch-and-report with a voluntary
+        # remove_allowed_host cleanup, making the final message the cleanup
+        # note (observed trial 3 — the answer preceded it).
+        from langchain_core.messages import AIMessage
+        all_text = " ".join(m.content for m in agent.all_messages()
+                            if isinstance(m, AIMessage)
+                            and isinstance(m.content, str)).lower()
+        self.assertIn("9.3.1", all_text,
+                      f"resolution turn never completed the fetch: "
+                      f"{final_answer(agent)[:400]}")
         pending = [r for r in self.store.for_thread(self.tid)
                    if r.state == "pending"]
         self.assertEqual(pending, [], "re-requested after approval")
