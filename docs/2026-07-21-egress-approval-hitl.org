@@ -230,8 +230,8 @@ coupling; rejected in review).
   min ago", the agent's task text quoted as its unverified words, the exact
   scope sentence ("this exact host and port, for THIS thread only; the
   hour is the grant's lifetime and starts when you approve — approving
-  later just starts it later; traffic is end-to-end encrypted — contents
-  are not inspected"), and — required copy (review) — *"Approving lets the
+  later just starts it later; the proxy does not inspect contents; HTTPS
+  traffic is encrypted end-to-end, a plain-HTTP port is not"), and — required copy (review) — *"Approving lets the
   agent retry automatically."* Buttons: Approve for 1 hour / Always allow
   for this thread / Decline (CSRF + redirect back to the thread). All of a
   thread's pending cards render inline (≤3 by cap; no "+N more"
