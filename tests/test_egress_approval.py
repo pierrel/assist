@@ -116,7 +116,8 @@ def test_parse_host_port_tolerant(host, port, want):
     ("127.0.0.1", 443), ("0x7f.0x0.0x0.0x1", 443), ("2130706433.", 443),
     ("host.docker.internal", 443), ("svc.internal", 443), ("10.0.0.1", 80),
     ("nodots", 443), ("api.example.com", 99999), ("api.example.com", "abc"),
-    ("", 443),
+    ("", 443), ("a..b", 443), ("-bad.example.com", 443),
+    ("bad-.example.com", 443), ("x" * 64 + ".example.com", 443),
 ])
 def test_parse_host_port_rejects(host, port):
     h, p, err = _parse_host_port(host, port)
