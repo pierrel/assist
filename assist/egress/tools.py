@@ -71,7 +71,11 @@ def _parse_host_port(host, port):
             f"'{raw or host}' is not a valid hostname. Give the bare "
             "lowercase DNS name, e.g. api.example.com (internationalized "
             "names must be given in punycode/A-label form).")
-    if re.fullmatch(r"[0-9.]+|0x[0-9a-f.]+", raw):
+    if all(re.fullmatch(r"0x[0-9a-f]+|0[0-7]*|[0-9]+", lbl)
+           for lbl in raw.split(".")):
+        # Every label is numeric (decimal/octal/hex) — a dotted IP encoding
+        # (127.0.0.1, 0x7f.0x0.0x0.0x1, 0177.0.0.1). Advisory only: the
+        # proxy's resolved-address vet is the authoritative guard.
         return None, None, ("IP addresses can't be requested — only DNS "
                             "hostnames.")
     if raw in _INFRA_HOSTS or raw.endswith(".internal"):
