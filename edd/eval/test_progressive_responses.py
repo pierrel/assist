@@ -23,7 +23,7 @@ from assist.events.continuations import continuation_tools
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
-from .utils import create_filesystem, stub_research_subagent
+from .utils import create_filesystem, final_answer, stub_research_subagent
 
 _BIKE_ORG = """* My bike — Linus Roadster
 ** Parts I still need
@@ -66,13 +66,6 @@ class TestProgressiveSplit(TestCase):
                             n += 1
         return n
 
-    def _final_answer(self, agent):
-        from langchain_core.messages import AIMessage
-        for m in reversed(agent.all_messages()):
-            if isinstance(m, AIMessage) and isinstance(m.content, str) and m.content.strip():
-                return m.content
-        return ""
-
     def test_files_plus_research_shape_splits(self):
         """Local files answer part; the rest is research-worthy → answer from
         the files now, journal the rest, do NOT run research in this turn."""
@@ -80,7 +73,7 @@ class TestProgressiveSplit(TestCase):
             agent = self._agent({"bike.org": _BIKE_ORG})
             agent.message("Is there anything I still need to get for my bike, "
                           "and what would each roughly cost these days?")
-        answer = self._final_answer(agent)
+        answer = final_answer(agent)
         # the fast half: the from-your-files answer is in the FIRST response
         self.assertTrue("light" in answer.lower() or "bell" in answer.lower(),
                         f"answer didn't use the local file: {answer[:400]}")

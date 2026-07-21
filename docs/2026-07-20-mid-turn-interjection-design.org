@@ -13,8 +13,8 @@ eligible entries exist, appends them to graph state as *individually framed*
 injected at the same boundary = coalescing). The model's next call sees them
 and chooses redirect / incorporate / defer / stop in its own voice. The *claim*
 (journal removal) is deferred until the injected message is provably in a
-durable checkpoint — one sweep function ("claim every journal id present in
-the checkpointed messages") called at exactly two sites: the next
+durable checkpoint — the same claim discipline ("claim every journal id
+present in the checkpointed messages") at exactly two sites: the next
 =before_model=, and the terminal =ready=/=awaiting_approval= exits. The shipped
 entry-gone gate then makes the queued fallback dispatcher skip a consumed
 entry — exactly-once with zero new dedup machinery. An entry the turn never
@@ -82,20 +82,37 @@ work falls out of the same equality. The =awaiting_approval= state is
 untouched by construction (no model calls run while interrupted → the shipped
 supersede path remains the one story there).
 
-* Consume side effects (kept minimal)
+* Consume side effects (kept minimal; as-built mechanism)
 
-On claim of an owner interjection: one call to the existing
-=_clear_pending_continuations= (redirect bias — this is US-6's actual
-cancel-the-background-work mechanism, and it keeps consumed and unconsumed
-interjections consistent: an unconsumed one already clears at its follow-up
-turn's start). The framing tells the model its scheduled follow-ups were
-cleared — re-schedule what still matters (a later =continue_later= in the same
-turn journals AFTER the clear, so the new plan survives). CUT from the plan:
-the =interjection_seen= event (a write with no reader — queued/seen derive
-from journal-presence and the checkpoint marker), and the pause-handler claim
-sweep (subtle — a pause aborts the superstep, so the injection may not be
-checkpointed — and redundant: the serial resume-before-follow-up ordering
-already protects the window; residual = a transiently stale "queued" label).
+An OWNER interjection supersedes the queued plan (redirect bias — this is
+US-6's actual cancel-the-background-work mechanism), split across the two
+callback moments so nothing durable can outrun the message itself:
+- At INJECTION time the *framing* callback enumerates the pending
+  continuations verbatim (Decision 3) and snapshots their ids in the
+  turn-scoped context. Nothing is cleared yet — the framed message exists
+  only in memory until its superstep commits.
+- At CLAIM time (=_consume_interjections=) the snapshotted ids are cleared.
+  The clear thus commits iff the enumerating message reached the durable
+  checkpoint — a turn that dies pre-checkpoint leaves the follow-ups intact
+  (they were promised "cleared" only in a message that never durably
+  existed), and the entry re-runs as a follow-up turn whose =_clears_plan=
+  start does the clear with full context. Clearing by snapshotted id, not
+  clear-all, is what lets a =continue_later= the model issues in RESPONSE
+  (a fresh id, journaled before the claim) survive — the review found
+  clear-all at either moment loses one side or the other.
+CUT from the plan: the =interjection_seen= event (a write with no reader —
+queued/seen derive from journal-presence and the checkpoint marker), and the
+pause-handler claim sweep (subtle — a pause aborts the superstep, so the
+injection may not be checkpointed — and redundant: the serial
+resume-before-follow-up ordering already protects the window; residual = a
+transiently stale "queued" label).
+
+Named restart residuals (the turn-scoped context is in-memory; a restart
+between a pause and its resume loses it): pre-restart CLAIMS lose
+fate-sharing coverage (a later error can't re-journal them — the framed copy
+in the checkpoint remains the record), and enumerated-but-uncleared
+continuation snapshots are dropped (the follow-ups still run: redundant work
+in the rare case, never lost work).
 
 * Visibility (the second review blocker — a #196 slice ships HERE)
 
@@ -125,8 +142,10 @@ precedent) that ends a subagent early when an owner interjection is pending.
 * Implementation notes
 
 - =assist/middleware/interjection.py=: =before_model= hook; thread id via
-  =active_handle()= (ThreadQueueMiddleware discipline); injected callbacks
-  (peek / claim+clear) registered by the web layer; inert unregistered. A
+  =active_handle()= (ThreadQueueMiddleware discipline); three injected
+  callbacks registered by the web layer — =peek= (journal read), =consume=
+  (claim + turn-scoped tracking + the deferred continuation clear), =frame=
+  (framing text + owner enumerate-and-snapshot); inert unregistered. A
   comment PINS the assumption that message history is non-mutating (deepagents
   summarization is; langchain's own SummarizationMiddleware is not — a swap
   would break the claim scan).
@@ -139,14 +158,23 @@ precedent) that ends a subagent early when an owner interjection is pending.
   =_continuation_chain_len= tolerate injected human messages (a non-marker
   human breaks the chain run — acceptable cap reset, confirm deliberately).
 
-* Eval plan
+* Eval plan (annotated as-built)
 
-Behavior suites (stubbed research): redirect / incorporate / defer (asserts
-the =continue_later= entry exists — mechanical) / stop (no post-boundary tool
-calls + an account of completed work) / coalesce (two rapid entries, both
-addressed) / triage (same-sender steers; different-sender left queued).
-Mechanical zero-loss (un-mocked journal/queue): every trial ends claimed ∨
-follow-up-ran — never neither. Latency measured on the research shape.
+Behavior suites (stubbed research; =edd/eval/test_interjection.py=):
+redirect / incorporate / defer (mechanical: addressed-now ∨ a continuation
+journaled) / stop (≤1 post-boundary tool call + an account of completed
+work) / coalesce (two rapid entries, both addressed). As-built deviations:
+- *Triage* — moved to unit (the sender matrix in =tests/test_interjection.py=
+  pins the mechanics; the behavioral steering is the same framing minus the
+  defer clause, covered by the redirect shape). A live-phone/SMS behavioral
+  pass stays a follow-up.
+- *Mechanical zero-loss* — the presented-∨-still-journaled floor is asserted
+  per eval trial (=_assert_presented=); the unconsumed-fallback and
+  error-path halves are unit-pinned (the web layer owns them).
+- *Latency on the research shape* — structural, not wall-clock: injection
+  happens only at main-loop boundaries by construction, so the worst case IS
+  the synchronous-subagent bound named under Honesty; wall-clock measurement
+  deferred to live testing.
 Regression: durable-queue + progressive-responses suites at baseline;
 anti-telegraphing phrasings. Cadence N=3 → 3 → 5 → 10.
 
@@ -168,23 +196,33 @@ anti-telegraphing phrasings. Cadence N=3 → 3 → 5 → 10.
    deepagents summarization) preserves =additional_kwargs= on HumanMessages —
    and a comment in the middleware pins the non-mutating-history assumption
    against a future summarizer swap (langchain's own rewrites history).
-3. *Cleared continuations are ENUMERATED to the model.* The consume callback
-   returns the cleared records, and the injected framing lists their task
-   texts verbatim ("Cleared scheduled follow-ups — recreate with
-   =continue_later= if still wanted, or revise deliberately: 1. <task> …").
-   The model recreates or intentionally drops each; nothing relies on its
-   memory of what it had planned. (Pierre's suggested shape, adopted.)
+3. *Cleared continuations are ENUMERATED to the model.* The framing callback
+   enumerates the pending continuations' task texts verbatim in the injected
+   message ("cleared your scheduled follow-ups: 1. <task> … — recreate any
+   that still matter with =continue_later=, or drop them deliberately") and
+   snapshots their ids; the actual clear runs at claim time against that
+   snapshot (see Consume side effects — fate-shared with the message's
+   durability). The model recreates or intentionally drops each; nothing
+   relies on its memory of what it had planned. (Pierre's suggested shape,
+   adopted.)
 4. *Defer via =continue_later=*: confirmed (reuse over a second mechanism).
 5. *Fate-sharing REVERSED (Pierre's push-back, adopted): claimed interjections
    SURVIVE a terminal turn error.* Rationale: a user often interjects
    precisely because the turn looks like it is failing — losing that steering
    intent with the failed turn would destroy the exact message that mattered
    most. Mechanism (symmetric with the shipped continuation cancel-sweep): the
-   turn tracks the ids it claimed (turn-scoped set); terminal error exits
-   re-journal those entries (same id, same text) and submit them to the serial
-   worker as follow-up turns. The framed copy left in the dead turn's context
-   is duplicate EXPOSURE when the follow-up runs — benign, named. The error
-   banner + the re-run follow-up together tell the honest story.
+   turn tracks the records it claimed (turn-scoped); terminal error exits
+   re-journal each claimed text under a *fresh id* and submit it to the serial
+   worker as a follow-up turn. Fresh, not same-id (an amendment found in
+   review): the dead turn's framed copy keeps the old id in the thread
+   checkpoint forever, so a same-id entry would be silently re-claimed by any
+   later turn's boundary scan and the follow-up's entry-gone gate would skip
+   it — the promised retry would never run. A fresh id matches nothing stale;
+   the message is delivered exactly once, by its dispatcher or by legitimate
+   re-injection into an intervening turn. The framed copy left in the dead
+   turn's context is duplicate EXPOSURE when the follow-up runs — benign,
+   named. The error banner + the re-run follow-up together tell the honest
+   story.
 6. *Web "stop" into a running triage turn*: confirmed — the account-of-work
    arrives as the triage turn's HITL-gated draft; nothing external sends.
 

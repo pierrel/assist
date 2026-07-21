@@ -9,9 +9,13 @@ An entry is a turn that has been accepted but not yet started. Two origins:
 
 Entries live in ``<root_dir>/<tid>/pending_messages.json``, journaled before
 the accepting call returns and removed (claimed, by id) when the turn actually
-starts — so at every instant the work is durable in at least one place: this
-journal while waiting, ``status.json``'s ``pending_message`` once it runs.
-Startup recovery re-dispatches whatever is still journaled, in submit order.
+starts — or, for an ``origin=None`` entry, when the RUNNING turn consumes it
+mid-turn as an interjection (claimed only once its injected copy is durably in
+the graph checkpoint; docs/2026-07-20-mid-turn-interjection-design.org) — so
+at every instant the work is durable in at least one place: this journal while
+waiting, ``status.json``'s ``pending_message`` or the thread checkpoint once
+it runs. Startup recovery re-dispatches whatever is still journaled, in
+submit order.
 See ``docs/2026-07-13-durable-message-queue.org`` (durability/recovery) and the
 blank-slate assessment doc (this journal is the nascent job queue).
 
@@ -39,7 +43,9 @@ class PendingMessageNotFound(RecordNotFound):
 
 @dataclass
 class PendingMessage:
-    """One accepted-but-not-yet-started unit of work. ``rider`` holds the four
+    """One accepted-but-not-yet-delivered unit of work — delivered as its own
+    turn, or consumed mid-turn by the running turn (the interjection path).
+    ``rider`` holds the four
     raw submit-form fields (sent_at/tz/lat/lon) so recovery rebuilds the
     ContextRider with the existing ``_build_rider``; ``sender`` is set for
     inbound-SMS follow-ups (it decides triage on re-dispatch); ``origin`` is

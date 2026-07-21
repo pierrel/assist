@@ -29,7 +29,7 @@ from assist.spec import AgentSpec
 from manage.web.threads import (_INTERJECTION_FRAME, _INTERJECTION_GUIDE,
                                 _INTERJECTION_DEFER)
 
-from .utils import create_filesystem, stub_research_subagent
+from .utils import create_filesystem, final_answer, stub_research_subagent
 
 _BIKE_ORG = """* My bike — Linus Roadster
 ** Parts I still need
@@ -95,13 +95,6 @@ class TestInterjection(TestCase):
             agent.message(ask)
         return agent, journal
 
-    def _final_answer(self, agent):
-        for m in reversed(agent.all_messages()):
-            if isinstance(m, AIMessage) and isinstance(m.content, str) \
-                    and m.content.strip():
-                return m.content
-        return ""
-
     def _tool_calls_after_injection(self, agent):
         """Tool calls the model made AFTER the injected frame message —
         the mechanical proxy for 'stop means stop'."""
@@ -138,7 +131,7 @@ class TestInterjection(TestCase):
             "for my bike for the rest of the year, month by month.",
             ["forget the plan — just list the parts I still need to buy"])
         self._assert_presented(agent, journal)
-        answer = self._final_answer(agent).lower()
+        answer = final_answer(agent).lower()
         self.assertTrue("light" in answer or "bell" in answer,
                         f"answer ignored the narrowed ask: {answer[:400]}")
         self.assertNotIn("december", answer)     # the month-by-month plan died
@@ -150,14 +143,14 @@ class TestInterjection(TestCase):
             "What parts do I still need to buy for my bike?",
             ["include what was already done recently too"])
         self._assert_presented(agent, journal)
-        answer = self._final_answer(agent).lower()
+        answer = final_answer(agent).lower()
         self.assertTrue("light" in answer or "bell" in answer,
                         f"lost the original ask: {answer[:400]}")
         self.assertTrue("saddle" in answer or "chain" in answer,
                         f"addition not incorporated: {answer[:400]}")
 
     def test_stop_halts_with_account(self):
-        """US-6: stop means stop — no further tool calls past the boundary,
+        """US-6: stop means stop — at most one further tool call past the boundary,
         and the reply accounts for what already happened (never silent)."""
         agent, journal = self._run(
             {"bike.org": _BIKE_ORG},
@@ -167,7 +160,7 @@ class TestInterjection(TestCase):
         self._assert_presented(agent, journal)
         self.assertLessEqual(self._tool_calls_after_injection(agent), 1,
                              "kept working after being told to stop")
-        answer = self._final_answer(agent)
+        answer = final_answer(agent)
         self.assertTrue(answer.strip(), "stop must still produce an account")
 
     def test_coalesce_two_rapid_interjections(self):
@@ -178,7 +171,7 @@ class TestInterjection(TestCase):
             ["only cover what still needs buying",
              "and mention where the bell comes from"])
         self._assert_presented(agent, journal)
-        answer = self._final_answer(agent).lower()
+        answer = final_answer(agent).lower()
         self.assertTrue("light" in answer or "bell" in answer,
                         f"first interjection lost: {answer[:400]}")
         self.assertIn("valencia", answer,
@@ -194,7 +187,7 @@ class TestInterjection(TestCase):
             "List the parts my bike still needs.",
             ["afterwards, find out what each of those roughly costs these days"])
         self._assert_presented(agent, journal)
-        answer = self._final_answer(agent).lower()
+        answer = final_answer(agent).lower()
         addressed_now = "cost" in answer or "price" in answer or "$" in answer
         deferred = len(self.journaled) > 0
         self.assertTrue(addressed_now or deferred,

@@ -133,23 +133,36 @@ def test_defer_variant_follows_tool_surface(wired):
     assert "continue_later" not in threads._frame_interjection(rec)
 
 
-def test_owner_interjection_clears_and_enumerates_continuations(wired):
-    """Pierre PR #199 note 3: cleared tasks are enumerated verbatim, and the
-    clear happens at INJECTION time so a continue_later issued in response
-    (journaled before the next-boundary claim) survives."""
+def test_owner_interjection_enumerates_then_clears_at_claim(wired):
+    """Pierre PR #199 note 3: pending tasks are enumerated verbatim in the
+    framing, which SNAPSHOTS their ids; the clear runs at claim time against
+    the snapshot — fate-shared with the message's durability — and a
+    continue_later issued in response (a fresh id, journaled before the
+    claim) survives the drain."""
     tid, _ = wired
-    _journal(tid, "find tire sizes", origin="continuation")
-    _journal(tid, "check tubeless", origin="continuation")
+    c1 = _journal(tid, "find tire sizes", origin="continuation")
+    c2 = _journal(tid, "check tubeless", origin="continuation")
     rec = _journal(tid, "stop all that")
-    threads._TURN_INTERJECTION[tid] = {"claimed": [], "defer": True}
+    ctx = {"claimed": [], "defer": True, "cleared_ids": set()}
+    threads._TURN_INTERJECTION[tid] = ctx
     frame = threads._frame_interjection(rec)
     assert "1. find tire sizes" in frame and "2. check tubeless" in frame
-    assert [r.origin for r in MESSAGE_BACKLOG.for_thread(tid)] == [None]
-    # an SMS interjection must NOT clear the owner's plan (spoofable sender)
-    _journal(tid, "again", origin="continuation")
+    # framing alone clears NOTHING (a turn dying pre-checkpoint must leave
+    # the promised follow-ups intact)
+    assert ctx["cleared_ids"] == {c1.id, c2.id}
+    assert sum(1 for r in MESSAGE_BACKLOG.for_thread(tid)
+               if r.origin == "continuation") == 2
+    # the model responds with a NEW continue_later before the claim...
+    c3 = _journal(tid, "compare brands instead", origin="continuation")
+    # ...then the claim drains only the snapshot: c1/c2 gone, c3 survives
+    threads._consume_interjections(tid, {rec.id})
+    left = [r.id for r in MESSAGE_BACKLOG.for_thread(tid)
+            if r.origin == "continuation"]
+    assert left == [c3.id]
+    # an SMS interjection must NOT snapshot the owner's plan (spoofable sender)
     sms = _journal(tid, "sms steer", sender="+15550001111")
     threads._frame_interjection(sms)
-    assert any(r.origin == "continuation" for r in MESSAGE_BACKLOG.for_thread(tid))
+    assert ctx["cleared_ids"] == set()
 
 
 # --- terminal sweep + fate-sharing --------------------------------------------
@@ -169,7 +182,9 @@ def test_terminal_sweep_claims_ids_left_in_checkpoint(wired):
 
 def test_error_exit_rejournals_claimed_interjections(wired, monkeypatch):
     """Fate-sharing REVERSED (Pierre PR #199 note 5): a claimed interjection
-    survives a terminal turn error — re-journaled same-id and re-submitted."""
+    survives a terminal turn error — re-journaled under a FRESH id (a same-id
+    entry would be silently re-claimed by a later turn's boundary scan of the
+    dead framed copy, and the follow-up's entry-gone gate would skip it)."""
     tid, _ = wired
     rec = PendingMessage(thread_id=tid, text="the rescue steer")
     threads._TURN_INTERJECTION[tid] = {"claimed": [rec], "defer": True}
@@ -178,8 +193,10 @@ def test_error_exit_rejournals_claimed_interjections(wired, monkeypatch):
                         lambda *a, **k: submitted.append(a))
     n = threads._rejournal_claimed_interjections(tid, None)
     assert n == 1
-    assert [r.id for r in MESSAGE_BACKLOG.for_thread(tid)] == [rec.id]
+    (entry,) = MESSAGE_BACKLOG.for_thread(tid)
+    assert entry.text == "the rescue steer" and entry.id != rec.id
     assert submitted[0][0] == tid and submitted[0][1] == "the rescue steer"
+    assert submitted[0][4] == entry.id        # dispatched under the fresh id
     assert tid not in threads._TURN_INTERJECTION      # coverage ended with the pop
     # best-effort: idempotent-empty second call, and never raises
     assert threads._rejournal_claimed_interjections(tid, None) == 0
@@ -205,8 +222,9 @@ def test_failed_turn_surfaces_rejournal_in_error_text(wired, monkeypatch):
     threads._process_message(tid, "original ask")
     st = _get_status(tid)
     assert st["stage"] == "error"
-    assert "mid-turn message will be retried" in st["error"]
-    assert [r.id for r in MESSAGE_BACKLOG.for_thread(tid)] == [rec.id]
+    assert threads._REJOURNAL_NOTE.strip() in st["error"]
+    (entry,) = MESSAGE_BACKLOG.for_thread(tid)
+    assert entry.text == "steer the failing turn" and entry.id != rec.id
     assert submitted and submitted[0][1] == "steer the failing turn"
 
 
@@ -252,20 +270,28 @@ def test_interjection_ids_survive_checkpoint_serde():
 
 
 def test_history_editing_middleware_preserves_human_kwargs():
-    """The one history-editing middleware in the stack only rewrites the last
-    AIMessage's tool calls — an injected HumanMessage's claim ids pass through
-    untouched (the non-mutating-history assumption the middleware pins)."""
+    """The history-editing middleware in the stack (tool_name_sanitization)
+    has two hooks: after_model rewrites only the last AIMessage, and
+    before_model rebuilds the WHOLE message list — both must pass an injected
+    HumanMessage's claim ids through untouched (the non-mutating-history
+    assumption the interjection middleware pins)."""
     from assist.middleware.tool_name_sanitization import (
         ToolNameSanitizationMiddleware)
+    mw = ToolNameSanitizationMiddleware()
     human = HumanMessage(content="framed", id="human-1", additional_kwargs={
         "interjection_ids": ["abc123"]})
-    bad_ai = AIMessage(content="", tool_calls=[
+    bad_ai = AIMessage(content="", id="ai-1", tool_calls=[
         {"name": "no spaces allowed!", "args": {}, "id": "c1"}])
-    out = ToolNameSanitizationMiddleware().after_model(
-        {"messages": [human, bad_ai]}, None)
+    out = mw.after_model({"messages": [human, bad_ai]}, None)
     assert human.additional_kwargs["interjection_ids"] == ["abc123"]
     # the returned edit rewrites only the AI message, never the human one
     assert all(m.id != "human-1" for m in (out or {}).get("messages", []))
+    # before_model: a historical bad tool call forces the full-history
+    # rewrite; the human message must come through with its kwargs intact
+    out2 = mw.before_model({"messages": [bad_ai, human]}, None)
+    if out2:                       # a rewrite happened — find the human copy
+        kept = [m for m in out2["messages"] if getattr(m, "id", None) == "human-1"]
+        assert kept and kept[0].additional_kwargs["interjection_ids"] == ["abc123"]
 
 
 # --- render surfaces + neutralization ----------------------------------------
@@ -301,6 +327,27 @@ def test_consumed_interjection_renders_stripped_with_seen_badge(wired, monkeypat
     assert "skip the research" in html_out
     assert "seen mid-turn" in html_out
     assert "latest word wins" not in html_out    # guidance never renders
+
+
+def test_seen_interjection_suppresses_its_queued_bubble(wired, monkeypatch):
+    """Injection is checkpointed a full superstep before the claim removes the
+    journal entry — in that window the same text must not render twice with
+    contradicting badges (seen wins over queued)."""
+    from fastapi.testclient import TestClient
+    tid, _ = wired
+    persisted = (threads._INTERJECTION_FRAME + "skip the research"
+                 + threads._INTERJECTION_GUIDE + ")")
+    monkeypatch.setattr(
+        web.MANAGER, "get", lambda t, sandbox_backend=None, **k:
+        type("C", (), {"get_messages": lambda s: [
+            {"role": "user", "content": "original ask"},
+            {"role": "user", "content": persisted}],
+            "pending_reply": lambda s: None})())
+    _set_status(tid, "processing", pending_message="original ask")
+    _journal(tid, "skip the research")     # not yet claimed
+    html_out = TestClient(web.app).get(f"/thread/{tid}").text
+    assert "seen mid-turn" in html_out
+    assert ">queued</span>" not in html_out
 
 
 def test_user_text_starting_with_frame_is_neutralized(wired, monkeypatch):

@@ -194,6 +194,16 @@ class AgentTestMixin:
         return agent
 
 
+def final_answer(agent) -> str:
+    """The last non-empty AI text message — the answer the user would read."""
+    from langchain_core.messages import AIMessage
+    for m in reversed(agent.all_messages()):
+        if isinstance(m, AIMessage) and isinstance(m.content, str) \
+                and m.content.strip():
+            return m.content
+    return ""
+
+
 def assertToolCall(test_case, agent, tool_name: str, msg: str = None):
     """
     Assert that a specific tool was called by the agent.

@@ -24,11 +24,12 @@ Mechanics (all verified empirically at design time):
   queued fallback dispatcher skip a consumed entry — exactly-once, no new
   dedup machinery. An entry the turn never consumes runs as today's follow-up
   turn: nothing is ever lost.
-- SENDER EQUALITY is the whole scoping story: inject iff
-  ``entry.sender == turn sender`` — an untrusted SMS entry can never enter a
-  full-privilege owner turn, an owner entry never lands inside a
-  reply-to-stranger triage context, and owner entries naturally steer
-  scheduled/continuation turns.
+- SCOPING is two gates: ``entry.origin is None`` (a user follow-up — an
+  agent-scheduled continuation entry is work, not steering) and
+  ``entry.sender == turn sender`` — the security posture: an untrusted SMS
+  entry can never enter a full-privilege owner turn, an owner entry never
+  lands inside a reply-to-stranger triage context, and owner entries
+  naturally steer scheduled/continuation turns.
 - CLAIM-SCAN INVARIANT (Pierre, PR #199): the journal id must be recoverable
   from the durable checkpoint at every claim site. This assumes message
   history is NON-MUTATING for kwargs: deepagents' summarization is (it
@@ -38,10 +39,11 @@ Mechanics (all verified empirically at design time):
 
 Wired like ContextRider/notify: callbacks injected by the web layer
 (``register_interjection_callbacks``); unregistered (CLI/emacsos/evals/
-subagents) ⇒ inert by construction. The web layer owns the framing text, the
-claim side effects (clear-continuations with verbatim enumeration), and the
-turn-scoped claim tracking that feeds its fate-sharing re-journal on terminal
-error.
+subagents) ⇒ inert by construction. The web layer owns the framing text (which
+for an owner entry also enumerates + snapshots the pending continuations), the
+claim side effects (clearing the snapshotted continuations — deferred to claim
+so the clear is fate-shared with the message's durability), and the turn-scoped
+claim tracking that feeds its fate-sharing re-journal on terminal error.
 """
 from __future__ import annotations
 
@@ -56,13 +58,30 @@ from assist.thread_queue import active_handle
 
 logger = logging.getLogger(__name__)
 
+# The kwargs key carrying journal ids on injected messages — THE claim-scan
+# invariant (Pierre, PR #199 note 2): every claim site recovers ids via
+# collect_interjection_ids so the scans can never drift apart.
+INTERJECTION_IDS_KEY = "interjection_ids"
+
+
+def collect_interjection_ids(msgs) -> set:
+    """Journal ids carried by messages already in (checkpointed) state."""
+    ids: set = set()
+    for m in msgs:
+        ids.update((getattr(m, "additional_kwargs", None) or {}).get(
+            INTERJECTION_IDS_KEY, []))
+    return ids
+
+
 # Set by the web layer at import time; None => middleware is inert.
 #   peek(tid) -> list of journal records (this hook runs on the turn's worker
 #                thread, so the locked read is fine)
 #   consume(tid, ids) -> None  (claim by id + turn-scoped claim tracking for
-#                               the web layer's error-exit re-journal; idempotent)
-#   frame(record) -> str  (framing + message text; owner entries also clear
-#                          pending continuations and enumerate them)
+#                               the web layer's error-exit re-journal + the
+#                               deferred continuation clear; idempotent)
+#   frame(record) -> str  (framing + message text; owner entries also
+#                          enumerate pending continuations and snapshot their
+#                          ids for the clear-at-claim)
 _CALLBACKS: dict[str, Callable] | None = None
 
 
@@ -90,13 +109,8 @@ class InterjectionMiddleware(AgentMiddleware):
             return None
         tid = handle.thread_id
         try:
-            msgs = state.get("messages", [])
             # 1. CLAIM ids already durably in state (a prior superstep).
-            in_state: set[str] = set()
-            for m in msgs:
-                for i in (getattr(m, "additional_kwargs", None) or {}).get(
-                        "interjection_ids", []):
-                    in_state.add(i)
+            in_state = collect_interjection_ids(state.get("messages", []))
             if in_state:
                 _CALLBACKS["consume"](tid, in_state)
 
@@ -111,7 +125,7 @@ class InterjectionMiddleware(AgentMiddleware):
             for rec in pending:
                 new_msgs.append(HumanMessage(
                     content=_CALLBACKS["frame"](rec),
-                    additional_kwargs={"interjection_ids": [rec.id]}))
+                    additional_kwargs={INTERJECTION_IDS_KEY: [rec.id]}))
             logger.info("interjection: injected %d message(s) into %s",
                         len(new_msgs), tid)
             return {"messages": new_msgs}
@@ -127,11 +141,14 @@ def _turn_sender(runtime: Runtime) -> str | None:
     """The running turn's sender (None = owner web/scheduled/continuation turn;
     an SMS triage turn carries it in the run config). Read via langgraph's
     get_config() — the run config is NOT on ``runtime`` in this langchain
-    (the ContextRiderMiddleware lesson)."""
+    (the ContextRiderMiddleware lesson). FAIL CLOSED: on any read failure
+    return "" — it matches no entry (the store coerces "" to None on write,
+    so no record ever carries it), degrading to inject-nothing rather than
+    treating a possibly-triage turn as owner scope."""
     try:
         from langgraph.config import get_config
         from assist.events.reply import SMS_SENDER_KEY
         cfg = get_config() or {}
         return (cfg.get("configurable") or {}).get(SMS_SENDER_KEY) or None
     except Exception:
-        return None
+        return ""
