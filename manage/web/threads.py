@@ -1497,7 +1497,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     logging.info("continuation on %s deferred: a reply is awaiting "
                                  "approval", tid)
                     return
-            if backlog_id:
+            if backlog_id and not resume:
                 # Exactly-once gate: the journal entry is the run ticket. A message can
                 # acquire TWO dispatchers — its live-submitted job/task plus a recovery
                 # drain job — and whichever runs second must find the entry gone and
@@ -1507,6 +1507,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # backlog_id, but that head turn is delivered by RECOVERY, not by a
                 # backlog_id dispatcher — so gone-entry here always means already
                 # delivered.
+                #
+                # `not resume`: a fair-sched RESUME is not a dispatch — it carries the
+                # ORIGINAL turn's backlog_id only so its terminal events keep their id,
+                # and that entry was rightly claimed at the original turn start. Gating
+                # a resume on it silently swallowed the resume and stranded the thread
+                # paused forever (live thread 2026-07-21; the symptom test pins this).
                 if not any(r.id == backlog_id
                            for r in MESSAGE_BACKLOG.for_thread(tid)):
                     logging.info("follow-up %s on %s not in the journal (already "

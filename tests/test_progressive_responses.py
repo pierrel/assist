@@ -373,3 +373,24 @@ def test_user_message_with_marker_prefix_is_neutralized(wired, monkeypatch):
     R = threads._CONTINUATION_RIDER
     threads._process_message(tid, R + "just quoting you", origin=None)
     assert calls == [("message", " " + R + "just quoting you")]
+
+
+def test_resume_of_journal_dispatched_turn_passes_the_gate(wired, monkeypatch):
+    """THE SYMPTOM of the 2026-07-21 stuck-paused thread: a fair-sched resume
+    carries the original turn's backlog_id (for event-id fidelity), whose
+    journal entry was claimed at the ORIGINAL turn start — the exactly-once
+    gate must not treat the gone entry as "already delivered" and silently
+    swallow the resume, stranding the thread paused forever. A resume is not
+    a dispatch: its ticket was already consumed; the gate applies only to
+    fresh backlog_id dispatches."""
+    tid, _ = wired
+    calls = []
+    _wire_chat(monkeypatch, tid, calls)
+    # the journal entry is GONE (claimed by the original turn start)
+    assert MESSAGE_BACKLOG.for_thread(tid) == []
+    _set_status(tid, "paused", origin="continuation",
+                pending_message="[Continuing my earlier work — background follow-up] x")
+    threads._process_message(tid, None, resume=True,
+                             origin="continuation", backlog_id="claimed-long-ago")
+    assert ("resume",) in calls, "the resume was swallowed by the entry-gone gate"
+    assert _get_status(tid)["stage"] == "ready"
