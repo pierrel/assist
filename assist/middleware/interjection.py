@@ -142,9 +142,10 @@ def _turn_sender(runtime: Runtime) -> str | None:
     an SMS triage turn carries it in the run config). Read via langgraph's
     get_config() — the run config is NOT on ``runtime`` in this langchain
     (the ContextRiderMiddleware lesson). FAIL CLOSED: on any read failure
-    return "" — it matches no entry (the store coerces "" to None on write,
-    so no record ever carries it), degrading to inject-nothing rather than
-    treating a possibly-triage turn as owner scope."""
+    return "" — it matches no entry (the store coerces "" to None on every
+    read via from_dict, so no record it returns ever carries it), degrading
+    to inject-nothing rather than treating a possibly-triage turn as owner
+    scope."""
     try:
         from langgraph.config import get_config
         from assist.events.reply import SMS_SENDER_KEY

@@ -81,7 +81,8 @@ def test_coalesce_all_pending_at_one_boundary(wired, monkeypatch):
 
 
 def test_sender_scoping_matrix(wired, monkeypatch):
-    """Inject iff entry.sender == turn.sender — the whole security posture."""
+    """Inject iff entry.origin is None AND entry.sender == turn.sender —
+    origin gates work vs steering; sender equality is the security posture."""
     tid, _ = wired
     _journal(tid, "sms text", sender="+15550001111")
     _journal(tid, "cont task", origin="continuation")
