@@ -48,8 +48,10 @@ class AgentSpec:
 
     # ADDITIVE to assist's built-in tool surface (filesystem, execute,
     # task, ...) — () means "no extra tools", not "no tools".  Reaches
-    # the main agent and the auto-injected general-purpose subagent;
-    # the bespoke context/research/critique subagents do not see these
+    # the MAIN agent only (deepagents' auto-injected general-purpose
+    # subagent — which used to inherit these — is disabled harness-wide;
+    # see the profile registration in ``assist.agent``); the bespoke
+    # context/research/critique subagents do not see these
     # (see ``create_agent``).
     tools: tuple[BaseTool | Callable | dict[str, Any], ...] = ()
 

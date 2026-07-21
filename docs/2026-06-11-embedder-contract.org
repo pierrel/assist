@@ -138,7 +138,11 @@ asymmetry dies with the adapter at the legacy-kwarg removal step.
   one-field change the day a client actually deviates.  When it comes
   back, settle: naming (spec names vs the registered
   =*-agent= names), the empty-set semantics against deepagents'
-  auto-injected general-purpose subagent + =task= tool, and prompt
+  auto-injected general-purpose subagent + =task= tool (update
+  2026-07-21: the auto-injected general-purpose subagent is now
+  DISABLED harness-wide — see the profile registration in
+  =assist/agent.py= — so only the =task= tool half of that question
+  remains), and prompt
   sections that advertise subagents (=general_instructions.md.j2=
   references the research workflow — a gated subagent set must gate
   the prompt too).  Container should be =tuple[str, ...]= (ordered,
