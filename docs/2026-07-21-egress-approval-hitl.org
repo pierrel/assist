@@ -121,35 +121,56 @@ incidentally, so holding every denied CONNECT stalls every turn for zero
 approvals. The proxy 403s immediately, as today.
 
 Steering cannot ride the 403 body on the HTTPS path (curl discards CONNECT
-response bodies). Two delivery points instead:
-- =_EGRESS_DENIED_GUIDANCE= — an exact module-level constant prepended by
+response bodies). Two delivery points, ONE centralized text (Pierre's
+review: the denial guidance is part of the infrastructure↔agent contract —
+it lives in =assist/egress/guidance.py=, never embedded in proxy
+implementation code):
+- =EGRESS_DENIED_GUIDANCE= — the central constant, prepended by
   =DockerSandboxBackend.execute= when output matches the denial signature
   (nonzero exit + "403" AND one of "proxy"/"CONNECT"/"tunnel" — verified
   against curl/pip/wget/git phrasings; an origin server's own 403 carries no
-  proxy token and correctly misses). Constant-shaped so a future breaker can
+  proxy token and correctly misses). It points the agent at the egress
+  skill + =request_egress=. Constant-shaped so a future breaker can
   equality-count it in the message tail (the =_SEARCH_UNAVAILABLE_MESSAGE=
   pattern) — escape hatch pre-wired, zero code now.
-- The HTTP-path 403 body (which plain-HTTP clients DO surface, exit 0 — the
-  execute matcher never fires there) carries the same call-=request_egress=
-  directive, not just an explanation.
+- The proxy's 403 body (which plain-HTTP clients DO surface, exit 0 — the
+  execute matcher never fires there) carries a short form of the same
+  directive. The text reaches the proxy via an env var at container create
+  (the =EGRESS_ALLOWLIST= wire-protocol precedent) — sourced from the same
+  central module, so proxy code carries no guidance prose of its own.
 Known residual: a proxy-unaware tool on the internal network gets a
-route-less timeout, no 403, no hint — guidance-only coverage via the dev
-skill line; named.
+route-less timeout, no 403, no hint — guidance-only coverage via the
+egress skill; named.
 
-** D2 — The AGENT creates the request (a tool), not the proxy — with the intent fork flagged
-=request_egress(host, port, task)= records a proposal; nothing opens until
-the user approves the record. Proxy-side auto-proposals from raw denials are
-rejected: approval fatigue is itself a security failure (telemetry/CDN noise
-→ junk cards → rubber-stamping), every proxy→host channel adds surface, and
-a raw CONNECT carries no "what is being done" — only the agent can satisfy
-that clause of the requirement.
+** D2 — The AGENT manages its thread's egress (three tools + a skill), not the proxy
+The tool surface (Pierre's review: the agent inspects and reduces its own
+grants, not just requests new ones — least privilege both directions):
+- =request_egress(host, port, task)= — records a proposal; nothing opens
+  until the user approves the record.
+- =list_allowed_hosts()= — enumerates what THIS thread can reach: the base
+  allowlist entries (host, any port — operator-owned, marked as such) plus
+  the thread's own grants with remaining duration. Pierre answered the
+  enumeration question yes: no downside, and it enables voluntary
+  reduction.
+- =remove_allowed_host(host, port)= — removes one of the THREAD'S OWN
+  grants (agent-initiated revoke). No HITL: this can only NARROW access,
+  never widen it. Base-allowlist entries are refused with guidance (they
+  are operator-owned; the committed conf is their only management path).
+A dedicated =egress= SKILL documents the workflow (denied → request → tell
+the user → don't retry until approved; audit with list; drop unneeded
+grants with remove) so the agent doesn't infer intent from raw tool names
+— guidance-first, per Pierre's review.
 
-*Flagged for Pierre (the one intent fork):* under this design a denial the
-agent doesn't act on produces NO approval request — the user sees a plain
-failure and never learns approval was possible. Offered backstop if wanted:
-a READ-ONLY "recent denials" list on the management page (no cards, no
-buttons — visibility without fatigue), fed by a proxy deny-spool. Deferred
-unless Pierre wants it in v1.
+Proxy-side auto-proposals from raw denials are rejected: approval fatigue
+is itself a security failure (telemetry/CDN noise → junk cards →
+rubber-stamping), every proxy→host channel adds surface, and a raw CONNECT
+carries no "what is being done" — only the agent can satisfy that clause
+of the requirement.
+
+Silent-denial residual (accepted for v1; Pierre's proceed): a denial the
+agent doesn't act on produces no approval request — the user sees a plain
+failure. The read-only recent-denials list (deny-spool) stays a v1.1
+option.
 
 ** D3 — Scope: exact host + exact port + ORIGINATING THREAD; committed conf stays the only durable path
 No wildcards anywhere. Approvals are port-scoped (stricter than the base
@@ -228,6 +249,12 @@ coupling; rejected in review).
   corrective string ("the user declined this — do not re-ask; proceed
   without it"); the resolution-dispatch prompt enumerates declines so the
   agent acknowledges in its own voice. No LLM turn burns at decline time.
+  *Decline carries NO free-form guidance field* (Pierre's review, explicit):
+  if the user wants to steer how the agent proceeds after a decline, that
+  guidance travels through the EXISTING steering mechanisms — a message to
+  the thread (delivered mid-turn by the interjection machinery when a turn
+  is running, or as a follow-up turn otherwise). One steering channel, not
+  a parallel one on every button.
 - *Management page /egress*: v1 is revoke-only — active approvals with
   remaining TTL + a Revoke button (a live exfil-capable grant needs a kill
   switch; TTL alone leaves a ≤1h regret window). Pending approval lives
@@ -263,20 +290,28 @@ connection threads — never the web loop.
    =egress-requests.json=, atomic RMW, lenient reads, lazy expiry-prune) +
    =write_projection()= regenerating =approvals/approved-hosts.json= whole.
    Startup guard: refuse an approvals dir under the thread root.
-2. =assist/egress/tools.py=: =egress_tools(store, caps)= →
-   =[request_egress]=; URL-tolerant host parse, fullmatch validation,
-   base-infra-name refusal, port coercion, single combined =task= string
-   (the =continue_later= contract voice: "a complete instruction for your
-   future self"; "request every host you need before ending the turn"),
-   pending/declined-aware corrective returns, caps counted on the store
-   under its lock.
+2. =assist/egress/tools.py=: =egress_tools(store, base_hosts, caps)= →
+   =[request_egress, list_allowed_hosts, remove_allowed_host]=;
+   URL-tolerant host parse, fullmatch validation, base-infra-name refusal,
+   port coercion, single combined =task= string (the =continue_later=
+   contract voice: "a complete instruction for your future self"; "request
+   every host you need before ending the turn"), pending/declined-aware
+   corrective returns, caps counted on the store under its lock. =list=
+   returns base entries (marked operator-owned, any port) + this thread's
+   grants with remaining duration; =remove= revokes only this thread's own
+   grant (privilege reduction, no HITL) and refuses base entries with
+   guidance. Plus =assist/egress/guidance.py=: the centralized denial
+   guidance constants (execute hint + proxy 403 body) — the
+   infrastructure↔agent contract text, in one reviewable place.
 3. =dockerfiles/egress-proxy.py=: =load_approvals()= + =load_client_map()=
    consulted at BOTH miss sites; exact =(host, port)= match + duration
    check (aware-UTC unexpired, or ="revoked-only"=) + =origin_tid= ==
    client-map[client IP], every parse failure or unknown IP ⇒ skip/deny;
    *resolved-address private-range guard for approved hosts* (resolve →
    vet → connect to the vetted IP); distinct =ALLOW-APPROVED= log; deny()
-   gains a plaintext body carrying the =request_egress= directive.
+   gains a plaintext body whose text arrives via the =EGRESS_DENY_BODY=
+   env var at container create (sourced from the central guidance module —
+   no prose in proxy code).
 4. =assist/sandbox_manager.py=: ro volume of the approvals SUBDIR into the
    proxy at =/approvals=; schema-version marker in the allowlist hash
    (one-time recreate post-deploy); =ASSIST_EGRESS_APPROVALS_DIR= read here
@@ -284,8 +319,8 @@ connection threads — never the web loop.
    container's egress-network IP → tid into =client-map.json= (atomic
    replace, after container create, before returning the backend); remove
    the entry in the reap path.
-5. =assist/sandbox.py=: =_EGRESS_DENIED_GUIDANCE= constant + the
-   signature-gated prepend in =execute=.
+5. =assist/sandbox.py=: the signature-gated prepend in =execute=, importing
+   =EGRESS_DENIED_GUIDANCE= from the central guidance module.
 6. =manage/web/state.py=: store + CSRF token (=EGRESS_CSRF=; 2nd instance of
    the pattern — the 3rd triggers a shared helper) + =egress_tools= into the
    NORMAL web toolset only.
@@ -297,8 +332,13 @@ connection threads — never the web loop.
 8. =manage/web/threads.py=: pending cards in the thread render via the
    lock-free =peek()=; resolution-dispatch on pending-set-empty.
 9. Events per D7.
-10. Guidance sweep: tool docstring (primary); one generic dev-skill line
-    about restricted egress + the request flow.
+10. The =egress= SKILL (=assist/skills/egress/SKILL.md=, Pierre's review —
+    discoverable workflow guidance, not raw tool names): when a command
+    fails with a proxy denial → =request_egress= + tell the user + don't
+    retry until approved; audit access with =list_allowed_hosts=; drop
+    grants you no longer need with =remove_allowed_host=; the committed
+    allowlist is the operator's permanent path. Tool docstrings stay the
+    fallback for turns that never load the skill.
 11. Tests + smoke + doc reconciliation.
 
 * Test plan
