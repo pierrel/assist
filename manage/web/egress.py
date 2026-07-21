@@ -6,10 +6,12 @@ active grants with their remaining lifetime + Revoke (a live exfil-capable
 grant needs one; TTL alone leaves a regret window). The POST routes are
 shared by the in-thread card (a ``redirect`` form field returns the user to
 the thread). CSRF: the in-memory ``EGRESS_CSRF`` token embedded in every
-form + required on the POST (the geo T1 pattern). Every handler runs its
-whole chain inside threadpool callables — nothing store-locked touches the
-single-worker asyncio loop. Absent the store (``ASSIST_EGRESS_APPROVALS_DIR``
-unset) the view 404s.
+form + required on the POST (the geo T1 pattern). Handlers await only the
+fast store work in threadpool callables; the resolution TURN runs as a
+post-response BackgroundTask — nothing store-locked touches the
+single-worker asyncio loop, and nothing turn-length runs where the response
+waits. Absent the store (``ASSIST_EGRESS_APPROVALS_DIR`` unset) the view
+404s.
 """
 from __future__ import annotations
 
