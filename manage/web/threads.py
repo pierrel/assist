@@ -48,6 +48,7 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
+from assist.middleware.interjection import register_interjection_callbacks
 from assist.events.continuations import CHAIN_CAP
 from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
@@ -644,6 +645,22 @@ def render_thread(
                       f'{task_txt}</div></div>')
             rendered.append(bubble)
             continue
+        elif role == "user" and raw.startswith(_INTERJECTION_FRAME):
+            # A consumed interjection: the durable copy carries the frame +
+            # steering guidance; show only the USER's words, badged so they can
+            # see the running turn saw it (US-4). rfind: the real guide is the
+            # appended one, even if the user's text quotes the guide string.
+            inner = raw[len(_INTERJECTION_FRAME):]
+            cut = inner.rfind(_INTERJECTION_GUIDE)
+            user_txt = inner[:cut] if cut != -1 else inner
+            bubble = (f'<div class="msg user"><div class="role">user'
+                      f'<span style="margin-left:.5rem; color:#9ca3af; '
+                      f'font-size:.75rem; font-weight:normal;">seen mid-turn'
+                      f'</span></div><div class="content">'
+                      f'{html.escape(user_txt).replace(chr(10), "<br/>")}'
+                      f'</div></div>')
+            rendered.append(bubble)
+            continue
         else:
             # Human/user content is plain text with basic escaping
             content_html = html.escape(raw).replace("\n", "<br/>")
@@ -673,6 +690,19 @@ def render_thread(
             '<div class="content"><span class="dots"><span>.</span><span>.</span><span>.</span></span></div>'
             '</div>',
         )
+    # Journaled-but-unconsumed user messages (origin=None) render as QUEUED
+    # user bubbles above the running turn's placeholder — visible from the
+    # moment of send (the design's visibility blocker: an invisible
+    # interjection gets resent). One lock-free peek, reused by the
+    # continuation note below (same discipline as documented there). Oldest
+    # first + insert(0) ⇒ newest ends up topmost, matching the page order.
+    _journal_entries = MESSAGE_BACKLOG.peek(tid)
+    for r in [r for r in _journal_entries if r.origin is None]:
+        rendered.insert(0, (
+            '<div class="msg user" style="opacity:.8;"><div class="role">user'
+            '<span style="margin-left:.5rem; color:#9ca3af; font-size:.75rem;'
+            'font-weight:normal;">queued</span></div><div class="content">'
+            f'{html.escape(r.text).replace(chr(10), "<br/>")}</div></div>'))
     body = "\n".join(rendered) or "<p><em>No messages yet.</em></p>"
 
     # Status banner (in-thread: keeps the fuller STAGE_LABELS sentence). While busy, a live
@@ -735,8 +765,7 @@ def render_thread(
     # the _get_status discipline — the locking for_thread() must never run on the
     # event loop, and the corrupt-file move-aside belongs to locked readers only).
     continuation_note = ""
-    pending_conts = [r for r in MESSAGE_BACKLOG.peek(tid)
-                     if r.origin == "continuation"]
+    pending_conts = [r for r in _journal_entries if r.origin == "continuation"]
     if pending_conts:
         items = "".join(
             f'<div>↻ will follow up: {html.escape(" ".join(r.text.split())[:200])}</div>'
@@ -1045,6 +1074,33 @@ _SUPERSEDE_RIDER = (
 # fidelity (the _SUPERSEDE_RIDER pattern).
 _CONTINUATION_RIDER = "[Continuing my earlier work — background follow-up] "
 
+# Mid-turn interjection framing (design: docs/2026-07-20-mid-turn-interjection-design.org).
+# The FRAME prefixes the user's text in the injected HumanMessage — it is the
+# durable render key (strip-and-badge, like the rider above) and the model's
+# attribution. The GUIDE carries ALL steering (the middleware is only a
+# delivery channel); eval-owned wording. DEFER is appended only when the turn's
+# tool surface has continue_later (triage + continuation turns don't).
+_INTERJECTION_FRAME = "[Mid-turn message from the user — sent while you were working] "
+_INTERJECTION_GUIDE = (
+    "\n\n(This message arrived mid-turn. The user's latest word wins: if it "
+    "changes what they want, redirect your remaining work now; if it adds "
+    "scope, fold it in. If it asks you to stop, do no further work and reply "
+    "with a brief account of what you already completed.")
+_INTERJECTION_DEFER = (
+    " Only if changing course would clearly waste nearly-finished work, "
+    "finish that first and call continue_later to handle this message right "
+    "after.")
+
+# Per-running-turn interjection context, keyed by tid: "claimed" holds the
+# records this turn consumed (the fate-sharing re-journal reads it at terminal
+# error exits — Pierre, PR #199 note 5), "defer" whether the turn's tool
+# surface carries continue_later (picks the framing variant). Turns serialize
+# per thread (THREAD_QUEUE), so each key has a single writer. Created at turn
+# start; a RESUMED slice reuses the live entry so claims made before a pause
+# keep coverage (a restart in between loses the in-memory list — accepted
+# residual, named in the design doc).
+_TURN_INTERJECTION: dict[str, dict] = {}
+
 
 def _continuation_chain_len(tid: str) -> int:
     """Current chain length for the continue_later cap: trailing continuation
@@ -1140,6 +1196,103 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
     return n
 
 
+def _consume_interjections(tid: str, ids: set) -> None:
+    """The interjection claim: remove each id from the journal (the entry-gone
+    gate then makes the queued fallback dispatcher skip it — exactly-once) and
+    remember the record in the turn-scoped context for the fate-sharing
+    re-journal. Called from the middleware's next-boundary claim and from the
+    terminal sweep below; idempotent (a claimed id is simply no longer found)."""
+    ctx = _TURN_INTERJECTION.setdefault(tid, {"claimed": [], "defer": False})
+    for rec in MESSAGE_BACKLOG.for_thread(tid):
+        if rec.id in ids:
+            MESSAGE_BACKLOG.claim(tid, rec.id)
+            ctx["claimed"].append(rec)
+
+
+def _frame_interjection(rec: "PendingMessage") -> str:
+    """Build the injected message: frame + the user's text + the behavioral
+    guidance. An OWNER interjection supersedes the agent's queued plan
+    (redirect bias — this IS the cancel-the-background-work mechanism): pending
+    continuations are cleared HERE, at injection time, not at claim time — a
+    continue_later the model issues in RESPONSE journals after this clear but
+    before the next-boundary claim, so clearing at claim would wipe the model's
+    new plan. The cleared tasks are enumerated verbatim so the model recreates
+    or deliberately drops each, relying on nothing it remembers (Pierre,
+    PR #199 note 3). An interjection that instead runs as a follow-up turn
+    clears the same way at its turn start — consistent either path."""
+    guide = _INTERJECTION_GUIDE
+    ctx = _TURN_INTERJECTION.get(rec.thread_id) or {}
+    if ctx.get("defer"):
+        guide += _INTERJECTION_DEFER
+    if rec.sender is None:
+        cleared = [r.text for r in MESSAGE_BACKLOG.for_thread(rec.thread_id)
+                   if r.origin == "continuation"]
+        if cleared:
+            _clear_pending_continuations(rec.thread_id)
+            guide += (" This message also cleared your scheduled follow-ups: "
+                      + " ".join(f"{i}. {t}" for i, t in enumerate(cleared, 1))
+                      + (" — recreate any that still matter with "
+                         "continue_later, or drop them deliberately."
+                         if ctx.get("defer") else
+                         " — mention in your reply anything dropped that "
+                         "still matters."))
+    return _INTERJECTION_FRAME + rec.text + guide + ")"
+
+
+def _claim_seen_interjections(tid: str, chat) -> None:
+    """The SECOND claim site (the design's terminal sweep): claim any
+    interjection whose injected message reached the durable checkpoint but
+    whose next before_model boundary never came (the injection superstep was
+    the turn's last). Best-effort — a failed read leaves the entry journaled
+    and it runs as a follow-up turn (at-least-once presentation, never lost)."""
+    try:
+        ids: set = set()
+        for m in chat.get_raw_messages():
+            ids.update((getattr(m, "additional_kwargs", None) or {}).get(
+                "interjection_ids", []))
+        if ids:
+            _consume_interjections(tid, ids)
+    except Exception:
+        logging.error("interjection terminal claim sweep failed for %s "
+                      "(unclaimed entries run as follow-up turns)", tid,
+                      exc_info=True)
+
+
+def _rejournal_claimed_interjections(tid: str, rider) -> int:
+    """Fate-sharing REVERSED (Pierre, PR #199 note 5): a user often interjects
+    precisely because the turn looks like it is failing, so an interjection a
+    now-dead turn had claimed must not die with it. Re-add each claimed record
+    (same id, same text — the store preserves ids) and submit it to the serial
+    worker as its own follow-up turn. The framed copy left in the dead turn's
+    context is duplicate EXPOSURE when the follow-up runs — benign, named in
+    the design. Returns how many, so the error text can say so. BEST-EFFORT by
+    contract: runs inside turn error handlers (a raise would mask the original
+    failure and strand the thread busy)."""
+    n = 0
+    try:
+        claimed = (_TURN_INTERJECTION.pop(tid, None) or {}).get("claimed", [])
+        for rec in claimed:
+            MESSAGE_BACKLOG.add(rec)
+            _RESUME_SCHEDULER.submit_message(
+                tid, rec.text,
+                _build_rider(datetime.now(timezone.utc).isoformat(),
+                             rider.tz if rider else None),
+                rec.sender, rec.id)
+            n += 1
+    except Exception:
+        logging.error("interjection re-journal failed for %s (original turn "
+                      "error still surfaces)", tid, exc_info=True)
+    return n
+
+
+# The interjection middleware is inert until the embedder registers callbacks;
+# the web layer is the only embedder that does (CLI/emacsos/evals keep today's
+# behavior by construction). The journal read is the locked one — the
+# middleware hook runs on the turn's worker thread, never the event loop.
+register_interjection_callbacks(
+    MESSAGE_BACKLOG.for_thread, _consume_interjections, _frame_interjection)
+
+
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None,
                      resume: bool = False, accumulated_active_ms: float = 0.0,
@@ -1174,6 +1327,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # pasting/quoting it) must not be misattributed as an agent note or count
         # toward the chain run — a leading space breaks the startswith keying
         # while leaving the visible text effectively unchanged.
+        text = " " + text
+    if text and text.startswith(_INTERJECTION_FRAME):
+        # Injected interjections never pass through here (the middleware appends
+        # them to graph state directly), so frame-prefixed text is always
+        # user-authored — same misattribution break as the rider above (it
+        # would otherwise render stripped + "seen mid-turn"-badged).
         text = " " + text
     # A genuine OWNER message (web/review — NOT an untrusted inbound SMS: a
     # spoofable sender must not be able to cancel promised work, and a
@@ -1261,6 +1420,15 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # pre-existing entries, which have live dispatchers of their own.
             _pre_turn_conts.update(r.id for r in MESSAGE_BACKLOG.for_thread(tid)
                                    if r.origin == "continuation")
+            # Turn-scoped interjection context (see _TURN_INTERJECTION): fresh
+            # for a new turn; a RESUMED slice reuses the live one so entries
+            # claimed before the pause keep fate-sharing coverage. "defer"
+            # mirrors the tool surface — triage and continuation turns have no
+            # continue_later, so their framing omits the defer option.
+            if not resume or tid not in _TURN_INTERJECTION:
+                _TURN_INTERJECTION[tid] = {
+                    "claimed": [],
+                    "defer": sender is None and origin != "continuation"}
             if origin == "continuation" and not resume and resume_decision is None:
                 # A HITL reply awaiting approval: the supersede flow below exists
                 # for a NEWER USER message and would silently REJECT the pending
@@ -1408,6 +1576,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                            (_now_ms() - started_at) / 1000.0)
         except Exception as e:
             logging.warning("turn-timing record failed for %s: %s", tid, e)
+        # Second interjection claim site (terminal): claim anything injected
+        # after the last before_model boundary, then END fate-sharing coverage
+        # — the answer is committed, so a later bookkeeping error must not
+        # re-journal an already-answered interjection.
+        _claim_seen_interjections(tid, chat)
+        _TURN_INTERJECTION.pop(tid, None)
         pending = chat.pending_reply()
         if pending:
             # Preserve started_at so the HITL approve/reject resume reuses the original
@@ -1468,13 +1642,16 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # re-checks cleanly instead of poking at the corpse of the old one.
         DOMAIN_MANAGERS.pop(tid, None)
         _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
+        _rejournaled = _rejournal_claimed_interjections(tid, rider)
         _set_status(
             tid, "error",
             error=("The sandbox container for this thread was lost mid-run. "
                    "Your last message was not completed. Send the message "
                    "again to retry in a fresh sandbox."
                    + (" A follow-up this turn had scheduled was cancelled."
-                      if _cancelled else "")),
+                      if _cancelled else "")
+                   + (" Your mid-turn message will be retried as its own turn."
+                      if _rejournaled else "")),
             **pending_kwargs,
         )
     except GraphRecursionError as e:
@@ -1484,18 +1661,22 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # again — so suggest narrowing/splitting, NOT "send again to retry".
         logging.warning("Recursion limit hit for thread %s: %s", tid, e)
         _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
+        _rejournaled = _rejournal_claimed_interjections(tid, rider)
         _set_status(
             tid, "error",
             error=("This request grew too large to complete — it hit the internal "
                    "step limit and was stopped. Try narrowing it or splitting it "
                    "into smaller parts."
                    + (" A follow-up this turn had scheduled was cancelled."
-                      if _cancelled else "")),
+                      if _cancelled else "")
+                   + (" Your mid-turn message will be retried as its own turn."
+                      if _rejournaled else "")),
             **pending_kwargs,
         )
     except Exception as e:
         logging.error("Message processing failed for thread %s: %s", tid, e, exc_info=True)
         _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
+        _rejournaled = _rejournal_claimed_interjections(tid, rider)
         if origin == "continuation":
             # Origin-aware failure (US-3: silence is not an outcome): the generic
             # banner would misattribute ("Couldn't process your message" — the
@@ -1504,7 +1685,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # the thread list, not sunk to the bottom band.
             _set_status(tid, "error",
                         error=("The background follow-up I promised couldn't be "
-                               "completed. Ask me to retry it."),
+                               "completed. Ask me to retry it."
+                               + (" Your mid-turn message will be retried as "
+                                  "its own turn." if _rejournaled else "")),
                         **pending_kwargs)
             append_event(MANAGER.thread_dir(tid), "continuation_failed",
                          id=backlog_id or "", error=str(e)[:300])
@@ -1512,7 +1695,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         else:
             _set_status(tid, "error",
                         error=str(e) + (" A follow-up this turn had scheduled "
-                                        "was cancelled." if _cancelled else ""),
+                                        "was cancelled." if _cancelled else "")
+                        + (" Your mid-turn message will be retried as its own "
+                           "turn." if _rejournaled else ""),
                         **pending_kwargs)
     finally:
         # Drain this turn's persisted active-hold on any TERMINAL exit (success/error)

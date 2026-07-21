@@ -38,6 +38,7 @@ from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
 from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
 from assist.middleware.context_rider_middleware import ContextRiderMiddleware
+from assist.middleware.interjection import InterjectionMiddleware
 from assist.middleware.image_input_guard import ImageInputGuardMiddleware
 from assist.env import env_int
 
@@ -430,7 +431,11 @@ def create_agent(model: BaseChatModel,
             # line (the error/exit summary) is at the TAIL, not the head.
             ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
                                        preview_style="head_tail", untrusted=True),
-            skills_mw, memory_mw, ContextRiderMiddleware(), logging_mw],
+            # Mid-turn interjection delivery (main agent only — deepagents
+            # never propagates this list to subagent stacks): inert unless the
+            # embedder registered callbacks (the web layer is the only one).
+            skills_mw, memory_mw, ContextRiderMiddleware(),
+            InterjectionMiddleware(), logging_mw],
         backend=backend,
         # Tool-list construction is the lever that actually moves delegation on
         # this model (prose demonstrably doesn't — 0/7 eval trials ignored both
