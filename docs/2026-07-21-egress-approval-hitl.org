@@ -57,24 +57,39 @@ What the feature newly trusts, and how each input is contained:
 - *The agent's purpose text is narrative-only*: it cannot change what opens
   (host/port are separate mechanical fields), and the card frames it as "the
   agent's stated reason (not verified)". Residual, named: the user can still
-  be talked into approving a bad host — TTL-bounded, revocable.
-- *Approve fires the STORED record* (keyed =host:port=, the geo swap-proof
+  be talked into approving a bad host — bounded by the grant's duration
+  (1h TTL, or thread lifetime for always-for-this-thread), revocable.
+- *Approve fires the STORED record* (keyed =tid:host:port=, the geo swap-proof
   property) — never re-derived state. The approvals projection is written
   only by the approve/revoke handlers.
-- *Scope honesty (review F3)*: an approval is global-per-hour — any turn in
-  ANY thread can use it while it lives (the proxy cannot attribute
-  connections to threads). The card copy says so ("any agent activity for
-  the next hour"). Thread-scoping is a named non-goal for v1 (it would need
-  per-connection attribution machinery in the proxy).
-- *TTL enforcement is proxy-side and fail-closed*: missing / naive /
-  unparseable =expires_at= ⇒ entry skipped (never treat-as-permanent);
-  writer emits =+00:00= aware UTC; containers share the kernel clock (no
-  skew). A compromised web process writing far-future expiries is out of
-  scope (host compromise is game over) — stated to keep the boundary
-  explicit.
-- *The approvals file as proxy input*: read-only mount of a dedicated
-  subdir holding only the projection file (proposal state, incl. agent free
-  text, never reaches the proxy); ≤64KB size cap (hygiene, not load-bearing);
+- *Scope: THREAD-SCOPED approvals (Pierre's review, 2026-07-21 — replaces
+  the original global-per-hour v1)*. An approval is usable only by turns of
+  the ORIGINATING thread: least privilege, smaller blast radius, and it
+  matches what the in-thread card visually implies. Mechanism —
+  per-connection attribution the proxy can trust: SandboxManager creates
+  one sandbox per turn and knows its thread; at container start it writes
+  the container's egress-network IP → tid into a =client-map.json= beside
+  the approvals projection (atomic replace; entry removed at reap). On an
+  allowlist miss the proxy resolves the CLIENT's tid from that map and
+  requires the approval's =origin_tid= to match. Fail-closed at every
+  seam: unknown client IP ⇒ base allowlist only; a create→map-write race
+  degrades to a transient deny that self-heals on retry; IP reuse across
+  per-turn containers is handled by create-time overwrite (newest writer
+  wins; stale entries die with the reap).
+- *Duration enforcement is proxy-side and fail-closed*: each projection
+  entry carries =origin_tid= plus EITHER a valid aware-UTC ISO =expires_at=
+  (the 1-hour grant) OR the literal string ="revoked-only"= (the
+  always-for-this-thread grant). Anything else — missing, naive,
+  unparseable, or an unrecognized marker — ⇒ entry skipped (an accidental
+  null can never mean "permanent"); writer emits =+00:00= aware UTC;
+  containers share the kernel clock (no skew). A compromised web process
+  writing far-future expiries is out of scope (host compromise is game
+  over) — stated to keep the boundary explicit.
+- *The approvals dir as proxy input*: read-only mount of a dedicated
+  subdir holding exactly two files — the approvals projection and the
+  =client-map.json= IP→tid attribution map (proposal state, incl. agent
+  free text, never reaches the proxy); ≤64KB size cap each (hygiene, not
+  load-bearing);
   any parse/shape problem ⇒ base allowlist only. The sandbox has NO route to
   the approvals dir (verified: sandbox mounts are exactly
   =work_dir→/workspace= and its sibling =tmp=; the egress dir is outside
@@ -136,14 +151,26 @@ a READ-ONLY "recent denials" list on the management page (no cards, no
 buttons — visibility without fatigue), fed by a proxy deny-spool. Deferred
 unless Pierre wants it in v1.
 
-** D3 — Scope: exact host + exact port, 1-hour TTL; committed conf stays the only durable path
+** D3 — Scope: exact host + exact port + ORIGINATING THREAD; committed conf stays the only durable path
 No wildcards anywhere. Approvals are port-scoped (stricter than the base
 conf's host-any-port — an approval for =:443= does not open =:22=; the HTTP
-path's port-80 default composes fail-closed). One-shot-per-connection
-rejected (pip opens many); per-thread rejected (no proxy attribution);
-durable rejected (standing exfil channel). TTL starts at approve, enforced
-by the proxy per request. Revoke = delete the projection entry, effective
-next connection. The card says: for permanent access, add the host to the
+path's port-80 default composes fail-closed) and THREAD-SCOPED (Pierre's
+review 2026-07-21, reversing the plan's global-scope v1 — least privilege;
+attribution mechanism in the threat-model section). One-shot-per-connection
+rejected (pip opens many); durable-global rejected (standing exfil
+channel).
+
+Two grant durations, both thread-scoped (Pierre's suggestion):
+- *Approve for 1 hour* — the default. The hour is the LIFETIME OF THE
+  GRANT, counted from the moment of approval — NOT a window within which
+  the user must respond (a card can be approved days later; the hour
+  starts then). Stated on the card and enforced proxy-side.
+- *Always allow for this thread* — no TTL; lives until revoked on
+  =/egress= or the thread is deleted (thread deletion removes its
+  approvals, so a grant can never outlive its scope). For long-running
+  workflows where hourly re-approval is friction.
+Revoke = delete the projection entry, effective next connection. The card
+says: for permanent, thread-independent access, add the host to the
 committed allowlist (git-audited, unchanged mechanics).
 
 ** D4 — Delivery: ro bind-mounted subdir; proxy re-reads the projection on allowlist miss only
@@ -154,8 +181,10 @@ proxy stays one stdlib file (~240 lines after the change); the one new trust
 input is the size-capped, exact-match, fail-closed projection.
 
 ** D5 — Storage: ONE store + a dumb projection (review simplification, adopted)
-A single =EgressStore= (records keyed =host:port=; state machine
-=pending= → =approved=+=expires_at= / =declined=) — not two stores (the plan's
+A single =EgressStore= (records keyed =tid:host:port= — thread-scoped
+grants mean two threads legitimately hold separate records for the same
+host; state machine =pending= → =approved=+duration / =declined=) — not
+two stores (the plan's
 original two would have been instances #3 and #4 of the single-file
 atomic-RMW shape while the geo store's own comment says #3 triggers
 extraction; review of that extraction happens at implementation).
@@ -175,12 +204,14 @@ coupling; rejected in review).
   is), from code-supplied copy only: =host:port= in a code block
   (html-escaped; =xn--= labels get a visible punycode warning), "requested N
   min ago", the agent's task text quoted as its unverified words, the exact
-  scope sentence ("this exact host and port only, for 1 hour, usable by any
-  agent activity in that window; traffic is end-to-end encrypted — contents
+  scope sentence ("this exact host and port, for THIS thread only; the
+  hour is the grant's lifetime and starts when you approve — approving
+  later just starts it later; traffic is end-to-end encrypted — contents
   are not inspected"), and — required copy (review) — *"Approving lets the
-  agent retry automatically."* Buttons: Approve for 1 hour / Decline (CSRF +
-  redirect back to the thread). All of a thread's pending cards render
-  inline (≤3 by cap; no "+N more" indirection).
+  agent retry automatically."* Buttons: Approve for 1 hour / Always allow
+  for this thread / Decline (CSRF + redirect back to the thread). All of a
+  thread's pending cards render inline (≤3 by cap; no "+N more"
+  indirection).
 - *Retry dispatch fires when the thread's pending set EMPTIES* (last approve
   or decline), not per-approval — so the agent can batch ("request all the
   hosts you need before ending the turn" rides the tool docstring), the user
@@ -239,24 +270,30 @@ connection threads — never the web loop.
    future self"; "request every host you need before ending the turn"),
    pending/declined-aware corrective returns, caps counted on the store
    under its lock.
-3. =dockerfiles/egress-proxy.py=: =load_approvals()= consulted at BOTH miss
-   sites; exact =(host, port)= + aware-UTC unexpired match, every parse
-   failure ⇒ skip; *resolved-address private-range guard for approved hosts*
-   (resolve → vet → connect to the vetted IP); distinct =ALLOW-APPROVED=
-   log; deny() gains a plaintext body carrying the =request_egress=
-   directive.
+3. =dockerfiles/egress-proxy.py=: =load_approvals()= + =load_client_map()=
+   consulted at BOTH miss sites; exact =(host, port)= match + duration
+   check (aware-UTC unexpired, or ="revoked-only"=) + =origin_tid= ==
+   client-map[client IP], every parse failure or unknown IP ⇒ skip/deny;
+   *resolved-address private-range guard for approved hosts* (resolve →
+   vet → connect to the vetted IP); distinct =ALLOW-APPROVED= log; deny()
+   gains a plaintext body carrying the =request_egress= directive.
 4. =assist/sandbox_manager.py=: ro volume of the approvals SUBDIR into the
    proxy at =/approvals=; schema-version marker in the allowlist hash
    (one-time recreate post-deploy); =ASSIST_EGRESS_APPROVALS_DIR= read here
-   independently (unset ⇒ no mount ⇒ dormant).
+   independently (unset ⇒ no mount ⇒ dormant); at sandbox start, write the
+   container's egress-network IP → tid into =client-map.json= (atomic
+   replace, after container create, before returning the backend); remove
+   the entry in the reap path.
 5. =assist/sandbox.py=: =_EGRESS_DENIED_GUIDANCE= constant + the
    signature-gated prepend in =execute=.
 6. =manage/web/state.py=: store + CSRF token (=EGRESS_CSRF=; 2nd instance of
    the pattern — the 3rd triggers a shared helper) + =egress_tools= into the
    NORMAL web toolset only.
 7. =manage/web/egress.py=: =/egress= (revoke-only page) + POST
-   approve/decline/revoke; CSRF; one-threadpool-callable handlers;
-   =_next=-style redirect validation; deleted-origin-thread ⇒ refuse + drop.
+   approve/approve-always/decline/revoke; CSRF; one-threadpool-callable
+   handlers; =_next=-style redirect validation; deleted-origin-thread ⇒
+   refuse + drop. Thread deletion (=hard_delete=) removes the thread's
+   approvals + proposals (a grant never outlives its scope).
 8. =manage/web/threads.py=: pending cards in the thread render via the
    lock-free =peek()=; resolution-dispatch on pending-set-empty.
 9. Events per D7.
@@ -278,10 +315,13 @@ connection threads — never the web loop.
   test (card fields, punycode flag, scope + auto-retry copy, card gone
   after approve/decline).
 - *Live proxy* (extend =dockerfiles/test-sandbox-egress.sh=): unapproved ⇒
-  403 (existing cases stay green); write approval ⇒ reachable; same host
-  different port ⇒ 403; expired ⇒ 403; corrupt projection ⇒ base still
-  allowed + dynamic denied; write-after-start visibility (the inode-pin
-  check); a private-resolving approved host ⇒ 403.
+  403 (existing cases stay green); write approval + matching client-map ⇒
+  reachable; same host different port ⇒ 403; expired ⇒ 403;
+  ="revoked-only"= entry ⇒ reachable until the entry is deleted; WRONG-tid
+  client (approval origin_tid ≠ client-map tid) ⇒ 403; client IP absent
+  from the map ⇒ 403 (attribution fail-closed); corrupt projection or map
+  ⇒ base still allowed + dynamic denied; write-after-start visibility (the
+  inode-pin check); a private-resolving approved host ⇒ 403.
 - *Behavioral eval* (mocked, N=3 cadence): (a) denial signature in execute
   output ⇒ agent calls =request_egress= with the right host, tells the
   user, does not retry-loop; (b) negative: no gratuitous requests for hosts
@@ -295,11 +335,12 @@ connection threads — never the web loop.
 - Silent-denial residual (D2) — flagged decision; read-only recent-denials
   list is the offered backstop (needs a proxy deny-spool: v1.1 unless
   Pierre wants it now).
-- Approval is global-for-1h, not task/thread-scoped (named in the card).
 - Web-only v1; emacsos approval surface deferred (its embed doesn't run the
   sandbox egress path today — verify before building anything).
-- Cross-thread same-host:port re-request overwrites the earlier pending
-  record (its card moves threads) — single-operator acceptable, named.
+- Thread-scoped keying (=tid:host:port=) means each thread requests and
+  approves independently — the same host approved in thread A must be
+  re-approved in thread B (least privilege by construction; the committed
+  allowlist is the cross-thread path).
 - Deny-spool evidence on cards; eTLD+1 visual emphasis; shared
   single-file-store base extraction (decide at implementation, the geo
   store comment's own rule); geo-banner lock-free fix (separate follow-up).
