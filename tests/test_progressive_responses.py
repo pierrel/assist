@@ -394,3 +394,41 @@ def test_resume_of_journal_dispatched_turn_passes_the_gate(wired, monkeypatch):
                              origin="continuation", backlog_id="claimed-long-ago")
     assert ("resume",) in calls, "the resume was swallowed by the entry-gone gate"
     assert _get_status(tid)["stage"] == "ready"
+
+
+def test_waiting_resume_keeps_paused_status(wired, monkeypatch):
+    """Same seam as the gate fix, un-mocked: a RESUME waiting behind another
+    thread's turn must NOT overwrite its `paused` status with "queued" — the
+    paused record is the resume's durable home, and follow-up routing keys on
+    it (a "queued" stage misroutes a follow-up off the serial scheduler and
+    onto the mid-flight checkpoint)."""
+    import threading as _threading
+    import time as _time
+    from assist.thread_queue import THREAD_QUEUE
+    tid, _ = wired
+    calls = []
+    _wire_chat(monkeypatch, tid, calls)
+    _set_status(tid, "paused", accumulated_active_ms=1234.0,
+                pending_message="mid-flight message")
+    release = _threading.Event()
+    held = _threading.Event()
+
+    def _holder():
+        with THREAD_QUEUE.acquire("t-other-holder"):
+            held.set()
+            release.wait(timeout=10)
+    h = _threading.Thread(target=_holder, daemon=True)
+    h.start()
+    assert held.wait(timeout=5)
+    w = _threading.Thread(target=threads._process_message,
+                          args=(tid, None), kwargs={"resume": True}, daemon=True)
+    w.start()
+    deadline = _time.time() + 2.0
+    while _time.time() < deadline:      # the whole wait window: never "queued"
+        assert _get_status(tid)["stage"] == "paused"
+        _time.sleep(0.05)
+    release.set()
+    w.join(timeout=10)
+    h.join(timeout=10)
+    assert ("resume",) in calls
+    assert _get_status(tid)["stage"] == "ready"

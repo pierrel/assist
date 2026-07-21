@@ -1434,13 +1434,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # A waiter behind a SAME-TID turn writes NOTHING: that running turn owns
         # status.json (its text/sender/rider must stay durable there for crash
         # recovery — clobbering the sender would resume a crashed triage turn
-        # full-privilege). A journaled follow-up (backlog_id set) never writes —
-        # it is durable in MESSAGE_BACKLOG; a direct-dispatch waiter (scheduled/
-        # geo/SMS turn) is covered by the lock-free peek_holder check, the same
-        # discipline _mark_pending uses. (Residual: a direct-dispatch waiter
-        # behind a same-tid turn that is ITSELF queued behind another thread
-        # still writes — rare double-nesting, dissolved by Step 2.)
-        if (stage == "queued" and backlog_id is None
+        # full-privilege). A journaled follow-up (backlog_id set, not resume)
+        # never writes — it is durable in MESSAGE_BACKLOG. A RESUME never
+        # writes regardless of backlog_id (a resume's durable home is its
+        # `paused` status record: overwriting it with "queued" would misroute
+        # a follow-up arriving in the wait window off the serial scheduler and
+        # onto the mid-flight checkpoint — the ordering hazard the paused
+        # routing exists to prevent — and would drop the carried active-hold
+        # on a crash). A direct-dispatch waiter (scheduled/geo/SMS turn) is
+        # covered by the lock-free peek_holder check, the same discipline
+        # _mark_pending uses. (Residual: a direct-dispatch waiter behind a
+        # same-tid turn that is ITSELF queued behind another thread still
+        # writes — rare double-nesting, dissolved by Step 2.)
+        if (stage == "queued" and backlog_id is None and not resume
                 and THREAD_QUEUE.peek_holder() != tid):
             _set_status(tid, "queued", **pending_kwargs)
 
