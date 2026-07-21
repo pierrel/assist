@@ -38,6 +38,11 @@ APPROVALS_SUBDIR = "approvals"
 PROJECTION_FILE = "approved-hosts.json"
 REVOKED_ONLY = "revoked-only"
 GRANT_TTL = timedelta(hours=1)
+# Declined records exist for the don't-re-ask corrective; a decline's
+# steering value decays with the conversation, so once ANNOUNCED
+# (dispatched) they are pruned after this window — the store stays bounded
+# by live traffic, not history.
+DECLINED_RETENTION = timedelta(days=7)
 
 
 def request_key(tid: str, host: str, port: int) -> str:
@@ -144,10 +149,21 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
 
     # --- internals (lock held) ---------------------------------------------
     def _mutate(self, recs: dict[str, EgressRequest]) -> None:
-        """Prune expired grants, persist, regenerate the projection whole."""
+        """Prune expired grants + stale announced declines, persist,
+        regenerate the projection whole."""
         now = datetime.now(timezone.utc)
+
+        def _stale_decline(r: EgressRequest) -> bool:
+            if r.state != "declined" or not r.dispatched:
+                return False
+            try:
+                return (now - datetime.fromisoformat(r.created_at)
+                        ) > DECLINED_RETENTION
+            except Exception:
+                return True     # unparseable stamp: prune rather than hoard
         live = {k: r for k, r in recs.items()
-                if not (r.state == "approved" and not _grant_live(r, now))}
+                if not (r.state == "approved" and not _grant_live(r, now))
+                and not _stale_decline(r)}
         self._write(live)
         tmp = f"{self._projection}.{os.getpid()}.tmp"
         with open(tmp, "w") as f:

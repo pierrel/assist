@@ -414,3 +414,32 @@ def test_malformed_tid_is_400_not_500(wired_web, monkeypatch):
                                      "tid": "../escape", "host": "a.example.com",
                                      "port": "443"})
     assert r.status_code == 400
+
+
+def test_stale_announced_declines_pruned(tmp_path):
+    from dataclasses import replace as _replace
+    from assist.egress.store import DECLINED_RETENTION
+    st = _store(tmp_path)
+    st.add_pending(_req(host="old.example.com"))
+    st.resolve(request_key("t1", "old.example.com", 443), "decline")
+    st.take_undispatched("t1")                      # announced
+    # age it past retention
+    recs = st._load()
+    k = request_key("t1", "old.example.com", 443)
+    recs[k] = _replace(recs[k], created_at=(
+        datetime.now(timezone.utc) - DECLINED_RETENTION
+        - timedelta(hours=1)).isoformat())
+    with st._lock:
+        st._mutate(recs)
+    assert st.all() == []                           # pruned
+    # an UNannounced decline is never pruned (the corrective still needs it)
+    st.add_pending(_req(host="new.example.com"))
+    st.resolve(request_key("t1", "new.example.com", 443), "decline")
+    recs = st._load()
+    k2 = request_key("t1", "new.example.com", 443)
+    recs[k2] = _replace(recs[k2], created_at=(
+        datetime.now(timezone.utc) - DECLINED_RETENTION
+        - timedelta(hours=1)).isoformat())
+    with st._lock:
+        st._mutate(recs)
+    assert [r.host for r in st.all()] == ["new.example.com"]
