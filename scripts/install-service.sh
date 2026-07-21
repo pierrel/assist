@@ -43,6 +43,10 @@ ENV_VARS=""
 # TRAVEL_INFRA_DIR enables the geo region-download feature (registry/catalog/proposals +
 # the provisioning scripts). Unset → the geo tools + /geo page are simply absent.
 [ -n "$TRAVEL_INFRA_DIR" ] && ENV_VARS="${ENV_VARS}Environment=\"TRAVEL_INFRA_DIR=$TRAVEL_INFRA_DIR\"\n"
+# ASSIST_EGRESS_APPROVALS_DIR enables the egress approval HITL (requests store +
+# the proxy-mounted approvals subdir); unset = feature dormant. Must NOT be
+# under ASSIST_THREADS_DIR (both the web wiring and the proxy mount refuse it).
+[ -n "$ASSIST_EGRESS_APPROVALS_DIR" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_EGRESS_APPROVALS_DIR=$ASSIST_EGRESS_APPROVALS_DIR\"\n"
 [ -n "$ASSIST_SSL_CERT" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_CERT=$ASSIST_SSL_CERT\"\n"
 [ -n "$ASSIST_SSL_KEY" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_KEY=$ASSIST_SSL_KEY\"\n"
 [ -n "$ASSIST_SMS_SECRET" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SMS_SECRET=$ASSIST_SMS_SECRET\"\n"
