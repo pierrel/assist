@@ -23,6 +23,7 @@ never reaches the proxy's parser):
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, replace
@@ -43,6 +44,23 @@ def request_key(tid: str, host: str, port: int) -> str:
     return f"{tid}:{host}:{port}"
 
 
+def approvals_dir_is_safe(egress_dir: str) -> bool:
+    """The self-approval guard, applied by EVERY reader of
+    ``ASSIST_EGRESS_APPROVALS_DIR`` — the web wiring (tools/routes) AND the
+    sandbox layer (proxy mount + client-map writes). An approvals dir under
+    the thread root would sit inside some thread's rw ``/workspace`` bind
+    mount, letting a prompt-injected sandbox write its own grants
+    (self-approval with no tool, no card, no user). A guard applied on only
+    one path is theater — the exploit rides whichever reader skipped it."""
+    root = os.path.realpath(
+        os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads"))
+    try:
+        return os.path.commonpath(
+            [os.path.realpath(egress_dir), root]) != root
+    except ValueError:      # different drives (never on this deploy) — refuse
+        return False
+
+
 @dataclass(frozen=True)
 class EgressRequest:
     host: str
@@ -52,6 +70,11 @@ class EgressRequest:
     created_at: str = ""
     state: str = "pending"          # pending | approved | declined
     expires_at: str = ""            # ISO or REVOKED_ONLY when approved
+    # Consumed by the ONE resolution turn that fires when the thread's
+    # pending set empties: only never-dispatched resolutions are enumerated,
+    # so an old decline or a long-lived always-grant is not re-announced (or
+    # its task re-run) on every later batch.
+    dispatched: bool = False
 
     @property
     def key(self) -> str:
@@ -60,7 +83,8 @@ class EgressRequest:
     def to_dict(self) -> dict:
         return {"host": self.host, "port": self.port, "task": self.task,
                 "origin_tid": self.origin_tid, "created_at": self.created_at,
-                "state": self.state, "expires_at": self.expires_at}
+                "state": self.state, "expires_at": self.expires_at,
+                "dispatched": self.dispatched}
 
     @staticmethod
     def from_dict(d: dict) -> "EgressRequest | None":
@@ -72,7 +96,8 @@ class EgressRequest:
                 host=host, port=port, task=str(d.get("task", "")),
                 origin_tid=tid, created_at=str(d.get("created_at", "")),
                 state=str(d.get("state", "pending")),
-                expires_at=str(d.get("expires_at", "")))
+                expires_at=str(d.get("expires_at", "")),
+                dispatched=bool(d.get("dispatched", False)))
         except Exception:
             logger.warning("egress: malformed request record skipped: %.120r", d)
             return None
@@ -121,7 +146,6 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
         live = {k: r for k, r in recs.items()
                 if not (r.state == "approved" and not _grant_live(r, now))}
         self._write(live)
-        import json
         tmp = f"{self._projection}.{os.getpid()}.tmp"
         with open(tmp, "w") as f:
             json.dump({k: {"host": r.host, "port": r.port,
@@ -131,12 +155,25 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
         os.replace(tmp, self._projection)
 
     # --- API ----------------------------------------------------------------
-    def add_pending(self, rec: EgressRequest) -> EgressRequest:
+    PER_THREAD_PENDING_CAP = 3
+    GLOBAL_PENDING_CAP = 10
+
+    def add_pending(self, rec: EgressRequest) -> str | None:
+        """Insert a pending request, counting BOTH caps under the same lock
+        as the insert (two parallel tool calls can otherwise land 4+ pending
+        — the threat model's fatigue bound). Returns an error reason string
+        when refused, None on success."""
         with self._lock:
             recs = self._load()
+            pending = [r for r in recs.values() if r.state == "pending"]
+            if sum(1 for r in pending if r.origin_tid == rec.origin_tid) \
+                    >= self.PER_THREAD_PENDING_CAP:
+                return "thread-cap"
+            if len(pending) >= self.GLOBAL_PENDING_CAP:
+                return "global-cap"
             recs[rec.key] = rec
             self._mutate(recs)
-            return rec
+            return None
 
     def resolve(self, key: str, decision: str) -> EgressRequest | None:
         """Approve ("hour" | "always") or decline a pending request. Returns
@@ -171,6 +208,34 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
             self._mutate(recs)
             return True
 
+    def take_undispatched(self, tid: str) -> list[EgressRequest]:
+        """Collect the thread's never-dispatched resolutions (approved live +
+        declined) and mark them dispatched, atomically — the ONE resolution
+        turn enumerates exactly this batch and no later batch repeats it."""
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            recs = self._load()
+            batch = [r for r in recs.values()
+                     if r.origin_tid == tid and not r.dispatched
+                     and (r.state == "declined"
+                          or (r.state == "approved" and _grant_live(r, now)))]
+            for r in batch:
+                recs[r.key] = replace(r, dispatched=True)
+            if batch:
+                self._mutate(recs)
+            return batch
+
+    def drop(self, key: str) -> bool:
+        """Projection-safe removal of ANY record (the deleted-thread cleanup
+        path) — unlike the base class, every mutation regenerates the
+        projection."""
+        with self._lock:
+            recs = self._load()
+            if recs.pop(key, None) is None:
+                return False
+            self._mutate(recs)
+            return True
+
     def remove_thread(self, tid: str) -> int:
         """Thread deletion: a grant never outlives its scope."""
         with self._lock:
@@ -192,3 +257,37 @@ class EgressStore(KeyedJsonStore[EgressRequest]):
         now = datetime.now(timezone.utc)
         with self._lock:
             return [r for r in self._load().values() if _grant_live(r, now)]
+
+
+def remaining_lifetime(rec: EgressRequest) -> str:
+    """One wording for a grant's remaining lifetime (the /egress page and the
+    list_allowed_hosts tool both show it — a shared helper so the copies
+    can't diverge)."""
+    if rec.expires_at == REVOKED_ONLY:
+        return "until revoked or the thread is deleted"
+    try:
+        mins = max(0, int((datetime.fromisoformat(rec.expires_at)
+                           - datetime.now(timezone.utc)).total_seconds() // 60))
+        return f"~{mins} min left"
+    except Exception:
+        return "expiring"
+
+
+def resolution_prompt(batch: list[EgressRequest]) -> str | None:
+    """The resolution turn's prompt over ONE take_undispatched batch — pure,
+    shared with the eval so the eval can't silently pin a stale shape."""
+    lines = []
+    for r in batch:
+        if r.state == "approved":
+            lines.append(f'- {r.host}:{r.port} APPROVED. Your recorded task: '
+                         f'"{r.task}"')
+        elif r.state == "declined":
+            lines.append(f"- {r.host}:{r.port} DECLINED — do not re-ask; "
+                         "proceed without it.")
+    if not lines:
+        return None
+    return ("[Egress requests resolved] The user has resolved this thread's "
+            "network access requests:\n" + "\n".join(lines)
+            + "\nFor approved hosts, carry out the recorded task now — if "
+            "the work already succeeded, just confirm the result. "
+            "Acknowledge any declined hosts in your answer.")

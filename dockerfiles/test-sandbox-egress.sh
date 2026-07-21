@@ -13,6 +13,15 @@
 #   - `pip install -r requirements.txt` (the same install command
 #     test_dev_agent_runs_eval uses) fails through the proxy
 #
+# Phase 2 (user-approved grants, docs/2026-07-21-egress-approval-hitl.org):
+#   - An approved host:port is reachable; the same host on another port,
+#     an expired grant, another THREAD's grant, and a private-resolving
+#     approved host (the DNS-rebinding guard) are all 403
+#   - A corrupt approvals file denies grants but leaves the base
+#     allowlist working (fail-closed both ways)
+#   - Approvals written AFTER proxy start are honored (the directory
+#     mount's inode-pin check)
+#
 # Both images must already be built: `assist-sandbox` and
 # `assist-egress-proxy`.  This harness creates a temporary internal
 # network, brings the proxy up on it, runs probes inside a sandbox

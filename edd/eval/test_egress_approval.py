@@ -18,7 +18,7 @@ from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 
 from assist.agent import create_agent, AgentHarness
 from assist.egress.guidance import EGRESS_DENIED_GUIDANCE
-from assist.egress.store import EgressStore, request_key
+from assist.egress.store import EgressStore, request_key, resolution_prompt
 from assist.egress import tools as egress_tools_mod
 from assist.egress.tools import egress_tools
 from assist.model_manager import select_assistant_model
@@ -119,15 +119,14 @@ class TestEgressApproval(TestCase):
         key = request_key(self.tid, "api.github.com", 443)
         if self.store.get(key) is None or self.store.get(key).state != "pending":
             self.skipTest("request half did not record (covered by the first test)")
-        rec = self.store.resolve(key, "hour")
+        self.store.resolve(key, "hour")
         backend.allow = True
+        # the REAL prompt shape, via the same shared helper prod dispatch
+        # uses — the eval can't silently pin a stale copy
+        prompt = resolution_prompt(self.store.take_undispatched(self.tid))
+        self.assertIsNotNone(prompt)
         with stub_research_subagent():
-            agent.message(
-                "[Egress requests resolved] The user has resolved this "
-                "thread's network access requests:\n"
-                f"- api.github.com:443 APPROVED. Your recorded task: \"{rec.task}\"\n"
-                "For approved hosts, carry out the recorded task now — if the "
-                "work already succeeded, just confirm the result.")
+            agent.message(prompt)
         # Search ALL assistant text, not just the last message: the model may
         # (correctly!) follow the fetch-and-report with a voluntary
         # remove_allowed_host cleanup, making the final message the cleanup

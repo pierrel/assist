@@ -96,10 +96,11 @@ What the feature newly trusts, and how each input is contained:
   both) — and a startup guard REFUSES an approvals dir under the thread root
   (the =TRAVEL_INFRA_DIR= fail-fast precedent), so a mis-set env var can't
   silently hand a sandbox write access to its own approvals.
-- *Flood/fatigue*: pending caps counted on the durable store under its write
-  lock (keys, not calls — re-requests of a pending host:port don't eat the
-  cap): 3 pending per thread, 10 global; over-cap returns a corrective
-  string. The agent cannot delete proposals (approve/decline are
+- *Flood/fatigue*: pending caps counted and inserted under ONE store lock
+  (=EgressStore.add_pending= — two parallel tool calls can't overshoot):
+  3 pending per thread, 10 global; over-cap returns a corrective string.
+  Re-requests of a pending key don't eat the cap (keyed overwrite guard in
+  the tool). The agent cannot delete proposals (approve/decline are
   user-actions), so it can't reset its own count. The cap bounds pending
   CARDS; a user-gated request→approve→request cycle remains possible —
   named, acceptable.
@@ -127,9 +128,11 @@ it lives in =assist/egress/guidance.py=, never embedded in proxy
 implementation code):
 - =EGRESS_DENIED_GUIDANCE= — the central constant, prepended by
   =DockerSandboxBackend.execute= when output matches the denial signature
-  (nonzero exit + "403" AND one of "proxy"/"CONNECT"/"tunnel" — verified
-  against curl/pip/wget/git phrasings; an origin server's own 403 carries no
-  proxy token and correctly misses). It points the agent at the egress
+  (as-built: nonzero exit + ("403" OR "forbidden") AND ("proxy" OR
+  "tunnel") — "forbidden" covers wget's 403-less phrasing; bare "CONNECT"
+  was dropped as too broad; verified against curl/pip/wget/git phrasings;
+  an origin server's own 403 carries no proxy/tunnel token and correctly
+  misses). It points the agent at the egress
   skill + =request_egress=. Constant-shaped so a future breaker can
   equality-count it in the message tail (the =_SEARCH_UNAVAILABLE_MESSAGE=
   pattern) — escape hatch pre-wired, zero code now.
@@ -234,7 +237,15 @@ coupling; rejected in review).
   thread's pending cards render inline (≤3 by cap; no "+N more"
   indirection).
 - *Retry dispatch fires when the thread's pending set EMPTIES* (last approve
-  or decline), not per-approval — so the agent can batch ("request all the
+  or decline), not per-approval. As-built refinements from review: the
+  prompt enumerates only =take_undispatched= — the never-yet-announced
+  resolutions — so an old decline or a long-lived always-grant's task is
+  not re-announced/re-run on later batches (each record carries a
+  =dispatched= flag, flipped atomically with the batch take); and the
+  approve/decline POST awaits only the fast record-resolution (the card is
+  gone when the 303 renders) while the resolution TURN runs as a
+  BackgroundTask (the reply_decision precedent — a full agent turn behind
+  THREAD_QUEUE must never run where the HTTP response waits) — so the agent can batch ("request all the
   hosts you need before ending the turn" rides the tool docstring), the user
   approves A and B, and ONE retry turn runs with the outcomes enumerated
   ("A approved; B declined"). Named edge: approve A, ignore B ⇒ no retry
@@ -286,11 +297,16 @@ connection threads — never the web loop.
 * Implementation plan (numbered; sequencing: 1–2 ∥ 3–4, then 5–9, then 10–11)
 
 1. =assist/egress/store.py=: =EgressRequest= (frozen: host, port, task,
-   origin_tid, created_at, state, expires_at) + =EgressStore= (single file
-   =egress-requests.json=, atomic RMW, lenient reads, lazy expiry-prune) +
-   =write_projection()= regenerating =approvals/approved-hosts.json= whole.
-   Startup guard: refuse an approvals dir under the thread root.
-2. =assist/egress/tools.py=: =egress_tools(store, base_hosts, caps)= →
+   origin_tid, created_at, state, expires_at, dispatched) + =EgressStore=
+   (single file =egress-requests.json=, atomic RMW, lenient reads, lazy
+   expiry-prune; every mutation — =_mutate= — regenerates
+   =approvals/approved-hosts.json= whole under the same lock, and the
+   generic base-class mutators are removed so no path can bypass it).
+   =approvals_dir_is_safe= is the SHARED startup guard: refuse an approvals
+   dir under the thread root — applied by BOTH env readers (the web wiring
+   AND sandbox_manager's proxy mount + client-map writes; a one-sided guard
+   is theater — found in review).
+2. =assist/egress/tools.py=: =egress_tools(store, base_hosts, thread_dir)= →
    =[request_egress, list_allowed_hosts, remove_allowed_host]=;
    URL-tolerant host parse, fullmatch validation, base-infra-name refusal,
    port coercion, single combined =task= string (the =continue_later=
@@ -303,7 +319,7 @@ connection threads — never the web loop.
    guidance. Plus =assist/egress/guidance.py=: the centralized denial
    guidance constants (execute hint + proxy 403 body) — the
    infrastructure↔agent contract text, in one reviewable place.
-3. =dockerfiles/egress-proxy.py=: =load_approvals()= + =load_client_map()=
+3. =dockerfiles/egress-proxy.py=: =_read_small_json= + =approved_target=
    consulted at BOTH miss sites; exact =(host, port)= match + duration
    check (aware-UTC unexpired, or ="revoked-only"=) + =origin_tid= ==
    client-map[client IP], every parse failure or unknown IP ⇒ skip/deny;
@@ -354,14 +370,14 @@ connection threads — never the web loop.
   redirect validation, deleted-thread refusal, 404-unconfigured); render
   test (card fields, punycode flag, scope + auto-retry copy, card gone
   after approve/decline).
-- *Live proxy* (extend =dockerfiles/test-sandbox-egress.sh=): unapproved ⇒
-  403 (existing cases stay green); write approval + matching client-map ⇒
-  reachable; same host different port ⇒ 403; expired ⇒ 403;
-  ="revoked-only"= entry ⇒ reachable until the entry is deleted; WRONG-tid
-  client (approval origin_tid ≠ client-map tid) ⇒ 403; client IP absent
-  from the map ⇒ 403 (attribution fail-closed); corrupt projection or map
-  ⇒ base still allowed + dynamic denied; write-after-start visibility (the
-  inode-pin check); a private-resolving approved host ⇒ 403.
+- *Live proxy* (extend =dockerfiles/test-sandbox-egress.sh=; 13 probes, all
+  green as-built): unapproved ⇒ 403 (existing cases stay green); write
+  approval + matching client-map ⇒ reachable; same host different port ⇒
+  403; expired ⇒ 403; WRONG-tid client ⇒ 403; corrupt projection ⇒ base
+  still allowed + grants denied; write-after-start visibility (the
+  inode-pin check); a private-resolving approved host ⇒ 403. As-built
+  note: the ="revoked-only"=-reachable and unknown-client-IP cases are
+  UNIT-pinned (tests/test_egress_approval.py) rather than smoke probes.
 - *Behavioral eval* (mocked, N=3 cadence): (a) denial signature in execute
   output ⇒ agent calls =request_egress= with the right host, tells the
   user, does not retry-loop; (b) negative: no gratuitous requests for hosts

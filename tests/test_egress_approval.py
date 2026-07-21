@@ -127,6 +127,8 @@ def test_request_flow_correctives(tmp_path, monkeypatch):
     st = _store(tmp_path)
     monkeypatch.setattr(egress_tools_mod, "_thread_id", lambda: "t1")
     request, list_hosts, remove = egress_tools(st, frozenset({"pypi.org"}))
+    # events flow through the thread_dir seam when wired; unwired here — the
+    # tools must still work (CLI/eval shape)
     assert "already on the base allowlist" in request("pypi.org", 443, "x")
     out = request("https://api.github.com/x", None, "fetch releases and summarize")
     assert "awaits the user's approval" in out
@@ -364,3 +366,31 @@ def test_thread_card_renders_and_clears(wired_web, monkeypatch):
     st.resolve(request_key(tid, "xn--bcher-kva.example", 443), "decline")
     assert "Network access request" not in TestClient(web.app).get(
         f"/thread/{tid}").text
+
+
+def test_global_pending_cap(tmp_path):
+    st = _store(tmp_path)
+    for i in range(st.GLOBAL_PENDING_CAP):
+        assert st.add_pending(_req(tid=f"t{i}", host=f"h{i}.example.com")) is None
+    assert st.add_pending(_req(tid="t-extra", host="hx.example.com")) == "global-cap"
+
+
+def test_take_undispatched_batches_once(tmp_path):
+    """The resolution turn enumerates each resolution exactly ONCE — an old
+    decline or a long-lived always-grant is not re-announced on later
+    batches (review finding: unbounded re-enumeration re-ran old tasks)."""
+    from assist.egress.store import resolution_prompt
+    st = _store(tmp_path)
+    st.add_pending(_req(tid="t1", host="a.example.com", task="task A"))
+    st.resolve(request_key("t1", "a.example.com", 443), "always")
+    batch1 = st.take_undispatched("t1")
+    assert [r.host for r in batch1] == ["a.example.com"]
+    assert "task A" in resolution_prompt(batch1)
+    assert st.take_undispatched("t1") == []          # never re-announced
+    # a later cycle only announces the NEW resolutions
+    st.add_pending(_req(tid="t1", host="c.example.com", task="task C"))
+    st.resolve(request_key("t1", "c.example.com", 443), "decline")
+    batch2 = st.take_undispatched("t1")
+    assert [r.host for r in batch2] == ["c.example.com"]
+    prompt2 = resolution_prompt(batch2)
+    assert "task A" not in prompt2 and "DECLINED" in prompt2

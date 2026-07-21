@@ -140,9 +140,21 @@ class SandboxManager:
         # before this feature is recreated once and gains the mount.
         approvals_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR") or None
         if approvals_dir:
-            from assist.egress.store import APPROVALS_SUBDIR
-            approvals_dir = os.path.join(approvals_dir, APPROVALS_SUBDIR)
-            os.makedirs(approvals_dir, exist_ok=True)
+            from assist.egress.store import APPROVALS_SUBDIR, approvals_dir_is_safe
+            if not approvals_dir_is_safe(approvals_dir):
+                # The SAME self-approval guard the web wiring applies: an
+                # approvals dir under the thread root sits inside a sandbox's
+                # rw /workspace mount — mounting it would let the sandbox
+                # write its own grants. Refuse the mount too, not just the
+                # tools (a one-sided guard is theater).
+                logger.error(
+                    "ASSIST_EGRESS_APPROVALS_DIR=%s is under the thread root "
+                    "— refusing the proxy mount; egress approvals dormant",
+                    approvals_dir)
+                approvals_dir = None
+            else:
+                approvals_dir = os.path.join(approvals_dir, APPROVALS_SUBDIR)
+                os.makedirs(approvals_dir, exist_ok=True)
         allowlist_hash = _egress_proxy_config_hash(allowlist_csv, approvals_dir)
 
         with cls._egress_lock:
@@ -416,6 +428,9 @@ class SandboxManager:
         egress_dir = os.environ.get("ASSIST_EGRESS_APPROVALS_DIR")
         if not egress_dir:
             return
+        from assist.egress.store import approvals_dir_is_safe
+        if not approvals_dir_is_safe(egress_dir):
+            return   # same refusal as the mount — never write under a sandbox-reachable dir
         try:
             container.reload()
             ip = (container.attrs["NetworkSettings"]["Networks"]
