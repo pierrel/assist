@@ -508,3 +508,19 @@ def test_turn_observer_isolated_and_reports_error(wired, monkeypatch):
     threads._process_message(tid, "hi")                 # must not raise
     assert good == [(tid, "error", None, None, None)]   # error stage, reply None
     assert _get_status(tid)["stage"] == "error"         # turn still terminalized
+
+
+def test_turn_observer_reports_error_when_ready_tail_fails(wired, monkeypatch):
+    # chat.message succeeds ("done"), but the ready-exit tail (_dispatch_continuations)
+    # raises → generic except → status "error". The observer must report "error",
+    # never the stale "ready"/"done" _terminal captured before the tail.
+    tid, _ = wired
+    _wire_chat(monkeypatch, tid, [])
+    monkeypatch.setattr(
+        threads, "_dispatch_continuations",
+        lambda tid, rider: (_ for _ in ()).throw(RuntimeError("tail boom")))
+    seen = []
+    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [lambda *a: seen.append(a)])
+    threads._process_message(tid, "hi")
+    assert seen == [(tid, "error", None, None, None)]
+    assert _get_status(tid)["stage"] == "error"

@@ -1825,6 +1825,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             **pending_kwargs,
         )
     except Exception as e:
+        # The ready exit sets _terminal BEFORE its append_event/_dispatch_continuations
+        # tail (which can raise into HERE); reset so the observer reports the
+        # authoritative "error", never a stale "ready", when that tail fails. A
+        # primary chat.message failure lands here with _terminal already None (no-op).
+        _terminal = None
         logging.error("Message processing failed for thread %s: %s", tid, e, exc_info=True)
         _cancelled = _cancel_this_turns_continuations(tid, _pre_turn_conts)
         _rejournaled = _rejournal_claimed_interjections(tid, rider)
