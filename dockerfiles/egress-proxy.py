@@ -117,18 +117,26 @@ def approved_target(host: str, port: int, client_ip: str) -> bool:
     projection is keyed ``tid:host:port``), but the ENTRY's own fields are
     the authority — the key is never trusted on its own. Fail-closed on
     every parse problem."""
-    tid = _read_small_json("client-map.json").get(client_ip)
+    cmap = _read_small_json("client-map.json")
+    tid = cmap.get(client_ip)
+    log(f"CIDEBUG client_ip={client_ip!r} cmap={cmap!r} tid={tid!r}")
     if not tid:
         return False
-    entry = _read_small_json("approved-hosts.json").get(f"{tid}:{host}:{port}")
+    ahosts = _read_small_json("approved-hosts.json")
+    key = f"{tid}:{host}:{port}"
+    entry = ahosts.get(key)
+    log(f"CIDEBUG key={key!r} entry={entry!r} ahosts_keys={list(ahosts.keys())!r}")
     if not isinstance(entry, dict):
         return False
     try:
-        return (str(entry["host"]).lower() == host
+        result = (str(entry["host"]).lower() == host
                 and int(entry["port"]) == port
                 and str(entry["origin_tid"]) == str(tid)
                 and _grant_live(entry.get("expires_at")))
-    except Exception:
+        log(f"CIDEBUG result={result!r}")
+        return result
+    except Exception as e:
+        log(f"CIDEBUG exception={e!r}")
         return False
 
 
@@ -197,6 +205,7 @@ def read_request_head(client: socket.socket) -> tuple[str, bytes]:
 def handle(client: socket.socket, addr) -> None:
     upstream = None
     try:
+        log(f"CIDEBUG accept addr={addr!r}")
         client.settimeout(30)
         try:
             head, body = read_request_head(client)
