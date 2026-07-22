@@ -118,7 +118,9 @@ def _search_emissions(out):
     for m in out.get("messages", []):
         for tc in (getattr(m, "tool_calls", None) or []) if isinstance(m, AIMessage) else []:
             if tc.get("name") == "search_internet":
-                c[_normalize_query((tc.get("args") or {}).get("query", ""))] += 1
+                args = tc.get("args")
+                query = args.get("query", "") if isinstance(args, dict) else ""
+                c[_normalize_query(query)] += 1
     return c
 
 
