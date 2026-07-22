@@ -97,7 +97,13 @@ def _read_small_json(name: str) -> dict:
         with open(path) as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except Exception as e:
+        try:
+            listing = os.listdir(APPROVALS_DIR)
+        except Exception as e2:
+            listing = f"<listdir failed: {e2!r}>"
+        log(f"CIDEBUG _read_small_json({name!r}) failed: {e!r}; "
+            f"exists={os.path.exists(path)!r} dir_listing={listing!r}")
         return {}
 
 

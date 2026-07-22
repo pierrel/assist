@@ -227,6 +227,7 @@ docker run -d --name "$SANDBOX2" --network "$NETWORK" \
     assist-sandbox sleep 300 >/dev/null || { echo "FAIL: sandbox2 start"; exit 1; }
 SB_IP=$(docker inspect -f "{{(index .NetworkSettings.Networks \"$NETWORK\").IPAddress}}" "$SANDBOX2")
 [ -n "$SB_IP" ] || { echo "FAIL: no sandbox2 IP"; exit 1; }
+echo "CIDEBUG SB_IP=$SB_IP APPROVALS_DIR=$APPROVALS_DIR"
 
 EXP_OK=$(date -u -d "+1 hour" +%Y-%m-%dT%H:%M:%S+00:00)
 EXP_OLD=$(date -u -d "-1 hour" +%Y-%m-%dT%H:%M:%S+00:00)
@@ -239,12 +240,26 @@ cat > "$APPROVALS_DIR/approved-hosts.json" <<EOF
  "t-other:example.net:443": {"host": "example.net", "port": 443, "origin_tid": "t-other", "expires_at": "$EXP_OK"},
  "t-smoke:host.docker.internal:443": {"host": "host.docker.internal", "port": 443, "origin_tid": "t-smoke", "expires_at": "$EXP_OK"}}
 EOF
+echo "CIDEBUG host-side listing:"; ls -la "$APPROVALS_DIR"
+echo "CIDEBUG host-side client-map.json:"; cat "$APPROVALS_DIR/client-map.json"
+echo "CIDEBUG proxy-side listing (docker exec ls /approvals):"
+docker exec "$PROXY" ls -la /approvals 2>&1 || echo "CIDEBUG exec ls failed"
+docker exec "$PROXY" cat /approvals/client-map.json 2>&1 || echo "CIDEBUG exec cat failed"
 
 probe() { docker exec "$SANDBOX2" curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$1" 2>/dev/null; }
 
 s1=$(probe https://example.com/)
 case "$s1" in 2*|3*) echo "ok  (8) approved example.com reachable ($s1)";;
-    *) echo "FAIL: approved example.com not reachable ($s1)"; docker logs "$PROXY" | tail -20; exit 1;; esac
+    *)
+        echo "CIDEBUG retrying probe (8) up to 10x with 0.3s sleep to test propagation-delay theory"
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            sleep 0.3
+            retry=$(probe https://example.com/)
+            echo "CIDEBUG retry $i status=$retry"
+            case "$retry" in 2*|3*) echo "CIDEBUG retry $i SUCCEEDED"; break;; esac
+        done
+        echo "FAIL: approved example.com not reachable ($s1)"; docker logs "$PROXY" | tail -40; exit 1;;
+esac
 
 s2=$(docker exec "$SANDBOX2" curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com:8443/ 2>/dev/null)
 case "$s2" in 2*|3*) echo "FAIL: port 8443 reachable despite 443-only grant"; exit 1;;
