@@ -33,6 +33,17 @@ HOST_DIR=$(mktemp -d)
 APPROVALS_DIR=$(mktemp -d)
 SANDBOX2="assist-egress-smoke-sb-$$"
 
+# Same runner-uid-vs-container-uid gap as $HOST_DIR below: `mktemp -d`
+# defaults to 0700, so the proxy container's non-root `proxy` user
+# (uid 1000, Dockerfile.egress-proxy) can't even traverse into
+# /approvals on a host where the runner's uid differs (GitHub's
+# ubuntu-latest = 1001) — every _read_small_json() call fails closed
+# with PermissionError, so approval grants silently never match. The
+# files created inside get their mode from the process umask (already
+# world-readable), so only the directory's own x-for-other bit is
+# missing.
+chmod 0755 "$APPROVALS_DIR"
+
 # Mount the real requirements.txt + pyproject.toml + assist source so
 # the positive case probes EXACTLY what dev-agent's eval install does
 # (`pip install -r requirements.txt -e .`).  Drift to a non-allowlisted
