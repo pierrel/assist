@@ -432,3 +432,79 @@ def test_waiting_resume_keeps_paused_status(wired, monkeypatch):
     h.join(timeout=10)
     assert ("resume",) in calls
     assert _get_status(tid)["stage"] == "ready"
+
+
+# --- shared session API (P0/D1): plan_turn / route_turn / turn observers -------
+
+def test_route_turn_idle_dispatches():
+    seen = []
+    dec = threads.route_turn("t1", "hi", "RIDER", "ready", None,
+                             dispatch=lambda fn, *a, **k: seen.append((fn, a, k)))
+    assert dec == "idle"
+    assert seen == [(threads._process_message, ("t1", "hi", "RIDER"),
+                     {"backlog_id": None})]
+
+
+def test_route_turn_busy_dispatches_with_backlog():
+    seen = []
+    dec = threads.route_turn("t1", "hi", "RIDER", "processing", "bk1",
+                             dispatch=lambda fn, *a, **k: seen.append((fn, a, k)))
+    assert dec == "busy"
+    assert seen == [(threads._process_message, ("t1", "hi", "RIDER"),
+                     {"backlog_id": "bk1"})]
+
+
+def test_route_turn_paused_routes_through_scheduler(monkeypatch):
+    sched, dispatched = [], []
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
+                        lambda *a: sched.append(a))
+    dec = threads.route_turn("t1", "hi", "RIDER", "paused", "bk1",
+                             dispatch=lambda *a, **k: dispatched.append(a))
+    assert dec == "paused"
+    assert dispatched == []                       # never a fresh worker on a paused thread
+    assert sched == [("t1", "hi", "RIDER", None, "bk1")]   # after the queued resume
+
+
+def test_plan_turn_idle_marks_pending(wired):
+    tid, _ = wired
+    _set_status(tid, "ready")
+    assert threads.plan_turn(tid, "hello") == ("ready", False)
+    assert _get_status(tid).get("pending_message") == "hello"   # _mark_pending ran
+
+
+def test_plan_turn_busy_when_processing(wired):
+    tid, _ = wired
+    _set_status(tid, "processing")
+    assert threads.plan_turn(tid, "hello") == ("processing", True)
+
+
+def test_turn_observer_fires_on_ready(wired, monkeypatch):
+    tid, _ = wired
+    _wire_chat(monkeypatch, tid, [])
+    seen = []
+    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [lambda *a: seen.append(a)])
+    threads._process_message(tid, "hi")
+    assert seen == [(tid, "ready", None, "done", None)]
+
+
+def test_turn_observer_isolated_and_reports_error(wired, monkeypatch):
+    tid, _ = wired
+
+    class _Boom:
+        def message(self, text):
+            raise RuntimeError("boom")
+
+        def pending_reply(self):
+            return None
+
+        def get_messages(self):
+            return []
+    monkeypatch.setattr(web.MANAGER, "get", lambda t, **k: _Boom())
+    good = []
+    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [
+        lambda *a: (_ for _ in ()).throw(ValueError("observer boom")),  # raises
+        lambda *a: good.append(a),                                      # still fires
+    ])
+    threads._process_message(tid, "hi")                 # must not raise
+    assert good == [(tid, "error", None, None, None)]   # error stage, reply None
+    assert _get_status(tid)["stage"] == "error"         # turn still terminalized

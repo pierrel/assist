@@ -1399,6 +1399,34 @@ register_interjection_callbacks(
     MESSAGE_BACKLOG.for_thread, _consume_interjections, _frame_interjection)
 
 
+# --- turn-completion observers (shared session API — D1 / tech-design §7.1) ----
+# The one seam every client observes a completed turn through, instead of each
+# re-deriving "did the turn finish and what did it say." Callbacks fire at a
+# turn's terminal exit with (tid, stage, origin, reply_text, backlog_id). No
+# observer is registered in v1 — this is the P0 harness hook the voice
+# delivery adapter (and any future client) will register onto.
+_TURN_OBSERVERS: list = []
+
+
+def register_turn_observer(cb) -> None:
+    """Register a turn-completion callback. Fired SYNCHRONOUSLY on the turn's
+    worker thread (which varies — the anyio pool, the _ResumeScheduler, or a
+    future voice turn-runner), so a callback must be thread-safe and
+    non-blocking."""
+    _TURN_OBSERVERS.append(cb)
+
+
+def _notify_turn_observers(tid, stage, origin, reply_text, backlog_id) -> None:
+    """Fire every observer, isolated: one raising must never disturb the others
+    or the just-written terminal status (the _rejournal best-effort mold)."""
+    for cb in _TURN_OBSERVERS:
+        try:
+            cb(tid, stage, origin, reply_text, backlog_id)
+        except Exception:
+            logging.error("turn observer failed for %s (%s); continuing", tid,
+                          stage, exc_info=True)
+
+
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None,
                      resume: bool = False, accumulated_active_ms: float = 0.0,
@@ -1479,6 +1507,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # handlers below can reference it even when the failure precedes the
     # snapshot (e.g. a queue-wait timeout).
     _pre_turn_conts: set = set()
+    # Turn-completion observer seam (D1/§7.1): set at the two SUCCESS terminal
+    # exits below (reply captured); a fall-through error exit leaves it None
+    # (reported as "error" at the post-block fire). The pause path and every
+    # early-return `return` exit the function before the fire, correctly.
+    _terminal: tuple[str, str | None] | None = None
 
     def on_queue_wait(stage: str) -> None:
         # `ThreadAffinityQueue.acquire` fires the callback with "queued"
@@ -1708,8 +1741,10 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _set_status(tid, "awaiting_approval",
                         pending_reply=pending.get("text", ""), pending_sender=sender or "",
                         started_at=started_at)
+            _terminal = ("awaiting_approval", pending.get("text", ""))
         else:
             _set_status(tid, "ready")
+            _terminal = ("ready", resp)
             if origin == "continuation":
                 append_event(MANAGER.thread_dir(tid), "continuation_completed",
                              id=backlog_id or "")
@@ -1818,6 +1853,15 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # so it can't leak — the pause path already popped it (to carry) and returned,
         # so this is a no-op there.
         THREAD_QUEUE.pop_hold(tid)
+
+    # Turn-completion observers (§7.1), fired ONCE after the terminal status is
+    # durable. Only fall-through exits reach here: ready/awaiting set _terminal;
+    # the error branches fall through with it None (→ "error"); the pause path and
+    # every early `return` exit before this line, so a paused/deferred/skipped turn
+    # correctly fires nothing. No observer registered in v1 ⇒ a no-op.
+    if _terminal is None:
+        _terminal = ("error", None)
+    _notify_turn_observers(tid, _terminal[0], origin, _terminal[1], backlog_id)
 
 
 def _capture_conversation(tid: str, reason: str) -> None:
@@ -2604,22 +2648,54 @@ def _get_backlog_limiter() -> anyio.CapacityLimiter:
     return _backlog_limiter
 
 
+def plan_turn(tid: str, text: str) -> tuple[str, bool]:
+    """Shared session API (D1 / tech-design §5): sample whether the thread is
+    busy and mark it pending, in the ONE busy sample that drives the whole submit
+    decision. Returns ``(prior_stage, busy)``.
+
+    Read the busy state BEFORE ``_mark_pending``: for an idle thread ``_mark_pending``
+    flips it busy (that first message is durable via ``status.pending_message``); a
+    message to an ALREADY-busy thread is a follow-up the caller journals (so a
+    restart can't drop it). "Busy" includes this tid holding the LLM slot with no
+    busy status yet (a direct-dispatch scheduled/geo/SMS turn writes its first
+    status only after acquiring) — otherwise the follow-up would be durable NOWHERE
+    while its task parks behind that turn (``peek_holder`` is the lock-free read).
+
+    The caller then durably journals the message iff ``busy`` — *its own way*: the
+    web awaits an off-loop ``MESSAGE_BACKLOG.add`` (a store lock must never touch
+    the event loop); a synchronous client writes directly. That client-specific
+    durable write sits BETWEEN this sample and ``route_turn``, which is exactly why
+    submission is two shared calls, not one."""
+    prior_stage = _get_status(tid).get("stage")
+    busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
+    _mark_pending(tid, text, busy)   # the ONE busy sample drives both decisions
+    return prior_stage, busy
+
+
+def route_turn(tid: str, text: str, rider, prior_stage: str,
+               backlog_id, dispatch) -> str:
+    """Shared session API (D1 / §5): the paused-vs-dispatch routing every client
+    shares. A PAUSED thread's new message rides the serial ``_ResumeScheduler`` so
+    it runs AFTER the queued resume — never on the paused turn's mid-flight
+    checkpoint (a plain ``queue.put``, loop-safe). Every other case dispatches
+    ``_process_message`` via the client's ``dispatch`` callable (web:
+    ``BackgroundTasks.add_task``; a future non-web client: its own executor).
+    ``backlog_id`` is set iff the message was journaled (busy). Returns the
+    decision for observability ('paused' | 'busy' | 'idle')."""
+    if prior_stage == "paused":
+        _RESUME_SCHEDULER.submit_message(tid, text, rider, None, backlog_id)
+        return "paused"
+    dispatch(_process_message, tid, text, rider, backlog_id=backlog_id)
+    return "busy" if backlog_id else "idle"
+
+
 @app.post("/thread/{tid}/message")
 async def post_message(tid: str, background_tasks: BackgroundTasks,
                        text: str = Form(...),
                        sent_at: str | None = Form(None), tz: str | None = Form(None),
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
-    # Read the busy state BEFORE _mark_pending: for an idle thread _mark_pending
-    # flips it busy (that first message is durable via status.pending_message); a
-    # message to an ALREADY-busy thread is a follow-up, journaled below so a restart
-    # can't drop it. "Busy" includes this tid holding the LLM slot with no busy
-    # status yet (a direct-dispatch scheduled/geo/SMS turn writes its first status
-    # only after acquiring) — otherwise the follow-up would be durable NOWHERE while
-    # its task parks behind that turn (peek_holder is the lock-free read).
-    prior_stage = _get_status(tid).get("stage")
-    busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
-    _mark_pending(tid, text, busy)   # the ONE busy sample drives both decisions
+    prior_stage, busy = plan_turn(tid, text)
     rider = _build_rider(sent_at, tz, lat, lon)
     backlog_id = None
     if busy:
@@ -2629,20 +2705,13 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
                    if (sent_at or tz or lat or lon) else None),
             enqueued_at=datetime.now(timezone.utc).isoformat())
         # Durable BEFORE the 303 — off-loop (file write + store lock never on the
-        # event loop), on the private limiter (see above).
+        # event loop), on the private limiter. This is the web client's durable
+        # journal write (the step that differs per client — see plan_turn).
         await anyio.to_thread.run_sync(MESSAGE_BACKLOG.add, rec,
                                        limiter=_get_backlog_limiter())
         backlog_id = rec.id
-    if prior_stage == "paused":
-        # A turn is paused mid-flight (its resume is already queued on the
-        # scheduler). Route this new message through the SAME serial scheduler so it
-        # runs AFTER the resume — never on the paused turn's mid-flight checkpoint.
-        # This only sets the flag off-loop-safely (a plain queue.put); the loop
-        # stays lock-free.
-        _RESUME_SCHEDULER.submit_message(tid, text, rider, None, backlog_id)
-    else:
-        background_tasks.add_task(_process_message, tid, text, rider,
-                                  backlog_id=backlog_id)
+    route_turn(tid, text, rider, prior_stage, backlog_id,
+               dispatch=background_tasks.add_task)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
