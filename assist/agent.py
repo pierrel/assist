@@ -30,6 +30,7 @@ from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
 from assist.middleware.bad_request_retry import BadRequestRetryMiddleware
 from assist.middleware.loop_detection import LoopDetectionMiddleware
 from assist.middleware.search_unavailable_breaker import SearchUnavailableBreakerMiddleware
+from assist.middleware.search_runaway_breaker import SearchRunawayBreakerMiddleware
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
@@ -717,6 +718,13 @@ def create_research_agent(model: BaseChatModel,
                 # docstring).  Threshold env-tunable for A/B + operator tuning.
                 SearchUnavailableBreakerMiddleware(
                     threshold=env_int("ASSIST_SEARCH_UNAVAILABLE_THRESHOLD", 4)),
+                # Bound a search RUNAWAY on a HEALTHY backend: same-query repetition,
+                # empty-result hammering (the 2026-07-18 coding-toy incident: 3 obscure
+                # queries searched ~80x each, all healthy-empty — invisible to the two
+                # guards above, which key on consecutive-repeats and the unavailable
+                # constant respectively). Inert on the non-search subagents (critique,
+                # fact-check) — same uniform-stack posture as the unavailable breaker.
+                SearchRunawayBreakerMiddleware(),
                 ThreadQueueMiddleware(),
                 EmptyResponseRecoveryMiddleware()]
 

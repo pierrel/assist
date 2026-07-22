@@ -2,8 +2,8 @@
 
 Small models (e.g. vLLM-served Ministral) sometimes hallucinate tool calls
 with names that violate the OpenAI function-name spec (a-zA-Z0-9_- , max 64
-chars).  For example, when search results return ``[]`` the model may emit a
-tool call whose name is literally ``[]``.
+chars).  For example, when a tool returns ``[]`` (an empty list result) the
+model may emit a tool call whose name is literally ``[]``.
 
 This causes two problems:
 1. LangGraph's tool node fails with "[] is not a valid tool".

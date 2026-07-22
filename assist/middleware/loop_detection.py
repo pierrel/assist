@@ -141,6 +141,18 @@ def _current_turn_slice(messages: list) -> list:
     return messages
 
 
+def _messages_from_state(request) -> list:
+    """The message history from a ``wrap_tool_call`` request's state, tolerating both the
+    dict and object state shapes langchain may pass. Shared by every history-counting
+    tool-call guard (the search-unavailable / search-runaway / read_url-reread breakers and
+    UrlProvenanceMiddleware) so the dict-vs-object contract lives in ONE place — a copy in
+    each was load-bearing logic that had to stay in sync (the PR #138 copy-paste class)."""
+    state = request.state or {}
+    if isinstance(state, dict):
+        return state.get("messages", [])
+    return getattr(state, "messages", [])
+
+
 def _extract_events(messages: list, window: int | None = None) -> list[dict]:
     """Collect recent (AIMessage tool_call, matching ToolMessage) pairs.
 

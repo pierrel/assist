@@ -63,6 +63,24 @@ def _search_unavailable(reason: str) -> str:
     logger.error("Web search unavailable: %s", reason)
     return _SEARCH_UNAVAILABLE_MESSAGE
 
+
+# What a HEALTHY-but-empty search returns (was a bare ``"[]"``, which the small
+# model read as "keep trying" and re-ran the same dead query dozens of times —
+# the 2026-07-18 coding-toy runaway: 3 obscure product queries each searched
+# ~80x, all empty).  A prose steer instead of ``"[]"`` tells the model an empty
+# is terminal for THIS query.  ``SearchRunawayBreakerMiddleware`` imports this
+# exact string as the single source of truth to detect an empty in the turn
+# history (same discipline as ``_SEARCH_UNAVAILABLE_MESSAGE``), so it must stay
+# byte-identical wherever an empty is produced (the tool here, and the
+# middleware's short-circuit of a repeated empty query).
+_SEARCH_EMPTY_GUIDANCE = (
+    "This search returned no results. Do NOT repeat this query or a lightly "
+    "reworded version — it will return nothing again. Try a distinctly "
+    "different angle: broaden it, drop a constraint, or use adjacent terms. If "
+    "a specific item isn't findable after a couple of different angles, treat "
+    "it as not findable and move on — say so and answer from what you have."
+)
+
 # --- Per-host fetch throttle ---
 _host_lock = threading.Lock()
 _host_last_call: dict[str, float] = {}
@@ -285,8 +303,9 @@ def search_internet(
     Queries ONE engine at a time in ``_ROTATION_ENGINES`` order and returns the FIRST
     engine that yields results (deterministic). Returns ``_SEARCH_UNAVAILABLE_MESSAGE``
     (logged) only if every engine is unreachable/throttled/malformed — a broken backend
-    fails LOUDLY but as a relayable tool result, not an exception. Returns ``"[]"`` when
-    the engines are healthy but genuinely have no results for this query."""
+    fails LOUDLY but as a relayable tool result, not an exception. Returns
+    ``_SEARCH_EMPTY_GUIDANCE`` (a "no results — don't repeat this query" steer) when the
+    engines are healthy but genuinely have no results for this query."""
     base_url = os.getenv("ASSIST_SEARCH_URL")
     if not base_url:
         return _search_unavailable(
@@ -314,7 +333,7 @@ def search_internet(
             f"SearXNG at {base_url}: every engine unreachable or throttled "
             f"(tried {', '.join(_ROTATION_ENGINES)}); Tavily backup unavailable/unset too"
         )
-    return "[]"
+    return _SEARCH_EMPTY_GUIDANCE
 
 
 def _query_engine(base_url: str, query: str, engine: str) -> tuple[list | None, bool]:

@@ -63,6 +63,7 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command
 
+from assist.middleware.loop_detection import _messages_from_state
 from assist.middleware.tool_result_to_file import UNTRUSTED_OFFLOAD_MARK
 
 logger = logging.getLogger(__name__)
@@ -298,9 +299,7 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         if not url:
             return handler(request)
 
-        state = request.state or {}
-        messages = state.get("messages", []) if isinstance(state, dict) \
-            else getattr(state, "messages", [])
+        messages = _messages_from_state(request)
         allowed = _seen_urls(messages)
         if normalize_url(url) in allowed:
             return handler(request)
