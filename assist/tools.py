@@ -28,7 +28,7 @@ import time
 import threading
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -128,12 +128,30 @@ class _MainContentExtractor(HTMLParser):
         self._main = 0
         self._main_text: list[str] = []
         self._body_text: list[str] = []
+        # <a href> capture: read_url strips text-only, which is useless for
+        # NAVIGATING a site (you learn a "Manual" link exists but not its
+        # URL). Collect (href, anchor-text) in document order so read_url can
+        # surface them — the difference between "find with read_url" working
+        # and the agent falling back to curl-crawling raw HTML for hrefs.
+        self._links: list[tuple[str, list[str]]] = []
+        self._in_a = 0
 
     def handle_starttag(self, tag, attrs):
         if tag in _NOISE_TAGS:
             self._noise += 1
         elif tag in _MAIN_TAGS:
             self._main += 1
+        elif tag == "a" and not self._noise:
+            href = next((v for k, v in attrs if k == "href"), None)
+            # keep only real navigable links: http(s) or relative. Drop
+            # in-page anchors and non-fetchable schemes (mailto/javascript/
+            # data/tel/…), scheme-parsed + case-insensitive so ` JavaScript:`
+            # and `data:text/html` don't slip in as noise.
+            if href and not href.lstrip().startswith("#"):
+                scheme = urlparse(href.strip()).scheme.lower()
+                if scheme in ("", "http", "https"):
+                    self._links.append((href, []))
+                    self._in_a += 1
         self._boundary()
 
     def handle_endtag(self, tag):
@@ -141,6 +159,8 @@ class _MainContentExtractor(HTMLParser):
             self._noise -= 1
         elif tag in _MAIN_TAGS and self._main:
             self._main -= 1
+        elif tag == "a" and self._in_a:
+            self._in_a -= 1
         self._boundary()
 
     def _boundary(self):
@@ -160,20 +180,51 @@ class _MainContentExtractor(HTMLParser):
         self._body_text.append(data)
         if self._main:
             self._main_text.append(data)
+        if self._in_a and self._links:
+            self._links[-1][1].append(data)
 
     def text(self) -> str:
         chosen = (self._main_text if any(s.strip() for s in self._main_text)
                   else self._body_text)
         return re.sub(r"\s+", " ", "".join(chosen)).strip()
 
+    def links(self) -> list[tuple[str, str]]:
+        """(href, anchor-text) for every real link, in document order, deduped
+        by href (first anchor text wins)."""
+        seen, out = set(), []
+        for href, words in self._links:
+            if href in seen:
+                continue
+            seen.add(href)
+            out.append((href, re.sub(r"\s+", " ", "".join(words)).strip()))
+        return out
 
-def _extract_main_content(html: str) -> str:
-    """Article text where the page marks one (``<article>``/``<main>``), else the
-    whole-page text with scripts/styles removed. See ``_MainContentExtractor``."""
+
+# Cap the surfaced link list: enough to navigate a page, not enough to flood
+# context on a link-farm. A page needing more than this is one to read a
+# narrower section of, not to dump wholesale.
+_MAX_SURFACED_LINKS = 40
+
+
+def _extract_main_content(html: str, base_url: str = "") -> str:
+    """Readable text (article region where marked, else whole-page minus
+    scripts/styles) followed by a compact ``Links on this page:`` list with
+    absolute URLs — so read_url can be used to NAVIGATE a site (find the page
+    or file to fetch) instead of curl-crawling raw HTML. ``base_url`` resolves
+    relative hrefs; omit it and links are listed as-written."""
     parser = _MainContentExtractor()
     parser.feed(html)
     parser.close()  # flush any token left dangling at end-of-document
-    return parser.text()
+    text = parser.text()
+    links = parser.links()
+    if not links:
+        return text
+    shown = links[:_MAX_SURFACED_LINKS]
+    lines = [f"- {urljoin(base_url, href) if base_url else href}"
+             + (f"  ({label})" if label else "") for href, label in shown]
+    more = (f"\n… and {len(links) - len(shown)} more links"
+            if len(links) > len(shown) else "")
+    return f"{text}\n\nLinks on this page:\n" + "\n".join(lines) + more
 
 
 def read_url(url: str) -> str:
@@ -182,7 +233,10 @@ def read_url(url: str) -> str:
     Returns the page's main article text where the page marks one
     (``<article>``/``<main>``) so the char budget holds signal, not nav/footer
     chrome; degrades to a whole-page text strip (scripts/styles removed) when
-    the page marks no article. Returns the FULL extracted text (not truncated) —
+    the page marks no article. A compact ``Links on this page:`` list (absolute
+    URLs) follows the text, so this tool can NAVIGATE a site — find the page or
+    downloadable file to fetch — without reading raw HTML. Returns the FULL
+    extracted text (not truncated) —
     the offload middleware saves a large result to a file and hands the agent a
     preview + path to grep, so full page content stays reachable without flooding
     context. The error path returns a short ``Error fetching URL:`` string inline.
@@ -201,7 +255,7 @@ def read_url(url: str) -> str:
             timeout=15,
         )
         resp.raise_for_status()
-        return _extract_main_content(resp.text)
+        return _extract_main_content(resp.text, base_url=url)
     except Exception as e:
         return f"Error fetching URL: {e}"
 

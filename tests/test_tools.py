@@ -466,3 +466,21 @@ class TestReadUrlExtraction:
         assert tools._extract_main_content(
             "<article><p>just this</p></article><footer>not this</footer>"
         ) == "just this"
+
+    def test_extract_surfaces_links_absolute_and_deduped(self):
+        html = ('<main><p>Manuals</p>'
+                '<a href="/pages/manual">Manual</a>'
+                '<a href="/pages/manual">dup</a>'          # deduped by href
+                '<a href="#top">skip anchor</a>'           # in-page anchor dropped
+                '<a href="mailto:x@y.z">skip mail</a>'
+                '<script src="/cdn/assets/x.js"></script>' # script href never a link
+                '</main>')
+        out = tools._extract_main_content(html, base_url="https://s.example/pages/support")
+        assert "Links on this page:" in out
+        assert "https://s.example/pages/manual  (Manual)" in out
+        assert out.count("/pages/manual") == 1             # deduped
+        assert "#top" not in out and "mailto" not in out and "/cdn/assets/" not in out
+
+    def test_extract_no_links_section_when_none(self):
+        assert "Links on this page" not in tools._extract_main_content(
+            "<main><p>text only</p></main>", base_url="https://s.example/")
