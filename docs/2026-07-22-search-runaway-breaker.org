@@ -104,8 +104,9 @@ unavailable breaker — active on the searcher, inert on critique/fact-check.
 - *Deterministic unit tests:* =tests/test_search_runaway_breaker_middleware.py= — every
   bound (total-cap 51st refused, consecutive-empty 6th refused, same-query 4th
   refused, empty circuit-break serves the constant with =tool_call_id= and no backend,
-  reset-on-non-empty, pass-through), 10 tests.
-- Full mocked unit suite green (1229); =tests/test_tools.py= empty-return assertions
+  reset-on-non-empty, pass-through, malformed/non-string query bounded not crashing),
+  11 tests.
+- Full mocked unit suite green (1230); =tests/test_tools.py= empty-return assertions
   updated to the guidance constant.
 
 * Design review (5 lenses) — resolutions
