@@ -54,7 +54,7 @@ from assist.tools import _SEARCH_UNAVAILABLE_MESSAGE
 # Share loop detection's per-turn event extraction (windowless here — we want
 # the cumulative full-turn count).  Same import precedent as
 # empty_response_recovery importing `_last_successful_artifact`.
-from assist.middleware.loop_detection import _extract_events
+from assist.middleware.loop_detection import _extract_events, _messages_from_state
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,8 @@ def _count_search_unavailable(messages: list) -> int:
     state; a windowed count could let heavy read_url interleaving push earlier
     unavailable searches out of view and undercount).  Exact-equality: the
     constant is returned verbatim from one code path, so a genuine empty result
-    (``[]``) or any other content is NOT counted.  Pending calls (no result
-    yet) have ``completed=False`` and are not counted."""
+    (the ``_SEARCH_EMPTY_GUIDANCE`` steer) or any other content is NOT counted.
+    Pending calls (no result yet) have ``completed=False`` and are not counted."""
     return sum(
         1 for e in _extract_events(messages, window=None)
         if e["completed"]
@@ -141,9 +141,7 @@ class SearchUnavailableBreakerMiddleware(AgentMiddleware):
         if request.tool_call.get("name", "") != _SEARCH_TOOL:
             return handler(request)
 
-        state = request.state or {}
-        messages = state.get("messages", []) if isinstance(state, dict) \
-            else getattr(state, "messages", [])
+        messages = _messages_from_state(request)
         if _count_search_unavailable(messages) < self.threshold:
             return handler(request)
 

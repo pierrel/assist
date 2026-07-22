@@ -1,0 +1,141 @@
+#+title: Search-runaway breaker — bound a healthy-backend search loop
+#+date: 2026-07-22
+
+* Problem (the 2026-07-18 coding-toy incident)
+
+Over 7 days the research searcher fired 668 =search_internet= calls; 346 of them
+were on ONE day (Jul 18), 73% of those (~250 calls) spent re-issuing THREE obscure
+coding-toy product-spec queries (e.g. "Tynami coding toy robot product
+specifications") ~80× each, ALL returning healthy-empty results (SearXNG up, just
+no hits), in concurrent 3-wide batches, for ~33 minutes. The user request itself
+was legitimate (compare screen-free coding toys for a child); the pathology was
+the searcher hammering a handful of unfindable products instead of concluding
+they were unfindable.
+
+Three shipped guards all missed it, by construction:
+- =LoopDetectionMiddleware= catches only CONSECUTIVE exact-repeats (A then A); the
+  three queries cycled A/B/C, so no two consecutive calls were identical.
+- =SearchUnavailableBreakerMiddleware= keys on the exact =_SEARCH_UNAVAILABLE_MESSAGE=
+  constant; a healthy-empty result was a bare ="[]"=, invisible to it.
+- The =sub_research.txt.j2= "STOP after 5 searches" cap is soft prompt guidance the
+  small model ignores.
+Only the searcher's recursion_limit (~25 supersteps — NOT the orchestrator's 300;
+deepagents doesn't forward it) eventually stopped it.
+
+Normal research is unaffected: ~11 searches/dispatch, and a legitimately broad
+comparison spreads ~116 DISTINCT queries across ~10 dispatches (~11 each). So the
+fix must bound repetition + empty-hammering + volume WITHOUT clipping distinct
+breadth.
+
+* Design
+
+Four bounds, primary lever = prompt hygiene, hard backstop = a new middleware.
+
+** Tool: healthy-empty returns guidance, not ="[]"= (=assist/tools.py=)
+=search_internet= now returns =_SEARCH_EMPTY_GUIDANCE= (a "no results — don't repeat
+this query, change the angle, conclude not-findable if it stays empty") in place of
+="[]"= for the healthy-empty case. A prose steer reads to the small model as
+"terminal for this query"; a bare ="[]"= read as "try again". The constant is the
+single source of truth the middleware imports to detect an empty in history (same
+discipline as =_SEARCH_UNAVAILABLE_MESSAGE=).
+
+** Prompt hygiene (=sub_research.txt.j2=, refocus-not-add)
+Folded a relax-on-empty rule mirroring the proven =read_url= "don't retry a variant"
+line: on empty, broaden / drop a constraint / try adjacent terms — don't reword the
+same dead query; after two-three empty angles for the same thing, conclude it's not
+findable and move on. Dropped the ineffective absolute "STOP after 5 searches no
+matter what" (the model ignores it, and it contradicts legitimate broad research —
+that ceiling is now the middleware's job). Best-practice grounding: query
+relaxation + know-when-to-stop (SIFT / CaRT / reformulation literature).
+
+** Middleware: =SearchRunawayBreakerMiddleware= (=assist/middleware/search_runaway_breaker.py=)
+A NEW sibling to the existing breakers (not a broadening of SearchUnavailable — it
+has the OPPOSITE return semantics on the empty case: short-circuit-and-CONTINUE, vs
+unavailable's finalize-and-STOP). Shares machinery: reuses
+=loop_detection._extract_events= (the completed-only, turn-bounded call→result
+pairing) and imports =_SEARCH_EMPTY_GUIDANCE=. Counts only COMPLETED
+=search_internet= events in the current turn. Decision ladder in =wrap_tool_call=
+(first match wins), thresholds hardcoded (like =ReadUrlRereadBreaker=, no env knobs):
+
+1. total completed searches >= 50  -> refuse-finalize (per-dispatch volume ceiling)
+2. trailing run of empties >= 5     -> refuse-finalize (nothing is landing; catches
+   distinct-reword hammering the same-query cap can't)
+3. same normalized query completed >= 3 -> refuse-steer (any position; loop_detection
+   only catches the consecutive case)
+4. this query already returned empty this turn -> short-circuit: serve the cached
+   empty-guidance WITHOUT a backend call
+else -> real backend call.
+
+Return shapes (consistent with the siblings): refusals are =status="error"= (FINALIZE-
+not-kill — the model answers from what it has, isn't terminated with a stub); the
+short-circuit is a NON-error ToolMessage byte-identical to a real empty (so history-
+counting and the model's reading don't diverge). Both always set =tool_call_id= so
+the call→result pairing (hence the counters and the OpenAI tool-call contract) hold.
+Query identity = normalized =query= only (lower/strip/collapse-ws), ignoring
+=max_results= so it can't be evaded; no fuzzy matching (coarse real bounds over
+ambiguous heuristics). Wired into the shared =_subagent_safety_mw()= after the
+unavailable breaker — active on the searcher, inert on critique/fact-check.
+
+* Honest residuals (named, not hidden)
+- *Concurrency lag:* completed-only counting can't see the in-flight siblings of ONE
+  concurrent batch, so the first batch of identical queries is un-counted; effective
+  ceiling ≈ 50 + one batch width (observed width ~3). From superstep 2 on, the
+  repeats short-circuit. A strict in-batch bound is stateless-feasible (count same-
+  query siblings preceding this call's id in the current AIMessage) but is a
+  deliberate v1 deferral — observed width is single-digit.
+- *Per-dispatch scope:* the caps are per searcher-dispatch (= one turn). Cross-
+  dispatch search budget is bounded only by the searcher recursion_limit (~25). The
+  incident was within one dispatch. Cross-dispatch is a v2 follow-up.
+- *Trailing-empty reset:* the consecutive-empty run resets on any non-empty result,
+  so a runaway that interleaves a result-returning query every ≤4 empties keeps the
+  run under 5 — bounded then by =total_cap=50=, the real backstop for that shape.
+- *total_cap is the only guard on Tavily spend* for a distinct-query loop against a
+  THROTTLED backend (results come back real, dodging both empty and unavailable
+  detection).
+
+* Validation
+- *Reproduction eval (before any fix, on the pre-fix ="[]"= condition):*
+  =edd/eval/test_search_runaway_loop.py= — a confined searcher (search + read only)
+  against a MOCKED healthy-empty SearXNG (=requests.get= patched; =requests.post=/Tavily
+  asserted never-called; =TAVILY_API_KEY= cleared) with a 3-obscure-product persistent
+  brief. Baseline reproduced the loop (18 empty searches). Guarded (breaker wired):
+  no query hits the backend past one 6-engine sweep, total bounded, agent still
+  answers. Regression: a healthy distinct-query run (results returned) is NOT clipped.
+- *Deterministic unit tests:* =tests/test_search_runaway_breaker_middleware.py= — every
+  bound (total-cap 51st refused, consecutive-empty 6th refused, same-query 4th
+  refused, empty circuit-break serves the constant with =tool_call_id= and no backend,
+  reset-on-non-empty, pass-through), 10 tests.
+- Full mocked unit suite green (1229); =tests/test_tools.py= empty-return assertions
+  updated to the guidance constant.
+
+* Design review (5 lenses) — resolutions
+Simplicity/agentic/clean-interfaces/threat-model (+ the reproduction data) converged
+with no design blockers. Folded: hardcode thresholds (drop env knobs/floors); rename
+=SearchRunawayBreaker= (covers the flat cap, not just loops); =_normalize_query= local
+to the module; short-circuit carries =tool_call_id=; decisions 1&2 share one finalize
+string; uniform-stack wiring (no skip-critique special case); fan-out cap deferred
+(observed batch width ~3); baseline runs on pre-fix ="[]"=; behavior assertion added
+for the cap. Rejected: broadening SearchUnavailable (SRP + opposite semantics), fuzzy
+near-duplicate matching (ambiguous, clips breadth), stateful in-flight counting
+(breaks checkpoint-safety).
+
+* Code review (4 lenses) — fixes
+Correctness/security/docstring/simplicity, all verified against the code. No blockers.
+Fixed: (security) gate =wrap_tool_call= pass-through on tool NAME not empty query — a
+malformed =search_internet(query="")= was bypassing every bound; (correctness) null-safe
+=_normalize_query= (a =query=None= history event crashed the hot path); (correctness) the
+reproduction eval now also passes when a hard runaway hits =recursion_limit= and returns
+None (assert on the surviving backend-GET counter); (simplicity) extracted
+=loop_detection._messages_from_state= — the dict-vs-object state extraction was a 4th copy
+across the breakers + =url_provenance= (PR #138 copy-paste class), now one shared helper;
+dropped the three never-overridden constructor params for the hardcoded constants; fixed
+two sibling docstrings the ="[]"=→guidance change left stale. Malformed-query and
+null-safety are pinned with unit tests.
+
+* Follow-ups (over time, separate PRs — from the best-practices comparison)
+Verification-quality guidance the prompts lack: lateral reading / triangulation
+(corroborate a load-bearing claim against a second independent source), conflicting-
+source handling, recency preference. Not loop-prevention — deferred.
+
+* Outcome
+(Branch =research-search-loop-breaker=; append PR + shipped-vs-deferred once it lands.)

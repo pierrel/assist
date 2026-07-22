@@ -25,7 +25,7 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from assist.middleware.loop_detection import _extract_events
+from assist.middleware.loop_detection import _extract_events, _messages_from_state
 from assist.middleware.url_provenance import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -98,9 +98,7 @@ class ReadUrlRereadBreaker(AgentMiddleware):
             return handler(request)
         target = normalize_url(url)
 
-        state = request.state or {}
-        messages = state.get("messages", []) if isinstance(state, dict) \
-            else getattr(state, "messages", [])
+        messages = _messages_from_state(request)
         if _prior_read_count(messages, target) < self._max_reads:
             return handler(request)
 

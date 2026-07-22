@@ -342,7 +342,7 @@ def create_filesystem(root_dir: str,
 def _urls_in_search_result(result_str: str) -> list[str]:
     """Extract URLs from a search_internet result string
     (``[{'title','url','content'}, ...]``). Returns [] for non-list results
-    (e.g. the unavailable message or ``"[]"``)."""
+    (e.g. the unavailable message or the empty-guidance steer — both prose)."""
     try:
         items = ast.literal_eval(result_str)
     except (ValueError, SyntaxError):

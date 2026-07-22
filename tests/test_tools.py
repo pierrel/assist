@@ -147,13 +147,14 @@ class TestSearchInternet:
         # formatting (quotes/spacing/key order).
         assert len(ast.literal_eval(result)) == 3
 
-    def test_genuine_empty_returns_bracket(self, monkeypatch):
-        """Zero results with NO engine failures is a real 'no results' answer,
-        not a backend failure — return '[]' so the agent can pivot."""
+    def test_genuine_empty_returns_guidance(self, monkeypatch):
+        """Zero results with NO engine failures is a real 'no results' answer, not a backend
+        failure — return the empty-guidance steer (was a bare '[]', which the small model
+        re-hammered) so the agent pivots instead of re-running the dead query."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp({"results": [], "unresponsive_engines": []})
-            assert tools.search_internet("obscure") == "[]"
+            assert tools.search_internet("obscure") == tools._SEARCH_EMPTY_GUIDANCE
 
     # --- Backend-failure modes: return the unavailable MESSAGE (loud, logged),
     # NOT raise.  Raising would crash the research turn; the agent must receive
@@ -272,12 +273,12 @@ class TestSearchInternet:
         assert "searxng: mojeek returned 1 results" in msgs
 
     def test_rotation_all_engines_healthy_but_empty_returns_empty(self, monkeypatch):
-        """Every engine up but genuinely no results → "[]" (a real no-results answer),
-        NOT unavailable."""
+        """Every engine up but genuinely no results → the empty-guidance steer (a real
+        no-results answer), NOT unavailable."""
         monkeypatch.setenv("ASSIST_SEARCH_URL", self.URL)
         with patch.object(tools, "requests") as req:
             req.get.return_value = _resp({"results": [], "unresponsive_engines": []})
-            assert tools.search_internet("q") == "[]"
+            assert tools.search_internet("q") == tools._SEARCH_EMPTY_GUIDANCE
 
     def test_results_present_with_some_failed_engines_returns_them_plainly(self, monkeypatch):
         """Results present + some engines throttled is the routine healthy metasearch case
