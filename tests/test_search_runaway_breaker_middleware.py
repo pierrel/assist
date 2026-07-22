@@ -99,15 +99,18 @@ def test_repeated_empty_query_hits_same_query_cap():
     assert not ran and out.status == "error" and "already run this exact search" in out.content
 
 
-def test_malformed_empty_or_null_query_is_counted_not_bypassed():
-    """A search_internet(query="") / (query=None) must flow THROUGH counting (not bypass every
-    bound keyed on the empty query) and must not crash the normalizer — both normalize to "".
-    3 prior malformed empties → the 4th malformed call does not reach the backend."""
+def test_malformed_query_is_counted_not_bypassed_and_never_crashes():
+    """A malformed search_internet query — "", None, a list, an int — must flow THROUGH
+    counting (not bypass every bound keyed on the empty query) and must not crash the
+    normalizer (`.lower()` on a non-string). All non-strings normalize to "" and group, so 3
+    prior malformed empties → the 4th malformed call does not reach the backend."""
     mw = SearchRunawayBreakerMiddleware()
+    # mixed malformed shapes, all empty-returning — including a truthy non-str (list/int)
     hist = _history([("", _SEARCH_EMPTY_GUIDANCE), (None, _SEARCH_EMPTY_GUIDANCE),
-                     ("", _SEARCH_EMPTY_GUIDANCE)])
-    out, ran = _run(mw, "", hist)
-    assert not ran and out.tool_call_id == "new"   # bounded, not passed straight to the backend
+                     (["cubetto"], _SEARCH_EMPTY_GUIDANCE)])
+    for bad in ("", None, ["cubetto"], 5):     # each must be handled without raising
+        out, ran = _run(mw, bad, hist)
+        assert not ran and out.tool_call_id == "new"   # bounded, not passed to the backend
 
 
 def test_consecutive_empty_cap_refuses_distinct_reword_hammer():
