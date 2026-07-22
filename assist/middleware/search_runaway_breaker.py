@@ -90,16 +90,17 @@ def _search_query(tool_call: dict) -> str:
     return args.get("query", "") if isinstance(args, dict) else ""
 
 
-def _normalize_query(query: str) -> str:
+def _normalize_query(query) -> str:
     """Query identity for the same-query cap: lowercased, stripped, internal whitespace
     collapsed. An UNAMBIGUOUS normalizer only — no fuzzy/token-set matching, which would
     risk clipping legitimately-distinct queries (coarse real bounds over ambiguous signals).
-    Null-safe: a malformed ``query`` of ``None`` or ``""`` normalizes to ``""`` (grouping
-    all malformed-query calls together so the caps still bound them — the small model emits
-    malformed tool args, cf. the ``glob(path="/")`` runaway). Local to this module,
-    mirroring ReadUrlRereadBreaker's local ``_read_url_arg``. American spelling (matches
-    ``normalize_url``)."""
-    return " ".join((query or "").lower().split())
+    Type-safe: ANY non-string ``query`` (``None``, a ``list``, an ``int`` — the small model
+    emits malformed tool args, cf. the ``glob(path="/")`` runaway) normalizes to ``""``, so
+    malformed calls group together and the caps still bound them instead of the normalizer
+    crashing on ``.lower()``. Local to this module, mirroring ReadUrlRereadBreaker's local
+    ``_read_url_arg``. American spelling (matches ``normalize_url``)."""
+    q = query if isinstance(query, str) else ""
+    return " ".join(q.lower().split())
 
 
 def _completed_searches(messages: list) -> list[dict]:
