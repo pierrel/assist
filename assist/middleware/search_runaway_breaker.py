@@ -9,9 +9,11 @@ product-spec queries ~80 times each, ALL returning healthy-empty ``"[]"`` — cy
 (so consecutive-repeat detection never fired) and returning real (empty) results (so the
 unavailable breaker never fired), 346 searches in 33 min. See docs (search-runaway).
 
-Four bounds, all keyed on the tool's OWN emitted constant (``_SEARCH_EMPTY_GUIDANCE``) and
-call counts — never on result CONTENT, so injected search snippets can't forge an empty or
-reset a counter. Decision order in ``wrap_tool_call`` (first match wins), counting only
+Four bounds, keyed only on the tool's OWN emitted constant (``_SEARCH_EMPTY_GUIDANCE``,
+matched by exact string equality) and call counts — never on the ATTACKER-INFLUENCED parts
+of a result (a search snippet's title/url/content), so injected search content can't forge
+an empty or reset a counter: a real result is a list-repr string and can never equal the
+bare constant. Decision order in ``wrap_tool_call`` (first match wins), counting only
 COMPLETED ``search_internet`` events in the current turn (via ``loop_detection._extract_events``):
 
   1. total completed searches >= TOTAL_CAP        -> refuse-finalize (stop, answer now)
