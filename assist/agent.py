@@ -449,6 +449,23 @@ def create_agent(model: BaseChatModel,
             # line (the error/exit summary) is at the TAIL, not the head.
             ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
                                        preview_style="head_tail", untrusted=True),
+            # read_url on the MAIN agent is a NAVIGATION tool: follow a known
+            # URL + the links it surfaces to find a page or downloadable file
+            # (the download itself is curl in the sandbox, egress-gated). It
+            # can't do general research — no search_internet here — so the
+            # delegation split holds: a research question still routes to the
+            # research-agent (which has search). The guards are load-bearing:
+            # UrlProvenanceMiddleware keeps read_url on URLs from the user or a
+            # link a page actually surfaced (same-host), never invented ones —
+            # so it can't flood on fabricated URLs the way raw curl did (thread
+            # …527c2a44). ReadUrlRereadBreaker caps SAME-url re-reads; the
+            # breadth crawl itself is ultimately bounded by the recursion limit,
+            # but read_url's clean extraction + the skill keep navigation to a
+            # few hops. Offload a large page like the research agent does.
+            ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000,
+                                       preview_style="head", untrusted=True,
+                                       name="ToolResultToFileMiddleware_read_url"),
+            *_read_url_guards(),
             # Mid-turn interjection delivery (main agent only — deepagents
             # never propagates this list to subagent stacks): inert unless the
             # embedder registered callbacks (the web layer is the only one).
@@ -472,7 +489,8 @@ def create_agent(model: BaseChatModel,
         # built-ins: direct deterministic real-world lookups the main agent answers
         # inline (gated by the travel / render skills), like a calculation — not web
         # research, so not on the research sub-agent.  Skip any a spec supplies (no dup).
-        tools=list(spec.tools) + [t for t in (travel, directions, map_data) if t not in spec.tools],
+        tools=list(spec.tools) + [t for t in (travel, directions, map_data, read_url)
+                                  if t not in spec.tools],
         # HITL gating (e.g. the web spec gates send_reply → approve/edit/reject); None off.
         **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     )
@@ -544,16 +562,19 @@ def create_context_agent(model: BaseChatModel,
 
 
 def _read_url_guards():
-    """The guard pair every read_url-bearing research agent gets, in one place so the
-    two sites can't drift.
+    """The guard pair every read_url-bearing agent gets, in one place so the
+    three call sites can't drift: the research SEARCHER and FACT-CHECKER
+    sub-agents, and the MAIN agent's navigation read_url (added 2026-07-21 for
+    the explore-website flow).
 
     - UrlProvenanceMiddleware: refuse read_url on a URL absent from prior tool/user
-      messages (a fabrication). Wired on the searcher and the fact-checker — the two
-      read_url-bearing sub-agents. The orchestrator has no read_url (V2: it delegates all
-      fetching), so it needs no guard: it can't 404-loop on a guessed URL it can't fetch.
-      See docs/2026-07-08-research-reread-runaway.org.
+      messages (a fabrication), with same-host page links allowed (site
+      navigation). The research ORCHESTRATOR has no read_url (V2: it delegates
+      all fetching to the searcher), so it needs no guard: it can't 404-loop on
+      a guessed URL it can't fetch. See docs/2026-07-08-research-reread-runaway.org.
     - ReadUrlRereadBreaker: refuse re-reading the SAME url past max_reads (the 2026-07-07
-      peptides real-URL re-read shape).
+      peptides real-URL re-read shape) — this is what bounds the crawl-to-death
+      that raw curl has no guard against.
     """
     return [UrlProvenanceMiddleware(), ReadUrlRereadBreaker()]
 

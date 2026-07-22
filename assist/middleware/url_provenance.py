@@ -18,20 +18,35 @@ fabricated URL by writing it into its reasoning, then fetching it — see
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
 and a ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute
 output), written under /large_tool_results/untrusted- — the SAME content laundered
-through a file. So a URL
-sourced only from fetched-page content, direct or offloaded, cannot be fetched; to
-reach a new page the agent re-searches. A URL sourced no other way — a pure
-fabrication, or one planted in a page — is rejected. This keeps the guard a coarse,
+through a file.
+
+SAME-HOST NAVIGATION (2026-07-21): a URL that literally appeared in fetched-page
+content is fetchable IF its host is already trusted (a user URL or search result was
+on that host). BOTH conditions are required — this is what lets ``read_url`` navigate
+WITHIN a site the user pointed at (the "explore a website, find and download a file"
+flow) without re-searching every next page, while keeping the two attacks the guard
+exists for blocked: (1) a FABRICATED same-host path (the searcher inventing
+``casio.com/products/<model>`` — the dead-URL flood) never appears on any page, so
+the page-content requirement refuses it; (2) a CROSS-HOST jump from page content
+(SSRF to 169.254.169.254 / an internal service, or a secret-bearing exfil URL to
+``evil.example/leak?d=…``) has no matching trusted host, so the same-host requirement
+refuses it — and the attacker can't statically author a link carrying the victim's
+runtime secret anyway. Only *more pages a trusted site actually links to* become
+reachable. A URL that is neither trusted-sourced nor a same-host page link is still
+rejected. This keeps the guard a coarse,
 unambiguous bound (a substring/membership check on trusted text, not a fuzzy "looks
 invented/malicious" heuristic), and it does not end the turn: it returns a corrective
 tool result so the model retries with a real URL. RESIDUAL: a model that FOLLOWS a
 multi-step injection to ``write_file`` an arbitrary URL then ``read_file`` it can
 self-launder — gated by behavioral injection-resistance, not this guard.
 
-Scope: the two ``read_url``-bearing research agents — the SEARCHER and the
-FACT-CHECKER. Each should only ever fetch a URL already trusted in its context: the
+Scope: every ``read_url``-bearing agent — the research SEARCHER and FACT-CHECKER
+sub-agents, and the MAIN agent's navigation ``read_url`` (added 2026-07-21 for the
+explore-website flow, whose trusted channel is the user's URLs plus same-host page
+links). Each should only ever fetch a URL already trusted in its context: the
 searcher's own search results; the fact-checker's cited URLs (which reach it via the
-report ``read_file``/initial message it is handed). The V2 orchestrator holds no
+report ``read_file``/initial message it is handed); the main agent's user-supplied
+URL and pages on that same host. The V2 research orchestrator holds no
 ``read_url`` (it delegates all fetching), so the guard doesn't run there — an earlier
 version guarded it after thread 20260708090812 fabricated URLs under
 search-unavailable and 404-looped ~90 min. Guidance now tells the orchestrator to STOP
@@ -92,6 +107,13 @@ _OFFLOAD_MARK = UNTRUSTED_OFFLOAD_MARK
 # The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
 # a marker here means the read TARGETS offloaded content.
 _OFFLOAD_PATH_KEYS = ("path", "file_path", "glob")
+
+
+def _host_of(url: str) -> str:
+    try:
+        return (urlsplit(url.strip().rstrip(_TRAILING)).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 def normalize_url(url: str) -> str:
@@ -190,6 +212,28 @@ def _seen_urls(messages: list) -> dict[str, str]:
     return seen
 
 
+def _page_content_urls(messages: list) -> set[str]:
+    """Normalized URLs that literally appeared in FETCHED-PAGE content — the
+    untrusted read_url channel, direct or offloaded (the INVERSE of the set
+    _seen_urls trusts). These are the links a page actually surfaced; a
+    fabricated path never appears here. Same-host members are navigable (see
+    wrap_tool_call) — that admits following a real link on an already-trusted
+    site while still blocking a fabricated same-host path (the dead-URL flood)
+    and an exfil URL the model invents."""
+    calls_by_id: dict[str, dict] = {}
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            cid = tc.get("id")
+            if cid:
+                calls_by_id[cid] = tc
+    urls: set[str] = set()
+    for m in messages:
+        if isinstance(m, ToolMessage) and _is_untrusted_result(m, calls_by_id):
+            for raw in _URL_RE.findall(_message_text(m)):
+                urls.add(normalize_url(raw))
+    return urls
+
+
 def _display_url(raw: str) -> str:
     """The captured URL trimmed for the correction message so it's fetchable:
     drop trailing sentence punctuation, plus a trailing closing bracket ONLY when
@@ -259,6 +303,23 @@ class UrlProvenanceMiddleware(AgentMiddleware):
             else getattr(state, "messages", [])
         allowed = _seen_urls(messages)
         if normalize_url(url) in allowed:
+            return handler(request)
+        # Same-host navigation: a link the fetched page ACTUALLY surfaced, on a
+        # host already trusted, is fetchable — this is what lets read_url
+        # navigate WITHIN a site the user pointed at (find a manual, follow
+        # Support → the download). BOTH conditions are load-bearing:
+        #  - in page content (not just host-matched): a fabricated same-host
+        #    path never appeared on any page, so the dead-URL flood the guard
+        #    exists to stop stays blocked — the model can only follow links a
+        #    page really emitted, not invent canonical URLs.
+        #  - same host (not just page-present): a page linking cross-host
+        #    (169.254.169.254, an internal service, evil.example/leak?d=secret)
+        #    has no matching trusted host, so SSRF + secret-bearing exfil stay
+        #    blocked — the jump to a NEW host from page content is refused.
+        nurl = normalize_url(url)
+        host = _host_of(url)
+        if (host and host in {_host_of(u) for u in allowed}
+                and nurl in _page_content_urls(messages)):
             return handler(request)
 
         self._intervention_count += 1

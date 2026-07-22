@@ -85,6 +85,59 @@ class TestUrlProvenanceMiddleware(TestCase):
                           "a URL seen only in a fetched page must be refused (exfil channel)")
         self.assertEqual(result.status, "error")
 
+    def test_allows_same_host_navigation_from_a_fetched_page(self):
+        # SAME-HOST NAVIGATION (2026-07-21): the user pointed at a site; a link
+        # the fetched page ACTUALLY surfaced, on THAT SAME HOST, is fetchable —
+        # so read_url can navigate the site (follow Support → the download).
+        # Requires BOTH: same host AND present in page content.
+        msgs = [HumanMessage(content="download the manual from https://shop.example/"),
+                ToolMessage(content="Support Links on this page: - https://shop.example/pages/support",
+                            name="read_url", tool_call_id="r0")]
+        _result, handler = self._call("https://shop.example/pages/support", msgs)
+        self.assertIsNotNone(handler.called_with,
+                             "same-host link from a fetched page must be navigable")
+
+    def test_blocks_fabricated_same_host_path_not_on_any_page(self):
+        # SECURITY (the dead-URL flood): a FABRICATED path on a trusted host —
+        # one no page ever surfaced — must stay blocked. Host-match alone is
+        # NOT enough; the URL must have appeared in fetched-page content, which
+        # a model-invented canonical URL never does.
+        msgs = [HumanMessage(content="explore https://shop.example/"),
+                ToolMessage(content="Home Links on this page: - https://shop.example/pages/support",
+                            name="read_url", tool_call_id="r0")]
+        result, handler = self._call("https://shop.example/products/invented-model-x", msgs)
+        self.assertIsNone(handler.called_with,
+                          "a fabricated same-host path (not on any page) must be refused")
+        self.assertEqual(result.status, "error")
+
+    def test_blocks_exfil_query_on_a_trusted_host_the_model_invents(self):
+        # SECURITY (exfil): even when the host is trusted (a search result was
+        # on it), a secret-bearing exfil URL the model fabricates — not present
+        # on any fetched page — is refused. (The attacker can't statically
+        # author a link carrying the victim's runtime secret either.)
+        msgs = [_search_result(["https://cdn.example/asset.js"]),
+                ToolMessage(content="page text, no useful links",
+                            name="read_url", tool_call_id="r0")]
+        result, handler = self._call("https://cdn.example/collect?secret=abc123", msgs)
+        self.assertIsNone(handler.called_with,
+                          "a fabricated exfil URL on a trusted host must be refused")
+        self.assertEqual(result.status, "error")
+
+    def test_still_blocks_ssrf_to_new_host_from_a_fetched_page(self):
+        # The containment that survives the same-host relaxation: a page linking
+        # to a DIFFERENT host (cloud metadata, an internal service, an exfil
+        # host) is still refused — the new host has no matching trusted URL.
+        for target in ("http://169.254.169.254/latest/meta-data/",
+                       "http://internal-admin.local/delete",
+                       "https://evil.example/leak"):
+            msgs = [HumanMessage(content="explore https://shop.example/"),
+                    ToolMessage(content=f"page Links: - {target}",
+                                name="read_url", tool_call_id="r0")]
+            result, handler = self._call(target, msgs)
+            self.assertIsNone(handler.called_with,
+                              f"cross-host jump from page content must stay blocked: {target}")
+            self.assertEqual(result.status, "error")
+
     def test_allows_same_url_when_it_comes_from_a_search_result(self):
         # Positive control for the exfil test: the exclusion is about the CHANNEL
         # (read_url page content), not the URL itself. The very same URL, sourced

@@ -105,8 +105,15 @@ class ToolResultToFileMiddleware(AgentMiddleware):
 
     def __init__(self, backend, *, tools: frozenset[str] | set[str],
                  floor_chars: int = _DEFAULT_FLOOR_CHARS, preview_style: str = "head",
-                 untrusted: bool = False):
+                 untrusted: bool = False, name: str | None = None):
         super().__init__()
+        # langchain REJECTS duplicate middleware ``.name``s (it raises at agent
+        # construction, not silently drop one), so an agent that wants two
+        # instances (e.g. execute with a head_tail preview AND read_url with a
+        # head preview) must give the second a distinct name — the class name
+        # alone would collide and crash the build.
+        if name is not None:
+            self.name = name
         self.backend = backend
         self._tools = frozenset(tools)
         self._floor = floor_chars
