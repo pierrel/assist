@@ -53,6 +53,17 @@ def test_corrupt_status_degrades_not_raises(tmp_path):
     assert e.status == "ready"            # corrupt ⇒ default, no exception
 
 
+def test_nonstring_status_stage_degrades_to_ready(tmp_path):
+    # Valid JSON but a non-string stage (null/number) is corrupt too — degrade to
+    # the default, don't surface "None"/"123" to a client.
+    for bad in (None, 123, ["processing"]):
+        d = _mk(tmp_path, "t1", description="x")
+        with open(os.path.join(d, "status.json"), "w") as f:
+            json.dump({"stage": bad}, f)
+        (e,) = _catalog(tmp_path).entries()
+        assert e.status == "ready", f"stage={bad!r} should degrade"
+
+
 def test_soft_deleted_and_pycache_excluded(tmp_path):
     _mk(tmp_path, "live", description="a")
     _mk(tmp_path, "gone", description="b", deleted=True)

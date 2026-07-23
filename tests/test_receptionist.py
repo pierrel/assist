@@ -154,6 +154,19 @@ def test_open_thread_is_idempotent_within_session(tmp_path):
     assert "already connected" in second.lower()
 
 
+def test_open_thread_topic_resolves_full_catalog_not_stale_listing(tmp_path):
+    # A topic/id must reach ANY thread even after the caller listed — resolve those
+    # against the full catalog, not the (capped, now-stale) _last listing.
+    opened = []
+    _mk(tmp_path, "a", description="apple thread")
+    tools = _tools(tmp_path, ["Home"], opened=opened)
+    tools["list_threads"]()                         # _last = [apple] (the heard list)
+    _mk(tmp_path, "b", description="banana thread")  # created AFTER the listing
+    reply = tools["open_thread"]("banana")           # not in _last, but in the catalog
+    assert opened == ["b"]                           # resolved against the full catalog
+    assert "banana" in reply
+
+
 def test_open_thread_ambiguous_asks(tmp_path):
     opened = []
     _mk(tmp_path, "a", description="trip to Rome")
