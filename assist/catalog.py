@@ -4,10 +4,11 @@ their state" surface (shared session API; docs/2026-07-21-voice-call-tech-design
 
 The receptionist (voice) consumes this WITHOUT loading any conversation: no
 checkpoint access, no ``Thread`` construction, no model call, no message read.
-Thread CONTENTS are unreachable by construction — this module has no path into
-``threads.db`` or the langgraph checkpoint; it only reads the per-thread sidecar
-files (``description.txt`` / ``status.json`` / the urgent marker) plus the dir
-mtime.
+Thread CONTENTS are unreachable by construction — this module never reads
+``threads.db`` or the langgraph checkpoint (it holds a ``ThreadManager``, which owns
+them, but only calls its directory operations — ``list`` / ``thread_dir``); it reads
+just the per-thread sidecar files (``description.txt`` / ``status.json`` / the urgent
+marker) plus the dir mtime.
 
 It mirrors the *file-reading halves* of the web layer's per-thread reads
 (``manage/web/state.py``'s ``_get_status`` / ``_has_urgent`` / ``description.txt``)
