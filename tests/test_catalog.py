@@ -91,6 +91,18 @@ def test_entries_sorted_mtime_desc(tmp_path):
     assert ids == ["new", "old"]          # ThreadManager.list order preserved
 
 
+def test_entries_limit_returns_most_recent_n(tmp_path):
+    # limit stops after N entries; since the order is mtime-desc, that's the most
+    # recent N — so the listing path reads only N threads' sidecars, not every one.
+    import time
+    for name in ("a", "b", "c"):
+        _mk(tmp_path, name, description=name)
+        time.sleep(0.01)
+    ids = [e.id for e in _catalog(tmp_path).entries(limit=2)]
+    assert ids == ["c", "b"]              # newest two only
+    assert len(_catalog(tmp_path).entries(limit=99)) == 3   # limit > count is fine
+
+
 def test_get_unknown_or_bad_tid_is_none(tmp_path):
     cat = _catalog(tmp_path)
     assert cat.get("does-not-exist") is None
