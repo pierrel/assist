@@ -49,6 +49,10 @@ per-need kwargs; run a design phase before the embedder surface grows
 further.  Must keep =manage.web= working — incremental migration, not a
 big-bang rewrite.
 
+* Memory
+** TODO Per-thread memory — a =/tmp= memory file that survives only the thread
+An additional memory location in =/tmp= so that it only survives the thread and not in the workspace. Guidance on when to use one memory file over the other: =/workspace/AGENTS.md= for facts about the user, preferences, and forward-looking rules that outlive any single conversation; =/tmp/memory.md= for thread-local learnings (codebase state, current SHA, roadmap understanding, session context) that evolve with the work in progress and should not persist beyond the thread.
+
 * Dev updates
 The dev agent needs significant improvements
 ** TODO Many more evals
