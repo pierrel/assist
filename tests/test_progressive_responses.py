@@ -526,6 +526,19 @@ def test_turn_observer_reports_error_when_ready_tail_fails(wired, monkeypatch):
     assert _get_status(tid)["stage"] == "error"
 
 
+def test_turn_observer_registration_during_notify_is_isolated(wired, monkeypatch):
+    # Snapshot semantics: turns run concurrently over the shared _TURN_OBSERVERS
+    # global, so a registration racing a notify pass must not extend that pass. An
+    # observer that registers a new one mid-pass must not make the newcomer fire now.
+    tid, _ = wired
+    _wire_chat(monkeypatch, tid, [])
+    late = []
+    monkeypatch.setattr(threads, "_TURN_OBSERVERS",
+                        [lambda *a: threads.register_turn_observer(lambda *b: late.append(b))])
+    threads._process_message(tid, "hi")
+    assert late == []                       # the mid-pass registrant did NOT fire this pass
+
+
 def test_turn_observer_fires_on_supersede_cap_awaiting_approval(wired, monkeypatch):
     # The supersede-cap path: a new message can't clear a stuck pending draft after
     # the reject-loop cap, so it writes a terminal awaiting_approval and returns

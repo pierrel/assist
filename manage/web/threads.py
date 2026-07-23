@@ -1418,8 +1418,10 @@ def register_turn_observer(cb) -> None:
 
 def _notify_turn_observers(tid, stage, origin, reply_text, backlog_id) -> None:
     """Fire every observer, isolated: one raising must never disturb the others
-    or the just-written terminal status (the _rejournal best-effort mold)."""
-    for cb in _TURN_OBSERVERS:
+    or the just-written terminal status (the _rejournal best-effort mold). Snapshot
+    the global first: turns run concurrently in a threadpool over this shared list,
+    so a registration racing a notify pass must not make the iteration set diverge."""
+    for cb in tuple(_TURN_OBSERVERS):
         try:
             cb(tid, stage, origin, reply_text, backlog_id)
         except Exception:
