@@ -19,7 +19,9 @@ can't name an exfil URL and have a follow-up read of it pass, a read-becomes-wri
 ``execute`` (shell) OUTPUT (arbitrary bytes — a cat'd download, a large log the agent
 re-reads from its real-fs offload — never a URL source); and a ``read_file``/``grep``
 of OFFLOADED untrusted content (read_url page, execute output), written under
-/large_tool_results/untrusted- — the SAME content laundered through a file.
+``…/large_tool_results/untrusted-`` (``/large_tool_results/…`` in state, or
+``/tmp/large_tool_results/…`` for a real-fs offload) — the SAME content laundered
+through a file.
 
 SAME-HOST NAVIGATION (2026-07-21): a URL that literally appeared in fetched-page
 content is fetchable IF its host is already trusted (a user URL or search result was
@@ -104,7 +106,7 @@ _MAX_LISTED = 8
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
 # File-read tools whose result can surface OFFLOADED untrusted content: a large read_url/
-# execute result is written to /large_tool_results/untrusted-<id> and the model greps/
+# execute result is written to …/large_tool_results/untrusted-<id> and the model greps/
 # read_files it back (ToolResultToFileMiddleware). That read is still the untrusted content,
 # laundered through a file — so URLs in it must stay untrusted.
 _FILE_READ_TOOLS = {"read_file", "grep"}
@@ -154,7 +156,7 @@ def _message_text(message: Any) -> str:
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
     """True if a ``read_file``/``grep`` (whose originating call IS known) touched
     OFFLOADED untrusted content (read_url page, execute output) — the same untrusted page content laundered through a
-    file. Two ways it shows up: the read's TARGET PATH is under /large_tool_results/untrusted-
+    file. Two ways it shows up: the read's TARGET PATH contains ``large_tool_results/untrusted-``
     (checked on the LOCATION args only — path/file_path/glob, not the grep ``pattern``),
     OR the result names an offloaded file (grep's default ``files_with_matches`` lists
     matching paths, so a grep-all that hit the offload dir shows it). Over-matches only
@@ -198,7 +200,7 @@ def _seen_urls(messages: list) -> dict[str, str]:
     content; (3) ``execute`` (shell) output — arbitrary bytes (a cat'd download, a log the
     agent re-reads from its real-fs offload), never a URL source; and (4) a
     ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute output)
-    under /large_tool_results/untrusted- — the SAME content laundered through
+    under ``…/large_tool_results/untrusted-`` — the SAME content laundered through
     a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted; to reach a new page the agent re-searches (the searcher prompt

@@ -136,7 +136,7 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # /large_tool_results/… StateBackend path.  A "/tmp/…" offload deliberately
         # matches no STATEFUL_PATHS prefix, so it lands on the sandbox fs, not state.
         self._offload_root = offload_root.rstrip("/")
-        # When True, offloads from this instance are written to /large_tool_results/untrusted-<id>
+        # When True, offloads from this instance are written to …/large_tool_results/untrusted-<id>
         # (see UNTRUSTED_OFFLOAD_MARK) so UrlProvenanceMiddleware recognizes a later read/grep of
         # them and won't provenance their URLs — read_url page content / execute output is the
         # untrusted channel even after it's offloaded to a file.
@@ -154,9 +154,10 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # ANSI/control bytes (the BadRequest-outage class) from the offloaded file.
         content = _sanitize(content)
         fname = sanitize_tool_call_id(result.tool_call_id)
-        # Untrusted offloads land at /large_tool_results/untrusted-<id> so a later
-        # read_file/grep of them is recognizable to the provenance guard (no mixing of
-        # trusted and untrusted large results in the same namespace).
+        # Untrusted offloads land at <offload_root>/large_tool_results/untrusted-<id>
+        # (e.g. /large_tool_results/untrusted-<id>, or /tmp/large_tool_results/untrusted-<id>
+        # for the "/tmp" root) so a later read_file/grep of them is recognizable to the
+        # provenance guard (no mixing of trusted and untrusted large results in one namespace).
         path = (f"{self._offload_root}/{UNTRUSTED_OFFLOAD_MARK}{fname}" if self._untrusted
                 else f"{self._offload_root}/{_OFFLOAD_DIR}/{fname}")
         write = self.backend.write(path, content)
