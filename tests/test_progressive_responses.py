@@ -524,3 +524,29 @@ def test_turn_observer_reports_error_when_ready_tail_fails(wired, monkeypatch):
     threads._process_message(tid, "hi")
     assert seen == [(tid, "error", None, None, None)]
     assert _get_status(tid)["stage"] == "error"
+
+
+def test_turn_observer_fires_on_supersede_cap_awaiting_approval(wired, monkeypatch):
+    # The supersede-cap path: a new message can't clear a stuck pending draft after
+    # the reject-loop cap, so it writes a terminal awaiting_approval and returns
+    # EARLY — before the common notify at the function end. The observer must still
+    # fire there, or this real terminal outcome is invisible to a registered client.
+    tid, _ = wired
+
+    class _Stuck(_Chat):
+        def resume_reply(self, decision):
+            self._calls.append(("resume_reply", decision.get("type")))
+            return "still proposing"        # the reject never clears the interrupt
+
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda t, sandbox_backend=None, **k: _Stuck(t, [], reply={"text": "stuck draft"}))
+    _set_status(tid, "awaiting_approval", pending_reply="stuck draft",
+                pending_sender="senderX")
+    seen = []
+    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [lambda *a: seen.append(a)])
+
+    threads._process_message(tid, "a superseding message", origin=None)
+
+    assert _get_status(tid)["stage"] == "awaiting_approval"
+    assert seen == [(tid, "awaiting_approval", None, "stuck draft", None)]

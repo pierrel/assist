@@ -1684,10 +1684,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                             # surface it loudly instead of silently losing the new message.
                             logging.warning("supersede couldn't clear the pending interrupt on "
                                             "%s; new message archived but not triaged this turn", tid)
+                            _pending_text = chat.pending_reply().get("text", "")
                             _set_status(tid, "awaiting_approval",
-                                        pending_reply=chat.pending_reply().get("text", ""),
+                                        pending_reply=_pending_text,
                                         pending_sender=prior_pending_sender,
                                         started_at=started_at)
+                            # A terminal awaiting_approval, same as the normal pending exit
+                            # below — but this path returns early, before the common notify
+                            # at the function end, so fire the turn observer here too (else
+                            # this real terminal outcome is invisible to a registered client).
+                            _terminal = ("awaiting_approval", _pending_text)
+                            _notify_turn_observers(tid, _terminal[0], origin, _terminal[1],
+                                                   backlog_id)
                             return
                         if same_sender:
                             text = _SUPERSEDE_RIDER + text
