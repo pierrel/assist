@@ -98,11 +98,16 @@ def test_get_unknown_or_bad_tid_is_none(tmp_path):
 
 
 def test_no_thread_construction_no_content_access(tmp_path):
-    # The catalog must never touch the checkpoint / message store — it reads only
-    # the sidecar files. A thread with a bogus "threads.db"/checkpoint but valid
-    # sidecars still yields a clean entry (proves contents are never loaded).
-    d = _mk(tmp_path, "t1", description="desc", stage="ready")
-    with open(os.path.join(d, "threads.db"), "w") as f:
-        f.write("not a real db")
-    (e,) = _catalog(tmp_path).entries()
-    assert e.description == "desc"        # no checkpoint read attempted
+    # The catalog must never touch the checkpoint / message store — only the sidecar
+    # files. Plant a poison threads.db at the REAL ThreadManager location
+    # (<root>/threads.db, thread_manager.py) and confirm entries come solely from the
+    # sidecars, with none of the db's content leaking into any field and the db file
+    # itself not surfacing as a thread.
+    _mk(tmp_path, "t1", description="desc", stage="ready")
+    with open(tmp_path / "threads.db", "w") as f:
+        f.write("SECRET_TRANSCRIPT should never surface")
+    entries = _catalog(tmp_path).entries()
+    assert {e.id for e in entries} == {"t1"}         # the db file is not a thread
+    (e,) = entries
+    assert e.description == "desc"                    # from the sidecar, not the db
+    assert all("SECRET" not in (x.description + x.status) for x in entries)

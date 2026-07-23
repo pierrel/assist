@@ -132,6 +132,10 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
             else:
                 return ("Which project should this go under? The options are "
                         + ", ".join(domains) + ".")
+        if not str(first_message or "").strip():
+            # Don't create an empty thread (the model can fire this before it has the
+            # ask) — elicit what they want first, like the domain question above.
+            return f"Sure — what would you like to start in {matched}?"
         try:
             on_new(matched, first_message)
         except Exception:
@@ -157,7 +161,9 @@ def create_receptionist(tools, domains):
     400 class). The model is built thinking-OFF with per-phase timeouts (a thinking
     router would burn its latency budget on <think> tokens the caller never hears; a
     hung first token is unbounded dead air)."""
-    from langchain.agents import create_agent
+    # aliased: this is LangChain's vanilla create_agent, NOT assist.agent.create_agent
+    # (the deepagent builder used everywhere else) — the distinction is the whole point.
+    from langchain.agents import create_agent as create_langchain_agent
     from langgraph.checkpoint.memory import InMemorySaver
 
     from assist.agent import _make_retry_middleware
@@ -166,7 +172,7 @@ def create_receptionist(tools, domains):
     from assist.model_manager import select_assistant_model
     from assist.promptable import base_prompt_for
 
-    return create_agent(
+    return create_langchain_agent(
         select_assistant_model(0.1),                # enable_thinking=False default + timeouts
         tools,
         system_prompt=base_prompt_for("receptionist_system.md.j2", domains=domains),
