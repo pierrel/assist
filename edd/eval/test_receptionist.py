@@ -103,7 +103,7 @@ class TestReceptionist(TestCase):
         root = self._dir(trip={"description": "trip planning to Portugal"},
                          garden={"description": "garden bed layout", "urgent": True})
         call = _Call(root, ["Home"])
-        reply = call.say("Hey, I'm not sure what I've got going on — what's here?")
+        call.say("Hey, I'm not sure what I've got going on — what's here?")
         self.assertTrue(call.called("list_threads"))
         self.assertEqual(call.opened, [])          # offered, didn't force-open
 
