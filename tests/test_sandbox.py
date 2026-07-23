@@ -54,6 +54,16 @@ class TestDockerSandboxBackend(TestCase):
         # name merely starts "tmp") is still prefixed, so the scoping can't be abused.
         self.assertEqual(self.sandbox._resolve("/tmpfoo"), "/workspace/tmpfoo")
 
+    def test_resolve_tmp_passthrough_keyed_on_pre_strip_path(self):
+        # In the references-confined sandbox, strip_prefixes turns "/references/tmp/x"
+        # into "/tmp/x" — the /tmp passthrough must key on the ORIGINAL path so that
+        # doesn't escape references confinement into the shared /tmp (it stays under
+        # work_dir); a GENUINE "/tmp/x" input still passes through.
+        ref = DockerSandboxBackend(self.container, work_dir="/workspace/references",
+                                   strip_prefixes=("references",))
+        self.assertEqual(ref._resolve("/references/tmp/x"), "/workspace/references/tmp/x")
+        self.assertEqual(ref._resolve("/tmp/x"), "/tmp/x")
+
     def test_execute_success(self):
         self.container.exec_run.return_value = (0, b"hello world\n")
         resp = self.sandbox.execute("echo hello world")

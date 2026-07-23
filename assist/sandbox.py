@@ -149,20 +149,23 @@ class DockerSandboxBackend(BaseSandbox):
         ``/workspace/references``) gets flattened to ``foo.org`` before
         the work_dir prefix is added.
         """
-        path = self._strip(path)
-        if not path:
-            return path
-        if path.startswith(self.work_dir):
-            return path
+        stripped = self._strip(path)
+        if not stripped:
+            return stripped
+        if stripped.startswith(self.work_dir):
+            return stripped
         # /tmp is a real host bind-mount (SandboxManager) — persistent (it survives
         # per-turn container teardown) and addressed IDENTICALLY by the shell
         # (`execute`) and the file tools.  Pass it through natively instead of
         # shadowing it under /workspace, so a file offloaded there has ONE path both
         # resolve to (not a /workspace copy the shell can't see).  Scoped to the exact
         # /tmp component, so /tmpfoo and glob(path="/") keep their /workspace prefixing.
+        # Keyed on the ORIGINAL (pre-strip) path: in the references-confined sandbox
+        # (strip_prefixes=("references",)) a "/references/tmp/x" strips to "/tmp/x" —
+        # that must stay confined under work_dir, NOT escape into the shared /tmp.
         if path == "/tmp" or path.startswith("/tmp/"):
-            return path
-        return self.work_dir + (path if path.startswith("/") else "/" + path)
+            return stripped
+        return self.work_dir + (stripped if stripped.startswith("/") else "/" + stripped)
 
     def _run_uid_gid(self) -> tuple[int, int]:
         """Resolve the container's run user — the single source of file ownership.
