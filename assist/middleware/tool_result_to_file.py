@@ -4,12 +4,21 @@ Some tools return a lot of text — ``read_url`` (a full web page), ``execute`` 
 long build/test log).  Left inline, a few of those flood the agent's context (the
 slow-zone the context work fights).  Truncating loses everything past the cap.
 Instead, for an opt-in set of tools, this middleware writes the full result to
-``/large_tool_results/<tool_call_id>`` (or ``/large_tool_results/untrusted-<id>`` for an
-``untrusted=True`` instance — the prefix deepagents' built-in eviction
-uses, and which its filesystem system prompt already tells the model to
-``grep``/``read_file``) and replaces the tool result with a short PREVIEW + the
-path + an explicit grep instruction.  Full content stays available; model-visible
+``<offload_root>/large_tool_results/<tool_call_id>`` (or ``.../large_tool_results/untrusted-<id>``
+for an ``untrusted=True`` instance — the ``large_tool_results`` prefix deepagents'
+built-in eviction uses, and which its filesystem system prompt already tells the
+model to ``grep``/``read_file``) and replaces the tool result with a short PREVIEW +
+the path + an explicit grep instruction.  Full content stays available; model-visible
 context is bounded to ~1kB per call BY CONSTRUCTION.
+
+``offload_root`` selects WHERE the file lands (see ``__init__``): the default ``""``
+keeps ``/large_tool_results/…``, which ``STATEFUL_PATHS`` routes to the in-memory
+``StateBackend`` — right for a backend with no real shell (the research sub-agent).
+A sandbox-backed instance passes ``"/tmp"`` so the offload is a REAL file on the
+sandbox's ``/tmp`` bind-mount, reachable by BOTH the ``grep``/``read_file``
+tools and shell ``cat`` at the SAME path — otherwise the model, seeing a
+``/large_tool_results/…`` path after ``execute`` and reaching for shell, hits a file
+that lives only in graph state (docs/2026-07-22-offload-to-real-fs.org).
 
 Deliberately NOT deepagents' ``FilesystemMiddleware`` (which we DON'T subclass):
 that is a fat 3-job middleware (system-prompt injection + message eviction in
@@ -27,9 +36,10 @@ That is the "guidance first" ethos's own exception.  The behavioral half — act
 grepping — is carried by the returned message + the prompt + the framework's
 existing ``/large_tool_results/`` guidance.
 
-Rides deepagents' own proven state-write path: ``StateBackend.write`` during
-``wrap_tool_call`` queues into the current graph state, so a later ``read_file``/
-``grep`` in the same turn reads it back.
+The write rides the composite backend during ``wrap_tool_call``: a default
+(``offload_root=""``) offload queues into graph state via ``StateBackend.write``
+(deepagents' proven path), while a ``"/tmp"`` offload lands on the sandbox's real
+fs — either way a later ``read_file``/``grep`` in the same turn reads it back.
 """
 from __future__ import annotations
 
@@ -43,6 +53,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from assist.middleware.output_sanitization import _sanitize
+from assist.sandbox import SandboxContainerLostError
 
 logger = logging.getLogger(__name__)
 
@@ -96,16 +107,19 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     ``tools`` is a POSITIVE allowlist — a tool not listed is never touched (containment
     by construction).  ``preview_style`` is per-instantiation: ``head`` for read_url
     (proven), ``head_tail`` for execute (log tails hold the salient line).  ``untrusted``
-    is per-instantiation too: when True the offload path is ``/large_tool_results/untrusted-<id>``
+    is per-instantiation too: when True the offload path is ``.../large_tool_results/untrusted-<id>``
     (see ``UNTRUSTED_OFFLOAD_MARK``) so ``UrlProvenanceMiddleware`` won't provenance a URL read
-    back from it; the default writes ``/large_tool_results/<id>``.
+    back from it; the default writes ``.../large_tool_results/<id>``.  ``offload_root``
+    (per-instantiation) sets the parent: ``""`` (default) → StateBackend-routed
+    ``/large_tool_results/…``; ``"/tmp"`` → the sandbox's real per-turn fs so shell +
+    file tools share one path (see the module docstring).
     """
 
     name = "ToolResultToFileMiddleware"
 
     def __init__(self, backend, *, tools: frozenset[str] | set[str],
                  floor_chars: int = _DEFAULT_FLOOR_CHARS, preview_style: str = "head",
-                 untrusted: bool = False, name: str | None = None):
+                 untrusted: bool = False, offload_root: str = "", name: str | None = None):
         super().__init__()
         # langchain REJECTS duplicate middleware ``.name``s (it raises at agent
         # construction, not silently drop one), so an agent that wants two
@@ -118,6 +132,10 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         self._tools = frozenset(tools)
         self._floor = floor_chars
         self._style = preview_style
+        # rstrip so "/tmp/" and "/tmp" behave the same; "" (default) yields the
+        # /large_tool_results/… StateBackend path.  A "/tmp/…" offload deliberately
+        # matches no STATEFUL_PATHS prefix, so it lands on the sandbox fs, not state.
+        self._offload_root = offload_root.rstrip("/")
         # When True, offloads from this instance are written to /large_tool_results/untrusted-<id>
         # (see UNTRUSTED_OFFLOAD_MARK) so UrlProvenanceMiddleware recognizes a later read/grep of
         # them and won't provenance their URLs — read_url page content / execute output is the
@@ -139,8 +157,8 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # Untrusted offloads land at /large_tool_results/untrusted-<id> so a later
         # read_file/grep of them is recognizable to the provenance guard (no mixing of
         # trusted and untrusted large results in the same namespace).
-        path = (f"/{UNTRUSTED_OFFLOAD_MARK}{fname}" if self._untrusted
-                else f"/{_OFFLOAD_DIR}/{fname}")
+        path = (f"{self._offload_root}/{UNTRUSTED_OFFLOAD_MARK}{fname}" if self._untrusted
+                else f"{self._offload_root}/{_OFFLOAD_DIR}/{fname}")
         write = self.backend.write(path, content)
         if getattr(write, "error", None):
             logger.warning("ToolResultToFile: write to %s failed: %s", path, write.error)
@@ -153,6 +171,12 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     def _safe_offload(self, request, result):
         try:
             return self._offload(request, result)
+        except SandboxContainerLostError:
+            # A real-fs offload write runs against the sandbox, so this signal is
+            # now reachable here.  It MUST propagate: the architecture fails the
+            # thread fast on container loss (see SandboxContainerLostError) rather
+            # than heal-and-retry — swallowing it would mask a dead container.
+            raise
         except Exception as e:  # never block the tool path on an offload bug
             logger.warning("ToolResultToFile: skipped due to %s: %s", type(e).__name__, e)
             return result

@@ -9,8 +9,12 @@ execute path uses a head_tail preview.  Here the log ends with "BUILD FAILED"
 ~5k chars before the end — outside the 300-char tail preview — so the model must
 GREP the offloaded file to report it.
 
-Mocked: the sandbox's `execute` is patched to return a canned large log (no real
-command) — rate-limit-free, deterministic, no build-time dependency.
+Mocked: the sandbox's `execute` is patched to return a canned large log for the
+`make build` command only — rate-limit-free, deterministic, no build-time
+dependency.  Every OTHER command (crucially the offload write's preflight
+`os.makedirs`/write-check, and the model's later grep) delegates to the REAL
+sandbox, so the `/tmp` offload actually lands and the grep can find it — otherwise
+the mock would swallow the offload write and the eval would test nothing.
 """
 import os
 import shutil
@@ -39,8 +43,14 @@ _LOG = (
 )
 
 
-def _mock_execute(command, *a, **k):
-    return ExecuteResponse(output=_LOG, exit_code=1)
+def _make_mock_execute(real_execute):
+    """Canned log for `make build`; delegate everything else (offload preflight,
+    grep) to the real sandbox so the /tmp offload actually lands."""
+    def _mock_execute(command, *a, **k):
+        if "make build" in command:
+            return ExecuteResponse(output=_LOG, exit_code=1)
+        return real_execute(command, *a, **k)
+    return _mock_execute
 
 
 class TestExecuteDeepLog(TestCase):
@@ -58,7 +68,8 @@ class TestExecuteDeepLog(TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.workspace, ignore_errors=True))
 
     def test_agent_reaches_error_code_by_grepping_the_log(self):
-        with patch.object(type(self.sandbox), "execute", staticmethod(_mock_execute)):
+        mock_execute = _make_mock_execute(self.sandbox.execute)   # bound real method, pre-patch
+        with patch.object(type(self.sandbox), "execute", staticmethod(mock_execute)):
             agent = AgentHarness(create_agent(self.model, self.workspace,
                                               sandbox_backend=self.sandbox))
             out = agent.message(

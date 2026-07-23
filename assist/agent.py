@@ -448,8 +448,13 @@ def create_agent(model: BaseChatModel,
             # hand the model a preview + grep instruction — big logs are the classic
             # context-flooder for the small model.  head_tail preview: a log's salient
             # line (the error/exit summary) is at the TAIL, not the head.
+            # offload_root="/tmp": the file lands on the sandbox's real /tmp bind-mount,
+            # so the model can shell-`cat`/`grep` it AND read_file/grep it at the SAME
+            # path — after `execute`, the model reaches for shell, and a StateBackend
+            # path it can't `cat` is the misalignment this fixes (docs/2026-07-22-…).
             ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
-                                       preview_style="head_tail", untrusted=True),
+                                       preview_style="head_tail", untrusted=True,
+                                       offload_root="/tmp"),
             # read_url on the MAIN agent is a NAVIGATION tool: follow a known
             # URL + the links it surfaces to find a page or downloadable file
             # (the download itself is curl in the sandbox, egress-gated). It

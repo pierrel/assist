@@ -40,6 +40,20 @@ class TestDockerSandboxBackend(TestCase):
     def test_resolve_handles_none(self):
         self.assertIsNone(self.sandbox._resolve(None))
 
+    def test_resolve_passes_tmp_through_natively(self):
+        # /tmp is a real bind-mount the shell and the file tools share — it must NOT
+        # be shadowed under /workspace, so an offloaded /tmp file has one path both
+        # resolve to (docs/2026-07-22-offload-to-real-fs.org).
+        self.assertEqual(self.sandbox._resolve("/tmp"), "/tmp")
+        self.assertEqual(
+            self.sandbox._resolve("/tmp/large_tool_results/untrusted-x"),
+            "/tmp/large_tool_results/untrusted-x")
+
+    def test_resolve_tmp_scoping_does_not_leak(self):
+        # Only the exact /tmp component passes through; /tmpfoo (a workspace file whose
+        # name merely starts "tmp") is still prefixed, so the scoping can't be abused.
+        self.assertEqual(self.sandbox._resolve("/tmpfoo"), "/workspace/tmpfoo")
+
     def test_execute_success(self):
         self.container.exec_run.return_value = (0, b"hello world\n")
         resp = self.sandbox.execute("echo hello world")

@@ -130,3 +130,16 @@ def test_execute_tool_offloaded_with_head_tail_preview():
     # the head_tail preview shows the TAIL (where the value is), and points to the file:
     assert tail_value in out.content and path in out.content and "grep(" in out.content
     assert "make build" in out.content   # the command is surfaced as the source
+
+
+def test_offload_root_tmp_writes_real_fs_path():
+    # offload_root="/tmp" (the sandbox-backed execute instance) lands the file on the
+    # real /tmp bind-mount — one path the model can shell-`cat` AND grep — while keeping
+    # the untrusted- marker so UrlProvenanceMiddleware still recognizes a read of it.
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(backend, tools=frozenset({"execute"}),
+                                    floor_chars=8000, untrusted=True, offload_root="/tmp")
+    out = _run(mw, _Req(name="execute", command="make build"), _msg("x" * 9000))
+    path = next(iter(backend.written))
+    assert path == f"/tmp/{UNTRUSTED_OFFLOAD_MARK}call_1", path
+    assert path in out.content and "grep(" in out.content

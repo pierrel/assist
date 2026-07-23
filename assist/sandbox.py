@@ -154,6 +154,14 @@ class DockerSandboxBackend(BaseSandbox):
             return path
         if path.startswith(self.work_dir):
             return path
+        # /tmp is a real host bind-mount (SandboxManager) — persistent (it survives
+        # per-turn container teardown) and addressed IDENTICALLY by the shell
+        # (`execute`) and the file tools.  Pass it through natively instead of
+        # shadowing it under /workspace, so a file offloaded there has ONE path both
+        # resolve to (not a /workspace copy the shell can't see).  Scoped to the exact
+        # /tmp component, so /tmpfoo and glob(path="/") keep their /workspace prefixing.
+        if path == "/tmp" or path.startswith("/tmp/"):
+            return path
         return self.work_dir + (path if path.startswith("/") else "/" + path)
 
     def _run_uid_gid(self) -> tuple[int, int]:
