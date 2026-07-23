@@ -45,6 +45,16 @@ def test_missing_sidecars_default(tmp_path):
     assert e.urgent is False
 
 
+def test_multiline_description_uses_first_nonempty_line(tmp_path):
+    # A one-line summary is the contract — an embedded newline must not leak (it would
+    # break the numbered list / spoken reply). Take the first non-empty line.
+    d = _mk(tmp_path, "t1", stage="ready")
+    with open(os.path.join(d, "description.txt"), "w") as f:
+        f.write("\n  trip planning to Portugal  \nand a stray second line\n")
+    (e,) = _catalog(tmp_path).entries()
+    assert e.description == "trip planning to Portugal"
+
+
 def test_corrupt_status_degrades_not_raises(tmp_path):
     d = _mk(tmp_path, "t1", description="x")
     with open(os.path.join(d, "status.json"), "w") as f:
@@ -92,6 +102,7 @@ def test_no_thread_construction_no_content_access(tmp_path):
     # the sidecar files. A thread with a bogus "threads.db"/checkpoint but valid
     # sidecars still yields a clean entry (proves contents are never loaded).
     d = _mk(tmp_path, "t1", description="desc", stage="ready")
-    open(os.path.join(d, "threads.db"), "w").write("not a real db")
+    with open(os.path.join(d, "threads.db"), "w") as f:
+        f.write("not a real db")
     (e,) = _catalog(tmp_path).entries()
     assert e.description == "desc"        # no checkpoint read attempted
