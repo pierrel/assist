@@ -86,11 +86,21 @@ def test_resolve_empty_or_miss(tmp_path):
 
 def test_match_domain_exact_and_substring():
     domains = ["Home", "Garden Project"]
-    assert _match_domain("home", domains) == "Home"
-    assert _match_domain("garden", domains) == "Garden Project"
-    assert _match_domain("the garden project thread", domains) == "Garden Project"
-    assert _match_domain("", domains) is None
-    assert _match_domain("finance", domains) is None
+    assert _match_domain("home", domains) == ("Home", [])
+    assert _match_domain("garden", domains) == ("Garden Project", [])
+    assert _match_domain("the garden project thread", domains) == ("Garden Project", [])
+    assert _match_domain("", domains) == (None, [])
+    assert _match_domain("finance", domains) == (None, [])
+
+
+def test_match_domain_overlapping_labels_are_ambiguous_not_misrouted():
+    # "home" is a substring of "homework" — first-match-wins would silently
+    # misroute; instead both match ⇒ ambiguous ⇒ new_thread asks which.
+    matched, amb = _match_domain("I need homework help", ["Home", "Homework"])
+    assert matched is None
+    assert set(amb) == {"Home", "Homework"}
+    matched, amb = _match_domain("the network one", ["Work", "Network"])
+    assert matched is None and set(amb) == {"Work", "Network"}
 
 
 # ── list_threads ──────────────────────────────────────────────────────────────
@@ -185,6 +195,14 @@ def test_new_thread_unknown_domain_asks(tmp_path):
     reply = tools["new_thread"]("finance", "x")
     assert created == []
     assert "Home" in reply and "Garden" in reply     # lists the options
+
+
+def test_new_thread_ambiguous_domain_asks_which(tmp_path):
+    created = []
+    tools = _tools(tmp_path, ["Home", "Homework"], created=created)
+    reply = tools["new_thread"]("I need homework help", "algebra problem set")
+    assert created == []                             # doesn't silently pick "Home"
+    assert "Home" in reply and "Homework" in reply   # asks which
 
 
 def test_new_thread_no_domains_configured(tmp_path):
