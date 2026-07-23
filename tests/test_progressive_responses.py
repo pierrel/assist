@@ -454,6 +454,15 @@ def test_route_turn_busy_dispatches_with_backlog():
                      {"backlog_id": "bk1"})]
 
 
+def test_route_turn_busy_keys_on_presence_not_truthiness():
+    # A journal id's PRESENCE means journaled (busy), per the contract — an id is
+    # never falsy-empty in practice, but the classification keys on `is not None`,
+    # so even a "" id (were one ever passed) is journaled, not misread as idle.
+    dec = threads.route_turn("t1", "hi", "RIDER", "processing", "",
+                             dispatch=lambda fn, *a, **k: None)
+    assert dec == "busy"
+
+
 def test_route_turn_paused_routes_through_scheduler(monkeypatch):
     sched, dispatched = [], []
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",

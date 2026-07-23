@@ -2704,7 +2704,7 @@ def plan_turn(tid: str, text: str) -> tuple[str, bool]:
 
 
 def route_turn(tid: str, text: str, rider, prior_stage: str,
-               backlog_id, dispatch) -> str:
+               backlog_id: str | None, dispatch) -> str:
     """Shared session API (D1 / §5): the paused-vs-dispatch routing every client
     shares. A PAUSED thread's new message rides the serial ``_ResumeScheduler`` so
     it runs AFTER the queued resume — never on the paused turn's mid-flight
@@ -2717,7 +2717,9 @@ def route_turn(tid: str, text: str, rider, prior_stage: str,
         _RESUME_SCHEDULER.submit_message(tid, text, rider, None, backlog_id)
         return "paused"
     dispatch(_process_message, tid, text, rider, backlog_id=backlog_id)
-    return "busy" if backlog_id else "idle"
+    # "busy" iff journaled; key on presence (is not None), matching the docstring
+    # contract — a journal id is the signal, not its truthiness.
+    return "busy" if backlog_id is not None else "idle"
 
 
 @app.post("/thread/{tid}/message")
