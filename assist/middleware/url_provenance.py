@@ -43,7 +43,12 @@ tool result so the model retries with a real URL. RESIDUAL: a model that FOLLOWS
 multi-step injection to ``write_file`` an arbitrary URL then ``read_file`` it — or to
 ``execute``-copy the real-fs untrusted offload into a workspace path (shedding the
 ``untrusted-`` marker) then ``read_file`` the copy — can self-launder; gated by
-behavioral injection-resistance, not this guard.
+behavioral injection-resistance, not this guard. A narrower same-class residual: a
+same-host URL in a LARGE ``execute`` log gets offloaded to ``untrusted-`` and, read
+back via ``read_file``/``grep``, counts as page content (the ``untrusted-`` marker
+can't tell a read_url offload from an execute one) — so it is navigable if its host is
+already trusted. Direct shell output is closed by construction (``_is_page_content``);
+this multi-step offload-then-file-read path is not, and shares the same behavioral gate.
 
 Scope: every ``read_url``-bearing agent — the research SEARCHER and FACT-CHECKER
 sub-agents, and the MAIN agent's navigation ``read_url`` (added 2026-07-21 for the
@@ -185,6 +190,20 @@ def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
     return False
 
 
+def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
+    """Genuine FETCHED-PAGE content — the subset of untrusted results whose URLs a real
+    page actually surfaced, so a same-host member is NAVIGABLE (see _page_content_urls /
+    wrap_tool_call). That is direct ``read_url`` and a ``read_file``/``grep`` of an
+    offloaded page — but NOT ``execute`` (shell) output. This split from
+    ``_is_untrusted_result`` is load-bearing: that predicate has OPPOSITE polarity in its
+    two callers — ``_seen_urls`` EXCLUDES it (untrusted → not a provenance source),
+    ``_page_content_urls`` INCLUDES it (page content → navigable if same-host) — and shell
+    output must be excluded by BOTH. Untrusted it is; a fetched page it is not, so a URL
+    printed by ``execute`` must not become navigable just because its host is trusted."""
+    return (_is_untrusted_result(m, calls_by_id)
+            and getattr(m, "name", None) != _SHELL_TOOL)
+
+
 def _seen_urls(messages: list) -> dict[str, str]:
     """Every URL in a TRUSTED tool result or the USER's message: a map from the
     normalized form (the membership key) to the ORIGINAL as it appeared (first seen).
@@ -229,12 +248,14 @@ def _seen_urls(messages: list) -> dict[str, str]:
 
 def _page_content_urls(messages: list) -> set[str]:
     """Normalized URLs that literally appeared in FETCHED-PAGE content — the
-    untrusted read_url channel, direct or offloaded (the INVERSE of the set
-    _seen_urls trusts). These are the links a page actually surfaced; a
-    fabricated path never appears here. Same-host members are navigable (see
-    wrap_tool_call) — that admits following a real link on an already-trusted
-    site while still blocking a fabricated same-host path (the dead-URL flood)
-    and an exfil URL the model invents."""
+    untrusted read_url channel, direct or offloaded (see ``_is_page_content``).
+    NOT the exact inverse of ``_seen_urls``: ``execute`` (shell) output is in
+    NEITHER set — untrusted, so not trusted, but also not a page, so not navigable.
+    These are the links a page actually surfaced; a fabricated path never appears
+    here. Same-host members are navigable (see wrap_tool_call) — that admits
+    following a real link on an already-trusted site while still blocking a
+    fabricated same-host path (the dead-URL flood) and an exfil URL the model
+    invents (or one printed into shell output on a trusted host)."""
     calls_by_id: dict[str, dict] = {}
     for m in messages:
         for tc in getattr(m, "tool_calls", None) or []:
@@ -243,7 +264,7 @@ def _page_content_urls(messages: list) -> set[str]:
                 calls_by_id[cid] = tc
     urls: set[str] = set()
     for m in messages:
-        if isinstance(m, ToolMessage) and _is_untrusted_result(m, calls_by_id):
+        if isinstance(m, ToolMessage) and _is_page_content(m, calls_by_id):
             for raw in _URL_RE.findall(_message_text(m)):
                 urls.add(normalize_url(raw))
     return urls
