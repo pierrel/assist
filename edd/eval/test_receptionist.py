@@ -47,7 +47,7 @@ class _Call:
         tools = receptionist_tools(catalog, domains,
                                    self.opened.append,
                                    lambda d, m: self.created.append((d, m)))
-        self.agent = create_receptionist(tools)
+        self.agent = create_receptionist(tools, domains)
         self.config = {"configurable": {"thread_id": "eval-call"}}
         self.messages: list = []
 

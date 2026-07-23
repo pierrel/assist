@@ -61,8 +61,10 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
     """The three receptionist tools, closing over the read-only ``catalog``, the
     ``domains`` labels, and the injected callbacks. Session-scoped: build a fresh
     set per call — ``_last`` (the listing ``open_thread`` resolves numbers against)
-    is per-session state."""
+    and ``_bound`` (the thread already connected this session) are per-session
+    state."""
     _last: list = []
+    _bound: list = []   # the tid this session is already connected to (idempotent open)
 
     def list_threads() -> str:
         """List the caller's existing conversation threads so you can help them
@@ -97,10 +99,15 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
                 return f"I've got a few that match — did you mean {names}?"
             return ("I couldn't tell which thread you meant. Tell me its number or "
                     "a few words from its topic.")
+        if _bound and _bound[-1] == entry.id:
+            # Idempotent: the model sometimes fires open_thread twice for one intent —
+            # don't bind (and speak the connect) again for the thread we're already on.
+            return f"You're already connected to the {entry.description} thread."
         try:
             on_open(entry.id)
         except Exception:
             return "Sorry — I couldn't connect you to that one. Want to try another?"
+        _bound.append(entry.id)
         return f"Connecting you to the {entry.description} thread."
 
     def new_thread(domain: str, first_message: str) -> str:
@@ -129,10 +136,15 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
     return [list_threads, open_thread, new_thread]
 
 
-def create_receptionist(tools):
+def create_receptionist(tools, domains):
     """Build the receptionist as a VANILLA LangChain agent (never a deepagent — a
     deepagent would drag in the filesystem/execute/task surface this router must
     not have; the vanilla loop's tool set is exactly ``tools``).
+
+    ``domains`` (the same labels passed to ``receptionist_tools``) are rendered into
+    the system prompt so the router knows the user's projects up front — a real
+    receptionist knows the departments — and can NAME them when eliciting which
+    project a new thread belongs to, instead of asking blindly.
 
     The three protective middleware are load-bearing on a phone call, not polish:
     EmptyResponseRecovery (a bare empty/<think>-only AIMessage would end the turn in
@@ -152,7 +164,7 @@ def create_receptionist(tools):
     return create_agent(
         select_assistant_model(0.1),                # enable_thinking=False default + timeouts
         tools,
-        system_prompt=base_prompt_for("receptionist_system.md.j2"),
+        system_prompt=base_prompt_for("receptionist_system.md.j2", domains=domains),
         middleware=[_make_retry_middleware(),
                     BadRequestRetryMiddleware(),
                     EmptyResponseRecoveryMiddleware()],
