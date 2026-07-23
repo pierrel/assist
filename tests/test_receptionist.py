@@ -141,6 +141,19 @@ def test_open_thread_without_listing_scans_catalog(tmp_path):
     assert opened == ["a"] and "trip planning" in reply
 
 
+def test_open_thread_is_idempotent_within_session(tmp_path):
+    # The small model sometimes fires open_thread twice for one intent; the second
+    # open of the thread we're already on must NOT bind (or speak "connecting") again.
+    opened = []
+    _mk(tmp_path, "a", description="trip planning")
+    tools = _tools(tmp_path, ["Home"], opened=opened)
+    first = tools["open_thread"]("trip")
+    second = tools["open_thread"]("trip")
+    assert opened == ["a"]                          # on_open fired once, not twice
+    assert "connecting" in first.lower()
+    assert "already connected" in second.lower()
+
+
 def test_open_thread_ambiguous_asks(tmp_path):
     opened = []
     _mk(tmp_path, "a", description="trip to Rome")
