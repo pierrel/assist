@@ -10,7 +10,7 @@ mechanical test asserts the bound tool set is exactly the three tools below.
 
 The three tools take injected callbacks (the ``notify_tools`` mold — no web
 imports): ``on_open(tid)`` binds the session to an existing thread; ``on_new(domain,
-first_message) -> tid`` creates one and returns its id. Both run synchronously on
+first_message)`` creates one AND binds the session to it. Both run synchronously on
 the caller's session thread and NEVER raise into the agent loop — a failure comes
 back as a spoken directive.
 """
@@ -39,18 +39,22 @@ def _resolve(selector, entries):
 
 
 def _match_domain(name, domains):
-    """Match a spoken domain name to one of the configured domain labels
-    (exact, then substring either way)."""
+    """Match a spoken domain name to the configured domain labels. Returns
+    ``(domain, ambiguous)`` mirroring ``_resolve``: an exact match wins outright;
+    otherwise the substring matches (either way, to absorb loose phrasing like "the
+    garden project thread") — exactly one → ``(that, [])``, none → ``(None, [])``,
+    several → ``(None, [those])`` so ``new_thread`` asks WHICH rather than silently
+    picking the first (overlapping labels like Home/Homework must not misroute)."""
     n = str(name or "").strip().lower()
     if not n:
-        return None
+        return None, []
     for d in domains:
         if d.lower() == n:
-            return d
-    for d in domains:
-        if n in d.lower() or d.lower() in n:
-            return d
-    return None
+            return d, []
+    matches = [d for d in domains if n in d.lower() or d.lower() in n]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
 
 
 def receptionist_tools(catalog, domains, on_open, on_new) -> list:
@@ -82,7 +86,10 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
         from the list or a few words from its topic ('the trip one'). Call this as
         soon as you know which thread the caller wants — you do not need to list
         first if they already told you."""
-        entries = _last or catalog.entries()[:20]
+        # A number resolves against the list the caller actually heard (_last,
+        # itself capped at 20); a topic/id must reach ANY thread, so fall back to
+        # the full catalog — not the top 20 — or older threads become unrouteable.
+        entries = _last or catalog.entries()
         entry, ambiguous = _resolve(selector, entries)
         if entry is None:
             if ambiguous:
@@ -101,8 +108,11 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
         to (ask in one short question if they didn't say; if there's only one
         project, just use it). ``first_message`` is what the caller wants to do, in
         their own words. Only call this once you have both."""
-        matched = _match_domain(domain, domains)
+        matched, ambiguous = _match_domain(domain, domains)
         if matched is None:
+            if ambiguous:
+                return ("Which project should this go under — "
+                        + " or ".join(ambiguous[:3]) + "?")
             if len(domains) == 1:
                 matched = domains[0]
             elif not domains:
@@ -119,7 +129,7 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
     return [list_threads, open_thread, new_thread]
 
 
-def create_receptionist(tools, *, temperature: float = 0.1):
+def create_receptionist(tools):
     """Build the receptionist as a VANILLA LangChain agent (never a deepagent — a
     deepagent would drag in the filesystem/execute/task surface this router must
     not have; the vanilla loop's tool set is exactly ``tools``).
@@ -140,7 +150,7 @@ def create_receptionist(tools, *, temperature: float = 0.1):
     from assist.promptable import base_prompt_for
 
     return create_agent(
-        select_assistant_model(temperature),        # enable_thinking=False default + timeouts
+        select_assistant_model(0.1),                # enable_thinking=False default + timeouts
         tools,
         system_prompt=base_prompt_for("receptionist_system.md.j2"),
         middleware=[_make_retry_middleware(),

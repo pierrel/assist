@@ -2,18 +2,20 @@
 their state" surface (shared session API; docs/2026-07-21-voice-call-tech-design.org
 §3).
 
-A receptionist (voice) or a thread-list UI (web) both consume this WITHOUT loading
-any conversation: no checkpoint access, no ``Thread`` construction, no model call,
-no message read. Thread CONTENTS are unreachable by construction — this module has
-no path into ``threads.db`` or the langgraph checkpoint; it only reads the
-per-thread sidecar files (``description.txt`` / ``status.json`` / the urgent
-marker) plus the dir mtime.
+The receptionist (voice) consumes this WITHOUT loading any conversation: no
+checkpoint access, no ``Thread`` construction, no model call, no message read.
+Thread CONTENTS are unreachable by construction — this module has no path into
+``threads.db`` or the langgraph checkpoint; it only reads the per-thread sidecar
+files (``description.txt`` / ``status.json`` / the urgent marker) plus the dir
+mtime.
 
-It lifts the *file-reading halves* of the web layer's per-thread reads so web and
-voice share ONE surface instead of each re-deriving it. Description GENERATION
-(which needs a model) and the web's ``DESCRIPTION_CACHE`` stay web-side — the
-catalog only reads the file, falling back to ``"New thread"`` on a miss (never
-generating one).
+It mirrors the *file-reading halves* of the web layer's per-thread reads
+(``manage/web/state.py``'s ``_get_status`` / ``_has_urgent`` / ``description.txt``)
+as one checkpoint-free surface; a later increment can point the web thread-list at
+it so the two stop re-deriving the same reads (web still owns them today).
+Description GENERATION (which needs a model) and the web's ``DESCRIPTION_CACHE``
+stay web-side — the catalog only reads the file, falling back to ``"New thread"``
+on a miss (never generating one).
 """
 from __future__ import annotations
 
@@ -21,6 +23,9 @@ import json
 import os
 from dataclasses import dataclass
 
+# These three sidecar names are authored by the web layer (manage/web/state.py);
+# it stays the source of truth until web is migrated onto this catalog. Renaming
+# one there without updating here silently blanks that field (e.g. urgent=False).
 _DESCRIPTION_FILE = "description.txt"
 _STATUS_FILE = "status.json"
 _URGENT_MARKER = "urgent_response"   # the notify() durable marker (state.py:_urgent_path)
@@ -49,8 +54,8 @@ class ThreadCatalog:
         try:
             with open(os.path.join(tdir, _DESCRIPTION_FILE)) as f:
                 return f.read().strip() or "New thread"
-        except OSError:
-            return "New thread"     # missing ⇒ not generated here (generation needs a model)
+        except Exception:
+            return "New thread"     # missing/unreadable ⇒ not generated here (needs a model)
 
     def _status(self, tdir: str) -> str:
         try:
