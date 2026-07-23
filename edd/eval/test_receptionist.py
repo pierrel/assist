@@ -153,5 +153,8 @@ class TestReceptionist(TestCase):
                          garden={"description": "garden bed layout"})
         call = _Call(root, ["Home"])
         reply = call.say("What's going on, give me the rundown.")
-        self.assertNotRegex(reply, r"(^|\n)\s*[-*#]\s|```|\|",
-                            "spoken reply must have no markdown bullets/headers/tables/code")
+        # The prompt says "No lists" for spoken output — reject numbered-list lines
+        # (1. / 2.) too, not just markdown bullets/headers/tables/code, so the eval
+        # matches the contract (the model must speak the threads, not echo the menu).
+        self.assertNotRegex(reply, r"(^|\n)\s*(?:[-*#]|\d+\.)\s|```|\|",
+                            "spoken reply must have no lists/markdown/tables/code")
