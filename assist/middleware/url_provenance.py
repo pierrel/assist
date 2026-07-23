@@ -170,7 +170,8 @@ def _reads_offloaded(tool_call: dict, content: str) -> bool:
 def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
     read_url page content directly, ``execute`` (shell) output, or a ``read_file``/
-    ``grep`` of OFFLOADED read_url content. Fails CLOSED: a file read whose originating ``tool_call`` is missing from
+    ``grep`` of OFFLOADED untrusted content (read_url page OR execute output — both land
+    under ``…/large_tool_results/untrusted-``). Fails CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
     verify its target wasn't the offload dir, so we don't provenance its URLs."""
     name = getattr(m, "name", None)
