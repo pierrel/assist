@@ -543,10 +543,17 @@ def test_turn_observer_fires_on_supersede_cap_awaiting_approval(wired, monkeypat
         lambda t, sandbox_backend=None, **k: _Stuck(t, [], reply={"text": "stuck draft"}))
     _set_status(tid, "awaiting_approval", pending_reply="stuck draft",
                 pending_sender="senderX")
-    seen = []
-    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [lambda *a: seen.append(a)])
+    seen, holder_at_fire = [], []
+
+    def _obs(*a):
+        seen.append(a)
+        holder_at_fire.append(threads.THREAD_QUEUE.peek_holder())
+    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [_obs])
 
     threads._process_message(tid, "a superseding message", origin=None)
 
     assert _get_status(tid)["stage"] == "awaiting_approval"
     assert seen == [(tid, "awaiting_approval", None, "stuck draft", None)]
+    # The whole point of the controlled unwind: the observer fires AFTER the queue
+    # is released (Copilot rd2), never while this turn still holds the slot.
+    assert holder_at_fire == [None]

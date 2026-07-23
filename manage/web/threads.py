@@ -1427,6 +1427,14 @@ def _notify_turn_observers(tid, stage, origin, reply_text, backlog_id) -> None:
                           stage, exc_info=True)
 
 
+class _SupersedeCapReached(Exception):
+    """Internal control-flow signal: the supersede reject-loop hit its cap with the
+    graph still interrupted, so the turn ends at a terminal awaiting_approval. Raised
+    (not returned) so it unwinds out of the THREAD_QUEUE.acquire scope before the
+    common turn-observer notify fires — a terminal exit that must NOT notify while
+    holding the global single-flight slot."""
+
+
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None,
                      resume: bool = False, accumulated_active_ms: float = 0.0,
@@ -1689,14 +1697,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                         pending_reply=_pending_text,
                                         pending_sender=prior_pending_sender,
                                         started_at=started_at)
-                            # A terminal awaiting_approval, same as the normal pending exit
-                            # below — but this path returns early, before the common notify
-                            # at the function end, so fire the turn observer here too (else
-                            # this real terminal outcome is invisible to a registered client).
+                            # A terminal awaiting_approval, like the normal pending exit — so
+                            # the observer must fire. Don't notify inline: this is INSIDE the
+                            # THREAD_QUEUE.acquire scope, and a synchronous observer would then
+                            # run while holding the global single-flight slot, stalling every
+                            # turn. Unwind instead (reaping the container via the finally,
+                            # releasing the queue) to the common notify at the function end.
                             _terminal = ("awaiting_approval", _pending_text)
-                            _notify_turn_observers(tid, _terminal[0], origin, _terminal[1],
-                                                   backlog_id)
-                            return
+                            raise _SupersedeCapReached
                         if same_sender:
                             text = _SUPERSEDE_RIDER + text
                     resp = chat.message(text)
@@ -1832,6 +1840,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                    + (_REJOURNAL_NOTE if _rejournaled else "")),
             **pending_kwargs,
         )
+    except _SupersedeCapReached:
+        # Controlled unwind from the supersede-cap terminal exit: the queue is now
+        # released and the container reaped, and _terminal is already the terminal
+        # ("awaiting_approval", …) — fall through to the common notify below (so the
+        # observer fires post-release, exactly like the normal terminal exits).
+        pass
     except Exception as e:
         # The ready exit sets _terminal BEFORE its append_event/_dispatch_continuations
         # tail (which can raise into HERE); reset so the observer reports the
@@ -1868,10 +1882,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         THREAD_QUEUE.pop_hold(tid)
 
     # Turn-completion observers (§7.1), fired ONCE after the terminal status is
-    # durable. Only fall-through exits reach here: ready/awaiting set _terminal;
-    # the error branches fall through with it None (→ "error"); the pause path and
-    # every early `return` exit before this line, so a paused/deferred/skipped turn
-    # correctly fires nothing. No observer registered in v1 ⇒ a no-op.
+    # durable AND the queue is released. Terminal exits reach here: ready/awaiting set
+    # _terminal; the supersede-cap awaiting_approval unwinds here via _SupersedeCapReached
+    # (so its observer also fires post-release, never under the queue lock); the error
+    # branches fall through with _terminal None (→ "error"). The pause path and the
+    # deleted-thread/duplicate-dispatch skips `return` before this line, so a paused/
+    # skipped turn correctly fires nothing. No observer registered in v1 ⇒ a no-op.
     if _terminal is None:
         _terminal = ("error", None)
     _notify_turn_observers(tid, _terminal[0], origin, _terminal[1], backlog_id)
