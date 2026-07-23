@@ -71,7 +71,7 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
         choose. Returns a short numbered list of topics and their state. Use this
         ONLY when the caller is unsure which thread they want — if they've already
         told you, just open it."""
-        entries = catalog.entries()[:20]
+        entries = catalog.entries(limit=20)
         _last.clear()
         _last.extend(entries)
         if not entries:

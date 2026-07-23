@@ -95,13 +95,17 @@ class ThreadCatalog:
                             status=self._status(tdir), updated_at=updated_at,
                             urgent=self._urgent(tdir))
 
-    def entries(self) -> list[CatalogEntry]:
-        """Every live thread as a catalog entry, in ``ThreadManager.list`` order
+    def entries(self, limit: int | None = None) -> list[CatalogEntry]:
+        """Live threads as catalog entries, in ``ThreadManager.list`` order
         (mtime-descending, soft-deleted filtered). One dir scan for the ids; a few
-        small sidecar reads each."""
+        small sidecar reads each. ``limit`` stops after that many entries — since the
+        order is mtime-descending, that's the most-recent N, so the latency-sensitive
+        listing path reads only N threads' sidecars instead of every thread's."""
         out: list[CatalogEntry] = []
         for tid in self._manager.list():
             entry = self.get(tid)
             if entry is not None:
                 out.append(entry)
+                if limit is not None and len(out) >= limit:
+                    break
         return out
