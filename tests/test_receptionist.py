@@ -174,6 +174,20 @@ def test_open_thread_topic_resolves_full_catalog_not_stale_listing(tmp_path):
     assert "banana" in reply
 
 
+def test_open_thread_bound_tracks_only_current_thread(tmp_path):
+    # _bound is a size-1 "currently connected" holder: re-opening the CURRENT thread
+    # is a no-op, but opening a different one and coming back re-binds (not treated
+    # as already-connected).
+    opened = []
+    _mk(tmp_path, "a", description="apple")
+    _mk(tmp_path, "b", description="banana")
+    tools = _tools(tmp_path, ["Home"], opened=opened)
+    tools["open_thread"]("apple")          # bind a
+    tools["open_thread"]("banana")         # switch to b
+    tools["open_thread"]("apple")          # current is b, so a re-binds
+    assert opened == ["a", "b", "a"]
+
+
 def test_open_thread_ambiguous_asks(tmp_path):
     opened = []
     _mk(tmp_path, "a", description="trip to Rome")
