@@ -330,6 +330,9 @@ they get no geo and the agent can't reason about "where I am" on those. Fix: per
 - Every turn's rider resolves geo as: the live fix if present → else the <24h last-seen →
   else no geo. Interactive turns still prefer the live fix. Ties into the coarse-persisted /
   ephemeral-precise privacy model already designed for the rider.
+** TODO Per-thread memory — a /tmp memory file that survives only the thread
+An additional memory location in =/tmp= so that it only survives the thread and not in the workspace. Guidance on when to use one memory file over the other: =/workspace/AGENTS.md= for facts about the user, preferences, and forward-looking rules that outlive any single conversation; =/tmp/memory.md= for thread-local learnings (codebase state, current SHA, roadmap understanding, session context) that evolve with the work in progress and should not persist beyond the thread.
+
 ** TODO Add TIMEZONE to the context rider (so the agent always knows location AND tz)
 The rider carries the message TIME (#153) but the agent should also always know the user's
 current TIMEZONE — for relative-date + travel reasoning without guessing. Add tz to the
