@@ -53,9 +53,14 @@ class ThreadCatalog:
     def _description(self, tdir: str) -> str:
         try:
             with open(os.path.join(tdir, _DESCRIPTION_FILE)) as f:
-                return f.read().strip() or "New thread"
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        return line     # first non-empty line — a one-line summary, so
+                                        # an embedded newline can't break a numbered/spoken list
         except Exception:
-            return "New thread"     # missing/unreadable ⇒ not generated here (needs a model)
+            pass
+        return "New thread"     # missing/unreadable/blank ⇒ not generated here (needs a model)
 
     def _status(self, tdir: str) -> str:
         try:

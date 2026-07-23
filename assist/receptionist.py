@@ -78,8 +78,11 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
             return "There are no threads yet — we can start a new one."
         lines = []
         for i, e in enumerate(entries, 1):
-            tag = (" (urgent)" if e.urgent
-                   else "" if e.status == "ready" else f" ({e.status})")
+            # urgent and a busy stage are orthogonal (a thread can be urgent AND
+            # processing) — show both so the caller doesn't lose either signal.
+            marks = (["urgent"] if e.urgent else []) + \
+                    ([] if e.status == "ready" else [e.status])
+            tag = f" ({', '.join(marks)})" if marks else ""
             lines.append(f"{i}. {e.description}{tag}")
         return "\n".join(lines)
 

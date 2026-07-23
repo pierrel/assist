@@ -116,6 +116,13 @@ def test_list_threads_numbers_and_tags(tmp_path):
     assert lines[1] == "2. trip planning (processing)"
 
 
+def test_list_threads_urgent_and_busy_show_both_tags(tmp_path):
+    # urgent and a busy stage are orthogonal — the tag must not drop the stage.
+    _mk(tmp_path, "a", description="deploy", stage="processing", urgent=True)
+    out = _tools(tmp_path, ["Home"])["list_threads"]()
+    assert out.splitlines()[0] == "1. deploy (urgent, processing)"
+
+
 def test_list_threads_empty(tmp_path):
     out = _tools(tmp_path, ["Home"])["list_threads"]()
     assert "no threads" in out.lower()
