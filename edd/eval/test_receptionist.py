@@ -15,6 +15,7 @@ generalization, not lexical echo).
 import json
 import os
 import re
+import shutil
 import tempfile
 from unittest import TestCase
 
@@ -73,6 +74,7 @@ class _Call:
 class TestReceptionist(TestCase):
     def _dir(self, **threads):
         root = tempfile.mkdtemp(prefix="receptionist_eval_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         for tid, kw in threads.items():
             _mk(root, tid, **kw)
         return root

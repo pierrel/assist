@@ -64,7 +64,7 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
     and ``_bound`` (the thread already connected this session) are per-session
     state."""
     _last: list = []
-    _bound: list = []   # the tid this session is already connected to (idempotent open)
+    _bound: list = []   # size-1 holder of the tid this session is connected to (idempotent open)
 
     def list_threads() -> str:
         """List the caller's existing conversation threads so you can help them
@@ -112,7 +112,7 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
             on_open(entry.id)
         except Exception:
             return "Sorry — I couldn't connect you to that one. Want to try another?"
-        _bound.append(entry.id)
+        _bound[:] = [entry.id]   # only the current binding matters; keep it size-1
         return f"Connecting you to the {entry.description} thread."
 
     def new_thread(domain: str, first_message: str) -> str:
