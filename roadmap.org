@@ -117,7 +117,7 @@ Idea (from 2026-06-15):
 - Watch the trade-off: over-aggressive extraction can drop tables/code/lists the
   research actually needs; the fallback exists for exactly that.  Validate with
   research evals (report still cites the right facts/URLs) before defaulting.
-** TODO Research resilience to search rate-limiting + =read_url= link exploration
+** DONE Research resilience to search rate-limiting + =read_url= link exploration
 Observed 2026-07-02, thread =20260702160303-2ba1f923= ("Research good coffee
 shops with WiFi within walking distance of Fellow Barber, 1398 Valencia St SF"):
 the agent gave up with "couldn't look this up because web search is currently
@@ -160,7 +160,7 @@ Two work items:
    unlocks a path the guard already allows but =read_url= never exposed. Validate
    with research evals; watch the char budget (links compete with content —
    maybe a separate =read_url_links= tool, or a links section appended).
-** TODO Research agent must NOT judge distances/travel — the routing tool does
+** DONE Research agent must NOT judge distances/travel — the routing tool does
 Observed 2026-07-02 (threads =...160303=, =...202502=, "coffee shops near Fellow
 Barber"): the research/critique agent ESTIMATED walking times by counting blocks
 by hand ("18th to 24th is ~6 blocks south -> ~0.5 mi, 8-10 min") — the report
@@ -254,7 +254,7 @@ Related: the distances item + [[queued-research-rate-limit-resilience]] above.
 guards will have run on real research traffic, so there's a log/thread history to
 audit for false positives.
 * Maps
-** TODO Bias travel/location responses to a map render block
+** DONE Bias travel/location responses to a map render block
 The map render block ships (PR #166), but the agent only maps when explicitly
 asked.  Bias it to ALSO emit a map for travel/location-shaped answers (routes,
 "how far", "near", places with addresses) — the map complements the prose, never
@@ -273,7 +273,7 @@ clamp to the last day of that month rather than skip or roll into the next —
 pick the least-surprising rule and lock it with a test.
 
 * Queue management
-** TODO Fair scheduling — pause large jobs so small jobs can complete (round-robin / preemptive)
+** DONE Fair scheduling — pause large jobs so small jobs can complete (round-robin / preemptive)
 *Motivation (observed 2026-07-08).* Thread =20260707142207-80e10495= (a peptides
 fact-check turn) held the queue for *68 minutes* while *5–6 other threads sat
 queued behind it*. Today's =THREAD_QUEUE= is *one turn at a time* (single
@@ -395,7 +395,7 @@ release → worker crash — fixed in emacsos by pinning the generator to a
 
 *Related (hygiene, NOT the fix).*  Branch =isolate-subagent-checkpointer= (assist, pushed/unmerged, commit f93d451): gives each ephemeral sub-agent its own =InMemorySaver= instead of the parent's persistent one.  Correct on its own — merge when convenient — but it does not resolve the wedge (confirmed by the dump).
 
-** TODO Org mid-section-split bug re-regressed on the current model
+** DONE Org mid-section-split bug re-regressed on the current model
 =test_org_insertion::TestAddTopLevelSection::test_does_not_split_section= has drifted from
 its ~4/5 historical baseline (docs/2026-06-03-org-insertion-mid-section.org) to ~1/3 on the
 current Qwen3.6 — INDEPENDENT of the edit-files skill (isolation: 1/3 WITHOUT edit-files,
@@ -614,7 +614,7 @@ subagent tool calls — they go through the same chain.
    "args canonicalizer" hooks per tool, or accept that some tools
    bypass the cassette.
 
-** TODO Refresh sandbox container TTL on activity (assist-side)
+** DONE Refresh sandbox container TTL on activity (assist-side)
 The sandbox container's PID 1 is currently =sleep 3600=
 (=dockerfiles/Dockerfile.sandbox:71=), so any thread that runs longer
 than an hour loses its container mid-flight.  Symptom:
@@ -745,12 +745,10 @@ detector with a single terminal behavior (strip-to-END).  The six-pattern /
 two-behavior tangle, the finalize-via-=jump_to= path, the per-turn nudge scan,
 and most thresholds/knobs are gone, so there's no longer a structure worth a
 dedicated refactor.
-** TODO Explore converting the remaining A/B detection to prompt guidance
-Reduced scope after the rollback (PR #128).  Per AGENTS.md "guidance over
-middleware": the only deterministic guard left is exact-repeat detection
-(A/B).  Open question is whether even that can move to prompt/skill guidance or
-stay as a thin backstop.  Lower priority now that the aggressive, misfiring
-patterns are gone.
+
+
+** TODO Middleware agent for detecting loops
+After ~20 steps in a single turn. Could unlock bringing back the general agent. Also adding the read_url tools back to the orchestrator and general agents.
 
 * Web UI — thread list
 ** DONE Thread list ordering by status then last-message age
