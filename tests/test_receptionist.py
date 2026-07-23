@@ -252,6 +252,16 @@ def test_new_thread_ambiguous_domain_asks_which(tmp_path):
     assert "Home" in reply and "Homework" in reply   # asks which
 
 
+def test_new_thread_empty_first_message_elicits_not_creates(tmp_path):
+    # The model can fire new_thread before it has the ask — an empty/whitespace
+    # first_message must NOT create a useless thread; elicit what they want.
+    created = []
+    tools = _tools(tmp_path, ["Home"], created=created)
+    reply = tools["new_thread"]("Home", "   ")
+    assert created == []                             # nothing created
+    assert "what would you like" in reply.lower()
+
+
 def test_new_thread_no_domains_configured(tmp_path):
     created = []
     tools = _tools(tmp_path, [], created=created)
