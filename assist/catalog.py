@@ -60,9 +60,12 @@ class ThreadCatalog:
     def _status(self, tdir: str) -> str:
         try:
             with open(os.path.join(tdir, _STATUS_FILE)) as f:
-                return str(json.load(f).get("stage", "ready"))
+                stage = json.load(f).get("stage")
         except Exception:
             return "ready"          # missing/corrupt ⇒ the same default _get_status uses
+        # A non-string stage (null/number in otherwise-valid JSON) is corrupt too:
+        # degrade to the default rather than surface "None"/"123" to a client.
+        return stage if isinstance(stage, str) and stage else "ready"
 
     def _urgent(self, tdir: str) -> bool:
         try:

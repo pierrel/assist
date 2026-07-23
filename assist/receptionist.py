@@ -88,10 +88,12 @@ def receptionist_tools(catalog, domains, on_open, on_new) -> list:
         from the list or a few words from its topic ('the trip one'). Call this as
         soon as you know which thread the caller wants — you do not need to list
         first if they already told you."""
-        # A number resolves against the list the caller actually heard (_last,
-        # itself capped at 20); a topic/id must reach ANY thread, so fall back to
-        # the full catalog — not the top 20 — or older threads become unrouteable.
-        entries = _last or catalog.entries()
+        # A number refers to the list the caller actually heard (_last, itself
+        # capped at 20); a topic or id must reach ANY thread, so resolve those
+        # against the FULL catalog — never the capped listing, or older threads
+        # become unopenable by name once the caller has listed.
+        stripped = str(selector or "").strip()
+        entries = (_last or catalog.entries()) if stripped.isdigit() else catalog.entries()
         entry, ambiguous = _resolve(selector, entries)
         if entry is None:
             if ambiguous:
