@@ -43,6 +43,8 @@ where reliability is harder than with frontier APIs.
   - **Org-format skill** scopes editing rules to `.org` files
     (heading-body discipline, no orphaned content) without affecting
     other formats.
+  - **Web rendering skill** displays workspace files and generated PNG
+    graphs directly in the conversation.
 
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught

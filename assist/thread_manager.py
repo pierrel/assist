@@ -357,7 +357,7 @@ class ThreadManager:
     # SIBLING of the working dir (not under it, so it isn't part of the agent's
     # /workspace project tree).  Unlike the per-turn container's ephemeral /tmp,
     # this lives on the host and survives across turns — so a file the agent
-    # writes to /tmp (e.g. a .md copy of a non-showable file, to render) is still
+    # writes to /tmp (e.g. a converted copy or generated image artifact) is still
     # there next turn and is reachable by the web renderer.  Removed with the
     # thread dir on hard_delete.
     def thread_tmp_dir(self, tid: str) -> str:

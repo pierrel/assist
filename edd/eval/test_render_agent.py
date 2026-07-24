@@ -14,6 +14,7 @@ skill over keeping a tool.)
 """
 import os
 import re
+import shutil
 import tempfile
 from textwrap import dedent
 from unittest import TestCase
@@ -22,6 +23,7 @@ from deepagents.backends import FilesystemBackend
 
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
+from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 
 from .utils import create_filesystem
@@ -33,6 +35,14 @@ _RENDER_SKILLS_DIR = os.path.join(
 # A render block: a fenced ```render whose body has type: file and the path.
 _RENDER_BLOCK = re.compile(r"```render\b(.*?)```", re.S | re.I)
 
+# Complete 1x1 transparent PNG used when the graph already exists. Keeping a
+# real image here prevents routing evals from accepting a broken browser image.
+_ONE_PIXEL_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c6360606060000000050001a5f645400000000049454e44"
+    "ae426082"
+)
+
 
 def _personal_workspace() -> dict:
     return {
@@ -42,7 +52,12 @@ def _personal_workspace() -> dict:
             ** 2026
             | date | dist (yd) | time | weight |
             |------+-----------+------+--------|
-            | 1/5  |      2600 | 1h   |  168.4 |
+            | 6/1  |      3200 | 1h10m |  169.4 |
+            | 6/8  |      3400 | 1h12m |  168.6 |
+            | 6/15 |      3300 | 1h10m |  167.4 |
+            | 6/24 |      3500 | 1h15m |  166.4 |
+            | 7/1  |      3600 | 1h15m |  167.4 |
+            | 7/23 |      3700 | 1h20m |  166.6 |
             """),
         "swim-workouts.org": "* Swim Workouts\n** 6/9/26 Mixed Stroke (~3000 yd)\n",
         "health.org": "* Wellness visits\n| Test | 2024 |\n|------+------|\n| LDL | 129 |\n",
@@ -66,17 +81,72 @@ class TestRenderAgent(TestCase):
         return AgentHarness(create_agent(self.model, root,
                                          spec=AgentSpec(skill_sources=skills)))
 
-    def _render_block_paths(self, agent) -> list:
+    def create_sandbox_agent(self, filesystem: dict):
+        """Production-shaped agent: real Docker execute + persistent sibling /tmp."""
+        thread_root = tempfile.mkdtemp(prefix="render_graph_eval_")
+        workspace = os.path.join(thread_root, "domain")
+        os.mkdir(workspace)
+        create_filesystem(workspace, filesystem)
+        sandbox = SandboxManager.get_sandbox_backend(workspace)
+        if sandbox is None:
+            shutil.rmtree(thread_root)
+            self.skipTest("Docker sandbox unavailable — is assist-sandbox built?")
+        self.addCleanup(shutil.rmtree, thread_root, True)
+        self.addCleanup(SandboxManager.cleanup, workspace)
+        skills = {"/render-skill/": FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
+                                                      virtual_mode=True)}
+        agent = AgentHarness(create_agent(
+            self.model, workspace, sandbox_backend=sandbox,
+            spec=AgentSpec(skill_sources=skills)))
+        return agent, thread_root
+
+    def _render_block_paths(self, agent, message_count: int = 0) -> list[str]:
         """Bodies of render blocks the AGENT emitted — only AIMessage content, so
         the loaded skill's own example blocks (a ToolMessage) don't count."""
         from langchain_core.messages import AIMessage
         bodies = []
-        for m in agent.all_messages():
+        for m in agent.all_messages()[message_count:]:
             if not isinstance(m, AIMessage):
                 continue
             content = m.content if isinstance(m.content, str) else ""
             bodies.extend(b for b in _RENDER_BLOCK.findall(content) if "type:" in b.lower())
         return bodies
+
+    def _png_path(self, blocks: list[str], thread_root: str) -> str | None:
+        """Host path named by the last PNG file render block."""
+        for body in reversed(blocks):
+            match = re.search(r"(?mi)^path:\s*(.+?\.png)\s*$", body)
+            if not match:
+                continue
+            path = match.group(1)
+            if path.startswith("/tmp/"):
+                return os.path.join(thread_root, "tmp", path.removeprefix("/tmp/"))
+            if path.startswith("/workspace/"):
+                return os.path.join(thread_root, "domain",
+                                    path.removeprefix("/workspace/"))
+        return None
+
+    def _assert_no_skill_file_detour(self, calls: list[dict]):
+        """The named skill tool replaces filesystem discovery of SKILL.md."""
+        detours = [
+            call for call in calls
+            if call.get("name") != "load_skill"
+            and any(marker in str(call.get("args") or {}).lower()
+                    for marker in ("skill.md", "/render-skill"))
+        ]
+        self.assertFalse(detours, f"render skill read as an ordinary file: {detours}")
+
+    def _put_png_in_workspace(self, thread_root: str, name: str):
+        path = os.path.join(thread_root, "domain", name)
+        with open(path, "wb") as image:
+            image.write(_ONE_PIXEL_PNG)
+
+    def _assert_valid_png(self, blocks: list[str], thread_root: str):
+        path = self._png_path(blocks, thread_root)
+        self.assertIsNotNone(path, f"no PNG path in render blocks: {blocks}")
+        self.assertTrue(os.path.isfile(path), f"rendered PNG does not exist: {path}")
+        with open(path, "rb") as image:
+            self.assertEqual(image.read(8), b"\x89PNG\r\n\x1a\n")
 
     def test_emits_render_block_for_named_file(self):
         """Example-thread shape: 'show me <named file>' in a realistic workspace
@@ -144,6 +214,102 @@ class TestRenderAgent(TestCase):
                         if p:
                             paths.append(str(p))
         return paths
+
+    def _tool_calls(self, agent) -> list[dict]:
+        """Every structured tool call emitted by the agent."""
+        from langchain_core.messages import AIMessage
+        return [
+            call
+            for message in agent.all_messages()
+            if isinstance(message, AIMessage)
+            for call in (getattr(message, "tool_calls", None) or [])
+        ]
+
+    def _render_skill_was_loaded(self, agent) -> bool:
+        """True only for the load_skill tool contract, never a SKILL.md path read."""
+        return any(
+            call.get("name") == "load_skill"
+            and (call.get("args") or {}).get("name") == "render"
+            for call in self._tool_calls(agent)
+        )
+
+    def test_creates_and_renders_requested_graph(self):
+        """Production regression: asking to SEE a graph should load the web render
+        skill and finish with an image render block, not create a PNG and summarize
+        it or claim that a text-only model cannot display it."""
+        agent, thread_root = self.create_sandbox_agent(_personal_workspace())
+        agent.message("Can you show me a graph of how my weight has changed over the last 2 months?")
+        blocks = self._render_block_paths(agent)
+        self.assertTrue(self._render_skill_was_loaded(agent), "render skill should load")
+        self.assertTrue(
+            any("type: file" in b.lower() and ".png" in b.lower() for b in blocks),
+            f"expected a file render block naming a PNG; render blocks: {blocks}",
+        )
+        self._assert_valid_png(blocks, thread_root)
+
+    def test_render_existing_graph_followup_loads_skill(self):
+        """Generality: an unrelated existing visual is placed in the conversation."""
+        fs = dict(_personal_workspace())
+        agent, thread_root = self.create_sandbox_agent(fs)
+        self._put_png_in_workspace(thread_root, "weekly_laps.png")
+        agent.message("Put the picture at /workspace/weekly_laps.png in this conversation.")
+        blocks = self._render_block_paths(agent)
+        self.assertTrue(self._render_skill_was_loaded(agent), "render skill should load")
+        self.assertTrue(
+            any("type: file" in b.lower() and "weekly_laps.png" in b for b in blocks),
+            f"expected a file render block for weekly_laps.png; render blocks: {blocks}",
+        )
+        self._assert_valid_png(blocks, thread_root)
+
+    def test_named_render_skill_request_uses_load_skill(self):
+        """An explicit named-skill correction must call load_skill, not search for
+        and read the mounted SKILL.md as an ordinary workspace file."""
+        fs = dict(_personal_workspace())
+        agent, thread_root = self.create_sandbox_agent(fs)
+        self._put_png_in_workspace(thread_root, "pace_trend.png")
+        before = len(self._tool_calls(agent))
+        agent.message("Use the render skill to put /workspace/pace_trend.png in the conversation.")
+        calls = self._tool_calls(agent)[before:]
+        blocks = self._render_block_paths(agent)
+        self.assertTrue(self._render_skill_was_loaded(agent), "render skill should load")
+        self._assert_no_skill_file_detour(calls)
+        self.assertTrue(
+            any("type: file" in b.lower() and "pace_trend.png" in b for b in blocks),
+            f"expected a file render block for pace_trend.png; render blocks: {blocks}",
+        )
+        self._assert_valid_png(blocks, thread_root)
+
+    def test_graph_render_followup_sequence(self):
+        """Production flow through resolution: create/show graph, then the terse
+        render follow-up that originally failed. Stop once the request succeeds;
+        standalone named-skill coverage pins the separate correction contract."""
+        agent, thread_root = self.create_sandbox_agent(_personal_workspace())
+        before_graph = len(agent.all_messages())
+        agent.message("Can you show me a graph of how my weight has changed over the last 2 months?")
+        graph_calls = self._tool_calls(agent)
+        graph_blocks = self._render_block_paths(agent, before_graph)
+
+        before_render = len(agent.all_messages())
+        agent.message("Please render the graph here.")
+        render_followup_calls = self._tool_calls(agent)[len(graph_calls):]
+        blocks_after_render = self._render_block_paths(agent, before_render)
+
+        loaded_initially = any(
+            call.get("name") == "load_skill"
+            and (call.get("args") or {}).get("name") == "render"
+            for call in graph_calls
+        )
+        self.assertTrue(loaded_initially,
+                        f"initial graph request did not load render: {graph_calls}")
+        self.assertTrue(
+            any("type: file" in block.lower() and ".png" in block.lower()
+                for block in blocks_after_render),
+            f"render follow-up emitted no new PNG block; calls: "
+            f"{render_followup_calls}; blocks: {blocks_after_render}",
+        )
+        self._assert_no_skill_file_detour(render_followup_calls)
+        self._assert_valid_png(graph_blocks, thread_root)
+        self._assert_valid_png(blocks_after_render, thread_root)
 
     def test_shows_unsupported_file_instead_of_summarizing(self):
         """The 2026-07-08 regression: asked to SHOW a file whose extension isn't

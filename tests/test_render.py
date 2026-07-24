@@ -19,7 +19,6 @@ from manage.web.threads import (
     _show_src,
     _extract_pdf_pages,
     _RENDER_DISPATCH,
-    _SHOWABLE_EXTS,
 )
 
 
@@ -81,6 +80,13 @@ class TestFileEmbed:
         # sandbox WITHOUT allow-scripts so embedded content can't run JS.
         assert "sandbox=" in h and "allow-scripts" not in h
 
+    def test_png_uses_inline_image(self):
+        h = _file_embed_html("t1", "/tmp/weight_chart.png")
+        assert '<img class="show-file show-file-image"' in h
+        assert "/thread/t1/show?path=%2Ftmp%2Fweight_chart.png" in h
+        assert 'alt="Graph or image: /tmp/weight_chart.png"' in h
+        assert "<iframe" not in h and "<embed" not in h
+
     def test_path_is_url_quoted(self):
         assert "my%20report.org" in _file_embed_html("t1", "my report.org")
 
@@ -96,10 +102,10 @@ class TestFileEmbed:
     def test_render_file_block_renders_showable(self):
         assert "<iframe" in _render_file_block("t1", {"path": "/workspace/r.org"})
 
-    @pytest.mark.parametrize("name", ["a.org", "a.md", "a.pdf"])
+    @pytest.mark.parametrize("name", ["a.org", "a.md", "a.pdf", "a.png"])
     def test_every_embed_has_a_fullpage_link(self, name):
         # The full-page "view on its own page" affordance: every embed branch
-        # (md/org iframe + pdf embed) must carry a caption href to the /show page.
+        # (md/org iframe + PDF embed + PNG image) must carry a caption href to /show.
         h = _file_embed_html("t1", name)
         assert 'class="show-cap"' in h and "<a href=" in h
 
@@ -131,6 +137,13 @@ class TestRenderAssistantContent:
         out = _render_assistant_content("t1", raw)
         assert "show-embed" in out and "/thread/t1/show?path=" in out
         assert "```render" not in out
+
+    def test_png_render_block_becomes_inline_image(self):
+        raw = "```render\ntype: file\npath: /tmp/weight_chart.png\n```"
+        out = _render_assistant_content("t1", raw)
+        assert '<img class="show-file show-file-image"' in out
+        assert "/thread/t1/show?path=%2Ftmp%2Fweight_chart.png" in out
+        assert "<iframe" not in out and "```render" not in out
 
     def test_plain_markdown_untouched(self):
         out = _render_assistant_content("t1", "# Hi\n\n| a | b |\n|---|---|\n| 1 | 2 |\n")
@@ -235,6 +248,30 @@ class TestShowRoute:
         assert r.headers["content-type"] == "application/pdf"
         assert r.content == b"%PDF-1.4 fake bytes"
 
+    def test_tmp_png_block_renders_inline_and_serves_original_bytes(self, workspace):
+        # Complete, decodable 1x1 transparent PNG: the browser-visible contract
+        # is an image, not merely arbitrary bytes carrying a .png suffix.
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000d49444154789c6360606060000000050001a5f645400000000049454e44"
+            "ae426082"
+        )
+        tmp = workspace.parent / "tmp"
+        tmp.mkdir()
+        (tmp / "weight_chart.png").write_bytes(png)
+
+        rendered = _render_assistant_content(
+            "t1", "```render\ntype: file\npath: /tmp/weight_chart.png\n```")
+        assert '<img class="show-file show-file-image"' in rendered
+        assert "<iframe" not in rendered and "```render" not in rendered
+
+        response = TestClient(web.app).get(
+            "/thread/t1/show", params={"path": "/tmp/weight_chart.png"})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/png"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.content == png
+
     def test_missing_file_404(self, workspace):
         r = TestClient(web.app, raise_server_exceptions=False).get(
             "/thread/t1/show", params={"path": "nope.md"})
@@ -264,18 +301,6 @@ class TestShowRoute:
         r = TestClient(web.app, raise_server_exceptions=False).get(
             "/thread/t1/show", params={"path": "/tmp/summary.md"})
         assert r.status_code == 200 and "<h1>Summary</h1>" in r.text
-
-    def test_route_renders_every_showable_ext(self, workspace):
-        # Drift guard: _SHOWABLE_EXTS is the allow-list for the file embed AND
-        # this route; if the set lists an ext the route can't handle it would 415
-        # inside the embed. Assert the route renders (never 415s) each member.
-        for ext in _SHOWABLE_EXTS:
-            name = f"drift{ext}"
-            (workspace / name).write_text("# hi\n" if ext != ".pdf" else "%PDF-1.4 x")
-            r = TestClient(web.app, raise_server_exceptions=False).get(
-                "/thread/t1/show", params={"path": name})
-            assert r.status_code != 415, f"{ext} -> {r.status_code}"
-
 
 class TestOrgRender:
     """Pure-Python org renderer (no emacs — see the security note in threads.py)."""
