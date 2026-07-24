@@ -166,3 +166,56 @@ Whenever something lands on `main` — merged by Claude **or** by the user — d
 Do not leave `main` ahead of prod silently: a "merged but not deployed" gap is invisible until a live thread hits the missing behavior. (This bit us: in-repo domain skills + the `elisp` skill were merged but undeployed, so a thread couldn't see a committed in-repo skill — prod had no discovery code.)
 
 Caveat for in-repo skills specifically: the skill list is cached per session in the thread's checkpoint, so an **existing** thread won't pick up a newly-discovered domain skill even after deploy — a new chat will. New threads work immediately.
+
+# Development workflow (three-phase) — the process any agent follows here
+
+Non-trivial changes follow **Design → Code → Review**. *Blast radius, not line count, sets
+rigor* — a 6-line change to a lock, `THREAD_QUEUE`, the asyncio event loop, or the
+message-submit hot path (`manage/web/`) gets the FULL treatment, *especially* a rushed
+regression fix. Trivial fixes / doc edits / single-file no-behavior refactors skip it.
+
+**Phase 1 — Design (before any code).** Produce a numbered implementation plan (files to
+touch, file:line refs, trade-offs, risks). Then run the **design-review lenses** in
+`.claude/agents/design-reviewer.md` — one reviewer per lens (simplicity, agentic-fit,
+user-intention, UX-walk-the-flow, clean-interfaces, threat-model, event-loop-liveness).
+Read every report; revise the plan where well-founded, justify where not.
+- *Codex:* `codex exec "<architect brief>" -C .` for the plan; `codex exec "<lens brief + the plan>"`
+  per lens (fan out in the background).
+- *Claude Code:* the `Plan` subagent for the plan; one `general-purpose` subagent per lens.
+- Each non-trivial feature gets a `docs/<date>-<slug>.org` state doc.
+
+**Phase 2 — Code.** Implement against the plan; run the tests/evals; then the **code-review
+lenses** in `.claude/agents/code-reviewer.md` (simplicity, clean-code, adversarial-security
+[HARD for new network/root/untrusted-input code], event-loop-liveness, readability, existing-
+patterns, design-adherence, docstring-alignment [its own pass], shared-logic/LOC). Fix
+BLOCKER/IMPORTANT, re-run.
+- *Codex:* `codex review "<lens instructions>" --uncommitted` (or `--base main`) per lens; fan out.
+- *Claude Code:* one `code-reviewer` subagent per lens.
+
+**Phase 3 — Review + ship.** Run the **local review loop to convergence** (the global
+`~/.codex/AGENTS.md` "The loop"). Then **deploy from the feature branch for parallel testing**
+(`make deploy-code` + `make restart` — see the `make restart` hang gotcha), tell Pierre it's
+live, and open the GitHub PR + run the **Copilot loop** (bridge period; cap 7 rounds; log
+meaningful comments to `~/src/agentic/review-bridge-log.md`). Redeploy on every review-driven
+change. Then Pierre merges (commits landing on `main` need his go-ahead); re-pin the agentic
+submodule; deploy `main`.
+
+**Eval cadence (assist-specific — evals are the contract):** baseline N=3 (before) → post-impl
+N=3 → post-review N=5 → stability N=10. Treat any pass-rate drop vs the prior step as a
+regression. **Reproduce the failure in an eval FIRST**; measure, don't argue. Change one thing
+at a time. Mock the research sub-agent unless the eval tests search. Baseline a NEW eval on
+`main` first. Run evals via the deploy venv; respect the eval duty-cycle + (when re-enabled) the
+nightly-cron window — see the meta `AGENTS.md` "Infra & ops facts".
+
+**Branching:** off `main` only, never off another feature branch (wait for the dependency to
+merge). Commit/push freely on feature branches; commits that land on `main` need explicit
+go-ahead. Prefer ff merges. Deploy from a feature branch is OK, but only one branch is prod's
+source at a time (`deploy-code` is `rsync --delete`).
+
+**Load-bearing paths (trigger full rigor):** locks, `THREAD_QUEUE`, the single-worker-uvicorn
+event loop, the message-submit hot path (`manage/web/threads.py` `_process_message` / render).
+Test the symptom not a proxy; don't mock away the risk; verify under the failure condition;
+smoke `python -m manage.web` (systemd's entry) after a layout/packaging refactor.
+
+**Testing hygiene:** `pytest tests/` (mocked, fast) always after Python changes; `eldev lint` +
+`eldev test` after elisp. See "Testing guidelines" above for the research-mock rule.
