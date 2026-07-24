@@ -27,3 +27,5 @@ config.yml
 dist/
 build/lib/
 build/bdist.*/
+# Provisioned speech models are deploy artifacts, not source.
+/models/

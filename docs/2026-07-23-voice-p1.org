@@ -17,7 +17,8 @@ records the build plan grounded in the real code, the reconciliations, and statu
 | Thread | Owns | May NOT |
 |--------+------+---------|
 | WS loop (=@app.websocket("/call")=) | frame → =inbound_q.put=; =outbound_q.get_nowait= → =ws.send=; handshake/secret | any lock, file I/O, model, STT/TTS, flow.py, blocking =.get()= |
-| Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine → enqueue TTS onto =outbound_q= | (stays free during THINKING) |
+| Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine; schedule/cancel TTS | blocking TTS synthesis; stays free during THINKING and SPEAKING |
+| TTS producer (1/call) | synthesize sentence chunks → =outbound_q=; cancellation stops iteration before flush | flow.py, session state, observer callbacks |
 | Turn-runner (1/turn) | run =_process_message= so the session loop can journal a mid-turn steering utterance while the turn runs; observer fires here | — |
 =inbound_q=/=outbound_q= are =queue.Queue=. The WS loop is a pure shuttle.
 
@@ -27,9 +28,11 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    frame-in/event-out engine (VAD, endpointing, barge-in, DTMF). Zero web imports, no
    network, no threads, *no wall clock* (t derived from frame count → deterministic
    fixtures). Deps: =onnxruntime= + a bundled =silero_vad.onnx= (NOT the =silero-vad=
-   pip pkg — see Reconciliations). *← current PR.*
+   pip pkg — see Reconciliations). *DONE (PR #209).*
 2. *PR2 — =speech.py= + =tests/voice/test_speech.py=* — lazy in-proc =faster-whisper=
-   (STT) + =piper= (TTS), on the session/turn thread. Deps: faster-whisper, piper-tts.
+   (STT) + =piper= (TTS), synchronously off the event loop; PR4 owns thread scheduling.
+   Deps: faster-whisper, piper-tts.
+   *← current PR.*
 3. *PR3 — frame codec + =tests/voice/fake_bridge.py= + =wire.py= skeleton* — the WS
    protocol (§2) + §8 resource caps, echo-level.
 4. *PR4 — =session.py=* — the state machine + call-event log + conversational contract,
@@ -65,6 +68,11 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    DTMF-only scope (=vad=False=, GREETING_PIN) never loads onnxruntime/the model, and
    scripted-prob tests never touch it. Sound improvement; the only I/O stays the model load.
    (Also: silero v5 prepends 64 samples of carried context per 512-window → 576-sample input.)
+7. *TTS on the session thread (design §5/§6) → a serialized per-call TTS producer.*
+   Piper blocks while producing each sentence. If the session loop synthesized directly,
+   it could not drain inbound PCM into =flow.py=, making barge-in impossible during that
+   interval. The session remains the sole Flow/state owner and only schedules/cancels TTS;
+   the producer emits PCM chunks and stops before the session sends =flush_uplink=.
 
 * Reuse map (do NOT re-derive)
 - =manage/web/threads.py=: =plan_turn=:2682, =route_turn=:2706, =register_turn_observer=:1411,
@@ -91,7 +99,7 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 | observer double-speak filter | test_session.py idle-turn + observer = one speak |
 | event log reconstructs the call | scripted-call boundary-sequence assertion |
 | STT WER ≤ target + no_speech_prob discriminates | test_speech.py real clip + noise clip |
-| /tts correct-rate PCM | test_speech.py sample-rate + peak |
+| in-process TTS API produces correct-rate PCM | test_speech.py sample-rate + peak |
 
 * Status
 - [X] Design read; architect build plan produced + reconciled; dep footprint de-risked (torch-free).
@@ -107,12 +115,16 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
       without it the VAD returned ~0 on ALL audio (would have silently detected nothing in prod).
       **flow.py PR1 is complete — 19 flow tests** (incl. the review-round DTMF gap-tolerance + DTMF-scope
       assert). Local review round 1: 1 IMPORTANT (DTMF glitch → duplicate digit) + nits fixed.
-- [ ] PR2–PR5 per the slicing above. Speech deps (faster-whisper, piper-tts) are INSTALLED + round-trip
-      verified (piper→whisper transcribed verbatim) but NOT yet in requirements.txt (that's PR2).
+- [ ] PR2: =manage/voice/speech.py= — independently lazy faster-whisper =base.en= CPU STT +
+      Piper TTS, synchronous/off-event-loop; raw s16le/16 kHz boundary; sentence-chunk iterator
+      preserves cancellation for PR4. Unit contract complete; real Whisper + Piper model checks pass.
+- [ ] PR3–PR5 per the slicing above.
 
 * Notes for Pierre
 - Deps landed in =requirements.txt=: =onnxruntime==1.27.0= (+ flatbuffers, protobuf) — lean, torch-free.
   The silero =silero_vad.onnx= (2.3 MB, official snakers4 repo) is committed under =manage/voice/assets/=.
-- faster-whisper + piper-tts are installed in the venv + round-trip verified, but pinned in requirements
-  only when PR2 (=speech.py=) lands. All torch-free. Speech models (whisper base.en ~150MB; a piper voice)
-  download at runtime/deploy — not committed. Deploy needs =make deploy-install= (venv rebuild) for P1.
+- faster-whisper + piper-tts are pinned for PR2. All torch-free. Speech models (whisper
+  base.en ~150MB; a Piper voice) are provisioned outside a live call and are not committed.
+  Deploy needs =make deploy-install= (venv rebuild) for P1.
+- PR4 scheduling constraint from review: observers enqueue text only; TTS must not run in an
+  observer or block the session's inbound-frame drain, so barge-in remains live during synthesis.
