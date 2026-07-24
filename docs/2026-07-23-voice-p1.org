@@ -98,14 +98,15 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 - [X] PR1: =manage/voice/flow.py= — =DtmfDetector= (in-band Goertzel) + the =Flow= engine (silero
       VAD via onnxruntime, lazy-loaded from =assets/silero_vad.onnx=; endpointing 200ms-open/700ms-close/
       30s-max; barge-in raised-threshold+sustain, gated by =set_speaking=; detector scoping via vad/dtmf
-      flags). 17 tests: DTMF (8, dep-free), endpointing/barge-in (deterministic via scripted VAD probs),
-      frame→512-window buffering, DTMF-only scope, real-silero-on-silence no-false-fire. onnxruntime +
-      the ONNX model committed.
+      flags). Tests: DTMF (dep-free), endpointing/barge-in (deterministic via scripted VAD probs),
+      frame→512-window buffering, DTMF-only scope (asserts VAD never runs), real-silero-on-silence
+      no-false-fire. onnxruntime + the ONNX model committed.
 - [X] PR1 real-speech integration: silero *fires* on a real (piper-synthesized) speech clip and
       endpoints it — committed fixture =tests/voice/fixtures/speech_16k.wav=. This caught a REAL bug:
       silero v5 prepends 64 samples of carried context to each 512-window (model input is 576, not 512);
-      without it the VAD returned ~0 on ALL audio (would have silently detected nothing in prod). 18 tests.
-      **flow.py PR1 is complete — ready to open.**
+      without it the VAD returned ~0 on ALL audio (would have silently detected nothing in prod).
+      **flow.py PR1 is complete — 19 flow tests** (incl. the review-round DTMF gap-tolerance + DTMF-scope
+      assert). Local review round 1: 1 IMPORTANT (DTMF glitch → duplicate digit) + nits fixed.
 - [ ] PR2–PR5 per the slicing above. Speech deps (faster-whisper, piper-tts) are INSTALLED + round-trip
       verified (piper→whisper transcribed verbatim) but NOT yet in requirements.txt (that's PR2).
 

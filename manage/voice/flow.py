@@ -47,10 +47,11 @@ class DtmfDetector:
 
     ``feed(frame) -> digit | None`` returns a digit exactly ONCE per keypress: when a
     valid single tone-pair holds for ``min_frames`` consecutive frames it fires, then
-    stays silent until the tone drops (an invalid/idle frame) — so a held key yields
-    one digit and two presses (with a gap) yield two. Rejects speech/noise by requiring
-    a dominant single tone in each group holding a large share of frame energy, within
-    a lenient twist band.
+    stays latched until the key RELEASES — release needs ``release_frames`` consecutive
+    non-tone frames, so a held key survives a brief mid-hold dropout (a lossy codec drops
+    frames) as one digit, while two presses separated by a real gap yield two. Rejects
+    speech/noise by requiring a dominant single tone in each group holding a large share
+    of frame energy, within a lenient twist band.
     """
 
     def __init__(self, *, min_frames: int = 2, release_frames: int = 2,
