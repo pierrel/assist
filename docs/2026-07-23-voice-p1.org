@@ -61,6 +61,10 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    (onnxruntime CPU)"; the intent is the ONNX model run via =onnxruntime.Session=. Verified
    torch-free footprint (dry-run 2026-07-23): onnxruntime→{onnxruntime,protobuf};
    faster-whisper→{av,ctranslate2,onnxruntime}; piper-tts→{onnxruntime}. NO torch/CUDA.
+6. *VAD load timing: construction (design §5) → LAZY on the first VAD window.* So a
+   DTMF-only scope (=vad=False=, GREETING_PIN) never loads onnxruntime/the model, and
+   scripted-prob tests never touch it. Sound improvement; the only I/O stays the model load.
+   (Also: silero v5 prepends 64 samples of carried context per 512-window → 576-sample input.)
 
 * Reuse map (do NOT re-derive)
 - =manage/web/threads.py=: =plan_turn=:2682, =route_turn=:2706, =register_turn_observer=:1411,

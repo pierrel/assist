@@ -53,8 +53,17 @@ def test_each_digit_detected_once():
 
 def test_leading_edge_debounce_two_presses():
     det = DtmfDetector()
-    frames = _tone_frames("5", 4) + [_silence_frame()] + _tone_frames("5", 4)
-    assert _feed(det, frames) == ["5", "5"]        # gap between presses ⇒ two digits
+    # a real inter-digit release (≥ release_frames of silence) separates two presses
+    frames = _tone_frames("5", 4) + [_silence_frame()] * 2 + _tone_frames("5", 4)
+    assert _feed(det, frames) == ["5", "5"]
+
+
+def test_held_key_survives_a_frame_dropout():
+    # A single glitched frame mid-hold (lossy codec) must NOT split a held key into two
+    # digits — only a full release_frames gap re-arms.
+    det = DtmfDetector()
+    frames = _tone_frames("5", 3) + [_silence_frame()] + _tone_frames("5", 3)
+    assert _feed(det, frames) == ["5"]             # one keypress despite the dropout
 
 
 def test_min_frames_gates_a_blip():

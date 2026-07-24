@@ -53,9 +53,10 @@ class DtmfDetector:
     a lenient twist band.
     """
 
-    def __init__(self, *, min_frames: int = 2, energy_frac: float = 0.3,
-                 group_dominance: float = 0.25, twist=(0.1, 10.0)):
+    def __init__(self, *, min_frames: int = 2, release_frames: int = 2,
+                 energy_frac: float = 0.3, group_dominance: float = 0.25, twist=(0.1, 10.0)):
         self._min_frames = min_frames
+        self._release_frames = release_frames     # non-tone frames needed to re-arm (gap tolerance)
         self._energy_frac = energy_frac
         self._group_dominance = group_dominance   # 2nd tone in a group must be < this × the top
         self._twist_lo, self._twist_hi = twist
@@ -67,6 +68,7 @@ class DtmfDetector:
         self._cur: str | None = None
         self._count = 0
         self._emitted = False
+        self._gap = 0
 
     def _candidate(self, samples: np.ndarray) -> str | None:
         """The valid DTMF digit in this frame, or None (silence/speech/noise)."""
@@ -93,8 +95,14 @@ class DtmfDetector:
         samples = np.frombuffer(frame, dtype="<i2").astype(np.float64)
         cand = self._candidate(samples)
         if cand is None:
-            self._cur, self._count, self._emitted = None, 0, False
+            # Tolerate a brief tone dropout mid-hold (a lossy codec drops frames): only
+            # re-arm after release_frames of continuous non-tone, so a single glitched
+            # frame during a held key can't split it into a duplicate digit.
+            self._gap += 1
+            if self._gap >= self._release_frames:
+                self._cur, self._count, self._emitted = None, 0, False
             return None
+        self._gap = 0
         if cand == self._cur:
             self._count += 1
         else:
@@ -141,19 +149,18 @@ class Flow:
     """
 
     def __init__(self, *, vad: bool = True, dtmf: bool = True, speaking: bool = False,
-                 model_path: str = _MODEL_PATH, open_ms: int = 200, close_ms: int = 700,
-                 max_utt_ms: int = 30_000, vad_threshold: float = 0.5,
-                 bargein_threshold: float = 0.7, bargein_sustain_ms: int = 300):
+                 open_ms: int = 200, close_ms: int = 700, max_utt_ms: int = 30_000,
+                 vad_threshold: float = 0.5, bargein_threshold: float = 0.7,
+                 bargein_sustain_ms: int = 300):
         self._dtmf = DtmfDetector() if dtmf else None
         self._vad = vad
         self._speaking = speaking
-        self._model_path = model_path
         self._vad_threshold = vad_threshold
         self._bargein_threshold = bargein_threshold
         # thresholds in whole VAD windows (ceil, so "≥200 ms" needs a full 200 ms)
         self._open_win = -(-open_ms // _VAD_WIN_MS)
         self._close_win = -(-close_ms // _VAD_WIN_MS)
-        self._max_utt_win = max_utt_ms // _VAD_WIN_MS
+        self._max_utt_win = max_utt_ms // _VAD_WIN_MS   # floor: the cap is a ceiling on length
         self._bargein_win = -(-bargein_sustain_ms // _VAD_WIN_MS)
         # rolling state
         self._buf = np.zeros(0, dtype=np.int16)
@@ -183,7 +190,7 @@ class Flow:
         if self._sess is None:
             import onnxruntime as ort
             self._sess = ort.InferenceSession(
-                self._model_path, providers=["CPUExecutionProvider"])
+                _MODEL_PATH, providers=["CPUExecutionProvider"])
         inp = np.concatenate([self._context, window]).reshape(1, -1)
         out = self._sess.run(None, {"input": inp, "state": self._state,
                                     "sr": np.array(SAMPLE_RATE, dtype=np.int64)})
@@ -222,7 +229,8 @@ class Flow:
             self._utt.append(win_bytes)
             self._silence_run = 0 if is_speech else self._silence_run + 1
             if self._silence_run >= self._close_win or len(self._utt) >= self._max_utt_win:
-                events.append(Utterance(b"".join(self._utt), len(self._utt) * _VAD_WIN_MS))
+                keep = len(self._utt) - self._silence_run    # drop the trailing close-silence
+                events.append(Utterance(b"".join(self._utt[:keep]), keep * _VAD_WIN_MS))
                 self._in_utt, self._utt = False, []
                 self._silence_run = self._speech_run = 0
         return events
