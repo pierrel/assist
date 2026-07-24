@@ -66,6 +66,15 @@ def test_held_key_survives_a_frame_dropout():
     assert _feed(det, frames) == ["5"]             # one keypress despite the dropout
 
 
+def test_pre_confirm_jitter_does_not_emit():
+    # tone/silence/tone BEFORE confirmation must not emit — confirmation needs
+    # min_frames CONSECUTIVE tone frames; gap-tolerance is held-key-only (post-emit).
+    det = DtmfDetector(min_frames=2)
+    frames = (_tone_frames("5", 1) + [_silence_frame()]
+              + _tone_frames("5", 1) + [_silence_frame()])
+    assert _feed(det, frames) == []
+
+
 def test_min_frames_gates_a_blip():
     det = DtmfDetector(min_frames=2)
     # a single-frame blip (20 ms) is below the 40 ms floor ⇒ nothing

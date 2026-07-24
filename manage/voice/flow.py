@@ -96,11 +96,15 @@ class DtmfDetector:
         samples = np.frombuffer(frame, dtype="<i2").astype(np.float64)
         cand = self._candidate(samples)
         if cand is None:
-            # Tolerate a brief tone dropout mid-hold (a lossy codec drops frames): only
-            # re-arm after release_frames of continuous non-tone, so a single glitched
-            # frame during a held key can't split it into a duplicate digit. Cap _gap at
-            # the threshold so a long silence between presses can't grow it unbounded.
-            if self._gap < self._release_frames:
+            if not self._emitted:
+                # Before a digit is confirmed, any non-tone frame breaks the run —
+                # confirmation needs min_frames CONSECUTIVE tone frames (no jitter emit).
+                self._cur, self._count = None, 0
+            elif self._gap < self._release_frames:
+                # AFTER emission, tolerate a brief mid-hold dropout (a lossy codec drops
+                # frames): re-arm only after release_frames of continuous non-tone, so a
+                # held key can't split into a duplicate digit. Cap _gap so a long silence
+                # between presses can't grow it unbounded.
                 self._gap += 1
                 if self._gap >= self._release_frames:
                     self._cur, self._count, self._emitted = None, 0, False
