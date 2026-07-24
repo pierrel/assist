@@ -160,7 +160,7 @@ class Flow:
         # thresholds in whole VAD windows (ceil, so "≥200 ms" needs a full 200 ms)
         self._open_win = -(-open_ms // _VAD_WIN_MS)
         self._close_win = -(-close_ms // _VAD_WIN_MS)
-        self._max_utt_win = max_utt_ms // _VAD_WIN_MS   # floor: the cap is a ceiling on length
+        self._max_utt_win = max(1, max_utt_ms // _VAD_WIN_MS)   # ≥1: a sub-window cap can't close-on-open
         self._bargein_win = -(-bargein_sustain_ms // _VAD_WIN_MS)
         # rolling state
         self._buf = np.zeros(0, dtype=np.int16)

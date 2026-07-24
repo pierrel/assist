@@ -216,10 +216,14 @@ def test_feed_buffers_frames_into_windows():
     assert flow._windows == 16 * FRAME_SAMPLES // _VAD_WIN   # 10
 
 
-def test_dtmf_scope_only(monkeypatch):
-    # A GREETING_PIN-scoped flow (vad=False) still detects DTMF and never touches VAD.
-    flow = Flow(vad=False)
+def test_dtmf_scope_only():
+    # A GREETING_PIN-scoped flow (vad=False) still detects DTMF and NEVER touches VAD
+    # (no STT/model pre-auth, §8) — _speech_prob raising proves it's never invoked.
+    class _NoVad(Flow):
+        def _speech_prob(self, window):
+            raise AssertionError("VAD must not run in a DTMF-only scope")
     import manage.voice.flow as flowmod
+    flow = _NoVad(vad=False)
     digits = []
     for f in _tone_frames("7", 5):
         digits += [e.digit for e in flow.feed(f) if isinstance(e, flowmod.Dtmf)]
