@@ -4,6 +4,8 @@ The DTMF detector is pure DSP — no ML model, no wall clock — so we synthesiz
 tones and drive them frame-by-frame. Time is the frame count; every assertion is
 reproducible.
 """
+import os
+
 import numpy as np
 
 from manage.voice.flow import (
@@ -222,3 +224,22 @@ def test_real_silero_silence_no_utterance():
     for _ in range(60):                         # ~1.2s of silence
         events += flow.feed(_silence_frame())
     assert _types(events, Utterance) == [] and _types(events, VadOpen) == []
+
+
+def test_real_silero_fires_on_speech():
+    # The real ONNX model on a real (piper-synthesized) speech clip: silero fires and
+    # the utterance endpoints. Closes the model-fires integration gap the scripted
+    # tests can't cover; the clip is a committed fixture (piper 16kHz s16le).
+    import wave
+    fix = os.path.join(os.path.dirname(__file__), "fixtures", "speech_16k.wav")
+    with wave.open(fix, "rb") as w:
+        assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (16000, 1, 2)
+        pcm = w.readframes(w.getnframes())
+    flow = Flow()
+    events = []
+    for i in range(0, len(pcm) - FRAME_BYTES + 1, FRAME_BYTES):
+        events += flow.feed(pcm[i:i + FRAME_BYTES])
+    for _ in range(50):                      # ≥700ms trailing silence forces the endpoint close
+        events += flow.feed(_silence_frame())
+    assert len(_types(events, VadOpen)) >= 1        # silero fired on the speech
+    assert len(_types(events, Utterance)) >= 1      # and the utterance endpointed

@@ -27,6 +27,7 @@ FRAME_BYTES = FRAME_SAMPLES * 2                  # 640 (s16le)
 # delivers 20 ms frames, so the engine buffers frames and drains 512-sample windows;
 # time is the window count (deterministic), never a wall clock.
 _VAD_WIN = 512
+_VAD_CTX = 64                                     # silero v5 prepends the last 64 samples
 _VAD_WIN_MS = _VAD_WIN * 1000 // SAMPLE_RATE      # 32
 _MODEL_PATH = os.path.join(os.path.dirname(__file__), "assets", "silero_vad.onnx")
 
@@ -159,6 +160,7 @@ class Flow:
         self._windows = 0
         self._sess = None
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        self._context = np.zeros(_VAD_CTX, dtype=np.float32)   # carried between windows
         self._in_utt = False
         self._speech_run = 0
         self._silence_run = 0
@@ -176,15 +178,16 @@ class Flow:
             self._bargein_fired = False
 
     def _speech_prob(self, window: np.ndarray) -> float:
-        """silero speech probability for one 512-sample float window (lazy-loaded)."""
+        """silero speech probability for one 512-sample float window (lazy-loaded).
+        v5 takes 64 samples of carried context prepended to the window (576 total)."""
         if self._sess is None:
             import onnxruntime as ort
             self._sess = ort.InferenceSession(
                 self._model_path, providers=["CPUExecutionProvider"])
-        out = self._sess.run(None, {"input": window.reshape(1, -1),
-                                    "state": self._state,
+        inp = np.concatenate([self._context, window]).reshape(1, -1)
+        out = self._sess.run(None, {"input": inp, "state": self._state,
                                     "sr": np.array(SAMPLE_RATE, dtype=np.int64)})
-        self._state = out[1]
+        self._state, self._context = out[1], window[-_VAD_CTX:]
         return float(out[0][0, 0])
 
     def _vad_window(self, win: np.ndarray) -> list:

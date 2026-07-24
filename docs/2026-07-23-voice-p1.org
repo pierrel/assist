@@ -97,13 +97,17 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
       flags). 17 tests: DTMF (8, dep-free), endpointing/barge-in (deterministic via scripted VAD probs),
       frame→512-window buffering, DTMF-only scope, real-silero-on-silence no-false-fire. onnxruntime +
       the ONNX model committed.
-- [ ] PR1 remaining before opening the PR: a real-SPEECH endpointing fixture (silero *fires* on speech +
-      endpoints) — needs a speech clip; generate one with piper once PR2's TTS lands (or a committed clip).
-      The endpointing *logic* is already fully covered by the scripted-prob tests; this is the model-fires
-      integration assert. Then flow.py PR1 opens.
-- [ ] PR2–PR5 per the slicing above.
+- [X] PR1 real-speech integration: silero *fires* on a real (piper-synthesized) speech clip and
+      endpoints it — committed fixture =tests/voice/fixtures/speech_16k.wav=. This caught a REAL bug:
+      silero v5 prepends 64 samples of carried context to each 512-window (model input is 576, not 512);
+      without it the VAD returned ~0 on ALL audio (would have silently detected nothing in prod). 18 tests.
+      **flow.py PR1 is complete — ready to open.**
+- [ ] PR2–PR5 per the slicing above. Speech deps (faster-whisper, piper-tts) are INSTALLED + round-trip
+      verified (piper→whisper transcribed verbatim) but NOT yet in requirements.txt (that's PR2).
 
 * Notes for Pierre
 - Deps landed in =requirements.txt=: =onnxruntime==1.27.0= (+ flatbuffers, protobuf) — lean, torch-free.
   The silero =silero_vad.onnx= (2.3 MB, official snakers4 repo) is committed under =manage/voice/assets/=.
-  faster-whisper + piper follow in PR2. These need =make deploy-install= (venv rebuild) when P1 deploys.
+- faster-whisper + piper-tts are installed in the venv + round-trip verified, but pinned in requirements
+  only when PR2 (=speech.py=) lands. All torch-free. Speech models (whisper base.en ~150MB; a piper voice)
+  download at runtime/deploy — not committed. Deploy needs =make deploy-install= (venv rebuild) for P1.
