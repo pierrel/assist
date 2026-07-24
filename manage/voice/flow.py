@@ -98,10 +98,12 @@ class DtmfDetector:
         if cand is None:
             # Tolerate a brief tone dropout mid-hold (a lossy codec drops frames): only
             # re-arm after release_frames of continuous non-tone, so a single glitched
-            # frame during a held key can't split it into a duplicate digit.
-            self._gap += 1
-            if self._gap >= self._release_frames:
-                self._cur, self._count, self._emitted = None, 0, False
+            # frame during a held key can't split it into a duplicate digit. Cap _gap at
+            # the threshold so a long silence between presses can't grow it unbounded.
+            if self._gap < self._release_frames:
+                self._gap += 1
+                if self._gap >= self._release_frames:
+                    self._cur, self._count, self._emitted = None, 0, False
             return None
         self._gap = 0
         if cand == self._cur:
