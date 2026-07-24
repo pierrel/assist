@@ -16,7 +16,7 @@ from manage.voice.flow import (
 _PAIR = {d: pair for pair, d in _DIGITS.items()}
 
 
-def _tone_frames(digit, n_frames, *, amp=0.3, seed=0):
+def _tone_frames(digit, n_frames, *, amp=0.3):
     """`n_frames` 20 ms s16le frames of the two-sinusoid DTMF tone for `digit`."""
     low, high = _PAIR[digit]
     total = FRAME_SAMPLES * n_frames
