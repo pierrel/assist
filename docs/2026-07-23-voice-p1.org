@@ -91,12 +91,19 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 
 * Status
 - [X] Design read; architect build plan produced + reconciled; dep footprint de-risked (torch-free).
-- [X] PR1 start: =manage/voice/flow.py= =DtmfDetector= (in-band Goertzel) + tests — dep-free, deterministic.
-- [ ] PR1 cont: VAD (silero-onnx via onnxruntime) + endpointing + barge-in + the =feed()= engine + WAV fixtures.
-      Needs =onnxruntime= installed (lean, torch-free) — a venv/requirements change (flag to Pierre).
+- [X] PR1: =manage/voice/flow.py= — =DtmfDetector= (in-band Goertzel) + the =Flow= engine (silero
+      VAD via onnxruntime, lazy-loaded from =assets/silero_vad.onnx=; endpointing 200ms-open/700ms-close/
+      30s-max; barge-in raised-threshold+sustain, gated by =set_speaking=; detector scoping via vad/dtmf
+      flags). 17 tests: DTMF (8, dep-free), endpointing/barge-in (deterministic via scripted VAD probs),
+      frame→512-window buffering, DTMF-only scope, real-silero-on-silence no-false-fire. onnxruntime +
+      the ONNX model committed.
+- [ ] PR1 remaining before opening the PR: a real-SPEECH endpointing fixture (silero *fires* on speech +
+      endpoints) — needs a speech clip; generate one with piper once PR2's TTS lands (or a committed clip).
+      The endpointing *logic* is already fully covered by the scripted-prob tests; this is the model-fires
+      integration assert. Then flow.py PR1 opens.
 - [ ] PR2–PR5 per the slicing above.
 
-* Open decisions for Pierre
-- *Dep install target:* onnxruntime (PR1) + faster-whisper/piper (PR2) into the assist venv
-  (=requirements.txt=) — lean + torch-free, but a prod-venv change (the venv is deploy-shared).
-  Recommend adding to requirements + the deploy venv as each PR lands (not a separate dev venv).
+* Notes for Pierre
+- Deps landed in =requirements.txt=: =onnxruntime==1.27.0= (+ flatbuffers, protobuf) — lean, torch-free.
+  The silero =silero_vad.onnx= (2.3 MB, official snakers4 repo) is committed under =manage/voice/assets/=.
+  faster-whisper + piper follow in PR2. These need =make deploy-install= (venv rebuild) when P1 deploys.

@@ -33,6 +33,7 @@ fastapi==0.128.0
 filelock==3.20.3
 filetype==1.2.0
 flake8==7.3.0
+flatbuffers==25.12.19
 frozenlist==1.8.0
 fsspec==2026.1.0
 google-auth==2.53.0
@@ -85,6 +86,7 @@ mpmath==1.3.0
 multidict==6.7.0
 networkx==3.6.1
 numpy==2.4.1
+onnxruntime==1.27.0
 openai==2.15.0
 orjson==3.11.5
 ormsgpack==1.12.1
@@ -100,6 +102,7 @@ posthog==7.5.1
 primp==0.15.0
 prompt_toolkit==3.0.52
 propcache==0.4.1
+protobuf==7.35.1
 ptyprocess==0.7.0
 pure_eval==0.2.3
 pyasn1==0.6.1

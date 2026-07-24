@@ -107,3 +107,118 @@ def test_wrong_frame_size_raises():
     import pytest
     with pytest.raises(ValueError):
         det.feed(b"\x00" * (FRAME_BYTES - 2))
+
+
+# ── endpointing / barge-in (deterministic via scripted VAD probabilities) ──────
+
+from manage.voice.flow import (  # noqa: E402
+    _VAD_WIN, BargeIn, Flow, Utterance, VadOpen,
+)
+
+_ZWIN = np.zeros(_VAD_WIN, dtype=np.int16)
+
+
+class _ScriptedFlow(Flow):
+    """Flow whose VAD probabilities are scripted — tests the endpointing/barge-in
+    timing logic with zero dependence on the ONNX model (never loaded)."""
+
+    def __init__(self, probs, **kw):
+        super().__init__(**kw)
+        self._scripted = list(probs)
+        self._i = 0
+
+    def _speech_prob(self, window):
+        p = self._scripted[self._i] if self._i < len(self._scripted) else 0.0
+        self._i += 1
+        return p
+
+
+def _windows(flow, probs):
+    """Drive `len(probs)` VAD windows; return the events (probs come from the flow)."""
+    out = []
+    for _ in probs:
+        out += flow._vad_window(_ZWIN)
+    return out
+
+
+def _types(events, kind):
+    return [e for e in events if isinstance(e, kind)]
+
+
+def test_endpoints_a_full_utterance():
+    # 200ms open (7 win) then 700ms trailing silence (22 win) ⇒ one open + one utterance.
+    probs = [0.9] * 10 + [0.1] * 25
+    flow = _ScriptedFlow(probs)
+    events = _windows(flow, probs)
+    assert len(_types(events, VadOpen)) == 1
+    utts = _types(events, Utterance)
+    assert len(utts) == 1 and utts[0].dur_ms > 0
+
+
+def test_short_speech_never_opens():
+    # 3 speech windows (~96ms) is below the 200ms open floor ⇒ nothing.
+    probs = [0.9] * 3 + [0.1] * 10
+    events = _windows(_ScriptedFlow(probs), probs)
+    assert _types(events, VadOpen) == [] and _types(events, Utterance) == []
+
+
+def test_barge_in_only_while_speaking():
+    probs = [0.9] * 12
+    on = _windows(_ScriptedFlow(probs, speaking=True), probs)
+    off = _windows(_ScriptedFlow(probs, speaking=False), probs)
+    assert len(_types(on, BargeIn)) == 1        # sustained speech while speaking fires once
+    assert _types(off, BargeIn) == []           # not while the agent is silent
+
+
+def test_barge_in_needs_sustain():
+    # 5 speech windows (~160ms) is below the 300ms sustain floor ⇒ no barge-in.
+    probs = [0.9] * 5 + [0.1] * 5
+    events = _windows(_ScriptedFlow(probs, speaking=True), probs)
+    assert _types(events, BargeIn) == []
+
+
+def test_set_speaking_rearms_barge_in():
+    flow = _ScriptedFlow([0.9] * 12 + [0.9] * 12, speaking=True)
+    first = _windows(flow, [0.9] * 12)
+    flow.set_speaking(False)                    # reply ends
+    flow.set_speaking(True)                     # next reply starts
+    second = _windows(flow, [0.9] * 12)
+    assert len(_types(first, BargeIn)) == 1 and len(_types(second, BargeIn)) == 1
+
+
+def test_max_utterance_cap_closes():
+    # Continuous speech never hits trailing silence ⇒ the max-utterance cap closes it.
+    probs = [0.9] * 15
+    flow = _ScriptedFlow(probs, max_utt_ms=320)   # cap = 10 windows
+    events = _windows(flow, probs)
+    assert len(_types(events, Utterance)) == 1
+
+
+def test_feed_buffers_frames_into_windows():
+    # 16 frames × 320 samples = 5120 samples = exactly 10 VAD windows.
+    class _Counter(Flow):
+        def _speech_prob(self, window):
+            return 0.0
+    flow = _Counter()
+    for _ in range(16):
+        flow.feed(_silence_frame())
+    assert flow._windows == 16 * FRAME_SAMPLES // _VAD_WIN   # 10
+
+
+def test_dtmf_scope_only(monkeypatch):
+    # A GREETING_PIN-scoped flow (vad=False) still detects DTMF and never touches VAD.
+    flow = Flow(vad=False)
+    import manage.voice.flow as flowmod
+    digits = []
+    for f in _tone_frames("7", 5):
+        digits += [e.digit for e in flow.feed(f) if isinstance(e, flowmod.Dtmf)]
+    assert digits == ["7"]
+
+
+def test_real_silero_silence_no_utterance():
+    # The real ONNX model (lazy-loaded) on silence: near-zero prob ⇒ no utterance.
+    flow = Flow()                               # vad=True, real silero
+    events = []
+    for _ in range(60):                         # ~1.2s of silence
+        events += flow.feed(_silence_frame())
+    assert _types(events, Utterance) == [] and _types(events, VadOpen) == []
