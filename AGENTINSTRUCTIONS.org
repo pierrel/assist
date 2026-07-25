@@ -17,6 +17,13 @@ are complete. The commands use the current production values: =SERVICE_NAME= is
 =assist-web= and =ASSIST_PORT= is =5050=. Check those entries in =.deploy.env= first and
 substitute their values below if the deployment configuration has changed.
 
+Run the =make= commands from the canonical checkout, which contains the production
+=.deploy.env=. Feature worktrees deliberately do not contain that untracked configuration:
+
+#+begin_src sh
+cd ~/src/agentic/assist
+#+end_src
+
 * 1. Create the bearer secret
 
 #+begin_src sh
