@@ -23,7 +23,8 @@ possible, we should enable it. Plan when we pick this up:
 - When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
   subagent rather than strip).
 * Architecture
-** TODO One Agent Protocol-shaped runs interface + async-only subagents
+** DONE One Agent Protocol-shaped runs interface + async-only subagents
+Shipped for review 2026-07-24 in [[https://github.com/pierrel/assist/pull/212][assist PR #212]].
 Make assistants/threads/runs the sole web execution interface while retaining the global
 =THREAD_QUEUE= and llama.cpp =--parallel 1=. Every interactive, scheduled, SMS, recovery,
 continuation, and child-agent job becomes a durable run; the existing web behavior rides
