@@ -70,7 +70,11 @@ def test_interrupted_protocol_run_cannot_be_restarted(service):
 
 def test_transitions_are_validated(service):
     run = service.create("t1", "general-agent", "hello")
+    with pytest.raises(ValueError, match="active_ms cannot be negative"):
+        service.transition("t1", run.id, "pending", active_ms=-1)
     service.claim("t1", run.id)
+    with pytest.raises(ValueError, match="active_ms cannot be negative"):
+        service.transition("t1", run.id, "success", active_ms=-1)
     done = service.transition("t1", run.id, "success")
     assert done.status == "success"
     with pytest.raises(InvalidRunTransition):
@@ -159,3 +163,13 @@ def test_dispatch_key_create_is_atomic(service):
 
     assert len({run.id for run in created}) == 1
     assert len(service.list("t1")) == 1
+
+
+def test_scan_children_does_not_parse_visible_run_histories(service, tmp_path):
+    service.create("t1", "general-agent", "visible")
+    child = service.create(
+        "t2", "context-agent", "hidden", mode="child",
+        parent_thread_id="t1", parent_run_id="parent-run",
+        dispatch_key="work:tool", hidden=True)
+
+    assert service.scan_children() == [child]
