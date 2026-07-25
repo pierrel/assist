@@ -68,7 +68,12 @@ children were removed afterward.
    completion does not wake the parent. Cancellation is durable first, then asks
    the active child to stop at its next model boundary. Neither operation
    preempts an in-flight inference or tool call.
-9. Subagents are direct leaf graphs and receive no delegation tools.
+9. Public task status describes the logical chain, not merely its newest control
+   Run: active work remains =running= behind a queued update or cancellation,
+   while a terminal resumed slice resolves its historical interruption. The
+   cancellation tool reports the post-operation truth, distinguishing a requested
+   boundary stop from an immediately completed cancellation.
+10. Subagents are direct leaf graphs and receive no delegation tools.
 
 * What “interrupt” means after this change
 

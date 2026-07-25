@@ -262,7 +262,7 @@ def _cancel_async_task(
         return f"Task `{task_id}` already completed with status {before['status']}."
     if before.get("status") == "cancelled":
         return f"Task `{task_id}` is already cancelled."
-    verb = "Cancellation requested" if after.get("status") == "pending" else "Task cancelled"
+    verb = "Cancellation requested" if after.get("status") == "running" else "Task cancelled"
     return verb + ": " + _format_task(after, include_result=False)
 
 

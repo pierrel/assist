@@ -37,11 +37,22 @@ class WebAgentProtocolService:
         self._admission_lock = threading.Lock()
 
     @staticmethod
+    def _task_active(runs: list) -> bool:
+        if any(candidate.status == "running" for candidate in runs):
+            return True
+        latest_nonpending = next(
+            (candidate for candidate in reversed(runs)
+             if candidate.status != "pending"), None)
+        return (latest_nonpending is not None
+                and latest_nonpending.status == "interrupted")
+
+    @staticmethod
     def _task_snapshot(thread_id: str, runs: list) -> dict | None:
         if not runs or runs[0].mode != "child":
             return None
         latest = runs[-1]
         first = runs[0]
+        active = WebAgentProtocolService._task_active(runs)
         description = next(
             (candidate.text for candidate in reversed(runs) if candidate.text),
             "")
@@ -49,7 +60,7 @@ class WebAgentProtocolService:
             "task_id": thread_id,
             "agent_name": latest.assistant_id,
             "description": description,
-            "status": "running" if latest.status == "interrupted" else latest.status,
+            "status": "running" if active else latest.status,
             "run_id": latest.id,
             "work_id": latest.work_id,
             "parent_thread_id": first.parent_thread_id,
@@ -181,7 +192,7 @@ class WebAgentProtocolService:
                     raise HTTPException(status_code=409, detail="Task key conflict")
                 return replay
             interrupt = multitask_strategy == "interrupt"
-            active = any(run.status in {"running", "interrupted"} for run in runs)
+            active = self._task_active(runs)
             if (interrupt and runs and not active
                     and runs[-1].status in TERMINAL_STATUSES):
                 raise HTTPException(status_code=409, detail="Task already completed")

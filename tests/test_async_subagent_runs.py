@@ -159,6 +159,8 @@ def test_update_queues_behind_running_slice_without_preemption(
         metadata={**metadata, "dispatch_key": "update"})
 
     assert update.status == "pending"
+    assert SERVICE.get_thread("sub-stable")["values"]["async_task"][
+        "status"] == "running"
     assert submitted == []
     first = threads._runs().transition(
         first.thread_id, first.id, "success", result="obsolete")
@@ -185,9 +187,25 @@ def test_interrupted_child_recovery_creates_one_resume(monkeypatch, tmp_path):
     assert resumes[0].resume is True
     assert resumes[0].active_ms == 25
 
+    resumed = threads._runs().claim(child.thread_id, resumes[0].id)
+    resumed = threads._runs().transition(
+        child.thread_id, resumed.id, "success", result="done")
+    task = SERVICE.get_thread(child.thread_id)["values"]["async_task"]
+    assert task["status"] == "success"
+    assert task["result"] == "done"
+    with pytest.raises(Exception, match="Task already completed"):
+        SERVICE.create_run(
+            child.thread_id, "context-agent", "too late",
+            multitask_strategy="interrupt",
+            metadata={
+                "parent_thread_id": child.parent_thread_id,
+                "parent_run_id": child.parent_run_id,
+                "dispatch_key": "late-update",
+            })
+
 
 def test_cancel_running_task_requests_a_boundary_stop(monkeypatch, tmp_path):
-    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
     child = SERVICE.create_run(
         "sub-stable", "context-agent", "inspect", metadata=metadata)
     assert SERVICE.cancel_run("sub-stable", child.id).status == "cancelled"
@@ -201,6 +219,34 @@ def test_cancel_running_task_requests_a_boundary_stop(monkeypatch, tmp_path):
     assert marker.status == "pending"
     assert marker.multitask_strategy == "cancel"
     assert threads._runs().get("sub-stable", other.id).status == "running"
+    assert SERVICE.get_thread("sub-stable")["values"]["async_task"][
+        "status"] == "running"
+    configure_async_subagent_app(web._agent_app)
+    with async_task_context(AsyncTaskContext(
+            "parent", parent.id, parent.work_id)):
+        response = TOOLS["cancel_async_task"].func(
+            "sub-stable", SimpleNamespace(tool_call_id="cancel"))
+    assert response.startswith("Cancellation requested:")
+
+
+def test_cancel_interrupted_task_reports_immediate_cancellation(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    child = threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(child.thread_id, child.id, "interrupted")
+    threads._recover_interrupted_child(child)
+    configure_async_subagent_app(web._agent_app)
+
+    with async_task_context(AsyncTaskContext(
+            "parent", parent.id, parent.work_id)):
+        response = TOOLS["cancel_async_task"].func(
+            child.thread_id, SimpleNamespace(tool_call_id="cancel"))
+
+    assert response.startswith("Task cancelled:")
+    assert SERVICE.get_thread(child.thread_id)["values"]["async_task"][
+        "status"] == "cancelled"
 
 
 def test_cancel_queued_update_cancels_the_running_logical_task(
