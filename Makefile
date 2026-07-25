@@ -93,6 +93,12 @@ deploy-code:
 	@rsync -avz --delete \
 		--filter=':- .gitignore' \
 		--exclude '.git' \
+		--filter='H /.claude/' \
+		--filter='H /edd/eval-history/' \
+		--filter='H /edd/eval/cassettes/' \
+		--filter='H /edd/eval/test_shared_docs_skill.py' \
+		--filter='H /improvements/' \
+		--filter='H /roadmap.org_archive' \
 		./ $(DEPLOY_HOST):$(DEPLOY_PATH)/
 	@echo "✓ Code deployed"
 
