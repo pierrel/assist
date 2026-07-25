@@ -6,6 +6,7 @@ import threading
 import time
 
 logger = logging.getLogger(__name__)
+_ANY_CONTAINER = object()
 
 
 def _rewrite_localhost(value: str) -> str:
@@ -454,8 +455,16 @@ class SandboxManager:
             forget_client(egress_dir, ip)
 
     @classmethod
-    def cleanup(cls, work_dir: str) -> None:
+    def current_container(cls, work_dir: str):
+        """Return the registered container generation, if any."""
+        return cls._containers.get(work_dir)
+
+    @classmethod
+    def cleanup(cls, work_dir: str, expected_container=_ANY_CONTAINER) -> None:
         """Tear down the container for a work_dir. Removal is automatic (--rm).
+
+        With an ``expected_container``, cleanup is generation-safe: a stale turn
+        cannot remove a replacement registered for the same workspace.
 
         SIGKILL, not a graceful ``stop()``.  A sandbox has nothing to shut
         down gracefully — it is ``--rm`` and all durable work is already
@@ -465,6 +474,10 @@ class SandboxManager:
         SIGKILLs anyway.  Killing keeps the per-turn teardown off that 5s
         path (and the same applies to thread-delete and shutdown).
         """
+        container = cls._containers.get(work_dir)
+        if (expected_container is not _ANY_CONTAINER
+                and container is not expected_container):
+            return
         container = cls._containers.pop(work_dir, None)
         cls._forget_egress_client(work_dir)
         if container:

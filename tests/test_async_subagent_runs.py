@@ -1,13 +1,19 @@
-from concurrent.futures import ThreadPoolExecutor
 import os
-from threading import Event
 
 import pytest
-from fastapi import HTTPException
+from types import SimpleNamespace
+from fastapi.testclient import TestClient
 
-from assist.run_service import InvalidRunTransition
 from manage.web import threads
+import manage.web as web
+from assist.async_subagents import (
+    AsyncTaskContext, async_task_context, async_task_tools,
+    configure_async_subagent_app,
+)
 from manage.web.protocol_service import SERVICE
+
+
+TOOLS = {tool.name: tool for tool in async_task_tools}
 
 
 def _root(monkeypatch, tmp_path):
@@ -15,469 +21,362 @@ def _root(monkeypatch, tmp_path):
     submitted = []
     monkeypatch.setattr(
         threads._RESUME_SCHEDULER, "submit",
-        lambda run_id, tid: submitted.append((run_id, tid)))
+        lambda run_id, tid, **kwargs: submitted.append((run_id, tid, kwargs)))
     return submitted
 
 
-def test_child_dispatch_is_idempotent(monkeypatch, tmp_path):
+def _parent_and_metadata(monkeypatch, tmp_path):
     submitted = _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
     parent = threads._create_run("parent", "question")
-
-    first = threads._dispatch_child(parent, "work:call", "context-agent", "look")
-    second = threads._dispatch_child(parent, "work:call", "context-agent", "look")
-
-    assert second == first
-    assert set(submitted) == {(first["run_id"], first["thread_id"])}
-    child = threads._runs().get(first["thread_id"], first["run_id"])
-    assert len(threads._runs().list(first["thread_id"])) == 1
-    assert child.mode == "child"
-    assert child.parent_run_id == parent.id
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": parent.id,
+        "dispatch_key": f"{parent.work_id}:tool-1",
+    }
+    SERVICE.create_thread("sub-stable", metadata)
+    return submitted, parent, metadata
 
 
-def test_required_child_completion_creates_resume_invocation(monkeypatch, tmp_path):
+def test_agent_protocol_start_is_idempotent(monkeypatch, tmp_path):
+    submitted, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+
+    first = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect files", metadata=metadata)
+    second = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect files", metadata=metadata)
+
+    assert second.id == first.id
+    assert len(threads._runs().list("sub-stable")) == 1
+    assert first.mode == "child"
+    assert first.parent_run_id == parent.id
+    assert first.work_id == "sub-stable"
+    assert {item[:2] for item in submitted} == {(first.id, "sub-stable")}
+
+
+def test_five_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):
     submitted = _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
     parent = threads._create_run("parent", "question")
-    threads._runs().claim("parent", parent.id)
-    parent = threads._runs().transition(
-        "parent", parent.id, "interrupted", active_ms=321)
-    identity = threads._dispatch_child(
-        parent, "work:required", "context-agent", "inspect files")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
+    configure_async_subagent_app(web._agent_app)
+    runtime = lambda call_id: SimpleNamespace(tool_call_id=call_id)
 
-    class Chat:
-        def message(self, text):
-            assert text == "inspect files"
-            return "child result"
+    with async_task_context(
+            AsyncTaskContext("parent", parent.id, parent.work_id)):
+        launched = TOOLS["start_async_task"].func(
+            "inspect files", "context-agent", runtime("start"))
+        task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+        assert task_id in TOOLS["list_async_tasks"].func(runtime("list"))
+        assert '"status": "pending"' in TOOLS["check_async_task"].func(
+            task_id, runtime("check"))
+        assert "Task updated" in TOOLS["update_async_task"].func(
+            task_id, "inspect org files", runtime("update"))
+        assert "Task cancelled" in TOOLS["cancel_async_task"].func(
+            task_id, runtime("cancel"))
 
-    monkeypatch.setattr(threads, "_get_sandbox_backend", lambda tid: None)
-    monkeypatch.setattr(threads.MANAGER, "get", lambda *args, **kwargs: Chat())
-    monkeypatch.setattr(threads.SandboxManager, "cleanup", lambda path: None)
-    threads._execute_child_run(child)
-
-    successors = [run for run in threads._runs().list("parent")
-                  if run.id != parent.id]
-    assert len(successors) == 1
-    assert successors[0].work_id == parent.work_id
-    assert successors[0].active_ms == 321
-    assert successors[0].resume_value == "child result"
-    assert submitted[-1] == (successors[0].id, "parent")
+    assert submitted
 
 
-def test_cleanup_failure_does_not_prevent_child_handoff(monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    identity = threads._dispatch_child(
-        parent, "work:required", "context-agent", "inspect files")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
-
-    class Chat:
-        def message(self, text):
-            return "child result"
-
-    monkeypatch.setattr(threads, "_get_sandbox_backend", lambda tid: None)
-    monkeypatch.setattr(threads.MANAGER, "get", lambda *args, **kwargs: Chat())
-    monkeypatch.setattr(
-        threads.SandboxManager, "cleanup",
-        lambda path: (_ for _ in ()).throw(RuntimeError("cleanup failed")))
-
-    threads._execute_child_run(child)
-
-    successor = threads._runs().list("parent")[-1]
-    assert successor.resume_value == "child result"
-    assert submitted[-1] == (successor.id, "parent")
-
-
-def test_background_child_posts_follow_up_without_resuming_parent(
+def test_terminal_task_creates_one_ordinary_wake_and_retains_result(
         monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    identity = threads._dispatch_child(
-        parent, "work:background", "background-research-agent", "research")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
-
-    class Chat:
-        def message(self, text):
-            return "findings"
-
-    monkeypatch.setattr(threads, "_get_sandbox_backend", lambda tid: None)
-    monkeypatch.setattr(threads.MANAGER, "get", lambda *args, **kwargs: Chat())
-    monkeypatch.setattr(threads.SandboxManager, "cleanup", lambda path: None)
-    threads._execute_child_run(child)
-
-    follow_up = threads._runs().list("parent")[-1]
-    assert follow_up.origin == "continuation"
-    assert "findings" in follow_up.text
-    assert follow_up.resume_value is None
-    assert submitted[-1] == (follow_up.id, "parent")
-
-
-def test_recovery_scans_hidden_child_and_reconciles_success_once(
-        monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    threads._runs().claim("parent", parent.id)
-    threads._runs().transition("parent", parent.id, "interrupted")
-    identity = threads._dispatch_child(
-        parent, "work:recover", "context-agent", "inspect")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
-    threads._runs().claim(child.thread_id, child.id)
-    threads._runs().transition(child.thread_id, child.id, "success", result="done")
-    submitted.clear()
-
-    threads.queue_recovery_runs()
-    assert submitted == [(parent.id, "parent")]
-    threads._recover_run(threads._runs().get("parent", parent.id))
-    threads.queue_recovery_runs()
-
-    successors = [run for run in threads._runs().list("parent")
-                  if run.dispatch_key == f"child-resume:{child.id}"]
-    assert len(successors) == 1
-    assert successors[0].resume_value == "done"
-    assert (successors[0].id, "parent") in submitted
-
-
-def test_recovered_success_stays_success_when_handoff_must_retry(
-        monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    identity = threads._dispatch_child(
-        parent, "work:recover", "context-agent", "inspect")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
-    child = threads._runs().claim(child.thread_id, child.id)
-
-    class Snapshot:
-        next = ()
-        interrupts = ()
-
-    class Message:
-        type = "ai"
-        content = "recovered result"
-
-    class Chat:
-        runconfig = {}
-        agent = type("Agent", (), {"get_state": lambda self, config: Snapshot()})()
-
-        def get_raw_messages(self):
-            return [Message()]
-
-    monkeypatch.setattr(threads.MANAGER, "get", lambda *args, **kwargs: Chat())
-    monkeypatch.setattr(
-        threads, "_complete_child_handoff",
-        lambda run, result: (_ for _ in ()).throw(RuntimeError("retry later")))
-
-    with pytest.raises(RuntimeError, match="retry later"):
-        threads._recover_child_run(child)
-
-    recovered = threads._runs().get(child.thread_id, child.id)
-    assert recovered.status == "success"
-    assert recovered.result == "recovered result"
-
-
-def test_parent_delete_race_discards_completed_child(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    identity = threads._dispatch_child(
-        parent, "work:required", "context-agent", "inspect")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
-    real_create = threads._create_run
-
-    def delete_parent_then_create(*args, **kwargs):
-        threads.MANAGER.hard_delete("parent")
-        return real_create(*args, **kwargs)
-
-    monkeypatch.setattr(threads, "_create_run", delete_parent_then_create)
-
-    assert threads._complete_child_handoff(child, "result") is None
-    assert not os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
-
-
-def test_parent_delete_excludes_late_child_admission(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    scanned = Event()
-    finish_scan = Event()
-    real_scan = threads._runs().scan_children
-
-    def paused_scan():
-        snapshot = real_scan()
-        scanned.set()
-        assert finish_scan.wait(1)
-        return snapshot
-
-    monkeypatch.setattr(threads._runs(), "scan_children", paused_scan)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        deletion = pool.submit(threads._delete_thread_and_children, "parent")
-        assert scanned.wait(1)
-        admission = pool.submit(
-            threads._dispatch_child, parent, "work:late", "context-agent", "inspect")
-        finish_scan.set()
-        deletion.result()
-        with pytest.raises(FileNotFoundError):
-            admission.result()
-
-
-def test_parent_delete_reaps_child_waiting_for_resume(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    identity = threads._dispatch_child(
-        parent, "work:required", "context-agent", "inspect")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect files", metadata=metadata)
     threads._runs().claim(child.thread_id, child.id)
     child = threads._runs().transition(
-        child.thread_id, child.id, "success", result="done")
-    assert threads._complete_child_handoff(child, "done") is not None
+        child.thread_id, child.id, "success", result="child result")
 
-    threads._delete_thread_and_children("parent")
+    first = threads._complete_child_handoff(child)
+    second = threads._complete_child_handoff(child)
 
+    assert second.id == first.id
+    wakes = [run for run in threads._runs().list("parent")
+             if run.origin == "task-completion"]
+    assert len(wakes) == 1
+    assert wakes[0].resume is False
+    assert "Call check_async_task" in wakes[0].text
+    assert "child result" not in wakes[0].text
+    assert os.path.isdir(threads.MANAGER.thread_dir("sub-stable"))
+    task = SERVICE.get_thread("sub-stable")["values"]["async_task"]
+    assert task["status"] == "success"
+    assert task["result"] == "child result"
+    assert (wakes[0].id, "parent", {}) in submitted
+
+
+def test_parent_thread_lists_its_tasks(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "research-agent", "research", metadata=metadata)
+
+    values = SERVICE.get_thread("parent")["values"]
+    assert values["async_tasks"] == [{
+        "task_id": "sub-stable",
+        "agent_name": "research-agent",
+        "description": "research",
+        "status": "pending",
+        "run_id": child.id,
+        "work_id": "sub-stable",
+        "parent_thread_id": "parent",
+        "result": None,
+        "error": None,
+        "created_at": child.created_at,
+        "updated_at": child.updated_at,
+    }]
+
+
+def test_update_replaces_pending_slice_but_keeps_task_identity(
+        monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    first = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    update = {**metadata, "dispatch_key": "parent-work:update-tool"}
+
+    second = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect org only",
+        multitask_strategy="interrupt", metadata=update)
+    replay = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect org only",
+        multitask_strategy="interrupt", metadata=update)
+
+    assert threads._runs().get("sub-stable", first.id).status == "cancelled"
+    assert replay.id == second.id
+    assert second.work_id == first.work_id == "sub-stable"
+    assert SERVICE.get_thread("sub-stable")["values"]["async_task"][
+        "description"] == "inspect org only"
+
+
+def test_update_queues_behind_running_slice_without_preemption(
+        monkeypatch, tmp_path):
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    first = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(first.thread_id, first.id)
+    submitted.clear()
+
+    update = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect org only",
+        multitask_strategy="interrupt",
+        metadata={**metadata, "dispatch_key": "update"})
+
+    assert update.status == "pending"
+    assert submitted == []
+    first = threads._runs().transition(
+        first.thread_id, first.id, "success", result="obsolete")
+    assert threads._complete_child_handoff(first) is None
+    threads._dispatch_pending_after(first.thread_id, first.id)
+    assert submitted == [(update.id, update.thread_id, {"user_priority": False})]
+
+
+def test_interrupted_child_recovery_creates_one_resume(monkeypatch, tmp_path):
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    child = threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(child.thread_id, child.id, "interrupted",
+                                       active_ms=25)
+    submitted.clear()
+
+    threads._recover_interrupted_child(child)
+    threads._recover_interrupted_child(child)
+
+    resumes = [run for run in threads._runs().list(child.thread_id)
+               if run.dispatch_key == f"task-resume:{child.id}"]
+    assert len(resumes) == 1
+    assert resumes[0].resume is True
+    assert resumes[0].active_ms == 25
+
+
+def test_cancel_running_task_requests_a_boundary_stop(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    assert SERVICE.cancel_run("sub-stable", child.id).status == "cancelled"
+    assert SERVICE.cancel_run("sub-stable", child.id).status == "cancelled"
+
+    other_meta = {**metadata, "dispatch_key": "other"}
+    other = SERVICE.create_run(
+        "sub-stable", "context-agent", "again", metadata=other_meta)
+    threads._runs().claim("sub-stable", other.id)
+    marker = SERVICE.cancel_run("sub-stable", other.id)
+    assert marker.status == "pending"
+    assert marker.multitask_strategy == "cancel"
+    assert threads._runs().get("sub-stable", other.id).status == "running"
+
+
+def test_cancel_queued_update_cancels_the_running_logical_task(
+        monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    active = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(active.thread_id, active.id)
+    update = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect org",
+        multitask_strategy="interrupt",
+        metadata={**metadata, "dispatch_key": "update"})
+
+    marker = SERVICE.cancel_run(update.thread_id, update.id)
+
+    assert marker.multitask_strategy == "cancel"
+    assert threads._runs().get(update.thread_id, update.id).status == "cancelled"
+    assert threads._runs().get(active.thread_id, active.id).status == "running"
+
+
+def test_active_task_limit_is_parent_scoped(monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    monkeypatch.setattr(SERVICE, "MAX_ACTIVE_TASKS_PER_PARENT", 1)
+
+    with pytest.raises(Exception, match="Active task limit reached"):
+        SERVICE.create_thread("sub-second", {
+            "parent_thread_id": "parent",
+            "parent_run_id": parent.id,
+            "dispatch_key": "second",
+        })
+
+
+def test_retention_never_prunes_result_before_completion_wake_is_consumed(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(
+        child.thread_id, child.id, "success", result="needed result")
+    wake = threads._complete_child_handoff(child)
+    monkeypatch.setattr(SERVICE, "MAX_RETAINED_TASKS_PER_PARENT", 1)
+
+    SERVICE.create_thread("sub-next", {
+        "parent_thread_id": "parent",
+        "parent_run_id": parent.id,
+        "dispatch_key": "next",
+    })
+
+    assert os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
+    threads._runs().claim("parent", wake.id)
+    threads._runs().transition("parent", wake.id, "interrupted")
+    unrelated = threads._create_run("parent", "new user turn")
+    threads._runs().claim("parent", unrelated.id)
+    threads._runs().transition("parent", unrelated.id, "success")
+    SERVICE.create_thread("sub-during-pause", {
+        "parent_thread_id": "parent",
+        "parent_run_id": parent.id,
+        "dispatch_key": "during-pause",
+    })
+    assert os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
+    resumed_wake = threads._create_run(
+        "parent", None, work_id=wake.work_id, resume=True)
+    threads._runs().claim("parent", resumed_wake.id)
+    threads._runs().transition("parent", resumed_wake.id, "success")
+    SERVICE.create_thread("sub-after-consume", {
+        "parent_thread_id": "parent",
+        "parent_run_id": parent.id,
+        "dispatch_key": "after-consume",
+    })
     assert not os.path.exists(threads.MANAGER.thread_dir(child.thread_id))
 
 
-def test_concurrent_required_children_admit_only_one(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
+def test_task_description_survives_fair_resume_generation(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    original = SERVICE.create_run(
+        "sub-stable", "context-agent", "original", metadata=metadata)
+    update = SERVICE.create_run(
+        "sub-stable", "context-agent", "updated intent",
+        multitask_strategy="interrupt",
+        metadata={**metadata, "dispatch_key": "update"})
+    update = threads._runs().claim(update.thread_id, update.id)
+    update = threads._runs().transition(update.thread_id, update.id, "interrupted")
+    threads._recover_interrupted_child(update)
 
-    def dispatch(key):
-        return threads._dispatch_child(
-            parent, key, "context-agent", f"inspect {key}")
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(dispatch, key) for key in ("work:a", "work:b")]
-    results = []
-    errors = []
-    for future in futures:
-        try:
-            results.append(future.result())
-        except InvalidRunTransition as exc:
-            errors.append(exc)
-
-    assert len(results) == 1
-    assert len(errors) == 1
+    task = SERVICE.get_thread(original.thread_id)["values"]["async_task"]
+    assert task["description"] == "updated intent"
 
 
-def test_concurrent_background_children_cannot_cross_chain_cap(
+def test_recovery_honors_persisted_cancel_before_resuming(
         monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    monkeypatch.setattr(
-        threads, "_continuation_chain_len", lambda tid: threads.CHAIN_CAP - 1)
-
-    def dispatch(key):
-        return threads._dispatch_child(
-            parent, key, "background-research-agent", f"research {key}")
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(dispatch, key) for key in ("work:a", "work:b")]
-    results = []
-    errors = []
-    for future in futures:
-        try:
-            results.append(future.result())
-        except InvalidRunTransition as exc:
-            errors.append(exc)
-
-    assert len(results) == 1
-    assert len(errors) == 1
-
-
-def test_each_child_task_has_an_isolated_checkpoint(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-
-    background = threads._dispatch_child(
-        parent, "work:bg", "background-research-agent", "research")
-    required = threads._dispatch_child(
-        parent, "work:ctx", "context-agent", "inspect")
-
-    assert background["thread_id"] != required["thread_id"]
-
-
-def test_child_mapping_is_stable_across_parent_successor(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    first = threads._dispatch_child(
-        parent, "work:task-call", "context-agent", "inspect")
-    successor = threads._create_run(
-        "parent", None, work_id=parent.work_id, resume_value="result")
-
-    replay = threads._dispatch_child(
-        successor, "work:task-call", "context-agent", "inspect")
-
-    assert replay == first
-
-
-def test_required_child_is_reaped_only_after_parent_consumes_result(
-        monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    identity = threads._dispatch_child(
-        parent, "work:task-call", "context-agent", "inspect")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
-    successor = threads._complete_child_handoff(child, "result")
-
-    assert successor is not None
-    assert os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
-    threads._cleanup_consumed_child(successor)
-    assert not os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
-
-
-def test_startup_ignores_interrupted_invocation_with_terminal_successor(
-        monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    threads._runs().claim("parent", parent.id)
-    threads._runs().transition("parent", parent.id, "interrupted")
-    successor = threads._create_run(
-        "parent", None, work_id=parent.work_id, resume_value="result")
-    threads._runs().claim("parent", successor.id)
-    threads._runs().transition("parent", successor.id, "success")
-
-    threads.queue_recovery_runs()
-
-    assert submitted == []
-
-
-def test_recovery_preserves_child_mapping_until_interrupt_replay(
-        monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    parent = threads._runs().claim("parent", parent.id)
-    identity = threads._dispatch_child(
-        parent, "work:crash", "context-agent", "inspect")
-    child = threads._runs().get(identity["thread_id"], identity["run_id"])
-
-    class Chat:
-        def pending_child(self):
-            return None
-
-    monkeypatch.setattr(threads.MANAGER, "get", lambda *args, **kwargs: Chat())
-    monkeypatch.setattr(threads, "_recovery_decision", lambda tid, text: "redispatch")
+    submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    active = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    active = threads._runs().claim(active.thread_id, active.id)
+    marker = SERVICE.cancel_run(active.thread_id, active.id)
     submitted.clear()
+    monkeypatch.setattr(
+        threads.MANAGER, "get",
+        lambda *args, **kwargs: pytest.fail("cancelled graph was resumed"))
 
-    threads._recover_run(parent)
+    threads._recover_child_run(active)
 
-    assert threads._runs().get(child.thread_id, child.id).status == "pending"
-    successors = [run for run in threads._runs().list("parent")
-                  if run.id != parent.id]
-    assert len(successors) == 1
-    assert submitted == [(successors[0].id, "parent")]
-
-
-def test_pending_follower_waits_for_parent_resume_terminal(monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    threads._runs().claim("parent", parent.id)
-    threads._runs().transition("parent", parent.id, "interrupted")
-    threads._set_status("parent", "paused", pending_message="question")
-    follower = threads._create_run("parent", "newer message")
-    child_tid = threads.MANAGER.reserve("sub-child", hidden=True)
-    child = threads._create_run(
-        child_tid, "inspect", assistant_id="context-agent", mode="child",
-        parent_thread_id="parent", parent_run_id=parent.id,
-        dispatch_key="work:child", work_id=parent.work_id,
-        origin="required-child")
-    threads._runs().claim(child.thread_id, child.id)
-    threads._runs().transition(child.thread_id, child.id, "success", result="result")
-
-    successor = threads._complete_child_handoff(child, "result")
-
-    assert successor is not None
-    assert submitted == [(successor.id, "parent")]
-    assert threads._runs().get("parent", follower.id).status == "pending"
+    assert threads._runs().get(active.thread_id, active.id).status == "cancelled"
+    assert submitted == [(marker.id, marker.thread_id, {})]
 
 
-def test_protocol_enqueue_waits_behind_interrupted_parent(monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    parent = threads._create_run("parent", "question")
-    threads._runs().claim("parent", parent.id)
-    threads._runs().transition("parent", parent.id, "interrupted")
-    threads._set_status("parent", "paused", pending_message="question")
-
-    follower = SERVICE.create_run("parent", "general-agent", "newer")
-
-    assert follower.status == "pending"
-    assert submitted == []
-    with pytest.raises(HTTPException) as caught:
-        SERVICE.create_run(
-            "parent", "general-agent", "replace", multitask_strategy="interrupt")
-    assert caught.value.status_code == 409
-
-
-def test_protocol_terminal_cancel_is_idempotent(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    run = threads._create_run("parent", "question")
-    threads._runs().claim("parent", run.id)
-    done = threads._runs().transition("parent", run.id, "success")
-
-    assert SERVICE.cancel_run("parent", run.id) == done
-
-
-def test_protocol_cancel_loses_claim_race_truthfully(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    run = threads._create_run("parent", "question")
-    real_cancel = threads._runs().cancel_pending
-
-    def claim_then_cancel(tid, run_id):
-        threads._runs().claim(tid, run_id)
-        return real_cancel(tid, run_id)
-
-    monkeypatch.setattr(threads._runs(), "cancel_pending", claim_then_cancel)
-
-    with pytest.raises(HTTPException) as caught:
-        SERVICE.cancel_run("parent", run.id)
-    assert caught.value.status_code == 409
-    assert threads._runs().get("parent", run.id).status == "running"
-
-
-def test_terminal_exit_releases_only_oldest_follower(monkeypatch, tmp_path):
-    submitted = _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    first = threads._create_run("parent", "one")
-    second = threads._create_run("parent", "two")
-    third = threads._create_run("parent", "three")
-
-    threads._dispatch_pending_after("parent", first.id)
-
-    assert submitted == [(second.id, "parent")]
-    assert third.status == "pending"
-
-
-def test_specialized_protocol_run_is_not_injected_into_general_agent(
+def test_repeated_active_cancel_keeps_the_pending_stop_marker(
         monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    active = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    active = threads._runs().claim(active.thread_id, active.id)
+
+    first = SERVICE.cancel_run(active.thread_id, active.id)
+    second = SERVICE.cancel_run(active.thread_id, first.id)
+
+    assert second.id == first.id
+    assert threads._runs().get(first.thread_id, first.id).status == "pending"
+
+
+def test_parent_deletion_removes_hidden_tasks(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    monkeypatch.setattr(threads.SandboxManager, "cleanup", lambda path: None)
+
+    threads._delete_thread_and_children("parent")
+
+    assert not os.path.exists(threads.MANAGER.thread_dir("parent"))
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-stable"))
+
+
+def test_parent_deletion_handles_child_history_once(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    first = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect", metadata=metadata)
+    threads._runs().cancel_pending(first.thread_id, first.id)
+    SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect org",
+        metadata={**metadata, "dispatch_key": "next"})
+
+    threads._delete_thread_and_children("parent")
+
+    assert not os.path.exists(threads.MANAGER.thread_dir("parent"))
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-stable"))
+
+
+def test_parent_deletion_removes_reserved_child_with_no_run(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    SERVICE.create_thread("sub-empty", metadata)
+
+    threads._delete_thread_and_children("parent")
+
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-empty"))
+
+
+def test_completion_input_renders_as_agent_task_note(monkeypatch, tmp_path):
     _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
-    threads._create_run(
-        "parent", "read only", assistant_id="context-agent")
+    marker = threads._TASK_COMPLETION_RIDER
+    monkeypatch.setattr(
+        threads.MANAGER, "get", lambda *args, **kwargs:
+        type("Chat", (), {
+            "get_messages": lambda self: [
+                {"role": "user", "content": marker + "Task ID: sub-123 Status: success"},
+                {"role": "assistant", "content": "I used the result."},
+            ],
+            "pending_reply": lambda self: None,
+        })())
+    threads._set_status("parent", "ready")
 
-    assert threads._pending_run_records("parent") == []
+    page = TestClient(web.app).get("/thread/parent").text
 
-
-def test_protocol_admission_caps_pending_runs(monkeypatch, tmp_path):
-    _root(monkeypatch, tmp_path)
-    threads.MANAGER.reserve("parent")
-    threads._create_run("parent", "one")
-    monkeypatch.setattr(SERVICE, "MAX_PENDING_PER_THREAD", 1)
-
-    with pytest.raises(HTTPException) as caught:
-        SERVICE.create_run("parent", "general-agent", "two")
-    assert caught.value.status_code == 429
-    assert len(threads._runs().list("parent")) == 1
+    assert "assistant (task)" in page
+    assert "Task ID: sub-123 Status: success" in page
+    assert '<div class="role">user</div>' not in page

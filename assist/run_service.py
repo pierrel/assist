@@ -68,7 +68,6 @@ class Run:
     origin: str | None
     resume: bool
     resume_decision: dict | None
-    resume_value: str | None
     pending_text: str | None
     active_ms: float
     consumed_by: str | None
@@ -103,8 +102,6 @@ class Run:
             origin=value.get("origin") or None,
             resume=bool(value.get("resume", False)),
             resume_decision=value.get("resume_decision") or None,
-            resume_value=(str(value["resume_value"])
-                          if value.get("resume_value") is not None else None),
             pending_text=(str(value["pending_text"])
                           if value.get("pending_text") is not None else None),
             active_ms=float(value.get("active_ms", 0.0)),
@@ -121,7 +118,7 @@ _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     # ``pending -> success`` is the interjection handoff: the accepted follower is
     # checkpointed into the active run, then terminalized with ``consumed_by`` so a
     # restart can never dispatch it as a second answer.
-    "pending": frozenset({"running", "success", "cancelled"}),
+    "pending": frozenset({"running", "success", "timeout", "cancelled"}),
     "running": frozenset({"pending", "success", "error", "timeout",
                            "interrupted", "cancelled"}),
     # A protocol run that interrupts never becomes running again. Resumption creates a
@@ -172,12 +169,9 @@ class RunService(PerThreadJsonStore[Run]):
         origin: str | None = None,
         resume: bool = False,
         resume_decision: dict | None = None,
-        resume_value: str | None = None,
         pending_text: str | None = None,
         active_ms: float = 0.0,
         run_id: str | None = None,
-        single_active_child: bool = False,
-        origin_limit: int | None = None,
         cancel_pending: bool = False,
         max_runs: int | None = None,
         max_pending: int | None = None,
@@ -205,7 +199,6 @@ class RunService(PerThreadJsonStore[Run]):
             dispatch_key=dispatch_key, sender=sender,
             rider=dict(rider) if rider else None, origin=origin, resume=resume,
             resume_decision=(dict(resume_decision) if resume_decision else None),
-            resume_value=resume_value,
             pending_text=pending_text,
             active_ms=float(active_ms), consumed_by=None, error=None,
             result=None,
@@ -232,26 +225,6 @@ class RunService(PerThreadJsonStore[Run]):
                         raise ValueError(
                             f"dispatch key conflicts with persisted run: {dispatch_key}")
                     return existing
-            all_runs = runs
-            if single_active_child or origin_limit is not None:
-                all_runs = self._read_children()
-            if single_active_child and any(
-                    candidate.mode == "child"
-                    and candidate.parent_thread_id == parent_thread_id
-                    and candidate.parent_run_id == parent_run_id
-                    and candidate.origin == origin
-                    and candidate.status in {"pending", "running"}
-                    for candidate in all_runs):
-                raise InvalidRunTransition(
-                    "only one required child may be active for a parent invocation")
-            if origin_limit is not None and sum(
-                    candidate.parent_thread_id == parent_thread_id
-                    and candidate.parent_run_id == parent_run_id
-                    and candidate.origin == origin
-                    and candidate.status != "cancelled"
-                    for candidate in all_runs) >= origin_limit:
-                raise InvalidRunTransition(
-                    f"child admission limit reached for {origin}")
             if cancel_pending:
                 if any(candidate.status in {"running", "interrupted"}
                        for candidate in runs):
@@ -434,7 +407,7 @@ class RunService(PerThreadJsonStore[Run]):
                         parent_run_id=None, dispatch_key=None,
                         sender=record.sender, rider=dict(record.rider) if record.rider else None,
                         origin=record.origin, resume=False, resume_decision=None,
-                        resume_value=None, pending_text=None, active_ms=0.0,
+                        pending_text=None, active_ms=0.0,
                         consumed_by=None, error=None, result=None,
                         multitask_strategy="enqueue",
                         created_at=record.enqueued_at or now, updated_at=now,

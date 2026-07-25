@@ -185,7 +185,7 @@ def _spy_cleanup(monkeypatch):
     calls = []
     monkeypatch.setattr(
         threads.SandboxManager, "cleanup",
-        classmethod(lambda cls, work_dir: calls.append(work_dir)),
+        classmethod(lambda cls, work_dir, expected=None: calls.append(work_dir)),
     )
     return calls
 

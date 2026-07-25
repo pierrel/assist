@@ -55,6 +55,18 @@ class TestCleanupKills(_SandboxStateBase):
     def test_cleanup_missing_workdir_is_noop(self):
         SandboxManager.cleanup("absent")  # must not raise
 
+    def test_stale_owner_cannot_kill_replacement(self):
+        old = _fake_container("old")
+        replacement = _fake_container("replacement")
+        SandboxManager._containers["w"] = replacement
+
+        SandboxManager.cleanup("w", old)
+        self.assertIs(SandboxManager._containers["w"], replacement)
+        replacement.kill.assert_not_called()
+
+        SandboxManager.cleanup("w", replacement)
+        replacement.kill.assert_called_once_with()
+
 
 class TestNoReuse(_SandboxStateBase):
     """get_sandbox_backend creates a fresh container every call and reaps any

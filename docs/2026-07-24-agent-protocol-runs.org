@@ -4,9 +4,14 @@
 
 * Status
 
-IMPLEMENTED in draft [[https://github.com/pierrel/assist/pull/212][assist PR #212]]; the local review and LOC-consolidation passes are complete. The durable
-child-suspension spike in [[Parent suspension proof]] passes against the real framework
-and =SqliteSaver=.
+MERGED in [[https://github.com/pierrel/assist/pull/212][assist PR #212]].  Its
+parent-child suspension design is historical and is superseded by
+[[file:2026-07-25-async-subagents-asgi.org][the all-background ASGI design]].  Main-thread user interjection and HITL
+interrupts remain; only the child-wait =interrupt()/Command(resume)= path is retired.
+
+Everything below this line records PR #212's historical design at merge time.
+It is not a description of the current runtime. The superseding document above
+is authoritative for subagent execution, transport exposure, and cancellation.
 
 * Goal
 

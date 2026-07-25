@@ -44,6 +44,12 @@ where reliability is harder than with frontier APIs.
     (heading-body discipline, no orphaned content) without affecting
     other formats.
 
+- **Background subagents in the web UI.** Context, research, and critique
+  tasks return a task ID immediately, then wake the conversation with a
+  follow-up when each result is ready. You can keep messaging the main
+  thread meanwhile; it can list, check, update, or cancel outstanding tasks
+  without interrupting an in-flight model or tool call.
+
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught
   and retried, and failed turns roll back to a checkpoint instead of

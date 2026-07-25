@@ -103,6 +103,78 @@ def test_fifo_among_waiters():
     assert completion_order == ["A", "B", "C", "D"]
 
 
+def test_user_priority_overtakes_background_but_not_active_holder():
+    q = ThreadAffinityQueue()
+    release = threading.Event()
+    acquired = []
+
+    def run(tid, *, user=False):
+        with q.acquire(tid, user_priority=user):
+            acquired.append(tid)
+            if tid == "active":
+                release.wait(timeout=5)
+
+    active = threading.Thread(target=run, args=("active",))
+    active.start()
+    deadline = time.time() + 2
+    while q.peek_holder() != "active" and time.time() < deadline:
+        time.sleep(0.01)
+    background = threading.Thread(target=run, args=("background",))
+    user = threading.Thread(target=run, args=("user",), kwargs={"user": True})
+    background.start()
+    deadline = time.time() + 2
+    while q.waiter_count() != 1 and time.time() < deadline:
+        time.sleep(0.01)
+    user.start()
+    deadline = time.time() + 2
+    while q.waiter_count() != 2 and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert q.waiter_count() == 2
+    assert acquired == ["active"]
+    release.set()
+    for thread in (active, background, user):
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    assert acquired == ["active", "user", "background"]
+
+
+def test_promote_already_parked_waiter_is_stable_within_user_tier():
+    q = ThreadAffinityQueue()
+    release = threading.Event()
+    acquired = []
+
+    def run(tid, *, user=False):
+        with q.acquire(tid, user_priority=user):
+            acquired.append(tid)
+            if tid == "active":
+                release.wait(timeout=5)
+
+    threads = [threading.Thread(target=run, args=("active",))]
+    threads[0].start()
+    deadline = time.time() + 2
+    while q.peek_holder() != "active" and time.time() < deadline:
+        time.sleep(0.01)
+    for tid, user in (("existing-user", True), ("parent", False),
+                      ("other-background", False)):
+        thread = threading.Thread(target=run, args=(tid,), kwargs={"user": user})
+        threads.append(thread)
+        thread.start()
+        deadline = time.time() + 2
+        expected = len(threads) - 1
+        while q.waiter_count() != expected and time.time() < deadline:
+            time.sleep(0.01)
+        assert q.waiter_count() == expected
+
+    q.promote("parent")
+    assert acquired == ["active"]
+    release.set()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    assert acquired == ["active", "existing-user", "parent", "other-background"]
+
+
 def test_holder_exception_releases_lock():
     q = ThreadAffinityQueue()
     waiter_acquired = threading.Event()
@@ -485,3 +557,13 @@ def test_peek_holder_returns_holder_thread_id():
     with q.acquire("research-thread"):
         assert q.peek_holder() == "research-thread"
     assert q.peek_holder() is None
+
+
+def test_request_pause_only_marks_matching_active_holder():
+    q = ThreadAffinityQueue()
+    with q.acquire("child") as handle:
+        assert not q.request_pause("other")
+        assert not handle.pause_requested
+        assert q.request_pause("child")
+        assert handle.pause_requested
+    assert not q.request_pause("child")

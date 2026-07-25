@@ -46,8 +46,9 @@ class AgentSpec:
     send them across processes.
     """
 
-    # ADDITIVE to assist's built-in tool surface (filesystem, execute,
-    # task, ...) — () means "no extra tools", not "no tools".  Reaches
+    # ADDITIVE to the selected built-in tool profile (filesystem, execute,
+    # and either blocking ``task`` or the supplied async task tools). () means
+    # "no extra tools", not "no tools". Reaches
     # the MAIN agent only (deepagents' auto-injected general-purpose
     # subagent — which used to inherit these — is disabled harness-wide;
     # see the profile registration in ``assist.agent``); the bespoke
@@ -69,17 +70,12 @@ class AgentSpec:
     # in ``create_agent``).
     default_backend: BackendProtocol | None = None
 
-    # Replacement for deepagents' blocking ``task`` subagent middleware. The web run
-    # service supplies the interrupting async-only task tool; CLI/emacsos/evals leave it
-    # None and retain their in-process synchronous subagents. This revives the deferred
-    # ``subagents``-selection trigger with one concrete client need, without exposing the
-    # run service or scheduler through the embedder contract.
-    subagent_tool: BaseTool | None = None
-
-    # The supplied async task tool can schedule a background follow-up as well as a
-    # required child. Kept structural so prompt behavior does not depend on the tool's
-    # human-readable description.
-    background_subagents: bool = False
+    # Deep Agents-compatible async task management surface for the MAIN agent.
+    # The web embedder supplies all five lifecycle tools; an empty tuple keeps the
+    # established in-process synchronous subagents for CLI/emacsos/leaf agents.
+    # Keeping the lifecycle tools together is the one structural signal needed to
+    # select the async prompt and suppress the blocking ``task`` middleware.
+    async_subagent_tools: tuple[BaseTool, ...] = ()
 
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
     # InterruptOnConfig}`` passed straight to ``create_deep_agent(interrupt_on=…)``.  The
@@ -99,6 +95,15 @@ class AgentSpec:
                 f"{type(self.tools).__name__}"
             )
         object.__setattr__(self, "tools", tuple(self.tools))
+
+        if isinstance(self.async_subagent_tools, (str, bytes)) \
+                or not isinstance(self.async_subagent_tools, Sequence):
+            raise TypeError(
+                "AgentSpec.async_subagent_tools must be a sequence of tools, got "
+                f"{type(self.async_subagent_tools).__name__}"
+            )
+        object.__setattr__(self, "async_subagent_tools",
+                           tuple(self.async_subagent_tools))
 
         if not isinstance(self.skill_sources, Mapping):
             raise TypeError(

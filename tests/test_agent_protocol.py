@@ -19,8 +19,8 @@ class _Service:
         assert threading.get_ident() != self.loop_thread
         self.calls.append(call)
 
-    def create_thread(self):
-        self._record("create_thread")
+    def create_thread(self, thread_id=None, metadata=None):
+        self._record("create_thread", thread_id, metadata)
         return {"thread_id": "child-1", "status": "idle"}
 
     def get_thread(self, thread_id):
@@ -31,9 +31,11 @@ class _Service:
             "values": {"messages": [{"role": "assistant", "content": "done"}]},
         }
 
-    def create_run(self, thread_id, assistant_id, text, *, multitask_strategy=None):
+    def create_run(self, thread_id, assistant_id, text, *, multitask_strategy=None,
+                   metadata=None):
         self._record(
-            "create_run", thread_id, assistant_id, text, multitask_strategy)
+            "create_run", thread_id, assistant_id, text, multitask_strategy,
+            metadata)
         return {
             "id": "run-1",
             "thread_id": thread_id,
@@ -65,25 +67,13 @@ def _app(service):
         service.loop_thread = threading.get_ident()
         return await call_next(request)
 
-    app.include_router(create_agent_protocol_router(service, secret="test-secret"))
+    app.include_router(create_agent_protocol_router(service))
     return app
 
 
 def _client():
     service = _Service()
-    return TestClient(_app(service), headers={
-        "Authorization": "Bearer test-secret"
-    }), service
-
-
-def test_authentication_is_required_before_service_access():
-    service = _Service()
-    client = TestClient(_app(service))
-    assert client.post("/threads", json={}).status_code == 401
-    assert client.post(
-        "/threads", json={}, headers={"Authorization": "Bearer wrong"}
-    ).status_code == 401
-    assert service.calls == []
+    return TestClient(_app(service)), service
 
 
 def test_installed_sdk_lifecycle_shapes():
@@ -110,8 +100,8 @@ def test_installed_sdk_lifecycle_shapes():
     assert cancelled.json() is None
 
     assert service.calls == [
-        ("create_thread",),
-        ("create_run", "child-1", "research-agent", "research this", None),
+        ("create_thread", None, None),
+        ("create_run", "child-1", "research-agent", "research this", None, None),
         ("get_run", "child-1", "run-1"),
         ("get_thread", "child-1"),
         ("cancel_run", "child-1", "run-1"),
@@ -128,7 +118,31 @@ def test_update_accepts_only_interrupt_strategy():
     assert response.status_code == 200
     assert response.json()["multitask_strategy"] == "interrupt"
     assert service.calls[-1] == (
-        "create_run", "child-1", "research-agent", "new context", "interrupt")
+        "create_run", "child-1", "research-agent", "new context", "interrupt", None)
+
+
+def test_sdk_idempotency_metadata_is_forwarded():
+    client, service = _client()
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": "parent-run",
+        "dispatch_key": "parent-work:tool-call",
+    }
+    response = client.post("/threads", json={
+        "thread_id": "sub-stable", "if_exists": "do_nothing",
+        "metadata": metadata,
+    })
+    assert response.status_code == 200
+    response = client.post("/threads/child-1/runs", json={
+        "assistant_id": "context-agent",
+        "input": {"messages": [{"role": "user", "content": "inspect"}]},
+        "metadata": metadata,
+    })
+    assert response.status_code == 200
+    assert service.calls == [
+        ("create_thread", "sub-stable", metadata),
+        ("create_run", "child-1", "context-agent", "inspect", None, metadata),
+    ]
 
 
 def test_installed_sdk_default_run_fields_are_accepted():
@@ -143,7 +157,7 @@ def test_installed_sdk_default_run_fields_are_accepted():
     })
     assert response.status_code == 200
     assert service.calls == [
-        ("create_run", "child-1", "research-agent", "research this", None),
+        ("create_run", "child-1", "research-agent", "research this", None, None),
     ]
 
 
@@ -154,6 +168,12 @@ def test_unknown_assistant_and_privileged_fields_are_rejected():
         "input": {"messages": [{"role": "user", "content": "go"}]},
     })
     assert unknown.status_code == 404
+
+    recursive = client.post("/threads/child-1/runs", json={
+        "assistant_id": "general-agent",
+        "input": {"messages": [{"role": "user", "content": "delegate again"}]},
+    })
+    assert recursive.status_code == 404
 
     metadata = client.post("/threads/child-1/runs", json={
         "assistant_id": "research-agent",

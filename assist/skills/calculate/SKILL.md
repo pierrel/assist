@@ -11,7 +11,7 @@ Every numeric answer must come from a Python computation you ran via `execute`. 
 
 ## When the answer depends on facts you don't know
 
-Current interest rates, named investment strategies, lookup data, current statistics — delegate to `research-agent` via the `task` tool first. Wait for the result, then run your computation on the values it returns.
+Current interest rates, named investment strategies, lookup data, current statistics — delegate to `research-agent` first. If `start_async_task` is available, start it, report the task ID, return, and run the computation after its completion wake. Otherwise use `task` and wait for the result.
 
 ## Use the user's own numbers
 

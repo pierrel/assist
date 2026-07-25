@@ -42,7 +42,7 @@ def wired(tmp_path, monkeypatch):
                         lambda t, tz=None: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda t: None)
     monkeypatch.setattr("manage.web.threads.get_cached_description", lambda t: "stub")
-    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd: None)
+    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd, expected=None: None)
     with contextlib.suppress(Exception):
         while True:
             threads._RESUME_SCHEDULER._q.get_nowait()

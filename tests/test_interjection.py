@@ -34,7 +34,7 @@ def wired(tmp_path, monkeypatch):
                         lambda t: "real description")
     monkeypatch.setattr("manage.web.state.get_cached_description",
                         lambda t: "real description")
-    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd: None)
+    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd, expected=None: None)
     threads._TURN_INTERJECTION.pop(tid, None)
     with contextlib.suppress(Exception):
         while True:
@@ -100,7 +100,7 @@ def test_sender_scoping_matrix(wired, monkeypatch):
 def test_next_boundary_claims_checkpointed_ids(wired, monkeypatch):
     tid, _ = wired
     rec = _journal(tid, "steer me")
-    threads._TURN_INTERJECTION[tid] = {"claimed": [], "defer": True}
+    threads._TURN_INTERJECTION[tid] = {"claimed": []}
     in_state = HumanMessage(content="framed", additional_kwargs={
         "interjection_ids": [rec.id]})
     out = _hook(monkeypatch, tid).before_model({"messages": [in_state]}, None)
@@ -122,47 +122,35 @@ def test_inert_without_callbacks_and_safe_on_error(wired, monkeypatch):
     assert mw.before_model({"messages": []}, None) is None
 
 
-# --- framing variants ---------------------------------------------------------
+# --- framing ------------------------------------------------------------------
 
-def test_defer_variant_follows_tool_surface(wired):
+def test_owner_interjection_directs_explicit_task_management(wired):
     tid, _ = wired
     rec = _journal(tid, "also check tires")
-    threads._TURN_INTERJECTION[tid] = {"claimed": [], "defer": True}
-    assert "background-research-agent" in threads._frame_interjection(rec)
-    threads._TURN_INTERJECTION[tid] = {"claimed": [], "defer": False}
-    assert "background-research-agent" not in threads._frame_interjection(rec)
+    frame = threads._frame_interjection(rec)
+    assert "list_async_tasks" in frame
+    assert "keep, update, or cancel" in frame
+    assert "background-research-agent" not in frame
 
 
-def test_owner_interjection_enumerates_then_clears_at_claim(wired):
-    """Pierre PR #199 note 3: pending tasks are enumerated verbatim in the
-    framing, which SNAPSHOTS their ids; the clear runs at claim time against
-    the snapshot — fate-shared with the message's durability — and a
-    background child issued in response (a fresh id created before the claim)
-    survives the drain."""
+def test_owner_interjection_preserves_pending_work_until_agent_decides(wired):
     tid, _ = wired
     c1 = _journal(tid, "find tire sizes", origin="continuation")
     c2 = _journal(tid, "check tubeless", origin="continuation")
     rec = _journal(tid, "stop all that")
-    ctx = {"claimed": [], "defer": True, "cleared_ids": set()}
+    ctx = {"claimed": []}
     threads._TURN_INTERJECTION[tid] = ctx
     frame = threads._frame_interjection(rec)
-    assert "1. find tire sizes" in frame and "2. check tubeless" in frame
-    # framing only snapshots ids — it removes nothing from the journal (a
-    # turn dying pre-checkpoint must leave the promised follow-ups intact)
-    assert ctx["cleared_ids"] == {c1.id, c2.id}
+    assert "list_async_tasks" in frame
     assert sum(1 for r in threads._runs().list(tid)
                if r.origin == "continuation" and r.status == "pending") == 2
-    # the model responds with a NEW background child before the claim...
     c3 = _journal(tid, "compare brands instead", origin="continuation")
-    # ...then the claim drains only the snapshot: c1/c2 gone, c3 survives
     threads._consume_interjections(tid, {rec.id})
     left = [r.id for r in threads._runs().list(tid)
             if r.origin == "continuation" and r.status == "pending"]
-    assert left == [c3.id]
-    # an SMS interjection must NOT snapshot the owner's plan (spoofable sender)
+    assert left == [c1.id, c2.id, c3.id]
     sms = _journal(tid, "sms steer", sender="+15550001111")
-    threads._frame_interjection(sms)
-    assert ctx["cleared_ids"] == set()
+    assert "list_async_tasks" not in threads._frame_interjection(sms)
 
 
 # --- terminal sweep + fate-sharing --------------------------------------------
@@ -187,7 +175,7 @@ def test_error_exit_rejournals_claimed_interjections(wired, monkeypatch):
     dead framed copy, and the follow-up's entry-gone gate would skip it)."""
     tid, _ = wired
     rec = PendingMessage(thread_id=tid, text="the rescue steer")
-    threads._TURN_INTERJECTION[tid] = {"claimed": [rec], "defer": True}
+    threads._TURN_INTERJECTION[tid] = {"claimed": [rec]}
     submitted = []
     monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
                         lambda *a: submitted.append(a))
@@ -314,7 +302,7 @@ def test_consumed_interjection_renders_stripped_with_seen_badge(wired, monkeypat
     from fastapi.testclient import TestClient
     tid, _ = wired
     F, G = threads._INTERJECTION_FRAME, threads._INTERJECTION_GUIDE
-    persisted = F + "skip the research" + G + threads._INTERJECTION_DEFER + ")"
+    persisted = F + "skip the research" + G + ")"
     monkeypatch.setattr(
         web.MANAGER, "get", lambda t, sandbox_backend=None, **k:
         type("C", (), {"get_messages": lambda s: [

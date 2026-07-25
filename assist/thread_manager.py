@@ -21,6 +21,7 @@ be "improved":
 """
 
 import logging
+import json
 import os
 import shutil
 import sqlite3
@@ -36,7 +37,7 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread import Thread
-from assist.async_subagents import task_tool, task_tool_no_background
+from assist.async_subagents import async_task_tools
 from assist.agent import create_context_agent, create_research_agent
 
 logger = logging.getLogger(__name__)
@@ -273,7 +274,6 @@ class ThreadManager:
             on_queue_state: Callable[[str], None] | None = None,
             configurable: dict | None = None,
             triage: bool = False,
-            continuation: bool = False,
             assistant_id: str = "general-agent") -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
@@ -283,8 +283,6 @@ class ThreadManager:
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
         # the reply HITL gate; a normal turn gets the full config tools and no HITL.
-        # A continuation may still use required async targets, but cannot
-        # recursively promise another automatic follow-up.
         tools = _web_triage_tools if triage else _web_tools
         interrupt_on = _web_interrupt_on if triage else None
         specialized = None
@@ -303,9 +301,8 @@ class ThreadManager:
                 sandbox_backend=sandbox_backend, leaf=True)
         elif assistant_id != "general-agent":
             raise ValueError(f"unknown assistant: {assistant_id}")
-        async_tool = (task_tool if assistant_id == "general-agent"
-                      and not continuation and not triage
-                      else task_tool_no_background)
+        async_tools = (async_task_tools if assistant_id == "general-agent"
+                       and not triage else ())
         thread_kwargs = dict(
                       thread_id=thread_id,
                       checkpointer=self.checkpointer,
@@ -319,8 +316,7 @@ class ThreadManager:
             working_dir, **thread_kwargs,
             spec=AgentSpec(
                 skill_sources=_web_skill_sources(), tools=tools,
-                subagent_tool=async_tool,
-                background_subagents=not continuation and not triage,
+                async_subagent_tools=async_tools,
                 interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:
@@ -355,11 +351,10 @@ class ThreadManager:
                       model=self.model, sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
                       spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
-                                     subagent_tool=task_tool,
-                                     background_subagents=True,
+                                     async_subagent_tools=async_task_tools,
                                      interrupt_on=None))
 
-    def reserve(self, thread_id: str | None = None, *, hidden: bool = False) -> str:
+    def reserve(self, thread_id: str | None = None, *, hidden: bool | dict = False) -> str:
         """Create an empty thread directory and return its id, without building an agent.
 
         Agent Protocol thread creation is a cheap persistence operation. The first run
@@ -370,7 +365,12 @@ class ThreadManager:
         tdir = self.thread_dir(tid)
         os.makedirs(tdir, exist_ok=True)
         if hidden:
-            open(os.path.join(tdir, ".subagent"), "a").close()
+            marker = os.path.join(tdir, ".subagent")
+            if isinstance(hidden, dict):
+                with open(marker, "w") as stream:
+                    json.dump(hidden, stream)
+            else:
+                open(marker, "a").close()
         return tid
 
     def close(self) -> None:

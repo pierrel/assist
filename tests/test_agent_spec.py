@@ -27,6 +27,7 @@ class TestDefaults:
         assert spec.tools == ()
         assert len(spec.skill_sources) == 0
         assert spec.default_backend is None
+        assert spec.async_subagent_tools == ()
 
     def test_two_default_specs_are_equal(self):
         assert AgentSpec() == AgentSpec()
@@ -52,6 +53,12 @@ class TestNormalization:
         assert spec.tools == (t,)
         assert isinstance(spec.tools, tuple)
 
+    def test_async_subagent_tools_list_normalized_to_tuple(self):
+        t = _tool()
+        spec = AgentSpec(async_subagent_tools=[t])
+        assert spec.async_subagent_tools == (t,)
+        assert isinstance(spec.async_subagent_tools, tuple)
+
     def test_skill_sources_copied_from_caller_dict(self):
         backend = object()
         sources = {"/x/": backend}
@@ -68,6 +75,10 @@ class TestValidation:
     def test_tools_non_sequence_rejected(self):
         with pytest.raises(TypeError, match="tools must be a sequence"):
             AgentSpec(tools=42)
+
+    def test_async_subagent_tools_non_sequence_rejected(self):
+        with pytest.raises(TypeError, match="async_subagent_tools must be a sequence"):
+            AgentSpec(async_subagent_tools=42)
 
     def test_skill_sources_non_mapping_rejected(self):
         with pytest.raises(TypeError, match="skill_sources must be a mapping"):

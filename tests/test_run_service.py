@@ -187,27 +187,11 @@ def test_child_admission_does_not_parse_visible_run_histories(service, tmp_path)
     (tmp_path / "t1" / "runs.json").write_text("not json")
 
     child = service.create(
-        "sub-t3", "background-research-agent", "hidden", mode="child",
+        "sub-t3", "research-agent", "hidden", mode="child",
         parent_thread_id="parent", parent_run_id="parent-run",
-        dispatch_key="work:background", origin="background",
-        origin_limit=2)
+        dispatch_key="work:background", origin="background")
 
     assert child.status == "pending"
-
-
-def test_rejected_child_admission_leaves_no_hidden_directory(service, tmp_path):
-    service.create(
-        "sub-t3", "context-agent", "first", mode="child",
-        parent_thread_id="parent", parent_run_id="parent-run",
-        dispatch_key="work:first", origin="required", single_active_child=True)
-
-    with pytest.raises(InvalidRunTransition, match="only one"):
-        service.create(
-            "sub-t4", "context-agent", "second", mode="child",
-            parent_thread_id="parent", parent_run_id="parent-run",
-            dispatch_key="work:second", origin="required", single_active_child=True)
-
-    assert not (tmp_path / "sub-t4").exists()
 
 
 def test_child_admission_recovers_an_abandoned_empty_directory(service, tmp_path):

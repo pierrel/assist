@@ -2,12 +2,11 @@
 #+date: <2026-07-19>
 #+author: design doc — PRD: 2026-07-19-prd-progressive-responses.org
 
-* Historical design, superseded 2026-07-24
+* Historical design, superseded 2026-07-25
 
-The sections through =Render= below are retained as decision history, not the current
-execution contract. The =AS BUILT= section is authoritative: new work is represented
-by Runs, queues carry run ids, and async child runs replace =continue_later= and
-=MESSAGE_BACKLOG=. The legacy backlog exists only for startup import.
+All sections below, including =AS BUILT=, are retained as decision history rather
+than the current execution contract. See
+[[file:2026-07-25-async-subagents-asgi.org][the all-background ASGI design]].
 
 * Shape (one paragraph)
 

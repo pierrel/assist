@@ -329,14 +329,14 @@ def create_agent(model: BaseChatModel,
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
-    # The web run service supplies an interrupting ``task`` tool and executes
+    # The web run service supplies the five async task lifecycle tools and executes
     # children as first-class runs.  Building the blocking graphs in that mode
     # would be wasted work and, more importantly, would leave two delegation
     # mechanisms in one agent.  Other embedders retain the established in-process
     # subagents unchanged.
     context_sub = None
     research_sub = None
-    if spec.subagent_tool is None:
+    if not spec.async_subagent_tools:
         context_sub = CompiledSubAgent(
             name="context-agent",
             description="Discovers and surfaces relevant context from the user's local filesystem — files, formats, and prior notes. Dispatch it on the first turn of a thread, before any research, and whenever the user's local files could inform the answer. Read-only — it will not modify files.",
@@ -356,7 +356,7 @@ def create_agent(model: BaseChatModel,
     # reports are server-side documents.  When file-chat starts needing
     # research reports on the embedder's FS, add `default_backend` to
     # `create_research_agent` and to `create_references_backend`'s routing.
-    if spec.subagent_tool is None:
+    if not spec.async_subagent_tools:
         research_sub = CompiledSubAgent(
             name="research-agent",
             description=(
@@ -372,8 +372,6 @@ def create_agent(model: BaseChatModel,
                                             tool_name_mw],
                                            sandbox_backend=sandbox_backend)
         )
-
-    async_background = spec.subagent_tool is not None and spec.background_subagents
 
     critique_sub_agent = {
         "name": "critique-agent",
@@ -405,8 +403,7 @@ def create_agent(model: BaseChatModel,
             "deepagents/general_instructions.md.j2",
             workspace_dir=workspace_dir,
             references_dir=references_dir,
-            background_followups=async_background,
-            async_subagents=spec.subagent_tool is not None,
+            async_subagents=bool(spec.async_subagent_tools),
         ),
         middleware=mw + [
             # Offload a large execute result (a long build/test log) to a file +
@@ -443,16 +440,16 @@ def create_agent(model: BaseChatModel,
             skills_mw, memory_mw, ContextRiderMiddleware(),
             InterjectionMiddleware(), logging_mw],
         backend=backend,
-        # The async-only embedder supplies one task tool and no deepagents
+        # The async embedder supplies five lifecycle tools and no deepagents
         # subagents. Legacy embedders retain synchronous subagents.
-        subagents=([] if spec.subagent_tool is not None
+        subagents=([] if spec.async_subagent_tools
                    else [context_sub, research_sub, critique_sub_agent]),
         # `travel` (time/distance), `directions` (turn-by-turn steps), and
         # `map_data` (lat,lon + route polylines for a map render block) are
         # built-ins: direct deterministic real-world lookups the main agent answers
         # inline (gated by the travel / render skills), like a calculation — not web
         # research, so not on the research sub-agent.  Skip any a spec supplies (no dup).
-        tools=([spec.subagent_tool] if spec.subagent_tool is not None else [])
+        tools=list(spec.async_subagent_tools)
               + list(spec.tools)
               + [t for t in (travel, directions, map_data, read_url)
                  if t not in spec.tools],
