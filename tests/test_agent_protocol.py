@@ -39,6 +39,7 @@ class _Service:
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "status": "pending",
+            "multitask_strategy": multitask_strategy or "enqueue",
         }
 
     def get_run(self, thread_id, run_id):
@@ -49,6 +50,7 @@ class _Service:
             "assistant_id": "research-agent",
             "status": "success",
             "error": None,
+            "multitask_strategy": "enqueue",
         }
 
     def cancel_run(self, thread_id, run_id):
@@ -124,6 +126,7 @@ def test_update_accepts_only_interrupt_strategy():
         "multitask_strategy": "interrupt",
     })
     assert response.status_code == 200
+    assert response.json()["multitask_strategy"] == "interrupt"
     assert service.calls[-1] == (
         "create_run", "child-1", "research-agent", "new context", "interrupt")
 
