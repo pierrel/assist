@@ -155,6 +155,10 @@ def create_agent_protocol_router(
     async def create_thread(request: Request) -> dict[str, Any]:
         body = await _validated_body(request, _CreateThread)
         assert isinstance(body, _CreateThread)
+        if (body.thread_id is None) != (body.if_exists is None):
+            raise HTTPException(
+                status_code=422,
+                detail="thread_id and if_exists=do_nothing must be provided together")
         if body.thread_id is not None:
             _validated_id(body.thread_id)
         return _thread_response(await call(

@@ -96,6 +96,12 @@ app backed by Assist's existing =RunService=.  It is private to the process; the
 unused public =/agent= mount, bearer-secret configuration, and operator runbook
 are removed.
 
+The adapter accepts only the installed-SDK request shapes it implements:
+anonymous thread creation supplies neither ID nor conflict policy, while a
+deterministic task thread ID must be paired with =if_exists="do_nothing"=.
+Mismatched fields are rejected rather than silently promising the SDK's default
+duplicate-raise behavior.
+
 Unmodified Deep Agents middleware is not usable here.  This is a verified
 framework constraint, not a preference:
 

@@ -145,6 +145,17 @@ def test_sdk_idempotency_metadata_is_forwarded():
     ]
 
 
+def test_thread_id_and_idempotency_semantics_are_paired():
+    client, service = _client()
+
+    missing_policy = client.post("/threads", json={"thread_id": "sub-stable"})
+    missing_id = client.post("/threads", json={"if_exists": "do_nothing"})
+
+    assert missing_policy.status_code == 422
+    assert missing_id.status_code == 422
+    assert service.calls == []
+
+
 def test_installed_sdk_default_run_fields_are_accepted():
     """langgraph-sdk 0.3.3 sends these defaults on every runs.create call."""
     client, service = _client()
