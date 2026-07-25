@@ -7,7 +7,8 @@
 Implemented, locally reviewed to convergence, deployed, and live-smoked. The
 first deployment exposed a hidden-runtime schema integration defect; its fix is
 verified through a compiled LangGraph tool node and the repeated live flow.
-External review remains; the feature stops before merge.
+Draft [[https://github.com/pierrel/assist/pull/213][PR #213]] is open for external
+review; the feature stops before merge.
 
 Baseline N=3 on 2026-07-25: 0/3.  Each run started the context task and avoided
 polling, but the visible reply omitted its full task ID and said the supervisor
