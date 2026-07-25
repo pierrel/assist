@@ -78,10 +78,10 @@ class WebAgentProtocolService:
                         detail="A running or interrupted invocation cannot be cancelled safely")
                 try:
                     run = _create_run(
-                    thread_id, text, assistant_id=assistant_id,
-                    cancel_pending=True, max_runs=self.MAX_RUNS_PER_THREAD,
-                    max_pending=self.MAX_PENDING_PER_THREAD,
-                    multitask_strategy="interrupt")
+                        thread_id, text, assistant_id=assistant_id,
+                        cancel_pending=True, max_runs=self.MAX_RUNS_PER_THREAD,
+                        max_pending=self.MAX_PENDING_PER_THREAD,
+                        multitask_strategy="interrupt")
                 except InvalidRunTransition as exc:
                     status = 429 if "limit reached" in str(exc) else 409
                     raise HTTPException(status_code=status, detail=str(exc)) from exc
