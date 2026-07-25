@@ -24,19 +24,26 @@ def test_create_is_durable_acceptance_commit(service, tmp_path):
     assert service.get("t1", run.id).rider == {"tz": "UTC"}
 
 
-def test_child_shape_is_validated(service):
+def test_child_shape_is_validated(service, tmp_path):
     with pytest.raises(ValueError, match="requires parent"):
         service.create("t1", "research-agent", "go", mode="child")
     with pytest.raises(ValueError, match="cannot have parent"):
         service.create("t1", "general-agent", "go", parent_thread_id="parent")
-
     child = service.create(
-        "t2", "research-agent", "go", mode="child",
+        "sub-t3", "research-agent", "go", mode="child",
         parent_thread_id="t1", parent_run_id="parent-run",
         dispatch_key="parent-work:tool-call",
     )
     assert child.parent_run_id == "parent-run"
     assert child.dispatch_key == "parent-work:tool-call"
+
+    (tmp_path / "sub-visible").mkdir()
+    (tmp_path / "sub-visible" / "description.txt").write_text("visible")
+    with pytest.raises(ValueError, match="visible thread"):
+        service.create(
+            "sub-visible", "research-agent", "go", mode="child",
+            parent_thread_id="t1", parent_run_id="parent-run",
+            dispatch_key="work:visible-collision")
 
 
 def test_claim_and_same_status_are_idempotent(service):
@@ -152,7 +159,7 @@ def test_dispatch_key_create_is_atomic(service):
 
     def create():
         created.append(service.create(
-            "t1", "context-agent", "inspect", mode="child",
+            "sub-t3", "context-agent", "inspect", mode="child",
             parent_thread_id="parent", parent_run_id="run",
             dispatch_key="work:tool"))
 
@@ -163,14 +170,67 @@ def test_dispatch_key_create_is_atomic(service):
         thread.join()
 
     assert len({run.id for run in created}) == 1
-    assert len(service.list("t1")) == 1
+    assert len(service.list("sub-t3")) == 1
 
 
 def test_scan_children_does_not_parse_visible_run_histories(service, tmp_path):
     service.create("t1", "general-agent", "visible")
     child = service.create(
-        "t2", "context-agent", "hidden", mode="child",
+        "sub-t3", "context-agent", "hidden", mode="child",
         parent_thread_id="t1", parent_run_id="parent-run",
-        dispatch_key="work:tool", hidden=True)
+        dispatch_key="work:tool")
 
     assert service.scan_children() == [child]
+
+
+def test_child_admission_does_not_parse_visible_run_histories(service, tmp_path):
+    (tmp_path / "t1" / "runs.json").write_text("not json")
+
+    child = service.create(
+        "sub-t3", "background-research-agent", "hidden", mode="child",
+        parent_thread_id="parent", parent_run_id="parent-run",
+        dispatch_key="work:background", origin="background",
+        origin_limit=2)
+
+    assert child.status == "pending"
+
+
+def test_rejected_child_admission_leaves_no_hidden_directory(service, tmp_path):
+    service.create(
+        "sub-t3", "context-agent", "first", mode="child",
+        parent_thread_id="parent", parent_run_id="parent-run",
+        dispatch_key="work:first", origin="required", single_active_child=True)
+
+    with pytest.raises(InvalidRunTransition, match="only one"):
+        service.create(
+            "sub-t4", "context-agent", "second", mode="child",
+            parent_thread_id="parent", parent_run_id="parent-run",
+            dispatch_key="work:second", origin="required", single_active_child=True)
+
+    assert not (tmp_path / "sub-t4").exists()
+
+
+def test_child_admission_recovers_an_abandoned_empty_directory(service, tmp_path):
+    (tmp_path / "sub-abandoned").mkdir()
+
+    child = service.create(
+        "sub-abandoned", "context-agent", "inspect", mode="child",
+        parent_thread_id="parent", parent_run_id="parent-run",
+        dispatch_key="work:abandoned")
+
+    assert child.status == "pending"
+    assert (tmp_path / "sub-abandoned" / ".subagent").is_file()
+
+
+def test_failed_child_persistence_removes_new_hidden_directory(
+        service, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        service, "_write", lambda *_: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError, match="disk full"):
+        service.create(
+            "sub-failed", "context-agent", "inspect", mode="child",
+            parent_thread_id="parent", parent_run_id="parent-run",
+            dispatch_key="work:failed")
+
+    assert not (tmp_path / "sub-failed").exists()

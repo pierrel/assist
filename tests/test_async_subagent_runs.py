@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
+from threading import Event
 
 import pytest
 from fastapi import HTTPException
@@ -197,6 +198,49 @@ def test_parent_delete_race_discards_completed_child(monkeypatch, tmp_path):
     assert not os.path.isdir(threads.MANAGER.thread_dir(child.thread_id))
 
 
+def test_parent_delete_excludes_late_child_admission(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    parent = threads._create_run("parent", "question")
+    scanned = Event()
+    finish_scan = Event()
+    real_scan = threads._runs().scan_children
+
+    def paused_scan():
+        snapshot = real_scan()
+        scanned.set()
+        assert finish_scan.wait(1)
+        return snapshot
+
+    monkeypatch.setattr(threads._runs(), "scan_children", paused_scan)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        deletion = pool.submit(threads._delete_thread_and_children, "parent")
+        assert scanned.wait(1)
+        admission = pool.submit(
+            threads._dispatch_child, parent, "work:late", "context-agent", "inspect")
+        finish_scan.set()
+        deletion.result()
+        with pytest.raises(FileNotFoundError):
+            admission.result()
+
+
+def test_parent_delete_reaps_child_waiting_for_resume(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    parent = threads._create_run("parent", "question")
+    identity = threads._dispatch_child(
+        parent, "work:required", "context-agent", "inspect")
+    child = threads._runs().get(identity["thread_id"], identity["run_id"])
+    threads._runs().claim(child.thread_id, child.id)
+    child = threads._runs().transition(
+        child.thread_id, child.id, "success", result="done")
+    assert threads._complete_child_handoff(child, "done") is not None
+
+    threads._delete_thread_and_children("parent")
+
+    assert not os.path.exists(threads.MANAGER.thread_dir(child.thread_id))
+
+
 def test_concurrent_required_children_admit_only_one(monkeypatch, tmp_path):
     _root(monkeypatch, tmp_path)
     threads.MANAGER.reserve("parent")
@@ -342,7 +386,7 @@ def test_pending_follower_waits_for_parent_resume_terminal(monkeypatch, tmp_path
     threads._runs().transition("parent", parent.id, "interrupted")
     threads._set_status("parent", "paused", pending_message="question")
     follower = threads._create_run("parent", "newer message")
-    child_tid = threads.MANAGER.reserve("child", hidden=True)
+    child_tid = threads.MANAGER.reserve("sub-child", hidden=True)
     child = threads._create_run(
         child_tid, "inspect", assistant_id="context-agent", mode="child",
         parent_thread_id="parent", parent_run_id=parent.id,
