@@ -269,19 +269,6 @@ class Thread:
         (the reply is sent); returns the agent's final content."""
         return self._run(Command(resume={"decisions": [decision]}))
 
-    def resume_child(self, result: str) -> str:
-        """Resume an async ``task`` interrupt with its child agent's result."""
-        return self._run(Command(resume=result))
-
-    def pending_child(self) -> dict | None:
-        """Return the web async-child interrupt payload, if this graph awaits one."""
-        snap = self.agent.get_state(self.runconfig)
-        for intr in (getattr(snap, "interrupts", None) or ()):
-            value = intr.value or {}
-            if value.get("child_run_id") and value.get("parent_run_id"):
-                return value
-        return None
-
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):
             raise TypeError("text must be a string")

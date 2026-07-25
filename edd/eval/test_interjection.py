@@ -25,8 +25,7 @@ from assist.agent import create_agent, AgentHarness
 from assist.backlog import PendingMessage
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
-from manage.web.threads import (_INTERJECTION_FRAME, _INTERJECTION_GUIDE,
-                                _INTERJECTION_DEFER)
+from manage.web.threads import _INTERJECTION_FRAME, _INTERJECTION_GUIDE
 
 from .utils import create_filesystem, final_answer, stub_research_subagent
 
@@ -45,11 +44,10 @@ class _Journal:
     stay invisible until the second before_model boundary, so injection is
     genuinely mid-turn."""
 
-    def __init__(self, defer_available=True):
+    def __init__(self):
         self.entries: list[PendingMessage] = []
         self.consumed: list[str] = []
         self.boundaries = 0
-        self.defer = defer_available
 
     def peek(self, tid):
         self.boundaries += 1
@@ -60,8 +58,7 @@ class _Journal:
         self.entries = [r for r in self.entries if r.id not in ids]
 
     def frame(self, rec):
-        return (_INTERJECTION_FRAME + rec.text + _INTERJECTION_GUIDE
-                + (_INTERJECTION_DEFER if self.defer else "") + ")")
+        return _INTERJECTION_FRAME + rec.text + _INTERJECTION_GUIDE + ")"
 
     def add(self, text):
         rec = PendingMessage(thread_id="eval", text=text, id=uuid.uuid4().hex)
@@ -73,8 +70,8 @@ class TestInterjection(TestCase):
     def setUp(self):
         self.model = select_assistant_model(0.1)
 
-    def _run(self, files, ask, interjections, defer_available=True):
-        journal = _Journal(defer_available)
+    def _run(self, files, ask, interjections):
+        journal = _Journal()
         for t in interjections:
             journal.add(t)
         root = tempfile.mkdtemp()

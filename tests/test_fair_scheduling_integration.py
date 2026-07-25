@@ -65,7 +65,7 @@ def wired(tmp_path, monkeypatch):
                         lambda t, tz=None: None)
     monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda t: None)
     monkeypatch.setattr("manage.web.threads.get_cached_description", lambda t: "stub")
-    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd: None)
+    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd, expected=None: None)
     # Drain the scheduler queue so an item from another test can't leak in.
     with contextlib.suppress(Exception):
         while True:
@@ -123,3 +123,50 @@ def test_new_message_while_paused_routes_through_scheduler(wired, monkeypatch):
     assert run.text == "follow-up" and run.status == "pending"
     assert submitted == []
     assert threads._execute_run not in spawned
+
+
+def test_resume_scheduler_user_priority_and_stable_promotion():
+    q = threads._PriorityRunQueue()
+    q.put({"run_id": "bg-1", "tid": "other"})
+    q.put({"run_id": "user-1", "tid": "user", "user_priority": True})
+    q.put({"run_id": "parent-resume", "tid": "parent"})
+    q.put({"run_id": "bg-2", "tid": "other"})
+
+    q.promote("parent")
+
+    assert [q.get_nowait()["run_id"] for _ in range(4)] == [
+        "user-1", "parent-resume", "bg-1", "bg-2"]
+
+
+def test_busy_user_submission_promotes_both_wait_points(wired, monkeypatch):
+    tid, _ = wired
+    from manage.web.state import _set_status
+    _set_status(tid, "paused", pending_message="hello")
+    scheduler_promotions = []
+    affinity_promotions = []
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "promote",
+                        scheduler_promotions.append)
+    monkeypatch.setattr(threads.THREAD_QUEUE, "promote", affinity_promotions.append)
+
+    run, busy = threads._accept_message_run(tid, "change course")
+
+    assert busy is True
+    assert run.text == "change course"
+    assert scheduler_promotions == [tid]
+    assert affinity_promotions == [tid]
+
+
+def test_pending_dispatch_selects_user_before_older_background(wired, monkeypatch):
+    tid, _ = wired
+    background = threads._create_run(tid, "child done", origin="task-completion")
+    user = threads._create_run(tid, "new direction")
+    submitted = []
+    monkeypatch.setattr(
+        threads._RESUME_SCHEDULER, "submit",
+        lambda run_id, thread_id, **kwargs:
+            submitted.append((run_id, thread_id, kwargs)))
+
+    threads._dispatch_pending_after(tid)
+
+    assert submitted == [(user.id, tid, {"user_priority": True})]
+    assert background.status == "pending"

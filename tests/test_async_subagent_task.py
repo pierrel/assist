@@ -1,168 +1,164 @@
-from __future__ import annotations
-
-import asyncio
-import sqlite3
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, TypedDict
 
 import pytest
-from langchain_core.messages import BaseMessage, ToolMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.types import Command
+from fastapi import FastAPI, Request
+from langchain_core.messages import AIMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 
 from assist.async_subagents import (
     AsyncTaskContext,
     async_task_context,
-    task_tool,
+    async_task_tools,
+    configure_async_subagent_app,
 )
 
 
-def _runtime(tool_call_id="call-1"):
-    return SimpleNamespace(tool_call_id=tool_call_id)
+TOOLS = {tool.name: tool for tool in async_task_tools}
 
 
-def test_requires_registered_web_execution_context():
-    with pytest.raises(RuntimeError, match="outside a configured web run"):
-        task_tool.func("find it", "context-agent", _runtime())
+def _runtime(call_id="call-1"):
+    return SimpleNamespace(tool_call_id=call_id)
 
 
-def test_rejects_unknown_type_before_dispatch():
-    with async_task_context(AsyncTaskContext("p", "r", "w", lambda *_: {})):
-        with pytest.raises(ValueError, match="unknown subagent type"):
-            task_tool.func("find it", "invented-agent", _runtime())
-
-
-def test_sync_dispatch_key_and_interrupt_payload(monkeypatch):
-    dispatched = []
-    payloads = []
-    monkeypatch.setattr(
-        "assist.async_subagents.interrupt",
-        lambda payload: payloads.append(payload) or "child result")
-
-    def dispatch(key, agent, description):
-        dispatched.append((key, agent, description))
-        return {"thread_id": "child-thread", "run_id": "child-run"}
-
-    context = AsyncTaskContext("parent-thread", "parent-run", "parent-work", dispatch)
-    with async_task_context(context):
-        command = task_tool.func("inspect files", "context-agent", _runtime("tc-7"))
-
-    assert dispatched == [("parent-work:tc-7", "context-agent", "inspect files")]
-    assert payloads == [{
-        "parent_thread_id": "parent-thread", "parent_run_id": "parent-run",
-        "parent_work_id": "parent-work", "child_thread_id": "child-thread",
-        "child_run_id": "child-run", "tool_call_id": "tc-7",
-    }]
-    assert list(command.update) == ["messages"]
-    assert len(command.update["messages"]) == 1
-    assert command.update["messages"][0].tool_call_id == "tc-7"
-    assert command.update["messages"][0].content == "child result"
-
-
-def test_async_tool_dispatches_off_loop(monkeypatch):
+@pytest.fixture
+def protocol():
+    app = FastAPI()
     calls = []
-    monkeypatch.setattr("assist.async_subagents.interrupt", lambda _: "done")
+    tasks = {}
 
-    def dispatch(key, agent, description):
-        calls.append((key, agent, description))
-        return {"thread_id": "ct", "run_id": "cr"}
+    @app.post("/threads")
+    async def create_thread(request: Request):
+        body = await request.json()
+        calls.append(("thread", body))
+        tid = body["thread_id"]
+        tasks.setdefault(tid, {
+            "task_id": tid,
+            "agent_name": None,
+            "description": None,
+            "status": "pending",
+            "run_id": None,
+            "parent_thread_id": body["metadata"]["parent_thread_id"],
+            "created_at": "2026-07-25T00:00:00Z",
+            "updated_at": "2026-07-25T00:00:00Z",
+        })
+        return {"thread_id": tid, "status": "idle", "values": {}}
 
-    context = AsyncTaskContext("pt", "pr", "pw", dispatch)
+    @app.post("/threads/{tid}/runs")
+    async def create_run(tid: str, request: Request):
+        body = await request.json()
+        calls.append(("run", tid, body))
+        task = tasks[tid]
+        task.update({
+            "agent_name": body["assistant_id"],
+            "description": body["input"]["messages"][0]["content"],
+            "run_id": "run-" + body["metadata"]["dispatch_key"],
+            "status": "pending",
+        })
+        return {
+            "run_id": task["run_id"], "thread_id": tid,
+            "assistant_id": task["agent_name"], "status": "pending",
+            "multitask_strategy": body.get("multitask_strategy", "enqueue"),
+        }
+
+    @app.get("/threads/{tid}")
+    def get_thread(tid: str):
+        if tid == "parent":
+            values = {"async_tasks": list(tasks.values())}
+        elif tid in tasks:
+            values = {"async_task": tasks[tid]}
+        else:
+            return {"thread_id": tid, "status": "idle", "values": {}}
+        return {"thread_id": tid, "status": "idle", "values": values}
+
+    @app.post("/threads/{tid}/runs/{run_id}/cancel")
+    def cancel(tid: str, run_id: str):
+        calls.append(("cancel", tid, run_id))
+        tasks[tid]["status"] = "cancelled"
+        return None
+
+    configure_async_subagent_app(app)
+    return calls, tasks
+
+
+def test_five_upstream_shaped_tools_exist():
+    assert set(TOOLS) == {
+        "start_async_task", "check_async_task", "update_async_task",
+        "cancel_async_task", "list_async_tasks",
+    }
+
+
+def test_requires_registered_web_execution_context(protocol):
+    with pytest.raises(RuntimeError, match="outside a configured web run"):
+        TOOLS["start_async_task"].func(
+            "find it", "context-agent", _runtime())
+
+
+def test_start_is_deterministic_and_uses_asgi(protocol):
+    calls, _ = protocol
+    context = AsyncTaskContext("parent", "parent-run", "parent-work")
     with async_task_context(context):
-        command = asyncio.run(task_tool.coroutine(
-            "research it", "research-agent", _runtime("async-call")))
+        first = TOOLS["start_async_task"].func(
+            "inspect files", "context-agent", _runtime("tc-7"))
+        second = TOOLS["start_async_task"].func(
+            "inspect files", "context-agent", _runtime("tc-7"))
 
-    assert calls == [("pw:async-call", "research-agent", "research it")]
-    assert command.update["messages"][0].tool_call_id == "async-call"
+    task_id = first.split("task_id: ", 1)[1].split(".", 1)[0]
+    assert second == first
+    assert task_id.startswith("sub-") and len(task_id) == 28
+    assert [call[1]["thread_id"] for call in calls if call[0] == "thread"] == [
+        task_id, task_id]
+    assert all(call[2]["metadata"]["dispatch_key"] == "parent-work:tc-7"
+               for call in calls if call[0] == "run")
 
 
-def test_background_confirmation_exposes_durable_run_id():
-    context = AsyncTaskContext(
-        "pt", "pr", "pw",
-        lambda *_: {"thread_id": "child-thread", "run_id": "child-run"})
+def test_tool_node_injects_runtime_when_model_calls_start(protocol):
+    """Exercise LangGraph's real tool boundary, not ``StructuredTool.func``."""
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode(async_task_tools))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+
+    with async_task_context(AsyncTaskContext("parent", "parent-run", "work")):
+        result = graph.compile().invoke({"messages": [AIMessage(
+            content="", tool_calls=[{
+                "name": "start_async_task",
+                "args": {"description": "inspect", "subagent_type": "context-agent"},
+                "id": "model-call-1",
+                "type": "tool_call",
+            }])]}, {"configurable": {"thread_id": "parent"}})
+
+    assert "task_id: sub-" in result["messages"][-1].content
+
+
+def test_check_list_update_and_cancel_are_parent_scoped(protocol):
+    _, tasks = protocol
+    context = AsyncTaskContext("parent", "parent-run", "parent-work")
     with async_task_context(context):
-        command = task_tool.func(
-            "research it", "background-research-agent", _runtime("bg-call"))
+        launched = TOOLS["start_async_task"].func(
+            "inspect", "context-agent", _runtime("start"))
+        task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+        assert task_id in TOOLS["list_async_tasks"].func(_runtime("list"))
+        assert '"status": "pending"' in TOOLS["check_async_task"].func(
+            task_id, _runtime("check"))
+        updated = TOOLS["update_async_task"].func(
+            task_id, "inspect only org files", _runtime("update"))
+        assert "Task updated" in updated
+        assert tasks[task_id]["description"] == "inspect only org files"
+        cancelled = TOOLS["cancel_async_task"].func(
+            task_id, _runtime("cancel"))
+        assert "Task cancelled" in cancelled
+        assert tasks[task_id]["status"] == "cancelled"
 
-    content = command.update["messages"][0].content
-    assert "task_id: child-run" in content
-    assert "child-thread" not in content
-
-
-def test_dispatch_must_return_complete_child_identity(monkeypatch):
-    monkeypatch.setattr("assist.async_subagents.interrupt", lambda _: "done")
-    context = AsyncTaskContext("pt", "pr", "pw", lambda *_: {"thread_id": "ct"})
-    with async_task_context(context):
-        with pytest.raises(ValueError, match="thread_id and run_id"):
-            task_tool.func("inspect", "context-agent", _runtime())
-
-
-class _State(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-
-
-def _dispatch_from(db: Path):
-    def dispatch(key, agent, description):
-        with sqlite3.connect(db) as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS children "
-                "(dispatch_key TEXT PRIMARY KEY, thread_id TEXT, run_id TEXT, "
-                "agent TEXT, description TEXT)")
-            conn.execute(
-                "INSERT OR IGNORE INTO children VALUES (?, ?, ?, ?, ?)",
-                (key, "child-thread", "child-run", agent, description))
-            row = conn.execute(
-                "SELECT thread_id, run_id FROM children WHERE dispatch_key = ?",
-                (key,),
-            ).fetchone()
-        return {"thread_id": row[0], "run_id": row[1]}
-    return dispatch
+    with async_task_context(AsyncTaskContext("other", "r", "w")):
+        assert "not found in this conversation" in TOOLS[
+            "check_async_task"].func(task_id, _runtime("foreign"))
 
 
-def _compile(checkpoint_db: Path, children_db: Path):
-    def delegate(_state):
-        context = AsyncTaskContext(
-            "parent-thread", "parent-run", "parent-work",
-            _dispatch_from(children_db))
-        with async_task_context(context):
-            return task_tool.func(
-                "inspect the workspace", "context-agent", _runtime("task-1"))
-
-    graph = StateGraph(_State)
-    graph.add_node("delegate", delegate)
-    graph.add_edge(START, "delegate")
-    graph.add_edge("delegate", END)
-    conn = sqlite3.connect(checkpoint_db, check_same_thread=False)
-    saver = SqliteSaver(conn)
-    saver.setup()
-    return conn, graph.compile(checkpointer=saver)
-
-
-def test_replay_after_process_recreation_dispatches_once_and_pairs_result(tmp_path):
-    checkpoint_db = tmp_path / "checkpoints.sqlite"
-    children_db = tmp_path / "children.sqlite"
-    config = {"configurable": {"thread_id": "parent-thread"}}
-
-    conn, graph = _compile(checkpoint_db, children_db)
-    first = graph.invoke({"messages": []}, config, durability="sync")
-    conn.close()
-
-    assert first["__interrupt__"][0].value["child_run_id"] == "child-run"
-
-    conn, graph = _compile(checkpoint_db, children_db)
-    final = graph.invoke(Command(resume="durable child result"), config,
-                         durability="sync")
-    conn.close()
-
-    with sqlite3.connect(children_db) as db:
-        children = db.execute(
-            "SELECT dispatch_key, thread_id, run_id FROM children").fetchall()
-    assert children == [("parent-work:task-1", "child-thread", "child-run")]
-    tool_messages = [message for message in final["messages"]
-                     if isinstance(message, ToolMessage)]
-    assert len(tool_messages) == 1
-    assert tool_messages[0].tool_call_id == "task-1"
-    assert tool_messages[0].content == "durable child result"
+def test_unknown_agent_is_rejected_without_asgi_call(protocol):
+    calls, _ = protocol
+    with async_task_context(AsyncTaskContext("parent", "r", "w")):
+        result = TOOLS["start_async_task"].func(
+            "invent", "invented-agent", _runtime())
+    assert "Unknown subagent" in result
+    assert calls == []

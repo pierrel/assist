@@ -17,8 +17,9 @@ Affinity, then fairness under contention:
   turn is resumed later (round-robin, back of the queue) from its durable
   checkpoint — no lost work.  UNCONTENDED, the holder is never paused (the
   tick just re-arms), so a long turn with nobody waiting runs uninterrupted.
-- Waiters are FIFO among themselves.  A resumed turn re-acquires like any
-  other waiter, so it lands at the back — natural round-robin, no priority.
+- User work precedes background work; each tier is FIFO.  Promotion can move an
+  already-waiting paused parent into the user tier, but never displaces the
+  current holder.
 - Same ``thread_id`` re-acquiring is a no-op (re-entrant by id).
 
 Failure-fast bounds (the tick timer, :meth:`_on_tick`, enforces both):
@@ -123,6 +124,14 @@ class _Handle:
         self.timer: threading.Timer | None = None
 
 
+class _Waiter:
+    __slots__ = ("thread_id", "user_priority")
+
+    def __init__(self, thread_id: str, user_priority: bool) -> None:
+        self.thread_id = thread_id
+        self.user_priority = user_priority
+
+
 _active_handle: contextvars.ContextVar = contextvars.ContextVar(
     "thread_queue_active_handle", default=None
 )
@@ -137,7 +146,8 @@ class ThreadAffinityQueue:
     ) -> None:
         self._cond = threading.Condition()
         self._holder: _Handle | None = None
-        self._waiters: deque[str] = deque()
+        self._user_waiters: deque[_Waiter] = deque()
+        self._background_waiters: deque[_Waiter] = deque()
         self._default_hold_timeout = hold_timeout_s
         self._default_wait_timeout = wait_timeout_s
         self._default_quantum = quantum_s
@@ -157,6 +167,7 @@ class ThreadAffinityQueue:
         hold_timeout_s: float | None = None,
         quantum_s: float | None = None,
         accumulated_active_ms: float = 0.0,
+        user_priority: bool = False,
     ) -> Iterator[_Handle]:
         """Acquire this thread's single-flight slot for the ``with`` block.
 
@@ -194,13 +205,18 @@ class ThreadAffinityQueue:
                 reentrant_holder = self._holder
             else:
                 reentrant_holder = None
-                if self._holder is not None:
+                # An awakened waiter does not own the Condition until it
+                # reacquires the lock. A fresh caller arriving in that window
+                # must join the queues instead of barging ahead.
+                if self._holder is not None or self._next_waiter() is not None:
                     cb("queued")
-                    self._waiters.append(thread_id)
+                    waiter = _Waiter(thread_id, user_priority)
+                    (self._user_waiters if user_priority
+                     else self._background_waiters).append(waiter)
                     deadline = time.time() + wait_timeout
                     try:
                         while self._holder is not None or (
-                            self._waiters and self._waiters[0] != thread_id
+                            self._next_waiter() is not waiter
                         ):
                             remaining = deadline - time.time()
                             if remaining <= 0:
@@ -208,12 +224,17 @@ class ThreadAffinityQueue:
                                     f"thread {thread_id} waited {wait_timeout}s for queue"
                                 )
                             self._cond.wait(timeout=remaining)
-                        self._waiters.popleft()
+                        queue_for_waiter = (self._user_waiters
+                                            if waiter.user_priority
+                                            else self._background_waiters)
+                        queue_for_waiter.popleft()
                     except BaseException:
-                        try:
-                            self._waiters.remove(thread_id)
-                        except ValueError:
-                            pass
+                        for waiters in (self._user_waiters,
+                                        self._background_waiters):
+                            try:
+                                waiters.remove(waiter)
+                            except ValueError:
+                                pass
                         self._cond.notify_all()
                         raise
 
@@ -304,12 +325,13 @@ class ThreadAffinityQueue:
         with self._cond:
             if self._holder is not handle:
                 return  # already released; a stale tick.
+            waiter_count = len(self._user_waiters) + len(self._background_waiters)
             slice_s = time.time() - handle.acquired_at
             cumulative_s = handle.accumulated_active_ms / 1000.0 + slice_s
             logger.debug(
                 "fair-sched tick: holder=%s slice=%.0fs cumulative=%.0fs waiters=%d "
                 "quantum=%.0fs cap=%.0fs", handle.thread_id, slice_s, cumulative_s,
-                len(self._waiters), handle.quantum_s, handle.hold_timeout_s)
+                waiter_count, handle.quantum_s, handle.hold_timeout_s)
             if cumulative_s >= handle.hold_timeout_s:
                 handle.expired = True
                 self._release_if_holder(handle)
@@ -318,12 +340,13 @@ class ThreadAffinityQueue:
                     handle.thread_id, handle.hold_timeout_s,
                 )
                 return  # terminal — do NOT re-arm.
-            if slice_s >= handle.quantum_s and len(self._waiters) > 0:
+            if slice_s >= handle.quantum_s and self._next_waiter() is not None:
                 if not handle.pause_requested:
                     logger.info(
                         "fair-sched: requesting pause of %s (held %.0fs >= quantum %.0fs, "
                         "%d waiting); will yield at next superstep",
-                        handle.thread_id, slice_s, handle.quantum_s, len(self._waiters))
+                        handle.thread_id, slice_s, handle.quantum_s,
+                        waiter_count)
                 handle.pause_requested = True
                 # Fall through and KEEP TICKING: the holder yields at its next
                 # after_model (which cancels the timer via acquire's finally), but
@@ -358,6 +381,40 @@ class ThreadAffinityQueue:
         with self._cond:
             return self._active_hold_ms.pop(thread_id, 0.0)
 
+    def _next_waiter(self) -> _Waiter | None:
+        """Return the next waiter. Caller must hold ``self._cond``."""
+        if self._user_waiters:
+            return self._user_waiters[0]
+        return self._background_waiters[0] if self._background_waiters else None
+
+    def promote(self, thread_id: str) -> None:
+        """Move this thread's parked background waiters into the user tier.
+
+        Promotion is stable: existing user waiters remain first and promoted
+        waiters retain their relative arrival order.  The active holder is
+        deliberately untouched.
+        """
+        with self._cond:
+            promoted = [waiter for waiter in self._background_waiters
+                        if waiter.thread_id == thread_id]
+            if not promoted:
+                return
+            self._background_waiters = deque(
+                waiter for waiter in self._background_waiters
+                if waiter.thread_id != thread_id)
+            for waiter in promoted:
+                waiter.user_priority = True
+                self._user_waiters.append(waiter)
+            self._cond.notify_all()
+
+    def request_pause(self, thread_id: str) -> bool:
+        """Ask the current holder to yield at its next model boundary."""
+        with self._cond:
+            if self._holder is None or self._holder.thread_id != thread_id:
+                return False
+            self._holder.pause_requested = True
+            return True
+
     def current_handle(self) -> _Handle | None:
         with self._cond:
             return self._holder
@@ -381,7 +438,7 @@ class ThreadAffinityQueue:
 
     def waiter_count(self) -> int:
         with self._cond:
-            return len(self._waiters)
+            return len(self._user_waiters) + len(self._background_waiters)
 
 
 def active_handle() -> _Handle | None:

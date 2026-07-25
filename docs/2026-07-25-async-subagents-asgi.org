@@ -1,0 +1,296 @@
+#+title: Subagents over the Agent Protocol
+#+date: <2026-07-25>
+#+author: Pierre + Codex
+
+* Status
+
+Implemented, locally reviewed to convergence, deployed, and live-smoked. The
+first deployment exposed a hidden-runtime schema integration defect; its fix is
+verified through a compiled LangGraph tool node and the repeated live flow.
+Draft [[https://github.com/pierrel/assist/pull/213][PR #213]] is open for external
+review; the feature stops before merge.
+
+Baseline N=3 on 2026-07-25: 0/3.  Each run started the context task and avoided
+polling, but the visible reply omitted its full task ID and said the supervisor
+was “waiting.”  Full output: =/tmp/assist-async-subagents-baseline-n3.log= on
+the development host.
+
+Post-implementation behavior: N=3 12/12, post-review N=5 20/20, and stability
+N=10 40/40. Deterministic suite: 1,368 passed. Four substantive local-review
+rounds converged, followed by the focused runtime-injection review.
+
+The tracked implementation is +103 lines overall. Production files are +152
+lines against merged =main=; the growth is the new five-tool lifecycle,
+two-tier scheduling, durable control/recovery, and bounded task retention. The
+new state doc and behavioral eval are reported separately from production LOC.
+
+Live smoke on 2026-07-25 verified immediate full-ID replies, child completion
+wakes, result checking, main-thread interjection between calls, two-child
+serialization, user priority over a queued child, selective queued-child
+cancellation, crash-style restart recovery without duplicate completion, and
+recursive parent/hidden-child deletion. The smoke parent and all four hidden
+children were removed afterward.
+
+* Lessons
+
+- A custom Pydantic tool schema can hide =ToolRuntime= from LangGraph's runtime
+  injection even though direct =tool.func(...)= tests pass. Infer the full schema
+  from the annotated callable and test through a compiled =ToolNode=; LangChain's
+  model-facing schema still removes the injected field.
+- Delegation has three real states: legacy synchronous, explicitly disabled,
+  and asynchronous. One tri-state value must drive graph construction,
+  installed tools, and prompt rendering so contradictory states cannot exist.
+
+* User contract
+
+1. A user message becomes a durable main-thread Run and waits for the one shared
+   execution slot.
+2. The main agent may start one or more subagent tasks.  Starting a task returns
+   its full task ID immediately.  The main agent then tells the user what it
+   started and returns.  It never waits or polls in that turn.
+3. A subagent call releases the parent and uses the existing durable Run service
+   and =THREAD_QUEUE=. =parallel=1= remains true; two model calls never overlap.
+4. Each child terminal result creates exactly one ordinary follow-up Run on its
+   parent thread.  That Run wakes the main agent, which checks the completed task
+   and continues the user's request.
+5. A new user message outranks queued child work and completion follow-ups for
+   that thread.  It never preempts the active model call or tool call.  The
+   existing main-thread interjection middleware still delivers it at the next
+   model boundary when the main thread itself is active.
+6. User interjection is not implicit cancellation.  The main agent sees the
+   outstanding-task snapshot and decides which tasks to keep, update, or cancel
+   in light of the new message.
+7. The main agent has =start_async_task=, =check_async_task=,
+   =update_async_task=, =cancel_async_task=, and =list_async_tasks=.  Task IDs
+   are always reported verbatim.
+8. Pending work can be changed or cancelled before it starts. An update to an
+   active child queues behind its current graph slice; that slice's obsolete
+   completion does not wake the parent. Cancellation is durable first, then asks
+   the active child to stop at its next model boundary. Neither operation
+   preempts an in-flight inference or tool call.
+9. Public task status describes the logical chain, not merely its newest control
+   Run: active work remains =running= behind a queued update or cancellation,
+   while a terminal resumed slice resolves its historical interruption. The
+   cancellation tool reports the post-operation truth, distinguishing a requested
+   boundary stop from an immediately completed cancellation.
+10. Subagents are direct leaf graphs and receive no delegation tools.
+
+* What “interrupt” means after this change
+
+Keep the complete user-to-main interjection mechanism in
+=assist/middleware/interjection.py= and =manage/web/threads.py=: journaled
+pending messages, model-boundary delivery, durable claim, rendering, recovery,
+and re-journaling on failure.
+
+Delete the parent-waits-for-child mechanism. In particular, subagent delegation
+must no longer call LangGraph =interrupt()=, suspend the parent tool node, or
+replay that node through =Command(resume=...)= when a child finishes.  Child
+completion is a new ordinary parent Run.  HITL interrupts such as =send_reply=
+are unrelated and remain.
+
+* Framework boundary
+
+The tool names and lifecycle follow Deep Agents' =AsyncSubAgentMiddleware= and
+the LangGraph Agent Protocol.  The transport is an in-process, prefixless ASGI
+app backed by Assist's existing =RunService=.  It is private to the process; the
+unused public =/agent= mount, bearer-secret configuration, and operator runbook
+are removed.
+
+The adapter accepts only the installed-SDK request shapes it implements:
+anonymous thread creation supplies neither ID nor conflict policy, while a
+deterministic task thread ID must be paired with =if_exists="do_nothing"=.
+Mismatched fields are rejected rather than silently promising the SDK's default
+duplicate-raise behavior.
+
+Unmodified Deep Agents middleware is not usable here.  This is a verified
+framework constraint, not a preference:
+
+- Assist invokes its graph synchronously and uses =SqliteSaver=.  ASGI
+  subagents reject the middleware's synchronous client path.
+- Both the pinned =langgraph-sdk 0.3.3= and current =0.4.2= create loopback
+  clients lazily, but expose no public client-injection or persistent app
+  registration seam for an application-owned ASGI app.
+- The upstream lifecycle has no completion notifier, no replay idempotency for
+  start, and promises immediate interrupt/cancel behavior that conflicts with
+  Assist's non-preemptive one-slot contract.
+
+Therefore Assist will provide a small upstream-shaped tool facade whose tools
+use the public LangGraph SDK through an injected ASGI client.  It will not copy
+the upstream middleware or patch private SDK globals.  Durable task state stays
+in the already-authoritative Run service rather than duplicating it in a second
+graph-state registry.  If Deep Agents later exposes client injection and
+idempotent admission, the local tool facade can be deleted without changing the
+Agent Protocol service or user contract.
+
+* Durable model and idempotency
+
+The existing child association remains the durable task registry.  A task's
+public =task_id= is its hidden child thread ID.  The task owns a stable logical
+=work_id= across updates and fair-pause successor Runs.
+
+- Start key: parent =work_id= plus LangGraph =tool_call_id=.  Replaying a start
+  returns the same child thread and first Run.
+- Hidden-thread identity is an immutable metadata marker. Its file and staging
+  entry are durable before atomic rename; a root-directory barrier then makes
+  that publication durable. Replay validates it without rewriting. Publication
+  and parent deletion share one admission lock, so a completed deletion cannot
+  leave a newly orphaned child.
+- Update key: parent =work_id= plus the parent's =tool_call_id=. Replaying an
+  update returns the same successor or pending instruction.
+- Completion-wake key: =task-completion:<terminal Run id>=. The wake's logical
+  =work_id= is =task-completion:<task work_id>=.
+  Terminal dispatch and startup recovery both create-or-find it.
+- Check and list derive status from the child's logical Run chain.  They do not
+  trust stale status recorded in conversation messages.
+- Child state is retained so a successful check can return its final output.
+  Deleting the visible parent deletes idle hidden children immediately; a
+  running child self-deletes when it reaches its boundary and never wakes a
+  deleted parent.
+- Each parent retains at most 128 tasks. Active tasks and terminal results with
+  unconsumed completion wakes are never pruned; the oldest cancelled or
+  successfully incorporated tasks are removed as new tasks are admitted.
+
+* Scheduling
+
+There are two priority tiers at every place work can wait:
+
+1. user work, including a paused main thread promoted because a new user message
+   will be folded into it by the interjection mechanism;
+2. child starts, child continuations, and task-completion wakes.
+
+FIFO is preserved inside each tier.  Promotion must reach both the resume
+scheduler and an already-parked =ThreadAffinityQueue= waiter.  The current
+holder is never displaced.  Choosing only a priority scheduler is insufficient
+because it may already have popped work that is then parked inside the affinity
+queue.
+
+* Deletions and simplifications
+
+- Replace =assist/async_subagents.py='s old custom =task= tool and its
+  =AsyncTaskContext=, =interrupt()=, and =Command(resume)= pairing.
+- Remove =Thread.pending_child= and =Thread.resume_child=.
+- Remove child =resume_value= state and required-child interrupted-parent
+  recovery/dependency branches.
+- Remove the required/background split and the
+  =background-research-agent= identity. Context, research, and critique are the
+  ordinary subagent types.
+- Remove background-research-specific interjection wording and blanket pending
+  continuation cancellation.
+- Remove the public =/agent= mount, secret configuration, and
+  =AGENTINSTRUCTIONS.org= operator enablement.  Keep the protocol request and
+  response adapter as the private ASGI boundary.
+- Collapse web, SMS, schedules, recovery, child completion, and task tools onto
+  the same durable admission and dispatch operations where their observed
+  contracts allow it.
+
+Production LOC is measured against merged =main= after implementation.  The
+target is neutral or negative.  If it grows, every retained addition must be
+identified in the PR by the contract it replaces or uniquely supplies.  Test
+LOC is reported separately.
+
+* Prompt and visible behavior
+
+The main system prompt says:
+
+- start every needed grounding task, then return to the user immediately;
+- never poll immediately after start;
+- report full task IDs and what each task will add;
+- treat status in conversation history as stale and call check/list;
+- on a completion wake, check that task, use its result, and either finish or
+  start the next necessary task;
+- on a user interjection, inspect outstanding tasks and keep, steer, or cancel
+  each deliberately;
+- never claim an active task was stopped until the tool reports cancellation.
+
+The automatic completion message contains trusted orchestration metadata and
+instructs the parent to fetch the result. The =check_async_task= return is the
+explicitly untrusted-data boundary, so a child result cannot impersonate a user
+message or system instruction.
+
+* Verification contract
+
+** Deterministic tests
+
+1. All five task tools use the private ASGI Agent Protocol app.
+2. Start and update replay return the same logical work without duplicate Runs.
+3. Multiple starts return in one parent turn and execute serially.
+4. Every success, error, timeout, and cancellation produces one coherent task
+   state. Success, error, and timeout wake the parent exactly once; cancellation
+   and superseded slices do not.
+5. Startup repairs terminal-child/no-wake and accepted-task/not-dispatched
+   crashes without duplication.
+6. New user work overtakes queued children and wakes at both scheduler and
+   affinity-queue wait points, but never displaces the active holder.
+7. A user interjection preserves tasks by default and lets the parent explicitly
+   update/cancel them.
+8. Main-thread interjection delivery, HITL approval, SMS, schedules, recovery,
+   deletion, and fair pause retain their existing behavior.
+9. Children lack task-management tools and cannot recursively dispatch
+   subagents.
+10. Completion framing keeps child output untrusted.
+11. Event-loop probes hold contended locks and prove HTTP status/message routes
+    remain responsive.
+12. The real entry point =python -m manage.web= starts successfully.
+13. Task tools infer their full schema from the callable, so LangGraph retains
+    and injects the hidden =ToolRuntime= field while exposing only user arguments
+    to the model. A compiled-tool-node test pins the integration boundary that a
+    direct =tool.func(...)= test cannot exercise.
+
+** Real-model evals
+
+Add an eval suite that observes, rather than merely asks for:
+
+- one and multiple tasks are started and the first parent reply returns without
+  check-looping;
+- full task IDs are surfaced;
+- a completion wake is checked and synthesized;
+- a user correction causes a fresh list/check followed by a justified
+  keep/update/cancel decision;
+- research no longer names or requests =background-research-agent=;
+- child agents do not call subagent management tools.
+
+Run N=3 before implementation to record the current failure shape, N=3 after
+implementation, N=5 after local review, and N=10 for stability.  Bound each
+real-model run and save its output.
+
+Observed 2026-07-25: the pre-implementation N=3 baseline was 0/3 scenarios;
+the implemented behavior passed N=3 (12/12 assertions), N=5 (20/20), and N=10
+(40/40). A final terminology-focused N=3/N=5/N=10 sequence also passed 72/72:
+visible replies consistently call delegated work a subagent or task. Static
+prompt wording alone was insufficient because the small model could reintroduce
+the retired label; placing the same naming contract in the start tool's
+description and immediate result made the observable contract stable.
+
+* Build order
+
+1. Add the failing unit contract and N=3 baseline eval.
+2. Make the affinity queue and resume scheduler priority-aware; preserve all
+   existing fairness and interjection tests.
+3. Simplify Run state to logical task chains and idempotent completion wakes.
+4. Convert the protocol adapter into the private prefixless ASGI app and add the
+   injected SDK client bridge composition root.
+5. Add the five local upstream-shaped tools to the main web agent only.
+6. Delete parent-child suspend/resume and =background-research-agent= paths.
+7. Reconcile system prompts, docstrings, comments, tests, roadmap, and operator
+   instructions against the new contract.
+8. Run deterministic checks and eval cadence, then the full local review loop to
+   convergence.
+9. Deploy through the coordination transaction and smoke the real web flow,
+   task completion, user interjection, priority, update, cancel, restart, and
+   deletion.
+10. Open the GitHub PR, run Copilot rounds, log meaningful findings, redeploy
+    every review-driven code change, save durable lessons, and stop before merge.
+
+* Risks and containment
+
+- The ASGI surface can launch host-integrated agents.  It is not mounted on a
+  listener, so remote authentication and network exposure disappear by
+  construction.  Input bounds and assistant allowlisting remain at the ASGI
+  boundary because child output and model arguments are untrusted.
+- Global one-slot scheduling makes a parent unable to act while an active child
+  owns the slot.  Fair boundaries and user-priority promotion bound when the
+  parent regains control; the design does not claim preemption.
+- A completion storm can enqueue many parent wakes. Idempotency prevents
+  duplicates and one-slot scheduling contains execution load.
+- Child results are untrusted content. The wake contains orchestration metadata;
+  =check_async_task= returns the result through the explicit untrusted-data boundary.

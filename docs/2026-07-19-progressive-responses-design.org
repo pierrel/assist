@@ -2,12 +2,11 @@
 #+date: <2026-07-19>
 #+author: design doc — PRD: 2026-07-19-prd-progressive-responses.org
 
-* Historical design, superseded 2026-07-24
+* Historical design, superseded 2026-07-25
 
-The sections through =Render= below are retained as decision history, not the current
-execution contract. The =AS BUILT= section is authoritative: new work is represented
-by Runs, queues carry run ids, and async child runs replace =continue_later= and
-=MESSAGE_BACKLOG=. The legacy backlog exists only for startup import.
+All sections below, including =AS BUILT=, are retained as decision history rather
+than the current execution contract. See
+[[file:2026-07-25-async-subagents-asgi.org][the subagent ASGI design]].
 
 * Shape (one paragraph)
 
@@ -199,7 +198,7 @@ Cadence: baseline N=3 → post-impl N=3 → N=5 → N=10.
 
 deepagents 0.6.1 ships =AsyncSubAgentMiddleware= (=middleware/async_subagents.py=)
 — =start_async_task= / =check_async_task= / =update_async_task= tools that
-launch a subagent as a background run. The right *shape*, rejected for this
+ launch a subagent as an asynchronous run. The right *shape*, rejected for this
 deployment on three structural grounds:
 1. *Requires an Agent Protocol execution service*: assist now implements the installed
    SDK subset as a thin authenticated adapter over its own RunService. It deliberately

@@ -22,17 +22,16 @@ from manage.web.app import app
 # Order matters only insofar as ``review`` imports from ``threads``.
 from manage.web import threads, review, evals, schedules, geo, egress  # noqa: E402,F401
 
-# The protocol API is private network-facing execution authority. It is mounted only
-# when an operator provides the bearer secret; the HTML UI and internal async children
-# still use the same service/run store directly.
-import os as _os
+# Subagent tools use a private, prefixless Agent Protocol ASGI app. It is never
+# mounted on the network-facing web app.
+from fastapi import FastAPI as _FastAPI
+from assist.async_subagents import configure_async_subagent_app
 from manage.web.agent_protocol import create_agent_protocol_router
 from manage.web.protocol_service import SERVICE as _PROTOCOL_SERVICE
 
-if _protocol_secret := _os.getenv("ASSIST_AGENT_PROTOCOL_SECRET"):
-    app.include_router(
-        create_agent_protocol_router(_PROTOCOL_SERVICE, secret=_protocol_secret),
-        prefix="/agent")
+_agent_app = _FastAPI()
+_agent_app.include_router(create_agent_protocol_router(_PROTOCOL_SERVICE))
+configure_async_subagent_app(_agent_app)
 
 # Re-export the names that external scripts (and any direct
 # ``from manage.web import X`` consumers) historically relied on, so

@@ -31,7 +31,7 @@ def wired(tmp_path, monkeypatch):
                         lambda t: "real description")
     monkeypatch.setattr("manage.web.state.get_cached_description",
                         lambda t: "real description")
-    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd: None)
+    monkeypatch.setattr("manage.web.threads.SandboxManager.cleanup", lambda wd, expected=None: None)
     with contextlib.suppress(Exception):
         while True:
             threads._RESUME_SCHEDULER._q.get_nowait()
@@ -142,15 +142,15 @@ def test_peek_is_side_effect_free_on_corruption(tmp_path):
     assert store.peek("t1") == []
 
 
-def test_user_message_clears_unclaimed_continuations(wired, monkeypatch):
+def test_user_message_preserves_unclaimed_continuations(wired, monkeypatch):
     tid, tmp_path = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
     stale = threads._create_run(tid, "stale plan", origin="continuation")
     threads._process_message(tid, "new user direction", origin=None)
-    assert threads._runs().get(tid, stale.id).status == "cancelled"
+    assert threads._runs().get(tid, stale.id).status == "pending"
     kinds = [e["kind"] for e in read_events(str(tmp_path / tid))]
-    assert "continuation_cancelled" in kinds
+    assert "continuation_cancelled" not in kinds
 
 
 def test_system_turns_do_not_clear_continuations(wired, monkeypatch):

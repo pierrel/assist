@@ -22,6 +22,12 @@ The core/app boundary is made real by (a) the spec itself, (b) a named
 file move (=ThreadManager= out of =assist/thread.py=).  No package
 split, no new distribution.
 
+*Current extension:* the frozen spec now also accepts =async_subagent_tools=.
+=None= retains the legacy synchronous subagents, an explicit empty sequence
+disables delegation for the restricted web triage profile, and a nonempty
+sequence replaces blocking =task= with the subagent lifecycle tools. See
+[[file:2026-07-25-async-subagents-asgi.org][the subagent ASGI design]] for that field's runtime contract.
+
 Rejected alternatives (from the framing doc):
 - *Composable middleware export* — both real clients want the identical
   hardened stack; middleware ordering is load-bearing
@@ -62,11 +68,14 @@ class AgentSpec:
     # paths go.  Mutually exclusive with sandbox_backend (a Thread/
     # create_agent param), validated at create_agent time.
     default_backend: BackendProtocol | None = None
+    # None = legacy sync; () = no delegation; nonempty = async tools.
+    async_subagent_tools: tuple[BaseTool, ...] | None = None
 #+end_src
 
-=__post_init__= normalizes =tools= to a tuple and =skill_sources= to
-=MappingProxyType= over a copy (via =object.__setattr__=, the class is
-frozen) so "frozen" is accurate, not shallow-frozen-by-accident.
+=__post_init__= normalizes =tools= and non-=None= =async_subagent_tools=
+to tuples and =skill_sources= to =MappingProxyType= over a copy (via
+=object.__setattr__=, the class is frozen) so "frozen" is accurate, not
+shallow-frozen-by-accident.
 Validation is *pure CPU only* — no backend listing, no probing, no
 locks (an =EmacsBackend= list is a network round trip to the phone; a
 =FilesystemBackend= list is disk I/O; both are banned here).
@@ -78,6 +87,7 @@ Every field maps to a live client need:
 | =tools=           | emacsos legacy chat: eval_elisp / apply_config / get_config |
 | =skill_sources=   | emacsos config-apply skill served at its own route |
 | =default_backend= | emacsos file-backed chat: EmacsBackend             |
+| =async_subagent_tools= | assist web: subagent lifecycle or triage no-delegation profile |
 
 ** Target signatures
 
@@ -94,7 +104,8 @@ Thread(working_dir, *,
 
 =spec= is keyword-only in both (an out-of-tree positional call must not
 silently bind a string to it).  =spec=None= means =AgentSpec()= —
-exactly today's defaults; manage.web and the eval harness pass no spec.
+exactly today's defaults; the eval harness passes no spec, while manage.web
+passes its web tools, skills, and subagent profile through one spec.
 
 *The split rule* (articulable, by design): /spec = the agent's shape,
 consumed by =create_agent=; Thread kwargs = per-instance and per-run
@@ -131,7 +142,10 @@ asymmetry dies with the adapter at the legacy-kwarg removal step.
 
 ** Dropped from v1 (deferrals, each with the trigger that revives it)
 
-- =subagents= selection — *user decision 2026-06-11: dropped.*  No
+- Arbitrary =subagents= selection remains dropped. The later
+  =async_subagent_tools= field selects the established synchronous profile,
+  no delegation, or the web's asynchronous profile; it does not accept arbitrary
+  child graph definitions. No
   client uses a non-default value (emacsos keeps all three subagents;
   research is routine phone traffic, reversing the framing doc's
   assumption).  Adding the field later is a backward-compatible

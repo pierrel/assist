@@ -9,9 +9,7 @@ persistence directly through ``Thread(thread_id=..., checkpointer=...)``
 It lives in the ``assist`` package (rather than ``manage``) because the
 eval harness uses it independently of the web app.
 
-Moved verbatim from ``assist.thread`` in the embedder-contract refactor;
-behavior unchanged.  Two semantics here are load-bearing and must not
-be "improved":
+Two semantics here are load-bearing and must not be "improved":
 
 - the sqlite connect happens in ``__init__`` (server *startup*), not
   lazily on first request — a blocking connect must never land on a
@@ -21,6 +19,7 @@ be "improved":
 """
 
 import logging
+import json
 import os
 import shutil
 import sqlite3
@@ -36,7 +35,7 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread import Thread
-from assist.async_subagents import task_tool, task_tool_no_background
+from assist.async_subagents import async_task_tools
 from assist.agent import create_context_agent, create_research_agent
 
 logger = logging.getLogger(__name__)
@@ -141,11 +140,12 @@ class ThreadManager:
         return self._model
 
     def list(self) -> list[str]:
-        """Return thread IDs filtered (no soft-deleted) and sorted by mtime descending."""
+        """Return visible, published thread IDs sorted by mtime descending."""
         dirs = []
         for name in os.listdir(self.root_dir):
             dpath = os.path.join(self.root_dir, name)
-            if not os.path.isdir(dpath) or name == "__pycache__":
+            if (not os.path.isdir(dpath) or name == "__pycache__"
+                    or name.startswith(".subagent-")):
                 continue
             if os.path.exists(os.path.join(dpath, ".subagent")):
                 continue
@@ -273,7 +273,6 @@ class ThreadManager:
             on_queue_state: Callable[[str], None] | None = None,
             configurable: dict | None = None,
             triage: bool = False,
-            continuation: bool = False,
             assistant_id: str = "general-agent") -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
@@ -283,8 +282,6 @@ class ThreadManager:
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
         # the reply HITL gate; a normal turn gets the full config tools and no HITL.
-        # A continuation may still use required async targets, but cannot
-        # recursively promise another automatic follow-up.
         tools = _web_triage_tools if triage else _web_tools
         interrupt_on = _web_interrupt_on if triage else None
         specialized = None
@@ -303,9 +300,8 @@ class ThreadManager:
                 sandbox_backend=sandbox_backend, leaf=True)
         elif assistant_id != "general-agent":
             raise ValueError(f"unknown assistant: {assistant_id}")
-        async_tool = (task_tool if assistant_id == "general-agent"
-                      and not continuation and not triage
-                      else task_tool_no_background)
+        async_tools = (async_task_tools if assistant_id == "general-agent"
+                       and not triage else ())
         thread_kwargs = dict(
                       thread_id=thread_id,
                       checkpointer=self.checkpointer,
@@ -319,8 +315,7 @@ class ThreadManager:
             working_dir, **thread_kwargs,
             spec=AgentSpec(
                 skill_sources=_web_skill_sources(), tools=tools,
-                subagent_tool=async_tool,
-                background_subagents=not continuation and not triage,
+                async_subagent_tools=async_tools,
                 interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:
@@ -355,22 +350,50 @@ class ThreadManager:
                       model=self.model, sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
                       spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
-                                     subagent_tool=task_tool,
-                                     background_subagents=True,
+                                     async_subagent_tools=async_task_tools,
                                      interrupt_on=None))
 
-    def reserve(self, thread_id: str | None = None, *, hidden: bool = False) -> str:
-        """Create an empty thread directory and return its id, without building an agent.
+    def reserve(self, thread_id: str | None = None,
+                *, hidden: dict | None = None) -> str:
+        """Reserve a thread directory and return its id without building an agent.
 
         Agent Protocol thread creation is a cheap persistence operation. The first run
-        constructs the graph/model off the request loop through :meth:`get`.
+        constructs the graph/model off the request loop through :meth:`get`. Hidden
+        thread identity is published atomically and an existing identity is validated,
+        never rewritten.
         """
         tid = thread_id or (
             datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex())
         tdir = self.thread_dir(tid)
+        if hidden is not None:
+            marker = os.path.join(tdir, ".subagent")
+            if os.path.isdir(tdir):
+                with open(marker) as stream:
+                    if json.load(stream) != hidden:
+                        raise ValueError("task metadata conflict")
+                return tid
+            pending = tempfile.mkdtemp(prefix=".subagent-", dir=self.root_dir)
+            try:
+                with open(os.path.join(pending, ".subagent"), "w") as stream:
+                    json.dump(hidden, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                directory_fd = os.open(pending, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+                os.rename(pending, tdir)
+                directory_fd = os.open(self.root_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if os.path.isdir(pending):
+                    shutil.rmtree(pending)
+            return tid
         os.makedirs(tdir, exist_ok=True)
-        if hidden:
-            open(os.path.join(tdir, ".subagent"), "a").close()
         return tid
 
     def close(self) -> None:

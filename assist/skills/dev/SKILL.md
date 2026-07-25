@@ -22,7 +22,7 @@ Determine which kind of task you have, then jump to the matching section:
 Before making ANY changes, complete ALL of the following in order.
 
 **1a. Explore.** Aim for ≤5 direct file reads.
-- Call the `context-agent` (via the `task` tool) once with a detailed prompt asking it to discover the project structure, conventions, and files relevant to this task.
+- Call the `context-agent` once with a detailed prompt asking it to discover the project structure, conventions, and files relevant to this task. If `start_async_task` is available, start it, report its task ID, end the turn, and continue when its completion wakes you. Otherwise use `task` and wait for its result.
 - Directly read 1–3 key files central to the task (e.g. the file you'll modify).
 
 **1b. Run at least one existing test — MANDATORY before writing a plan.**
@@ -33,7 +33,7 @@ Before making ANY changes, complete ALL of the following in order.
 - Include the test output in your response. This confirms the environment works.
 
 **1c. Research (only if needed).**
-- If the task involves unfamiliar libraries or patterns, call `research-agent` (via the `task` tool) to research best practices.
+- If the task involves unfamiliar libraries or patterns, call `research-agent` the same way: use `start_async_task` when available, otherwise use `task` and wait.
 
 **1d. Note findings.**
 - Write 3–5 key bullet points to `dev_notes.txt` in the workspace.
@@ -84,7 +84,7 @@ Only after the user approves the failing tests:
 
 After your changes are ready:
 1. Use the shell-execution tool to get the diff: `execute("git diff main")` (or `git diff master` if main doesn't exist).
-2. Call the `critique-agent` (via the `task` tool) with the full diff output for code review.
+2. Call the `critique-agent` with the full diff output for code review. With `start_async_task`, report the task ID and return, then continue this step on its completion wake; otherwise use `task` synchronously.
 3. Address any issues the critique raises — fix bugs, improve tests, clean up code.
 4. Re-run tests after any changes from critique feedback.
 
