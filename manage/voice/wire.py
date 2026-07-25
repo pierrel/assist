@@ -1,9 +1,9 @@
 """Bounded WebSocket transport for the voice-call client.
 
 This module owns framing, transport authentication, backpressure, and teardown.
-Call state and policy live in ``session.py``; PR3 exposes one synchronous
-runner seam for that later slice without importing the agent, speech, or flow
-layers.
+Call state and policy will live in ``session.py``. This module exposes one
+synchronous runner seam for that later layer without importing the agent,
+speech, or flow layers.
 """
 from __future__ import annotations
 
