@@ -131,7 +131,7 @@ def _interrupt_and_pair(
 def _deferred_pair(child: ChildIdentity, tool_call_id: str) -> Command:
     return Command(update={"messages": [ToolMessage(
         content=("Research was scheduled and will be posted automatically as a "
-                 f"follow-up (task_id: {child['thread_id']}). Answer the user now "
+                 f"follow-up (task_id: {child['run_id']}). Answer the user now "
                  "from the context already available."),
         tool_call_id=tool_call_id,
     )]})

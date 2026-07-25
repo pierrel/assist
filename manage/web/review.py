@@ -401,7 +401,7 @@ async def post_review(tid: str, request: Request,
 
         run, busy = await anyio.to_thread.run_sync(
             format_and_accept, limiter=_threads._get_run_admission_limiter())
-    except ValueError as e:
+    except (UnicodeDecodeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not busy:
         background_tasks.add_task(_threads._execute_run, run.id, tid)
