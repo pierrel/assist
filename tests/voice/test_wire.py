@@ -68,6 +68,9 @@ def test_codec_validates_known_controls_and_ignores_unknown():
     '{"type":"ring","call_id":"","caller":"+1"}',
     '{"type":"answered","call_id":""}',
     '{"type":"ring","call_id":"a","caller":"+1","extra":1}',
+    '\ud800',
+    r'{"type":"ring","call_id":"\ud800","caller":"+1"}',
+    r'{"type":"dtmf","digit":"\ud800"}',
 ])
 def test_codec_rejects_ambiguous_or_invalid_known_controls(text):
     with pytest.raises(wire.WireProtocolError):

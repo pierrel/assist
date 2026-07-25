@@ -78,12 +78,20 @@ def _reject_nonfinite(value: str) -> None:
 def _bounded_string(value: Any, field: str, limit: int) -> str:
     if type(value) is not str or len(value) > limit:
         raise WireProtocolError(f"invalid {field}")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as exc:
+        raise WireProtocolError(f"invalid {field}") from exc
     return value
 
 
 def decode_phone_control(text: str) -> dict[str, Any] | None:
     """Decode a phone control, returning ``None`` for an unknown type."""
-    if len(text.encode("utf-8")) > MAX_WS_MESSAGE_BYTES:
+    try:
+        encoded_size = len(text.encode("utf-8"))
+    except UnicodeError as exc:
+        raise WireProtocolError("invalid UTF-8 control") from exc
+    if encoded_size > MAX_WS_MESSAGE_BYTES:
         raise WireProtocolError("control frame too large")
     try:
         value = json.loads(
@@ -113,7 +121,8 @@ def decode_phone_control(text: str) -> dict[str, Any] | None:
     elif kind == "call_end":
         _bounded_string(value["cause"], "cause", 64)
     elif kind == "dtmf":
-        if type(value["digit"]) is not str or len(value["digit"]) != 1:
+        digit = _bounded_string(value["digit"], "digit", 1)
+        if len(digit) != 1:
             raise WireProtocolError("invalid digit")
     elif kind == "stats":
         rate = value["rate_hz"]

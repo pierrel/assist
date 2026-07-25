@@ -44,7 +44,7 @@ Run the CLI
 python -m manage.cli
 #+end_src
 
-Run the Web UI (auto-reload)
+Run the Web UI
 
 #+begin_src shell
 python -m manage.web
