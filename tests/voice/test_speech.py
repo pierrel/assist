@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import wave
 
 import numpy as np
@@ -10,6 +11,7 @@ from manage.voice.speech import Speech
 
 _WHISPER_TEST_MODEL = os.getenv("ASSIST_WHISPER_TEST_MODEL")
 _PIPER_TEST_MODEL = os.getenv("ASSIST_PIPER_TEST_MODEL")
+_FIXTURES = Path(__file__).with_name("fixtures")
 
 
 @dataclass
@@ -145,7 +147,7 @@ def test_synthesize_resamples_to_16k(monkeypatch, tmp_path):
 @pytest.mark.skipif(not _WHISPER_TEST_MODEL,
                     reason="ASSIST_WHISPER_TEST_MODEL is not provisioned")
 def test_real_whisper_transcribes_fixture_and_rejects_noise(tmp_path):
-    with wave.open("tests/voice/fixtures/speech_16k.wav", "rb") as wav:
+    with wave.open(str(_FIXTURES / "speech_16k.wav"), "rb") as wav:
         spoken = wav.readframes(wav.getnframes())
     speech = Speech(tmp_path / "voice.onnx", _WHISPER_TEST_MODEL)
 
