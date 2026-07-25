@@ -4,10 +4,10 @@
 
 * Status
 
-Implemented and locally reviewed to convergence. The first deployment's live
-smoke exposed a hidden-runtime schema integration defect; its fix is verified
-through a compiled LangGraph tool node. Repeat live smoke and external review
-remain; the feature stops before merge.
+Implemented, locally reviewed to convergence, deployed, and live-smoked. The
+first deployment exposed a hidden-runtime schema integration defect; its fix is
+verified through a compiled LangGraph tool node and the repeated live flow.
+External review remains; the feature stops before merge.
 
 Baseline N=3 on 2026-07-25: 0/3.  Each run started the context task and avoided
 polling, but the visible reply omitted its full task ID and said the supervisor
@@ -22,6 +22,23 @@ The tracked implementation is +103 lines overall. Production files are +152
 lines against merged =main=; the growth is the new five-tool lifecycle,
 two-tier scheduling, durable control/recovery, and bounded task retention. The
 new state doc and behavioral eval are reported separately from production LOC.
+
+Live smoke on 2026-07-25 verified immediate full-ID replies, child completion
+wakes, result checking, main-thread interjection between calls, two-child
+serialization, user priority over a queued child, selective queued-child
+cancellation, crash-style restart recovery without duplicate completion, and
+recursive parent/hidden-child deletion. The smoke parent and all four hidden
+children were removed afterward.
+
+* Lessons
+
+- A custom Pydantic tool schema can hide =ToolRuntime= from LangGraph's runtime
+  injection even though direct =tool.func(...)= tests pass. Infer the full schema
+  from the annotated callable and test through a compiled =ToolNode=; LangChain's
+  model-facing schema still removes the injected field.
+- Delegation has three real states: legacy synchronous, explicitly disabled,
+  and background async. One tri-state value must drive graph construction,
+  installed tools, and prompt rendering so contradictory states cannot exist.
 
 * User contract
 
