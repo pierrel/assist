@@ -80,7 +80,7 @@ def test_dispatch_no_matching_subscription_is_noop(client, monkeypatch):
 def test_reply_decision_gated_on_awaiting_approval(client, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
     queued = []
-    monkeypatch.setattr(threads, "_process_message", lambda *a, **k: queued.append((a, k)))
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
     # not awaiting → 409
     _set_status("t-sub", "ready")
     assert client.post("/thread/t-sub/reply/approve").status_code == 409
@@ -89,8 +89,9 @@ def test_reply_decision_gated_on_awaiting_approval(client, monkeypatch):
     r = client.post("/thread/t-sub/reply/approve", follow_redirects=False)
     assert r.status_code == 303
     assert len(queued) == 1
-    args = queued[0][0]
-    assert args[0] == "t-sub" and args[3] == "+1555" and args[4] == {"type": "approve"}
+    run = threads._runs().get("t-sub", queued[0][0])
+    assert queued[0][1] == "t-sub"
+    assert run.sender == "+1555" and run.resume_decision == {"type": "approve"}
 
 
 def test_reply_decision_bad_verb(client, monkeypatch):
@@ -104,11 +105,12 @@ def test_dispatch_calls_process_message_with_rendered_template(client, monkeypat
     sub = Subscription(id="s", thread_id="t-sub", sender_regexp=".*", template="from {sender}: {text}")
     monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda sender: sub)
     calls = []
-    monkeypatch.setattr(threads, "_process_message", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: calls.append(a))
     threads._dispatch_event("+1555", "hello")
     assert len(calls) == 1                                # supersede now lives in _process_message
-    assert calls[0][0][0] == "t-sub" and "hello" in calls[0][0][1]
-    assert calls[0][1].get("sender") == "+1555"
+    run = threads._runs().get("t-sub", calls[0][0])
+    assert calls[0][1] == "t-sub" and "hello" in run.text
+    assert run.sender == "+1555"
 
 
 def test_triage_tools_exclude_host_effect_tools():

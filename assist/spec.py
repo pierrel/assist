@@ -11,7 +11,7 @@ model, concurrency, status callback, per-request ``configurable``).
 
 Admission rule: a field requires a real, existing client need.  Do not
 add fields for needs no client has yet — deferred candidates
-(``subagents`` selection, ``system_prompt``, middleware tuning) are
+(``system_prompt``, middleware tuning) are
 recorded in the design doc with the trigger that revives them.
 """
 
@@ -68,6 +68,18 @@ class AgentSpec:
     # Mutually exclusive with the ``sandbox_backend`` param (validated
     # in ``create_agent``).
     default_backend: BackendProtocol | None = None
+
+    # Replacement for deepagents' blocking ``task`` subagent middleware. The web run
+    # service supplies the interrupting async-only task tool; CLI/emacsos/evals leave it
+    # None and retain their in-process synchronous subagents. This revives the deferred
+    # ``subagents``-selection trigger with one concrete client need, without exposing the
+    # run service or scheduler through the embedder contract.
+    subagent_tool: BaseTool | None = None
+
+    # The supplied async task tool can schedule a background follow-up as well as a
+    # required child. Kept structural so prompt behavior does not depend on the tool's
+    # human-readable description.
+    background_subagents: bool = False
 
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
     # InterruptOnConfig}`` passed straight to ``create_deep_agent(interrupt_on=…)``.  The

@@ -22,6 +22,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Dict
 
 from fastapi import FastAPI
+from starlette.concurrency import run_in_threadpool
 
 from assist.domain_manager import DomainManager
 from assist.env import load_dev_env
@@ -32,9 +33,9 @@ from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
 from assist.events.notify import notify_tools
-from assist.events.continuations import continuation_tools
 from assist.events.inbound import InboundLog
 from assist.backlog import MessageBacklog
+from assist.run_service import RunService
 from assist.egress.store import EgressStore, approvals_dir_is_safe
 from assist.egress.tools import egress_tools
 from assist.sandbox_manager import _load_egress_allowlist
@@ -111,10 +112,12 @@ SCHEDULE_STORE = ScheduleStore(ROOT)
 SUBSCRIPTION_STORE = SubscriptionStore(ROOT)
 # Durable inbound-message log (records before the 200; dedup by content-hash message_id).
 INBOUND_LOG = InboundLog(ROOT)
-# Durable follow-up journal: a message accepted while its thread is busy is journaled
-# here at submit and claimed (removed by id) when its turn starts, so a restart can't
-# silently drop it — startup recovery re-dispatches whatever is still journaled.
+# Legacy follow-up journal, read only during startup migration. New work is persisted
+# in RUN_SERVICE below.
 MESSAGE_BACKLOG = MessageBacklog(ROOT)
+# Durable execution authority.  ``status.json`` remains the web UI projection;
+# the legacy backlog is read only during startup migration.
+RUN_SERVICE = RunService(ROOT)
 # Normal turns get the config tools (schedule + subscription). A TRIAGE turn (untrusted
 # inbound SMS) gets ONLY send_reply, HITL-gated — never the host-effect config tools — so an
 # injected text can't plant/delete a subscription or schedule (MANAGER.get(triage=True)).
@@ -171,26 +174,8 @@ _egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
                               thread_dir=MANAGER.thread_dir)
                  if EGRESS_STORE else [])
 
-# continue_later (progressive responses): callbacks live in threads.py beside the
-# dispatch machinery, so the deferred imports inside these defs resolve at tool-call time (the notify
-# pattern — threads.py imports this module, a top-level import here would cycle).
-# NORMAL tool set only, never triage: an untrusted inbound SMS must not be able to
-# schedule agent-invented background work.
-
-
-def _continuation_journal(tid, task):
-    from manage.web.threads import _journal_continuation
-    _journal_continuation(tid, task)
-
-
-def _continuation_chain(tid):
-    from manage.web.threads import _continuation_chain_len
-    return _continuation_chain_len(tid)
-
-
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
-              + continuation_tools(_continuation_journal, _continuation_chain)
               + _geo_tools + _egress_tools)
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(REPLY_INTERRUPT_ON)
@@ -655,34 +640,21 @@ def set_description(tid: str, description: str) -> None:
 
 
 def _recover_interrupted_threads() -> None:
-    """Startup recovery scan (runs on the loop, pre-yield — cheap file ops only):
-    every turn's work is durable (the checkpoint at each superstep, the message in
-    status.json / the backlog journal), so instead of erroring busy threads,
-    rewrite each to "paused" and enqueue a recover job; the checkpoint read + the
-    resume-vs-redispatch decision run on the serial worker (threads.py
-    _recover_thread).
+    """Worker-thread startup migration + recovery queueing.
 
-    The stage-rewrite to "paused" is load-bearing, not cosmetic: post_message
-    routes a new live message through the serial worker ONLY when the stage is
-    "paused" — without the rewrite, a message sent right after restart to a
-    still-"processing" thread would park as a THREAD_QUEUE waiter and could run
-    BEFORE the recovery resume, on the killed turn's mid-flight checkpoint. It is
-    also _recover_thread's marker for "this thread has an interrupted HEAD turn"
-    (a journal-only recovery must not touch the head — e.g. a durable HITL
-    interrupt awaiting approval). Enqueuing pre-yield (the worker queue accepts
-    puts before its thread starts) guarantees no live submit can outrun a
-    recovery job."""
-    from manage.web.threads import submit_recovery
+    Run-store locks, legacy-journal reads, and checkpoint inspection are blocking, so
+    lifespan invokes this function through ``run_in_threadpool`` before serving. Busy
+    status is first projected to paused so a live submit cannot outrun the recovered
+    head; ``queue_recovery_runs`` then imports legacy tickets and queues run IDs in
+    dependency order.
+    """
+    from manage.web.threads import queue_recovery_runs
     for tid in MANAGER.list():
         status = _get_status(tid)
         if status.get("stage") in BUSY_STAGES:
             _set_status(tid, "paused",
                         **{k: v for k, v in status.items() if k != "stage"})
-            submit_recovery(tid)
-        elif MESSAGE_BACKLOG.for_thread(tid):
-            # Not busy, but journaled follow-ups survive (e.g. a crash after the
-            # head turn finished but before its follow-ups started).
-            submit_recovery(tid)
+    queue_recovery_runs()
 
 
 @asynccontextmanager
@@ -693,7 +665,7 @@ async def lifespan(app: FastAPI):
     # Recover threads a previous server run left busy, instead of erroring them
     # (extracted so the test pins the REAL scan, not a copy).
     from manage.web.threads import start_scheduler, stop_scheduler
-    _recover_interrupted_threads()
+    await run_in_threadpool(_recover_interrupted_threads)
 
     # Populate description cache at startup
     for tid in MANAGER.list():

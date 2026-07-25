@@ -36,6 +36,8 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread import Thread
+from assist.async_subagents import task_tool, task_tool_no_background
+from assist.agent import create_context_agent, create_research_agent
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,8 @@ class ThreadManager:
         for name in os.listdir(self.root_dir):
             dpath = os.path.join(self.root_dir, name)
             if not os.path.isdir(dpath) or name == "__pycache__":
+                continue
+            if os.path.exists(os.path.join(dpath, ".subagent")):
                 continue
             if os.path.exists(os.path.join(dpath, ".deleted")):
                 continue
@@ -269,7 +273,8 @@ class ThreadManager:
             on_queue_state: Callable[[str], None] | None = None,
             configurable: dict | None = None,
             triage: bool = False,
-            continuation: bool = False) -> Thread:
+            continuation: bool = False,
+            assistant_id: str = "general-agent") -> Thread:
         tdir = self.thread_dir(thread_id)
         if not os.path.isdir(tdir):
             raise FileNotFoundError(f"thread directory not found: {thread_id}, {tdir}")
@@ -278,25 +283,45 @@ class ThreadManager:
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
         # the reply HITL gate; a normal turn gets the full config tools and no HITL.
-        # A CONTINUATION turn (agent-scheduled background work) drops continue_later:
-        # without the tool in its spec, create_agent registers the SYNCHRONOUS
-        # research-agent (not the background door), so the background turn actually
-        # DOES the research — the inverse of the fast turn's tool-list construction.
-        # v1: no chaining from background turns (the door is absent there too).
+        # A continuation may still use required async targets, but cannot
+        # recursively promise another automatic follow-up.
         tools = _web_triage_tools if triage else _web_tools
-        if continuation:
-            tools = tuple(t for t in tools
-                          if getattr(t, "__name__", None) != "continue_later")
         interrupt_on = _web_interrupt_on if triage else None
-        return Thread(working_dir,
+        specialized = None
+        if assistant_id == "context-agent":
+            specialized = create_context_agent(
+                self.model, working_dir, self.checkpointer,
+                sandbox_backend=sandbox_backend)
+        elif assistant_id == "critique-agent":
+            specialized = create_context_agent(
+                self.model, working_dir, self.checkpointer,
+                sandbox_backend=sandbox_backend,
+                prompt_template="deepagents/dev_critique.md.j2")
+        elif assistant_id == "research-agent":
+            specialized = create_research_agent(
+                self.model, working_dir, self.checkpointer,
+                sandbox_backend=sandbox_backend, leaf=True)
+        elif assistant_id != "general-agent":
+            raise ValueError(f"unknown assistant: {assistant_id}")
+        async_tool = (task_tool if assistant_id == "general-agent"
+                      and not continuation and not triage
+                      else task_tool_no_background)
+        thread_kwargs = dict(
                       thread_id=thread_id,
                       checkpointer=self.checkpointer,
                       model=self.model,
                       sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
-                      configurable=configurable,
-                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=tools,
-                                     interrupt_on=interrupt_on))
+                      configurable=configurable)
+        if specialized is not None:
+            return Thread(working_dir, agent=specialized, **thread_kwargs)
+        return Thread(
+            working_dir, **thread_kwargs,
+            spec=AgentSpec(
+                skill_sources=_web_skill_sources(), tools=tools,
+                subagent_tool=async_tool,
+                background_subagents=not continuation and not triage,
+                interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:
         tdir = self.thread_dir(thread_id)
@@ -320,10 +345,8 @@ class ThreadManager:
 
     def new(self, working_dir: str|None = None, sandbox_backend=None,
             on_queue_state: Callable[[str], None] | None = None) -> Thread:
-        # Derive a clean ID for directory: prefer timestamp+rand
-        tid = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex()
+        tid = self.reserve()
         tdir = os.path.join(self.root_dir, tid)
-        os.makedirs(tdir, exist_ok=True)
         if not working_dir:
             working_dir = self.make_default_working_dir(tdir)
 
@@ -332,7 +355,23 @@ class ThreadManager:
                       model=self.model, sandbox_backend=sandbox_backend,
                       on_queue_state=on_queue_state,
                       spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
+                                     subagent_tool=task_tool,
+                                     background_subagents=True,
                                      interrupt_on=None))
+
+    def reserve(self, thread_id: str | None = None, *, hidden: bool = False) -> str:
+        """Create an empty thread directory and return its id, without building an agent.
+
+        Agent Protocol thread creation is a cheap persistence operation. The first run
+        constructs the graph/model off the request loop through :meth:`get`.
+        """
+        tid = thread_id or (
+            datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex())
+        tdir = self.thread_dir(tid)
+        os.makedirs(tdir, exist_ok=True)
+        if hidden:
+            open(os.path.join(tdir, ".subagent"), "a").close()
+        return tid
 
     def close(self) -> None:
         try:

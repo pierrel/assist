@@ -6,8 +6,8 @@ diagnostics — ``read_events`` is the read API; the web render reads the
 journal + status directly today). This is the "push
 architecture with a pull UI" decision (docs/2026-07-19-blank-slate-assessment
 .org): event production is decoupled from run completion with zero UI push
-machinery. Division of truth: the checkpoint holds MESSAGES, the message
-journal holds pending WORK, status.json holds the live banner, and this log
+machinery. Division of truth: the checkpoint holds MESSAGES, the run store holds
+pending WORK, status.json holds the live banner, and this log
 holds the durable HISTORY of what the job system did.
 
 Format: ``<thread_dir>/events.jsonl`` — one JSON object per line with at least

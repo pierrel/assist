@@ -5,7 +5,7 @@ editors anchored under each clickable line, plus an overall textarea
 and a Submit button.  Drafts persist in localStorage keyed per thread.
 
 POST ``/thread/{tid}/review`` accepts the JSON payload, formats it as a
-markdown message, and routes it through ``threads._process_message`` so
+markdown message, and creates a durable run through the shared run service so
 the submission flows through the affinity queue exactly like a regular
 ``/message`` post.
 """
@@ -14,28 +14,19 @@ from __future__ import annotations
 import html
 import json
 import os
-from datetime import datetime, timezone
-
+import urllib.parse
 import anyio.to_thread
-from fastapi import BackgroundTasks, Form, HTTPException
+from fastapi import BackgroundTasks, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
-from assist.backlog import PendingMessage
 from assist.domain_manager import Change
 from assist.thread import Thread
-from assist.thread_queue import THREAD_QUEUE
 
 from manage.web import threads as _threads
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _rename_pair, render_file_diff
-from manage.web.state import (
-    BUSY_STAGES,
-    MANAGER,
-    MESSAGE_BACKLOG,
-    _get_domain_manager,
-    _get_status,
-    _thread_title,
-)
+from manage.web.state import MANAGER, _get_domain_manager, _thread_title
 
 
 # Submit-message format: ``threads.render_thread`` recognises a user
@@ -354,77 +345,64 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
 
 @app.get("/thread/{tid}/review", response_class=HTMLResponse)
 async def get_review(tid: str) -> str:
-    tdir = MANAGER.thread_dir(tid)
-    if not os.path.isdir(tdir):
-        raise HTTPException(status_code=404, detail="Thread not found")
-    chat: Thread | None = None
-    try:
-        chat = MANAGER.get(tid, sandbox_backend=None)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Thread not found")
-    return render_review_page(tid, chat)
+    def load_and_render() -> str:
+        if not os.path.isdir(MANAGER.thread_dir(tid)):
+            raise HTTPException(status_code=404, detail="Thread not found")
+        try:
+            chat = MANAGER.get(tid, sandbox_backend=None)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        return render_review_page(tid, chat)
+
+    return await run_in_threadpool(load_and_render)
 
 
 @app.post("/thread/{tid}/review")
-async def post_review(tid: str, background_tasks: BackgroundTasks, payload: str = Form(...)):
+async def post_review(tid: str, request: Request,
+                      background_tasks: BackgroundTasks):
     """Accept the localStorage payload, format it as a thread message, queue it.
 
-    Reuses ``threads._process_message`` so the submission flows through
-    ``ThreadAffinityQueue`` and surfaces the same busy/queued/error UI
-    as a regular ``/message`` post.
+    Uses the same durable run acceptance + serial executor as a regular
+    ``/message`` post.
     """
     tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Malformed review payload")
-
-    overall = (data.get("overall") or "").strip() if isinstance(data, dict) else ""
-    comments = data.get("lines") if isinstance(data, dict) else []
-    if not isinstance(comments, list):
-        comments = []
-
-    # Snapshot the current diff for rename-detection in the formatter.
-    changes: list[Change] = []
-    try:
-        dm = _get_domain_manager(tid)
-        if dm:
-            changes = dm.main_diff()
-    except Exception:
-        pass
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 66_000:
+            raise HTTPException(status_code=413, detail="Review payload too large")
 
     try:
-        message = _format_review_message(overall, comments, changes)
+        def format_and_accept():
+            form = urllib.parse.parse_qs(body.decode(), keep_blank_values=True)
+            payload = form.get("payload", [""])[0]
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise ValueError("Malformed review payload") from exc
+            overall = ((data.get("overall") or "").strip()
+                       if isinstance(data, dict) else "")
+            comments = data.get("lines") if isinstance(data, dict) else []
+            if not isinstance(comments, list):
+                comments = []
+            if len(comments) > 200:
+                raise ValueError("Review has too many line comments")
+            changes: list[Change] = []
+            try:
+                dm = _get_domain_manager(tid)
+                if dm:
+                    changes = dm.main_diff()
+            except Exception:
+                pass
+            message = _format_review_message(overall, comments, changes)
+            return _threads._accept_message_run(tid, message)
+
+        run, busy = await anyio.to_thread.run_sync(
+            format_and_accept, limiter=_threads._get_run_admission_limiter())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    # Set a busy+pending status synchronously (same race fix as the /message
-    # route) so the redirect render shows the submission instead of losing it to
-    # the background task. Same single busy sample as post_message: a review
-    # submitted to a BUSY thread is a follow-up — journal it durably (off-loop,
-    # private limiter) and skip the status write (the running turn owns
-    # status.json); the turn claims the entry when it starts.
-    prior_stage = _get_status(tid).get("stage")
-    busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
-    _threads._mark_pending(tid, message, busy)
-    backlog_id = None
-    if busy:
-        rec = await anyio.to_thread.run_sync(
-            MESSAGE_BACKLOG.add,
-            PendingMessage(thread_id=tid, text=message,
-                           enqueued_at=datetime.now(timezone.utc).isoformat()),
-            limiter=_threads._get_backlog_limiter())
-        backlog_id = rec.id
-    if prior_stage == "paused":
-        # A paused thread has RELEASED the slot, so a BackgroundTask waiter would
-        # acquire immediately and run on the mid-flight checkpoint. Route through
-        # the serial worker so it runs AFTER the queued resume/recovery — same as
-        # post_message.
-        _threads._RESUME_SCHEDULER.submit_message(tid, message, None, None,
-                                                  backlog_id)
-    else:
-        background_tasks.add_task(_threads._process_message, tid, message,
-                                  backlog_id=backlog_id)
+    if not busy:
+        background_tasks.add_task(_threads._execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}?reviewed=1", status_code=303)

@@ -306,9 +306,9 @@ class TestPostReviewRoute:
     """End-to-end checks on the POST endpoint.
 
     The route validates the JSON payload, formats the message via
-    ``_format_review_message``, and schedules ``_process_message`` as a
+    ``_format_review_message``, commits a Run, and schedules ``_execute_run`` as a
     background task.  We stub out the heavy bits (``_get_domain_manager``,
-    ``_process_message``) and exercise the FastAPI handler directly.
+    ``_execute_run``) and exercise the FastAPI handler directly.
     """
 
     @pytest.fixture
@@ -343,12 +343,13 @@ class TestPostReviewRoute:
     def test_303_and_schedules_background_task(self, client, monkeypatch):
         scheduled: list[tuple[str, str]] = []
 
-        def fake_process(tid, text, backlog_id=None):
-            scheduled.append((tid, text))
+        def fake_execute(run_id, tid):
+            scheduled.append((tid, threads._runs().get(tid, run_id).text))
 
         # Patch the modules where these names are defined; route
         # handlers look them up via the threads / state namespaces.
-        monkeypatch.setattr("manage.web.threads._process_message", fake_process)
+        from manage.web import threads
+        monkeypatch.setattr("manage.web.threads._execute_run", fake_execute)
         monkeypatch.setattr("manage.web.review._get_domain_manager", lambda tid: None)
 
         payload = {
@@ -375,8 +376,8 @@ class TestPostReviewRoute:
         from manage.web import threads
         from manage.web.state import _get_status
 
-        monkeypatch.setattr("manage.web.threads._process_message",
-                            lambda tid, text, backlog_id=None: None)
+        monkeypatch.setattr("manage.web.threads._execute_run",
+                            lambda run_id, tid: None)
         monkeypatch.setattr("manage.web.review._get_domain_manager", lambda tid: None)
         # Another thread holds the LLM slot -> expect "queued".
         monkeypatch.setattr(

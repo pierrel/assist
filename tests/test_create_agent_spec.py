@@ -8,6 +8,7 @@ import tempfile
 from unittest.mock import patch, MagicMock
 
 import pytest
+from langchain_core.tools import StructuredTool
 
 from assist.spec import AgentSpec
 
@@ -18,6 +19,15 @@ def _tool_a(x: str) -> str:
 
 def _tool_b(y: int) -> int:
     return y
+
+
+def _async_task(description: str, subagent_type: str) -> str:
+    return f"{subagent_type}: {description}"
+
+
+_async_task_tool = StructuredTool.from_function(
+    name="task", func=_async_task,
+    description="Delegate to an async child run.")
 
 
 class _CreateAgentHarness:
@@ -54,6 +64,42 @@ class TestSpecWiring(_CreateAgentHarness):
         from assist.tools import directions, map_data, read_url, travel
         kwargs = self._build(spec=AgentSpec(tools=(_tool_a, _tool_b)))
         assert kwargs["tools"] == [_tool_a, _tool_b, travel, directions, map_data, read_url]
+
+    def test_subagent_tool_replaces_blocking_subagents(self):
+        from assist.agent import create_agent
+        from assist.tools import directions, map_data, read_url, travel
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        with patch("assist.agent.create_deep_agent") as fake, \
+             patch("assist.agent.create_context_agent") as fake_ctx, \
+             patch("assist.agent.create_research_agent") as fake_res:
+            fake.return_value = MagicMock()
+            with tempfile.TemporaryDirectory() as wd:
+                create_agent(
+                    MagicMock(), wd, checkpointer=InMemorySaver(),
+                    spec=AgentSpec(subagent_tool=_async_task_tool))
+
+        kwargs = fake.call_args.kwargs
+        assert kwargs["subagents"] == []
+        assert kwargs["tools"] == [
+            _async_task_tool, travel, directions, map_data, read_url]
+        fake_ctx.assert_not_called()
+        fake_res.assert_not_called()
+
+    def test_subagent_tool_without_background_uses_required_prompt(self):
+        kwargs = self._build(spec=AgentSpec(subagent_tool=_async_task_tool))
+
+        assert "background-research-agent" not in kwargs["system_prompt"]
+        assert "delegate one required task at a time" in kwargs["system_prompt"]
+        assert "Never place two `task` calls" in kwargs["system_prompt"]
+
+    def test_absent_subagent_tool_preserves_sync_subagents(self):
+        kwargs = self._build(spec=AgentSpec())
+
+        assert [sub.name if hasattr(sub, "name") else sub["name"]
+                for sub in kwargs["subagents"]] == [
+                    "context-agent", "research-agent", "critique-agent"]
+        assert "background-research-agent" not in kwargs["system_prompt"]
 
     def test_spec_skill_sources_reach_middleware(self):
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
