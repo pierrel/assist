@@ -2,6 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, Request
+from langchain_core.messages import AIMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 
 from assist.async_subagents import (
     AsyncTaskContext,
@@ -107,6 +110,25 @@ def test_start_is_deterministic_and_uses_asgi(protocol):
         task_id, task_id]
     assert all(call[2]["metadata"]["dispatch_key"] == "parent-work:tc-7"
                for call in calls if call[0] == "run")
+
+
+def test_tool_node_injects_runtime_when_model_calls_start(protocol):
+    """Exercise LangGraph's real tool boundary, not ``StructuredTool.func``."""
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode(async_task_tools))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+
+    with async_task_context(AsyncTaskContext("parent", "parent-run", "work")):
+        result = graph.compile().invoke({"messages": [AIMessage(
+            content="", tool_calls=[{
+                "name": "start_async_task",
+                "args": {"description": "inspect", "subagent_type": "context-agent"},
+                "id": "model-call-1",
+                "type": "tool_call",
+            }])]}, {"configurable": {"thread_id": "parent"}})
+
+    assert "task_id: sub-" in result["messages"][-1].content
 
 
 def test_check_list_update_and_cancel_are_parent_scoped(protocol):

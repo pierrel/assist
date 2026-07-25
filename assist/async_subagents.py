@@ -13,14 +13,14 @@ import json
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Annotated, Any, Iterator
 
 import anyio
 import httpx
 from langchain.tools import ToolRuntime
 from langchain_core.tools import StructuredTool
 from langgraph_sdk.client import LangGraphClient
-from pydantic import BaseModel, Field
+from pydantic import Field
 from starlette.types import ASGIApp
 
 
@@ -121,26 +121,16 @@ def _format_task(task: dict[str, Any], *, include_result: bool = True) -> str:
     return json.dumps(fields, ensure_ascii=False)
 
 
-class _StartInput(BaseModel):
-    description: str = Field(
-        min_length=1, max_length=64_000,
-        description="Complete, self-contained work for the background agent.")
-    subagent_type: str = Field(description="One listed async subagent type.")
-
-
-class _TaskIdInput(BaseModel):
-    task_id: str = Field(description="Exact full task_id returned by start_async_task.")
-
-
-class _UpdateInput(_TaskIdInput):
-    instructions: str = Field(
-        min_length=1, max_length=64_000,
-        description="Complete replacement or follow-up instructions for the task.")
+_TaskId = Annotated[str, Field(
+    description="Exact full task_id returned by start_async_task.")]
 
 
 def _start_async_task(
-    description: str,
-    subagent_type: str,
+    description: Annotated[str, Field(
+        min_length=1, max_length=64_000,
+        description="Complete, self-contained work for the background agent.")],
+    subagent_type: Annotated[
+        str, Field(description="One listed async subagent type.")],
     runtime: ToolRuntime,
 ) -> str:
     context, tool_call_id = _context(runtime)
@@ -176,7 +166,10 @@ def _start_async_task(
             "to the user and return now; the result will trigger a follow-up.")
 
 
-def _check_async_task(task_id: str, runtime: ToolRuntime) -> str:
+def _check_async_task(
+    task_id: _TaskId,
+    runtime: ToolRuntime,
+) -> str:
     context, _ = _context(runtime)
 
     async def check(client):
@@ -208,8 +201,10 @@ def _list_async_tasks(runtime: ToolRuntime) -> str:
 
 
 def _update_async_task(
-    task_id: str,
-    instructions: str,
+    task_id: _TaskId,
+    instructions: Annotated[str, Field(
+        min_length=1, max_length=64_000,
+        description="Complete replacement or follow-up instructions for the task.")],
     runtime: ToolRuntime,
 ) -> str:
     context, tool_call_id = _context(runtime)
@@ -244,7 +239,10 @@ def _update_async_task(
     return "Task updated (queued): " + _format_task(task, include_result=False)
 
 
-def _cancel_async_task(task_id: str, runtime: ToolRuntime) -> str:
+def _cancel_async_task(
+    task_id: _TaskId,
+    runtime: ToolRuntime,
+) -> str:
     context, _ = _context(runtime)
 
     async def cancel(client):
@@ -274,22 +272,18 @@ async_task_tools = (
     StructuredTool.from_function(
         name="start_async_task", func=_start_async_task,
         description=("Start background work and return its task ID immediately. "
-                     "Never poll in the launch turn. Available types:\n" + _AVAILABLE),
-        infer_schema=False, args_schema=_StartInput),
+                     "Never poll in the launch turn. Available types:\n" + _AVAILABLE)),
     StructuredTool.from_function(
         name="check_async_task", func=_check_async_task,
-        description="Fetch one task's current status and terminal result using its full ID.",
-        infer_schema=False, args_schema=_TaskIdInput),
+        description="Fetch one task's current status and terminal result using its full ID."),
     StructuredTool.from_function(
         name="update_async_task", func=_update_async_task,
         description=("Queue replacement instructions for a task. Active inference "
-                     "or tool work finishes its current graph slice first."),
-        infer_schema=False, args_schema=_UpdateInput),
+                     "or tool work finishes its current graph slice first.")),
     StructuredTool.from_function(
         name="cancel_async_task", func=_cancel_async_task,
         description=("Cancel pending work or request that active work stop at its "
-                     "next model boundary; in-flight inference/tools are not preempted."),
-        infer_schema=False, args_schema=_TaskIdInput),
+                     "next model boundary; in-flight inference/tools are not preempted.")),
     StructuredTool.from_function(
         name="list_async_tasks", func=_list_async_tasks,
         description="List this conversation's durable tasks with fresh statuses and full IDs."),

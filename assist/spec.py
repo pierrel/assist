@@ -46,9 +46,9 @@ class AgentSpec:
     send them across processes.
     """
 
-    # ADDITIVE to the selected built-in tool profile (filesystem, execute,
-    # and either blocking ``task`` or the supplied async task tools). () means
-    # "no extra tools", not "no tools". Reaches
+    # ADDITIVE to the selected built-in tool profile (filesystem and execute;
+    # delegation is selected independently below). () means "no extra tools",
+    # not "no tools". Reaches
     # the MAIN agent only (deepagents' auto-injected general-purpose
     # subagent — which used to inherit these — is disabled harness-wide;
     # see the profile registration in ``assist.agent``); the bespoke
@@ -71,11 +71,11 @@ class AgentSpec:
     default_backend: BackendProtocol | None = None
 
     # Deep Agents-compatible async task management surface for the MAIN agent.
-    # The web embedder supplies all five lifecycle tools; an empty tuple keeps the
-    # established in-process synchronous subagents for CLI/emacsos/leaf agents.
-    # Keeping the lifecycle tools together is the one structural signal needed to
-    # select the async prompt and suppress the blocking ``task`` middleware.
-    async_subagent_tools: tuple[BaseTool, ...] = ()
+    # ``None`` keeps the established synchronous subagents for legacy embedders;
+    # an explicit empty sequence disables delegation (the web triage profile),
+    # and the web main profile supplies all five lifecycle tools. This one field
+    # selects the delegation mechanism without a second mode flag.
+    async_subagent_tools: tuple[BaseTool, ...] | None = None
 
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
     # InterruptOnConfig}`` passed straight to ``create_deep_agent(interrupt_on=…)``.  The
@@ -96,14 +96,16 @@ class AgentSpec:
             )
         object.__setattr__(self, "tools", tuple(self.tools))
 
-        if isinstance(self.async_subagent_tools, (str, bytes)) \
-                or not isinstance(self.async_subagent_tools, Sequence):
+        if self.async_subagent_tools is not None and (
+                isinstance(self.async_subagent_tools, (str, bytes))
+                or not isinstance(self.async_subagent_tools, Sequence)):
             raise TypeError(
                 "AgentSpec.async_subagent_tools must be a sequence of tools, got "
                 f"{type(self.async_subagent_tools).__name__}"
             )
-        object.__setattr__(self, "async_subagent_tools",
-                           tuple(self.async_subagent_tools))
+        if self.async_subagent_tools is not None:
+            object.__setattr__(self, "async_subagent_tools",
+                               tuple(self.async_subagent_tools))
 
         if not isinstance(self.skill_sources, Mapping):
             raise TypeError(

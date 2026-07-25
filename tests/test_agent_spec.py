@@ -27,7 +27,7 @@ class TestDefaults:
         assert spec.tools == ()
         assert len(spec.skill_sources) == 0
         assert spec.default_backend is None
-        assert spec.async_subagent_tools == ()
+        assert spec.async_subagent_tools is None
 
     def test_two_default_specs_are_equal(self):
         assert AgentSpec() == AgentSpec()

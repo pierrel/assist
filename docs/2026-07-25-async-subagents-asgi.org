@@ -4,8 +4,10 @@
 
 * Status
 
-Implemented and locally reviewed to convergence. Deployment, live smoke, and
-external review remain; the feature stops before merge.
+Implemented and locally reviewed to convergence. The first deployment's live
+smoke exposed a hidden-runtime schema integration defect; its fix is verified
+through a compiled LangGraph tool node. Repeat live smoke and external review
+remain; the feature stops before merge.
 
 Baseline N=3 on 2026-07-25: 0/3.  Each run started the context task and avoided
 polling, but the visible reply omitted its full task ID and said the supervisor
@@ -13,10 +15,10 @@ was “waiting.”  Full output: =/tmp/assist-async-subagents-baseline-n3.log= o
 the development host.
 
 Post-implementation behavior: N=3 12/12, post-review N=5 20/20, and stability
-N=10 40/40. Deterministic suite: 1,366 passed. Four substantive local-review
-rounds converged with a final clean correctness/concurrency/security/docs pass.
+N=10 40/40. Deterministic suite: 1,368 passed. Four substantive local-review
+rounds converged, followed by the focused runtime-injection review.
 
-The tracked implementation is +68 lines overall. Production files are +149
+The tracked implementation is +103 lines overall. Production files are +152
 lines against merged =main=; the growth is the new five-tool lifecycle,
 two-tier scheduling, durable control/recovery, and bounded task retention. The
 new state doc and behavioral eval are reported separately from production LOC.
@@ -49,9 +51,7 @@ new state doc and behavioral eval are reported separately from production LOC.
    completion does not wake the parent. Cancellation is durable first, then asks
    the active child to stop at its next model boundary. Neither operation
    preempts an in-flight inference or tool call.
-9. Async children are leaves with respect to async delegation.  They may use the
-   existing simple synchronous subagents where needed, but receive none of the
-   five async-task management tools.
+9. Async children are direct leaf graphs and receive no delegation tools.
 
 * What “interrupt” means after this change
 
@@ -198,6 +198,10 @@ message or system instruction.
 11. Event-loop probes hold contended locks and prove HTTP status/message routes
     remain responsive.
 12. The real entry point =python -m manage.web= starts successfully.
+13. Task tools infer their full schema from the callable, so LangGraph retains
+    and injects the hidden =ToolRuntime= field while exposing only user arguments
+    to the model. A compiled-tool-node test pins the integration boundary that a
+    direct =tool.func(...)= test cannot exercise.
 
 ** Real-model evals
 
