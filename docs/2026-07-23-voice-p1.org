@@ -19,7 +19,7 @@ records the build plan grounded in the real code, the reconciliations, and statu
 |--------+------+---------|
 | WS loop (=@app.websocket("/call")=) | frame → =inbound_q.put=; =outbound_q.get_nowait= → =ws.send=; handshake/secret | any lock, file I/O, model, STT/TTS, flow.py, blocking =.get()= |
 | Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine; schedule/cancel TTS | blocking TTS synthesis; stays free during THINKING and SPEAKING |
-| TTS producer (1/call) | synthesize sentence chunks → =outbound_q=; cancellation stops iteration before flush | flow.py, session state, observer callbacks |
+| TTS producer (1/call) | synthesize sentence chunks tagged with the current generation → serialized outbound accept boundary | flow.py, session state, observer callbacks |
 | Turn-runner (1/turn) | execute a committed durable Run by id; observer fires at its terminal exit | — |
 =inbound_q=/=outbound_q= are =queue.Queue=. The WS loop is a pure shuttle.
 
@@ -58,7 +58,7 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    =create_thread_with_message_core(text, domain, rider) -> tid= from its body
    plus =_initialize_thread=; route becomes a thin Form adapter over it.
 4. *Receptionist signature: =receptionist_tools(catalog, domains, on_open, on_new)=*
-   (shipped, receptionist.py:60) — pass =DOMAINS= (state.py:198).
+   (shipped in =receptionist.py=) — pass =DOMAINS= from =state.py=.
 5. *VAD dep: use =onnxruntime= + the silero ONNX model, NOT the =silero-vad= pip package.*
    =pip install silero-vad= pulls =torch= + the full CUDA toolkit (torch-2.13, triton,
    nvidia-cublas/cudnn/cusparse, cuda-toolkit-13 — GB). The design says "silero-VAD
@@ -73,7 +73,10 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    Piper blocks while producing each sentence. If the session loop synthesized directly,
    it could not drain inbound PCM into =flow.py=, making barge-in impossible during that
    interval. The session remains the sole Flow/state owner and only schedules/cancels TTS;
-   the producer emits PCM chunks and stops before the session sends =flush_uplink=.
+   the producer emits generation-tagged PCM through one serialized accept boundary. On
+   barge-in the session invalidates that generation and enqueues =flush_uplink= atomically
+   at the same boundary; a chunk returned later by an in-flight Piper =next()= is rejected.
+   The session never waits for synthesis before flushing.
 
 * Reuse map (do NOT re-derive)
 - =manage/web/threads.py=: =_create_run= + =_execute_run= (durable ordinary-turn path),
@@ -81,13 +84,14 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
   =_notify_turn_observers= (terminal callback carrying =run_id=, per-observer isolated),
   =create_thread_with_message= / =_initialize_thread=.
 - =assist/middleware/interjection.py=: barge-in delivery; voice owner turns
-  =sender=None,origin=None= pass both gates (:119-121); =register_interjection_callbacks=:88.
-- =assist/catalog.py= (=ThreadCatalog=) + =assist/receptionist.py= (=receptionist_tools=:60,
-  =create_receptionist=:148) — the ROUTER agent; not yet wired to any client (voice is first).
+  =sender=None,origin=None= pass both gates; reuse =register_interjection_callbacks=.
+- =assist/catalog.py= (=ThreadCatalog=) + =assist/receptionist.py=
+  (=receptionist_tools=, =create_receptionist=) — the ROUTER agent; not yet wired to any
+  client (voice is first).
 - =manage/web/app.py= (=app=) + =state.py= (=lifespan=, =DOMAINS=) — /call WS route +
   observer registration. Bind =0.0.0.0= in =__main__.py= — the WG/firewall deploy gate.
-- =assist/spec.py=:56 (=AgentSpec.tools= extra_tools) — =back_to_receptionist()= on the in-thread agent.
-- =assist/events/thread_log.py=:32 (=append_event=, O_APPEND/torn-line) — the call-event log.
+- =assist/spec.py= (=AgentSpec.tools= extra_tools) — =back_to_receptionist()= on the in-thread agent.
+- =assist/events/thread_log.py= (=append_event=, O_APPEND/torn-line) — the call-event log.
 
 * P1 "Done =" (§10) → test map
 | target | test |
@@ -129,4 +133,6 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
   base.en ~150MB; a Piper voice) are provisioned outside a live call and are not committed.
   Deploy needs =make deploy-install= (venv rebuild) for P1.
 - PR4 scheduling constraint from review: observers enqueue text only; TTS must not run in an
-  observer or block the session's inbound-frame drain, so barge-in remains live during synthesis.
+  observer or block the session's inbound-frame drain. Barge-in invalidates the active TTS
+  generation and enqueues the flush at one serialized boundary, so an in-flight synthesis
+  chunk cannot land after the flush.
