@@ -53,13 +53,13 @@ PIPER_FILES = {
 def _download(
     url: str, destination: Path, expected_sha256: str, expected_size: int
 ) -> None:
-    current_hash = (
-        hashlib.sha256(destination.read_bytes()).hexdigest()
-        if destination.exists()
-        else None
-    )
-    if current_hash == expected_sha256:
-        return
+    if destination.exists() and destination.stat().st_size == expected_size:
+        digest = hashlib.sha256()
+        with destination.open("rb") as existing:
+            while chunk := existing.read(1024 * 1024):
+                digest.update(chunk)
+        if digest.hexdigest() == expected_sha256:
+            return
     temporary = destination.with_suffix(destination.suffix + ".part")
     digest, size = hashlib.sha256(), 0
 
