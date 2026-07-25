@@ -17,14 +17,16 @@ from manage.web.state import ROOT
 if __name__ == "__main__":
     os.makedirs(ROOT, exist_ok=True)
     port = int(os.getenv("ASSIST_PORT", "8000"))
-    # Optional TLS: set ASSIST_SSL_CERT + ASSIST_SSL_KEY to serve HTTPS directly.
-    # Needed so the browser exposes geolocation over a non-localhost address (e.g.
-    # the WireGuard IP) — geolocation requires a secure context (HTTPS or localhost).
+    # Optional TLS: set ASSIST_SSL_CERT + ASSIST_SSL_KEY to serve HTTPS
+    # directly. Needed so the browser exposes geolocation over a non-localhost
+    # address: geolocation requires a secure context (HTTPS or localhost).
     # Use a trusted local cert (mkcert) so there's no browser warning.
     ssl_kwargs = {}
     cert, key = os.getenv("ASSIST_SSL_CERT"), os.getenv("ASSIST_SSL_KEY")
-    if bool(cert) != bool(key):  # fail fast on a half-set config (silent HTTP hides it)
-        raise SystemExit("Set BOTH ASSIST_SSL_CERT and ASSIST_SSL_KEY (or neither).")
+    if bool(cert) != bool(key):
+        raise SystemExit(
+            "Set BOTH ASSIST_SSL_CERT and ASSIST_SSL_KEY (or neither)."
+        )
     if cert and key:
         ssl_kwargs = {"ssl_certfile": cert, "ssl_keyfile": key}
     uvicorn.run(
@@ -33,5 +35,7 @@ if __name__ == "__main__":
         port=port,
         log_level="info",
         reload=False,
+        ws_max_size=4096,
+        ws_per_message_deflate=False,
         **ssl_kwargs,
     )

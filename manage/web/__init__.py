@@ -1,6 +1,6 @@
-"""manage.web package — FastAPI web UI for the assist agent.
+"""manage.web package: FastAPI web UI for the assist agent.
 
-Composed from sibling modules:
+Composed from route modules:
 
 - ``app``    — the ``FastAPI`` instance (separated so route modules can
                import it without a circular dep on this ``__init__``).
@@ -12,15 +12,20 @@ Composed from sibling modules:
 - ``threads``— index, thread page, and the message/capture/merge/delete
                routes.  Owns ``_process_message``.
 - ``evals``  — ``/evals`` and ``/evals/run/{id}`` routes.
+- ``voice.wire`` — the bounded ``/call`` WebSocket transport.
 
 Importing ``manage.web`` triggers route registration on ``app`` via the
-submodule imports below.  ``uvicorn manage.web:app`` continues to work.
+imports below.  Start the network service with ``python -m manage.web`` so its
+WebSocket size and compression bounds are applied.
 """
-from manage.web.app import app
+from manage.web.app import app  # noqa: F401
 
 # Importing the route modules registers their endpoints on ``app``.
 # Order matters only insofar as ``review`` imports from ``threads``.
-from manage.web import threads, review, evals, schedules, geo, egress  # noqa: E402,F401
+from manage.web import (  # noqa: E402,F401
+    threads, review, evals, schedules, geo, egress,
+)
+from manage.voice import wire as _voice_wire  # noqa: E402,F401
 
 # Subagent tools use a private, prefixless Agent Protocol ASGI app. It is never
 # mounted on the network-facing web app.
