@@ -1,4 +1,5 @@
 import os
+import threading
 
 import pytest
 from types import SimpleNamespace
@@ -14,6 +15,13 @@ from manage.web.protocol_service import SERVICE
 
 
 TOOLS = {tool.name: tool for tool in async_task_tools}
+
+
+def _capture_error(errors, operation, *args):
+    try:
+        operation(*args)
+    except BaseException as exc:
+        errors.append(exc)
 
 
 def _root(monkeypatch, tmp_path):
@@ -52,6 +60,98 @@ def test_agent_protocol_start_is_idempotent(monkeypatch, tmp_path):
     assert first.parent_run_id == parent.id
     assert first.work_id == "sub-stable"
     assert {item[:2] for item in submitted} == {(first.id, "sub-stable")}
+
+
+def test_task_thread_replay_does_not_rewrite_its_identity(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    marker = os.path.join(threads.MANAGER.thread_dir("sub-stable"), ".subagent")
+    before = os.stat(marker)
+
+    SERVICE.create_thread("sub-stable", metadata)
+
+    after = os.stat(marker)
+    assert (after.st_dev, after.st_ino, after.st_mtime_ns) == (
+        before.st_dev, before.st_ino, before.st_mtime_ns)
+
+
+def test_task_thread_replay_rejects_different_or_corrupt_identity(
+        monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    marker = os.path.join(threads.MANAGER.thread_dir("sub-stable"), ".subagent")
+
+    with pytest.raises(Exception, match="Task metadata conflict"):
+        SERVICE.create_thread(
+            "sub-stable", {**metadata, "dispatch_key": "different"})
+    with open(marker, "w") as stream:
+        stream.write("{")
+    with pytest.raises(Exception, match="Task metadata conflict"):
+        SERVICE.create_thread("sub-stable", metadata)
+
+    with open(marker) as stream:
+        assert stream.read() == "{"
+
+
+def test_task_thread_marker_failure_never_publishes_partial_identity(
+        monkeypatch, tmp_path):
+    _, parent, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    threads.MANAGER.hard_delete("sub-stable")
+    monkeypatch.setattr(
+        "assist.thread_manager.json.dump",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError, match="disk full"):
+        SERVICE.create_thread("sub-new", {
+            **metadata, "parent_run_id": parent.id,
+        })
+
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-new"))
+
+
+def test_recovery_hides_and_removes_abandoned_task_staging_directory(
+        monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    staging = tmp_path / ".subagent-abandoned"
+    staging.mkdir()
+
+    assert staging.name not in threads.MANAGER.list()
+    threads.queue_recovery_runs()
+
+    assert not staging.exists()
+
+
+def test_parent_deletion_cannot_leave_a_new_orphan_task(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    original_rename = os.rename
+
+    def pause_publication(source, target):
+        entered.set()
+        assert release.wait(timeout=2)
+        original_rename(source, target)
+
+    monkeypatch.setattr("assist.thread_manager.os.rename", pause_publication)
+    errors = []
+    creator = threading.Thread(
+        target=lambda: _capture_error(
+            errors, SERVICE.create_thread, "sub-race", metadata))
+    deleter = threading.Thread(
+        target=lambda: _capture_error(
+            errors, threads._delete_thread_and_children, "parent"))
+
+    creator.start()
+    assert entered.wait(timeout=2)
+    deleter.start()
+    assert deleter.is_alive()
+    release.set()
+    creator.join(timeout=2)
+    deleter.join(timeout=2)
+
+    assert not creator.is_alive()
+    assert not deleter.is_alive()
+    assert errors == []
+    assert not os.path.exists(threads.MANAGER.thread_dir("parent"))
+    assert not os.path.exists(threads.MANAGER.thread_dir("sub-race"))
 
 
 def test_five_tools_round_trip_through_real_private_asgi(monkeypatch, tmp_path):

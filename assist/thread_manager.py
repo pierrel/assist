@@ -9,9 +9,7 @@ persistence directly through ``Thread(thread_id=..., checkpointer=...)``
 It lives in the ``assist`` package (rather than ``manage``) because the
 eval harness uses it independently of the web app.
 
-Moved verbatim from ``assist.thread`` in the embedder-contract refactor;
-behavior unchanged.  Two semantics here are load-bearing and must not
-be "improved":
+Two semantics here are load-bearing and must not be "improved":
 
 - the sqlite connect happens in ``__init__`` (server *startup*), not
   lazily on first request — a blocking connect must never land on a
@@ -142,11 +140,12 @@ class ThreadManager:
         return self._model
 
     def list(self) -> list[str]:
-        """Return thread IDs filtered (no soft-deleted) and sorted by mtime descending."""
+        """Return visible, published thread IDs sorted by mtime descending."""
         dirs = []
         for name in os.listdir(self.root_dir):
             dpath = os.path.join(self.root_dir, name)
-            if not os.path.isdir(dpath) or name == "__pycache__":
+            if (not os.path.isdir(dpath) or name == "__pycache__"
+                    or name.startswith(".subagent-")):
                 continue
             if os.path.exists(os.path.join(dpath, ".subagent")):
                 continue
@@ -354,23 +353,47 @@ class ThreadManager:
                                      async_subagent_tools=async_task_tools,
                                      interrupt_on=None))
 
-    def reserve(self, thread_id: str | None = None, *, hidden: bool | dict = False) -> str:
-        """Create an empty thread directory and return its id, without building an agent.
+    def reserve(self, thread_id: str | None = None,
+                *, hidden: dict | None = None) -> str:
+        """Reserve a thread directory and return its id without building an agent.
 
         Agent Protocol thread creation is a cheap persistence operation. The first run
-        constructs the graph/model off the request loop through :meth:`get`.
+        constructs the graph/model off the request loop through :meth:`get`. Hidden
+        thread identity is published atomically and an existing identity is validated,
+        never rewritten.
         """
         tid = thread_id or (
             datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex())
         tdir = self.thread_dir(tid)
-        os.makedirs(tdir, exist_ok=True)
-        if hidden:
+        if hidden is not None:
             marker = os.path.join(tdir, ".subagent")
-            if isinstance(hidden, dict):
-                with open(marker, "w") as stream:
+            if os.path.isdir(tdir):
+                with open(marker) as stream:
+                    if json.load(stream) != hidden:
+                        raise ValueError("task metadata conflict")
+                return tid
+            pending = tempfile.mkdtemp(prefix=".subagent-", dir=self.root_dir)
+            try:
+                with open(os.path.join(pending, ".subagent"), "w") as stream:
                     json.dump(hidden, stream)
-            else:
-                open(marker, "a").close()
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                directory_fd = os.open(pending, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+                os.rename(pending, tdir)
+                directory_fd = os.open(self.root_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if os.path.isdir(pending):
+                    shutil.rmtree(pending)
+            return tid
+        os.makedirs(tdir, exist_ok=True)
         return tid
 
     def close(self) -> None:

@@ -130,6 +130,11 @@ public =task_id= is its hidden child thread ID.  The task owns a stable logical
 
 - Start key: parent =work_id= plus LangGraph =tool_call_id=.  Replaying a start
   returns the same child thread and first Run.
+- Hidden-thread identity is an immutable metadata marker. Its file and staging
+  entry are durable before atomic rename; a root-directory barrier then makes
+  that publication durable. Replay validates it without rewriting. Publication
+  and parent deletion share one admission lock, so a completed deletion cannot
+  leave a newly orphaned child.
 - Update key: parent =work_id= plus the parent's =tool_call_id=. Replaying an
   update returns the same successor or pending instruction.
 - Completion-wake key: =task-completion:<terminal Run id>=. The wake's logical

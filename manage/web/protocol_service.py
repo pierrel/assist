@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from fastapi import HTTPException
 
@@ -72,7 +73,8 @@ class WebAgentProtocolService:
 
     def create_thread(self, thread_id: str | None = None,
                       metadata: dict | None = None) -> dict:
-        with self._admission_lock:
+        with self._admission_lock, (
+                _RUN_ADMISSION_LOCK if metadata is not None else nullcontext()):
             hidden = metadata is not None
             if not hidden and len(MANAGER.list()) >= self.MAX_THREADS:
                 raise HTTPException(status_code=429, detail="Thread limit reached")
@@ -128,8 +130,13 @@ class WebAgentProtocolService:
                 if not existing and hidden_count >= self.MAX_HIDDEN_THREADS:
                     raise HTTPException(status_code=429, detail="Task limit reached")
             now = datetime.now(UTC).isoformat()
-            return {"thread_id": MANAGER.reserve(
-                        thread_id, hidden=(metadata if hidden else False)), "created_at": now,
+            try:
+                reserved = MANAGER.reserve(
+                    thread_id, hidden=(metadata if hidden else None))
+            except (FileNotFoundError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=409, detail="Task metadata conflict") from exc
+            return {"thread_id": reserved, "created_at": now,
                     "updated_at": now, "status": "idle"}
 
     def get_thread(self, thread_id: str) -> dict:

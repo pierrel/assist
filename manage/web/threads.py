@@ -2804,10 +2804,14 @@ def queue_recovery_runs() -> None:
         if abandoned is not None:
             _RESUME_SCHEDULER.submit(abandoned.id, tid)
 
-    # A crash between private thread reservation and first Run admission leaves a
-    # metadata-only hidden directory. No accepted work exists, so discard it; a
-    # deterministic start replay recreates the same task ID.
+    # A crash during atomic reservation can leave an unpublished staging directory;
+    # a crash after publication but before first Run admission leaves a metadata-only
+    # hidden directory. Neither has accepted work, so discard it; a deterministic
+    # start replay recreates the same task ID.
     for child_tid in os.listdir(MANAGER.root_dir):
+        if child_tid.startswith(".subagent-"):
+            MANAGER.hard_delete(child_tid)
+            continue
         marker = os.path.join(MANAGER.thread_dir(child_tid), ".subagent")
         if os.path.isfile(marker) and not _runs().list(child_tid):
             MANAGER.hard_delete(child_tid)
