@@ -17,11 +17,12 @@ records the build plan grounded in the real code, the reconciliations, and statu
 * Threading model (blocker-class — single-worker uvicorn)
 | Thread | Owns | May NOT |
 |--------+------+---------|
-| WS loop (=@app.websocket("/call")=) | frame → =inbound_q.put=; =outbound_q.get_nowait= → =ws.send=; handshake/secret | any lock, file I/O, model, STT/TTS, flow.py, blocking =.get()= |
+| WS loop (=@app.websocket("/call")=) | frame → =inbound_q.put=; =outbound.get_nowait= → =ws.send=; handshake/secret | any lock, file I/O, model, STT/TTS, flow.py, blocking =.get()= |
 | Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine; schedule/cancel TTS | blocking TTS synthesis; stays free during THINKING and SPEAKING |
-| TTS producer (1/call) | synthesize sentence chunks tagged with the current generation → serialized outbound accept boundary | flow.py, session state, observer callbacks |
+| TTS producer (1/call) | synthesize sentence chunks → split into 20 ms generation-tagged frames → serialized outbound accept boundary | flow.py, session state, observer callbacks |
 | Turn-runner (1/turn) | execute a committed durable Run by id; observer fires at its terminal exit | — |
-=inbound_q=/=outbound_q= are =queue.Queue=. The WS loop is a pure shuttle.
+=inbound_q= is =queue.Queue=; =outbound= is a bounded generation-aware buffer with
+nonblocking =get_nowait=. The WS loop is a pure shuttle.
 
 * Build sequence + PR slicing (architect-validated 2026-07-23)
 Dependency-ordered; each new dep enters the smallest PR that needs it.
@@ -73,10 +74,13 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    Piper blocks while producing each sentence. If the session loop synthesized directly,
    it could not drain inbound PCM into =flow.py=, making barge-in impossible during that
    interval. The session remains the sole Flow/state owner and only schedules/cancels TTS;
-   the producer emits generation-tagged PCM through one serialized accept boundary. On
-   barge-in the session invalidates that generation and enqueues =flush_uplink= atomically
-   at the same boundary; a chunk returned later by an in-flight Piper =next()= is rejected.
-   The session never waits for synthesis before flushing.
+   the producer splits each sentence result into 20 ms generation-tagged PCM frames
+   before one serialized accept boundary. Producer backpressure waits on a condition
+   that releases the boundary lock and rechecks the generation on wake. On barge-in,
+   one atomic buffer operation invalidates the generation, purges its queued PCM, and
+   inserts =flush_uplink= at the front. A frame returned later by an in-flight Piper
+   =next()= is rejected; only a frame the WS shuttle already dequeued can escape. The
+   session never waits for synthesis or buffer capacity before flushing.
 
 * Reuse map (do NOT re-derive)
 - =manage/web/threads.py=: =_create_run= + =_execute_run= (durable ordinary-turn path),
@@ -97,7 +101,7 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 | target | test |
 |--------+------|
 | endpointing premature-cutoff/false-trigger within targets | test_flow.py labeled-WAV frame-by-frame |
-| barge-in cancels-TTS-then-flush within 1 frame w/o cancelling the turn | test_session.py via fake bridge |
+| barge-in invalidates/purges TTS then flushes within 1 frame w/o cancelling the turn | test_session.py via fake bridge |
 | Goertzel DTMF on synth tones incl. noise | test_flow.py (DONE — see status) |
 | global PIN lockout | security test, rotating caller-ids |
 | per-state detector scoping (no STT pre-auth) | test_session.py + construction spy |
@@ -131,8 +135,8 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
   The silero =silero_vad.onnx= (2.3 MB, official snakers4 repo) is committed under =manage/voice/assets/=.
 - faster-whisper + piper-tts are pinned for PR2. All torch-free. Speech models (whisper
   base.en ~150MB; a Piper voice) are provisioned outside a live call and are not committed.
-  Deploy needs =make deploy-install= (venv rebuild) for P1.
+  Deploy needs =make deploy-install= plus =make deploy-speech-models= for P1.
 - PR4 scheduling constraint from review: observers enqueue text only; TTS must not run in an
   observer or block the session's inbound-frame drain. Barge-in invalidates the active TTS
-  generation and enqueues the flush at one serialized boundary, so an in-flight synthesis
-  chunk cannot land after the flush.
+  generation, purges its queued frames, and prioritizes the flush at one serialized
+  boundary, so an in-flight synthesis frame cannot land after the flush.
