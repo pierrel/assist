@@ -1253,7 +1253,7 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
                              id=rec.id, reason="the scheduling turn failed")
                 n += 1
         active_run_id = (_TURN_INTERJECTION.get(tid) or {}).get("run_id")
-        for child in _runs().scan_all():
+        for child in _runs().scan_children():
             if (child.mode == "child" and child.parent_thread_id == tid
                     and child.parent_run_id == active_run_id
                     and child.origin == "background-child"
@@ -1471,7 +1471,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 assistant_id="general-agent", mode="turn", parent_thread_id=None,
                 parent_run_id=None, dispatch_key=None,
                 single_active_child=False, origin_limit=None,
-                cancel_pending=False, hidden=False, max_runs=None,
+                cancel_pending=False, max_runs=None,
                 max_pending=None, multitask_strategy="enqueue") -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
@@ -1483,38 +1483,40 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         resume_value=resume_value,
         pending_text=pending_text, active_ms=active_ms,
         single_active_child=single_active_child, origin_limit=origin_limit,
-        cancel_pending=cancel_pending, hidden=hidden, max_runs=max_runs,
+        cancel_pending=cancel_pending, max_runs=max_runs,
         max_pending=max_pending, multitask_strategy=multitask_strategy)
 
 
 def _dispatch_child(parent: Run, dispatch_key: str, assistant_id: str,
                     description: str) -> dict[str, str]:
     """Create-or-find one child invocation and queue its durable id."""
-    background = assistant_id == "background-research-agent"
-    # ``dispatch_key`` is work_id + LangGraph tool-call id, stable across the
-    # successor invocation that replays the interrupted task node.
-    child_key = dispatch_key
-    child_tid = "sub-" + hashlib.sha256(child_key.encode()).hexdigest()[:24]
-    existing = next((candidate for candidate in _runs().list(child_tid)
-                     if candidate.dispatch_key == dispatch_key), None)
-    if existing is None:
-        chain_len = _continuation_chain_len(parent.thread_id) if background else 0
-        if chain_len >= CHAIN_CAP:
-            raise ValueError(
-                f"background follow-up chain is limited to {CHAIN_CAP} turns")
-        if background:
-            assistant_id = "research-agent"
-        existing = _create_run(
-            child_tid, description, assistant_id=assistant_id, mode="child",
-            parent_thread_id=parent.thread_id, parent_run_id=parent.id,
-            dispatch_key=dispatch_key, work_id=parent.work_id,
-            origin="background-child" if background else "required-child",
-            single_active_child=not background,
-            origin_limit=(CHAIN_CAP - chain_len) if background else None,
-            hidden=True)
-    if existing.status == "pending":
-        _RESUME_SCHEDULER.submit(existing.id, child_tid)
-    return {"thread_id": child_tid, "run_id": existing.id}
+    with _RUN_ADMISSION_LOCK:
+        if not os.path.isdir(MANAGER.thread_dir(parent.thread_id)):
+            raise FileNotFoundError(parent.thread_id)
+        background = assistant_id == "background-research-agent"
+        # ``dispatch_key`` is work_id + LangGraph tool-call id, stable across the
+        # successor invocation that replays the interrupted task node.
+        child_key = dispatch_key
+        child_tid = "sub-" + hashlib.sha256(child_key.encode()).hexdigest()[:24]
+        existing = next((candidate for candidate in _runs().list(child_tid)
+                         if candidate.dispatch_key == dispatch_key), None)
+        if existing is None:
+            chain_len = _continuation_chain_len(parent.thread_id) if background else 0
+            if chain_len >= CHAIN_CAP:
+                raise ValueError(
+                    f"background follow-up chain is limited to {CHAIN_CAP} turns")
+            if background:
+                assistant_id = "research-agent"
+            existing = _create_run(
+                child_tid, description, assistant_id=assistant_id, mode="child",
+                parent_thread_id=parent.thread_id, parent_run_id=parent.id,
+                dispatch_key=dispatch_key, work_id=parent.work_id,
+                origin="background-child" if background else "required-child",
+                single_active_child=not background,
+                origin_limit=(CHAIN_CAP - chain_len) if background else None)
+        if existing.status == "pending":
+            _RESUME_SCHEDULER.submit(existing.id, child_tid)
+        return {"thread_id": child_tid, "run_id": existing.id}
 
 
 def _execute_child_run(run: Run, *, resume: bool = False) -> None:
@@ -3635,17 +3637,20 @@ async def delete_thread(tid: str):
 
 
 def _delete_thread_and_children(tid: str) -> None:
-    """Delete a visible thread and any not-yet-running hidden children."""
-    for child in _runs().scan_all():
-        if child.mode != "child" or child.parent_thread_id != tid:
-            continue
-        if child.status == "pending":
-            try:
-                _runs().cancel_pending(child.thread_id, child.id)
-            except InvalidRunTransition:
+    """Delete a visible thread and every hidden child not currently running."""
+    with _RUN_ADMISSION_LOCK:
+        for child in _runs().scan_children():
+            if child.mode != "child" or child.parent_thread_id != tid:
                 continue
+            if child.status == "running":
+                continue
+            if child.status == "pending":
+                try:
+                    _runs().cancel_pending(child.thread_id, child.id)
+                except InvalidRunTransition:
+                    continue
             MANAGER.hard_delete(child.thread_id)
-    MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
+        MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
 
 
 @app.post("/thread/{tid}/rename")

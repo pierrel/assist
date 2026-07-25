@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
@@ -178,7 +179,6 @@ class RunService(PerThreadJsonStore[Run]):
         single_active_child: bool = False,
         origin_limit: int | None = None,
         cancel_pending: bool = False,
-        hidden: bool = False,
         max_runs: int | None = None,
         max_pending: int | None = None,
         multitask_strategy: str = "enqueue",
@@ -192,6 +192,8 @@ class RunService(PerThreadJsonStore[Run]):
                                 or not dispatch_key):
             raise ValueError(
                 "a child run requires parent_thread_id, parent_run_id, and dispatch_key")
+        if mode == "child" and not thread_id.startswith("sub-"):
+            raise ValueError("a child run requires a sub- thread id")
         if mode == "turn" and (parent_thread_id or parent_run_id):
             raise ValueError("a turn run cannot have parent fields")
         rid = run_id or uuid.uuid4().hex
@@ -211,6 +213,13 @@ class RunService(PerThreadJsonStore[Run]):
             created_at=now, updated_at=now,
         )
         with self._lock:
+            if mode == "child":
+                directory = os.path.dirname(self._path(thread_id))
+                marker = os.path.join(directory, ".subagent")
+                new_child_directory = not os.path.exists(directory)
+                if os.path.exists(directory) and not os.path.isfile(marker):
+                    if os.listdir(directory):
+                        raise ValueError("a child run cannot use a visible thread")
             runs = self._read(thread_id)
             if dispatch_key:
                 existing = next((candidate for candidate in runs
@@ -225,16 +234,7 @@ class RunService(PerThreadJsonStore[Run]):
                     return existing
             all_runs = runs
             if single_active_child or origin_limit is not None:
-                all_runs = []
-                try:
-                    thread_ids = os.listdir(self._root)
-                except FileNotFoundError:
-                    thread_ids = []
-                for candidate_tid in thread_ids:
-                    try:
-                        all_runs.extend(self._read(candidate_tid))
-                    except (FileNotFoundError, NotADirectoryError):
-                        continue
+                all_runs = self._read_children()
             if single_active_child and any(
                     candidate.mode == "child"
                     and candidate.parent_thread_id == parent_thread_id
@@ -268,13 +268,17 @@ class RunService(PerThreadJsonStore[Run]):
                 raise InvalidRunTransition("pending run limit reached")
             if any(existing.id == rid for existing in runs):
                 raise ValueError(f"run already exists: {rid}")
-            if hidden:
-                os.makedirs(os.path.dirname(self._path(thread_id)), exist_ok=True)
-                with open(os.path.join(os.path.dirname(self._path(thread_id)),
-                                       ".subagent"), "a"):
+            if mode == "child":
+                os.makedirs(directory, exist_ok=True)
+                with open(marker, "a"):
                     pass
             runs.append(run)
-            self._write(thread_id, runs)
+            try:
+                self._write(thread_id, runs)
+            except Exception:
+                if mode == "child" and new_child_directory:
+                    shutil.rmtree(directory, ignore_errors=True)
+                raise
         return run
 
     def get(self, thread_id: str, run_id: str) -> Run:
@@ -379,19 +383,25 @@ class RunService(PerThreadJsonStore[Run]):
         """Return runs across visible and hidden thread directories."""
         return self.all()
 
+    def _read_children(self) -> list[Run]:
+        try:
+            thread_ids = os.listdir(self._root)
+        except FileNotFoundError:
+            return []
+        found = []
+        for thread_id in thread_ids:
+            directory = os.path.join(self._root, thread_id)
+            if os.path.isfile(os.path.join(directory, ".subagent")):
+                try:
+                    found.extend(self._read(thread_id))
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+        return found
+
     def scan_children(self) -> list[Run]:
         """Return child runs without parsing visible thread histories."""
         with self._lock:
-            try:
-                thread_ids = os.listdir(self._root)
-            except FileNotFoundError:
-                return []
-            found = []
-            for thread_id in thread_ids:
-                directory = os.path.join(self._root, thread_id)
-                if os.path.isfile(os.path.join(directory, ".subagent")):
-                    found.extend(self._read(thread_id))
-            return found
+            return self._read_children()
 
     def import_legacy(
         self,
