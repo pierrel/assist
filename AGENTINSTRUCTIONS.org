@@ -1,15 +1,22 @@
 #+title: Enable the authenticated Agent Protocol API
 
-The feature code is deployed, but the production =/agent= routes stay unmounted until
-=assist-web= receives =ASSIST_AGENT_PROTOCOL_SECRET=. This fail-closed default prevents
-an unauthenticated caller from creating agent work that can spend the local LLM slot and
-use host-integrated tools.
+* Why this manual setup is necessary
 
-The coding agent cannot install the systemd drop-in because that path is outside the
-configured passwordless-sudo allowlist. Run these commands once from an interactive
-shell on the assist host. They use the current production values: =SERVICE_NAME= is
-=assist-web= and =ASSIST_PORT= is =5050=. Check those two entries in =.deploy.env= first and substitute
-their values below if the deployment configuration has changed.
+The =/agent= API can create threads and Runs that consume the single local LLM slot and
+use the same host-integrated tools as the web application. Exposing it without a
+credential would let anyone who can reach the HTTPS listener create that work.
+
+The server therefore mounts =/agent= only when =ASSIST_AGENT_PROTOCOL_SECRET= is set.
+The secret must live outside the rsync-managed code tree so a deployment cannot publish
+or erase it, and systemd must load it before starting =assist-web=. Installing that
+root-owned secret and systemd configuration requires interactive sudo; the coding agent
+is intentionally not allowed to write them. That is why these one-time operator steps
+cannot be completed by the normal code deployment.
+
+The feature code is already deployed, but =/agent= remains unmounted until these steps
+are complete. The commands use the current production values: =SERVICE_NAME= is
+=assist-web= and =ASSIST_PORT= is =5050=. Check those entries in =.deploy.env= first and
+substitute their values below if the deployment configuration has changed.
 
 * 1. Create the bearer secret
 
