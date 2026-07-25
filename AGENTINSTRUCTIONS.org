@@ -9,8 +9,9 @@ credential would let anyone who can reach the HTTPS listener create that work.
 The server therefore mounts =/agent= only when =ASSIST_AGENT_PROTOCOL_SECRET= is set.
 The secret stays in a root-readable file rather than the normally world-readable systemd
 unit. The existing =assist-web.service= loads that file through an =EnvironmentFile=
-line. Installing the root-owned unit and secret requires interactive sudo, which the
-coding agent is intentionally not allowed to use.
+line. Creating or removing the root-owned secret requires interactive sudo, which the
+coding agent is intentionally not allowed to use. The existing passwordless deployment
+rules cover installation of =assist-web.service= itself.
 
 The feature code is already deployed, but =/agent= remains unmounted until these steps
 are complete. The commands use the current production values: =SERVICE_NAME= is
@@ -27,56 +28,111 @@ cd ~/src/agentic/assist
 * 1. Create the bearer secret
 
 #+begin_src sh
-sudo mkdir -p /etc/assist
-openssl rand -hex 32 | awk '{print "ASSIST_AGENT_PROTOCOL_SECRET=" $0}' \
-  | sudo tee /etc/assist/agent-protocol.env >/dev/null
-sudo chmod 600 /etc/assist/agent-protocol.env
+sudo install -d -m 755 /etc/assist
+sudo sh -c '
+  set -eu
+  path=/etc/assist/agent-protocol.env
+  if test -e "$path"; then
+    test "$(stat -c "%U:%G:%a" "$path")" = root:root:600 \
+      && test "$(wc -l <"$path")" -eq 1 \
+      && grep -Eq "^ASSIST_AGENT_PROTOCOL_SECRET=[0-9a-f]{64}$" "$path" || {
+      echo "$path exists but is not a valid protected secret" >&2
+      exit 1
+    }
+    echo "Keeping the existing Agent Protocol secret"
+    exit 0
+  fi
+  umask 077
+  tmp=$(mktemp /etc/assist/.agent-protocol.env.XXXXXX)
+  trap "rm -f \"$tmp\"" EXIT HUP INT TERM
+  secret=$(openssl rand -hex 32)
+  printf "ASSIST_AGENT_PROTOCOL_SECRET=%s\n" "$secret" >"$tmp"
+  ln "$tmp" "$path"
+  rm "$tmp"
+  trap - EXIT HUP INT TERM
+'
 #+end_src
 
 Why: the API deliberately has no default credential. The secret file is readable only
-by root, is outside the deployed code tree, and is not replaced by =deploy-code=.
+by root from the instant it is created, is outside the deployed code tree, and is not
+replaced by =deploy-code=. A complete temporary file is atomically linked into place
+without overwriting an existing path. Re-running this step validates and preserves an
+existing secret rather than silently rotating it. On the current host, the first attempt
+already completed this step successfully, so it will report that it is keeping the
+existing secret.
 
 * 2. Regenerate and restart the existing service
 
 #+begin_src sh
-make deploy-service
-make restart
+make deploy-service \
+  && grep -Fx 'EnvironmentFile=-/etc/assist/agent-protocol.env' \
+    /etc/systemd/system/assist-web.service \
+  && ssh localhost 'sudo systemctl restart assist-web'
 #+end_src
 
 Why: =assist-web= does not inherit variables from an interactive shell.
-=deploy-service= updates the existing =/etc/systemd/system/assist-web.service=, whose
-=EnvironmentFile= line loads the protected secret. The restart makes it active.
-The final =journalctl -f= step in =make restart= keeps running; press =Ctrl-C= after the
-service has started.
+=deploy-service= gets the host and destination from the canonical checkout's
+=.deploy.env=, then installs the already-deployed service template. The =grep= is a gate:
+do not restart unless it prints the expected =EnvironmentFile= line. The bounded restart
+makes the new environment active without entering =make restart='s endless log follow.
+
+A restart interrupts an active turn or Run. Perform it only when the web UI has no active
+or queued work.
 
 * 3. Verify authentication and the service
 
 #+begin_src sh
 systemctl show assist-web -p ActiveState -p MainPID -p ActiveEnterTimestamp
-curl -sk -o /dev/null -w '%{http_code}\n' \
+curl -sS --retry 5 --retry-connrefused --retry-delay 1 \
+  --connect-timeout 2 --max-time 15 -o /dev/null -w '%{http_code}\n' \
+  https://localhost:5050/
+curl -sS --retry 5 --retry-connrefused --retry-delay 1 \
+  --connect-timeout 2 --max-time 15 -o /dev/null -w '%{http_code}\n' \
   -X POST https://localhost:5050/agent/threads \
-  -H 'content-type: application/json' -d '{}'
+  -H 'content-type: application/json' -d '{"unexpected":true}'
 
 sudo sh -c '
   . /etc/assist/agent-protocol.env
   printf "header = \"authorization: Bearer %s\"\n" \
     "$ASSIST_AGENT_PROTOCOL_SECRET" |
-    curl --config - -skf -X POST https://localhost:5050/agent/threads \
-      -H "content-type: application/json" -d "{}"
+    curl --config - -sS --connect-timeout 2 --max-time 15 \
+      -o /dev/null -w "%{http_code}\n" \
+      -X POST https://localhost:5050/agent/threads \
+      -H "content-type: application/json" -d "{\"unexpected\":true}"
 '
 #+end_src
 
-The unauthenticated request must print =401=. The authenticated request must return JSON
-containing a =thread_id=. Do not paste the environment file or bearer value into logs,
-issues, chat, or shell tracing.
+The service status must show =ActiveState=active=, a nonzero =MainPID=, and a new
+=ActiveEnterTimestamp=. The readiness request must print =200=. The unauthenticated
+request must print =401=. The authenticated request must print =422=:
+authentication succeeded, then the deliberately invalid body was rejected before any
+thread was created. Both requests verify the deployed TLS certificate. Do not paste the
+environment file or bearer value into logs, issues, chat, or shell tracing.
 
 * Roll back
 
 #+begin_src sh
-sudo rm /etc/assist/agent-protocol.env
-make restart
+sudo sh -c '
+  set -eu
+  test ! -e /etc/assist/agent-protocol.env.disabled
+  mv /etc/assist/agent-protocol.env /etc/assist/agent-protocol.env.disabled
+' && ssh localhost 'sudo systemctl restart assist-web'
+curl -sS --retry 5 --retry-connrefused --retry-delay 1 \
+  --connect-timeout 2 --max-time 15 -o /dev/null -w '%{http_code}\n' \
+  -X POST https://localhost:5050/agent/threads \
+  -H 'content-type: application/json' -d '{"unexpected":true}'
 #+end_src
 
-Removing the secret unmounts =/agent= on restart. The service's optional
-=EnvironmentFile= line can remain. This does not affect the HTML web UI,
-existing threads, Runs, schedules, SMS, or other execution producers.
+The final request must print =404=. Renaming the secret unmounts =/agent= on restart but
+keeps the credential available for recovery. To restore it while idle, run:
+
+#+begin_src sh
+sudo mv /etc/assist/agent-protocol.env.disabled \
+  /etc/assist/agent-protocol.env \
+  && ssh localhost 'sudo systemctl restart assist-web'
+#+end_src
+
+Then repeat the verification step. The service's optional =EnvironmentFile= line can
+remain. The restart interrupts active work, so roll back or restore only while idle.
+Persisted threads and Run records, schedules, SMS configuration, and the HTML web UI
+remain intact.
