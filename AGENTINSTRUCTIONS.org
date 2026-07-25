@@ -1,17 +1,16 @@
 #+title: Enable the authenticated Agent Protocol API
 
-* Why this manual setup is necessary
+* Why this setup is necessary
 
 The =/agent= API can create threads and Runs that consume the single local LLM slot and
 use the same host-integrated tools as the web application. Exposing it without a
 credential would let anyone who can reach the HTTPS listener create that work.
 
 The server therefore mounts =/agent= only when =ASSIST_AGENT_PROTOCOL_SECRET= is set.
-The secret must live outside the rsync-managed code tree so a deployment cannot publish
-or erase it, and systemd must load it before starting =assist-web=. Installing that
-root-owned secret and systemd configuration requires interactive sudo; the coding agent
-is intentionally not allowed to write them. That is why these one-time operator steps
-cannot be completed by the normal code deployment.
+The secret stays in a root-readable file rather than the normally world-readable systemd
+unit. The existing =assist-web.service= loads that file through an =EnvironmentFile=
+line. Installing the root-owned unit and secret requires interactive sudo, which the
+coding agent is intentionally not allowed to use.
 
 The feature code is already deployed, but =/agent= remains unmounted until these steps
 are complete. The commands use the current production values: =SERVICE_NAME= is
@@ -27,23 +26,21 @@ openssl rand -hex 32 | awk '{print "ASSIST_AGENT_PROTOCOL_SECRET=" $0}' \
 sudo chmod 600 /etc/assist/agent-protocol.env
 #+end_src
 
-Why: the API deliberately has no default credential. The file is outside the code and
-deployment trees, mode 0600, and is not tracked or replaced by =deploy-code=.
+Why: the API deliberately has no default credential. The secret file is readable only
+by root, is outside the deployed code tree, and is not replaced by =deploy-code=.
 
-* 2. Add the service drop-in
+* 2. Regenerate and restart the existing service
 
 #+begin_src sh
-sudo mkdir -p /etc/systemd/system/assist-web.service.d
-printf '%s\n' \
-  '[Service]' \
-  'EnvironmentFile=/etc/assist/agent-protocol.env' \
-  | sudo tee /etc/systemd/system/assist-web.service.d/agent-protocol.conf >/dev/null
-sudo systemctl daemon-reload
-sudo systemctl restart assist-web
+make deploy-service
+make restart
 #+end_src
 
-Why: systemd does not inherit variables from an interactive shell. The drop-in keeps the
-secret out of the tracked unit and out of process arguments.
+Why: =assist-web= does not inherit variables from an interactive shell.
+=deploy-service= updates the existing =/etc/systemd/system/assist-web.service=, whose
+=EnvironmentFile= line loads the protected secret. The restart makes it active.
+The final =journalctl -f= step in =make restart= keeps running; press =Ctrl-C= after the
+service has started.
 
 * 3. Verify authentication and the service
 
@@ -69,11 +66,10 @@ issues, chat, or shell tracing.
 * Roll back
 
 #+begin_src sh
-sudo rm /etc/systemd/system/assist-web.service.d/agent-protocol.conf
 sudo rm /etc/assist/agent-protocol.env
-sudo systemctl daemon-reload
-sudo systemctl restart assist-web
+make restart
 #+end_src
 
-Removing the drop-in unmounts =/agent= on restart. It does not affect the HTML web UI,
+Removing the secret unmounts =/agent= on restart. The service's optional
+=EnvironmentFile= line can remain. This does not affect the HTML web UI,
 existing threads, Runs, schedules, SMS, or other execution producers.
