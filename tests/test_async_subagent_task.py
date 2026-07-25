@@ -79,6 +79,19 @@ def test_async_tool_dispatches_off_loop(monkeypatch):
     assert command.update["messages"][0].tool_call_id == "async-call"
 
 
+def test_background_confirmation_exposes_durable_run_id():
+    context = AsyncTaskContext(
+        "pt", "pr", "pw",
+        lambda *_: {"thread_id": "child-thread", "run_id": "child-run"})
+    with async_task_context(context):
+        command = task_tool.func(
+            "research it", "background-research-agent", _runtime("bg-call"))
+
+    content = command.update["messages"][0].content
+    assert "task_id: child-run" in content
+    assert "child-thread" not in content
+
+
 def test_dispatch_must_return_complete_child_identity(monkeypatch):
     monkeypatch.setattr("assist.async_subagents.interrupt", lambda _: "done")
     context = AsyncTaskContext("pt", "pr", "pw", lambda *_: {"thread_id": "ct"})

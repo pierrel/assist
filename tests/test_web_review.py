@@ -335,6 +335,12 @@ class TestPostReviewRoute:
                         data={"payload": "not-json"})
         assert r.status_code == 400
 
+    def test_400_on_non_utf8_form_body(self, client):
+        r = client.post(
+            "/thread/thread-1/review", content=b"payload=" + bytes([0xff]),
+            headers={"content-type": "application/x-www-form-urlencoded"})
+        assert r.status_code == 400
+
     def test_400_on_empty_payload(self, client):
         r = client.post("/thread/thread-1/review",
                         data={"payload": json.dumps({"overall": "", "lines": []})})
