@@ -73,6 +73,7 @@ class Run:
     consumed_by: str | None
     error: str | None
     result: str | None
+    multitask_strategy: str
     created_at: str
     updated_at: str
 
@@ -109,6 +110,7 @@ class Run:
             consumed_by=value.get("consumed_by") or None,
             error=value.get("error") or None,
             result=value.get("result") or None,
+            multitask_strategy=value.get("multitask_strategy", "enqueue"),
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
         )
@@ -179,6 +181,7 @@ class RunService(PerThreadJsonStore[Run]):
         hidden: bool = False,
         max_runs: int | None = None,
         max_pending: int | None = None,
+        multitask_strategy: str = "enqueue",
     ) -> Run:
         """Persist and return a pending run, the work-acceptance commit."""
         if not assistant_id:
@@ -204,6 +207,7 @@ class RunService(PerThreadJsonStore[Run]):
             pending_text=pending_text,
             active_ms=float(active_ms), consumed_by=None, error=None,
             result=None,
+            multitask_strategy=multitask_strategy,
             created_at=now, updated_at=now,
         )
         with self._lock:
@@ -422,6 +426,7 @@ class RunService(PerThreadJsonStore[Run]):
                         origin=record.origin, resume=False, resume_decision=None,
                         resume_value=None, pending_text=None, active_ms=0.0,
                         consumed_by=None, error=None, result=None,
+                        multitask_strategy="enqueue",
                         created_at=record.enqueued_at or now, updated_at=now,
                     )
                     runs.append(run)

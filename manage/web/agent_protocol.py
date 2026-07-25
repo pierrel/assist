@@ -129,7 +129,7 @@ def _run_response(value: Any) -> dict[str, Any]:
         "updated_at": source.get("updated_at"),
         "status": source["status"],
         "metadata": {},
-        "multitask_strategy": source.get("multitask_strategy", "enqueue"),
+        "multitask_strategy": source["multitask_strategy"],
     }
     if source.get("error") is not None:
         result["error"] = source["error"]

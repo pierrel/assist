@@ -1472,7 +1472,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 parent_run_id=None, dispatch_key=None,
                 single_active_child=False, origin_limit=None,
                 cancel_pending=False, hidden=False, max_runs=None,
-                max_pending=None) -> Run:
+                max_pending=None, multitask_strategy="enqueue") -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
         tid, assistant_id, text, work_id=work_id, mode=mode,
@@ -1484,7 +1484,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         pending_text=pending_text, active_ms=active_ms,
         single_active_child=single_active_child, origin_limit=origin_limit,
         cancel_pending=cancel_pending, hidden=hidden, max_runs=max_runs,
-        max_pending=max_pending)
+        max_pending=max_pending, multitask_strategy=multitask_strategy)
 
 
 def _dispatch_child(parent: Run, dispatch_key: str, assistant_id: str,

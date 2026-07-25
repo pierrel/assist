@@ -20,6 +20,7 @@ def test_create_is_durable_acceptance_commit(service, tmp_path):
     stored = json.loads((tmp_path / "t1" / "runs.json").read_text())
     assert stored[0]["id"] == run.id
     assert stored[0]["status"] == "pending"
+    assert stored[0]["multitask_strategy"] == "enqueue"
     assert service.get("t1", run.id).rider == {"tz": "UTC"}
 
 
