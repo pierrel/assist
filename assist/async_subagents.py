@@ -23,12 +23,19 @@ from langgraph_sdk.client import LangGraphClient
 from pydantic import Field
 from starlette.types import ASGIApp
 
+from assist.middleware.loop_detection import _messages_from_state
+from assist.middleware.url_provenance import (
+    delegated_general_purpose_body, delegated_general_purpose_description)
+from assist.subagent_contract import (
+    GENERAL_PURPOSE_DESCRIPTION, MAX_TASK_DESCRIPTION_CHARS)
+
 
 SUBAGENTS = {
     "context-agent": (
         "Discover relevant context in the user's local files. Read-only; use "
         "before answering whenever local context could inform the response."
     ),
+    "general-purpose": GENERAL_PURPOSE_DESCRIPTION,
     "research-agent": (
         "Research external topics thoroughly and return grounded findings with "
         "their sources."
@@ -106,6 +113,8 @@ def _task_value(thread: dict[str, Any]) -> dict[str, Any]:
 
 def _format_task(task: dict[str, Any], *, include_result: bool = True) -> str:
     description = str(task.get("description") or "")
+    if task.get("agent_name") == "general-purpose":
+        description = delegated_general_purpose_body(description)
     fields = {
         "task_id": task.get("task_id"),
         "agent_name": task.get("agent_name"),
@@ -118,6 +127,11 @@ def _format_task(task: dict[str, Any], *, include_result: bool = True) -> str:
             "success", "error", "timeout", "cancelled"}:
         fields["result"] = task.get("result")
         fields["error"] = task.get("error")
+        if task.get("status") != "success":
+            fields["instruction"] = (
+                "This status is terminal. Report the failure and any blocked "
+                "dependent work. Do not retry, redispatch, update, or complete "
+                "this todo with direct tools.")
     return json.dumps(fields, ensure_ascii=False)
 
 
@@ -127,7 +141,7 @@ _TaskId = Annotated[str, Field(
 
 def _start_async_task(
     description: Annotated[str, Field(
-        min_length=1, max_length=64_000,
+        min_length=1, max_length=MAX_TASK_DESCRIPTION_CHARS,
         description="Complete, self-contained work for the subagent.")],
     subagent_type: Annotated[
         str, Field(description="One listed subagent type.")],
@@ -204,7 +218,7 @@ def _list_async_tasks(runtime: ToolRuntime) -> str:
 def _update_async_task(
     task_id: _TaskId,
     instructions: Annotated[str, Field(
-        min_length=1, max_length=64_000,
+        min_length=1, max_length=MAX_TASK_DESCRIPTION_CHARS,
         description="Complete replacement or follow-up instructions for the task.")],
     runtime: ToolRuntime,
 ) -> str:
@@ -218,10 +232,17 @@ def _update_async_task(
             return None
         if task.get("status") in {"success", "error", "timeout", "cancelled"}:
             return thread
+        description = instructions
+        if task["agent_name"] == "general-purpose":
+            try:
+                description = delegated_general_purpose_description(
+                    instructions, _messages_from_state(runtime))
+            except ValueError as exc:
+                return str(exc)
         await client.runs.create(
             task_id,
             task["agent_name"],
-            input={"messages": [{"role": "user", "content": instructions}]},
+            input={"messages": [{"role": "user", "content": description}]},
             multitask_strategy="interrupt",
             metadata={
                 "parent_thread_id": context.parent_thread_id,
@@ -232,6 +253,8 @@ def _update_async_task(
         return await client.threads.get(task_id)
 
     thread = _run(update)
+    if isinstance(thread, str):
+        return thread
     if thread is None:
         return f"Task `{task_id}` was not found in this conversation."
     task = _task_value(thread)
@@ -278,7 +301,10 @@ async_task_tools = (
                      + _AVAILABLE)),
     StructuredTool.from_function(
         name="check_async_task", func=_check_async_task,
-        description="Fetch one task's current status and terminal result using its full ID."),
+        description=("Fetch one task's current status and terminal result using its "
+                     "full ID. On a task-completion wake, this MUST be the first "
+                     "tool called with the exact ID from the latest wake; never "
+                     "answer from wake metadata alone.")),
     StructuredTool.from_function(
         name="update_async_task", func=_update_async_task,
         description=("Queue replacement instructions for a task. Active inference "

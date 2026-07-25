@@ -49,11 +49,11 @@ class AgentSpec:
     # ADDITIVE to the selected built-in tool profile (filesystem and execute;
     # delegation is selected independently below). () means "no extra tools",
     # not "no tools". Reaches
-    # the MAIN agent only (deepagents' auto-injected general-purpose
-    # subagent — which used to inherit these — is disabled harness-wide;
-    # see the profile registration in ``assist.agent``); the bespoke
-    # context/research/critique subagents do not see these
-    # (see ``create_agent``).
+    # the MAIN agent only. Deep Agents' auto-injected general-purpose
+    # subagent remains disabled harness-wide; assist's explicit GP leaf gets
+    # guarded read_url but does not inherit embedder tools. The bespoke
+    # context/research/critique subagents do not see these either (see
+    # ``create_agent``).
     tools: tuple[BaseTool | Callable | dict[str, Any], ...] = ()
 
     # ADDITIVE skill routes: virtual path -> backend holding SKILL.md

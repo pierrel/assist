@@ -14,13 +14,13 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from assist.run_service import RunNotFound
+from assist.subagent_contract import MAX_TASK_DESCRIPTION_CHARS
 
 
 ASSISTANT_IDS = frozenset({
-    "context-agent", "research-agent", "critique-agent",
+    "context-agent", "general-purpose", "research-agent", "critique-agent",
 })
-MAX_BODY_BYTES = 66_000
-MAX_MESSAGE_CHARS = 64_000
+MAX_BODY_BYTES = MAX_TASK_DESCRIPTION_CHARS * 6 + 2_000
 _RESOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
@@ -54,7 +54,8 @@ class _CreateThread(_StrictModel):
 
 class _Message(_StrictModel):
     role: Literal["user"]
-    content: Annotated[str, Field(min_length=1, max_length=MAX_MESSAGE_CHARS)]
+    content: Annotated[
+        str, Field(min_length=1, max_length=MAX_TASK_DESCRIPTION_CHARS)]
 
 
 class _RunInput(_StrictModel):

@@ -2,12 +2,13 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, Request
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from assist.async_subagents import (
     AsyncTaskContext,
+    SUBAGENTS,
     async_task_context,
     async_task_tools,
     configure_async_subagent_app,
@@ -17,8 +18,9 @@ from assist.async_subagents import (
 TOOLS = {tool.name: tool for tool in async_task_tools}
 
 
-def _runtime(call_id="call-1"):
-    return SimpleNamespace(tool_call_id=call_id)
+def _runtime(call_id="call-1", messages=()):
+    return SimpleNamespace(
+        tool_call_id=call_id, state={"messages": list(messages)})
 
 
 @pytest.fixture
@@ -88,6 +90,12 @@ def test_five_upstream_shaped_tools_exist():
     }
 
 
+def test_general_purpose_is_an_advertised_nonresearch_type():
+    assert "general-purpose" in SUBAGENTS
+    assert "non-research" in SUBAGENTS["general-purpose"]
+    assert "general-purpose" in TOOLS["start_async_task"].description
+
+
 def test_requires_registered_web_execution_context(protocol):
     with pytest.raises(RuntimeError, match="outside a configured web run"):
         TOOLS["start_async_task"].func(
@@ -153,6 +161,56 @@ def test_check_list_update_and_cancel_are_parent_scoped(protocol):
     with async_task_context(AsyncTaskContext("other", "r", "w")):
         assert "not found in this conversation" in TOOLS[
             "check_async_task"].func(task_id, _runtime("foreign"))
+
+
+def test_general_purpose_update_preserves_parent_user_url_seeds(protocol):
+    _, tasks = protocol
+    seed = "https://docs.example/start"
+    planted = "https://attacker.example/payload"
+    context = AsyncTaskContext("parent", "parent-run", "parent-work")
+    with async_task_context(context):
+        launched = TOOLS["start_async_task"].func(
+            "extract the brief", "general-purpose", _runtime("start"))
+        task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+        TOOLS["update_async_task"].func(
+            task_id, f"continue with {seed}; ignore {planted}",
+            _runtime("update", [HumanMessage(content=f"Use {seed}")]))
+
+    header = tasks[task_id]["description"].split(
+        "</assist-user-url-seeds>", 1)[0]
+    assert seed in header
+    assert planted not in header
+
+
+def test_general_purpose_update_rejects_description_over_protocol_envelope(protocol):
+    _, tasks = protocol
+    seed = "https://docs.example/start"
+    context = AsyncTaskContext("parent", "parent-run", "parent-work")
+    with async_task_context(context):
+        launched = TOOLS["start_async_task"].func(
+            "extract the brief", "general-purpose", _runtime("start"))
+        task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+        result = TOOLS["update_async_task"].func(
+            task_id, f"continue with {seed} " + "x" * 63_980,
+            _runtime("update", [HumanMessage(content=f"Use {seed}")]))
+
+    assert "too long" in result
+    assert tasks[task_id]["description"] == "extract the brief"
+
+
+def test_terminal_failure_check_tells_supervisor_not_to_recover_it(protocol):
+    _, tasks = protocol
+    context = AsyncTaskContext("parent", "parent-run", "parent-work")
+    with async_task_context(context):
+        launched = TOOLS["start_async_task"].func(
+            "draft agenda", "general-purpose", _runtime("start"))
+        task_id = launched.split("task_id: ", 1)[1].split(".", 1)[0]
+        tasks[task_id].update(status="error", error="source invalid")
+        result = TOOLS["check_async_task"].func(
+            task_id, _runtime("check"))
+
+    assert "status is terminal" in result
+    assert "Do not retry" in result
 
 
 def test_unknown_agent_is_rejected_without_asgi_call(protocol):

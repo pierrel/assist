@@ -86,3 +86,21 @@ class TestThreadManagerLazy(TestCase):
                     f"{os.listdir(working_dir)} — DomainManager.is_empty "
                     "will return False and skip the git clone.",
                 )
+
+    def test_general_purpose_child_uses_the_explicit_leaf_factory(self):
+        model = MagicMock()
+        leaf = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            os.makedirs(manager.thread_dir("child"))
+            with patch("assist.thread_manager.select_assistant_model",
+                       return_value=model), \
+                 patch("assist.thread_manager.create_general_purpose_subagent",
+                       return_value=leaf) as factory, \
+                 patch("assist.thread_manager.Thread", return_value=MagicMock()) as thread:
+                manager.get(
+                    "child", working_dir=tmp, assistant_id="general-purpose")
+
+        factory.assert_called_once_with(
+            model, tmp, manager.checkpointer, sandbox_backend=None)
+        assert thread.call_args.kwargs["agent"] is leaf

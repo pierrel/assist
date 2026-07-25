@@ -146,7 +146,7 @@ asymmetry dies with the adapter at the legacy-kwarg removal step.
   =async_subagent_tools= field selects the established synchronous profile,
   no delegation, or the web's asynchronous profile; it does not accept arbitrary
   child graph definitions. No
-  client uses a non-default value (emacsos keeps all three subagents;
+  client uses a non-default value (emacsos keeps all four subagents;
   research is routine phone traffic, reversing the framing doc's
   assumption).  Adding the field later is a backward-compatible
   one-field change the day a client actually deviates.  When it comes
@@ -154,9 +154,9 @@ asymmetry dies with the adapter at the legacy-kwarg removal step.
   =*-agent= names), the empty-set semantics against deepagents'
   auto-injected general-purpose subagent + =task= tool (update
   2026-07-21: the auto-injected general-purpose subagent is now
-  DISABLED harness-wide — see the profile registration in
-  =assist/agent.py= — so only the =task= tool half of that question
-  remains), and prompt
+  DISABLED harness-wide; update 2026-07-25: assist now registers one explicit
+  GP leaf on the main supervisor, but arbitrary client selection still remains
+  out of scope), and prompt
   sections that advertise subagents (=general_instructions.md.j2=
   references the research workflow — a gated subagent set must gate
   the prompt too).  Container should be =tuple[str, ...]= (ordered,

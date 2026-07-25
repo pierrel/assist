@@ -31,6 +31,9 @@ where reliability is harder than with frontier APIs.
   workspace bind-mounted at `/workspace` with reasonable guards.
 
 - **Specialized agents and skills out of the box.**
+  - **General-purpose agent** for one specific, well-defined non-research
+    task. Several independent todos can run as separate task workstreams; it
+    has guarded `read_url` for extracting or transforming a user-supplied page.
   - **Research agent** rigorous fact-checking and critiquing with
     internet search (`search_internet`) and URL fetch (`read_url`).
   - **Context agent** for read-only filesystem exploration — finds the
@@ -44,7 +47,7 @@ where reliability is harder than with frontier APIs.
     (heading-body discipline, no orphaned content) without affecting
     other formats.
 
-- **Subagents in the web UI.** Context, research, and critique
+- **Subagents in the web UI.** General-purpose, context, research, and critique
   tasks return a task ID immediately, then wake the conversation with a
   follow-up when each result is ready. You can keep messaging the main
   thread meanwhile; it can list, check, update, or cancel outstanding tasks
@@ -664,7 +667,7 @@ practice and do not lock.
 ```
 assist/
 ├── assist/                  # Core application code
-│   ├── agent.py             # Agent factories (general, context, research, dev)
+│   ├── agent.py             # Main + general-purpose/context/research factories
 │   ├── promptable.py        # Jinja prompt rendering + skill body loading
 │   ├── model_manager.py     # Model selection and configuration
 │   ├── domain_manager.py    # Git repository and sandbox management

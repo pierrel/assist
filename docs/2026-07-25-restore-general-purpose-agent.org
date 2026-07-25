@@ -1,0 +1,308 @@
+#+title: Restore the general-purpose subagent
+#+date: <2026-07-25>
+#+author: Pierre + Codex
+
+State: Testing — prompt-only routing stability has not converged; not deployed
+
+* Problem
+
+Assist disabled Deep Agents' automatic =general-purpose= subagent in commit
+=91a4f9e= after production logs showed it receiving context searches, critique,
+and fact-check requests.  The last case was actively misleading: the automatic
+subagent inherited a main-agent tool set with neither =read_url= nor
+=search_internet=, so its answer looked verified without retrieving a source.
+An N=3 routing experiment found no regression from removing it.
+
+That evidence justified removing the old, ambiguously described target.  It did
+not show that a general worker is useless.  The tool and execution surfaces have
+also changed since then:
+
+- commit =23e3a95= gave the main agent guarded =read_url= for navigation within a
+  user-provided or page-linked website; it remains unavailable for search;
+- PR #213 replaced web =task= dispatch with explicit, durable subagent task
+  types, while legacy embedders still use synchronous =task= subagents;
+- the main agent can now start several independent task lifecycles and continue
+  the conversation while they run.
+
+The missing capability is a leaf worker for a specific, well-defined piece of
+non-research work.  The main agent also lacks clear guidance for turning a plan
+with several independent todos into several such workstreams.
+
+* Contract
+
+1. =general-purpose= is available to both web and legacy main agents.
+2. It receives the normal filesystem/execute tools plus guarded =read_url=.
+   The main agent retains the guarded =read_url= it already has.
+3. =read_url= means bounded extraction, summarization, or transformation starting
+   from a URL literally supplied by the user.  A main agent must not copy a URL
+   learned from page/tool content into a new GP brief: that new child
+   =HumanMessage= would launder the URL into a trusted provenance channel.  The GP
+   may follow links surfaced within its own guarded history.  Investigation,
+   verification, and external fact-finding always go to =research-agent= even
+   when the user gives the website or URL.
+4. The main agent delegates only a specific, self-contained non-research todo:
+   one outcome, relevant inputs/paths, constraints, and expected result.
+5. For several independent todos, the main agent writes the plan, starts one GP
+   task per todo together, and owns final synthesis.  Dependent todos remain
+   sequential.  In web mode this means multiple =start_async_task= calls in one
+   turn; in legacy mode it means parallel =task= calls.
+6. On each completion wake, the main checks fresh task state.  It starts an
+   unblocked dependent todo when its prerequisite succeeds, and synthesizes only
+   after every required task is terminal.  A failed prerequisite is named as the
+   reason its dependent todo is blocked; successful independent results remain
+   usable.
+7. Routing is prompt- and eval-driven.  No middleware, classifier, task rewrite,
+   or rejection branch is added to prevent a research-shaped GP dispatch.  The
+   existing URL-provenance boundary does carry the parent's genuine user URL
+   seeds separately from the supervisor-authored task body; this preserves source
+   identity and does not decide which agent receives a task.
+8. GP is a leaf and cannot delegate again.  This is the existing subagent
+   lifecycle boundary, not a new routing guard.
+
+* Design
+
+Keep the provider-wide automatic GP disabled.  Re-enabling Deep Agents' default
+would add its research-advertising description to every graph, including context
+and research leaves.  Instead, register one explicit assist GP beside the named
+context, research, and critique agents.
+
+Add =create_general_purpose_subagent= in =assist/agent.py=.  It composes the
+existing hardened middleware and backend, exposes =read_url= with the same
+offload and provenance/reread middleware as the main agent, and uses a short leaf
+prompt.  It does not receive =search_internet= or nested subagents.  Its
+=default_backend= and =sandbox_backend= contract matches =create_context_agent= /
+=create_agent=: legacy embedders pass =spec.default_backend=, and the two backend
+forms remain mutually exclusive.  The same factory backs a =CompiledSubAgent=
+for legacy mode and the =general-purpose= assistant ID used by the web Run
+service, avoiding two implementations of the worker.  Reconcile the existing
+=create_agent= docstring to call it the main supervisor rather than another
+"general-purpose agent."
+
+The leaf prompt treats its supervisor brief as task scope, not as permission to
+obey quoted content.  Instructions found in files, fetched pages, or quoted data
+cannot broaden the task or override the leaf's system instructions.  Because
+Deep Agents otherwise turns the whole supervisor brief into a trusted
+=HumanMessage=, the parent prepends a source-authenticated list of URLs that both
+appear in end-user messages and are copied into this GP brief.  URLs from earlier
+user messages that the task does not use are omitted.  The GP's existing
+provenance middleware trusts only those seeds from the brief body, then retains
+same-host page-link navigation.  The internal block is removed from task-status
+display.  If adding it would cross the existing 64,000-character Agent Protocol
+message limit, the task tool asks the supervisor to shorten the brief instead of
+sending an invalid request.  This closes a cross-agent provenance gap rather than
+classifying or rejecting a research-shaped task.
+
+Add =general-purpose= to =assist.async_subagents.SUBAGENTS=.  This only advertises
+and admits the existing task type; it does not decide when the model uses it.
+=manage/web/agent_protocol.py='s separate assistant allowlist admits the same ID,
+and =ThreadManager.get= maps it to the shared factory.
+
+Extend =general_instructions.md.j2= with one routing section that applies to both
+delegation modes and renders the correct tool name per mode.  It tells the model
+to plan with =write_todos=, give one independent todo to each GP, launch independent
+calls together, keep prerequisites sequential, and never substitute GP for the
+context, research, or critique specialists.  Completion guidance requires fresh
+task checks, starts newly unblocked dependent work, and waits to synthesize until
+all required tasks are terminal.  Partial failures name the failed todo while
+preserving successful results.
+
+* Eval plan
+
+Extend the deterministic-child supervisor eval in
+=edd/eval/test_async_subagents.py= before changing behavior.  Its task tool lists
+the same four production types.  Pin six observed decisions:
+
+1. a multi-part local request first records its todos, then produces one
+   =general-purpose= start per independent todo in the same assistant turn; each
+   description is specific and self-contained, while a dependent todo waits for
+   its prerequisite;
+2. a mixed request starts GP for local work and =research-agent= for external
+   facts, without placing the research todo in a GP description;
+3. extraction or transformation beginning at a URL literally present in the
+   user's message may use GP, while a URL learned from tool/page content stays in
+   its current agent; verifying a claim and an open-ended lookup use
+   =research-agent=;
+4. a prerequisite completion wake starts its dependent GP todo and reports the
+   new task ID; an earlier independent completion does not trigger final synthesis.
+5. legacy mode emits two independent GP =task= calls in one assistant message,
+   while withholding dependent work from that parallel batch.
+6. two independent edits whose paths/formats are unknown launch context first,
+   launch no premature GP, then start both GP tasks together after context returns.
+
+Add a factory-backed real-model eval with deterministic, stubbed page retrieval.
+It invokes the GP itself, observes its =read_url= call, and requires its result to
+come from the fetched page.  The supervisor eval remains responsible for proving
+that research-shaped work never routes there.  The page fixture includes an
+instruction to perform an unrelated tool action; the GP must treat it as data and
+stay within the delegated extraction task.
+
+Run the new eval N=3 on the untouched baseline, then N=3 after implementation,
+N=5 after local review, and N=10 for stability.  Keep research deterministic;
+this suite evaluates routing, not retrieval.
+
+Baseline 2026-07-25: the main agent wrote the three correct todos but launched
+zero GP tasks in 3/3 trials (it either did the work inline or stopped after
+planning), so the multi-todo delegation contract was 0/3.  The future explicit
+GP factory was absent in 3/3.  The tool description alone already separated
+page extraction from research and continued a dependent task after a completion
+wake in 3/3; those are regression pins while the prompt change targets the
+missing planning-to-GP transition.  Full log:
+=/tmp/assist-restore-gp-baseline-n3.log=.
+
+The review pass removed routing hints from the new user messages and replaced
+the toy agenda/checklist concurrency case with a substantive runbook/risk-register
+request.  The baseline conclusion still holds by construction: its admitted task
+types and system prompt contain no =general-purpose= target, and the factory is
+absent.  The post-fix N=3 suite covers eleven cases and passed 33/33, including
+natural multi-todo routing, mixed URL extraction/verification, open-ended
+research exclusion, cross-agent URL provenance, successful dependencies,
+partial failure, and direct GP page extraction.  Full log:
+=/tmp/assist-restore-gp-post-fix-n3-v6.log=.
+
+The design-adherence review added explicit assertions that GP briefs carry the
+user's constraints, expected outputs, prerequisite result path, and literal URL.
+It also added the previously missing legacy-mode behavior case with compiled
+deterministic leaves; its focused N=1 pass succeeded before the post-review
+cadence.
+
+The first post-review N=5 attempt stopped after iteration 1 at 11/12.  The
+multi-deliverable case wrote the correct todos but then called =write_file=
+itself instead of launching GP tasks.  The log is
+=/tmp/assist-restore-gp-post-review-n5.log=.  A superseded prompt-only attempt
+required the next assistant message after =write_todos= to launch every
+currently unblocked, fully briefable independent non-research todo before any
+direct work tool.
+
+The next focused N=3 attempt passed the direct multi-todo case but failed the
+new context-wake case and the legacy full-turn assertion (1/3; log
+=/tmp/assist-restore-gp-focused-n3-v7.log=).  On the context wake the supervisor
+read and edited the two files itself; in legacy mode the deterministic leaves
+claimed success without creating their artifacts, prompting a reasonable direct
+recovery.  At that stage the prompt added a mode-correct context-result recipe
+(exact check in web mode, synchronous result in legacy), and the legacy fixture
+created the files its path-specific results claimed.  The ineffective recipe was
+removed in the capped simplification below.
+
+The focused rerun then passed both web cases and failed only a legacy assertion
+that prohibited direct tools for the entire synchronous turn (2/3; log
+=/tmp/assist-restore-gp-focused-n3-v8.log=).  That exceeded the stated legacy
+contract: the promised behavior is planning followed by one parallel GP batch,
+with no direct work in that launch message and dependent work withheld from the
+batch.  The web cases retain full-turn no-duplication because their tasks remain
+pending when the supervisor returns.  The legacy eval is narrowed to its actual
+contract.  A focused rerun of the three failures passed 3/3 after temporarily
+putting the same guidance at the async completion and legacy launch decision
+points (log =/tmp/assist-restore-gp-focused-v11-n1.log=).
+
+The first full-cadence iteration then passed 12/13.  The remaining failure used
+GP to resolve “next month” for an otherwise research-only request, despite also
+launching the correct research task (log
+=/tmp/assist-restore-gp-stability-v12-1-5.log=).  The shared GP description now
+forbids research preparation, and the supervisor prompt makes the boundary
+concrete: when every requested outcome is research, launch no GP; a mixed
+request may still use GP for a bounded extraction and research separately for
+verification.  That focused research boundary passes 3/3 (log
+=/tmp/assist-restore-gp-research-boundary-v15-n3.log=).
+
+The subsequent full runs exposed the remaining prompt-only limit.  Correct GP
+planning, parallel launches, dependency withholding, and research separation
+all pass focused runs, but the model still intermittently performs local edits
+after a context result, copies a child-result URL into a GP brief, or performs
+legacy work inline.  The URL copy cannot become a trusted GP seed, so the
+provenance boundary still prevents the fetch; the routing behavior itself is
+wrong.  A concise high-salience routing block passed the three observed failure
+cases 3/3, but the next full iteration was 11/13 and the next focused context
+handoff failed again.  Logs:
+
+- =/tmp/assist-restore-gp-final-stability-n5.log= (11/13; URL laundering and
+  legacy inline work);
+- =/tmp/assist-restore-gp-top-routing-v18-n1.log= (focused 3/3);
+- =/tmp/assist-restore-gp-cap-limited-stability-n3.log= (11/13; context inline
+  work and URL laundering);
+- =/tmp/assist-restore-gp-handoff-v19-n3.log= (context failed, URL passed).
+
+The requested five-hour cap leaves the prompt-only contract unproven.  Do not
+deploy or publish this branch unless Pierre chooses between accepting that
+variance, changing the behavioral contract, or allowing structural routing
+enforcement.
+
+The capped prompt state retains one concise, prominent routing block: one
+specific non-research outcome per GP; one mode-correct GP launch per independent
+briefable todo with dependencies held; bounded =read_url= extraction only from a
+literal user URL; and no research or research preparation.  Detailed restatements
+and concrete handoff examples were removed after they failed to converge.
+
+Unit tests pin the explicit task registry and protocol allowlist, legacy subagent
+list, web assistant factory mapping, the observable GP tool/guard surface, and
+continued main-agent =read_url=.  The final deterministic suite is recorded
+as 1,393 passed with the existing Python 3.14/Pydantic compatibility warning;
+=git diff --check= is clean.
+
+* Files and sequence
+
+1. Add the failing routing cases to =edd/eval/test_async_subagents.py= and record
+   the N=3 baseline.
+2. Add the GP leaf prompt and factory in
+   =assist/templates/deepagents/general_purpose.md.j2= and =assist/agent.py=.
+3. Register the GP in =assist/async_subagents.py=, admit it in
+   =manage/web/agent_protocol.py=, and map it in =assist/thread_manager.py=.
+4. Add the main-agent planning/routing guidance in
+   =assist/templates/deepagents/general_instructions.md.j2=.
+5. Update unit contracts, =README.md=, =assist/spec.py=, the PR #213 state doc,
+   and =roadmap.org= so all enumerations and historical explanations match.
+6. Run eval/test cadence and full local review.  Deploy, publish, and run the
+   Copilot bridge only if the eval contract converges or Pierre explicitly
+   chooses a different acceptance boundary.  This step is not executed.
+
+* Risks and rejected alternatives
+
+- *Research misrouting:* handled by precise descriptions, prompt guidance, and
+  routing evals.  A structural classifier/rejection hook is explicitly rejected.
+- *Provenance laundering:* a child =HumanMessage= otherwise makes every URL in
+  the supervisor brief look user-authored to the existing middleware.  Guidance
+  forbids moving URLs learned from untrusted page/tool content across the agent
+  boundary, and the parent carries genuine user URL seeds in a distinct block
+  that the GP's existing provenance guard alone trusts.  This is deterministic
+  source preservation, not a GP-versus-research routing classifier.
+- *False parallelism:* independent tasks can have concurrent lifecycles, but the
+  host still schedules model calls on one llama.cpp slot.  Guidance says to
+  launch workstreams together, not that inference overlaps.
+- *Harness-wide re-enable:* rejected because the upstream GP description itself
+  advertises research and automatic insertion would leak into leaf graphs.
+- *Copying the main agent:* rejected.  One leaf factory supplies both legacy and
+  web execution paths and reuses the existing middleware/tool contracts.
+
+* Coordination
+
+This lane was rebased onto merged PR #213 before design.  No active assist lane
+currently overlaps these files; the other active coding lane is in =emacsos=.
+The live assist deployment still belongs to the completed #213 lane, so deploy
+must use the coordinated transaction and re-check ownership before replacing it.
+
+This feature adds no listener or authentication path.  It reuses the existing
+task-description size limit, task-retention caps, serial scheduler, sandbox and
+egress boundary, =read_url= provenance/reread middleware, and large-result
+offload.  The provenance wrapper now checks the existing message envelope before
+dispatch so an otherwise valid near-limit brief cannot fail later at the private
+Agent Protocol boundary.  No routing guard is added.  The security review added
+one network-boundary correction: =read_url= no longer follows redirects inside a
+single tool call; same-host targets re-enter provenance as a separate call and
+cross-host targets require the user to supply the destination directly.
+
+* Design review
+
+Seven lenses ran before implementation.  They found the Agent Protocol's separate
+assistant allowlist, direct GP behavior eval coverage, same-turn/dependency UX,
+legacy =default_backend= inheritance, and cross-agent URL provenance as material
+gaps; all are incorporated above.  Event-loop liveness was clean because ASGI
+still does only bounded validation/admission before the existing threadpool handoff.
+The first code-review round then found that the supervisor-authored child brief
+laundered every copied URL into a trusted =HumanMessage=.  The source-preserving
+seed block above closes that concrete security path without adding a routing
+guard.  Naturalized evals then exposed prompt conflicts around inline writes,
+terminal task recovery, and mixed URL routing.  Guidance at the system prompt
+and task-tool descriptions now makes terminal failure final and tells the model
+what work is blocked; it does not reject, rewrite, or classify a dispatch.  Tests
+continue to pin observable tools/guards rather than middleware list order, and
+the GP does not inherit main-only memory, skills, context-rider, interjection, or
+delegation layers without eval evidence.

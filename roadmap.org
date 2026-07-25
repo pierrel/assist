@@ -772,8 +772,12 @@ and most thresholds/knobs are gone, so there's no longer a structure worth a
 dedicated refactor.
 
 
-** TODO Middleware agent for detecting loops
-After ~20 steps in a single turn. Could unlock bringing back the general agent. Also adding the read_url tools back to the orchestrator and general agents.
+** TODO Restore the general-purpose subagent and =read_url= navigation
+The main agent already regained guarded =read_url= in commit =23e3a95=.  The
+=restore-general-agent= branch adds the same navigation surface to an explicit
+GP leaf and prompt-driven parallel todo routing, but its small-model stability
+eval has not converged, so it is not deployed or published.  Research stays on
+=research-agent=.  Do not add loop middleware or a structural routing guard.
 
 * Web UI — thread list
 ** DONE Thread list ordering by status then last-message age

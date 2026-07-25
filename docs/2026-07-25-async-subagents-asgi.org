@@ -4,11 +4,10 @@
 
 * Status
 
-Implemented, locally reviewed to convergence, deployed, and live-smoked. The
+Merged in [[https://github.com/pierrel/assist/pull/213][PR #213]] as =5b6a84f=,
+deployed, and live-smoked. The
 first deployment exposed a hidden-runtime schema integration defect; its fix is
 verified through a compiled LangGraph tool node and the repeated live flow.
-Draft [[https://github.com/pierrel/assist/pull/213][PR #213]] is open for external
-review; the feature stops before merge.
 
 Baseline N=3 on 2026-07-25: 0/3.  Each run started the context task and avoided
 polling, but the visible reply omitted its full task ID and said the supervisor
@@ -73,7 +72,9 @@ children were removed afterward.
    while a terminal resumed slice resolves its historical interruption. The
    cancellation tool reports the post-operation truth, distinguishing a requested
    boundary stop from an immediately completed cancellation.
-10. Subagents are direct leaf graphs and receive no delegation tools.
+10. Context, general-purpose, research, and critique subagents are direct leaf
+    graphs and receive no delegation tools.  General-purpose handles one
+    specific non-research todo; research remains the external fact-finding path.
 
 * What “interrupt” means after this change
 
@@ -172,8 +173,8 @@ queue.
 - Remove child =resume_value= state and required-child interrupted-parent
   recovery/dependency branches.
 - Remove the required/background split and the
-  =background-research-agent= identity. Context, research, and critique are the
-  ordinary subagent types.
+  =background-research-agent= identity. Context, general-purpose, research, and
+  critique are the ordinary subagent types.
 - Remove background-research-specific interjection wording and blanket pending
   continuation cancellation.
 - Remove the public =/agent= mount, secret configuration, and

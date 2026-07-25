@@ -257,7 +257,10 @@ def read_url(url: str) -> str:
     extracted text (not truncated) —
     the offload middleware saves a large result to a file and hands the agent a
     preview + path to grep, so full page content stays reachable without flooding
-    context. The error path returns a short ``Error fetching URL:`` string inline.
+    context. Same-host redirects are surfaced for a separate guarded tool call;
+    cross-host redirects require direct user resubmission. Redirects are never
+    followed inside this function. The error path returns a short
+    ``Error fetching URL:`` string inline.
 
     Per-host throttled (~1s between calls to the same host) so a burst of
     fetches to different sites isn't artificially serialised, but a tight
@@ -271,7 +274,18 @@ def read_url(url: str) -> str:
             url,
             headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"},
             timeout=15,
+            allow_redirects=False,
         )
+        if getattr(resp, "is_redirect", False) is True:
+            location = resp.headers.get("location")
+            if location:
+                target = urljoin(url, location)
+                if urlparse(target).hostname != urlparse(url).hostname:
+                    return ("Cross-host redirect not followed: " + target
+                            + ". Ask the user to supply that URL directly if they "
+                            "want it fetched.")
+                return ("Same-host redirect target: " + target
+                        + ". Call read_url on that URL separately.")
         resp.raise_for_status()
         return _extract_main_content(resp.text, base_url=url)
     except Exception as e:

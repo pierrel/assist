@@ -23,19 +23,21 @@ of OFFLOADED untrusted content (read_url page, execute output), written under
 ``/tmp/large_tool_results/…`` for a real-fs offload) — the SAME content laundered
 through a file.
 
-SAME-HOST NAVIGATION (2026-07-21): a URL that literally appeared in fetched-page
-content is fetchable IF its host is already trusted (a user URL or search result was
+SAME-HOST NAVIGATION (2026-07-21): a URL that literally appeared in a ``read_url``
+result, as a fetched-page link or an unfollowed redirect target, is fetchable IF
+its host is already trusted (a user URL or search result was
 on that host). BOTH conditions are required — this is what lets ``read_url`` navigate
 WITHIN a site the user pointed at (the "explore a website, find and download a file"
 flow) without re-searching every next page, while keeping the two attacks the guard
 exists for blocked: (1) a FABRICATED same-host path (the searcher inventing
-``casio.com/products/<model>`` — the dead-URL flood) never appears on any page, so
-the page-content requirement refuses it; (2) a CROSS-HOST jump from page content
+``casio.com/products/<model>`` — the dead-URL flood) never appears in fetch output, so
+the fetch-output requirement refuses it; (2) a CROSS-HOST jump from a page or redirect
 (SSRF to 169.254.169.254 / an internal service, or a secret-bearing exfil URL to
 ``evil.example/leak?d=…``) has no matching trusted host, so the same-host requirement
 refuses it — and the attacker can't statically author a link carrying the victim's
-runtime secret anyway. Only *more pages a trusted site actually links to* become
-reachable. A URL that is neither trusted-sourced nor a same-host page link is still
+runtime secret anyway. Only same-host links and redirect targets a trusted site
+actually emits become reachable. A URL that is neither trusted-sourced nor surfaced
+in same-host fetch output is still
 rejected. This keeps the guard a coarse,
 unambiguous bound (a substring/membership check on trusted text, not a fuzzy "looks
 invented/malicious" heuristic), and it does not end the turn: it returns a corrective
@@ -51,12 +53,16 @@ already trusted. Direct shell output is closed by construction (``_is_page_conte
 this multi-step offload-then-file-read path is not, and shares the same behavioral gate.
 
 Scope: every ``read_url``-bearing agent — the research SEARCHER and FACT-CHECKER
-sub-agents, and the MAIN agent's navigation ``read_url`` (added 2026-07-21 for the
-explore-website flow, whose trusted channel is the user's URLs plus same-host page
-links). Each should only ever fetch a URL already trusted in its context: the
+sub-agents, the MAIN agent's navigation ``read_url`` (added 2026-07-21 for the
+explore-website flow), and the explicit GENERAL-PURPOSE leaf. Each should only
+ever fetch a URL already trusted in its context: the
 searcher's own search results; the fact-checker's cited URLs (which reach it via the
 report ``read_file``/initial message it is handed); the main agent's user-supplied
-URL and pages on that same host. The V2 research orchestrator holds no
+URL and pages on that same host; the GP's parent-authenticated block of literal
+user URL seeds and links it surfaces inside that same task.  The GP deliberately
+does not trust other URLs in its supervisor-authored HumanMessage, because that
+would launder page/tool/child output across the delegation boundary. The V2
+research orchestrator holds no
 ``read_url`` (it delegates all fetching), so the guard doesn't run there — an earlier
 version guarded it after thread 20260708090812 fabricated URLs under
 search-unavailable and 404-looped ~90 min. Guidance now tells the orchestrator to STOP
@@ -65,7 +71,7 @@ See docs/2026-07-08-research-reread-runaway.org.
 """
 import logging
 import re
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from langchain.agents.middleware import AgentMiddleware
@@ -75,6 +81,7 @@ from langgraph.types import Command
 
 from assist.middleware.loop_detection import _messages_from_state
 from assist.middleware.tool_result_to_file import UNTRUSTED_OFFLOAD_MARK
+from assist.subagent_contract import MAX_TASK_DESCRIPTION_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +131,12 @@ _OFFLOAD_MARK = UNTRUSTED_OFFLOAD_MARK
 # The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
 # a marker here means the read TARGETS offloaded content.
 _OFFLOAD_PATH_KEYS = ("path", "file_path", "glob")
+_USER_URL_SEEDS_OPEN = "<assist-user-url-seeds>"
+_USER_URL_SEEDS_CLOSE = "</assist-user-url-seeds>"
+_SYSTEM_HUMAN_PREFIXES = (
+    "[Background task finished] ",
+    "[Continuing my earlier work — background follow-up] ",
+)
 
 
 def _host_of(url: str) -> str:
@@ -191,8 +204,8 @@ def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
 
 
 def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
-    """Genuine FETCHED-PAGE content — the subset of untrusted results whose URLs a real
-    page actually surfaced, so a same-host member is NAVIGABLE (see _page_content_urls /
+    """Genuine FETCH output — the subset of untrusted results whose URLs a page
+    link or unfollowed redirect actually surfaced, so a same-host member is NAVIGABLE (see _page_content_urls /
     wrap_tool_call). That is direct ``read_url`` and a ``read_file``/``grep`` of an
     offloaded page — but NOT ``execute`` (shell) output. This split from
     ``_is_untrusted_result`` is load-bearing: that predicate has OPPOSITE polarity in its
@@ -204,7 +217,62 @@ def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
             and getattr(m, "name", None) != _SHELL_TOOL)
 
 
-def _seen_urls(messages: list) -> dict[str, str]:
+def _delegated_seed_urls(text: str) -> list[str]:
+    """Return only the parent-authenticated URL seed block from a GP brief."""
+    if not text.startswith(_USER_URL_SEEDS_OPEN):
+        return []
+    start = len(_USER_URL_SEEDS_OPEN)
+    end = text.find(_USER_URL_SEEDS_CLOSE, start)
+    if end < 0:
+        return []
+    return _URL_RE.findall(text[start:end])
+
+
+def delegated_general_purpose_description(description: str,
+                                          messages: list) -> str:
+    """Carry genuine user URL seeds into a supervisor-authored GP brief.
+
+    Deep Agents turns a supervisor's task description into a new HumanMessage.
+    Without this source boundary, a URL copied from an untrusted page or child
+    result would become indistinguishable from one the user supplied. The GP's
+    provenance middleware trusts only this block, while the task body remains
+    ordinary untrusted supervisor input.
+    """
+    user_urls: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, HumanMessage):
+            continue
+        content = _message_text(message)
+        if content.startswith(_SYSTEM_HUMAN_PREFIXES):
+            continue
+        for raw in _URL_RE.findall(content):
+            user_urls.setdefault(normalize_url(raw), _display_url(raw))
+    seeds: dict[str, str] = {}
+    for raw in _URL_RE.findall(description):
+        normalized = normalize_url(raw)
+        if normalized in user_urls:
+            seeds.setdefault(normalized, user_urls[normalized])
+    listed = "\n".join(f"- {url}" for url in seeds.values())
+    delegated = (f"{_USER_URL_SEEDS_OPEN}\n{listed}\n{_USER_URL_SEEDS_CLOSE}\n\n"
+                 f"{description}")
+    if len(delegated) > MAX_TASK_DESCRIPTION_CHARS:
+        raise ValueError(
+            "General-purpose task instructions are too long after preserving "
+            "the user URL. Shorten the task brief and try again.")
+    return delegated
+
+
+def delegated_general_purpose_body(description: str) -> str:
+    """Remove the internal provenance block from a user-visible task brief."""
+    if not description.startswith(_USER_URL_SEEDS_OPEN):
+        return description
+    end = description.find(_USER_URL_SEEDS_CLOSE, len(_USER_URL_SEEDS_OPEN))
+    if end < 0:
+        return description
+    return description[end + len(_USER_URL_SEEDS_CLOSE):].lstrip("\n")
+
+
+def _seen_urls(messages: list, *, delegated: bool = False) -> dict[str, str]:
     """Every URL in a TRUSTED tool result or the USER's message: a map from the
     normalized form (the membership key) to the ORIGINAL as it appeared (first seen).
     The normalized keys are the sources the model cannot fabricate; the originals
@@ -221,7 +289,10 @@ def _seen_urls(messages: list) -> dict[str, str]:
     agent re-reads from its real-fs offload), never a URL source; and (4) a
     ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute output)
     under ``…/large_tool_results/untrusted-`` — the SAME content laundered through
-    a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
+    a file (ToolResultToFileMiddleware writes it there and the model greps it). In
+    delegated GP mode, the only trusted source is the parent-authenticated URL
+    seed block; the rest of the supervisor brief and all tool results remain
+    untrusted as seeds. So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted; to reach a new page the agent re-searches (the searcher prompt
     requires that). RESIDUAL: a model that FOLLOWS a multi-step injection to
@@ -237,7 +308,13 @@ def _seen_urls(messages: list) -> dict[str, str]:
                 calls_by_id[cid] = tc
     seen: dict[str, str] = {}
     for m in messages:
+        if delegated and isinstance(m, HumanMessage):
+            for raw in _delegated_seed_urls(_message_text(m)):
+                seen.setdefault(normalize_url(raw), _display_url(raw))
+            continue
         if not isinstance(m, (HumanMessage, ToolMessage)):
+            continue
+        if delegated:
             continue
         if isinstance(m, ToolMessage) and _is_untrusted_result(m, calls_by_id):
             continue
@@ -247,13 +324,14 @@ def _seen_urls(messages: list) -> dict[str, str]:
 
 
 def _page_content_urls(messages: list) -> set[str]:
-    """Normalized URLs that literally appeared in FETCHED-PAGE content — the
-    untrusted read_url channel, direct or offloaded (see ``_is_page_content``).
+    """Normalized URLs that literally appeared in FETCH output — a page link or
+    unfollowed redirect in the untrusted read_url channel, direct or offloaded
+    (see ``_is_page_content``).
     NOT the exact inverse of ``_seen_urls``: ``execute`` (shell) output is in
     NEITHER set — untrusted, so not trusted, but also not a page, so not navigable.
-    These are the links a page actually surfaced; a fabricated path never appears
-    here. Same-host members are navigable (see wrap_tool_call) — that admits
-    following a real link on an already-trusted site while still blocking a
+    These are the links or redirect targets a fetch actually surfaced; a fabricated
+    path never appears here. Same-host members are navigable (see wrap_tool_call) —
+    that admits following a real navigation target on an already-trusted site while still blocking a
     fabricated same-host path (the dead-URL flood) and an exfil URL the model
     invents (or one printed into shell output on a trusted host)."""
     calls_by_id: dict[str, dict] = {}
@@ -283,11 +361,10 @@ def _display_url(raw: str) -> str:
 
 
 def _correction(allowed: dict[str, str]) -> str:
-    # No sourced URLs in context yet. Shared by both read_url agents: the searcher HAS
-    # search_internet (so "search first" is the right nudge if it simply hasn't searched),
-    # while the fact-checker does NOT (an empty list there means search already came back
-    # empty/unavailable, so stop). Cover both without inspecting tool availability:
-    # search-if-you-can, otherwise stop — never keep guessing.
+    # No sourced URLs in context yet. The searcher has search_internet, while the
+    # fact-checker, main, and GP do not necessarily have a search path. Cover every
+    # guarded caller without inspecting tool availability: search-if-you-can,
+    # otherwise stop — never keep guessing.
     if not allowed:
         return (
             "That URL was a guess: it appears in no search result, the question, or any "
@@ -315,9 +392,10 @@ class UrlProvenanceMiddleware(AgentMiddleware):
     listing the URLs the agent may actually read, so it retries with a real one.
     Stateless across turns except an intervention counter for logging."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, delegated: bool = False) -> None:
         super().__init__()
         self.tools = []
+        self._delegated = delegated
         self._intervention_count = 0
 
     def wrap_tool_call(
@@ -335,21 +413,20 @@ class UrlProvenanceMiddleware(AgentMiddleware):
             return handler(request)
 
         messages = _messages_from_state(request)
-        allowed = _seen_urls(messages)
+        allowed = _seen_urls(messages, delegated=self._delegated)
         if normalize_url(url) in allowed:
             return handler(request)
-        # Same-host navigation: a link the fetched page ACTUALLY surfaced, on a
+        # Same-host navigation: a link or redirect read_url ACTUALLY surfaced, on a
         # host already trusted, is fetchable — this is what lets read_url
         # navigate WITHIN a site the user pointed at (find a manual, follow
         # Support → the download). BOTH conditions are load-bearing:
-        #  - in page content (not just host-matched): a fabricated same-host
-        #    path never appeared on any page, so the dead-URL flood the guard
-        #    exists to stop stays blocked — the model can only follow links a
-        #    page really emitted, not invent canonical URLs.
-        #  - same host (not just page-present): a page linking cross-host
+        #  - in fetch output (not just host-matched): a fabricated same-host
+        #    path never appeared in a page or redirect, so the dead-URL flood the
+        #    guard exists to stop stays blocked.
+        #  - same host (not just fetch-present): a page or redirect pointing cross-host
         #    (169.254.169.254, an internal service, evil.example/leak?d=secret)
         #    has no matching trusted host, so SSRF + secret-bearing exfil stay
-        #    blocked — the jump to a NEW host from page content is refused.
+        #    blocked — the jump to a NEW host from fetch output is refused.
         nurl = normalize_url(url)
         host = _host_of(url)
         if (host and host in {_host_of(u) for u in allowed}
@@ -368,3 +445,51 @@ class UrlProvenanceMiddleware(AgentMiddleware):
             name=_READ_TOOL,
             status="error",
         )
+
+
+class GeneralPurposeUrlSeedMiddleware(AgentMiddleware):
+    """Preserve user-authored URL provenance across GP task delegation."""
+
+    @staticmethod
+    def _request(request: ToolCallRequest) -> ToolCallRequest | ToolMessage:
+        tool_call = request.tool_call
+        if tool_call.get("name") not in {"task", "start_async_task"}:
+            return request
+        args = tool_call.get("args") or {}
+        if (not isinstance(args, dict)
+                or args.get("subagent_type") != "general-purpose"):
+            return request
+        try:
+            description = delegated_general_purpose_description(
+                str(args.get("description") or ""),
+                _messages_from_state(request))
+        except ValueError as exc:
+            return ToolMessage(
+                content=str(exc),
+                tool_call_id=tool_call.get("id", ""),
+                name=tool_call.get("name", "task"),
+                status="error",
+            )
+        rewritten = {**args, "description": description}
+        return request.override(tool_call={**tool_call, "args": rewritten})
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], "ToolMessage | Command"],
+    ) -> "ToolMessage | Command":
+        prepared = self._request(request)
+        if isinstance(prepared, ToolMessage):
+            return prepared
+        return handler(prepared)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[
+            [ToolCallRequest], Awaitable["ToolMessage | Command"]],
+    ) -> "ToolMessage | Command":
+        prepared = self._request(request)
+        if isinstance(prepared, ToolMessage):
+            return prepared
+        return await handler(prepared)

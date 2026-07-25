@@ -33,7 +33,8 @@ from assist.middleware.search_runaway_breaker import SearchRunawayBreakerMiddlew
 from assist.middleware.empty_response_recovery import EmptyResponseRecoveryMiddleware
 from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
-from assist.middleware.url_provenance import UrlProvenanceMiddleware
+from assist.middleware.url_provenance import (
+    GeneralPurposeUrlSeedMiddleware, UrlProvenanceMiddleware)
 from assist.middleware.read_url_reread_breaker import ReadUrlRereadBreaker
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
@@ -43,22 +44,15 @@ from assist.middleware.context_rider_middleware import ContextRiderMiddleware
 from assist.middleware.interjection import InterjectionMiddleware
 from assist.middleware.image_input_guard import ImageInputGuardMiddleware
 from assist.env import env_int
+from assist.subagent_contract import GENERAL_PURPOSE_DESCRIPTION
 
 
 logger = logging.getLogger(__name__)
 
-# No auto-added `general-purpose` subagent, anywhere assist builds a deep
-# agent. Evidence (prod logs, 2026-07-21): every observed general-purpose
-# dispatch was misrouted work belonging to a NAMED agent — context-agent
-# exploration, critique-agent report reviews, and "fact-check" requests that
-# GP cannot actually perform (it inherits the orchestrator's tools, which
-# deliberately carry no read_url/search — so a GP "fact-check" pattern-matches
-# plausibility while LOOKING like verification). Removing the target is the
-# repo's structural-lever pattern (don't register what shouldn't be invoked):
-# a habitual task(general-purpose) call now gets the corrective error listing
-# the real agents, which the model observably follows. Registered
-# provider-wide ("openai" is every assist model's provider) so the main
-# graph, the research pipeline, and the eval harness all agree.
+# Keep Deep Agents' automatic `general-purpose` subagent disabled. Its upstream
+# description advertises research, and provider-wide auto-insertion would add it
+# inside context/research leaf graphs too. Assist registers its own explicit leaf
+# on the MAIN supervisor only; see `create_general_purpose_subagent`.
 register_harness_profile("openai", HarnessProfile(
     general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False)))
 
@@ -246,7 +240,7 @@ def create_agent(model: BaseChatModel,
                  *,
                  spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
-    """Build the general-purpose agent.
+    """Build the main supervisor agent.
 
     ``spec`` is the embedder contract (see ``assist.spec.AgentSpec``
     and docs/2026-06-11-embedder-contract.org): one declaration object
@@ -334,8 +328,19 @@ def create_agent(model: BaseChatModel,
     # restricted web triage profile deliberately supplies none.
     context_sub = None
     research_sub = None
+    general_purpose_sub = None
     legacy_subagents = spec.async_subagent_tools is None
     if legacy_subagents:
+        general_purpose_sub = CompiledSubAgent(
+            name="general-purpose",
+            description=GENERAL_PURPOSE_DESCRIPTION,
+            runnable=create_general_purpose_subagent(
+                model,
+                working_dir,
+                checkpointer,
+                sandbox_backend=sandbox_backend,
+                default_backend=spec.default_backend),
+        )
         context_sub = CompiledSubAgent(
             name="context-agent",
             description="Discovers and surfaces relevant context from the user's local filesystem — files, formats, and prior notes. Dispatch it on the first turn of a thread, before any research, and whenever the user's local files could inform the answer. Read-only — it will not modify files.",
@@ -415,9 +420,9 @@ def create_agent(model: BaseChatModel,
             # so the model can shell-`cat`/`grep` it AND read_file/grep it at the SAME
             # path — after `execute`, the model reaches for shell, and a StateBackend
             # path it can't `cat` is the misalignment this fixes (docs/2026-07-22-…).
-            ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
-                                       preview_style="head_tail", untrusted=True,
-                                       offload_root="/tmp"),
+            # A GP brief is supervisor-authored, so preserve only URLs from
+            # genuine parent user messages as its initial provenance seeds.
+            GeneralPurposeUrlSeedMiddleware(),
             # read_url on the MAIN agent is a NAVIGATION tool: follow a known
             # URL + the links it surfaces to find a page or downloadable file
             # (the download itself is curl in the sandbox, egress-gated). It
@@ -431,10 +436,7 @@ def create_agent(model: BaseChatModel,
             # breadth crawl itself is ultimately bounded by the recursion limit,
             # but read_url's clean extraction + the skill keep navigation to a
             # few hops. Offload a large page like the research agent does.
-            ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000,
-                                       preview_style="head", untrusted=True,
-                                       name="ToolResultToFileMiddleware_read_url"),
-            *_read_url_guards(),
+            *_navigation_middleware(backend),
             # Mid-turn interjection delivery (main agent only — deepagents
             # never propagates this list to subagent stacks): inert unless the
             # embedder registered callbacks (the web layer is the only one).
@@ -444,7 +446,8 @@ def create_agent(model: BaseChatModel,
         # A non-legacy embedder gets no deepagents subagents: web main supplies
         # five lifecycle tools; web triage deliberately supplies none.
         subagents=([] if not legacy_subagents
-                   else [context_sub, research_sub, critique_sub_agent]),
+                   else [general_purpose_sub, context_sub, research_sub,
+                         critique_sub_agent]),
         # `travel` (time/distance), `directions` (turn-by-turn steps), and
         # `map_data` (lat,lon + route polylines for a map render block) are
         # built-ins: direct deterministic real-world lookups the main agent answers
@@ -525,22 +528,82 @@ def create_context_agent(model: BaseChatModel,
     return RollbackRunnable(agent, recursion_limit=500)
 
 
-def _read_url_guards():
+def _read_url_guards(*, delegated: bool = False):
     """The guard pair every read_url-bearing agent gets, in one place so the
-    three call sites can't drift: the research SEARCHER and FACT-CHECKER
-    sub-agents, and the MAIN agent's navigation read_url (added 2026-07-21 for
-    the explore-website flow).
+    four call sites can't drift: the research SEARCHER and FACT-CHECKER
+    sub-agents, the MAIN agent's navigation read_url (added 2026-07-21 for the
+    explore-website flow), and the explicit GENERAL-PURPOSE leaf.
 
-    - UrlProvenanceMiddleware: refuse read_url on a URL absent from prior tool/user
-      messages (a fabrication), with same-host page links allowed (site
-      navigation). The research ORCHESTRATOR has no read_url (V2: it delegates
-      all fetching to the searcher), so it needs no guard: it can't 404-loop on
-      a guessed URL it can't fetch. See docs/2026-07-08-research-reread-runaway.org.
+    - UrlProvenanceMiddleware: refuse read_url on a URL absent from prior trusted
+      tool/user messages (or, for delegated GP, its parent-authenticated user URL
+      seed block), with same-host page links allowed. The research ORCHESTRATOR
+      has no read_url (V2: it delegates all fetching to the searcher), so it needs
+      no guard: it can't 404-loop on a guessed URL it can't fetch. See
+      docs/2026-07-08-research-reread-runaway.org.
     - ReadUrlRereadBreaker: refuse re-reading the SAME url past max_reads (the 2026-07-07
       peptides real-URL re-read shape) — this is what bounds the crawl-to-death
       that raw curl has no guard against.
     """
-    return [UrlProvenanceMiddleware(), ReadUrlRereadBreaker()]
+    return [UrlProvenanceMiddleware(delegated=delegated),
+            ReadUrlRereadBreaker()]
+
+
+def _navigation_middleware(backend: BackendProtocol, *, delegated: bool = False):
+    """Shared execute/read_url offloading and navigation bounds."""
+    middleware = [
+        ToolResultToFileMiddleware(
+            backend, tools={"execute"}, floor_chars=8000,
+            preview_style="head_tail", untrusted=True,
+            offload_root="/tmp"),
+        ToolResultToFileMiddleware(
+            backend, tools={"read_url"}, floor_chars=4000,
+            preview_style="head", untrusted=True,
+            name="ToolResultToFileMiddleware_read_url"),
+    ]
+    return middleware + _read_url_guards(delegated=delegated)
+
+
+def create_general_purpose_subagent(
+        model: BaseChatModel,
+        working_dir: str,
+        checkpointer=None,
+        sandbox_backend=None,
+        default_backend: BackendProtocol | None = None,
+        ) -> CompiledStateGraph:
+    """Build the explicit general-purpose leaf used by legacy and web tasks.
+
+    The leaf has the standard filesystem/execute surface plus guarded
+    ``read_url`` navigation. It has no search or delegation tools. An embedder's
+    ``default_backend`` follows the same contract as the main and context agents.
+    """
+    if sandbox_backend is not None and default_backend is not None:
+        raise ValueError(
+            "create_general_purpose_subagent: pass sandbox_backend OR "
+            "default_backend, not both")
+
+    workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
+    if sandbox_backend:
+        backend = create_sandbox_composite_backend(sandbox_backend)
+    else:
+        backend = _create_standard_backend(
+            working_dir, default_backend=default_backend)
+
+    middleware, _ = _hardening_middleware()
+    logging_mw = ModelLoggingMiddleware("general-purpose")
+    return create_deep_agent(
+        model=model,
+        tools=[read_url],
+        checkpointer=checkpointer or InMemorySaver(),
+        system_prompt=base_prompt_for(
+            "deepagents/general_purpose.md.j2",
+            workspace_dir=workspace_dir),
+        backend=backend,
+        middleware=middleware + [
+            *_navigation_middleware(backend, delegated=True),
+            logging_mw,
+        ],
+        subagents=[],
+    )
 
 
 def create_research_agent(model: BaseChatModel,

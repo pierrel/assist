@@ -463,6 +463,34 @@ class TestReadUrlExtraction:
             out = tools.read_url("https://example.com/err")
         assert out.startswith("Error fetching URL:")
 
+    def test_cross_host_redirect_is_refused_without_following(self):
+        redirect = _html_resp("")
+        redirect.is_redirect = True
+        redirect.headers = {"location": "https://other.example/private"}
+        with patch.object(tools, "requests") as rq, \
+                patch.object(tools, "_host_throttle"):
+            rq.get.return_value = redirect
+            out = tools.read_url("https://example.com/start")
+
+        assert out == (
+            "Cross-host redirect not followed: https://other.example/private. "
+            "Ask the user to supply that URL directly if they want it fetched.")
+        assert rq.get.call_args.kwargs["allow_redirects"] is False
+
+    def test_same_host_redirect_is_surfaced_for_guarded_followup(self):
+        redirect = _html_resp("")
+        redirect.is_redirect = True
+        redirect.headers = {"location": "/next"}
+        with patch.object(tools, "requests") as rq, \
+                patch.object(tools, "_host_throttle"):
+            rq.get.return_value = redirect
+            out = tools.read_url("https://example.com/start")
+
+        assert out == (
+            "Same-host redirect target: https://example.com/next. "
+            "Call read_url on that URL separately.")
+        assert rq.get.call_args.kwargs["allow_redirects"] is False
+
     def test_extract_main_content_helper(self):
         assert tools._extract_main_content(
             "<article><p>just this</p></article><footer>not this</footer>"

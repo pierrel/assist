@@ -7,6 +7,7 @@ from manage.web.agent_protocol import (
     MAX_BODY_BYTES,
     create_agent_protocol_router,
 )
+from assist.subagent_contract import MAX_TASK_DESCRIPTION_CHARS
 
 
 class _Service:
@@ -121,6 +122,18 @@ def test_update_accepts_only_interrupt_strategy():
         "create_run", "child-1", "research-agent", "new context", "interrupt", None)
 
 
+def test_general_purpose_assistant_is_admitted():
+    client, service = _client()
+    response = client.post("/threads/child-1/runs", json={
+        "assistant_id": "general-purpose",
+        "input": {"messages": [{"role": "user", "content": "draft the agenda"}]},
+    })
+    assert response.status_code == 200
+    assert service.calls == [
+        ("create_run", "child-1", "general-purpose", "draft the agenda", None, None),
+    ]
+
+
 def test_sdk_idempotency_metadata_is_forwarded():
     client, service = _client()
     metadata = {
@@ -219,6 +232,20 @@ def test_body_size_is_bounded_before_json_validation():
     )
     assert response.status_code == 413
     assert service.calls == []
+
+
+def test_max_character_message_fits_body_envelope_when_json_escaped():
+    client, service = _client()
+    content = '"\né' * (MAX_TASK_DESCRIPTION_CHARS // 3)
+    content += "x" * (MAX_TASK_DESCRIPTION_CHARS - len(content))
+
+    response = client.post("/threads/t/runs", json={
+        "assistant_id": "general-purpose",
+        "input": {"messages": [{"role": "user", "content": content}]},
+    })
+
+    assert response.status_code == 200
+    assert service.calls[0][3] == content
 
 
 def test_resource_ids_are_bounded_before_the_service():

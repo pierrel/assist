@@ -36,7 +36,11 @@ from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread import Thread
 from assist.async_subagents import async_task_tools
-from assist.agent import create_context_agent, create_research_agent
+from assist.agent import (
+    create_context_agent,
+    create_general_purpose_subagent,
+    create_research_agent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +291,10 @@ class ThreadManager:
         specialized = None
         if assistant_id == "context-agent":
             specialized = create_context_agent(
+                self.model, working_dir, self.checkpointer,
+                sandbox_backend=sandbox_backend)
+        elif assistant_id == "general-purpose":
+            specialized = create_general_purpose_subagent(
                 self.model, working_dir, self.checkpointer,
                 sandbox_backend=sandbox_backend)
         elif assistant_id == "critique-agent":

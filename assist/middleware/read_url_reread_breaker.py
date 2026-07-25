@@ -8,8 +8,9 @@ information — it is a runaway. The 2026-07-07 peptides incident re-read one Pu
 *78 times* under search-unavailable (see docs/2026-07-07-read-url-reread-breaker.org).
 
 On the call that follows ``max_reads`` completed fetches of the same URL in the current
-TURN's history (run == turn for the single-run research agents this is wired on — the
-searcher, the fact-checker, and the orchestrator), refuse with a corrective ToolMessage (status=error) — FINALIZE, don't kill: the model is told to
+TURN's history, refuse with a corrective ToolMessage (status=error). It is wired
+to the research searcher and fact-checker, the main supervisor, and the explicit
+GP leaf; the research orchestrator has no ``read_url``. FINALIZE, don't kill: the model is told to
 answer from what it has (or say it can't and stop), instead of looping. That's the
 volume-cap-destroys-output lesson (a runaway must be nudged to finalize, not terminated
 with an empty stub).
@@ -74,9 +75,9 @@ def _prior_read_count(messages: list, target: str) -> int:
 class ReadUrlRereadBreaker(AgentMiddleware):
     """Refuse a ``read_url`` once the same URL has been fetched ``max_reads`` times this run.
 
-    The count is bounded to the current turn (via ``_extract_events``' turn slice) —
-    a no-op on the single-run research agents it's wired on (searcher, fact-checker,
-    orchestrator), and the right behavior if it's ever attached to a longer-lived agent.
+    The count is bounded to the current turn (via ``_extract_events``' turn slice).
+    That is a no-op distinction for the single-run research leaves and prevents
+    earlier turns on the longer-lived main and GP graphs from consuming this turn's cap.
 
     Corrective, not turn-ending (mirrors UrlProvenanceMiddleware): the refused call returns
     an error ToolMessage telling the model to stop re-reading and answer. Stateless across

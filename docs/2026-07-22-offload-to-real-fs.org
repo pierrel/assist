@@ -53,9 +53,9 @@ Two changes make one path work for both views:
    ~UrlProvenanceMiddleware~'s floating-substring match
    (=url_provenance.py:154=) still fires — provenance unaffected.
 
-3. **=agent.py=** — only the main-agent ~execute~ instance passes
-   ~offload_root="/tmp"~ → ~/tmp/large_tool_results/…~ on the real fs. BOTH
-   ~read_url~ instances (main agent + research sub-agent) keep the default
+3. **=agent.py=** — only the main-agent and explicit GP ~execute~ instances pass
+   ~offload_root="/tmp"~ → ~/tmp/large_tool_results/…~ on the real fs. All
+   ~read_url~ instances (main, GP, and research leaves) keep the default
    ~/large_tool_results/~ → StateBackend. This is the reported bug's exact scope
    ("exec ↔ filesystem misalignment"): the model reaches for shell after
    ~execute~, not after ~read_url~ (which it greps via the tool per the preview).
@@ -75,7 +75,7 @@ Two changes make one path work for both views:
 
 ~STATEFUL_PATHS~ is left as-is: ~/tmp/large_tool_results/…~ matches none of its
 prefixes (it starts with ~/tmp~), so it falls through to the sandbox default
-backend; and both ~read_url~ instances still use the ~/large_tool_results/~ →
+backend; and all ~read_url~ instances still use the ~/large_tool_results/~ →
 StateBackend route. No dead routing removed, no extra churn.
 
 * Decisions / rejected alternatives
@@ -86,8 +86,9 @@ StateBackend route. No dead routing removed, no extra churn.
 - **Not a global path-constant change.** A single hard-coded ~/tmp/…~ constant
   would send the research sub-agent's offload (references FilesystemBackend) to
   ~<work_dir>/references/tmp/…~ — git-tracked pollution. Per-instance
-  ~offload_root~ contains the change to the one sandbox-backed instance that needs it.
-- **Move ONLY ~execute~, keep BOTH ~read_url~ offloads in StateBackend.** The
+   ~offload_root~ contains the change to the sandbox-backed main and GP instances
+   that need it.
+- **Move ONLY ~execute~, keep every ~read_url~ offload in StateBackend.** The
   reported bug is the exec↔fs misalignment (the model shell-~cat~s after
   ~execute~). ~read_url~ results are grepped via the tool, not shell — and
   keeping their untrusted page content in the shell-unreachable StateBackend is
