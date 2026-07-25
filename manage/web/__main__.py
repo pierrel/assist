@@ -12,6 +12,7 @@ import os
 import uvicorn
 
 from manage.web.state import ROOT
+from manage.voice.wire import MAX_WS_MESSAGE_BYTES
 
 
 if __name__ == "__main__":
@@ -35,7 +36,7 @@ if __name__ == "__main__":
         port=port,
         log_level="info",
         reload=False,
-        ws_max_size=4096,
+        ws_max_size=MAX_WS_MESSAGE_BYTES,
         ws_per_message_deflate=False,
         **ssl_kwargs,
     )

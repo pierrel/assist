@@ -12,7 +12,7 @@ Composed from route modules:
 - ``threads``— index, thread page, and the message/capture/merge/delete
                routes.  Owns ``_process_message``.
 - ``evals``  — ``/evals`` and ``/evals/run/{id}`` routes.
-- ``voice.wire`` — the bounded ``/call`` WebSocket transport.
+- ``manage.voice.wire`` — the bounded ``/call`` WebSocket transport.
 
 Importing ``manage.web`` triggers route registration on ``app`` via the
 imports below.  Start the network service with ``python -m manage.web`` so its
