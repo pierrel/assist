@@ -4,7 +4,7 @@
 
 * Status
 
-IMPLEMENTED; the local review and LOC-consolidation passes are complete. The durable
+IMPLEMENTED in draft [[https://github.com/pierrel/assist/pull/212][assist PR #212]]; the local review and LOC-consolidation passes are complete. The durable
 child-suspension spike in [[Parent suspension proof]] passes against the real framework
 and =SqliteSaver=.
 
