@@ -28,6 +28,7 @@ from manage.web import (
     _format_review_message,
     _is_binary_diff,
     _rename_pair,
+    render_review_page,
     render_file_diff,
 )
 
@@ -221,6 +222,20 @@ class TestRenderFileDiff:
         assert "binary" in out  # the badge
 
 
+def test_review_form_submits_only_the_serialized_payload(monkeypatch):
+    monkeypatch.setattr("manage.web.review._thread_title", lambda _: "Review")
+    monkeypatch.setattr("manage.web.review._get_status", lambda _: {"stage": "ready"})
+    monkeypatch.setattr(
+        "manage.web.review._get_domain_manager",
+        lambda _: type("DM", (), {"main_diff": lambda self: [
+            Change(path="a.py", diff=_basic_diff())]})())
+
+    page = render_review_page("thread-1", None)
+
+    assert 'name="payload"' in page
+    assert 'name="overall_display"' not in page
+
+
 # --- _format_review_message ---------------------------------------------
 
 class TestFormatReviewMessage:
@@ -346,6 +361,12 @@ class TestPostReviewRoute:
             "/thread/thread-1/review", content=bytes(66_001),
             headers={"content-type": "application/x-www-form-urlencoded"})
         assert r.status_code == 413
+
+    def test_400_on_multiple_form_fields(self, client):
+        r = client.post(
+            "/thread/thread-1/review", content=b"payload=%7B%7D&extra=x",
+            headers={"content-type": "application/x-www-form-urlencoded"})
+        assert r.status_code == 400
 
     def test_400_on_empty_payload(self, client):
         r = client.post("/thread/thread-1/review",
