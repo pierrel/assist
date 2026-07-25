@@ -17,17 +17,20 @@ records the build plan grounded in the real code, the reconciliations, and statu
 * Threading model (blocker-class — single-worker uvicorn)
 | Thread | Owns | May NOT |
 |--------+------+---------|
-| WS tasks (=@app.websocket("/call")=) | =ws.receive= → offloaded =inbound.put=; offloaded =outbound.get= → =ws.send=; handshake/secret; close both buffers in =finally= | any lock or blocking buffer operation on the event-loop thread; file I/O, model, STT/TTS, flow.py |
+| WS tasks (=@app.websocket("/call")=) | =ws.receive= → offloaded =inbound.put=; offloaded =outbound.get= → =ws.send=; handshake/secret; graceful terminal drain or abrupt abort | any lock or blocking buffer operation on the event-loop thread; file I/O, model, STT/TTS, flow.py |
 | Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine; schedule/cancel TTS | blocking TTS synthesis; stays free during THINKING and SPEAKING |
 | TTS producer (1/call) | synthesize sentence chunks → split into 20 ms generation-tagged frames → serialized outbound accept boundary | flow.py, session state, observer callbacks |
 | Turn-runner (1/turn) | execute a committed durable Run by id; observer fires at its terminal exit | — |
 =inbound= is a bounded closeable buffer; =outbound= adds generation-aware audio
 invalidation. Every operation on either crosses the thread boundary through
 =run_in_threadpool=, so the WS tasks remain pure shuttles and never acquire their
-locks on the uvicorn loop. Idempotent =close()= atomically marks closed, discards the
-call-local backlog, and wakes all blocked getters/putters; every WS/session teardown
-path closes both buffers, since cancelling the awaiting coroutine cannot stop its
-already-running worker call.
+locks on the uvicorn loop. Inbound =close()= and outbound =abort()= atomically mark
+closed, discard call-local backlog, and wake all waiters. Graceful outbound
+=close(final=hangup)= instead replaces ordinary backlog with exactly one priority
+terminal control, keeps it retrievable until the sender takes it, then makes later
+gets report closed. The WS owner awaits that terminal send before socket close;
+disconnect/failure uses =abort()=. Every teardown selects one of these idempotent
+paths, since cancelling the awaiting coroutine cannot stop its worker call.
 
 * Build sequence + PR slicing (architect-validated 2026-07-23)
 Dependency-ordered; each new dep enters the smallest PR that needs it.
@@ -115,7 +118,7 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 | event log reconstructs the call | scripted-call boundary-sequence assertion |
 | STT WER ≤ target + no_speech_prob discriminates | test_speech.py real clip + noise clip |
 | in-process TTS API produces correct-rate PCM | test_speech.py sample-rate + peak |
-| disconnect releases blocked buffer workers | test_wire.py empty-outbound get + full-inbound put |
+| teardown releases workers and preserves terminal control | test_wire.py empty-outbound get + full-inbound put + hangup-immediately-before-close |
 
 * Status
 - [X] Design read; architect build plan produced + reconciled; dep footprint de-risked (torch-free).
