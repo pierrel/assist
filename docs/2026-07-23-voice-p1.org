@@ -17,12 +17,13 @@ records the build plan grounded in the real code, the reconciliations, and statu
 * Threading model (blocker-class — single-worker uvicorn)
 | Thread | Owns | May NOT |
 |--------+------+---------|
-| WS loop (=@app.websocket("/call")=) | frame → =inbound_q.put=; =outbound.get_nowait= → =ws.send=; handshake/secret | any lock, file I/O, model, STT/TTS, flow.py, blocking =.get()= |
+| WS tasks (=@app.websocket("/call")=) | =ws.receive= → offloaded =inbound_q.put=; offloaded =outbound.get= → =ws.send=; handshake/secret | any lock or blocking queue operation on the event-loop thread; file I/O, model, STT/TTS, flow.py |
 | Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine; schedule/cancel TTS | blocking TTS synthesis; stays free during THINKING and SPEAKING |
 | TTS producer (1/call) | synthesize sentence chunks → split into 20 ms generation-tagged frames → serialized outbound accept boundary | flow.py, session state, observer callbacks |
 | Turn-runner (1/turn) | execute a committed durable Run by id; observer fires at its terminal exit | — |
-=inbound_q= is =queue.Queue=; =outbound= is a bounded generation-aware buffer with
-nonblocking =get_nowait=. The WS loop is a pure shuttle.
+=inbound_q= is =queue.Queue=; =outbound= is a bounded generation-aware buffer. Every
+operation on either crosses the thread boundary through =run_in_threadpool=, so the
+WS tasks remain pure shuttles and never acquire their locks on the uvicorn loop.
 
 * Build sequence + PR slicing (architect-validated 2026-07-23)
 Dependency-ordered; each new dep enters the smallest PR that needs it.
