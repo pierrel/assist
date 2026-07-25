@@ -154,6 +154,22 @@ def test_unknown_controls_count_toward_the_rate_limit(monkeypatch):
     assert exc.value.code == 1008
 
 
+def test_unknown_controls_refresh_valid_inbound_idle(monkeypatch):
+    monkeypatch.setattr(wire, "IDLE_SECONDS", 0.1)
+    wire.configure_call_runner(_echo_runner)
+    with TestClient(app).websocket_connect(
+        "/call", headers=HEADERS
+    ) as websocket:
+        bridge = FakeBridge(websocket)
+        bridge.ring()
+        assert bridge.receive_control() == {"type": "answer"}
+        for _ in range(5):
+            time.sleep(0.03)
+            bridge.send_control("future")
+        bridge.send_control("call_end", cause="remote")
+        assert bridge.receive_control() == {"type": "hangup"}
+
+
 def test_first_ring_timeout_releases_the_slot(monkeypatch):
     monkeypatch.setattr(wire, "FIRST_RING_SECONDS", 0.01)
     client = TestClient(app)

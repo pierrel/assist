@@ -307,6 +307,7 @@ async def _receive_loop(
             rate.record(time.monotonic())
             control = decode_phone_control(text)
             if control is None:
+                last_valid = time.monotonic()
                 continue
             item: Any = control
         else:
