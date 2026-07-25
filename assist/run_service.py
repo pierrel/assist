@@ -311,6 +311,8 @@ class RunService(PerThreadJsonStore[Run]):
         result: str | None = None,
     ) -> Run:
         """Move a run to ``status``; repeating the same transition is a no-op."""
+        if active_ms is not None and active_ms < 0:
+            raise ValueError("active_ms cannot be negative")
         with self._lock:
             runs = self._read(thread_id)
             current = self._find(runs, run_id)
@@ -372,6 +374,20 @@ class RunService(PerThreadJsonStore[Run]):
     def scan_all(self) -> list[Run]:
         """Return runs across visible and hidden thread directories."""
         return self.all()
+
+    def scan_children(self) -> list[Run]:
+        """Return child runs without parsing visible thread histories."""
+        with self._lock:
+            try:
+                thread_ids = os.listdir(self._root)
+            except FileNotFoundError:
+                return []
+            found = []
+            for thread_id in thread_ids:
+                directory = os.path.join(self._root, thread_id)
+                if os.path.isfile(os.path.join(directory, ".subagent")):
+                    found.extend(self._read(thread_id))
+            return found
 
     def import_legacy(
         self,

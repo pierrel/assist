@@ -341,6 +341,12 @@ class TestPostReviewRoute:
             headers={"content-type": "application/x-www-form-urlencoded"})
         assert r.status_code == 400
 
+    def test_413_on_single_oversized_chunk(self, client):
+        r = client.post(
+            "/thread/thread-1/review", content=bytes(66_001),
+            headers={"content-type": "application/x-www-form-urlencoded"})
+        assert r.status_code == 413
+
     def test_400_on_empty_payload(self, client):
         r = client.post("/thread/thread-1/review",
                         data={"payload": json.dumps({"overall": "", "lines": []})})

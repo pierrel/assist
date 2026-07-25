@@ -370,9 +370,9 @@ async def post_review(tid: str, request: Request,
         raise HTTPException(status_code=404, detail="Thread not found")
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > 66_000:
+        if len(body) + len(chunk) > 66_000:
             raise HTTPException(status_code=413, detail="Review payload too large")
+        body.extend(chunk)
 
     try:
         def format_and_accept():

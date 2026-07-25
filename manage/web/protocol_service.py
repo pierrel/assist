@@ -62,7 +62,7 @@ class WebAgentProtocolService:
                 raise FileNotFoundError(thread_id)
             if multitask_strategy == "interrupt":
                 current_runs = _runs().list(thread_id)
-                children = _runs().scan_all()
+                children = _runs().scan_children()
                 unsafe = any(
                     run.status == "running"
                     or (run.status == "interrupted" and (
