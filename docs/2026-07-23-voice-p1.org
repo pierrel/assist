@@ -8,7 +8,8 @@ authoritative *design* is the six-lens-reviewed tech doc in the emacsos repo:
 This doc is the *assist-side P1 build/state doc* — it does NOT restate the design; it
 records the build plan grounded in the real code, the reconciliations, and status.
 
-- P0 (shared session API: =plan_turn=/=route_turn= + turn-observer seam) — DONE, merged, deployed.
+- P0 (durable Run service + turn-observer seam) — DONE, merged, deployed; PR #213 is
+  authoritative for submission, queueing, interjection, and recovery semantics.
 - P0.5 (=catalog.py= + =receptionist.py= + eval N=10=80/80) — DONE, merged, deployed.
 - *P1 (this doc)* — the voice client: a new =manage/voice/= package, validated entirely
   against a FAKE BRIDGE (no phone hardware; that is P3). All in assist.
@@ -16,10 +17,21 @@ records the build plan grounded in the real code, the reconciliations, and statu
 * Threading model (blocker-class — single-worker uvicorn)
 | Thread | Owns | May NOT |
 |--------+------+---------|
-| WS loop (=@app.websocket("/call")=) | frame → =inbound_q.put=; =outbound_q.get_nowait= → =ws.send=; handshake/secret | any lock, file I/O, model, STT/TTS, flow.py, blocking =.get()= |
-| Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine → enqueue TTS onto =outbound_q= | (stays free during THINKING) |
-| Turn-runner (1/turn) | run =_process_message= so the session loop can journal a mid-turn steering utterance while the turn runs; observer fires here | — |
-=inbound_q=/=outbound_q= are =queue.Queue=. The WS loop is a pure shuttle.
+| WS tasks (=@app.websocket("/call")=) | =ws.receive= → offloaded =inbound.put=; offloaded =outbound.get= → =ws.send=; handshake/secret; graceful terminal drain or abrupt abort | any lock or blocking buffer operation on the event-loop thread; file I/O, model, STT/TTS, flow.py |
+| Session loop (1/call) | pull PCM → drive flow.py → STT → journal events → state machine; schedule/cancel TTS | blocking TTS synthesis; stays free during THINKING and SPEAKING |
+| TTS producer (1/call) | synthesize sentence chunks → split into 20 ms generation-tagged frames → serialized outbound accept boundary | flow.py, session state, observer callbacks |
+| Turn-runner (1/turn) | execute a committed durable Run by id; observer fires at its terminal exit | — |
+=inbound= is a bounded closeable buffer; =outbound= adds generation-aware audio
+invalidation. Every operation on either crosses the thread boundary through
+=run_in_threadpool=, so the WS tasks remain pure shuttles and never acquire their
+locks on the uvicorn loop. Inbound =close()= and outbound =abort()= atomically mark
+closed, discard call-local backlog, and wake all waiters. Graceful outbound
+=close(final=hangup)= instead replaces ordinary backlog with exactly one priority
+terminal control, keeps it retrievable until the sender takes it, then makes later
+gets report closed. The WS owner gives terminal send/socket close a 2 s grace;
+timeout or send failure falls through to =abort()= and releases the one-call slot.
+Disconnect/failure also uses =abort()=. Every teardown selects one of these idempotent
+paths, since cancelling the awaiting coroutine cannot stop its worker call.
 
 * Build sequence + PR slicing (architect-validated 2026-07-23)
 Dependency-ordered; each new dep enters the smallest PR that needs it.
@@ -27,34 +39,36 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    frame-in/event-out engine (VAD, endpointing, barge-in, DTMF). Zero web imports, no
    network, no threads, *no wall clock* (t derived from frame count → deterministic
    fixtures). Deps: =onnxruntime= + a bundled =silero_vad.onnx= (NOT the =silero-vad=
-   pip pkg — see Reconciliations). *← current PR.*
+   pip pkg — see Reconciliations). *DONE (PR #209).*
 2. *PR2 — =speech.py= + =tests/voice/test_speech.py=* — lazy in-proc =faster-whisper=
-   (STT) + =piper= (TTS), on the session/turn thread. Deps: faster-whisper, piper-tts.
+   (STT) + =piper= (TTS), synchronously off the event loop; PR4 owns thread scheduling.
+   Deps: faster-whisper, piper-tts.
+   *← current PR.*
 3. *PR3 — frame codec + =tests/voice/fake_bridge.py= + =wire.py= skeleton* — the WS
    protocol (§2) + §8 resource caps, echo-level.
 4. *PR4 — =session.py=* — the state machine + call-event log + conversational contract,
-   tying flow/speech/wire together, driving the shared session API (the big one; full
+   tying flow/speech/wire together, driving the shared Run service (the big one; full
    three-phase rigor — touches the queue/observer/hot path).
 5. *PR5 — security + full scripted-call reconstruction* (global PIN lockout,
    detector-scoping spies, caller-id handling) — or folded into PR4 if reviewable.
 
-* Reconciliations — design predates P0/P0.5 landing; the CODE wins
-1. *=submit_turn= (design) → =plan_turn= + =route_turn= (shipped, threads.py:2682/2706).*
-   Voice reuses BOTH: supplies its own =dispatch= executor (direct call on the
-   turn-runner thread) and writes its busy journal (=MESSAGE_BACKLOG.add=) *synchronously*
-   (it is off-loop already; no =anyio.to_thread=).
-2. *Double-speak filter "on origin" (design) → filter on =backlog_id=-presence.*
-   =route_turn= does not forward =origin= to =dispatch= (threads.py:2719), so =origin= is
-   =None= for both web and voice owner turns. The observer signature already carries
-   =backlog_id=: idle voice turn (=backlog_id is None=, spoken synchronously) ⇒ SUPPRESS
-   the observer speak; busy/interjection turn (=backlog_id= set, the caller's answer) ⇒
-   speak via the observer at the next safe boundary.
+* Reconciliations — PR #213 is authoritative; the CODE wins
+1. *=submit_turn= (design) → commit and execute a durable ordinary Run.*
+   Voice must use the same =_create_run= → =_execute_run= path as web turns: persist the
+   accepted turn before dispatch, carry only its id across the turn-runner boundary, and
+   inherit the Run service's queueing, interjection, pause, and recovery semantics. It must
+   not write =MESSAGE_BACKLOG= or recreate the removed =plan_turn=/=route_turn= split.
+2. *One reply-delivery source: the terminal turn observer.*
+   The observer signature is =(tid, stage, origin, reply_text, run_id)=. Voice speaks an
+   accepted turn's reply only from that callback, including an immediately runnable turn;
+   it does not also speak a synchronous executor return. This removes the old
+   =backlog_id=-based double-speak distinction while preserving exactly-once delivery.
 3. *=on_new= "wraps create_thread_with_message" (design) → that is a FastAPI route*
-   (=Form=/=BackgroundTasks=, threads.py:2004). Extract a plain
+   (=Form=/=BackgroundTasks=). Extract a plain
    =create_thread_with_message_core(text, domain, rider) -> tid= from its body
-   (:2013-2018 + =_initialize_thread=:1104); route becomes a thin Form adapter over it.
+   plus =_initialize_thread=; route becomes a thin Form adapter over it.
 4. *Receptionist signature: =receptionist_tools(catalog, domains, on_open, on_new)=*
-   (shipped, receptionist.py:60) — pass =DOMAINS= (state.py:198).
+   (shipped in =receptionist.py=) — pass =DOMAINS= from =state.py=.
 5. *VAD dep: use =onnxruntime= + the silero ONNX model, NOT the =silero-vad= pip package.*
    =pip install silero-vad= pulls =torch= + the full CUDA toolkit (torch-2.13, triton,
    nvidia-cublas/cudnn/cusparse, cuda-toolkit-13 — GB). The design says "silero-VAD
@@ -65,33 +79,47 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    DTMF-only scope (=vad=False=, GREETING_PIN) never loads onnxruntime/the model, and
    scripted-prob tests never touch it. Sound improvement; the only I/O stays the model load.
    (Also: silero v5 prepends 64 samples of carried context per 512-window → 576-sample input.)
+7. *TTS on the session thread (design §5/§6) → a serialized per-call TTS producer.*
+   Piper blocks while producing each sentence. If the session loop synthesized directly,
+   it could not drain inbound PCM into =flow.py=, making barge-in impossible during that
+   interval. The session remains the sole Flow/state owner and only schedules/cancels TTS;
+   the producer splits each sentence result into 20 ms generation-tagged PCM frames
+   before one serialized accept boundary. Producer backpressure waits on a condition
+   that releases the boundary lock and rechecks the generation on wake. On barge-in,
+   one atomic buffer operation invalidates the generation, purges its queued PCM, and
+   inserts =flush_uplink= at the front. A frame returned later by an in-flight Piper
+   =next()= is rejected; only a frame the WS shuttle already dequeued can escape. The
+   session never waits for synthesis or buffer capacity before flushing.
 
 * Reuse map (do NOT re-derive)
-- =manage/web/threads.py=: =plan_turn=:2682, =route_turn=:2706, =register_turn_observer=:1411,
-  =_notify_turn_observers=:1895 (fires after terminal =_set_status= + =pop_hold=, per-observer
-  isolated), =create_thread_with_message=:2004 / =_initialize_thread=:1104.
+- =manage/web/threads.py=: =_create_run= + =_execute_run= (durable ordinary-turn path),
+  =_dispatch_pending_after= (user-priority FIFO), =register_turn_observer= +
+  =_notify_turn_observers= (terminal callback carrying =run_id=, per-observer isolated),
+  =create_thread_with_message= / =_initialize_thread=.
 - =assist/middleware/interjection.py=: barge-in delivery; voice owner turns
-  =sender=None,origin=None= pass both gates (:119-121); =register_interjection_callbacks=:88.
-- =assist/catalog.py= (=ThreadCatalog=) + =assist/receptionist.py= (=receptionist_tools=:60,
-  =create_receptionist=:148) — the ROUTER agent; not yet wired to any client (voice is first).
-- =manage/web/app.py=:11 (=app=) + =state.py=:688 (=lifespan=) — /call WS route + observer
-  registration; =DOMAINS=:198. Bind =0.0.0.0= (=__main__.py=:32) — the WG/firewall deploy gate.
-- =assist/spec.py=:56 (=AgentSpec.tools= extra_tools) — =back_to_receptionist()= on the in-thread agent.
-- =assist/events/thread_log.py=:32 (=append_event=, O_APPEND/torn-line) — the call-event log.
+  =sender=None,origin=None= pass both gates; reuse =register_interjection_callbacks=.
+- =assist/catalog.py= (=ThreadCatalog=) + =assist/receptionist.py=
+  (=receptionist_tools=, =create_receptionist=) — the ROUTER agent; not yet wired to any
+  client (voice is first).
+- =manage/web/app.py= (=app=) + =state.py= (=lifespan=, =DOMAINS=) — /call WS route +
+  observer registration. Bind =0.0.0.0= in =__main__.py= — the WG/firewall deploy gate.
+- =assist/spec.py= (=AgentSpec.tools= extra_tools) — =back_to_receptionist()= on the in-thread agent.
+- =assist/events/thread_log.py= (=append_event=, O_APPEND/torn-line) — the call-event log.
 
 * P1 "Done =" (§10) → test map
 | target | test |
 |--------+------|
 | endpointing premature-cutoff/false-trigger within targets | test_flow.py labeled-WAV frame-by-frame |
-| barge-in cancels-TTS-then-flush within 1 frame w/o cancelling the turn | test_session.py via fake bridge |
+| barge-in invalidates/purges TTS then flushes within 1 frame w/o cancelling the turn | test_session.py via fake bridge |
 | Goertzel DTMF on synth tones incl. noise | test_flow.py (DONE — see status) |
 | global PIN lockout | security test, rotating caller-ids |
 | per-state detector scoping (no STT pre-auth) | test_session.py + construction spy |
 | silence watchdog fires | test_session.py frame-count THINKING gap |
-| observer double-speak filter | test_session.py idle-turn + observer = one speak |
+| observer is the single reply source | test_session.py idle and queued turns each speak once |
 | event log reconstructs the call | scripted-call boundary-sequence assertion |
 | STT WER ≤ target + no_speech_prob discriminates | test_speech.py real clip + noise clip |
-| /tts correct-rate PCM | test_speech.py sample-rate + peak |
+| in-process TTS API produces correct-rate PCM | test_speech.py sample-rate + peak |
+| teardown releases workers and bounds terminal control | test_wire.py empty-outbound get + full-inbound put + hangup-before-close + stalled terminal send |
 
 * Status
 - [X] Design read; architect build plan produced + reconciled; dep footprint de-risked (torch-free).
@@ -107,12 +135,18 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
       without it the VAD returned ~0 on ALL audio (would have silently detected nothing in prod).
       **flow.py PR1 is complete — 19 flow tests** (incl. the review-round DTMF gap-tolerance + DTMF-scope
       assert). Local review round 1: 1 IMPORTANT (DTMF glitch → duplicate digit) + nits fixed.
-- [ ] PR2–PR5 per the slicing above. Speech deps (faster-whisper, piper-tts) are INSTALLED + round-trip
-      verified (piper→whisper transcribed verbatim) but NOT yet in requirements.txt (that's PR2).
+- [X] PR2: =manage/voice/speech.py= — independently lazy faster-whisper =base.en= CPU STT +
+      Piper TTS, synchronous/off-event-loop; raw s16le/16 kHz boundary; sentence-chunk iterator
+      preserves cancellation for PR4. Unit contract complete; real Whisper + Piper model checks pass.
+- [ ] PR3–PR5 per the slicing above.
 
 * Notes for Pierre
 - Deps landed in =requirements.txt=: =onnxruntime==1.27.0= (+ flatbuffers, protobuf) — lean, torch-free.
   The silero =silero_vad.onnx= (2.3 MB, official snakers4 repo) is committed under =manage/voice/assets/=.
-- faster-whisper + piper-tts are installed in the venv + round-trip verified, but pinned in requirements
-  only when PR2 (=speech.py=) lands. All torch-free. Speech models (whisper base.en ~150MB; a piper voice)
-  download at runtime/deploy — not committed. Deploy needs =make deploy-install= (venv rebuild) for P1.
+- faster-whisper + piper-tts are pinned for PR2. All torch-free. Speech models (whisper
+  base.en ~150MB; a Piper voice) are provisioned outside a live call and are not committed.
+  Deploy needs =make deploy-install= plus =make deploy-speech-models= for P1.
+- PR4 scheduling constraint from review: observers enqueue text only; TTS must not run in an
+  observer or block the session's inbound-frame drain. Barge-in invalidates the active TTS
+  generation, purges its queued frames, and prioritizes the flush at one serialized
+  boundary, so an in-flight synthesis frame cannot land after the flush.

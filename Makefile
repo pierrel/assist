@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install restart status logs setup-sudo help sandbox-build egress-proxy-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -81,7 +81,7 @@ sandbox-shell:
 
 # === Deployment Targets ===
 
-deploy: deploy-code deploy-sandbox-build deploy-searxng deploy-install restart
+deploy: deploy-code deploy-sandbox-build deploy-searxng deploy-install deploy-speech-models restart
 	@echo "✓ Deployed everything EXCEPT the systemd service."
 	@echo "  The service unit is left untouched (installing it needs interactive sudo)."
 	@echo "  To apply service/unit changes, run: make deploy-service"
@@ -93,6 +93,12 @@ deploy-code:
 	@rsync -avz --delete \
 		--filter=':- .gitignore' \
 		--exclude '.git' \
+		--filter='H /.claude/' \
+		--filter='H /edd/eval-history/' \
+		--filter='H /edd/eval/cassettes/' \
+		--filter='H /edd/eval/test_shared_docs_skill.py' \
+		--filter='H /improvements/' \
+		--filter='H /roadmap.org_archive' \
 		./ $(DEPLOY_HOST):$(DEPLOY_PATH)/
 	@echo "✓ Code deployed"
 
@@ -175,6 +181,12 @@ deploy-install:
 		.venv/bin/pip install -e . && \
 		.venv/bin/pip install -r requirements.txt'
 	@echo "✓ Dependencies installed"
+
+deploy-speech-models:
+	@echo "→ Provisioning pinned speech models on remote server..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && \
+		.venv/bin/python scripts/provision-speech-models.py models/voice'
+	@echo "✓ Speech models provisioned"
 
 restart:
 	@echo "→ Restarting $(SERVICE_NAME) service..."

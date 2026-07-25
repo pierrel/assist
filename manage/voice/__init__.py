@@ -2,8 +2,8 @@
 run service + turn-observer seam and the receptionist
 (P0.5). See docs/2026-07-23-voice-p1.org for the build plan and threading model.
 
-This PR ships ``flow.py`` — the hermetic frame-in/event-out engine. The rest of the
-package lands in later P1 slices: ``session.py`` (per-call state machine), ``wire.py``
-(the WSS /call endpoint — the only asyncio-loop code, a pure frame-shuttle), and
-``speech.py`` (in-proc STT/TTS).
+P1 currently includes ``flow.py`` (the hermetic frame-in/event-out engine) and
+``speech.py`` (lazy in-process STT/TTS). The remaining slices add ``session.py``
+(the per-call state machine) and ``wire.py`` (the WSS /call endpoint — the only
+asyncio-loop code, a pure frame shuttle).
 """
