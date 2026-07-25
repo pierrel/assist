@@ -1,0 +1,72 @@
+#+title: Enable the authenticated Agent Protocol API
+
+The feature code is deployed, but the production =/agent= routes stay unmounted until
+=assist-web= receives =ASSIST_AGENT_PROTOCOL_SECRET=. This fail-closed default prevents
+an unauthenticated caller from creating agent work that can spend the local LLM slot and
+use host-integrated tools.
+
+The coding agent cannot install the systemd drop-in because that path is outside the
+configured passwordless-sudo allowlist. Run these commands once from an interactive
+shell on the assist host. They use the current production values: =SERVICE_NAME= is
+=assist-web= and =ASSIST_PORT= is =5050=. Check those two entries in =.deploy.env= first and substitute
+their values below if the deployment configuration has changed.
+
+* 1. Create the bearer secret
+
+#+begin_src sh
+sudo mkdir -p /etc/assist
+openssl rand -hex 32 | awk '{print "ASSIST_AGENT_PROTOCOL_SECRET=" $0}' \
+  | sudo tee /etc/assist/agent-protocol.env >/dev/null
+sudo chmod 600 /etc/assist/agent-protocol.env
+#+end_src
+
+Why: the API deliberately has no default credential. The file is outside the code and
+deployment trees, mode 0600, and is not tracked or replaced by =deploy-code=.
+
+* 2. Add the service drop-in
+
+#+begin_src sh
+sudo mkdir -p /etc/systemd/system/assist-web.service.d
+printf '%s\n' \
+  '[Service]' \
+  'EnvironmentFile=/etc/assist/agent-protocol.env' \
+  | sudo tee /etc/systemd/system/assist-web.service.d/agent-protocol.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart assist-web
+#+end_src
+
+Why: systemd does not inherit variables from an interactive shell. The drop-in keeps the
+secret out of the tracked unit and out of process arguments.
+
+* 3. Verify authentication and the service
+
+#+begin_src sh
+systemctl show assist-web -p ActiveState -p MainPID -p ActiveEnterTimestamp
+curl -sk -o /dev/null -w '%{http_code}\n' \
+  -X POST https://localhost:5050/agent/threads \
+  -H 'content-type: application/json' -d '{}'
+
+sudo sh -c '
+  . /etc/assist/agent-protocol.env
+  printf "header = \"authorization: Bearer %s\"\n" \
+    "$ASSIST_AGENT_PROTOCOL_SECRET" |
+    curl --config - -skf -X POST https://localhost:5050/agent/threads \
+      -H "content-type: application/json" -d "{}"
+'
+#+end_src
+
+The unauthenticated request must print =401=. The authenticated request must return JSON
+containing a =thread_id=. Do not paste the environment file or bearer value into logs,
+issues, chat, or shell tracing.
+
+* Roll back
+
+#+begin_src sh
+sudo rm /etc/systemd/system/assist-web.service.d/agent-protocol.conf
+sudo rm /etc/assist/agent-protocol.env
+sudo systemctl daemon-reload
+sudo systemctl restart assist-web
+#+end_src
+
+Removing the drop-in unmounts =/agent= on restart. It does not affect the HTML web UI,
+existing threads, Runs, schedules, SMS, or other execution producers.
