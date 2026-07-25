@@ -23,7 +23,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from assist.agent import create_agent, AgentHarness
 from assist.backlog import PendingMessage
-from assist.events.continuations import continuation_tools
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 from manage.web.threads import (_INTERJECTION_FRAME, _INTERJECTION_GUIDE,
@@ -73,7 +72,6 @@ class _Journal:
 class TestInterjection(TestCase):
     def setUp(self):
         self.model = select_assistant_model(0.1)
-        self.journaled = []          # continue_later's captured tasks
 
     def _run(self, files, ask, interjections, defer_available=True):
         journal = _Journal(defer_available)
@@ -81,8 +79,6 @@ class TestInterjection(TestCase):
             journal.add(t)
         root = tempfile.mkdtemp()
         create_filesystem(root, files)
-        tools = continuation_tools(
-            lambda tid, task: self.journaled.append(task), lambda tid: 0)
         with mock.patch("assist.middleware.interjection.active_handle",
                         lambda: SimpleNamespace(thread_id="eval")), \
              mock.patch("assist.middleware.interjection._CALLBACKS",
@@ -90,8 +86,7 @@ class TestInterjection(TestCase):
                          "frame": journal.frame}), \
              stub_research_subagent():
             # agent built INSIDE the stub context (the research-mocking rule)
-            agent = AgentHarness(create_agent(self.model, root,
-                                              spec=AgentSpec(tools=tools)))
+            agent = AgentHarness(create_agent(self.model, root, spec=AgentSpec()))
             agent.message(ask)
         return agent, journal
 
@@ -176,20 +171,3 @@ class TestInterjection(TestCase):
                         f"first interjection lost: {answer[:400]}")
         self.assertIn("valencia", answer,
                       f"second interjection lost: {answer[:400]}")
-
-    def test_defer_via_continue_later(self):
-        """US-3: a big new ask mid-flight may be deferred — mechanically, defer
-        ⇒ a continuation entry exists (design: continue_later IS the defer
-        mechanism). Redirect-in-place also passes (the bias is redirect); what
-        must never happen is the addition vanishing."""
-        agent, journal = self._run(
-            {"bike.org": _BIKE_ORG},
-            "List the parts my bike still needs.",
-            ["afterwards, find out what each of those roughly costs these days"])
-        self._assert_presented(agent, journal)
-        answer = final_answer(agent).lower()
-        addressed_now = "cost" in answer or "price" in answer or "$" in answer
-        deferred = len(self.journaled) > 0
-        self.assertTrue(addressed_now or deferred,
-                        f"the cost ask vanished: journaled={self.journaled}, "
-                        f"answer={answer[:400]}")

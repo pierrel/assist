@@ -1,7 +1,7 @@
-"""Restart recovery — durable follow-up journal + resume-from-checkpoint.
+"""Restart recovery — legacy journal import + run/checkpoint recovery.
 
 Pins the contracts of docs/2026-07-13-durable-message-queue.org (Step 1): a
-message accepted while its thread is busy is journaled durably BEFORE the POST
+Historical messages accepted while a thread was busy were journaled before the POST
 returns; the turn claims (removes) its entry status-first when it starts; and
 startup recovery delivers every journaled message exactly once and handles the
 interrupted head turn — resume-vs-rest decided by GRAPH STATE, with "finalize"
@@ -93,16 +93,15 @@ def test_follow_up_to_busy_thread_is_journaled_durably(wired, monkeypatch):
     TestClient(web.app).post(f"/thread/{tid}/message", data={"text": "follow-up"},
                              follow_redirects=False)
 
-    # Durable on disk before the redirect returned, and the dispatch carries the
-    # entry id so the turn claims it when it starts.
-    on_disk = json.loads((tmp_path / tid / "pending_messages.json").read_text())
-    assert [r["text"] for r in on_disk] == ["follow-up"]
-    assert spawned and spawned[0][2].get("backlog_id") == on_disk[0]["id"]
+    # Durable before redirect; the background notification carries only its id.
+    (run,) = threads._runs().list(tid)
+    assert run.text == "follow-up" and run.status == "pending"
+    assert spawned == []  # the running head's terminal handoff releases this run
     # The running head turn's status was NOT clobbered by the follow-up.
     assert _get_status(tid).get("pending_message") == "head turn"
 
 
-def test_idle_thread_first_message_is_not_journaled(wired, monkeypatch):
+def test_idle_thread_first_message_is_a_run_not_legacy_journal(wired, monkeypatch):
     tid, tmp_path = wired
     _set_status(tid, "ready")
     monkeypatch.setattr(threads.BackgroundTasks, "add_task",
@@ -110,38 +109,10 @@ def test_idle_thread_first_message_is_not_journaled(wired, monkeypatch):
     from fastapi.testclient import TestClient
     TestClient(web.app).post(f"/thread/{tid}/message", data={"text": "first"},
                              follow_redirects=False)
-    # The first message is durable via status.pending_message — the journal is
-    # follow-ups only.
+    # The Run is acceptance truth; status is only the UI projection.
     assert not (tmp_path / tid / "pending_messages.json").exists()
+    assert [run.text for run in threads._runs().list(tid)] == ["first"]
     assert _get_status(tid).get("pending_message") == "first"
-
-
-def test_turn_claims_its_entry_status_first(wired, monkeypatch):
-    """When a journaled follow-up's turn starts: status takes ownership (text +
-    claimed_id) and THEN the journal entry is popped — the message is durable in
-    at least one store at every instant."""
-    tid, _ = wired
-    calls = []
-    _wire_chat(monkeypatch, tid, calls)
-    rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="follow-up"))
-
-    statuses = []
-    real_set = threads._set_status
-
-    def spy_set(t, stage, **kw):
-        statuses.append((stage, kw.get("claimed_id"),
-                         bool(MESSAGE_BACKLOG.for_thread(tid))))
-        real_set(t, stage, **kw)
-    monkeypatch.setattr(threads, "_set_status", spy_set)
-
-    threads._process_message(tid, "follow-up", backlog_id=rec.id)
-
-    # The starting_sandbox write carried the claim id while the entry was STILL
-    # journaled; the pop happened after.
-    claim_writes = [s for s in statuses if s[0] == "starting_sandbox"]
-    assert claim_writes == [("starting_sandbox", rec.id, True)]
-    assert MESSAGE_BACKLOG.for_thread(tid) == []       # claimed after
-    assert calls == [("message", "follow-up")]
 
 
 # --- the recovery decision: graph state, not text -----------------------------
@@ -203,11 +174,7 @@ def _drain_worker_queue(calls_expected_tid):
         except Exception:
             return
         assert it["tid"] == calls_expected_tid
-        threads._process_message(it["tid"], it["text"], rider=it["rider"],
-                                 sender=it["sender"], resume=it["resume"],
-                                 accumulated_active_ms=it["acc"],
-                                 pending_text=it["pending"],
-                                 backlog_id=it.get("backlog_id"))
+        threads._execute_run(it["run_id"], it["tid"])
 
 
 def test_recover_redispatches_head_and_drains_backlog_in_order(wired, monkeypatch):
@@ -219,7 +186,7 @@ def test_recover_redispatches_head_and_drains_backlog_in_order(wired, monkeypatc
     MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="f1"))
     MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="f2"))
 
-    threads._recover_thread(tid)
+    threads.queue_recovery_runs()
     # The head ran inline; the follow-ups were SUBMITTED to the serial worker
     # (behind any resume the head might have re-queued) — run them as the worker.
     _drain_worker_queue(tid)
@@ -228,19 +195,23 @@ def test_recover_redispatches_head_and_drains_backlog_in_order(wired, monkeypatc
     assert MESSAGE_BACKLOG.for_thread(tid) == []   # each entry claimed exactly once
 
 
-def test_duplicate_dispatchers_deliver_exactly_once(wired, monkeypatch):
-    """The exactly-once gate: a live job submitted during recovery and the
-    recovery drain can BOTH target the same journal entry — whichever runs second
-    must find the entry claimed and skip, not run a second turn."""
+def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
+        wired, monkeypatch):
     tid, _ = wired
-    calls = []
-    _wire_chat(monkeypatch, tid, calls)
-    rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="once"))
+    run = threads._create_run(tid, "accepted")
+    _set_status(tid, "processing", pending_message="accepted",
+                pending_run_id=run.id)
+    decisions = []
+    monkeypatch.setattr(threads, "_recovery_decision",
+                        lambda *args: decisions.append(args) or "redispatch")
 
-    threads._process_message(tid, "once", backlog_id=rec.id)   # first dispatcher
-    threads._process_message(tid, "once", backlog_id=rec.id)   # duplicate
+    threads.queue_recovery_runs()
 
-    assert calls == [("message", "once")]          # exactly one turn ran
+    assert decisions == []
+    assert [(item.id, item.text) for item in threads._runs().list(tid)] == [
+        (run.id, "accepted")]
+    queued = threads._RESUME_SCHEDULER._q.get_nowait()
+    assert queued["run_id"] == run.id
 
 
 def test_journal_only_recovery_skips_head_and_stays_healthy(wired, monkeypatch):
@@ -256,7 +227,7 @@ def test_journal_only_recovery_skips_head_and_stays_healthy(wired, monkeypatch):
     _set_status(tid, "ready")
     MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="leftover"))
 
-    threads._recover_thread(tid)
+    threads.queue_recovery_runs()
 
     assert decisions == []                          # head decision never ran
     assert _get_status(tid)["stage"] == "ready"     # no error banner
@@ -265,9 +236,11 @@ def test_journal_only_recovery_skips_head_and_stays_healthy(wired, monkeypatch):
 
 
 def test_recover_resumes_and_preserves_triage_sender(wired, monkeypatch):
-    """A triage (inbound-SMS) turn killed mid-processing resumes AS a triage turn:
-    the sender persisted in the busy status write drives triage=True + the reply
-    target — without it the recovery would rebuild a full-privilege agent."""
+    """Legacy busy-status recovery preserves triage sender and reply target.
+
+    New accepted work takes the same values from its durable Run; this test pins the
+    pre-Run crash fallback imported during migration.
+    """
     tid, _ = wired
     calls, triage_seen = [], []
     _wire_chat(monkeypatch, tid, calls, triage_seen)
@@ -275,7 +248,8 @@ def test_recover_resumes_and_preserves_triage_sender(wired, monkeypatch):
     _set_status(tid, "paused", pending_message="sms text", sender="+15550001111",
                 accumulated_active_ms=1234.0)
 
-    threads._recover_thread(tid)
+    threads.queue_recovery_runs()
+    _drain_worker_queue(tid)
 
     assert calls == [("resume",)]
     assert triage_seen and triage_seen[0][0] is True          # triage preserved
@@ -293,7 +267,8 @@ def test_recover_dedupes_claimed_entry(wired, monkeypatch):
     rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="claimed msg"))
     _set_status(tid, "paused", pending_message="claimed msg", claimed_id=rec.id)
 
-    threads._recover_thread(tid)
+    threads.queue_recovery_runs()
+    _drain_worker_queue(tid)
 
     assert calls == [("resume",)]                    # one delivery path
     assert MESSAGE_BACKLOG.for_thread(tid) == []     # deduped, not re-dispatched
@@ -306,7 +281,7 @@ def test_recover_finalizes_completed_turn(wired, monkeypatch):
     monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "finalize")
     _set_status(tid, "paused", pending_message="already answered")
 
-    threads._recover_thread(tid)
+    threads.queue_recovery_runs()
 
     assert calls == []                               # nothing re-run
     assert _get_status(tid)["stage"] == "ready"
@@ -319,7 +294,7 @@ def test_recover_unrecoverable_errors_with_message_surfaced(wired, monkeypatch):
     monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "error")
     _set_status(tid, "paused", pending_message="lost?")
 
-    threads._recover_thread(tid)
+    threads.queue_recovery_runs()
 
     st = _get_status(tid)
     assert st["stage"] == "error" and st.get("pending_message") == "lost?"
@@ -336,8 +311,9 @@ def test_lifespan_rewrites_busy_to_paused_and_enqueues_recovery(wired, monkeypat
     _set_status(tid, "processing", pending_message="mid-flight",
                 sender="+15550001111")
     recovered = []
-    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_recover",
-                        lambda t: recovered.append(t))
+    monkeypatch.setattr(threads, "_recovery_decision", lambda t, p: "resume")
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, t: recovered.append((run_id, t)))
 
     # The REAL scan the lifespan calls (extracted so this test can't drift from it).
     from manage.web.state import _recover_interrupted_threads
@@ -347,7 +323,7 @@ def test_lifespan_rewrites_busy_to_paused_and_enqueues_recovery(wired, monkeypat
     assert st["stage"] == "paused"
     assert st.get("pending_message") == "mid-flight"    # carried through
     assert st.get("sender") == "+15550001111"           # triage info survives
-    assert recovered == [tid]
+    assert len(recovered) == 1 and recovered[0][1] == tid
 
 
 # --- kill-shaped resume: a real graph, a real SqliteSaver, a hard abandon -----
@@ -440,23 +416,21 @@ def test_sms_follow_up_to_paused_thread_routes_through_worker(wired, monkeypatch
     sub = SimpleNamespace(thread_id=tid, render=lambda s, t: f"[{s}] {t}")
     monkeypatch.setattr(threads.SUBSCRIPTION_STORE, "route", lambda s: sub)
     ran, submitted = [], []
-    monkeypatch.setattr(threads, "_process_message",
+    monkeypatch.setattr(threads, "_execute_run",
                         lambda *a, **k: ran.append(a))
-    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
-                        lambda t, text, rider, sender, backlog_id=None:
-                            submitted.append((t, text, sender, backlog_id)))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, t: submitted.append((run_id, t)))
 
     threads._dispatch_event("+15550001111", "hey")
 
     assert ran == []                                  # no direct dispatch
-    recs = MESSAGE_BACKLOG.for_thread(tid)
-    assert len(recs) == 1 and recs[0].sender == "+15550001111"
-    assert submitted == [(tid, "[+15550001111] hey", "+15550001111", recs[0].id)]
+    (run,) = threads._runs().list(tid)
+    assert run.sender == "+15550001111" and run.text == "[+15550001111] hey"
+    assert submitted == [(run.id, tid)]
 
 
-def test_review_to_paused_thread_routes_through_worker(wired, monkeypatch):
-    """A /review submission to a PAUSED thread routes through the serial worker
-    with its journal id, mirroring post_message (Copilot #197 rd1)."""
+def test_review_to_paused_thread_waits_for_resume_handoff(wired, monkeypatch):
+    """A paused thread persists reviews without outrunning its queued resume."""
     import json as _json
     from fastapi.testclient import TestClient
     tid, _ = wired
@@ -465,9 +439,8 @@ def test_review_to_paused_thread_routes_through_worker(wired, monkeypatch):
     ran, submitted = [], []
     monkeypatch.setattr(threads.BackgroundTasks, "add_task",
                         lambda self, fn, *a, **k: ran.append(fn))
-    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
-                        lambda t, text, rider, sender, backlog_id=None:
-                            submitted.append((t, backlog_id)))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, t: submitted.append((run_id, t)))
 
     r = TestClient(web.app).post(
         f"/thread/{tid}/review",
@@ -475,10 +448,9 @@ def test_review_to_paused_thread_routes_through_worker(wired, monkeypatch):
         follow_redirects=False)
 
     assert r.status_code == 303
-    assert threads._process_message not in ran        # no BackgroundTask dispatch
-    recs = MESSAGE_BACKLOG.for_thread(tid)
-    assert len(recs) == 1
-    assert submitted == [(tid, recs[0].id)]
+    assert threads._execute_run not in ran        # no BackgroundTask dispatch
+    (run,) = threads._runs().list(tid)
+    assert submitted == []
 
 
 def test_claim_is_idempotent(tmp_path):
@@ -517,7 +489,7 @@ def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "close", lambda: None)
 
     with TestClient(web.app) as client:   # ctx-managed: ONE portal/loop for both
-        MESSAGE_BACKLOG._lock.acquire()
+        threads._runs()._lock.acquire()
         post_done = _threading.Event()
         try:
             t = _threading.Thread(
@@ -537,5 +509,5 @@ def test_event_loop_stays_live_while_store_lock_is_held(wired, monkeypatch):
             assert elapsed < 2.0, \
                 f"loop blocked: GET took {elapsed:.1f}s under a held store lock"
         finally:
-            MESSAGE_BACKLOG._lock.release()
+            threads._runs()._lock.release()
         assert post_done.wait(5.0), "POST must complete once the lock is released"

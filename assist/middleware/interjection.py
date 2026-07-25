@@ -1,8 +1,8 @@
 """Mid-turn interjection — deliver journaled user messages to the RUNNING turn.
 
-A message sent while a turn is running lands durably in the pending-work
-journal (=MESSAGE_BACKLOG=). This middleware's ``before_model`` hook peeks that
-journal at every main-loop model-call boundary and, when unconsumed eligible
+A message sent while a turn is running lands durably as a pending Run. This
+middleware's ``before_model`` hook reads the injected run projection at every
+main-loop model-call boundary and, when unconsumed eligible
 entries exist, appends them to graph state as individually framed
 ``HumanMessage``s — the model's very next call sees them and chooses redirect /
 incorporate / defer / stop in its own voice (the four outcomes are DESCRIPTIVE,
@@ -21,7 +21,7 @@ Mechanics (all verified empirically at design time):
   ids found in messages ALREADY IN STATE (a prior superstep ⇒ durably
   checkpointed), via ``additional_kwargs["interjection_ids"]``; a second sweep
   runs at the turn's terminal exits. The shipped entry-gone gate then makes the
-  queued fallback dispatcher skip a consumed entry — exactly-once, no new
+  queued fallback dispatcher skip a terminalized entry — exactly-once, no new
   dedup machinery. An entry the turn never consumes runs as today's follow-up
   turn: nothing is ever lost.
 - SCOPING is two gates: ``entry.origin is None`` (a user follow-up — an

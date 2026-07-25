@@ -51,8 +51,7 @@ def wired(tmp_path, monkeypatch):
 
     monkeypatch.setattr(web.MANAGER, "root_dir", str(tmp_path))
     monkeypatch.setattr(web.MANAGER, "thread_dir", lambda t: str(tmp_path / t))
-    # The follow-up journal lives under the thread root — repoint it with MANAGER
-    # (post_message journals a message to a busy thread before dispatching it).
+    # Repoint the legacy journal used by migration-only assertions in this fixture.
     from manage.web.state import MESSAGE_BACKLOG
     monkeypatch.setattr(MESSAGE_BACKLOG, "_root", str(tmp_path))
     monkeypatch.setattr(web.MANAGER, "thread_default_working_dir",
@@ -88,13 +87,12 @@ def test_pause_carries_pending_and_submits_resume(wired):
     # A resume was queued on the dedicated scheduler (NOT a BackgroundTask), carrying
     # the pending text so the resume keeps the bubble too.
     item = threads._RESUME_SCHEDULER._q.get_nowait()
-    assert item["tid"] == tid and item["resume"] is True
-    assert item["pending"] == "hello"
+    run = threads._runs().get(tid, item["run_id"])
+    assert item["tid"] == tid and run.resume is True
+    assert run.pending_text == "hello"
 
     # 2. Run the resume as the scheduler would.
-    threads._process_message(item["tid"], None, resume=True,
-                             accumulated_active_ms=item["acc"],
-                             pending_text=item["pending"])
+    threads._execute_run(item["run_id"], item["tid"])
     assert _get_status(tid)["stage"] == "ready"
 
     # Lossless + no re-run: the paused message() ran once, then resume() ran once —
@@ -108,10 +106,8 @@ def test_new_message_while_paused_routes_through_scheduler(wired, monkeypatch):
     _set_status(tid, "paused", pending_message="hello")
 
     submitted = []
-    monkeypatch.setattr(
-        threads._RESUME_SCHEDULER, "submit_message",
-        lambda t, text, rider, sender, backlog_id=None:
-            submitted.append((t, text, backlog_id)))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda run_id, t: submitted.append((run_id, t)))
     spawned = []
     monkeypatch.setattr(threads.BackgroundTasks, "add_task",
                         lambda self, fn, *a, **k: spawned.append(fn))
@@ -120,12 +116,10 @@ def test_new_message_while_paused_routes_through_scheduler(wired, monkeypatch):
     TestClient(web.app).post(f"/thread/{tid}/message", data={"text": "follow-up"},
                              follow_redirects=False)
 
-    # The new message was routed to the serial scheduler (runs AFTER the resume),
-    # NOT spawned as a competing BackgroundTask onto a mid-flight checkpoint —
-    # and it was journaled first (durable follow-up), with its entry id carried
-    # so the turn claims it when it starts.
-    from manage.web.state import MESSAGE_BACKLOG
-    recs = MESSAGE_BACKLOG.for_thread(tid)
-    assert [r.text for r in recs] == ["follow-up"]
-    assert submitted == [(tid, "follow-up", recs[0].id)]
-    assert threads._process_message not in spawned
+    # The new message is persisted but deliberately not notified yet. The queued
+    # resume releases followers only after it becomes terminal, so a required-child
+    # resume created later cannot be overtaken by this message.
+    (run,) = threads._runs().list(tid)
+    assert run.text == "follow-up" and run.status == "pending"
+    assert submitted == []
+    assert threads._execute_run not in spawned

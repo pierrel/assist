@@ -1,15 +1,15 @@
 """Index + thread page rendering and the routes that drive them.
 
-Owns ``_process_message`` (the synchronous per-turn worker — spawned as a
-``BackgroundTask`` for ``/message``/``/review`` submissions and SMS/scheduled
-dispatch, or run on the ``_ResumeScheduler`` serial worker for fair-scheduling
-resumes, paused-thread follow-ups, and restart recovery),
+Every producer commits a durable Run through ``_create_run``; dispatch queues carry
+only its id to ``_execute_run``. That executor claims the ticket and calls the private
+synchronous ``_process_message`` turn implementation. This module also owns
 ``_initialize_thread`` (first-turn clone + sandbox boot), and
 ``_capture_conversation`` (capture-this-thread side-quest).
 """
 from __future__ import annotations
 
 import html
+import hashlib
 import io
 import json
 import logging
@@ -48,11 +48,12 @@ import anyio.to_thread
 from langchain_core.messages import HumanMessage
 
 from assist.backlog import PendingMessage
+from assist.run_service import InvalidRunTransition, Run, RunNotFound
+from assist.async_subagents import AsyncTaskContext, async_task_context
 from assist.egress.store import resolution_prompt
 from starlette.concurrency import run_in_threadpool
 from assist.middleware.interjection import (collect_interjection_ids,
                                             register_interjection_callbacks)
-from assist.events.continuations import CHAIN_CAP
 from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.events.reply import SMS_SENDER_KEY
@@ -86,6 +87,7 @@ from manage.web.state import (
     MANAGER,
     MERGE_LOCK,
     MESSAGE_BACKLOG,
+    RUN_SERVICE,
     SCHEDULE_STORE,
     SUBSCRIPTION_STORE,
     _mark_urgent,
@@ -710,7 +712,11 @@ def render_thread(
     # shows twice with contradicting badges. (Residual: an identical text
     # sent again while the first is on screen hides its queued bubble until
     # the first is claimed — cosmetic, self-resolving.)
-    _journal_entries = MESSAGE_BACKLOG.peek(tid)
+    _journal_entries = [PendingMessage(
+        thread_id=run.thread_id, text=run.text or "", sender=run.sender,
+        rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
+        for run in _runs().peek(tid)
+        if run.status == "pending" and run.text]
     for r in [r for r in _journal_entries
               if r.origin is None and r.text not in seen_interjections]:
         rendered.insert(0, (
@@ -1123,7 +1129,8 @@ def _initialize_thread(tid: str, text: str, domain: str | None,
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
                 _set_status(tid, "error", error=f"Clone failed: {e}", pending_message=text)
                 return
-        _process_message(tid, text, rider)
+        run = _create_run(tid, text, rider=rider)
+        _execute_run(run.id, tid)
     except Exception as e:
         logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
         _set_status(tid, "error", error=str(e), pending_message=text)
@@ -1141,13 +1148,14 @@ _SUPERSEDE_RIDER = (
 # in the checkpoint ARE the chain history — no counter file), and recovery exact-match
 # fidelity (the _SUPERSEDE_RIDER pattern).
 _CONTINUATION_RIDER = "[Continuing my earlier work — background follow-up] "
+CHAIN_CAP = 5
 
 # Mid-turn interjection framing (design: docs/2026-07-20-mid-turn-interjection-design.org).
 # The FRAME prefixes the user's text in the injected HumanMessage — it is the
 # durable render key (strip-and-badge, like the rider above) and the model's
 # attribution. The GUIDE carries ALL steering (the middleware is only a
-# delivery channel); eval-owned wording. DEFER is appended only when the turn's
-# tool surface has continue_later (triage + continuation turns don't).
+# delivery channel); eval-owned wording. DEFER is appended only when the turn
+# can schedule an async background child (triage + continuation turns cannot).
 _INTERJECTION_FRAME = "[Mid-turn message from the user — sent while you were working] "
 _INTERJECTION_GUIDE = (
     "\n\n(This message arrived mid-turn. The user's latest word wins: if it "
@@ -1156,7 +1164,7 @@ _INTERJECTION_GUIDE = (
     "with a brief account of what you already completed.")
 _INTERJECTION_DEFER = (
     " Only if changing course would clearly waste nearly-finished work, "
-    "finish that first and call continue_later to handle this message right "
+    "finish that first and delegate it to background-research-agent right "
     "after.")
 # One string, four error exits — the interjection unit test greps it, so the
 # copies would be sync-load-bearing if inlined.
@@ -1165,7 +1173,7 @@ _REJOURNAL_NOTE = " Your mid-turn message will be retried as its own turn."
 # Per-running-turn interjection context, keyed by tid: "claimed" holds the
 # records this turn consumed (the fate-sharing re-journal reads it at terminal
 # error exits — Pierre, PR #199 note 5), "defer" whether the turn's tool
-# surface carries continue_later (picks the framing variant), "cleared_ids"
+# surface carries the background target (picks the framing variant), "cleared_ids"
 # the continuation entries the framing enumerated — cleared only at claim
 # time, so the clear commits iff the enumerating message did (fate-shared by
 # construction). Turns serialize per thread (THREAD_QUEUE), so each key has a
@@ -1178,16 +1186,15 @@ _TURN_INTERJECTION: dict[str, dict] = {}
 
 
 def _continuation_chain_len(tid: str) -> int:
-    """Current chain length for the continue_later cap: trailing continuation
+    """Current background-chain length: trailing continuation
     turns already in the conversation (marker-prefixed human messages in the
     checkpoint, newest-first until the first non-marker human message — a user
-    or scheduled message breaks the run) plus journaled-but-unstarted
-    continuations. Derived, so it cannot desync; raw checkpoint read (no agent
-    build, no model call). An unreadable CHECKPOINT counts as cap-reached —
-    fail closed (a corrupt journal degrades to zero pending, moved aside
-    loudly by the store)."""
-    pending = sum(1 for r in MESSAGE_BACKLOG.for_thread(tid)
-                  if r.origin == "continuation")
+    or scheduled message breaks the run) plus pending continuation Runs. Derived,
+    so it cannot desync; raw checkpoint read (no agent build or model call). An
+    unreadable checkpoint counts as cap-reached.
+    """
+    pending = sum(1 for r in _runs().list(tid)
+                  if r.status == "pending" and r.origin == "continuation")
     try:
         tup = MANAGER.checkpointer.get_tuple(
             {"configurable": {"thread_id": tid}})
@@ -1208,43 +1215,22 @@ def _continuation_chain_len(tid: str) -> int:
     return trailing + pending
 
 
-def _journal_continuation(tid: str, task: str) -> None:
-    """continue_later's journal callback: durably record the scheduled work
-    (the job queue) + push the lifecycle event (the durable history)."""
-    rec = MESSAGE_BACKLOG.add(PendingMessage(
-        thread_id=tid, text=task, origin="continuation",
-        enqueued_at=datetime.now(timezone.utc).isoformat()))
-    append_event(MANAGER.thread_dir(tid), "continuation_scheduled",
-                 id=rec.id, task=task)
-
-
-def _dispatch_continuations(tid: str, rider: ContextRider | None) -> None:
-    """Submit this thread's unclaimed continuations to the serial worker (called
-    at a turn's ready exit). Each runs as an ordinary self-message turn; the
-    worker + the exactly-once claim gate make double-dispatch (vs the recovery
-    drain) harmless. The rider is rebuilt fresh — the finishing turn's tz with a
-    dispatch-time timestamp — so tz-dependent tools keep working mid-chain."""
-    for rec in MESSAGE_BACKLOG.for_thread(tid):
-        if rec.origin != "continuation":
-            continue
-        cont_rider = _build_rider(datetime.now(timezone.utc).isoformat(),
-                                  rider.tz if rider else None)
-        _RESUME_SCHEDULER.submit_message(tid, rec.text, cont_rider, None,
-                                         rec.id, origin="continuation")
-        append_event(MANAGER.thread_dir(tid), "continuation_dispatched", id=rec.id)
-
-
 def _clear_pending_continuations(tid: str) -> None:
     """An OWNER message (never an untrusted inbound SMS — the caller gates on
     sender) supersedes the agent's queued plan (redirect bias): remove this
     thread's unclaimed continuation entries — the agent can re-schedule in its
     answer if still warranted. The RUNNING turn is not preempted (that's the
     interjection feature); only not-yet-started work is cancelled."""
-    for rec in MESSAGE_BACKLOG.for_thread(tid):
-        if rec.origin == "continuation":
-            MESSAGE_BACKLOG.claim(tid, rec.id)
+    for rec in _runs().list(tid):
+        if rec.status == "pending" and rec.origin == "continuation":
+            _runs().cancel(tid, rec.id)
             append_event(MANAGER.thread_dir(tid), "continuation_cancelled",
                          id=rec.id, reason="superseded by a user message")
+    for child in _runs().scan_all():
+        if (child.mode == "child" and child.parent_thread_id == tid
+                and child.origin == "background-child"
+                and child.status == "pending"):
+            _runs().cancel(child.thread_id, child.id)
 
 
 def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
@@ -1259,11 +1245,20 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
     error status write after the call would never run)."""
     n = 0
     try:
-        for rec in MESSAGE_BACKLOG.for_thread(tid):
-            if rec.origin == "continuation" and rec.id not in pre_turn_ids:
-                MESSAGE_BACKLOG.claim(tid, rec.id)
+        for rec in _runs().list(tid):
+            if (rec.status == "pending" and rec.origin == "continuation"
+                    and rec.id not in pre_turn_ids):
+                _runs().cancel(tid, rec.id)
                 append_event(MANAGER.thread_dir(tid), "continuation_cancelled",
                              id=rec.id, reason="the scheduling turn failed")
+                n += 1
+        active_run_id = (_TURN_INTERJECTION.get(tid) or {}).get("run_id")
+        for child in _runs().scan_all():
+            if (child.mode == "child" and child.parent_thread_id == tid
+                    and child.parent_run_id == active_run_id
+                    and child.origin == "background-child"
+                    and child.status == "pending"):
+                _runs().cancel(child.thread_id, child.id)
                 n += 1
     except Exception:
         logging.error("continuation cancel sweep failed for %s (original turn "
@@ -1272,35 +1267,41 @@ def _cancel_this_turns_continuations(tid: str, pre_turn_ids: set) -> int:
 
 
 def _consume_interjections(tid: str, ids: set) -> None:
-    """The interjection claim: remove each id from the journal (the entry-gone
-    gate then makes the queued fallback dispatcher skip it — exactly-once) and
-    remember the record in the turn-scoped context for the fate-sharing
-    re-journal. A successful claim also drains the framing's continuation
+    """Terminalize injected pending Runs and remember them for fate-sharing retry.
+
+    Dispatch skips each now non-pending ticket, giving exactly-once execution. A
+    successful claim also drains the framing's continuation
     snapshot ("cleared_ids"): the clear is deferred to HERE so it commits iff
     the enumerating message reached the durable checkpoint — a turn that dies
     pre-checkpoint leaves the scheduled follow-ups intact (they were promised
     "cleared" only in a message that never durably existed). Clearing by
-    snapshotted id, not clear-all, is what lets a continue_later the model
-    issues in RESPONSE (a fresh id, journaled before this claim) survive.
+    snapshotted id, not clear-all, lets a new background child the model
+    dispatches in RESPONSE survive.
     Called from the middleware's next-boundary claim and from the terminal
-    sweep below; idempotent (a claimed id is simply no longer found)."""
+    sweep below; idempotent (terminal runs are absent from pending records)."""
     ctx = _TURN_INTERJECTION.setdefault(
         tid, {"claimed": [], "defer": False, "cleared_ids": set()})
     claimed_any = False
-    for rec in MESSAGE_BACKLOG.for_thread(tid):
+    for rec in _pending_run_records(tid):
         if rec.id in ids:
-            MESSAGE_BACKLOG.claim(tid, rec.id)
+            _runs().transition(tid, rec.id, "success",
+                               consumed_by=ctx.get("run_id"))
             ctx["claimed"].append(rec)
             claimed_any = True
     if claimed_any and ctx.get("cleared_ids"):
         snapshot = ctx["cleared_ids"]
         ctx["cleared_ids"] = set()
-        for rec in MESSAGE_BACKLOG.for_thread(tid):
-            if rec.id in snapshot and rec.origin == "continuation":
-                MESSAGE_BACKLOG.claim(tid, rec.id)
+        for rec in _runs().list(tid):
+            if (rec.status == "pending" and rec.id in snapshot
+                    and rec.origin == "continuation"):
+                _runs().cancel(tid, rec.id)
                 append_event(MANAGER.thread_dir(tid),
                              "continuation_cancelled", id=rec.id,
                              reason="superseded by a mid-turn user message")
+        for child in _runs().scan_all():
+            if (child.id in snapshot and child.origin == "background-child"
+                    and child.status == "pending"):
+                _runs().cancel(child.thread_id, child.id)
 
 
 def _frame_interjection(rec: "PendingMessage") -> str:
@@ -1321,15 +1322,18 @@ def _frame_interjection(rec: "PendingMessage") -> str:
     if ctx.get("defer"):
         guide += _INTERJECTION_DEFER
     if rec.sender is None:
-        pending = [r for r in MESSAGE_BACKLOG.for_thread(rec.thread_id)
-                   if r.origin == "continuation"]
+        pending = [r for r in _runs().list(rec.thread_id)
+                   if r.status == "pending" and r.origin == "continuation"]
+        pending += [r for r in _runs().scan_all()
+                    if r.status == "pending" and r.origin == "background-child"
+                    and r.parent_thread_id == rec.thread_id]
         if pending:
             ctx.setdefault("cleared_ids", set()).update(r.id for r in pending)
             guide += (" This message also cleared your scheduled follow-ups: "
                       + " ".join(f"{i}. {r.text}"
                                  for i, r in enumerate(pending, 1))
                       + (" — recreate any that still matter with "
-                         "continue_later, or drop them deliberately."
+                         "background-research-agent, or drop them deliberately."
                          if ctx.get("defer") else
                          " — mention in your reply anything dropped that "
                          "still matters."))
@@ -1355,12 +1359,12 @@ def _claim_seen_interjections(tid: str, chat) -> None:
 def _rejournal_claimed_interjections(tid: str, rider) -> int:
     """Fate-sharing REVERSED (Pierre, PR #199 note 5): a user often interjects
     precisely because the turn looks like it is failing, so an interjection a
-    now-dead turn had claimed must not die with it. Re-journal each claimed
-    record's text under a FRESH id and submit it to the serial worker as its
+    now-dead turn had consumed must not die with it. Create a fresh pending Run
+    for each consumed record and submit it to the serial worker as its
     own follow-up turn. Fresh, not same-id: the dead turn's framed copy keeps
     the old id in the thread checkpoint forever, so any later turn's boundary
-    claim scan would silently re-claim a same-id entry and the follow-up's
-    entry-gone gate would then skip it — the promised retry would never run.
+    claim scan would silently consume a same-id retry too — the promised retry
+    would never run.
     A fresh id matches nothing stale: the entry is delivered exactly once, by
     its dispatcher or by legitimate re-injection into an intervening turn.
     The dead framed copy itself is duplicate EXPOSURE when the follow-up runs
@@ -1371,19 +1375,14 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
     try:
         claimed = (_TURN_INTERJECTION.pop(tid, None) or {}).get("claimed", [])
         for rec in claimed:
-            fresh = MESSAGE_BACKLOG.add(PendingMessage(
-                thread_id=rec.thread_id, text=rec.text, sender=rec.sender,
-                rider=rec.rider, enqueued_at=rec.enqueued_at))
+            fresh = _create_run(
+                rec.thread_id, rec.text,
+                rider=_rider_from_fields(rec.rider), sender=rec.sender)
             # The retried turn keeps the ORIGINAL message's context rider
             # (sent_at/tz/lat/lon from the journal entry — recovery fidelity,
             # like the restart drain); fall back to a fresh rider with the
             # dead turn's tz only when the entry never carried one.
-            _RESUME_SCHEDULER.submit_message(
-                tid, fresh.text,
-                _rider_from_fields(fresh.rider)
-                or _build_rider(datetime.now(timezone.utc).isoformat(),
-                                rider.tz if rider else None),
-                fresh.sender, fresh.id)
+            _RESUME_SCHEDULER.submit(fresh.id, tid)
             n += 1
     except Exception:
         logging.error("interjection re-journal failed for %s (original turn "
@@ -1395,14 +1394,24 @@ def _rejournal_claimed_interjections(tid: str, rider) -> int:
 # the web layer is the only embedder that does (CLI/emacsos/evals keep today's
 # behavior by construction). The journal read is the locked one — the
 # middleware hook runs on the turn's worker thread, never the event loop.
+def _pending_run_records(tid: str) -> list[PendingMessage]:
+    """Interjection adapter over pending runs (the middleware needs record shape)."""
+    return [PendingMessage(
+        thread_id=run.thread_id, text=run.text or "", sender=run.sender,
+        rider=run.rider, enqueued_at=run.created_at, origin=run.origin, id=run.id)
+        for run in _runs().list(tid)
+        if (run.status == "pending" and run.mode == "turn" and run.text
+            and run.assistant_id == "general-agent")]
+
+
 register_interjection_callbacks(
-    MESSAGE_BACKLOG.for_thread, _consume_interjections, _frame_interjection)
+    _pending_run_records, _consume_interjections, _frame_interjection)
 
 
 # --- turn-completion observers (shared session API — D1 / tech-design §7.1) ----
 # The one seam every client observes a completed turn through, instead of each
 # re-deriving "did the turn finish and what did it say." Callbacks fire at a
-# turn's terminal exit with (tid, stage, origin, reply_text, backlog_id). No
+# turn's terminal exit with (tid, stage, origin, reply_text, run_id). No
 # observer is registered in v1 — this is the P0 harness hook the voice
 # delivery adapter (and any future client) will register onto.
 _TURN_OBSERVERS: list = []
@@ -1416,14 +1425,14 @@ def register_turn_observer(cb) -> None:
     _TURN_OBSERVERS.append(cb)
 
 
-def _notify_turn_observers(tid, stage, origin, reply_text, backlog_id) -> None:
+def _notify_turn_observers(tid, stage, origin, reply_text, run_id) -> None:
     """Fire every observer, isolated: one raising must never disturb the others
     or the just-written terminal status (the _rejournal best-effort mold). Snapshot
     the global first: turns run concurrently in a threadpool over this shared list,
     so a registration racing a notify pass must not make the iteration set diverge."""
     for cb in tuple(_TURN_OBSERVERS):
         try:
-            cb(tid, stage, origin, reply_text, backlog_id)
+            cb(tid, stage, origin, reply_text, run_id)
         except Exception:
             logging.error("turn observer failed for %s (%s); continuing", tid,
                           stage, exc_info=True)
@@ -1437,12 +1446,336 @@ class _SupersedeCapReached(Exception):
     holding the global single-flight slot."""
 
 
+_RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
+_RUN_SERVICES_LOCK = threading.Lock()
+
+
+def _runs():
+    """Return the durable run service sharing the current ThreadManager root.
+
+    Production has one immutable root. Tests historically relocate ``MANAGER.root_dir``
+    after module import; cache one service per observed root so those writers still share
+    a lock instead of mutating the process singleton's root under concurrent requests.
+    """
+    root = MANAGER.root_dir
+    service = _RUN_SERVICES_BY_ROOT.get(root)
+    if service is not None:
+        return service
+    with _RUN_SERVICES_LOCK:
+        return _RUN_SERVICES_BY_ROOT.setdefault(root, type(RUN_SERVICE)(root))
+
+
+def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
+                resume_decision=None, resume=False, active_ms=0.0,
+                resume_value=None, pending_text=None, origin=None, work_id=None,
+                assistant_id="general-agent", mode="turn", parent_thread_id=None,
+                parent_run_id=None, dispatch_key=None,
+                single_active_child=False, origin_limit=None,
+                cancel_pending=False, hidden=False, max_runs=None,
+                max_pending=None) -> Run:
+    """Commit one web turn before placing its id on a dispatch queue."""
+    return _runs().create(
+        tid, assistant_id, text, work_id=work_id, mode=mode,
+        parent_thread_id=parent_thread_id, parent_run_id=parent_run_id,
+        dispatch_key=dispatch_key, sender=sender,
+        rider=_rider_to_fields(rider) if rider is not None else None,
+        origin=origin, resume=resume, resume_decision=resume_decision,
+        resume_value=resume_value,
+        pending_text=pending_text, active_ms=active_ms,
+        single_active_child=single_active_child, origin_limit=origin_limit,
+        cancel_pending=cancel_pending, hidden=hidden, max_runs=max_runs,
+        max_pending=max_pending)
+
+
+def _dispatch_child(parent: Run, dispatch_key: str, assistant_id: str,
+                    description: str) -> dict[str, str]:
+    """Create-or-find one child invocation and queue its durable id."""
+    background = assistant_id == "background-research-agent"
+    # ``dispatch_key`` is work_id + LangGraph tool-call id, stable across the
+    # successor invocation that replays the interrupted task node.
+    child_key = dispatch_key
+    child_tid = "sub-" + hashlib.sha256(child_key.encode()).hexdigest()[:24]
+    existing = next((candidate for candidate in _runs().list(child_tid)
+                     if candidate.dispatch_key == dispatch_key), None)
+    if existing is None:
+        chain_len = _continuation_chain_len(parent.thread_id) if background else 0
+        if chain_len >= CHAIN_CAP:
+            raise ValueError(
+                f"background follow-up chain is limited to {CHAIN_CAP} turns")
+        if background:
+            assistant_id = "research-agent"
+        existing = _create_run(
+            child_tid, description, assistant_id=assistant_id, mode="child",
+            parent_thread_id=parent.thread_id, parent_run_id=parent.id,
+            dispatch_key=dispatch_key, work_id=parent.work_id,
+            origin="background-child" if background else "required-child",
+            single_active_child=not background,
+            origin_limit=(CHAIN_CAP - chain_len) if background else None,
+            hidden=True)
+    if existing.status == "pending":
+        _RESUME_SCHEDULER.submit(existing.id, child_tid)
+    return {"thread_id": child_tid, "run_id": existing.id}
+
+
+def _execute_child_run(run: Run, *, resume: bool = False) -> None:
+    """Execute a hidden child, then schedule the parent's next invocation."""
+    if run.status == "pending":
+        try:
+            run = _runs().claim(run.thread_id, run.id)
+        except InvalidRunTransition:
+            return
+    parent_working_dir = None
+    try:
+        parent_working_dir = MANAGER.thread_default_working_dir(run.parent_thread_id)
+        sandbox = _get_sandbox_backend(run.parent_thread_id)
+        chat = MANAGER.get(
+            run.thread_id, working_dir=parent_working_dir, sandbox_backend=sandbox,
+            assistant_id=run.assistant_id)
+        result = chat.resume() if resume else chat.message(run.text or "")
+        _runs().transition(run.thread_id, run.id, "success", result=result)
+    except Exception as exc:
+        logging.error("child run %s failed", run.id, exc_info=True)
+        _runs().transition(run.thread_id, run.id, "error", error=str(exc))
+        result = f"The delegated task failed: {exc}"
+    finally:
+        if parent_working_dir is not None:
+            try:
+                SandboxManager.cleanup(parent_working_dir)
+            except Exception:
+                logging.error(
+                    "child run %s sandbox cleanup failed", run.id, exc_info=True)
+
+    _complete_child_handoff(run, result)
+
+
+def _recover_child_run(run: Run) -> None:
+    """Resume or finalize one child invocation abandoned while running."""
+    parent_working_dir = MANAGER.thread_default_working_dir(run.parent_thread_id)
+    try:
+        chat = MANAGER.get(
+            run.thread_id, working_dir=parent_working_dir, sandbox_backend=None,
+            assistant_id=run.assistant_id)
+        snap = chat.agent.get_state(chat.runconfig)
+        if (getattr(snap, "next", None) or ()
+                or (getattr(snap, "interrupts", None) or ())):
+            _execute_child_run(run, resume=True)
+            return
+        raw = chat.get_raw_messages()
+        result = next((message.content for message in reversed(raw)
+                       if getattr(message, "type", None) == "ai"
+                       and isinstance(message.content, str) and message.content), None)
+        if result is not None:
+            _runs().transition(run.thread_id, run.id, "success", result=result)
+        else:
+            _execute_child_run(run)
+            return
+    except Exception as exc:
+        logging.error("child recovery failed for %s", run.id, exc_info=True)
+        _runs().transition(run.thread_id, run.id, "error", error=str(exc))
+        _complete_child_handoff(run, f"The delegated task failed: {exc}")
+        return
+
+    _complete_child_handoff(run, result)
+
+
+def _complete_child_handoff(run: Run, result: str) -> Run | None:
+    """Create-or-find the one parent invocation caused by a terminal child."""
+    try:
+        parent = _runs().get(run.parent_thread_id, run.parent_run_id)
+    except RunNotFound:
+        logging.info("parent of child run %s was deleted", run.id)
+        MANAGER.hard_delete(run.thread_id)
+        return None
+
+    try:
+        if run.origin == "background-child":
+            successor = _create_run(
+                run.parent_thread_id,
+                "Background research completed. Present these findings to the user:\n\n" + result,
+                origin="continuation", work_id=parent.work_id,
+                dispatch_key=f"child-followup:{run.id}")
+        else:
+            successor = _create_run(
+                run.parent_thread_id, None, resume_value=result,
+                rider=_rider_from_fields(parent.rider), sender=parent.sender,
+                origin=parent.origin, assistant_id=parent.assistant_id,
+                active_ms=parent.active_ms, work_id=parent.work_id,
+                dispatch_key=f"child-resume:{run.id}")
+    except FileNotFoundError:
+        if not os.path.isdir(MANAGER.thread_dir(run.parent_thread_id)):
+            logging.info("parent of child run %s was deleted", run.id)
+            MANAGER.hard_delete(run.thread_id)
+            return None
+        raise
+    _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
+    if run.origin == "background-child":
+        MANAGER.hard_delete(run.thread_id)
+    return successor
+
+
+def _cleanup_consumed_child(run: Run) -> None:
+    """Reap a required child after its parent replay consumed the resume value."""
+    prefix = "child-resume:"
+    if not run.dispatch_key or not run.dispatch_key.startswith(prefix):
+        return
+    child_id = run.dispatch_key[len(prefix):]
+    child = next((candidate for candidate in _runs().scan_all()
+                  if candidate.id == child_id and candidate.mode == "child"), None)
+    if child is not None:
+        MANAGER.hard_delete(child.thread_id)
+
+
+def _execute_run(run_id: str, tid: str) -> None:
+    """Load and execute one durable run; dispatch queues carry ids only."""
+    try:
+        run = _runs().get(tid, run_id)
+    except RunNotFound:
+        logging.info("run %s on %s disappeared before dispatch", run_id, tid)
+        return
+    if run.mode == "child":
+        if run.status == "pending":
+            _execute_child_run(run)
+        elif run.status == "running":
+            _recover_child_run(run)
+        elif run.status in {"success", "error"}:
+            _complete_child_handoff(
+                run, run.result or f"The delegated task failed: {run.error}")
+        return
+    if run.status in {"running", "interrupted"}:
+        _recover_run(run)
+        return
+    if run.status != "pending":
+        logging.info("run %s on %s is already %s; skipping duplicate dispatch",
+                     run_id, tid, run.status)
+        return
+    context = AsyncTaskContext(
+        run.thread_id, run.id, run.work_id,
+        lambda key, assistant, description: _dispatch_child(
+            run, key, assistant, description))
+    with async_task_context(context):
+        _process_message(
+            tid, run.text, rider=_rider_from_fields(run.rider), sender=run.sender,
+            resume_decision=run.resume_decision, resume=run.resume,
+            accumulated_active_ms=run.active_ms, pending_text=run.pending_text,
+            origin=run.origin, _run=run,
+            resume_value=run.resume_value, assistant_id=run.assistant_id)
+    try:
+        current = _runs().get(tid, run_id)
+        # Pending means execution deliberately deferred before claim (e.g. a
+        # continuation behind HITL). Interrupted means a fair/child suspension
+        # already created its successor. Terminal means another dispatcher or an
+        # interjection consumer completed the ticket. Only a still-running run owns
+        # this invocation's terminal projection.
+        if current.status == "running":
+            status = _get_status(tid)
+            terminal = "error" if status.get("stage") == "error" else "success"
+            _runs().transition(tid, run_id, terminal, error=status.get("error"))
+            current = _runs().get(tid, run_id)
+        if current.status in {"success", "error", "timeout", "cancelled"}:
+            _cleanup_consumed_child(current)
+            _dispatch_pending_after(tid, run_id)
+    except RunNotFound:
+        pass  # thread deletion removes its run store while a dispatcher unwinds.
+
+
+def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
+    """Queue the oldest pending run; each terminal exit releases the next."""
+    runs = _runs().list(tid)
+    if any(run.status == "running" for run in runs):
+        return
+    if (_get_status(tid).get("stage") == "paused"
+            and any(run.status == "interrupted" for run in runs)):
+        return
+    for pending in runs:
+        if pending.status == "pending" and pending.id != run_id:
+            _RESUME_SCHEDULER.submit(pending.id, tid)
+            return
+
+
+def _recover_run(run: Run) -> None:
+    """Recover one invocation abandoned in running/interrupted state.
+
+    A protocol invocation is never restarted in place. Recovery finalizes it or creates
+    one successor on the same thread/work, then queues accepted followers behind that
+    successor by construction.
+    """
+    tid = run.thread_id
+    pending_text = run.pending_text or run.text or _get_status(tid).get("pending_message")
+    children = [child for child in _runs().scan_all()
+                if child.parent_thread_id == tid
+                and child.parent_run_id == run.id
+                and child.origin == "required-child"]
+    if children and run.status == "running":
+        try:
+            checkpoint_has_child = bool(
+                MANAGER.get(tid, sandbox_backend=None).pending_child())
+        except FileNotFoundError:
+            return
+        if checkpoint_has_child:
+            run = _runs().transition(tid, run.id, "interrupted")
+            _set_status(tid, "paused", pending_message=pending_text)
+        else:
+            # The child mapping reached disk before LangGraph committed its interrupt.
+            # Keep it pending but do not execute it yet. Parent checkpoint recovery
+            # replays the task node, whose dispatch key finds this same child; only
+            # then is it queued before the replay commits its interrupt.
+            children = []
+    if run.status == "interrupted":
+        successor = next((candidate for candidate in _runs().list(tid)
+                          if candidate.status in {"pending", "running"}
+                          and candidate.work_id == run.work_id
+                          and (candidate.resume
+                               or candidate.resume_value is not None)), None)
+        if successor is None and children:
+            child = children[0]
+            if child.status in {"success", "error"}:
+                successor = _complete_child_handoff(
+                    child, child.result
+                    or f"The delegated task failed: {child.error}")
+            else:
+                _RESUME_SCHEDULER.submit(child.id, child.thread_id)
+                return
+        if successor is None:
+            successor = _create_run(
+                tid, None, rider=_rider_from_fields(run.rider), sender=run.sender,
+                resume=True, active_ms=run.active_ms, pending_text=pending_text,
+                origin=run.origin, work_id=run.work_id)
+        _RESUME_SCHEDULER.submit(successor.id, tid)
+        return
+
+    decision = _recovery_decision(tid, pending_text or "")
+    logging.info("recovery: run %s on %s -> %s", run.id, tid, decision)
+    if decision == "finalize":
+        _runs().transition(tid, run.id, "success")
+        _set_status(tid, "ready")
+        _dispatch_pending_after(tid)
+        return
+    if decision == "error":
+        message = ("Server restarted and this thread's turn could not be recovered. "
+                   "Send the message again.")
+        _runs().transition(tid, run.id, "error", error=message)
+        _set_status(tid, "error", error=message, pending_message=pending_text)
+        _dispatch_pending_after(tid, run.id)
+        return
+
+    _runs().transition(tid, run.id, "interrupted", active_ms=run.active_ms)
+    successor = _create_run(
+        tid, None if decision == "resume" else pending_text,
+        rider=_rider_from_fields(run.rider), sender=run.sender,
+        resume=(decision == "resume"), active_ms=run.active_ms,
+        pending_text=pending_text if decision == "resume" else None,
+        origin=run.origin, work_id=run.work_id)
+    _RESUME_SCHEDULER.submit(successor.id, tid)
+
+
 def _process_message(tid: str, text: str | None, rider: ContextRider | None = None,
                      sender: str | None = None, resume_decision: dict | None = None,
                      resume: bool = False, accumulated_active_ms: float = 0.0,
                      pending_text: str | None = None,
-                     backlog_id: str | None = None,
-                     origin: str | None = None) -> None:
+                     origin: str | None = None, _run: Run | None = None,
+                     resume_value: str | None = None,
+                     assistant_id: str = "general-agent") -> None:
+    event_id = _run.id if _run is not None else None
     # `sender` (set only for an inbound-message triage turn) rides the run config as
     # ``sms_sender`` so send_reply knows who to reply to; a normal turn passes None.
     # `origin` ("continuation" for an agent-scheduled background turn, else None) keys
@@ -1458,9 +1791,6 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # placeholder bubble while processing (cleared once status==ready). On a resume
     # (text=None) the original message is carried via `pending_text` so the bubble
     # survives the pause window instead of vanishing until the turn completes.
-    # `backlog_id` (set only for a journaled follow-up) names this turn's entry in the
-    # durable MESSAGE_BACKLOG; it is claimed (removed) after the first busy status write
-    # inside the queue acquire — see the claim below.
     if origin == "continuation" and text and not text.startswith(_CONTINUATION_RIDER):
         # Single-sourced here so every dispatcher (ready-exit, recovery drain) gets
         # the marker without carrying it: the prefix travels with the text into the
@@ -1488,12 +1818,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     and resume_decision is None and not resume)
     _pending_msg = text if text else pending_text
     pending_kwargs = {"pending_message": _pending_msg} if _pending_msg else {}
-    # Persist the turn's sender + rider in EVERY busy status write, so a restart can
-    # recover this turn faithfully whatever stage it dies at: a triage (inbound-SMS)
-    # turn resumed without its sender would rebuild as a FULL-privilege non-triage
-    # agent with no reply target — the sender is what keeps the reduced tool surface
-    # + HITL gate on recovery. The rider's raw fields let recovery rebuild it via
-    # _build_rider.
+    # The durable Run is authoritative for sender/rider and therefore triage privilege.
+    # Mirror them into every busy status write for UI projection and legacy recovery.
     if sender:
         pending_kwargs["sender"] = sender
     if rider is not None:
@@ -1531,12 +1857,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # "processing" statuses itself, so the "running" callback is
         # intentionally ignored.
         #
-        # A waiter behind a SAME-TID turn writes NOTHING: that running turn owns
-        # status.json (its text/sender/rider must stay durable there for crash
-        # recovery — clobbering the sender would resume a crashed triage turn
-        # full-privilege). A journaled follow-up (backlog_id set, not resume)
-        # never writes — it is durable in MESSAGE_BACKLOG. A RESUME never
-        # writes regardless of backlog_id (a resume's durable home is its
+        # A waiter behind a SAME-TID turn writes nothing: that running turn owns the
+        # status projection while its Run remains durable authority. A RESUME never
+        # writes while waiting (its durable home is its
         # `paused` status record: overwriting it with "queued" would misroute
         # a follow-up arriving in the wait window off the serial scheduler and
         # onto the mid-flight checkpoint — the ordering hazard the paused
@@ -1546,7 +1869,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # _mark_pending uses. (Residual: a direct-dispatch waiter behind a
         # same-tid turn that is ITSELF queued behind another thread still
         # writes — rare double-nesting, dissolved by Step 2.)
-        if (stage == "queued" and backlog_id is None and not resume
+        if (stage == "queued" and not resume
                 and THREAD_QUEUE.peek_holder() != tid):
             _set_status(tid, "queued", **pending_kwargs)
 
@@ -1566,6 +1889,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # double-callback.
         with THREAD_QUEUE.acquire(tid, on_state_change=on_queue_wait,
                                   accumulated_active_ms=accumulated_active_ms):
+            # A queued run remains pending until it actually owns THREAD_QUEUE. This
+            # is what makes it visible to the active turn's interjection reader. Two
+            # dispatchers for one run serialize here; only the first can claim it.
+            if _run is not None:
+                try:
+                    current_run = _runs().get(tid, _run.id)
+                except RunNotFound:
+                    return
+                if current_run.status != "pending":
+                    logging.info("run %s on %s reached %s before slot claim; skipping",
+                                 _run.id, tid, current_run.status)
+                    return
             if _clears_plan:
                 _clear_pending_continuations(tid)
             # Snapshot pre-existing continuation entries: ones THIS turn journals
@@ -1573,17 +1908,19 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             # exit must cancel them (not strand a visible "will follow up"
             # promise until a surprise restart fire) — while never touching
             # pre-existing entries, which have live dispatchers of their own.
-            _pre_turn_conts.update(r.id for r in MESSAGE_BACKLOG.for_thread(tid)
-                                   if r.origin == "continuation")
+            _pre_turn_conts.update(
+                r.id for r in _runs().list(tid)
+                if r.status == "pending" and r.origin == "continuation")
             # Turn-scoped interjection context (see _TURN_INTERJECTION): fresh
             # for a new turn; a RESUMED slice reuses the live one so entries
             # claimed before the pause keep fate-sharing coverage. "defer"
             # mirrors the tool surface — triage and continuation turns have no
-            # continue_later, so their framing omits the defer option.
+            # background target, so their framing omits the defer option.
             if not resume or tid not in _TURN_INTERJECTION:
                 _TURN_INTERJECTION[tid] = {
                     "claimed": [], "cleared_ids": set(),
-                    "defer": sender is None and origin != "continuation"}
+                    "defer": sender is None and origin != "continuation",
+                    "run_id": _run.id if _run is not None else None}
             if origin == "continuation" and not resume and resume_decision is None:
                 # A HITL reply awaiting approval: the supersede flow below exists
                 # for a NEWER USER message and would silently REJECT the pending
@@ -1603,38 +1940,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     logging.info("continuation on %s deferred: a reply is awaiting "
                                  "approval", tid)
                     return
-            if backlog_id and not resume:
-                # Exactly-once gate: the journal entry is the run ticket. A message can
-                # acquire TWO dispatchers — its live-submitted job/task plus a recovery
-                # drain job — and whichever runs second must find the entry gone and
-                # SKIP, not re-run the turn (claim() alone is idempotent-silent, which
-                # would deliver twice). The one state where "entry gone" still means
-                # "run" is the crash window below: status carries claimed_id ==
-                # backlog_id, but that head turn is delivered by RECOVERY, not by a
-                # backlog_id dispatcher — so gone-entry here always means already
-                # delivered.
-                #
-                # `not resume`: a fair-sched RESUME is not a dispatch — it carries the
-                # ORIGINAL turn's backlog_id only so its terminal events keep their id,
-                # and that entry was rightly claimed at the original turn start. Gating
-                # a resume on it silently swallowed the resume and stranded the thread
-                # paused forever (live thread 2026-07-21; the symptom test pins this).
-                if not any(r.id == backlog_id
-                           for r in MESSAGE_BACKLOG.for_thread(tid)):
-                    logging.info("follow-up %s on %s not in the journal (already "
-                                 "delivered, or the journal was unreadable); "
-                                 "skipping this dispatch", backlog_id, tid)
+            if _run is not None:
+                try:
+                    _run = _runs().claim(tid, _run.id)
+                except InvalidRunTransition:
                     return
-                # This journaled follow-up now OWNS the slot: take over status.json
-                # (its text/sender/rider + the claimed entry id), THEN pop the journal
-                # entry — status-first, so the message is durable in at least one store
-                # at every instant. A crash between the two leaves it in both; recovery
-                # dedupes by claimed_id.
-                _set_status(tid, "starting_sandbox", claimed_id=backlog_id,
-                            **pending_kwargs)
-                MESSAGE_BACKLOG.claim(tid, backlog_id)
-            else:
-                _set_status(tid, "starting_sandbox", **pending_kwargs)
+            _set_status(tid, "starting_sandbox", **pending_kwargs)
             try:
                 # Inside the try so the `finally` reaps even if sandbox
                 # creation registers a container and then raises — cleanup
@@ -1650,15 +1961,20 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     if sender:
                         _cfg[SMS_SENDER_KEY] = sender
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
+                    assistant_kwargs = ({"assistant_id": assistant_id}
+                                        if assistant_id != "general-agent" else {})
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,
                                        on_queue_state=None,
                                        configurable=(_cfg or None),
                                        triage=bool(sender),
-                                       continuation=(origin == "continuation"))
+                                       continuation=(origin == "continuation"),
+                                       **assistant_kwargs)
                 except FileNotFoundError:
                     return
                 _set_status(tid, "processing", **pending_kwargs)
-                if resume:
+                if resume_value is not None:
+                    resp = chat.resume_child(resume_value)
+                elif resume:
                     # Fair-scheduling resume: continue the in-flight turn from its
                     # durable checkpoint (input=None). No new message, no supersede.
                     resp = chat.resume()
@@ -1720,6 +2036,11 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # cleanup() SIGKILLs (the response is already committed to the
                 # checkpoint here, and the sandbox has nothing to flush).
                 SandboxManager.cleanup(MANAGER.thread_default_working_dir(tid))
+        if (_run is not None and getattr(chat, "pending_child", lambda: None)()):
+            carry = THREAD_QUEUE.pop_hold(tid)
+            _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
+            _set_status(tid, "paused", **pending_kwargs)
+            return
         MANAGER.touch(tid)
 
         # Generate description if there is none
@@ -1765,19 +2086,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             _terminal = ("ready", resp)
             if origin == "continuation":
                 append_event(MANAGER.thread_dir(tid), "continuation_completed",
-                             id=backlog_id or "")
-            # Dispatch any continuations this turn scheduled (or that were deferred
-            # behind an approval) — at the READY exit ONLY: never at
-            # awaiting_approval (a continuation must not enter the supersede path),
-            # and never at tool time (the running turn holds the queue; parking the
-            # serial worker for the rest of the turn would starve every thread's
-            # resumes). Crash-before-dispatch is covered by the recovery drain.
-            # A CONTINUATION turn skips this: it cannot journal (no door/tool in
-            # its config), and its queued siblings were already submitted by the
-            # scheduling turn — re-submitting them is redundant worker traffic +
-            # duplicate dispatched events (the gate makes it harmless, not clean).
-            if origin != "continuation":
-                _dispatch_continuations(tid, rider)
+                             id=event_id or "")
     except ThreadPauseRequested:
         # NON-terminal (fair scheduling): the turn yielded the slot at its quantum so a
         # waiting turn could run. Its work is durable in the checkpoint (nothing lost);
@@ -1792,9 +2101,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         DOMAIN_MANAGERS.pop(tid, None)  # fresh container on resume; drop the cached backend
         # Enqueue the resume BEFORE advertising `paused`, so a new message that races in
         # and sees `paused` is routed onto this scheduler strictly AFTER the resume.
-        _RESUME_SCHEDULER.submit_resume(
-            tid, rider, sender, carry, pending_kwargs.get("pending_message"),
-            origin=origin, backlog_id=backlog_id)
+        if _run is not None:
+            _runs().transition(tid, _run.id, "interrupted", active_ms=carry)
+            successor = _create_run(
+                tid, None, rider=rider, sender=sender, resume=True,
+                active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
+                origin=origin, work_id=_run.work_id)
+            _RESUME_SCHEDULER.submit(successor.id, tid)
+        else:
+            # Compatibility for direct low-level callers during the migration.
+            _RESUME_SCHEDULER.submit_resume(
+                tid, rider, sender, carry, pending_kwargs.get("pending_message"),
+                origin=origin)
         # accumulated_active_ms rides the status write so a restart-recovered resume
         # keeps its 2h-cap accounting (the in-memory submit_resume above is lost with
         # the process; sender/rider are already in pending_kwargs). A crash of a
@@ -1849,8 +2167,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         # observer fires post-release, exactly like the normal terminal exits).
         pass
     except Exception as e:
-        # The ready exit sets _terminal BEFORE its append_event/_dispatch_continuations
-        # tail (which can raise into HERE); reset so the observer reports the
+        # A terminal tail failure must not report a stale ready state; reset so
+        # the observer reports the
         # authoritative "error", never a stale "ready", when that tail fails. A
         # primary chat.message failure lands here with _terminal already None (no-op).
         _terminal = None
@@ -1869,7 +2187,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                                + (_REJOURNAL_NOTE if _rejournaled else "")),
                         **pending_kwargs)
             append_event(MANAGER.thread_dir(tid), "continuation_failed",
-                         id=backlog_id or "", error=str(e)[:300])
+                         id=event_id or "", error=str(e)[:300])
             _mark_unseen_response(tid)
         else:
             _set_status(tid, "error",
@@ -1892,7 +2210,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
     # skipped turn correctly fires nothing. No observer registered in v1 ⇒ a no-op.
     if _terminal is None:
         _terminal = ("error", None)
-    _notify_turn_observers(tid, _terminal[0], origin, _terminal[1], backlog_id)
+    _notify_turn_observers(tid, _terminal[0], origin, _terminal[1], event_id)
 
 
 def _capture_conversation(tid: str, reason: str) -> None:
@@ -1988,14 +2306,14 @@ async def apple_touch_icon() -> Response:
 
 @app.post("/threads")
 async def create_thread(domain: str | None = Form(None)):
-    chat = MANAGER.new()
-    tid = chat.thread_id
+    tid = await run_in_threadpool(MANAGER.reserve)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected:
-        DomainManager(
+        await run_in_threadpool(
+            DomainManager,
             MANAGER.thread_default_working_dir(tid),
             selected,
-            branch_suffix=tid[-4:],
+            branch_suffix=tid[-4:]
         )
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
@@ -2010,8 +2328,7 @@ async def create_thread_with_message(
 ):
     # Reserve the thread directory synchronously so the redirect target is valid,
     # but defer everything slow (clone, sandbox, agent, description) to the background.
-    chat = MANAGER.new()
-    tid = chat.thread_id
+    tid = await run_in_threadpool(MANAGER.reserve)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
@@ -2028,33 +2345,23 @@ async def get_thread(
     reviewed: int = 0,
     pushed: int = 0,
 ) -> str:
-    tdir = MANAGER.thread_dir(tid)
-    if not os.path.isdir(tdir):
-        raise HTTPException(status_code=404, detail="Thread not found")
-
-    # Opening the thread page = the user has seen its responses -> clear the "new"
-    # badge (bare missing-ok unlink + set discard; lock-free on the event loop).
-    _clear_unseen_response(tid)
-    _clear_urgent(tid)   # opening the thread clears its urgent flag (its pill + the icon dot once none remain)
-
-    stage = _get_status(tid).get("stage", "ready")
-    # During the initial setup stages there is no point constructing a Thread
-    # (which would also race with the background task starting the sandbox).
-    chat: Thread | None = None
-    if stage not in INIT_STAGES:
-        # Skip the sandbox during plain renders; it gets started by the
-        # background task when a message is being processed.
-        try:
-            chat = MANAGER.get(tid, sandbox_backend=None)
-        except FileNotFoundError:
+    def load_and_render() -> str:
+        if not os.path.isdir(MANAGER.thread_dir(tid)):
             raise HTTPException(status_code=404, detail="Thread not found")
-    return render_thread(
-        tid, chat,
-        captured=bool(captured),
-        merged=bool(merged),
-        reviewed=bool(reviewed),
-        pushed=bool(pushed),
-    )
+        _clear_unseen_response(tid)
+        _clear_urgent(tid)
+        stage = _get_status(tid).get("stage", "ready")
+        chat: Thread | None = None
+        if stage not in INIT_STAGES:
+            try:
+                chat = MANAGER.get(tid, sandbox_backend=None)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="Thread not found")
+        return render_thread(
+            tid, chat, captured=bool(captured), merged=bool(merged),
+            reviewed=bool(reviewed), pushed=bool(pushed))
+
+    return await run_in_threadpool(load_and_render)
 
 
 @app.get("/thread/{tid}/status")
@@ -2064,7 +2371,8 @@ async def thread_status(tid: str):
     return JSONResponse(_get_status(tid))
 
 
-def _mark_pending(tid: str, text: str, busy: bool) -> None:
+def _mark_pending(tid: str, text: str, busy: bool,
+                  run_id: str | None = None) -> None:
     """Record an inbound message as busy+pending *synchronously*, before the
     POST handler returns its redirect.
 
@@ -2089,25 +2397,21 @@ def _mark_pending(tid: str, text: str, busy: bool) -> None:
     input — which is wrong for a thread that's just received a follow-up
     message.
 
-    No-op when ``busy`` — the CALLER's single busy sample (status stage OR
-    holder==tid), which also drives its journal decision — so a second message
+    No-op when ``busy`` — the caller's single busy sample (status stage OR
+    holder==tid), which also drives durable Run admission — so a second message
     to a mid-turn thread doesn't clobber the in-flight turn's status; that
-    follow-up is made durable in MESSAGE_BACKLOG instead. One shared sample
+    follow-up is already durable in RUN_SERVICE. One shared sample
     keeps the two decisions consistent (independent samples could straddle a
     turn's acquire: journal skipped AND status skipped = durable nowhere).
 
-    Runs on the asyncio event-loop thread, so it must never block: it uses
-    ``THREAD_QUEUE.peek_holder()`` (a lock-free read), NOT ``current_handle()``
-    — taking the queue's condition lock here would couple the event loop to
-    the queue and freeze the whole server whenever that lock is held by a
-    long-running turn.
+    Called off the asyncio event loop together with durable run creation.
     """
     if busy:
         # The caller's single busy sample (status stage OR holder==tid) decided
-        # this message is a journaled follow-up — write nothing: the running
+        # this message is a pending follower — write nothing: the running
         # turn owns status.json, and a write here would be clobbered by its
-        # writes while the journal already holds this message durably. One
-        # sample drives BOTH the journal decision and this skip, so they can't
+        # writes while its Run already holds this message durably. One
+        # sample drives both Run admission and this skip, so they cannot
         # disagree (two samples could straddle a turn's acquire).
         return
     holder_tid = THREAD_QUEUE.peek_holder()
@@ -2115,7 +2419,21 @@ def _mark_pending(tid: str, text: str, busy: bool) -> None:
     # Stamp the turn-start origin at submit (this is the idle→busy edge — the guard above
     # returns for an already-busy thread, so we never reset a mid-turn turn's clock).
     # _now_ms() is a bare time read — event-loop-safe, no I/O/lock (see the docstring).
-    _set_status(tid, stage, pending_message=text, started_at=_now_ms())
+    _set_status(tid, stage, pending_message=text, pending_run_id=run_id,
+                started_at=_now_ms())
+
+
+_RUN_ADMISSION_LOCK = threading.Lock()
+
+
+def _accept_message_run(tid: str, text: str, rider=None) -> tuple[Run, bool]:
+    """Persist one web submission and return whether earlier work owns the thread."""
+    with _RUN_ADMISSION_LOCK:
+        prior_stage = _get_status(tid).get("stage")
+        busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
+        run = _create_run(tid, text, rider=rider)
+        _mark_pending(tid, text, busy, run.id)
+        return run, busy
 
 
 def _build_rider(sent_at: str | None, tz: str | None,
@@ -2173,7 +2491,8 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str) -> None:
     # continuations (only a USER message supersedes the agent's plan) nor counts
     # as one (no marker prefix; it breaks the chain's trailing run, an accepted
     # accounting reset — the cap is a runaway backstop, not billing).
-    _process_message(tid, prompt, rider, origin="system")
+    run = _create_run(tid, prompt, rider=rider, origin="system")
+    _execute_run(run.id, tid)
 
 
 def _dispatch_event(sender: str, text: str) -> None:
@@ -2189,27 +2508,22 @@ def _dispatch_event(sender: str, text: str) -> None:
         return
     rendered = sub.render(sender, text)
     stage = _get_status(sub.thread_id).get("stage")
+    run = _create_run(sub.thread_id, rendered, sender=sender)
     if stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == sub.thread_id:
         # A follow-up to a busy thread (busy status, or holding the slot with no
-        # busy status written yet) — journal it (runs off-loop here, so a direct
-        # add) so a restart can't drop it; its turn claims the entry when it
-        # starts — or a running SAME-sender triage turn consumes it mid-turn
-        # via the interjection middleware — exactly like a web follow-up.
-        rec = MESSAGE_BACKLOG.add(PendingMessage(
-            thread_id=sub.thread_id, text=rendered, sender=sender,
-            enqueued_at=datetime.now(timezone.utc).isoformat()))
+        # busy status written yet). The Run above is already durable; either the
+        # serial scheduler executes it after a paused head or the current triage
+        # consumes the pending Run as an interjection.
         if stage == "paused":
             # A paused thread has RELEASED the slot — dispatching directly would
             # acquire immediately and run on the mid-flight checkpoint. Route
             # through the serial worker, behind the queued resume/recovery
             # (same as post_message).
-            _RESUME_SCHEDULER.submit_message(sub.thread_id, rendered, None,
-                                             sender, rec.id)
+            _RESUME_SCHEDULER.submit(run.id, sub.thread_id)
         else:
-            _process_message(sub.thread_id, rendered, sender=sender,
-                             backlog_id=rec.id)
+            _execute_run(run.id, sub.thread_id)
     else:
-        _process_message(sub.thread_id, rendered, sender=sender)
+        _execute_run(run.id, sub.thread_id)
 
 
 def _sms_secret_state(provided: str | None):
@@ -2289,8 +2603,9 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
         raise HTTPException(status_code=409,
                             detail="This reply was updated by a newer message — reload and review it.")
     sender = status.get("pending_sender") or ""
-    background_tasks.add_task(_process_message, tid, None, None, sender,
-                             _REPLY_DECISIONS[decision](text))
+    run = _create_run(tid, None, sender=sender,
+                      resume_decision=_REPLY_DECISIONS[decision](text))
+    background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -2422,8 +2737,7 @@ def _recovery_prep(q: "queue.Queue") -> None:
 
 
 def _rider_from_fields(fields: dict | None) -> ContextRider | None:
-    """Rebuild a turn's ContextRider from the raw fields persisted in status.json /
-    a journal entry (the same four the submit form carries)."""
+    """Rebuild a rider from Run fields or the legacy status/journal projection."""
     if not fields:
         return None
     return _build_rider(fields.get("sent_at"), fields.get("tz"),
@@ -2479,70 +2793,106 @@ def _recovery_decision(tid: str, pending_message: str) -> str:
     return "redispatch"
 
 
-def _recover_thread(tid: str) -> None:
-    """Serial-worker recovery of one thread after a restart.
+def queue_recovery_runs() -> None:
+    """Import the legacy journal once, then queue durable runs in dependency order.
 
-    HEAD turn — only when the pre-restart stage was busy (the lifespan rewrote
-    every such thread to "paused", so that stage IS the marker; a journal-only
-    recovery — a ready/awaiting_approval thread with surviving follow-ups — has
-    no interrupted head turn and must not touch it, esp. a durable HITL
-    interrupt awaiting approval): dedupe the claimed journal entry (a crash
-    between the status-claim write and the pop leaves it in both stores —
-    status owns it), then decide by graph state — "resume" / "finalize" /
-    "redispatch", or "error" when the state is unreadable (surfaced as the
-    restart-error banner).
+    Runs off the asyncio loop during lifespan startup. An abandoned head is queued
+    alone; its recovery queues its successor before accepted followers. Otherwise all
+    pending runs are queued in durable creation order.
+    """
+    visible = MANAGER.list()
+    for tid in visible:
+        legacy = MESSAGE_BACKLOG.for_thread(tid)
+        if legacy:
+            # ``status.json`` owns the message in the status-first legacy crash
+            # window. Importing that same ticket would create a second turn after
+            # recovery resumes the owned head.
+            claimed_id = _get_status(tid).get("claimed_id")
+            imported = _runs().import_legacy(
+                tid, [rec for rec in legacy if rec.id != claimed_id])
+            for rec in legacy:
+                MESSAGE_BACKLOG.claim(tid, rec.id)
+            logging.info("recovery: imported %d legacy entries for %s",
+                         len(imported), tid)
 
-    FOLLOW-UPS — always: submit each journaled entry to the serial worker (NOT
-    inline). If the head resume paused again mid-recovery, its re-queued resume
-    job is already ahead of these submissions, preserving the never-on-a-
-    mid-flight-checkpoint ordering; and if a live dispatcher for the same entry
-    is also queued, whichever runs second finds the entry claimed and skips
-    (the exactly-once gate in _process_message)."""
-    status = _get_status(tid)
-    pending = status.get("pending_message") or ""
-    sender = status.get("sender") or None
-    rider = _rider_from_fields(status.get("rider"))
-    origin = status.get("origin") or None   # a crashed continuation recovers AS one
+    visible_runs = {tid: _runs().list(tid) for tid in visible}
+    abandoned_by_tid = {}
+    for tid, runs in visible_runs.items():
+        abandoned = None
+        for index in range(len(runs) - 1, -1, -1):
+            candidate = runs[index]
+            if candidate.status == "running":
+                abandoned = candidate
+                break
+            if candidate.status == "interrupted" and not any(
+                    later.work_id == candidate.work_id
+                    and later.status in {"success", "error", "timeout", "cancelled"}
+                    for later in runs[index + 1:]):
+                abandoned = candidate
+                break
+        abandoned_by_tid[tid] = abandoned
+    abandoned_parent_ids = {
+        run.id for run in abandoned_by_tid.values() if run is not None}
 
-    if status.get("stage") == "paused":
-        claimed = status.get("claimed_id")
-        if claimed:
-            MESSAGE_BACKLOG.claim(tid, claimed)
-        decision = _recovery_decision(tid, pending)
-        logging.info("recovery: %s -> %s", tid, decision)
-        if decision == "resume":
-            _process_message(
-                tid, None, rider=rider, sender=sender, resume=True,
-                accumulated_active_ms=float(
-                    status.get("accumulated_active_ms") or 0.0),
-                pending_text=pending or None, origin=origin)
-        elif decision == "finalize":
-            _set_status(tid, "ready")
-        elif decision == "redispatch" and pending:
-            _process_message(tid, pending, rider=rider, sender=sender,
-                             origin=origin)
-        else:
-            _set_status(tid, "error",
-                        error=("Server restarted and this thread's turn could "
-                               "not be recovered. Send the message again."),
-                        pending_message=pending)
+    # Reconcile abandoned parents before making their children executable. This
+    # closes the crash window where child identity persisted before the parent's
+    # LangGraph interrupt checkpoint.
+    for tid, abandoned in abandoned_by_tid.items():
+        if abandoned is not None:
+            _RESUME_SCHEDULER.submit(abandoned.id, tid)
 
-    for rec in MESSAGE_BACKLOG.for_thread(tid):
-        _RESUME_SCHEDULER.submit_message(
-            tid, rec.text, _rider_from_fields(rec.rider), rec.sender, rec.id,
-            origin=rec.origin)
+    # Hidden child directories are intentionally absent from ThreadManager.list().
+    for child in [run for run in _runs().scan_all() if run.mode == "child"]:
+        if child.parent_run_id in abandoned_parent_ids:
+            continue
+        if child.status in {"pending", "running"}:
+            _RESUME_SCHEDULER.submit(child.id, child.thread_id)
+        elif child.status in {"success", "error"}:
+            _complete_child_handoff(
+                child, child.result or f"The delegated task failed: {child.error}")
 
+    for tid in visible:
+        abandoned = abandoned_by_tid[tid]
+        if abandoned is not None:
+            continue
 
-def submit_recovery(tid: str) -> None:
-    """Lifespan entry point: enqueue a thread's post-restart recovery on the serial
-    worker (a cheap queue.put — safe on the event loop, and accepted before the
-    worker thread starts)."""
-    _RESUME_SCHEDULER.submit_recover(tid)
+        # A Run is the acceptance truth. A crash after that commit but before
+        # claim leaves the old busy status projection behind; dispatch the
+        # persisted ticket instead of synthesizing a duplicate from status.json.
+        status = _get_status(tid)
+        if any(run.status == "pending"
+               and run.id == status.get("pending_run_id")
+               for run in visible_runs[tid]):
+            _dispatch_pending_after(tid)
+            continue
+
+        if status.get("stage") in BUSY_STAGES:
+            pending = status.get("pending_message") or ""
+            decision = _recovery_decision(tid, pending)
+            if decision == "finalize":
+                _set_status(tid, "ready")
+            elif decision == "error":
+                _set_status(
+                    tid, "error",
+                    error=("Server restarted and this thread's turn could not be "
+                           "recovered. Send the message again."),
+                    pending_message=pending)
+            else:
+                recovered = _create_run(
+                    tid, None if decision == "resume" else pending,
+                    rider=_rider_from_fields(status.get("rider")),
+                    sender=status.get("sender") or None,
+                    resume=(decision == "resume"),
+                    active_ms=float(status.get("accumulated_active_ms") or 0.0),
+                    pending_text=pending if decision == "resume" else None,
+                    origin=status.get("origin") or None)
+                _RESUME_SCHEDULER.submit(recovered.id, tid)
+                continue
+        _dispatch_pending_after(tid)
 
 
 class _ResumeScheduler:
-    """One dedicated thread that dispatches fair-scheduling resumes — and, at
-    startup, post-restart RECOVERY jobs — SERIALLY.
+    """One dedicated thread that executes durable run IDs serially.
 
     A paused turn resumes by re-running ``_process_message(..., resume=True)``, which
     re-acquires the LLM slot and parks in the queue's ``cond.wait`` until its turn comes
@@ -2554,9 +2904,9 @@ class _ResumeScheduler:
     is ``--parallel 1``, so only one resume can run at a time anyway. A resume that pauses
     again simply re-submits itself here (round-robin, back of the queue).
 
-    Recovery jobs (``submit_recover``, enqueued by the lifespan BEFORE serving
-    starts) ride the same queue, so a live submit can never outrun a thread's
-    recovery — see ``_recover_thread`` and docs/2026-07-13-durable-message-queue.org."""
+    Startup queues abandoned heads before their followers, so a live submit can never
+    execute on a mid-flight checkpoint. The queue is notification only; ``runs.json``
+    remains the recoverable authority."""
 
     def __init__(self) -> None:
         self._q: "queue.Queue[dict]" = queue.Queue()
@@ -2569,55 +2919,28 @@ class _ResumeScheduler:
             target=self._loop, name="resume-scheduler", daemon=True)
         self._thread.start()
 
+    def submit(self, run_id: str, tid: str) -> None:
+        self._q.put({"kind": "run", "run_id": run_id, "tid": tid})
+
     def submit_resume(self, tid: str, rider, sender, accumulated_active_ms: float,
                       pending_text: str | None,
-                      origin: str | None = None,
-                      backlog_id: str | None = None) -> None:
+                      origin: str | None = None) -> None:
         """Continue a paused turn from its checkpoint (input=None). ``origin``
         MUST carry the paused turn's origin: a resumed continuation that lost it
-        would rebuild with the WRONG tool surface (door instead of
-        research-agent — unable to do its research, able to chain) and drop
-        every origin-keyed render/failure behavior."""
-        self._q.put({"kind": "turn", "tid": tid, "text": None, "rider": rider,
-                     "sender": sender, "resume": True, "acc": accumulated_active_ms,
-                     "pending": pending_text, "backlog_id": backlog_id,
-                     "origin": origin})
-
-    def submit_message(self, tid: str, text: str, rider, sender,
-                       backlog_id: str | None = None,
-                       origin: str | None = None) -> None:
-        """Run a NEW message for a tid with an in-flight (paused) turn or a pending
-        restart recovery — routed here so it runs AFTER the resume/recovery job on
-        this serial thread, never on a mid-flight checkpoint (fix-by-construction
-        ordering; no priority needed). ``backlog_id`` names the message's durable
-        journal entry (claimed when the turn starts; a duplicate dispatcher for the
-        same entry skips via the exactly-once gate); ``origin`` is "continuation"
-        for agent-scheduled background turns (render/failure keying)."""
-        self._q.put({"kind": "turn", "tid": tid, "text": text, "rider": rider,
-                     "sender": sender, "resume": False, "acc": 0.0, "pending": None,
-                     "backlog_id": backlog_id, "origin": origin})
-
-    def submit_recover(self, tid: str) -> None:
-        """Recover one thread after a restart: decide resume-vs-redispatch from the
-        durable checkpoint state, run it, then drain the thread's journaled
-        follow-ups — all serially on this worker (the lifespan enqueues these
-        BEFORE serving starts, so no live submit can outrun them)."""
-        self._q.put({"kind": "recover", "tid": tid})
+        would incorrectly regain background delegation and drop every origin-keyed
+        render/failure behavior."""
+        run = _create_run(
+            tid, None, rider=rider, sender=sender, resume=True,
+            active_ms=accumulated_active_ms, pending_text=pending_text,
+            origin=origin)
+        self.submit(run.id, tid)
 
     def _loop(self) -> None:
         _recovery_prep(self._q)
         while True:
             it = self._q.get()
             try:
-                if it.get("kind") == "recover":
-                    _recover_thread(it["tid"])
-                else:
-                    _process_message(it["tid"], it["text"], rider=it["rider"],
-                                     sender=it["sender"], resume=it["resume"],
-                                     accumulated_active_ms=it["acc"],
-                                     pending_text=it["pending"],
-                                     backlog_id=it.get("backlog_id"),
-                                     origin=it.get("origin"))
+                _execute_run(it["run_id"], it["tid"])
             except Exception:
                 logging.error("fair-scheduling dispatch failed for %s", it["tid"],
                               exc_info=True)
@@ -2632,7 +2955,7 @@ _GEO_DELIVER_INTERVAL_S = 120   # retry held completions (D4) roughly every 2 mi
 def _geo_startup() -> None:
     """Seed + reconcile once, then periodically deliver held completions. Runs on its OWN
     thread — NEVER the asyncio lifespan thread — because delivery goes through
-    ``_scheduled_dispatch`` → ``_process_message`` (a full agent turn) + a blocking
+    ``_scheduled_dispatch`` → durable Run → ``_execute_run`` (a full agent turn) plus a blocking
     health probe, which would stall uvicorn startup on the loop. The retry loop makes D4
     real: an LLM-down-at-completion is held and re-attempted until the LLM is back (a
     cheap no-op when nothing is held)."""
@@ -2663,63 +2986,20 @@ def stop_scheduler() -> None:
     _SCHEDULER.stop()
 
 
-# Private capacity for the backlog append — NOT the shared threadpool: every follow-up
+# Private capacity for durable run admission — NOT the shared threadpool: every follow-up
 # to a processing thread parks a shared-pool worker in cond.wait (up to wait_timeout),
-# so under exactly the backlog-heavy load this journal exists for, a run_in_threadpool
-# append could starve behind the parkers and the POST would hang pre-303 with the
+# so under exactly the submission-heavy load this exists for, a run_in_threadpool
+# admission could starve behind the parkers and the POST would hang pre-303 with the
 # message not yet durable. A dedicated limiter is immune to that. Created lazily —
 # anyio primitives must be constructed inside a running loop.
-_backlog_limiter: anyio.CapacityLimiter | None = None
+_run_admission_limiter: anyio.CapacityLimiter | None = None
 
 
-def _get_backlog_limiter() -> anyio.CapacityLimiter:
-    global _backlog_limiter
-    if _backlog_limiter is None:
-        _backlog_limiter = anyio.CapacityLimiter(4)
-    return _backlog_limiter
-
-
-def plan_turn(tid: str, text: str) -> tuple[str, bool]:
-    """Shared session API (D1 / tech-design §5): sample whether the thread is
-    busy and mark it pending, in the ONE busy sample that drives the whole submit
-    decision. Returns ``(prior_stage, busy)``.
-
-    Read the busy state BEFORE ``_mark_pending``: for an idle thread ``_mark_pending``
-    flips it busy (that first message is durable via ``status.pending_message``); a
-    message to an ALREADY-busy thread is a follow-up the caller journals (so a
-    restart can't drop it). "Busy" includes this tid holding the LLM slot with no
-    busy status yet (a direct-dispatch scheduled/geo/SMS turn writes its first
-    status only after acquiring) — otherwise the follow-up would be durable NOWHERE
-    while its task parks behind that turn (``peek_holder`` is the lock-free read).
-
-    The caller then durably journals the message iff ``busy`` — *its own way*: the
-    web awaits an off-loop ``MESSAGE_BACKLOG.add`` (a store lock must never touch
-    the event loop); a synchronous client writes directly. That client-specific
-    durable write sits BETWEEN this sample and ``route_turn``, which is exactly why
-    submission is two shared calls, not one."""
-    prior_stage = _get_status(tid).get("stage")
-    busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
-    _mark_pending(tid, text, busy)   # the ONE busy sample drives both decisions
-    return prior_stage, busy
-
-
-def route_turn(tid: str, text: str, rider, prior_stage: str,
-               backlog_id: str | None, dispatch) -> str:
-    """Shared session API (D1 / §5): the paused-vs-dispatch routing every client
-    shares. A PAUSED thread's new message rides the serial ``_ResumeScheduler`` so
-    it runs AFTER the queued resume — never on the paused turn's mid-flight
-    checkpoint (a plain ``queue.put``, loop-safe). Every other case dispatches
-    ``_process_message`` via the client's ``dispatch`` callable (web:
-    ``BackgroundTasks.add_task``; a future non-web client: its own executor).
-    ``backlog_id`` is set iff the message was journaled (busy). Returns the
-    decision for observability ('paused' | 'busy' | 'idle')."""
-    if prior_stage == "paused":
-        _RESUME_SCHEDULER.submit_message(tid, text, rider, None, backlog_id)
-        return "paused"
-    dispatch(_process_message, tid, text, rider, backlog_id=backlog_id)
-    # "busy" iff journaled; key on presence (is not None), matching the docstring
-    # contract — a journal id is the signal, not its truthiness.
-    return "busy" if backlog_id is not None else "idle"
+def _get_run_admission_limiter() -> anyio.CapacityLimiter:
+    global _run_admission_limiter
+    if _run_admission_limiter is None:
+        _run_admission_limiter = anyio.CapacityLimiter(4)
+    return _run_admission_limiter
 
 
 @app.post("/thread/{tid}/message")
@@ -2728,23 +3008,12 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
                        sent_at: str | None = Form(None), tz: str | None = Form(None),
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
-    prior_stage, busy = plan_turn(tid, text)
     rider = _build_rider(sent_at, tz, lat, lon)
-    backlog_id = None
-    if busy:
-        rec = PendingMessage(
-            thread_id=tid, text=text,
-            rider=({"sent_at": sent_at, "tz": tz, "lat": lat, "lon": lon}
-                   if (sent_at or tz or lat or lon) else None),
-            enqueued_at=datetime.now(timezone.utc).isoformat())
-        # Durable BEFORE the 303 — off-loop (file write + store lock never on the
-        # event loop), on the private limiter. This is the web client's durable
-        # journal write (the step that differs per client — see plan_turn).
-        await anyio.to_thread.run_sync(MESSAGE_BACKLOG.add, rec,
-                                       limiter=_get_backlog_limiter())
-        backlog_id = rec.id
-    route_turn(tid, text, rider, prior_stage, backlog_id,
-               dispatch=background_tasks.add_task)
+    run, busy = await anyio.to_thread.run_sync(
+        lambda: _accept_message_run(tid, text, rider),
+        limiter=_get_run_admission_limiter())
+    if not busy:
+        background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -3361,9 +3630,22 @@ async def delete_thread(tid: str):
     _existing_thread_dir(tid)
     # Off-loop: hard_delete does rmtree + sqlite deletes, and _evict_egress
     # takes the egress store lock — none of it belongs on the event loop.
-    await run_in_threadpool(MANAGER.hard_delete, tid,
-                            on_delete=[_evict_caches, _evict_egress])
+    await run_in_threadpool(_delete_thread_and_children, tid)
     return RedirectResponse(url="/", status_code=303)
+
+
+def _delete_thread_and_children(tid: str) -> None:
+    """Delete a visible thread and any not-yet-running hidden children."""
+    for child in _runs().scan_all():
+        if child.mode != "child" or child.parent_thread_id != tid:
+            continue
+        if child.status == "pending":
+            try:
+                _runs().cancel_pending(child.thread_id, child.id)
+            except InvalidRunTransition:
+                continue
+            MANAGER.hard_delete(child.thread_id)
+    MANAGER.hard_delete(tid, on_delete=[_evict_caches, _evict_egress])
 
 
 @app.post("/thread/{tid}/rename")
@@ -3464,4 +3746,3 @@ def merge_thread(tid: str):
             # Unexpected error
             logging.error(f"Merge & Push failed for thread {tid}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Merge & Push failed: {str(e)}")
-

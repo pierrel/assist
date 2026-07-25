@@ -53,8 +53,7 @@ def _hook(monkeypatch, tid, sender=None):
 
 
 def _journal(tid, text, sender=None, origin=None):
-    return MESSAGE_BACKLOG.add(PendingMessage(
-        thread_id=tid, text=text, sender=sender, origin=origin))
+    return threads._create_run(tid, text, sender=sender, origin=origin)
 
 
 # --- injection at the boundary ------------------------------------------------
@@ -69,7 +68,7 @@ def test_owner_entry_injected_framed_with_claim_id(wired, monkeypatch):
     assert threads._INTERJECTION_GUIDE in m.content
     assert m.additional_kwargs["interjection_ids"] == [rec.id]
     # injection does NOT claim — the entry is only in memory until checkpointed
-    assert [r.id for r in MESSAGE_BACKLOG.for_thread(tid)] == [rec.id]
+    assert threads._runs().get(tid, rec.id).status == "pending"
 
 
 def test_coalesce_all_pending_at_one_boundary(wired, monkeypatch):
@@ -106,7 +105,7 @@ def test_next_boundary_claims_checkpointed_ids(wired, monkeypatch):
         "interjection_ids": [rec.id]})
     out = _hook(monkeypatch, tid).before_model({"messages": [in_state]}, None)
     assert out is None                       # claimed, not re-injected
-    assert MESSAGE_BACKLOG.for_thread(tid) == []
+    assert threads._runs().get(tid, rec.id).status == "success"
     assert [r.id for r in threads._TURN_INTERJECTION[tid]["claimed"]] == [rec.id]
 
 
@@ -129,17 +128,17 @@ def test_defer_variant_follows_tool_surface(wired):
     tid, _ = wired
     rec = _journal(tid, "also check tires")
     threads._TURN_INTERJECTION[tid] = {"claimed": [], "defer": True}
-    assert "continue_later" in threads._frame_interjection(rec)
+    assert "background-research-agent" in threads._frame_interjection(rec)
     threads._TURN_INTERJECTION[tid] = {"claimed": [], "defer": False}
-    assert "continue_later" not in threads._frame_interjection(rec)
+    assert "background-research-agent" not in threads._frame_interjection(rec)
 
 
 def test_owner_interjection_enumerates_then_clears_at_claim(wired):
     """Pierre PR #199 note 3: pending tasks are enumerated verbatim in the
     framing, which SNAPSHOTS their ids; the clear runs at claim time against
     the snapshot — fate-shared with the message's durability — and a
-    continue_later issued in response (a fresh id, journaled before the
-    claim) survives the drain."""
+    background child issued in response (a fresh id created before the claim)
+    survives the drain."""
     tid, _ = wired
     c1 = _journal(tid, "find tire sizes", origin="continuation")
     c2 = _journal(tid, "check tubeless", origin="continuation")
@@ -151,14 +150,14 @@ def test_owner_interjection_enumerates_then_clears_at_claim(wired):
     # framing only snapshots ids — it removes nothing from the journal (a
     # turn dying pre-checkpoint must leave the promised follow-ups intact)
     assert ctx["cleared_ids"] == {c1.id, c2.id}
-    assert sum(1 for r in MESSAGE_BACKLOG.for_thread(tid)
-               if r.origin == "continuation") == 2
-    # the model responds with a NEW continue_later before the claim...
+    assert sum(1 for r in threads._runs().list(tid)
+               if r.origin == "continuation" and r.status == "pending") == 2
+    # the model responds with a NEW background child before the claim...
     c3 = _journal(tid, "compare brands instead", origin="continuation")
     # ...then the claim drains only the snapshot: c1/c2 gone, c3 survives
     threads._consume_interjections(tid, {rec.id})
-    left = [r.id for r in MESSAGE_BACKLOG.for_thread(tid)
-            if r.origin == "continuation"]
+    left = [r.id for r in threads._runs().list(tid)
+            if r.origin == "continuation" and r.status == "pending"]
     assert left == [c3.id]
     # an SMS interjection must NOT snapshot the owner's plan (spoofable sender)
     sms = _journal(tid, "sms steer", sender="+15550001111")
@@ -178,7 +177,7 @@ def test_terminal_sweep_claims_ids_left_in_checkpoint(wired):
                     HumanMessage(content="framed", additional_kwargs={
                         "interjection_ids": [rec.id]})]
     threads._claim_seen_interjections(tid, _Chat())
-    assert MESSAGE_BACKLOG.for_thread(tid) == []
+    assert threads._runs().get(tid, rec.id).status == "success"
 
 
 def test_error_exit_rejournals_claimed_interjections(wired, monkeypatch):
@@ -190,14 +189,13 @@ def test_error_exit_rejournals_claimed_interjections(wired, monkeypatch):
     rec = PendingMessage(thread_id=tid, text="the rescue steer")
     threads._TURN_INTERJECTION[tid] = {"claimed": [rec], "defer": True}
     submitted = []
-    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
-                        lambda *a, **k: submitted.append(a))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda *a: submitted.append(a))
     n = threads._rejournal_claimed_interjections(tid, None)
     assert n == 1
-    (entry,) = MESSAGE_BACKLOG.for_thread(tid)
+    (entry,) = threads._runs().list(tid)
     assert entry.text == "the rescue steer" and entry.id != rec.id
-    assert submitted[0][0] == tid and submitted[0][1] == "the rescue steer"
-    assert submitted[0][4] == entry.id        # dispatched under the fresh id
+    assert submitted == [(entry.id, tid)]     # dispatched under the fresh id
     assert tid not in threads._TURN_INTERJECTION      # coverage ended with the pop
     # best-effort: idempotent-empty second call, and never raises
     assert threads._rejournal_claimed_interjections(tid, None) == 0
@@ -218,15 +216,16 @@ def test_failed_turn_surfaces_rejournal_in_error_text(wired, monkeypatch):
     monkeypatch.setattr(web.MANAGER, "get",
                         lambda t, sandbox_backend=None, **k: _Boom())
     submitted = []
-    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
-                        lambda *a, **k: submitted.append(a))
+    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit",
+                        lambda *a: submitted.append(a))
     threads._process_message(tid, "original ask")
     st = _get_status(tid)
     assert st["stage"] == "error"
     assert threads._REJOURNAL_NOTE.strip() in st["error"]
-    (entry,) = MESSAGE_BACKLOG.for_thread(tid)
-    assert entry.text == "steer the failing turn" and entry.id != rec.id
-    assert submitted and submitted[0][1] == "steer the failing turn"
+    entries = threads._runs().list(tid)
+    entry = next(r for r in entries if r.id != rec.id)
+    assert entry.text == "steer the failing turn"
+    assert submitted == [(entry.id, tid)]
 
 
 def test_successful_turn_ends_fate_sharing(wired, monkeypatch):
@@ -252,7 +251,7 @@ def test_successful_turn_ends_fate_sharing(wired, monkeypatch):
                         lambda t, sandbox_backend=None, **k: _Chat())
     threads._process_message(tid, "original ask")
     assert _get_status(tid)["stage"] == "ready"
-    assert MESSAGE_BACKLOG.for_thread(tid) == []
+    assert threads._runs().get(tid, rec.id).status == "success"
     assert tid not in threads._TURN_INTERJECTION
 
 

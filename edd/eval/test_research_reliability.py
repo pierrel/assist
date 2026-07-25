@@ -87,7 +87,10 @@ class TestResearchReliability(TestCase):
     def _agent(self):
         root = tempfile.mkdtemp()
         create_filesystem(root, {"references": {}})
-        return AgentHarness(create_research_agent(self.model, root)), root
+        # Web async delegation executes research as a first-class child run. The
+        # child is deliberately a leaf so it cannot open a second blocking
+        # delegation stack on the one model slot; pin that deployed path here.
+        return AgentHarness(create_research_agent(self.model, root, leaf=True)), root
 
     def test_only_fetches_search_result_urls(self):
         """Every fetched URL came from a search result — none were guessed."""

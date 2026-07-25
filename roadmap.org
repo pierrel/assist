@@ -23,6 +23,15 @@ possible, we should enable it. Plan when we pick this up:
 - When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
   subagent rather than strip).
 * Architecture
+** TODO One Agent Protocol-shaped runs interface + async-only subagents
+Make assistants/threads/runs the sole web execution interface while retaining the global
+=THREAD_QUEUE= and llama.cpp =--parallel 1=. Every interactive, scheduled, SMS, recovery,
+continuation, and child-agent job becomes a durable run; the existing web behavior rides
+exclusively on that service. Required child agents suspend and resume the parent through
+LangGraph's supported interrupt mechanism, while deferred children still post automatic
+follow-ups. Target the installed LangGraph SDK subset rather than deploying Agent Server.
+See [[https://github.com/langchain-ai/agent-protocol][Agent Protocol]], [[https://docs.langchain.com/oss/python/deepagents/async-subagents][Deep Agents async subagents]], and
+[[file:docs/2026-07-24-agent-protocol-runs.org][the reviewed implementation state doc]].
 ** DONE Refactor assist into a framework (deepagents / assist / client boundary)
 Shipped 2026-06-12: the =AgentSpec= embedder contract
 ([[file:docs/2026-06-11-embedder-contract.org][docs/2026-06-11-embedder-contract.org]], assist PR #134 + the

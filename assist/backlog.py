@@ -1,13 +1,12 @@
-"""Durable pending-work journal — the thread's job queue.
+"""Legacy pending-work journal, retained only for startup migration.
 
 An entry is a turn that has been accepted but not yet started. Two origins:
 - ``origin=None`` — a USER follow-up sent while the thread was busy (used to
   live only in-memory; a restart silently dropped it).
-- ``origin="continuation"`` — AGENT-scheduled background work (the
-  ``continue_later`` tool; docs/2026-07-19-progressive-responses-design.org),
-  bounded by the 5-per-user-message chain cap enforced at that tool.
+- ``origin="continuation"`` — background work written by the retired
+  ``continue_later`` implementation and imported once at startup.
 
-Entries live in ``<root_dir>/<tid>/pending_messages.json``, journaled before
+Historical entries live in ``<root_dir>/<tid>/pending_messages.json``, journaled before
 the accepting call returns and removed (claimed, by id) when the turn actually
 starts — or, for an ``origin=None`` entry, when the RUNNING turn consumes it
 mid-turn as an interjection (claimed only once its injected copy is durably in
@@ -19,8 +18,7 @@ submit order.
 See ``docs/2026-07-13-durable-message-queue.org`` (durability/recovery) and the
 blank-slate assessment doc (this journal is the nascent job queue).
 
-The first message of an idle thread is NOT journaled — ``_mark_pending`` makes
-it durable in ``status.json`` before the POST returns.
+New work is represented by ``assist.run_service.Run`` records instead.
 """
 from __future__ import annotations
 
@@ -79,8 +77,7 @@ class MessageBacklog(PerThreadJsonStore[PendingMessage]):
     origins). ``root_dir`` is the thread root (``MANAGER.root_dir``), matching
     ScheduleStore/SubscriptionStore. No store-level cap: USER follow-ups are
     human-paced and refusing one would mean 500ing a message, while the
-    model-authored continuation inflow is bounded upstream by ``continue_later``'s
-    5-per-user-message chain cap (the tool is the only continuation writer)."""
+    file is migration-only; new accepted work is capped by ``RunService``."""
 
     FILENAME = BACKLOG_FILE
     NOTFOUND_EXC = PendingMessageNotFound

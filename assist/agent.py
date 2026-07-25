@@ -7,7 +7,6 @@ from deepagents import (create_deep_agent, CompiledSubAgent,
                         register_harness_profile)
 from deepagents.backends.protocol import BackendProtocol
 from langchain.messages import AIMessage, AnyMessage, HumanMessage
-from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
@@ -330,16 +329,24 @@ def create_agent(model: BaseChatModel,
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
-    context_sub = CompiledSubAgent(
-        name="context-agent",
-        description="Discovers and surfaces relevant context from the user's local filesystem — files, formats, and prior notes. Dispatch it on the first turn of a thread, before any research, and whenever the user's local files could inform the answer. Read-only — it will not modify files.",
-        runnable=create_context_agent(model,
-                                      working_dir,
-                                      checkpointer,
-                                      [retry_middle, json_validation_mw, tool_name_mw],
-                                      sandbox_backend=sandbox_backend,
-                                      default_backend=spec.default_backend)
-    )
+    # The web run service supplies an interrupting ``task`` tool and executes
+    # children as first-class runs.  Building the blocking graphs in that mode
+    # would be wasted work and, more importantly, would leave two delegation
+    # mechanisms in one agent.  Other embedders retain the established in-process
+    # subagents unchanged.
+    context_sub = None
+    research_sub = None
+    if spec.subagent_tool is None:
+        context_sub = CompiledSubAgent(
+            name="context-agent",
+            description="Discovers and surfaces relevant context from the user's local filesystem — files, formats, and prior notes. Dispatch it on the first turn of a thread, before any research, and whenever the user's local files could inform the answer. Read-only — it will not modify files.",
+            runnable=create_context_agent(model,
+                                          working_dir,
+                                          checkpointer,
+                                          [retry_middle, json_validation_mw, tool_name_mw],
+                                          sandbox_backend=sandbox_backend,
+                                          default_backend=spec.default_backend)
+        )
 
     # NOTE: research-agent is confined to <working_dir>/references/ via
     # `create_references_backend` and does NOT inherit `default_backend`.
@@ -349,59 +356,24 @@ def create_agent(model: BaseChatModel,
     # reports are server-side documents.  When file-chat starts needing
     # research reports on the embedder's FS, add `default_backend` to
     # `create_research_agent` and to `create_references_backend`'s routing.
-    research_sub = CompiledSubAgent(
-        name="research-agent",
-        description=(
-            "Used to conduct thorough research on external topics. "
-            f"Reports are saved under '{references_dir}/'. "
-            "The result of the research will be placed in a file and the file "
-            "name/path will be returned. Provide a filename for more control."
-        ),
-        runnable=create_research_agent(model,
-                                       working_dir,
-                                       checkpointer,
-                                       [retry_middle, json_validation_mw, tool_name_mw],
-                                       sandbox_backend=sandbox_backend)
-    )
-
-    # Progressive responses: the continuation "door" the small model actually
-    # walks through. Registered ONLY when the spec carries continue_later (the
-    # web deployment). The model reliably IGNORES a novel proactive tool verb
-    # (0/4 in evals) but fluently SELECTS among task-dispatchable subagents —
-    # its strongest habit — so scheduling background research is exposed as a
-    # sibling of research-agent: dispatching it journals the task via the
-    # continue_later callback and returns immediately with the answer-now
-    # directive. Same journal, same cap, two doors.
-    _continue_later_fn = next(
-        (t for t in spec.tools if getattr(t, "__name__", None) == "continue_later"),
-        None)
-    background_sub = None
-    if _continue_later_fn is not None:
-        def _background_research(state):
-            msgs = state.get("messages", [])
-            task_text = ""
-            for m in reversed(msgs):
-                if isinstance(m, HumanMessage):
-                    task_text = m.content if isinstance(m.content, str) else str(m.content)
-                    break
-            # Return ONLY the new message (the delta convention): deepagents
-            # builds the parent's ToolMessage from the LAST message and excludes
-            # `messages` from subagent state propagation, so echoing history is
-            # inert — but a bare delta is smaller and can never be mistaken for
-            # the id-less re-append hazard the middleware docs warn about.
-            return {"messages": [AIMessage(content=_continue_later_fn(task_text))]}
-        background_sub = CompiledSubAgent(
-            name="background-research-agent",
+    if spec.subagent_tool is None:
+        research_sub = CompiledSubAgent(
+            name="research-agent",
             description=(
-                "Delegate research to run AFTER this turn, in the background: "
-                "the research is performed later and its findings are posted to "
-                "this conversation as a follow-up message. Use this instead of "
-                "researching synchronously in this turn, whenever the user "
-                "already has a useful answer from local context. The task "
-                "must be complete and self-contained — your future self will not "
-                "remember this turn's plan."),
-            runnable=RunnableLambda(_background_research),
+                "Used to conduct thorough research on external topics. "
+                f"Reports are saved under '{references_dir}/'. "
+                "The result of the research will be placed in a file and the file "
+                "name/path will be returned. Provide a filename for more control."
+            ),
+            runnable=create_research_agent(model,
+                                           working_dir,
+                                           checkpointer,
+                                           [retry_middle, json_validation_mw,
+                                            tool_name_mw],
+                                           sandbox_backend=sandbox_backend)
         )
+
+    async_background = spec.subagent_tool is not None and spec.background_subagents
 
     critique_sub_agent = {
         "name": "critique-agent",
@@ -433,15 +405,8 @@ def create_agent(model: BaseChatModel,
             "deepagents/general_instructions.md.j2",
             workspace_dir=workspace_dir,
             references_dir=references_dir,
-            # Progressive-responses guidance renders ONLY when the embedder's spec
-            # actually carries the continue_later tool (the web deployment) — an
-            # agent whose host can't dispatch continuations (bare CLI, emacsos)
-            # keeps today's prompt and structurally cannot promise a follow-up.
-            # Derived from spec.tools membership, never a separate flag, so prompt
-            # and capability cannot skew.
-            continue_later=any(
-                getattr(t, "__name__", None) == "continue_later"
-                for t in spec.tools),
+            background_followups=async_background,
+            async_subagents=spec.subagent_tool is not None,
         ),
         middleware=mw + [
             # Offload a large execute result (a long build/test log) to a file +
@@ -478,25 +443,19 @@ def create_agent(model: BaseChatModel,
             skills_mw, memory_mw, ContextRiderMiddleware(),
             InterjectionMiddleware(), logging_mw],
         backend=backend,
-        # Tool-list construction is the lever that actually moves delegation on
-        # this model (prose demonstrably doesn't — 0/7 eval trials ignored both
-        # the continue_later verb AND the background door while research-agent
-        # was present): when the spec carries continue_later, the fast turn's
-        # agent has NO synchronous research-agent — its research habit lands on
-        # the background door, the only research-shaped affordance. The
-        # CONTINUATION turn runs with the inverse spec (research-agent present,
-        # no door — see thread_manager continuation=True), so the background
-        # turn does the actual research.
-        subagents=([context_sub, background_sub, critique_sub_agent]
-                   if background_sub is not None
+        # The async-only embedder supplies one task tool and no deepagents
+        # subagents. Legacy embedders retain synchronous subagents.
+        subagents=([] if spec.subagent_tool is not None
                    else [context_sub, research_sub, critique_sub_agent]),
         # `travel` (time/distance), `directions` (turn-by-turn steps), and
         # `map_data` (lat,lon + route polylines for a map render block) are
         # built-ins: direct deterministic real-world lookups the main agent answers
         # inline (gated by the travel / render skills), like a calculation — not web
         # research, so not on the research sub-agent.  Skip any a spec supplies (no dup).
-        tools=list(spec.tools) + [t for t in (travel, directions, map_data, read_url)
-                                  if t not in spec.tools],
+        tools=([spec.subagent_tool] if spec.subagent_tool is not None else [])
+              + list(spec.tools)
+              + [t for t in (travel, directions, map_data, read_url)
+                 if t not in spec.tools],
         # HITL gating (e.g. the web spec gates send_reply → approve/edit/reject); None off.
         **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     )
@@ -509,6 +468,7 @@ def create_context_agent(model: BaseChatModel,
                          middleware=[],
                          sandbox_backend=None,
                          default_backend: BackendProtocol | None = None,
+                         prompt_template: str = "deepagents/context_agent.md.j2",
                          ) -> RollbackRunnable:
     """Create a read-only context agent for codebase exploration.
 
@@ -557,7 +517,7 @@ def create_context_agent(model: BaseChatModel,
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/context_agent.md.j2",
+        system_prompt=base_prompt_for(prompt_template,
                                       workspace_dir=workspace_dir),
         backend=backend,
         middleware=base_mw + middleware + [logging_mw],
@@ -589,10 +549,13 @@ def create_research_agent(model: BaseChatModel,
                           working_dir: str,
                           checkpointer=None,
                           middleware=[],
-                          sandbox_backend=None) -> RollbackRunnable:
+                          sandbox_backend=None,
+                          *, leaf: bool = False) -> RollbackRunnable:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
-    Includes DuckDuckGo web search and a critique/research/fact-check subagent trio.
+    The default research lead delegates searching, critique, and fact-checking.
+    ``leaf=True`` instead builds the direct search/read worker used by async child runs;
+    it cannot recursively delegate on the single model slot.
 
     Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
     rolls back to a previous checkpoint.  Research agents only write additive
@@ -769,18 +732,21 @@ def create_research_agent(model: BaseChatModel,
     # and enforces clean delegation instead of the orchestrator doing worker work.
     agent = create_deep_agent(
         model=model,
-        tools=[],
+        tools=[search_internet, read_url] if leaf else [],
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for("deepagents/research_instructions.txt.j2",
-                                      workspace_dir=workspace_dir),
+        system_prompt=(base_prompt_for("deepagents/sub_research.txt.j2") if leaf
+                       else base_prompt_for(
+                           "deepagents/research_instructions.txt.j2",
+                           workspace_dir=workspace_dir)),
         backend=backend,
         # No _read_url_guards here: the orchestrator has no read_url to guard.
         # The searcher + fact-check sub-agents carry those guards themselves.
         # logging_mw stays innermost/last.
-        middleware=base_mw + middleware + [logging_mw],
-        subagents=[critique_sub_agent,
-                   research_sub_agent,
-                   fact_check_sub_agent]
+        middleware=(base_mw + middleware
+                    + (_read_url_guards() if leaf else []) + [logging_mw]),
+        subagents=([] if leaf else [critique_sub_agent,
+                                    research_sub_agent,
+                                    fact_check_sub_agent])
     )
 
     # 300 graph steps ≈ 150 model calls: the deliberate runaway backstop for the
@@ -814,5 +780,3 @@ def create_research_agent(model: BaseChatModel,
         references_path=references_path,
         sandbox_backend=cleanup_sandbox,
     )
-
-

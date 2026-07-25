@@ -1,0 +1,270 @@
+#+title: One runs interface for web execution and async-only subagents
+#+date: <2026-07-24>
+#+author: Pierre + Codex
+
+* Status
+
+IMPLEMENTED; the local review and LOC-consolidation passes are complete. The durable
+child-suspension spike in [[Parent suspension proof]] passes against the real framework
+and =SqliteSaver=.
+
+* Goal
+
+Make one Agent Protocol-shaped run service the only way the web application accepts,
+schedules, resumes, recovers, or cancels agent work. Keep the existing global
+=THREAD_QUEUE= and llama.cpp =--parallel 1=: asynchronous means independently durable
+and non-blocking to the caller, never concurrent model inference.
+
+The HTML web app and the LangGraph SDK-compatible HTTP adapter call the same in-process
+service. The web app never calls its own HTTP listener. =Thread= remains the low-level
+graph executor used by the service and by non-web embedders (CLI and emacsos); this PR
+does not break their streaming interface.
+
+* Names: two different specifications
+
+=assist.spec.AgentSpec= remains the embedder contract for an agent's tools, skills,
+backend, and HITL gates. An Agent Protocol /assistant/ is a fixed graph identity used
+when creating a run. They are separate layers and neither replaces the other.
+
+This implementation targets the installed =deepagents 0.6.1= + =langgraph-sdk 0.3.3=
+call shapes, not every resource in LangGraph Agent Server. Official interfaces:
+- [[https://docs.langchain.com/oss/python/deepagents/async-subagents][Deep Agents async subagents]]
+- [[https://docs.langchain.com/langsmith/agent-server][LangChain Agent Server]]
+- [[https://github.com/langchain-ai/agent-protocol][Agent Protocol]]
+
+* Supported protocol subset
+
+The external adapter implements the operations the installed async middleware uses:
+
+| Operation | Purpose |
+|-----------+---------|
+| =POST /threads= | Create an ordinary thread. Internal dispatch creates hidden children. |
+| =GET /threads/{thread_id}= | Return thread status and graph values. |
+| =POST /threads/{thread_id}/runs= | Create a run for a fixed assistant. |
+| =GET /threads/{thread_id}/runs/{run_id}= | Return durable run status. |
+| =POST /threads/{thread_id}/runs/{run_id}/cancel= | Cancel pending ordinary work; unsafe cancellation returns 409. |
+
+The fixed assistants are =general-agent=, =context-agent=, =research-agent=, and
+=critique-agent=. There is no mutable-assistant API, arbitrary graph registration,
+store API, cron API, distributed worker, or client checkpoint mutation. The internal
+service has only =create_thread=, =get_thread=, =create_run=, =get_run=, and
+=cancel_run=; claiming, executing, recovery, and projection are private worker
+operations.
+
+* Sources of truth
+
+1. LangGraph checkpoints remain conversation, graph-progress, and HITL truth.
+2. A durable Run record is the sole accepted-work and execution-lifecycle truth.
+3. =status.json= is a disposable UI projection rebuilt from checkpoints + runs.
+4. =THREAD_QUEUE= remains the global execution/fairness truth.
+5. Schedule, subscription, and inbound-message stores remain domain truth.
+6. The event log remains observational history, never scheduling authority.
+
+A persisted pending Run is the one acceptance commit point. Scheduling is only a
+notification: startup can always scan nonterminal runs. There is no dual write to
+=MESSAGE_BACKLOG=. Existing =pending_messages.json= entries are imported idempotently
+before dispatch; once imported, only Runs are written.
+
+* Run identity and lifecycle
+
+A protocol run is one graph invocation and has upstream statuses =pending=, =running=,
+=interrupted=, =success=, =error=, =timeout=. =cancelled= is retained because the
+installed async middleware exposes it as terminal.
+
+A logical web turn may contain several protocol runs. It has one =work_id= and one
+user-visible lifecycle. Required-child delegation is:
+
+1. parent run A starts;
+2. its task tool idempotently creates child run B and calls =interrupt(...)=;
+3. A durably becomes =interrupted= and releases =THREAD_QUEUE=;
+4. B runs through the same global queue and becomes terminal;
+5. child completion creates parent resume run C on A's thread with
+   =Command(resume=child_result)=;
+6. LangGraph replays the interrupted tool node; =interrupt()= returns the saved resume
+   value and the tool returns its normal =ToolMessage= with the original tool-call ID;
+7. C finishes the same logical work and produces the only user-visible answer.
+
+We never append a child =ToolMessage= by editing checkpoint state. That would bypass
+LangGraph task-completion bookkeeping and could duplicate the child or corrupt
+assistant/tool ordering.
+
+Child creation is keyed by the parent work/run identity plus the saved task/tool-call
+identity. Node replay finds the existing child instead of creating another. The mapping
+is durable before =interrupt()=. Parent resume creation is likewise idempotent by child
+run ID.
+
+* Parent suspension proof
+
+Before migrating production paths, a focused SqliteSaver test must prove:
+
+1. a custom task tool creates exactly one child and interrupts;
+2. the parent invocation returns and releases the global queue;
+3. the child runs independently;
+4. =Command(resume=...)= makes the same interrupt return the result inside the replayed
+   tool invocation;
+5. the original tool-call ID is paired exactly once and the parent produces one answer;
+6. process recreation after each handoff resumes without duplicate child or answer;
+7. sibling parallel tool calls do not break interrupt/task association.
+
+Failure of this proof is a design failure, not an edge to paper over. Required
+subagents would remain synchronous until a supported resumable boundary exists; the
+upstream task-ID/check-later UX is not an acceptable silent replacement.
+
+*Result, 2026-07-24:* =tests/test_async_subagent_interrupt.py= proves the sequence
+through process recreation and a sibling tool node. The interrupted node replays as
+documented, child create-or-find remains exactly once, the completed sibling does not
+execute again, both =ToolMessage=s retain the initiating tool-call IDs, and one final
+parent answer is produced.
+
+* Existing behavior preserved
+
+** Interactive work
+
+=create_run= persists the run and its queued/processing projection before POST returns,
+then notifies the serial dispatcher. Redirected pages keep the pending bubble, history,
+input, and queued-vs-processing label. Only the dispatcher calls the private executor.
+
+** Suspended parents and ordering
+
+A work item awaiting a required child remains visibly busy. New same-thread work is
+durable behind the dependency =child -> parent resume -> follower= and never executes
+against the suspended checkpoint. Required-child terminal state creates no bubble,
+unseen badge, or turn observer event.
+
+** Interjections
+
+A message accepted while a turn is running is its own durable Run, but may be consumed
+at the next model boundary. Consumption atomically records =consumed_by=<active run>=
+after the message is checkpointed. On active-run failure it becomes pending again. It
+does not blindly become a second later answer.
+
+** Deferred research
+
+Deferred research is a child run whose parent answer finishes immediately. Completion
+automatically creates the current visible follow-up; it is not pull-only. Preserve the
+chain cap, owner-message supersession, system/SMS non-supersession, HITL deferral,
+no recursive deferral, loud attributed failure, unseen marking, and exactly-once
+delivery.
+
+** HITL and SMS
+
+HITL checkpoint state remains authoritative. Runs preserve draft, sender, =started_at=,
+and stale-draft protection; same-sender folding and different-sender isolation remain.
+Inbound SMS is durably claimed before HTTP 200, then its triage run is committed with
+sender metadata and the reduced HITL-gated =AgentSpec= before dispatch.
+
+** Fair scheduling, containment, and observers
+
+Each protocol run has its own cumulative active-hold accounting. A logical parent stops
+accruing while its child holds the queue, then its resume continues the parent's prior
+active total. The child has its own cap. Each execution slice receives a fresh sandbox,
+which is reaped before queue release on success, interrupt, pause, cancellation, and
+error.
+
+Only a terminal user-visible logical work item notifies observers, after durable terminal
+state and queue release. Deferred follow-ups are visible work and do notify; required
+internal children and interrupted parent invocations do not. Observer callbacks remain
+the existing best-effort in-process seam; this change does not claim durable delivery.
+
+* Crash edges
+
+Every transition below is idempotent and covered by kill-shaped recovery tests:
+
+1. accepted run persisted, dispatcher not notified -> startup scan dispatches it;
+2. run claimed, before graph invocation -> checkpoint inspection safely re-dispatches;
+3. child mapping persisted, before parent interrupt checkpoint -> replay reuses child;
+4. parent interrupted, before child dispatch -> dependency scan dispatches child;
+5. child terminal, before parent-resume creation -> scan creates resume once;
+6. resume created, before dispatch -> scan dispatches it;
+7. result checkpointed, before run terminal -> checkpoint inspection finalizes it;
+8. terminal persisted, before UI projection -> projections rebuild from the run.
+
+Startup orders dependencies, not timing: suspended head first, required child, parent
+resume, then accepted followers. Live submissions cannot outrun startup recovery.
+
+* Security and event-loop boundary
+
+The protocol adapter is a resource-exhaustion and privilege-selection surface. It uses
+an explicit bearer secret, rejects unknown assistant and thread IDs, bounds request
+bodies and message content, and rejects metadata. A client cannot choose host paths,
+backends, origin, sender privilege, or tool profiles. Internally dispatched hidden
+children inherit the parent workspace; HTTP thread creation is ordinary-thread only.
+Protocol admission caps visible threads, pending runs, and per-thread run history under
+one service lock, so an authenticated automation bug cannot grow storage without bound.
+
+All run-store operations take locks and do disk I/O, so async routes execute them in the
+threadpool. Thread and review rendering, including agent construction and run projection,
+also run there. A web-route liveness test holds the real run-store lock while a concurrent
+status GET stays prompt.
+
+* Implementation slices
+
+1. Prove durable interrupt-child-resume with the real framework and SqliteSaver.
+2. Add one =assist/run_service.py= containing the typed Run, durable store, and narrow
+   service. Existing =ThreadManager= remains thread truth.
+3. Make the serial dispatcher accept only run IDs; move =_process_message= behind its
+   private executor. Migrate every web producer and recovery path, retaining current
+   synchronous subagents and continuation behavior as the equivalence checkpoint.
+4. Remove =MESSAGE_BACKLOG= writers and direct =plan_turn= / =route_turn= /
+   =_process_message= entry points; import legacy entries once.
+5. Add the thin LangGraph SDK-compatible FastAPI adapter and contract tests.
+6. Replace =continue_later= / synthetic background research with deferred child runs.
+7. Replace required synchronous subagents with the proven interrupting task tool and
+   fixed child assistant factories.
+8. Pending update/cancel is supported. Running, interrupted, and child cancellation
+   returns 409 until a cooperative graph-boundary contract exists; the API never reports
+   a false cancellation. Then run deterministic, eval, review, deploy, smoke, and Copilot.
+
+* LOC disposition
+
+The first implementation incorrectly left the live =continue_later= producer, adapter,
+and ready-exit dispatcher beside async background children. The consolidation pass
+deleted that parallel architecture and its obsolete eval; =pending_messages.json= now
+exists only as a startup import boundary. It also reused =PerThreadJsonStore= for Runs
+and the existing oldest-pending dispatcher for protocol admissions.
+
+Production remains about +1.1k net lines rather than neutral. That delta is accepted
+because four contracts did not exist before: durable invocation history and transitions,
+supported interrupt/resume child pairing, an authenticated SDK wire surface, and crash
+reconciliation across parent/child handoffs. The existing thread manager, global queue,
+checkpoint, sandbox, status projection, interjection path, and legacy journal importer
+are reused; no second executor, queue, checkpoint store, or thread registry remains.
+
+* Validation
+
+- Existing =pytest tests/= stays green at the equivalence checkpoint and final diff.
+- New transition, crash-edge, protocol-SDK, liveness, containment, and parent-child
+  tests cover the contracts above.
+- Real-model context and research-delegation gates at post-review N=5 and stability N=10;
+  async background mechanics and interrupt/resume are exercised through the real graph
+  in deterministic tests rather than the removed =continue_later= harness.
+- Smoke =python -m manage.web=, =make smoke=, HTTPS create/send/status, SDK protocol,
+  two queued threads under =--parallel 1=, and restart with a pending run.
+
+* Validation result
+
+- Deterministic: =1352 passed=; =git diff --check= and changed-module compilation clean.
+- Real-model post-review/stability: context invocation/routing 40/40; leaf research
+  reliability 19/20 across N=10. The one miss fetched an alternate URL after the seeded
+  dead fetch but stopped without writing its report. A broader first trial was 14/15,
+  with one unrelated standalone context-agent miss finding =fitness.org=.
+- Local review: five full rounds before consolidation, then a focused LOC review and a
+  post-consolidation review. The latter found and fixed the pending-Run/status restart
+  duplication window; the new regression test pins exact Run-ID recovery.
+
+* Design-review dispositions
+
+- ACCEPTED: one RunService/store module, one protocol adapter, existing ThreadManager,
+  one pending-run commit point, fixed assistant registry, dependency-ordered recovery.
+- ACCEPTED: supported =interrupt()/Command(resume=...)= instead of checkpoint mutation.
+- ACCEPTED: protocol invocation statuses remain truthful; logical work supplies the web
+  lifecycle across interrupted/resume runs.
+- ACCEPTED: required child and deferred child have different delivery policies.
+- REJECTED: stock =AsyncSubAgentMiddleware= for required grounding. Its task-ID/poll UX
+  changes the current answer contract; it remains compatible with the service for
+  explicitly deferred work.
+- REJECTED: second thread registry, mutable assistants, arbitrary metadata, and general
+  Agent Server features with no current consumer.
+- REJECTED: a review claim that child runs bypass =THREAD_QUEUE=. Child execution calls
+  =Thread.message()/resume()=, whose existing =Thread._run= boundary acquires the global
+  queue; adding a second outer acquisition would duplicate the same mechanism.

@@ -139,7 +139,8 @@ class Thread:
                  model: BaseChatModel | None = None,
                  max_concurrency: int = 5,
                  sandbox_backend=None,
-                 on_queue_state: Callable[[str], None] | None = None):
+                 on_queue_state: Callable[[str], None] | None = None,
+                 agent=None):
         """The embedder surface (docs/2026-06-11-embedder-contract.org):
 
         `spec` — the embedder contract (``assist.spec.AgentSpec``): one
@@ -156,11 +157,17 @@ class Thread:
         (thread identity belongs to the ``thread_id=`` param; the
         checkpoint keys are not settable at all).
 
+        `agent` — an internal prebuilt-graph injection for specialized web child
+        runs. It is mutually exclusive with `spec`; ordinary embedders use the
+        single `AgentSpec` declaration surface.
+
         The remaining params are per-instance/run wiring: identity
         (``thread_id``), persistence (``checkpointer``), model,
         concurrency, sandbox, and the queue-state callback.  The split
         rule: *spec = the agent's shape; kwargs = instance wiring*.
         """
+        if agent is not None and spec is not None:
+            raise ValueError("agent and spec are mutually exclusive")
         self.working_dir = working_dir
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         self.thread_id = thread_id or f"{working_dir}:{ts}"
@@ -207,11 +214,9 @@ class Thread:
             # Thread's runconfig (nested values stay shared, as ever).
             self.runconfig["configurable"].update(configurable)
 
-        self.agent = create_agent(self.model,
-                                  working_dir=working_dir,
-                                  checkpointer=checkpointer,
-                                  sandbox_backend=sandbox_backend,
-                                  spec=spec)
+        self.agent = agent or create_agent(
+            self.model, working_dir=working_dir, checkpointer=checkpointer,
+            sandbox_backend=sandbox_backend, spec=spec)
 
     def _run(self, graph_input) -> str:
         """Acquire the per-thread LLM affinity queue for the agent loop (so concurrent
@@ -263,6 +268,19 @@ class Thread:
         {"name": "send_reply", "args": {"text": …}}}``. On approve/edit the tool body runs
         (the reply is sent); returns the agent's final content."""
         return self._run(Command(resume={"decisions": [decision]}))
+
+    def resume_child(self, result: str) -> str:
+        """Resume an async ``task`` interrupt with its child agent's result."""
+        return self._run(Command(resume=result))
+
+    def pending_child(self) -> dict | None:
+        """Return the web async-child interrupt payload, if this graph awaits one."""
+        snap = self.agent.get_state(self.runconfig)
+        for intr in (getattr(snap, "interrupts", None) or ()):
+            value = intr.value or {}
+            if value.get("child_run_id") and value.get("parent_run_id"):
+                return value
+        return None
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):

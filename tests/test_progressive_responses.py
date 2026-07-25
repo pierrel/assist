@@ -1,8 +1,4 @@
-"""Progressive responses — the continue_later tool, chain cap, dispatch,
-render keying, and failure surfacing (docs/2026-07-19-progressive-responses-
-design.org). LLM-judgment behaviors (does the model split well) live in
-edd/eval/test_progressive_responses.py; everything mechanical is pinned here.
-"""
+"""Progressive-response migration, rendering, and failure surfacing."""
 import contextlib
 import json
 from types import SimpleNamespace
@@ -13,8 +9,9 @@ from manage import web
 from manage.web import threads
 from manage.web.state import MESSAGE_BACKLOG, _get_status, _set_status, _thread_title
 from assist.backlog import PendingMessage
-from assist.events.continuations import CHAIN_CAP, continuation_tools
 from assist.events.thread_log import append_event, read_events
+
+CHAIN_CAP = threads.CHAIN_CAP
 
 
 @pytest.fixture
@@ -85,38 +82,6 @@ def test_event_log_roundtrip_and_torn_line(tmp_path):
     assert read_events(str(tmp_path / "missing")) == []
 
 
-# --- the tool: cap, journal, corrective strings -------------------------------
-
-def test_continue_later_journals_and_directs(monkeypatch):
-    journaled, out = [], []
-    tools = continuation_tools(lambda tid, task: journaled.append((tid, task)),
-                               lambda tid: 0)
-    tool = tools[0]
-    monkeypatch.setattr("assist.events.continuations._thread_id", lambda: "t1")
-    msg = tool("  research   bike accessories  ")
-    assert journaled == [("t1", "research bike accessories")]   # whitespace collapsed
-    assert "finish your answer" in msg.lower() and "end this turn" in msg.lower()
-
-
-def test_continue_later_cap_refusal_schedules_nothing(monkeypatch):
-    journaled = []
-    tools = continuation_tools(lambda tid, task: journaled.append(task),
-                               lambda tid: CHAIN_CAP)
-    monkeypatch.setattr("assist.events.continuations._thread_id", lambda: "t1")
-    msg = tools[0]("more research")
-    assert journaled == []
-    assert "cap reached" in msg.lower() and "do not promise" in msg.lower()
-
-
-def test_continue_later_rejects_empty_task(monkeypatch):
-    journaled = []
-    tools = continuation_tools(lambda tid, task: journaled.append(task),
-                               lambda tid: 0)
-    monkeypatch.setattr("assist.events.continuations._thread_id", lambda: "t1")
-    assert "nothing scheduled" in tools[0]("   ").lower()
-    assert journaled == []
-
-
 # --- chain-length derivation --------------------------------------------------
 
 def test_chain_len_counts_trailing_markers_plus_pending(wired, monkeypatch):
@@ -129,9 +94,8 @@ def test_chain_len_counts_trailing_markers_plus_pending(wired, monkeypatch):
     tup = SimpleNamespace(checkpoint={"channel_values": {"messages": msgs}})
     monkeypatch.setattr(web.MANAGER, "checkpointer",
                         SimpleNamespace(get_tuple=lambda cfg: tup))
-    MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="job 3",
-                                       origin="continuation"))
-    MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="user follow-up"))
+    threads._create_run(tid, "job 3", origin="continuation")
+    threads._create_run(tid, "user follow-up")
     assert threads._continuation_chain_len(tid) == 3   # 2 trailing + 1 pending
 
     # A USER message after the chain resets the trailing run.
@@ -149,46 +113,15 @@ def test_chain_len_fails_closed_on_unreadable_state(wired, monkeypatch):
 
 # --- dispatch at the ready exit ----------------------------------------------
 
-def test_ready_exit_dispatches_continuations_with_origin(wired, monkeypatch):
-    """The real flow: the TURN ITSELF schedules the continuation mid-run (the
-    continue_later tool journals it); the ready exit then dispatches it. (An
-    entry journaled BEFORE a user turn is a stale plan and is cleared instead —
-    pinned by test_user_message_clears_unclaimed_continuations.)"""
-    tid, tmp_path = wired
-
-    class _Scheduling(_Chat):
-        def message(self, text):
-            threads._journal_continuation(self.thread_id, "bg job")
-            return "fast answer"
-    monkeypatch.setattr(web.MANAGER, "get",
-                        lambda t, sandbox_backend=None, **k: _Scheduling(t, []))
-    submitted = []
-    monkeypatch.setattr(
-        threads._RESUME_SCHEDULER, "submit_message",
-        lambda t, text, rider, sender, backlog_id=None, origin=None:
-            submitted.append((t, text, backlog_id, origin)))
-
-    threads._process_message(tid, "user question", origin=None)
-
-    recs = MESSAGE_BACKLOG.for_thread(tid)
-    assert len(recs) == 1 and recs[0].text == "bg job"   # durable while queued
-    assert submitted == [(tid, "bg job", recs[0].id, "continuation")]
-    kinds = [e["kind"] for e in read_events(str(tmp_path / tid))]
-    assert kinds.count("continuation_scheduled") == 1
-    assert kinds.count("continuation_dispatched") == 1
-
-
 def test_continuation_turn_gets_marker_and_agent_note_render(wired, monkeypatch):
     tid, _ = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
     rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="bg job",
                                              origin="continuation"))
-    threads._process_message(tid, "bg job", backlog_id=rec.id,
-                             origin="continuation")
+    threads._process_message(tid, "bg job", origin="continuation")
     # the self-message the agent ran carried the durable attribution marker
     assert calls == [("message", threads._CONTINUATION_RIDER + "bg job")]
-    assert MESSAGE_BACKLOG.for_thread(tid) == []   # claimed
 
 
 def test_peek_is_side_effect_free_on_corruption(tmp_path):
@@ -209,39 +142,13 @@ def test_peek_is_side_effect_free_on_corruption(tmp_path):
     assert store.peek("t1") == []
 
 
-def test_continuation_turn_does_not_redispatch_siblings(wired, monkeypatch):
-    """A continuation turn's ready exit must not re-submit still-queued sibling
-    entries — they already have dispatchers from the scheduling turn; re-adding
-    jobs is redundant traffic + duplicate dispatched events (Copilot #198 rd1)."""
-    tid, tmp_path = wired
-    calls = []
-    _wire_chat(monkeypatch, tid, calls)
-    # sibling B still journaled (its job queued elsewhere) while continuation A runs
-    a = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="job A",
-                                           origin="continuation"))
-    MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="job B",
-                                       origin="continuation"))
-    submitted = []
-    monkeypatch.setattr(
-        threads._RESUME_SCHEDULER, "submit_message",
-        lambda t, text, rider, sender, backlog_id=None, origin=None:
-            submitted.append(backlog_id))
-
-    threads._process_message(tid, "job A", backlog_id=a.id, origin="continuation")
-
-    assert submitted == []          # no re-dispatch from the continuation turn
-    kinds = [e["kind"] for e in read_events(str(tmp_path / tid))]
-    assert kinds.count("continuation_dispatched") == 0
-
-
 def test_user_message_clears_unclaimed_continuations(wired, monkeypatch):
     tid, tmp_path = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
-    MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="stale plan",
-                                       origin="continuation"))
+    stale = threads._create_run(tid, "stale plan", origin="continuation")
     threads._process_message(tid, "new user direction", origin=None)
-    assert MESSAGE_BACKLOG.for_thread(tid) == []
+    assert threads._runs().get(tid, stale.id).status == "cancelled"
     kinds = [e["kind"] for e in read_events(str(tmp_path / tid))]
     assert "continuation_cancelled" in kinds
 
@@ -265,8 +172,7 @@ def test_continuation_defers_while_reply_awaits_approval(wired, monkeypatch):
     _wire_chat(monkeypatch, tid, calls, reply={"text": "draft awaiting approval"})
     rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="bg job",
                                              origin="continuation"))
-    threads._process_message(tid, "bg job", backlog_id=rec.id,
-                             origin="continuation")
+    threads._process_message(tid, "bg job", origin="continuation")
     assert calls == []                                          # nothing ran
     assert [r.id for r in MESSAGE_BACKLOG.for_thread(tid)] == [rec.id]
 
@@ -286,8 +192,7 @@ def test_continuation_failure_is_loud_and_attributed(wired, monkeypatch):
                         lambda t: unseen.append(t))
     rec = MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="bg job",
                                              origin="continuation"))
-    threads._process_message(tid, "bg job", backlog_id=rec.id,
-                             origin="continuation")
+    threads._process_message(tid, "bg job", origin="continuation")
     st = _get_status(tid)
     assert st["stage"] == "error"
     assert "background follow-up" in st["error"]        # not "your message"
@@ -341,8 +246,7 @@ def test_ready_thread_shows_will_follow_up_note(wired, monkeypatch):
     tid, _ = wired
     _wire_chat(monkeypatch, tid, [])
     _set_status(tid, "ready")
-    MESSAGE_BACKLOG.add(PendingMessage(thread_id=tid, text="find tire sizes",
-                                       origin="continuation"))
+    threads._create_run(tid, "find tire sizes", origin="continuation")
     html_out = TestClient(web.app).get(f"/thread/{tid}").text
     assert "will follow up: find tire sizes" in html_out
 
@@ -375,14 +279,8 @@ def test_user_message_with_marker_prefix_is_neutralized(wired, monkeypatch):
     assert calls == [("message", " " + R + "just quoting you")]
 
 
-def test_resume_of_journal_dispatched_turn_passes_the_gate(wired, monkeypatch):
-    """THE SYMPTOM of the 2026-07-21 stuck-paused thread: a fair-sched resume
-    carries the original turn's backlog_id (for event-id fidelity), whose
-    journal entry was claimed at the ORIGINAL turn start — the exactly-once
-    gate must not treat the gone entry as "already delivered" and silently
-    swallow the resume, stranding the thread paused forever. A resume is not
-    a dispatch: its ticket was already consumed; the gate applies only to
-    fresh backlog_id dispatches."""
+def test_resume_of_continuation_turn_runs(wired, monkeypatch):
+    """A fair-scheduling resume continues the checkpointed continuation."""
     tid, _ = wired
     calls = []
     _wire_chat(monkeypatch, tid, calls)
@@ -390,8 +288,7 @@ def test_resume_of_journal_dispatched_turn_passes_the_gate(wired, monkeypatch):
     assert MESSAGE_BACKLOG.for_thread(tid) == []
     _set_status(tid, "paused", origin="continuation",
                 pending_message="[Continuing my earlier work — background follow-up] x")
-    threads._process_message(tid, None, resume=True,
-                             origin="continuation", backlog_id="claimed-long-ago")
+    threads._process_message(tid, None, resume=True, origin="continuation")
     assert ("resume",) in calls, "the resume was swallowed by the entry-gone gate"
     assert _get_status(tid)["stage"] == "ready"
 
@@ -434,59 +331,6 @@ def test_waiting_resume_keeps_paused_status(wired, monkeypatch):
     assert _get_status(tid)["stage"] == "ready"
 
 
-# --- shared session API (P0/D1): plan_turn / route_turn / turn observers -------
-
-def test_route_turn_idle_dispatches():
-    seen = []
-    dec = threads.route_turn("t1", "hi", "RIDER", "ready", None,
-                             dispatch=lambda fn, *a, **k: seen.append((fn, a, k)))
-    assert dec == "idle"
-    assert seen == [(threads._process_message, ("t1", "hi", "RIDER"),
-                     {"backlog_id": None})]
-
-
-def test_route_turn_busy_dispatches_with_backlog():
-    seen = []
-    dec = threads.route_turn("t1", "hi", "RIDER", "processing", "bk1",
-                             dispatch=lambda fn, *a, **k: seen.append((fn, a, k)))
-    assert dec == "busy"
-    assert seen == [(threads._process_message, ("t1", "hi", "RIDER"),
-                     {"backlog_id": "bk1"})]
-
-
-def test_route_turn_busy_keys_on_presence_not_truthiness():
-    # A journal id's PRESENCE means journaled (busy), per the contract — an id is
-    # never falsy-empty in practice, but the classification keys on `is not None`,
-    # so even a "" id (were one ever passed) is journaled, not misread as idle.
-    dec = threads.route_turn("t1", "hi", "RIDER", "processing", "",
-                             dispatch=lambda fn, *a, **k: None)
-    assert dec == "busy"
-
-
-def test_route_turn_paused_routes_through_scheduler(monkeypatch):
-    sched, dispatched = [], []
-    monkeypatch.setattr(threads._RESUME_SCHEDULER, "submit_message",
-                        lambda *a: sched.append(a))
-    dec = threads.route_turn("t1", "hi", "RIDER", "paused", "bk1",
-                             dispatch=lambda *a, **k: dispatched.append(a))
-    assert dec == "paused"
-    assert dispatched == []                       # never a fresh worker on a paused thread
-    assert sched == [("t1", "hi", "RIDER", None, "bk1")]   # after the queued resume
-
-
-def test_plan_turn_idle_marks_pending(wired):
-    tid, _ = wired
-    _set_status(tid, "ready")
-    assert threads.plan_turn(tid, "hello") == ("ready", False)
-    assert _get_status(tid).get("pending_message") == "hello"   # _mark_pending ran
-
-
-def test_plan_turn_busy_when_processing(wired):
-    tid, _ = wired
-    _set_status(tid, "processing")
-    assert threads.plan_turn(tid, "hello") == ("processing", True)
-
-
 def test_turn_observer_fires_on_ready(wired, monkeypatch):
     tid, _ = wired
     _wire_chat(monkeypatch, tid, [])
@@ -517,22 +361,6 @@ def test_turn_observer_isolated_and_reports_error(wired, monkeypatch):
     threads._process_message(tid, "hi")                 # must not raise
     assert good == [(tid, "error", None, None, None)]   # error stage, reply None
     assert _get_status(tid)["stage"] == "error"         # turn still terminalized
-
-
-def test_turn_observer_reports_error_when_ready_tail_fails(wired, monkeypatch):
-    # chat.message succeeds ("done"), but the ready-exit tail (_dispatch_continuations)
-    # raises → generic except → status "error". The observer must report "error",
-    # never the stale "ready"/"done" _terminal captured before the tail.
-    tid, _ = wired
-    _wire_chat(monkeypatch, tid, [])
-    monkeypatch.setattr(
-        threads, "_dispatch_continuations",
-        lambda tid, rider: (_ for _ in ()).throw(RuntimeError("tail boom")))
-    seen = []
-    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [lambda *a: seen.append(a)])
-    threads._process_message(tid, "hi")
-    assert seen == [(tid, "error", None, None, None)]
-    assert _get_status(tid)["stage"] == "error"
 
 
 def test_turn_observer_registration_during_notify_is_isolated(wired, monkeypatch):
