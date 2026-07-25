@@ -243,7 +243,7 @@ are reused; no second executor, queue, checkpoint store, or thread registry rema
 
 * Validation result
 
-- Deterministic: =1356 passed= after Copilot round 2; =git diff --check= and
+- Deterministic: =1358 passed= after Copilot round 3; =git diff --check= and
   changed-module compilation clean.
 - Real-model post-review/stability: context invocation/routing 40/40; leaf research
   reliability 19/20 across N=10. The one miss fetched an alternate URL after the seeded

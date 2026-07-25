@@ -26,7 +26,13 @@ from assist.thread import Thread
 from manage.web import threads as _threads
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _rename_pair, render_file_diff
-from manage.web.state import MANAGER, _get_domain_manager, _thread_title
+from manage.web.state import (
+    BUSY_STAGES,
+    MANAGER,
+    _get_domain_manager,
+    _get_status,
+    _thread_title,
+)
 
 
 # Submit-message format: ``threads.render_thread`` recognises a user
@@ -187,7 +193,7 @@ def render_review_page(tid: str, chat: Thread | None) -> str:
             <input type="hidden" id="payload" name="payload" value="" />
             <div class="review-header">
               <label for="overall">Overall comment</label>
-              <textarea id="overall" name="overall_display"
+              <textarea id="overall"
                         placeholder="Optional general comment about the change..."></textarea>
               <div class="review-actions">
                 <button type="submit" class="submit-btn" {submit_disabled}>Submit review</button>
@@ -376,7 +382,8 @@ async def post_review(tid: str, request: Request,
 
     try:
         def format_and_accept():
-            form = urllib.parse.parse_qs(body.decode(), keep_blank_values=True)
+            form = urllib.parse.parse_qs(
+                body.decode(), keep_blank_values=True, max_num_fields=1)
             payload = form.get("payload", [""])[0]
             try:
                 data = json.loads(payload)
