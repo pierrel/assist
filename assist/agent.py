@@ -330,7 +330,7 @@ def create_agent(model: BaseChatModel,
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
     # ``None`` retains the legacy in-process subagents. Any explicit sequence
-    # suppresses them: web main supplies five async lifecycle tools, while the
+    # suppresses them: web main supplies five subagent lifecycle tools, while the
     # restricted web triage profile deliberately supplies none.
     context_sub = None
     research_sub = None
@@ -552,7 +552,7 @@ def create_research_agent(model: BaseChatModel,
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     The default research lead delegates searching, critique, and fact-checking.
-    ``leaf=True`` instead builds the direct search/read worker used by async child runs;
+    ``leaf=True`` instead builds the direct search/read worker used by subagent runs;
     it cannot recursively delegate on the single model slot.
 
     Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent

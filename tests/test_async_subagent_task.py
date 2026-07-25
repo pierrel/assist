@@ -160,5 +160,5 @@ def test_unknown_agent_is_rejected_without_asgi_call(protocol):
     with async_task_context(AsyncTaskContext("parent", "r", "w")):
         result = TOOLS["start_async_task"].func(
             "invent", "invented-agent", _runtime())
-    assert "Unknown async subagent" in result
+    assert "Unknown subagent" in result
     assert calls == []

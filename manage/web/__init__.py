@@ -22,7 +22,7 @@ from manage.web.app import app
 # Order matters only insofar as ``review`` imports from ``threads``.
 from manage.web import threads, review, evals, schedules, geo, egress  # noqa: E402,F401
 
-# Async-task tools use a private, prefixless Agent Protocol ASGI app.  It is never
+# Subagent tools use a private, prefixless Agent Protocol ASGI app. It is never
 # mounted on the network-facing web app.
 from fastapi import FastAPI as _FastAPI
 from assist.async_subagents import configure_async_subagent_app

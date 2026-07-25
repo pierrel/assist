@@ -96,10 +96,11 @@ class TestSpecWiring(_CreateAgentHarness):
 
         assert kwargs["subagents"] == []
         assert "start_async_task" not in kwargs["system_prompt"]
-        assert "Do not call `task` or any async-task tool" in kwargs["system_prompt"]
+        assert "Do not call `task` or any subagent management tool" in kwargs[
+            "system_prompt"]
         assert "dispatch the `context-agent`" not in kwargs["system_prompt"]
 
-    def test_async_subagent_tools_select_all_background_prompt(self):
+    def test_subagent_tools_select_asynchronous_prompt(self):
         kwargs = self._build(spec=AgentSpec(
             async_subagent_tools=_async_task_tools))
 

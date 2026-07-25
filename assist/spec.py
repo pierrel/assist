@@ -70,7 +70,7 @@ class AgentSpec:
     # in ``create_agent``).
     default_backend: BackendProtocol | None = None
 
-    # Deep Agents-compatible async task management surface for the MAIN agent.
+    # Deep Agents-compatible subagent management surface for the MAIN agent.
     # ``None`` keeps the established synchronous subagents for legacy embedders;
     # an explicit empty sequence disables delegation (the web triage profile),
     # and the web main profile supplies all five lifecycle tools. This one field

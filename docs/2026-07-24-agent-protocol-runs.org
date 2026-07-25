@@ -1,4 +1,4 @@
-#+title: One runs interface for web execution and async-only subagents
+#+title: One runs interface for web execution
 #+date: <2026-07-24>
 #+author: Pierre + Codex
 
@@ -6,7 +6,7 @@
 
 MERGED in [[https://github.com/pierrel/assist/pull/212][assist PR #212]].  Its
 parent-child suspension design is historical and is superseded by
-[[file:2026-07-25-async-subagents-asgi.org][the all-background ASGI design]].  Main-thread user interjection and HITL
+[[file:2026-07-25-async-subagents-asgi.org][the asynchronous-subagent ASGI design]].  Main-thread user interjection and HITL
 interrupts remain; only the child-wait =interrupt()/Command(resume)= path is retired.
 
 Everything below this line records PR #212's historical design at merge time.

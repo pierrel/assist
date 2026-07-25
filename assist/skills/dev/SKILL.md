@@ -33,7 +33,7 @@ Before making ANY changes, complete ALL of the following in order.
 - Include the test output in your response. This confirms the environment works.
 
 **1c. Research (only if needed).**
-- If the task involves unfamiliar libraries or patterns, call `research-agent` the same way: background via `start_async_task` when available, otherwise synchronously via `task`.
+- If the task involves unfamiliar libraries or patterns, call `research-agent` the same way: use `start_async_task` when available, otherwise use `task` and wait.
 
 **1d. Note findings.**
 - Write 3–5 key bullet points to `dev_notes.txt` in the workspace.

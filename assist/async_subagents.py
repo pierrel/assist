@@ -1,4 +1,4 @@
-"""Agent Protocol-backed background-task tools for the web supervisor.
+"""Agent Protocol-backed subagent tools for the web supervisor.
 
 The tools are intentionally shaped like Deep Agents' async-subagent tools, but
 use an injected in-process ASGI app.  Deep Agents 0.6.x has no public client
@@ -72,15 +72,15 @@ def async_task_context(context: AsyncTaskContext) -> Iterator[None]:
 def _context(runtime: ToolRuntime) -> tuple[AsyncTaskContext, str]:
     context = _CONTEXT.get()
     if context is None:
-        raise RuntimeError("async task tool invoked outside a configured web run")
+        raise RuntimeError("subagent tool invoked outside a configured web run")
     if not runtime.tool_call_id:
-        raise ValueError("tool call ID is required for async task management")
+        raise ValueError("tool call ID is required for subagent management")
     return context, runtime.tool_call_id
 
 
 async def _with_client(operation):
     if _APP is None:
-        raise RuntimeError("async subagent ASGI app is not configured")
+        raise RuntimeError("subagent ASGI app is not configured")
     transport = httpx.ASGITransport(app=_APP)
     async with httpx.AsyncClient(
             base_url="http://assist-agent", transport=transport) as raw:
@@ -100,7 +100,7 @@ def _task_id(context: AsyncTaskContext, tool_call_id: str) -> str:
 def _task_value(thread: dict[str, Any]) -> dict[str, Any]:
     value = (thread.get("values") or {}).get("async_task")
     if not isinstance(value, dict):
-        raise ValueError("thread is not an async task")
+        raise ValueError("thread is not a subagent task")
     return value
 
 
@@ -128,15 +128,15 @@ _TaskId = Annotated[str, Field(
 def _start_async_task(
     description: Annotated[str, Field(
         min_length=1, max_length=64_000,
-        description="Complete, self-contained work for the background agent.")],
+        description="Complete, self-contained work for the subagent.")],
     subagent_type: Annotated[
-        str, Field(description="One listed async subagent type.")],
+        str, Field(description="One listed subagent type.")],
     runtime: ToolRuntime,
 ) -> str:
     context, tool_call_id = _context(runtime)
     if subagent_type not in SUBAGENTS:
         allowed = ", ".join(f"`{name}`" for name in SUBAGENTS)
-        return f"Unknown async subagent type `{subagent_type}`. Available: {allowed}"
+        return f"Unknown subagent type `{subagent_type}`. Available: {allowed}"
     task_id = _task_id(context, tool_call_id)
     dispatch_key = f"{context.parent_work_id}:{tool_call_id}"
 
@@ -162,8 +162,9 @@ def _start_async_task(
         )
 
     _run(launch)
-    return (f"Launched async subagent. task_id: {task_id}. Report this full ID "
-            "to the user and return now; the result will trigger a follow-up.")
+    return (f"Started subagent. task_id: {task_id}. In the user reply, call it a "
+            "subagent or task, never background or async. Report this full ID and "
+            "return now; the result will trigger a follow-up.")
 
 
 def _check_async_task(
@@ -193,7 +194,7 @@ def _list_async_tasks(runtime: ToolRuntime) -> str:
     values = (_run(get_parent).get("values") or {})
     tasks = (values.get("async_tasks") or [])[-64:]
     if not tasks:
-        return "No async tasks exist for this conversation."
+        return "No subagent tasks exist for this conversation."
     rendered = "\n".join(_format_task(task, include_result=False) for task in tasks)
     if values.get("async_tasks_truncated"):
         rendered += "\nOlder completed task history was pruned from this listing."
@@ -271,8 +272,10 @@ _AVAILABLE = "\n".join(
 async_task_tools = (
     StructuredTool.from_function(
         name="start_async_task", func=_start_async_task,
-        description=("Start background work and return its task ID immediately. "
-                     "Never poll in the launch turn. Available types:\n" + _AVAILABLE)),
+        description=("Start a subagent and return its task ID immediately. In the "
+                     "user reply, call it a subagent or task, never background or "
+                     "async. Never poll in the launch turn. Available types:\n"
+                     + _AVAILABLE)),
     StructuredTool.from_function(
         name="check_async_task", func=_check_async_task,
         description="Fetch one task's current status and terminal result using its full ID."),

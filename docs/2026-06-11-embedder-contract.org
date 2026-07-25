@@ -25,8 +25,8 @@ split, no new distribution.
 *Current extension:* the frozen spec now also accepts =async_subagent_tools=.
 =None= retains the legacy synchronous subagents, an explicit empty sequence
 disables delegation for the restricted web triage profile, and a nonempty
-sequence replaces blocking =task= with background lifecycle tools. See
-[[file:2026-07-25-async-subagents-asgi.org][the all-background ASGI design]] for that field's runtime contract.
+sequence replaces blocking =task= with the subagent lifecycle tools. See
+[[file:2026-07-25-async-subagents-asgi.org][the subagent ASGI design]] for that field's runtime contract.
 
 Rejected alternatives (from the framing doc):
 - *Composable middleware export* — both real clients want the identical
@@ -87,7 +87,7 @@ Every field maps to a live client need:
 | =tools=           | emacsos legacy chat: eval_elisp / apply_config / get_config |
 | =skill_sources=   | emacsos config-apply skill served at its own route |
 | =default_backend= | emacsos file-backed chat: EmacsBackend             |
-| =async_subagent_tools= | assist web: background lifecycle or triage no-delegation profile |
+| =async_subagent_tools= | assist web: subagent lifecycle or triage no-delegation profile |
 
 ** Target signatures
 
@@ -105,7 +105,7 @@ Thread(working_dir, *,
 =spec= is keyword-only in both (an out-of-tree positional call must not
 silently bind a string to it).  =spec=None= means =AgentSpec()= —
 exactly today's defaults; the eval harness passes no spec, while manage.web
-passes its web tools, skills, and async task profile through one spec.
+passes its web tools, skills, and subagent profile through one spec.
 
 *The split rule* (articulable, by design): /spec = the agent's shape,
 consumed by =create_agent=; Thread kwargs = per-instance and per-run
@@ -144,7 +144,7 @@ asymmetry dies with the adapter at the legacy-kwarg removal step.
 
 - Arbitrary =subagents= selection remains dropped. The later
   =async_subagent_tools= field selects the established synchronous profile,
-  no delegation, or the web's background profile; it does not accept arbitrary
+  no delegation, or the web's asynchronous profile; it does not accept arbitrary
   child graph definitions. No
   client uses a non-default value (emacsos keeps all three subagents;
   research is routine phone traffic, reversing the framing doc's

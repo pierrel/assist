@@ -6,7 +6,7 @@
 
 All sections below, including =AS BUILT=, are retained as decision history rather
 than the current execution contract. See
-[[file:2026-07-25-async-subagents-asgi.org][the all-background ASGI design]].
+[[file:2026-07-25-async-subagents-asgi.org][the subagent ASGI design]].
 
 * Shape (one paragraph)
 
@@ -198,7 +198,7 @@ Cadence: baseline N=3 → post-impl N=3 → N=5 → N=10.
 
 deepagents 0.6.1 ships =AsyncSubAgentMiddleware= (=middleware/async_subagents.py=)
 — =start_async_task= / =check_async_task= / =update_async_task= tools that
-launch a subagent as a background run. The right *shape*, rejected for this
+ launch a subagent as an asynchronous run. The right *shape*, rejected for this
 deployment on three structural grounds:
 1. *Requires an Agent Protocol execution service*: assist now implements the installed
    SDK subset as a thin authenticated adapter over its own RunService. It deliberately

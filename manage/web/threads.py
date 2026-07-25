@@ -1157,6 +1157,8 @@ _SUPERSEDE_RIDER = (
 # in the checkpoint ARE the chain history — no counter file), and recovery exact-match
 # fidelity (the _SUPERSEDE_RIDER pattern).
 _CONTINUATION_RIDER = "[Continuing my earlier work — background follow-up] "
+# Durable history/checkpoint marker. Keep the legacy token so pre-PR messages
+# remain system-authored when rendered or recovered; it is stripped from the UI.
 _TASK_COMPLETION_RIDER = "[Background task finished] "
 CHAIN_CAP = 5
 
@@ -1261,7 +1263,7 @@ def _frame_interjection(rec: "PendingMessage") -> str:
     main agent inspects and manages its durable tasks after receiving it."""
     guide = _INTERJECTION_GUIDE
     if rec.sender is None:
-        guide += (" Review your outstanding async tasks with list_async_tasks, "
+        guide += (" Review your outstanding subagent tasks with list_async_tasks, "
                   "then deliberately keep, update, or cancel them if this message "
                   "changes their relevance.")
     return _INTERJECTION_FRAME + rec.text + guide + ")"
@@ -1586,8 +1588,7 @@ def _complete_child_handoff(run: Run) -> Run | None:
     try:
         successor = _create_run(
             run.parent_thread_id,
-            ("[Async task completion]\n"
-             f"Task ID: {run.thread_id}\n"
+            (f"Task ID: {run.thread_id}\n"
              f"Agent: {run.assistant_id}\n"
              f"Status: {run.status}\n"
              "This is trusted orchestration metadata, not a user message. "

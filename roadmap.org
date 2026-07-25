@@ -23,7 +23,7 @@ possible, we should enable it. Plan when we pick this up:
 - When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
   subagent rather than strip).
 * Architecture
-** DONE One Agent Protocol-shaped runs interface + async-only subagents
+** DONE One Agent Protocol-shaped runs interface
 Shipped for review 2026-07-24 in [[https://github.com/pierrel/assist/pull/212][assist PR #212]]. This records that PR's
 historical design; the adjacent replacement item supersedes its child lifecycle.
 Make assistants/threads/runs the sole web execution interface while retaining the global
@@ -34,7 +34,7 @@ while deferred children posted automatic follow-ups. Target the installed LangGr
 subset rather than deploying Agent Server.
 See [[https://github.com/langchain-ai/agent-protocol][Agent Protocol]], [[https://docs.langchain.com/oss/python/deepagents/async-subagents][Deep Agents async subagents]], and
 [[file:docs/2026-07-24-agent-protocol-runs.org][the reviewed implementation state doc]].
-** DONE Make every web subagent background and user-steerable
+** DONE Make every web subagent asynchronous and user-steerable
 Shipped for review 2026-07-25 in [[https://github.com/pierrel/assist/pull/213][assist PR #213]].
 Replace PR #212's required-child suspension with the five Deep Agents async-task
 tools over a private in-process ASGI Agent Protocol app.  Every start releases the

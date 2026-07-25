@@ -1,4 +1,4 @@
-"""Small-model contract for all-background delegation.
+"""Small-model contract for subagent delegation.
 
 The subagents are deterministic stubs.  This suite evaluates the supervisor's
 decisions and first visible reply, not child research quality or queue plumbing.
@@ -28,8 +28,9 @@ class _TaskInput(BaseModel):
 def _start(description: str, subagent_type: str) -> str:
     """Return the future production tool's observable scheduling result."""
     suffix = hashlib.sha256(description.encode()).hexdigest()[:12]
-    return (f"Launched async subagent. task_id: task-eval-{suffix}. "
-            "The result will be posted as a follow-up.")
+    return (f"Started subagent. task_id: task-eval-{suffix}. In the user reply, call "
+            "it a subagent or task, never background or async. Report this full ID "
+            "and return now; the result will trigger a follow-up.")
 
 
 class _TaskIdInput(BaseModel):
@@ -61,7 +62,8 @@ def _cancel(task_id: str) -> str:
 _START = StructuredTool.from_function(
     name="start_async_task",
     func=_start,
-    description=("Start a background task and return its task ID immediately. "
+    description=("Start a subagent and return its task ID immediately. In the user "
+                 "reply, call it a subagent or task, never background or async. "
                  "Do not wait for or poll the result in this turn."),
     infer_schema=False,
     args_schema=_TaskInput,
@@ -103,7 +105,7 @@ class TestAsyncSubagentSupervisor(TestCase):
                 if isinstance(message, AIMessage)
                 for call in (message.tool_calls or [])]
 
-    def test_starts_background_work_and_returns_without_polling(self):
+    def test_starts_subagents_and_returns_without_polling(self):
         agent = self._agent()
         reply = agent.message(
             "Look through my trip notes and research current train options. "
@@ -116,7 +118,9 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertEqual(checks, [], "the launch turn must not poll")
         self.assertRegex(reply, r"task-[A-Za-z0-9_-]+",
                          "the visible reply must include the full task ID")
-        self.assertRegex(reply, r"(?i)(follow.?up|when .*finish|background|started)")
+        self.assertRegex(reply, r"(?i)(follow.?up|when .*finish|started)")
+        self.assertNotRegex(reply, r"(?i)\b(background|async)\b",
+                            "all web subagents should be named simply as subagents")
         self.assertNotRegex(reply, r"(?i)(I found|the train options are)",
                             "the launch reply must not invent unfinished results")
 
@@ -125,7 +129,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         reply = agent.message(
             "Look through my trip notes and independently research current national "
             "rail discount programs. Both briefs are already self-contained. Start "
-            "every useful background task, tell me their IDs, and return.")
+            "every useful subagent task, tell me their IDs, and return.")
         calls = self._calls(agent)
         starts = [call for call in calls if call.get("name") == "start_async_task"]
         self.assertGreaterEqual(len(starts), 2, calls)
@@ -140,14 +144,14 @@ class TestAsyncSubagentSupervisor(TestCase):
         agent = self._agent()
         agent.message(
             "Look only through my local trip notes to find when weekend rail "
-            "service resumes. Start the context background task and return while "
+            "service resumes. Start the context subagent and return while "
             "it runs; do not do external research.")
         start = next(call for call in reversed(self._calls(agent))
                      if call.get("name") == "start_async_task")
         task_id = "task-eval-" + hashlib.sha256(
             start["args"]["description"].encode()).hexdigest()[:12]
         reply = agent.message(
-            "[Background task finished] [Async task completion] Task ID: "
+            "[Background task finished] Task ID: "
             f"{task_id}. Status: success. This is orchestration metadata. "
             "Check the exact task before responding.")
         calls = self._calls(agent)
@@ -160,7 +164,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         agent = self._agent()
         agent.message("Hello")
         reply = agent.message(
-            "I changed my mind. Stop the outstanding background work from my "
+            "I changed my mind. Stop the outstanding subagent task from my "
             "earlier request and tell me what you stopped.")
         calls = self._calls(agent)
         names = [call.get("name") for call in calls]

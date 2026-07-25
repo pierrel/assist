@@ -1,4 +1,4 @@
-#+title: All-background async subagents over the Agent Protocol
+#+title: Subagents over the Agent Protocol
 #+date: <2026-07-25>
 #+author: Pierre + Codex
 
@@ -38,7 +38,7 @@ children were removed afterward.
   from the annotated callable and test through a compiled =ToolNode=; LangChain's
   model-facing schema still removes the injected field.
 - Delegation has three real states: legacy synchronous, explicitly disabled,
-  and background async. One tri-state value must drive graph construction,
+  and asynchronous. One tri-state value must drive graph construction,
   installed tools, and prompt rendering so contradictory states cannot exist.
 
 * User contract
@@ -48,9 +48,8 @@ children were removed afterward.
 2. The main agent may start one or more subagent tasks.  Starting a task returns
    its full task ID immediately.  The main agent then tells the user what it
    started and returns.  It never waits or polls in that turn.
-3. Children use the existing durable Run service and the existing
-   =THREAD_QUEUE=.  =parallel=1= remains true.  “Background” means the parent is
-   released, not that two model calls run at once.
+3. A subagent call releases the parent and uses the existing durable Run service
+   and =THREAD_QUEUE=. =parallel=1= remains true; two model calls never overlap.
 4. Each child terminal result creates exactly one ordinary follow-up Run on its
    parent thread.  That Run wakes the main agent, which checks the completed task
    and continues the user's request.
@@ -69,7 +68,7 @@ children were removed afterward.
    completion does not wake the parent. Cancellation is durable first, then asks
    the active child to stop at its next model boundary. Neither operation
    preempts an in-flight inference or tool call.
-9. Async children are direct leaf graphs and receive no delegation tools.
+9. Subagents are direct leaf graphs and receive no delegation tools.
 
 * What “interrupt” means after this change
 
@@ -78,7 +77,7 @@ Keep the complete user-to-main interjection mechanism in
 pending messages, model-boundary delivery, durable claim, rendering, recovery,
 and re-journaling on failure.
 
-Delete the parent-waits-for-child mechanism.  In particular, async delegation
+Delete the parent-waits-for-child mechanism. In particular, subagent delegation
 must no longer call LangGraph =interrupt()=, suspend the parent tool node, or
 replay that node through =Command(resume=...)= when a child finishes.  Child
 completion is a new ordinary parent Run.  HITL interrupts such as =send_reply=
@@ -157,8 +156,8 @@ queue.
 - Remove child =resume_value= state and required-child interrupted-parent
   recovery/dependency branches.
 - Remove the required/background split and the
-  =background-research-agent= identity.  Context, research, and critique are all
-  ordinary background task types.
+  =background-research-agent= identity. Context, research, and critique are the
+  ordinary subagent types.
 - Remove background-research-specific interjection wording and blanket pending
   continuation cancellation.
 - Remove the public =/agent= mount, secret configuration, and
@@ -210,8 +209,8 @@ message or system instruction.
    update/cancel them.
 8. Main-thread interjection delivery, HITL approval, SMS, schedules, recovery,
    deletion, and fair pause retain their existing behavior.
-9. Children lack async task tools and cannot recursively dispatch background
-   children.
+9. Children lack task-management tools and cannot recursively dispatch
+   subagents.
 10. Completion framing keeps child output untrusted.
 11. Event-loop probes hold contended locks and prove HTTP status/message routes
     remain responsive.
@@ -232,11 +231,19 @@ Add an eval suite that observes, rather than merely asks for:
 - a user correction causes a fresh list/check followed by a justified
   keep/update/cancel decision;
 - research no longer names or requests =background-research-agent=;
-- child agents do not call async management tools.
+- child agents do not call subagent management tools.
 
 Run N=3 before implementation to record the current failure shape, N=3 after
 implementation, N=5 after local review, and N=10 for stability.  Bound each
 real-model run and save its output.
+
+Observed 2026-07-25: the pre-implementation N=3 baseline was 0/3 scenarios;
+the implemented behavior passed N=3 (12/12 assertions), N=5 (20/20), and N=10
+(40/40). A final terminology-focused N=3/N=5/N=10 sequence also passed 72/72:
+visible replies consistently call delegated work a subagent or task. Static
+prompt wording alone was insufficient because the small model could reintroduce
+the retired label; placing the same naming contract in the start tool's
+description and immediate result made the observable contract stable.
 
 * Build order
 

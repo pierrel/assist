@@ -1,7 +1,7 @@
 """Minimal LangGraph SDK-compatible ASGI routes for agent runs.
 
 The router deliberately accepts only the calls made by Assist's five
-Deep Agents-shaped async-task tools. It is an in-process adapter over an injected
+Deep Agents-shaped subagent tools. It is an in-process adapter over an injected
 service, not a second execution path or a remote configuration API.
 """
 from __future__ import annotations
