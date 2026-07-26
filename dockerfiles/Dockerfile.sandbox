@@ -5,6 +5,8 @@ RUN pacman -Syu --noconfirm && \
     pacman -S --noconfirm \
         python \
         python-pip \
+        # deterministic graph/PNG creation for the render skill
+        python-matplotlib \
         base-devel \
         git \
         grep \

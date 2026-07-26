@@ -1,9 +1,32 @@
 ---
 name: render
-description: Rendering things in the user's web view (web UI only) beyond plain text — files AND maps. FILES — "show me fitness.org"; "open my notes"; "view the report"; "display that pdf"; "pull up the recipes file". MAPS — whenever the discussion involves mappable, real-world locations (places, addresses, businesses, routes, "near", "walking distance", "how far", "on a map"), e.g. "coffee shops near X"; "map these places"; "show the route from A to B". MUST load before responding when the user asks to SHOW/OPEN/VIEW/DISPLAY/pull up a file, OR whenever real-world places/routes are being discussed that would be clearer on a map.
+description: Rendering things in the user's web view (web UI only) beyond plain text — files, generated PNG graphs/charts, existing PNG artifacts, and maps. MUST load when the user wants to see a file in the conversation, asks for a graph or chart to be created and displayed, refers back to a PNG artifact they want displayed, names the render skill, or discusses places/routes that would be clearer on a map.
 ---
 
 # Render — show a file in the user's web view
+
+## Creating and showing graphs
+
+When the user asks to **show a graph or chart**, complete this exact sequence:
+
+1. Use `execute` with Python and matplotlib to create a PNG under persistent
+   `/tmp` (for example `/tmp/chart.png`). Matplotlib is already installed;
+   do not install packages.
+2. Verify the command succeeded and the PNG exists at that exact path.
+3. In the same response, emit a file render block naming that exact PNG:
+
+```render
+type: file
+path: /tmp/chart.png
+```
+
+The model is text-only, but that does not prevent it from displaying an image
+file it created. Do not `read_file` a PNG, replace it with an ASCII graph, create
+an HTML/markdown substitute, or merely tell the user where the PNG was saved.
+
+If the user later says **show/render the graph here**, reuse the PNG path from
+the conversation and emit the block again immediately. Do not inspect, recreate,
+or re-verify an existing PNG before emitting its block.
 
 When the user asks to **show, open, view, display, or pull up** a file, render
 it for them in the web view. Do this by emitting a **render block** — a fenced
@@ -18,7 +41,7 @@ Replace `PATH-TO-THE-FILE` with the real file — either in the user's workspace
 (e.g. `path: /workspace/fitness.org`) or under `/tmp` (e.g.
 `path: /tmp/summary.md`). **`/tmp` is a persistent scratch directory** that
 renders exactly like the workspace, so you can `write_file` a file there to show
-it (see "Showing a file that isn't .org/.md/.pdf" below).
+it (see "Showing other file types" below).
 
 ## Showing only part of a file
 
@@ -52,11 +75,11 @@ a single line or page use the same number twice, e.g. `pages: 3-3`). The range i
 the block must be numbers you resolved — never put a description like
 `lines: the backups section` in the block. Omit the range to show the whole file.
 
-## Showing a file that isn't .org / .md / .pdf
+## Showing other file types
 
-`.org`, `.md`, and `.pdf` render richly (formatted). **Any other file still
-renders — as plain text.** So you CAN show a `.txt`, `.py`, `.j2`, log, config,
-or extension-less file directly:
+`.org`, `.md`, and `.pdf` render richly (formatted), and `.png` renders as an
+inline image. Other files render as plain text. So you CAN show a `.txt`, `.py`,
+`.j2`, log, config, or extension-less file directly:
 
 ```render
 type: file
@@ -125,13 +148,13 @@ confirmed — `map_data` geocodes real names, so a made-up one gives a wrong/emp
 - Emit the render block **instead of** reading the file and summarizing or
   pasting its contents. The block displays the actual file; a summary is not
   what the user asked for.
-- `.org`, `.md`, and `.pdf` render richly; any other file renders as plain text,
-  or convert it to a `/tmp/*.md` copy first (see "Showing a file that isn't
-  .org/.md/.pdf"). Either way, SHOW the file — don't fall back to summarizing.
+- `.org`, `.md`, and `.pdf` render richly; `.png` renders as an inline image;
+  other files render as plain text or a converted `/tmp/*.md` copy. Either way,
+  SHOW the file — don't fall back to summarizing.
 - If you don't know the exact path, find the file first (e.g. `glob`), then
   emit the block with its real path.
 - You may add a short sentence before the block (e.g. "Here's your file:"), but
   the render block itself must be exactly the fenced `render` block above.
-- For content you are writing yourself — tables, lists, code, formatting — just
-  use normal markdown; the chat renders it. The render block is **only** for
-  showing an existing workspace file.
+- For ordinary text content you are writing yourself — tables, lists, code,
+  formatting — use normal markdown. A generated PNG graph is a file artifact,
+  so show it with the render block after creating it.

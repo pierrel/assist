@@ -1,0 +1,145 @@
+#+TITLE: Render generated PNG graphs in the web conversation
+#+DATE: <2026-07-23>
+#+STATUS: implemented, locally reviewed, and eval-stable; not deployed
+
+* Incident
+In thread =20260511093139-e1d2173d= the user asked to see a graph of two months of
+weight data. The agent eventually generated =/tmp/weight_chart.png=, then tried to
+=read_file= the binary and summarized the result. On the next turn, "Please render
+the graph here", it claimed that a text-only model could not render the PNG and
+substituted ASCII. When explicitly told to check the render skill, it searched for
+and read =/render-skill/render/SKILL.md= instead of calling =load_skill("render")=.
+It finally emitted a file render block, but the web route decoded PNG bytes through
+the generic plain-text fallback rather than serving an image.
+
+* Behavioral baseline
+The regressions were added to =edd/eval/test_render_agent.py= before any production
+behavior changed and run as separate real-Qwen trials:
+
+| case | baseline |
+|------+----------|
+| first-turn "show me a graph of how my weight changed" | 0/3 rendered (the render skill loaded, but no block was emitted) |
+| self-contained "render the graph" with the PNG path | 3/3 |
+| self-contained named-skill correction with the PNG path | 3/3 |
+
+The corrected, Docker-backed graph creation case was 0/3: the agent loaded the
+render skill every time but created/rendered markdown or HTML instead of PNG. The
+faithful production sequence was also 0/3: "Please render the graph
+here" never called =load_skill("render")= (twice it made no tool call; once it
+wrote another markdown graph), and the named correction therefore could not make
+the sequence pass. The passing self-contained cases show that terse follow-ups and
+conversation state, not just skill availability, are part of the failure.
+
+After review added unrelated wording, the old skill failed the existing-PNG
+generality case 0/3 while its explicitly named case remained 3/3. This separates
+semantic selection from the already-working direct named-skill path.
+
+The isolated implementation then passed 3/3 for each of the first-turn graph,
+unrelated existing-PNG, explicitly named-skill, and faithful follow-up sequence
+cases. Review subsequently strengthened the artifact and tool-call assertions;
+the post-review cadence below tests that final contract.
+
+* Decision
+Keep the existing stable =type: file= block. A PNG is a file artifact; a new
+=image= or =chart= render type would add model vocabulary and parser surface without
+adding capability. Extend the file representation in two places:
+
+1. The render skill says that requested graphs/charts are written as PNG files in
+   persistent =/tmp= and then shown with a file render block. Its description names
+   graph, chart, image, PNG, and the verb render so the small model selects it on
+   the observed requests.
+2. The web file renderer emits an =<img>= for PNG and the sync =/show= route serves
+   the original bytes as =image/png=. Org/markdown remain HTML, PDF remains the
+   browser viewer, and other extensions remain escaped plain text.
+3. The sandbox image installs Arch's =python-matplotlib= package. This makes graph
+   creation available before the turn starts, instead of asking the agent to mutate
+   an externally-managed Python installation at runtime. The skill gives Qwen the
+   checkable sequence: create the =/tmp/*.png= with Python/matplotlib, verify that
+   path exists, then emit the file block for that exact path.
+
+A standalone explicit request to use the render skill must go through =load_skill=.
+The render-specific description and body own this behavior; no shared framework
+change is justified unless a reachable failing eval requires it.
+
+That condition occurred in the first post-review N=5 gate. Graph creation,
+unrelated existing-PNG display, and the standalone named request were each 5/5,
+but a then-three-turn experiment was 4/5: one correction turn tried to =read_file= a
+hallucinated =/workspace/.claude/skills/render/SKILL.md= instead of calling
+=load_skill=. Review found that this turn followed an already-successful render
+and was unreachable in the repaired flow. A proposed shared prompt change and
+divergent calculate regression were therefore removed as theoretical code.
+
+* Threat model
+The render block and PNG are agent-authored, untrusted input. The path continues
+through =_safe_workspace_file=, including symlink resolution and separate
+=/workspace= and =/tmp= roots. The server chooses =image/png= from the supported
+extension and sends =X-Content-Type-Options: nosniff=; it does not derive HTML or a
+MIME type from file contents, decode the PNG as text, or place bytes in a data URL.
+The browser consumes the bytes through an escaped, URL-encoded same-origin =src=.
+
+No image parser, plotting engine, subprocess, or package installation is added to
+the host render path. The =/show= route stays a synchronous FastAPI handler, so file
+I/O remains in the threadpool and does not block the single-worker event loop.
+Matplotlib exists only inside the already-contained per-turn sandbox; it never
+parses or executes agent-authored content on the host render path.
+
+* Validation contract
+- Unit symptom: rendering a PNG block produces an actual =<img>= in the conversation;
+  GETting that exact =src= returns byte-identical PNG data with =image/png= and
+  =nosniff=. It must not produce an iframe, code fence, or decoded binary text.
+- Behavioral: an initial graph request and a standalone explicitly named skill
+  request must call =load_skill(name="render")=, not merely read a =SKILL.md= path.
+  Follow-ups in a thread where render is already loaded may reuse the body in
+  conversation history, but must emit a new =type: file= PNG block and must not
+  detour through filesystem skill discovery. The emitted path must name a real
+  artifact with the PNG signature. Multi-turn assertions inspect only messages
+  emitted after each turn boundary, never cumulative history.
+- Cadence: N=3 baseline, N=3 after the isolated implementation, local review to
+  convergence, N=5 after review fixes, then N=10 stability. No deployment.
+
+* Planned files
+- =assist/web_skills/render/SKILL.md=: graph/image selection and PNG recipe.
+- =manage/web/threads.py=: PNG =<img>= embed and binary response.
+- =dockerfiles/Dockerfile.sandbox=: install the sandbox plotting dependency.
+- =tests/test_render.py=: browser-visible HTML and byte-response symptom test.
+- =edd/eval/test_render_agent.py=: production-shaped behavior contracts.
+- =docs/2026-06-28-render-skill.org=: reconcile the earlier "images not built" scope.
+
+* As-built reconciliation
+The implementation retains =type: file= and adds one PNG branch to the web
+renderer: an inline =<img>= whose same-origin =/show= URL returns original bytes
+as =image/png= with =nosniff=. The sync route and existing safe-path chokepoint are
+unchanged. The sandbox image installs =python-matplotlib=, and the render skill
+now gives the small model a concrete create, verify, and emit sequence. The stale
+=_SHOWABLE_EXTS= tuple was removed because every extension already reaches the
+escaped-text fallback.
+
+The render recipe says that an already-created PNG is re-emitted immediately,
+without a redundant filesystem verification that can derail the follow-up turn.
+The sequence eval stops when that render follow-up succeeds; continuing with
+"try again" after success manufactured a turn the repaired user flow cannot reach.
+The standalone named-skill case owns the correction contract instead.
+
+The evals use a real Docker sandbox for graph creation, validate each emitted
+artifact independently by existence and PNG signature, use a decodable PNG for
+existing-file cases, inspect only the current turn in the follow-up sequence,
+and reject filesystem reads/searches for the mounted skill. Baseline and
+post-implementation N=3 results are recorded above. The first post-review N=5
+gate experiment is recorded above but did not describe a reachable flow. The four
+final contracts passed the final N=5 gate; the final-prompt N=10 stability result
+passed 40/40 individual real-model trials. Nothing was deployed.
+
+* Design-review reconciliation
+The simplicity, agentic/framework, user-flow, security, and liveness reviewers
+agreed on the =type: file= / =<img>= design but blocked the first draft on two test
+proxies: it accepted a named =.png= path without a real artifact, and the sequence
+test could accept a block from an earlier turn. Both were corrected before the
+production baseline: graph evals now use the real Docker sandbox, validate PNG
+signature bytes at the emitted path, and slice messages at each turn boundary.
+
+The review also found that =_SHOWABLE_EXTS= is stale: the route already accepts all
+extensions through its escaped-text fallback, so the tuple is not an allow-list or
+source of truth. Remove it and its misleading drift test rather than adding PNG to
+it. Reconcile every absolute "all other files are text" statement in the skill,
+renderer docstrings/comments, tests, and the original render design. Preserve the
+caption/open link and give the inline image meaningful escaped alt text.

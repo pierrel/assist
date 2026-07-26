@@ -2,6 +2,18 @@
 #+DATE: <2026-06-28>
 #+STATUS: built (CPU-tested + focal emission eval 3/3; live web render pending deploy)
 
+* 2026-07-23 follow-up: PNG graphs
+The original v1 scope below deliberately deferred images and graphs. That
+limitation is superseded by =docs/2026-07-23-png-graph-render.org=: the same
+=type: file= block now displays PNG files inline, the sandbox provides
+matplotlib for deterministic graph creation, and the render skill teaches the
+create-PNG → verify → emit-block sequence. The generic text fallback remains for
+non-PNG file types.
+
+=_SHOWABLE_EXTS= was removed in that follow-up. It had become a stale tuple after
+the route gained its any-extension escaped-text fallback, not a real allow-list or
+source of truth.
+
 * Decision + design-review outcome (2026-06-28)
 Reviewed by the design-review team (simplicity, agentic/framework-fit,
 user-intention, clean-interfaces). The split was block-from-skill vs keeping a
@@ -24,7 +36,8 @@ Review fixes folded in (as built):
 - ~type~+~path~ "always a workspace file" is a **deliberate kept constraint** —
   no inline-payload escape hatch, so the security boundary stays singular.
 - =_RENDER_DISPATCH= is the single source of truth for known types.
-- =_SHOWABLE_EXTS= moved to =manage/web/threads.py= (its only remaining consumers).
+- =_SHOWABLE_EXTS= moved to =manage/web/threads.py= in v1, then removed by the
+  2026-07-23 PNG follow-up after the route accepted every extension.
 - Factual correction: show_file was *already* web-scoped via ~_WEB_TOOLS~; only
   the *prompt steering* leaked into the shared template — that's the real wart,
   now fixed by the web-only skill. The web app token-stream concern is moot (the
@@ -110,21 +123,23 @@ lazy-loads on matching requests and never reaches emacsos/eval agents.
 - *Moved:* the show/open/view steering — out of the shared =general_instructions.md.j2=
   and into the web render ~SKILL.md~.
 - *Reused unchanged:* ~/thread/{tid}/show~, ~_safe_workspace_file~, ~_org_to_html~,
-  the CSP + sandbox iframe, ~_SHOWABLE_EXTS~.
+  and the CSP + sandbox iframe. (The PNG follow-up extends the show route and adds
+  an image branch alongside the iframe.)
 
-* Extensibility (out of scope now — build ready for it)
+* Extensibility (original v1 scope; PNG follow-up implemented 2026-07-23)
 The growth path Pierre named is **rendering visualizations / graphs**. The design
 is ready for it WITHOUT format change:
 - The block stays ~type~ + ~path~. A future ~type: chart~ points ~path~ at a
   workspace spec file (e.g. a vega-lite JSON the agent wrote); a ~chart~ renderer
-  in ~_RENDER_DISPATCH~ reads that file and renders the visualization. Same for
-  ~type: image~ (serve a workspace png through the /show route).
+  in ~_RENDER_DISPATCH~ reads that file and renders the visualization.
 - So adding a render type = one entry in the dispatch registry + one renderer +
   its own security review (each new content type is a new surface — e.g. a chart
   spec is untrusted model/agent output; render it in the sandboxed iframe / via a
   vetted lib, never eval it — same lesson as the org-RCE fix).
-- *Not built now* (no speculative code): images, charts/graphs. v1 is file-embed
-  (org/md/pdf) only.
+- *Superseded:* the original idea of a separate ~type: image~. The observed graph
+  failure justified PNG display + sandbox graph creation, but PNG remains a
+  ~type: file~ artifact; see the follow-up named above. Interactive chart specs
+  remain unbuilt.
 
 * Decisions / trade-offs
 - *Skill (guidance) vs tool (structured).* The risk: a tool call's args are a
@@ -190,7 +205,8 @@ is ready for it WITHOUT format change:
 - New: =assist/web_skills/render/SKILL.md= (web skill), =docs/2026-06-28-render-skill.org=,
   =edd/eval/test_render_agent.py=.
 - Edit: =manage/web/threads.py= (parse render blocks + ~_RENDER_DISPATCH~ +
-  ~_render_assistant_content~ + the file embed; ~_SHOWABLE_EXTS~ moved here),
+  ~_render_assistant_content~ + the file embed; v1 moved ~_SHOWABLE_EXTS~ here,
+  and the PNG follow-up later removed it),
   =assist/thread.py= (~_messages_to_dicts~ — drop the show_file branch; no block
   parsing here, that's web-only in render_thread), =assist/thread_manager.py=
   (drop ~_WEB_TOOLS~; register the web skill via ~skill_sources~), =assist/tools.py=

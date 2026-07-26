@@ -192,12 +192,6 @@ async def _invalid_thread_id(request, exc):
 
 _MD_EXTENSIONS = ["fenced_code", "tables"]
 
-# Extensions the /show route + the render-block file embed can display.  Single
-# source of truth (the route dispatches md/org/pdf; _render_file_block gates on
-# this; test_route_renders_every_showable_ext pins route coverage).
-_SHOWABLE_EXTS = (".org", ".md", ".pdf")
-
-
 # Thread-list ordering rank (lower sorts first). Per Pierre: STATUS first — urgent,
 # then any busy stage except queued (processing / paused / initializing / cloning /
 # starting_sandbox), then queued (waiting for a slot), then "new" (an unopened
@@ -945,9 +939,10 @@ def render_thread(
           .msg.tools > .content {{ font-size: .82rem; color: #6b7280; margin: .15rem 0 .15rem .3rem;
               padding: .3rem .55rem; border-left: 2px solid #e5e7eb; }}
           /* A file embed lifted from a ```render block, shown inline in the
-             assistant bubble (org/md rendered page, or pdf viewer). */
+             assistant bubble (image, rendered document/text, or pdf viewer). */
           .show-embed {{ margin: .5rem 0; }}
           .show-file {{ width: 100%; height: 65vh; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }}
+          .show-file-image {{ height: auto; max-height: 65vh; object-fit: contain; }}
           .show-map {{ width: 100%; height: 55vh; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }}
           /* Pseudo-fullscreen (no Fullscreen API — reliable for a null-origin
              sandboxed iframe): fill the viewport, caption bar stays visible to exit. */
@@ -3049,7 +3044,7 @@ def _existing_thread_dir(tid: str) -> str:
     return tdir
 
 
-# ---- render skill: embed a workspace file (org/md/pdf) in the web UI ----
+# ---- render skill: embed a workspace file in the web UI ----
 
 _SHOW_PAGE_CSS = (
     "body{font-family:sans-serif;max-width:780px;margin:1rem auto;padding:0 1rem;"
@@ -3243,13 +3238,17 @@ def _show_src(tid: str, path: str, lines: str = "", pages: str = "") -> str:
 
 
 def _file_embed_html(tid: str, path: str, lines: str = "", pages: str = "") -> str:
-    """Inline embed for a workspace file: pdf in the browser viewer, md/org as a
-    sandboxed iframe over the /show route, plus a caption link to open it on its
-    own page.  An optional line/page range is carried into BOTH the embed src and
-    the caption link, so inline and full-page show the same section."""
+    """Inline workspace file: PNG image, PDF viewer, or sandboxed document/text
+    iframe over the /show route, plus a caption link to open it on its own page.
+    An optional line/page range is carried into BOTH the embed src and caption
+    link, so inline and full-page show the same section."""
     src = _show_src(tid, path, lines, pages)
     label = html.escape(path)
-    if os.path.splitext(path)[1].lower() == ".pdf":
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".png":
+        viewer = (f'<img class="show-file show-file-image" src="{src}" alt="Graph or image: '
+                  f'{label}" loading="lazy" />')
+    elif ext == ".pdf":
         viewer = f'<embed class="show-file" type="application/pdf" src="{src}" />'
     else:
         # sandbox WITHOUT allow-scripts: the embedded md/org page is static, so
@@ -3278,10 +3277,9 @@ def _scalar(value):
 def _render_file_block(tid: str, block: dict) -> str | None:
     """``type: file`` renderer.  Embeds a workspace/tmp file, or None when the
     path is missing (the block is then left to show as a normal code block).
-    ``.org``/``.md``/``.pdf`` render richly; ANY other file falls back to plain
-    text (the /show route escapes it) — so "show me this .j2/.py/.txt" works
-    instead of silently degrading to a raw code block.  An optional
-    ``lines:``/``pages:`` range is carried into the embed."""
+    PNG renders as an image; org/markdown/PDF render as documents; other files
+    fall back to escaped plain text. An optional ``lines:``/``pages:`` range is
+    carried into the embed."""
     path = _scalar(block.get("path", ""))
     if not path:
         return None
@@ -3601,10 +3599,10 @@ def _extract_pdf_pages(fpath: str, pages: str) -> bytes | None:
 
 @app.get("/thread/{tid}/show")
 def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
-    """Render a file from the thread's agent workspace for embedding: pdf as
-    bytes (browser viewer), md/org as a styled HTML page.  Optional section range
-    — ``lines=N-M`` (md/org) or ``pages=N-M`` (pdf, extracted); the key not
-    matching the file type is simply unread, a malformed range shows the whole file.
+    """Render a thread workspace file: PNG/PDF as bytes, md/org as styled HTML,
+    and other files as escaped text. Optional section range — ``lines=N-M``
+    (md/org/text) or ``pages=N-M`` (pdf, extracted); the key not matching the file
+    type is unread, and a malformed range shows the whole file.
 
     Declared SYNC (not ``async def``) on purpose: the file read, the markdown/org
     conversion, and pdf extraction are blocking CPU/IO and a shown file can be
@@ -3615,6 +3613,11 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
     if fpath is None or not os.path.isfile(fpath):
         raise HTTPException(status_code=404, detail="file not found")
     ext = os.path.splitext(fpath)[1].lower()
+    if ext == ".png":
+        return FileResponse(
+            fpath, media_type="image/png",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
     if ext == ".pdf":
         pdf_headers = {"X-Content-Type-Options": "nosniff"}
         if pages:
@@ -3635,7 +3638,7 @@ def show_file_view(tid: str, path: str, lines: str = "", pages: str = ""):
     elif ext == ".org":
         body = _org_to_html(src)
     else:
-        # Text fallback: any other file (.txt, .py, .j2, no extension, …) shows as
+        # Text fallback: other files (.txt, .py, .j2, no extension, …) show as
         # escaped plain text in a <pre>.  html.escape neutralises any markup, so an
         # agent-generated file can't inject HTML/JS (same guarantee as the org
         # renderer); binary content degrades to replacement chars, not a crash.

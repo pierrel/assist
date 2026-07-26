@@ -43,6 +43,8 @@ where reliability is harder than with frontier APIs.
   - **Org-format skill** scopes editing rules to `.org` files
     (heading-body discipline, no orphaned content) without affecting
     other formats.
+  - **Web rendering skill** displays workspace files and generated PNG
+    graphs directly in the conversation.
 
 - **Subagents in the web UI.** Context, research, and critique
   tasks return a task ID immediately, then wake the conversation with a
