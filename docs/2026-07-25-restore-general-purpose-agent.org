@@ -220,6 +220,9 @@ handoff failed again.  Logs:
 - =/tmp/assist-restore-gp-cap-limited-stability-n3.log= (11/13; context inline
   work and URL laundering);
 - =/tmp/assist-restore-gp-handoff-v19-n3.log= (context failed, URL passed).
+- =/tmp/assist-restore-gp-conflict-removal-v20-n1.log= (direct multi-todo,
+  context handoff, and legacy all failed after removing older direct-action
+  recipes; that broad, non-improving trial was reverted).
 
 The requested five-hour cap leaves the prompt-only contract unproven.  Do not
 deploy or publish this branch unless Pierre chooses between accepting that
