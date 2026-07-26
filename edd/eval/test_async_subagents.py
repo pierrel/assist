@@ -28,11 +28,21 @@ _TASK_TYPES: dict[str, str] = {}
 _FAILED_TASK_IDS: set[str] = set()
 _PENDING_TASK_IDS: set[str] = set()
 _TASK_ROOT: str | None = None
+_TASK_SEQUENCE = 0
 _DIRECT_WORK_TOOLS = {"write_file", "edit_file", "execute"}
 
 
-def _task_id(description: str) -> str:
-    return "task-eval-" + hashlib.sha256(description.encode()).hexdigest()[:12]
+def _task_id(description: str, subagent_type: str) -> str:
+    matches = [task_id for task_id, saved in _TASK_DESCRIPTIONS.items()
+               if saved == description and _TASK_TYPES[task_id] == subagent_type]
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected one started task for {description!r}, found {len(matches)}")
+    return matches[0]
+
+
+def _task_id_for_call(call: dict) -> str:
+    return _task_id(call["args"]["description"], call["args"]["subagent_type"])
 
 
 def _delegate_starts(calls: list[dict]) -> list[dict]:
@@ -48,7 +58,10 @@ class _TaskInput(BaseModel):
 
 def _start(description: str, subagent_type: str) -> str:
     """Return the production tool's observable scheduling result."""
-    task_id = _task_id(description)
+    global _TASK_SEQUENCE
+    _TASK_SEQUENCE += 1
+    identity = f"{_TASK_SEQUENCE}\0{subagent_type}\0{description}"
+    task_id = "task-eval-" + hashlib.sha256(identity.encode()).hexdigest()[:12]
     _TASK_DESCRIPTIONS[task_id] = description
     _TASK_TYPES[task_id] = subagent_type
     return (f"Started subagent. task_id: {task_id}. In the user reply, call "
@@ -162,12 +175,13 @@ _TOOLS = (_START, _CHECK, _UPDATE, _CANCEL, _LIST)
 
 class TestAsyncSubagentSupervisor(TestCase):
     def setUp(self):
-        global _TASK_ROOT
+        global _TASK_ROOT, _TASK_SEQUENCE
         _TASK_DESCRIPTIONS.clear()
         _TASK_TYPES.clear()
         _FAILED_TASK_IDS.clear()
         _PENDING_TASK_IDS.clear()
         _TASK_ROOT = None
+        _TASK_SEQUENCE = 0
         self.model = select_assistant_model(0.1)
 
     def _agent(self) -> AgentHarness:
@@ -223,7 +237,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertFalse(any(call.get("name") == "check_async_task" for call in calls))
         for call in starts:
             description = call["args"]["description"]
-            task_id = _task_id(description)
+            task_id = _task_id(description, call["args"]["subagent_type"])
             self.assertIn(task_id, reply)
 
     def test_completion_wake_checks_then_uses_result(self):
@@ -234,7 +248,7 @@ class TestAsyncSubagentSupervisor(TestCase):
             "it runs; do not do external research.")
         start = next(call for call in reversed(self._calls(agent))
                      if call.get("name") == "start_async_task")
-        task_id = _task_id(start["args"]["description"])
+        task_id = _task_id_for_call(start)
         reply = agent.message(
             "[Background task finished] Task ID: "
             f"{task_id}. Status: success. This is orchestration metadata. "
@@ -283,7 +297,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertFalse(any(call.get("name") == "check_async_task" for call in calls))
         task_ids = set()
         for call in delegates:
-            task_id = _task_id(call["args"]["description"])
+            task_id = _task_id_for_call(call)
             task_ids.add(task_id)
             self.assertIn(task_id, reply)
         self.assertEqual(len(task_ids), 3)
@@ -337,7 +351,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertIn("three-step launch plan", first_delegates[0]["args"][
             "description"].lower())
         self.assertNotIn("summary.txt", first_delegates[0]["args"]["description"].lower())
-        task_id = _task_id(first_delegates[0]["args"]["description"])
+        task_id = _task_id_for_call(first_delegates[0])
 
         reply = agent.message(
             "[Background task finished] Task ID: "
@@ -358,7 +372,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertFalse(any(call.get("name") in _DIRECT_WORK_TOOLS
                              for call in first_calls + later_calls),
                          first_calls + later_calls)
-        next_id = _task_id(next_delegates[0]["args"]["description"])
+        next_id = _task_id_for_call(next_delegates[0])
         self.assertIn(next_id, reply)
 
     def test_failed_prerequisite_does_not_launch_blocked_delegate(self):
@@ -398,7 +412,7 @@ class TestAsyncSubagentSupervisor(TestCase):
                            if call.get("name") == "start_async_task"
                            and call.get("args", {}).get(
                                "subagent_type") == "context-agent")
-            context_id = _task_id(context["args"]["description"])
+            context_id = _task_id_for_call(context)
             agent.message(
                 "[Background task finished] Task ID: "
                 f"{context_id}. Status: success. This is orchestration metadata. "
@@ -411,7 +425,7 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertIn("launch", brief)
         self.assertNotRegex(brief, r"(?:add|create|write|revise).{0,40}summary",
                             "the first delegate must not perform the blocked edit")
-        task_id = _task_id(delegates[0]["args"]["description"])
+        task_id = _task_id_for_call(delegates[0])
 
         before = len(self._calls(agent))
         agent.message(
@@ -448,8 +462,8 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertFalse(any("combined.txt" in call["args"]["description"].lower()
                              for call in delegates))
 
-        alpha_id = _task_id(alpha["args"]["description"])
-        beta_id = _task_id(beta["args"]["description"])
+        alpha_id = _task_id_for_call(alpha)
+        beta_id = _task_id_for_call(beta)
         _PENDING_TASK_IDS.add(beta_id)
         before = len(self._calls(agent))
         agent.message(
