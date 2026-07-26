@@ -223,6 +223,9 @@ handoff failed again.  Logs:
 - =/tmp/assist-restore-gp-conflict-removal-v20-n1.log= (direct multi-todo,
   context handoff, and legacy all failed after removing older direct-action
   recipes; that broad, non-improving trial was reverted).
+- =/tmp/assist-restore-gp-late-prompt-v21-n1.log= (the same three cases failed
+  after moving the routing text behind Deep Agents' appended tool prompts; the
+  extra prompt middleware was reverted).
 
 The requested five-hour cap leaves the prompt-only contract unproven.  Do not
 deploy or publish this branch unless Pierre chooses between accepting that
