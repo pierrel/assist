@@ -1,0 +1,1496 @@
+#+title: Agent prompt architecture and calibrated outcome evaluation
+#+date: <2026-07-26>
+
+* State
+
+Status: design review.
+
+This document is the architecture and experiment contract only.  No prompt,
+skill, evaluator, model-selection, or agent-construction implementation belongs
+in the design change that introduces it.  Implementation starts only after this
+document has completed the full design-review lenses and Pierre has approved the
+resulting architecture.
+
+The baseline is merged and deployed =main= at =9f8a7d9= (PR #215, the one-level
+delegate agent).  The active per-thread-memory work overlaps the memory prompt
+surface but is not part of this design baseline.  Any implementation phase that
+touches memory starts only after that work lands or is explicitly abandoned,
+then rebases on the resulting =main= and repeats the Phase-0 census.  The prompt
+architecture must describe the resulting capability, not design around an
+unmerged branch.
+
+The current custom main/delegate template is 2,485 source words before Deep
+Agents appends its base prompt and middleware adds TODO, filesystem, skill,
+memory, and other guidance.  The custom skill block contributes another 258
+words before the dynamic skill list; the current memory procedure contributes
+461 words before the memory contents.  Raw source size is not itself a defect,
+but the current result mixes stable capability boundaries with conditional
+workflows and repeats several rules in more than one prompt source.
+
+Known drift already proves that source-by-source review is insufficient:
+
+- inbound-message triage is documented as reply-only, but its real Deep Agents
+  graph still receives filesystem, execution, =read_url=, travel, directions,
+  and map tools because =AgentSpec.tools= is additive and the shared constructor
+  installs its own capabilities;
+- the shared main prompt describes a report-file result for an async research
+  leaf that returns findings directly;
+- =edd/product-policy.org= describes the read-only context agent as a writer;
+- product documentation collapses the research lead and research leaf into one
+  incompatible capability list;
+- the main/delegate template, skill body, tool descriptions, and framework TODO
+  prompt can all describe the same orchestration with different emphasis;
+- the capture profile assumes every behavioral miss should recommend another
+  addition to the main system prompt, which is the accretion mechanism this
+  architecture is intended to replace.
+
+* Problem
+
+Assist has accumulated behavior by adding instructions to an always-loaded
+general prompt.  This makes a local fix cheap but imposes its cost and possible
+conflicts on every later turn, including turns where the instruction cannot
+apply.  It also obscures the actual contract because the model sees the fully
+assembled request, not any one Jinja template.
+
+The eval suite has the corresponding test problem.  Deterministic assertions are
+excellent for exact state, security boundaries, and explicit capability probes,
+but many natural acceptance evals assert an implementation trace: exact agent
+names, tool order, TODO wording, regex vocabulary, or a particular orchestration
+shape.  Those checks can reject a useful outcome and encourage prompt wording
+that mirrors the fixture.  Replacing all checks with an unqualified model judge
+would be worse: it could reward fluent claims contradicted by the workspace,
+share the tested model's blind spots, or change verdicts between identical runs.
+
+The architecture therefore needs two separations:
+
+1. stable bootstrap instructions versus conditional skill-loaded workflows;
+2. deterministic contracts versus calibrated semantic outcome judgment.
+
+* Goals
+
+1. Make the fully rendered model request auditable for every production and eval
+   profile, including middleware-injected guidance and tool descriptions.
+2. Make untrusted inbound-message triage actually reply-only by construction,
+   before changing prompt policy around it.
+3. Reduce the main and delegate system prompt to a bootstrap kernel: what the
+   agent must know in order to choose the next source of instructions safely.
+4. Keep local context gathering preloaded unless a controlled experiment proves
+   an equally reliable smaller boundary.
+5. Keep memory /contents/ available as context while progressively disclosing
+   the conditional procedure for deciding and performing memory writes.
+6. Put optional workflows such as complex task breakdown and external research
+   behind skills whose descriptions provide the routing trigger.
+7. Give every specialist a concise role contract aligned with its actual tools,
+   filesystem, return shape, caller, and trust boundary.
+8. Qualify a semantic outcome judge against fixed human labels before its
+   verdict can gate a natural eval.
+9. Change one instruction boundary per implementation phase so every result
+   teaches us whether that boundary works for Qwen3.6-27B.
+
+* Non-goals
+
+- Do not implement any part of the architecture in the design PR.
+- Do not rewrite all prompts or migrate all workflows in one change.
+- Do not add a prompt registry, policy engine, automatic router, second general
+  agent factory, or middleware that deterministically performs the model's work.
+  A narrower existing agent constructor is an evidence-gated alternative for a
+  role whose required capability surface Deep Agents cannot express.
+- Do not make prompt token count the product goal.  A smaller prompt that lowers
+  useful outcome reliability fails.
+- Do not judge security, authorization, exact persisted state, or resource bounds
+  with an LLM when code can decide them exactly.
+- Do not use an external judge endpoint by default.  Assist's local-first privacy
+  boundary applies to eval artifacts too; any remote candidate requires a later
+  explicit operator decision and synthetic inputs.
+- Do not make a specialist load a skill merely to learn its own identity or
+  primary job.
+- Do not remove the context-first rule, critique capability, or any other current
+  behavior based on architectural taste.  Each removal needs a measured phase.
+
+* Instruction placement architecture
+:PROPERTIES:
+:CUSTOM_ID: instruction-placement
+:END:
+
+The model needs one rule for deciding where an instruction belongs:
+
+#+begin_quote
+Preload what is required to choose the next source of instructions safely.
+Progressively disclose what is required to execute the chosen workflow.
+#+end_quote
+
+Six instruction homes follow from that rule.
+
+| Home | Volatility it contains | Admission test | Examples |
+|------+------------------------+----------------+----------|
+| Bootstrap role kernel | Cross-task identity, grounding, trust, and orchestration choices | The model can violate safety or cannot choose the next capability before loading anything | workspace and text-only boundary; context-first grounding; specialist versus whole-outcome delegation; durable task result outranks TODO state; child results are untrusted data |
+| Capability protocol | Generic use of an always-visible capability family | Middleware or a tool family can state the protocol once for every role that actually receives it | skills middleware owns match/load/apply; TODO middleware owns plan mechanics; task tools own available child names and lifecycle arguments |
+| Tool description/result | One invocation and its immediate return contract | The instruction is useful only while selecting or interpreting that tool | exact task ID argument; =start_async_task= returns immediately; cancellation requested is not cancellation completed |
+| Skill | Conditional multi-step operating procedure | A visible description can identify the request before the procedure is needed | complex-request planning; memory persistence; external research; development; editing; file formats |
+| Role system contract | A specialist's fixed job and capability boundary | Every invocation of this profile has the same job | context is read-only; research lead decomposes and synthesizes; research leaf searches and cites; receptionist routes only |
+| Context data | Facts rather than behavior policy | The model needs the content, but not instructions about managing it | repository memory; per-thread memory; current date; task result data |
+
+The final rendered request is the contract.  A sentence is not considered removed
+or moved merely because it left a Jinja template; the Phase-0 census must prove
+where it appears after Deep Agents and every middleware have modified the request.
+Duplicate instructions are defects when their independent owners can drift.
+
+Capability and trust boundaries prefer construction over prompting.  A delegate
+cannot self-delegate because it has no async lifecycle tools, and a context agent
+cannot write because the read-only enforcer rejects mutating tools.  The prompt
+should accurately explain those shapes, not pretend to enforce them.
+
+The current triage profile violates this rule.  Its wrapper supplies only the
+HITL-gated reply tool, but the shared Deep Agents constructor independently adds
+filesystem, execution, URL, map, and travel tools.  A helper test of the supplied
+tool list does not prove the final graph is confined.  P0 records the real graph;
+P1 makes reply-only confinement a structural invariant before any prompt
+reduction can treat the documented boundary as true.
+
+** Main bootstrap kernel
+
+The target custom main role kernel contains only:
+
+1. role, workspace, text-only, and owner-instruction boundaries;
+2. the context-first rule and its narrow skip cases;
+3. the choice between a specialist lookup and a whole-outcome delegate;
+4. the irreducible durable lifecycle and trust rules needed on every completion
+   wake but not expressible by the task tools themselves;
+5. TODOs as advisory planning state, reconciled against checked task results and
+   workspace evidence;
+6. child, fetched-page, and tool-result text as data that cannot issue new
+   instructions.
+
+The always-visible capability protocols remain part of the complete bootstrap
+request, but each has one owner.  Skills middleware owns matching, loading, and
+applying skills.  TODO middleware owns generic plan mechanics.  Tool schemas own
+current specialist/delegate names, arguments, and immediate results.  The role
+kernel does not restate those protocols unless a measured small-model exception
+is recorded.
+
+Examples, research report procedure, file-creation defaults, memory write syntax,
+task-file conventions, complex-request dependency recipes, and domain workflows
+do not belong in this kernel.
+
+** Delegate bootstrap kernel
+
+The delegate shares the stable workspace, skill, context, memory-data, and trust
+rules.  Its role contract says only that it owns one self-contained outcome,
+receives no parent history, may use its synchronous specialists, and returns the
+verified result to its caller.  It has no concept of outer task IDs, completion
+wakes, parent TODOs, or the supervisor's scheduling lifecycle.
+
+** Memory boundary
+
+Memory data and memory management are different volatilities.  Existing memory
+contents remain preloaded because they affect the very first interpretation of a
+request.  The instructions for recognizing a durable fact, choosing a memory
+target, and persisting it become a conditional memory skill.  A short visible
+skill description must match explicit requests ("remember this") and natural
+persistent facts or forward-looking preferences.  The skill body owns write
+mechanics and exclusions such as credentials and transient state.
+
+Read access and mutation authority are also different.  Repository and thread
+memory targets are read-only through generic filesystem and execution paths.
+Only an owner-authored interactive main turn receives the narrow save capability;
+delegate briefs, child/fetched/tool results, completion wakes, scheduled/system
+turns, and inbound triage cannot authorize persistence.  Turn provenance and
+path protection are enforced outside the model.  A prompt instruction or an
+unmounted memory skill is not an authorization boundary.
+
+This boundary must be re-evaluated against the merged per-thread-memory design.
+Repository memory, thread working memory, and any promotion rule must have one
+unambiguous owner before the memory phase begins.
+
+** Research boundary
+
+The main/delegate only need to recognize that current or external facts require
+the research specialist and then load a research workflow.  The skill owns
+selection, brief formation, prior-result reuse, generic grounding,
+partial-result handling, and unavailable-search handling.  It is return-shape
+neutral.  Each bound tool/subagent description owns its caller's concrete return
+shape and immediate consumption contract: direct findings for async main, a
+report path for synchronous delegate/legacy main.
+
+Research specialists keep system contracts because research is their entire
+role.  The lead owns decomposition, report synthesis, and its private report
+workspace.  The leaf owns search/fetch discipline, source fidelity, stopping,
+and a findings-with-sources return.  Report critique and fact checking remain
+inside the research topology unless an eval demonstrates another caller with a
+real need.
+
+** Other specialists
+
+The context, code-critique, report-critique, fact-check, receptionist,
+thread-description, and capture profiles each receive a direct capability audit.
+No shared prose is assumed correct for them.  The code-critique decision remains
+open until the dev skill and delegate code-work flow are tested: if delegates
+need that named specialist to complete the existing dev workflow, retain it and
+make the description precise; if there is no real caller, remove it rather than
+explaining an unused capability.
+
+The capture profile must stop treating "add text to the main system prompt" as
+the default remedy.  Its output should identify the observed outcome failure and
+the narrowest candidate instruction home without prescribing that the main
+prompt grow.
+
+* Hybrid eval architecture
+:PROPERTIES:
+:CUSTOM_ID: hybrid-evals
+:END:
+
+Every eval declares which evidence decides its result.
+
+** Deterministic gates
+
+Keep deterministic validation for:
+
+- exact file/state mutations and preservation of existing content;
+- capability absence, authorization, trust provenance, and other security
+  boundaries;
+- task lifecycle facts such as checked terminal status, no blocked dependent,
+  exact task ownership, and cancellation state;
+- resource bounds, tool-call counts that exist specifically to prevent a
+  runaway, valid schemas, and process liveness;
+- explicit capability probes whose purpose is to prove that a named tool,
+  skill, or agent path can work.
+
+A deterministic gate can fail a case before semantic judging.  The judge cannot
+waive it.
+
+** Natural outcome observation
+
+A natural acceptance case gives the judge only evidence a user could care about:
+
+1. the natural prompt sequence;
+2. relevant initial fixtures;
+3. final files or a normalized workspace diff;
+4. the final user-visible response;
+5. a minimal terminal event ledger when the requested outcome includes task
+   state that is not represented in files;
+6. a case-specific list of requested outcomes and forbidden outcomes written in
+   user language.
+
+The judge does not see expected tool names, prompt variant names, desired TODO
+shape, or routing traces.  Agent output, fetched content, and file content are
+delimited as untrusted evidence.  The judge is still fallible and may follow text
+inside them; paired qualification cases test that failure directly.  When an
+agent claims success but the final artifact disagrees, the artifact is
+authoritative.
+
+Each case declares the artifact paths needed to decide its outcomes.  The
+observation builder resolves them inside the synthetic eval workspace, rejects
+symlinks or traversal outside it, caps file count, per-file bytes, total bytes,
+and final response/event-ledger size, and records every omission.  An outcome
+whose required evidence exceeded a bound is unjudgeable and cannot pass.  Broad
+repository diffs, environment data, credentials, and real thread artifacts are
+never collected merely because they are available locally.
+
+The judge returns structured data:
+
+- =pass=, =partial=, or =fail=;
+- one verdict per requested outcome, with evidence from the observation;
+- any forbidden outcome or contradiction;
+- a short overall rationale;
+- confidence only as diagnostic metadata, never as a way to turn a failure into
+  a pass.
+
+Strict schema validation requires exactly one verdict for every requested
+outcome ID, no unknown or duplicate IDs, valid enum values, and evidence
+references limited to observation IDs actually supplied.  One normal eval gets
+one bounded judge call with explicit wall-clock and output-token limits.  Invalid
+schema, timeout, overflow, missing outcome, or required-evidence truncation is
+=judge_error= and therefore not a pass; it is never retried until a favorable
+verdict appears.
+
+Natural-suite reporting preserves all three labels.  A phase's acceptance gate
+uses full passes; partial outcomes are reported separately rather than rounded
+up or hidden with =xfail=.
+
+** Judge qualification
+
+The first candidate is the existing local model in a dedicated, temperature-zero
+judge prompt with thinking enabled if the endpoint supports it.  This is the
+simplest private candidate, not an assumption that a model can grade itself.
+
+Calibration uses thirty labelled observations split before judge-prompt work:
+
+1. an eighteen-case development set, balanced six each across pass, partial, and
+   fail, used to write and revise the general rubric;
+2. a twelve-case blind qualification set, balanced four each across the three
+   labels, whose inputs and labels remain hidden until the judge prompt, model,
+   thresholds, and development work are frozen.
+
+Both sets mix objectively inspectable synthetic artifacts with natural outcomes
+from current eval shapes.  Each qualification label includes at least one
+natural outcome, and the set includes fluent false claims, missing files,
+incomplete multi-part outcomes, benign paraphrases, and prompt-injection text
+inside artifacts.  Pierre labels natural observations without seeing candidate
+verdicts.  A corpus custodian who does not tune the judge keeps the qualification
+set blind.
+
+The candidate runs three times over the twelve-case qualification set.  It
+qualifies only if all of these are true:
+
+- the majority verdict exactly matches at least 10 of 12 labels;
+- zero human/objective =fail= cases receive a majority =pass=;
+- no majority verdict differs from its label by two grades;
+- at least 30 of 36 individual verdicts match their case's majority, with no
+  individual =fail= to =pass= flip;
+- the report includes the three-label confusion matrix and every rationale cites
+  evidence actually present in the supplied observation;
+- paired observations with identical semantics but benign versus
+  instruction-shaped artifact, file, or final-response text have the same
+  =pass= versus =not pass= verdict on every individual run;
+- every fluent false-success and forged-evidence-identifier case is a non-pass on
+  every individual run.
+
+The model and prompt version are recorded with every verdict.  Failure
+disqualifies the candidate and reveals the qualification set for diagnosis.  A
+changed model may use the same development set, but a changed prompt or rubric
+requires a newly frozen balanced twelve-case blind set; do not tune on a revealed
+qualification set and call the rerun qualification.
+
+The three qualification runs measure stability; they are not a production
+voting scheme.  Normal eval gating uses its single bounded verdict.  Aggregate
+qualification accuracy never waives the paired-injection, false-success,
+forged-evidence, or two-grade-flip hard gates on any individual run.
+
+If the current local model does not qualify, the judge remains diagnostic and
+cannot gate evals.  The next alternatives, in order, are:
+
+1. retain outcome-specific deterministic validators plus human review for
+   natural cases;
+2. qualify a stronger separately configured local judge endpoint;
+3. with explicit operator approval and synthetic-only observations, qualify a
+   remote judge.
+
+Do not mask a weak judge with majority voting, repeated sampling until the
+desired verdict appears, or per-eval prompt exceptions.
+
+* Experiment protocol for every implementation phase
+:PROPERTIES:
+:CUSTOM_ID: experiment-protocol
+:END:
+
+1. Rebase the phase branch on the then-current =main= and regenerate the prompt
+   census.  Record all active profile and memory surfaces.
+2. Pre-register the phase hypothesis, one controlled instruction move, targeted
+   cohort, adjacent regression cohort, pass/fail gate, expected learning, and
+   alternatives in this state document before changing behavior.
+3. Baseline the exact cohorts on unchanged =main= at N=10, unless an unchanged
+   model, prompt, fixture, and validator already have a recorded N=10 result.
+   Preserve transcripts, rendered prompt fingerprints, deterministic results,
+   semantic verdicts when a judge is qualified, and token counts.  Until then,
+   retain current outcome validators and record human adjudication only for a
+   case they cannot decide.
+4. Make only the declared instruction-home change.  Do not combine wording
+   tuning with a tool/capability change.
+5. Run targeted and adjacent cohorts at N=3 as an early diagnostic.  A
+   deterministic regression stops the phase immediately; sampling difference
+   from the N=10 natural baseline is evidence to investigate, not yet a gate.
+6. Run the full design and code review loops.  Re-run affected cohorts at N=5
+   after review, then N=10 for stability.  The N=10 candidate must meet the
+   unchanged-main N=10 full-pass count and the natural floor.  Any shortfall
+   fails the phase, consistent with the repo eval contract.
+7. Keep a residual-closing rider only if it clears the residual completely;
+   otherwise revert to the simpler candidate.
+8. Record what the result taught, including failed hypotheses, before starting
+   the next phase.  Later phases consume evidence, not the original assumption.
+
+The acceptance floor for a natural cohort is the greater of its recorded
+baseline and 70% full passes.  This floor does not permit trading away an
+existing reliable behavior merely because the aggregate suite remains above
+70%.  Deterministic and security gates remain 100%.
+
+** Eval execution and liveness
+
+Offline execution does not isolate the shared =--parallel 1= llama.cpp slot from
+production web traffic.  Prefer a genuinely separate local subject/judge
+endpoint.  Otherwise each block is a declared maintenance reservation: acquire
+the workspace real-LLM resource, verify the configured endpoint, then close
+model-requiring web admission atomically under the same synchronization that
+governs durable Run admission.  Once closed, boundedly drain active/queued work
+or abort; only then may the first eval model call start.  New submissions fail
+fast with an honest visible maintenance state while unrelated UI/status requests
+remain responsive.  After the final cooldown, smoke the endpoint and verify the
+production queue before reopening admission under the same synchronization.  A
+concurrent submission is therefore either admitted and drained before eval or
+visibly rejected, never check-then-raced into the slot.
+
+The judge is one bare, non-streaming model call with no Assist agent, tools,
+middleware, checkpointer, sandbox, =THREAD_QUEUE=, or subagents.  A subject run
+fully closes its response stream and atomically persists its observation before
+the judge starts.  Subject and judge calls serialize on the hardware reservation
+even if configured through different local endpoint URLs.
+
+Before launch, a manifest records case count times repetitions, expected subject
+turns/subagents and judge calls, measured one-case p50/p90 duration, projected GPU
+minutes, per-case deadline, block partition, and total expected wall time.  A
+case deadline is shorter than the one-hour block cap.  If the projection does
+not fit bounded blocks, narrow the pre-registered cohort before launch.
+
+Each model/tool/case operation has a deadline, and the cohort runs in its own
+process group under a second deadline.  An outer supervisor outside that group
+owns the reservation, lease-backed maintenance/cooldown state, result manifest,
+and child group.  It handles INT/TERM by sending TERM, waiting one short fixed
+grace, then KILL and reaping the group.  An OS-backed parent-death or cgroup
+mechanism prevents abrupt supervisor death from leaving descendants alive;
+expired owner leases make maintenance recoverable.  On either path, close HTTP
+clients/streams, terminate eval-owned sandboxes, atomically record the
+interrupted case as infrastructure failure, verify the resource lock can be
+reacquired, and smoke the endpoint before any resume.  Process/progress diagnosis
+happens before choosing to resume.
+
+Result identity is the phase, baseline/candidate side, case ID, repetition,
+seed, and fingerprints of subject model/prompt/fixture/validator plus judge
+model/prompt/rubric.  Observation and verdict writes are atomic; a repetition is
+complete only when all required evidence is durable.  Resume rejects a changed
+manifest, ignores incomplete rows, preserves every interrupted attempt, and
+never replaces a failed seed with a favorable new sample.
+
+No continuous real-LLM block exceeds one hour.  Block plus roughly fifteen-minute
+GPU cooldown is one visible reservation: the eval process exits immediately,
+the coordination state exposes the cooldown expiry, and one completion signal
+releases it without polling.  An infrastructure failure may be rerun only after
+diagnosis or an external-state change, with the same identity and manifest; the
+failed attempt remains and the replacement completes the missing sample.  An
+unchanged repeat failure stops the block.  Honor the nightly exclusion window if
+the paused cron is re-enabled.
+
+** Experiment report contract
+
+Every case row records the natural prompt or prompt sequence; unchanged-main and
+candidate verdicts; each requested outcome with observed, missing, and forbidden
+evidence; failure class (=behavior=, =deterministic=, =judge=,
+=human-disagreement=, or =infrastructure=); transcript/artifact paths; subject and
+judge model/prompt versions; seed and run index; and the exact focused rerun
+command.  Every partial or failure in a summary links to its row.  Infrastructure
+failures are reported separately, excluded from behavior percentages, and block
+a phase conclusion when they leave the N=10 comparison incomplete.
+
+** Cross-phase user-experience guard
+
+Each phase retains a small journey cohort: simple answer, simple edit,
+multiple-outcome async launch, explicit memory save, and research request, using
+only the journeys the phase can affect.  Record model/tool round trips, time to
+the first truthful user-visible response, and total completion time in matched
+baseline/candidate blocks.
+
+An unrelated ordinary journey may add no skill, TODO, or subagent detour and no
+extra model round trip.  A targeted progressively disclosed workflow may add at
+most the one skill-load round trip it is designed to introduce.  Unless a phase
+pre-registers a stricter product bound, candidate median first-response and total
+time must be no more than 20% plus two seconds over the matched baseline, and p90
+must be no more than thirty seconds over baseline.  Any exceeded bound fails the
+phase even when final outcome counts pass.
+
+* P0: Rendered prompt and capability census
+:PROPERTIES:
+:CUSTOM_ID: phase-0
+:END:
+
+** Value
+
+Make the actual instruction and capability surface reviewable and regression
+testable before changing it.  This produces a durable diagnostic used by every
+later phase and immediately exposes docs or eval profiles that do not match
+production.
+
+** Hypothesis
+
+Exercising each model-call path through its real production/eval composition or
+invocation path and capturing the final model request will reveal material
+duplicate, contradictory, unavailable, or misplaced instructions that cannot be
+found reliably by reading templates alone.
+
+** Controlled change
+
+Add an eval/test-side census with three distinct artifacts:
+
+1. a recording model captures the exact request and bound tool schemas at the
+   final model-call boundary; this request is never reconstructed;
+2. separately observed constructor, middleware, template, skill-source, and tool
+   manifests annotate provenance without pretending the flattened request
+   retains it; an unattributed span is a census failure;
+3. exercised enforcement probes record exposed tools separately from actions
+   actually permitted by read-only, provenance, HITL, and other guards.
+
+The minimal scenario matrix covers every branch known to change the contract:
+production web sandbox main, triage, and delegate; legacy non-execution; active
+and inactive context rider; empty and populated memory; and representative
+built-in, domain, and embedder skill-source precedence.  It records tools after
+runtime middleware filtering.  Nested dict subagents are reached through a
+scripted real parent dispatch rather than a test-only constructor or hand-rendered
+prompt.  The census changes no production prompt or capability.
+
+Every scenario uses synthetic sentinel messages, memory, paths, domain skills,
+and embedder skills passed through the production constructors.  It never reads
+or snapshots the deployed workspace, real =AGENTS.md=, user threads, or private
+domain contents.  Persist only synthetic fixture content and normalized
+fingerprints.  Provenance is a test-side ownership map over captured output and
+source snapshots, not runtime metadata, a production registry, or a constructor
+flag; unknown or ambiguous spans are findings for review.
+
+The required paths are main, delegate, restricted triage, legacy main, context,
+research lead, direct research leaf, nested research worker, nested fact-check,
+async read-only code critique, synchronous inherited-surface code critique,
+nested report critique, receptionist, thread-description direct model call, and
+capture.  Each is reached through the same production/eval composition or
+invocation path, including real parent dispatch for nested declarative profiles;
+do not invent a constructor for a direct call or add a runtime profile registry
+to serve the test.
+
+** Test and gate
+
+- The census reaches every named path through the same composition or invocation
+  path used by production or the eval harness.
+- Every positive capability claim or procedure requiring a capability maps to an
+  exposed and effectively permitted action.  Truthful negative boundaries such
+  as "cannot delegate" are verified rather than reported as mismatches.
+- Every final prompt span is attributed through the separate source manifest,
+  including Deep Agents and middleware injection; no provenance is inferred
+  from the flattened request alone.
+- Exposed tools and effectively permitted actions are reported separately, so a
+  visible mutating filesystem tool denied by a read-only guard is not described
+  as either absent or permitted.
+- A second run is byte-stable after normalizing date, generated IDs, memory
+  contents, and other declared volatile data.
+- A deterministic fixture-hygiene scan proves saved baselines contain only
+  declared synthetic sentinels and no live workspace path, secret, or user data.
+- Existing deterministic tests remain green.  No model eval is required because
+  behavior is unchanged.
+
+Failure blocks prompt movement because later token counts and ownership claims
+would not be trustworthy.
+
+** Expected learning
+
+We expect the fully rendered main request to contain more repetition than the
+2,485-word custom template suggests, and we expect direct leaf profiles to expose
+several descriptions inherited from lead/legacy assumptions.
+
+** Alternatives
+
+If a recording model cannot expose middleware-modified requests faithfully, add
+a test-only final =ModelRequest= observer at the model-call boundary.  Do not
+approximate the contract by concatenating known templates manually.
+
+* P0b: Bound eval execution and reserve the model slot
+:PROPERTIES:
+:CUSTOM_ID: phase-0b
+:END:
+
+** Value
+
+Every later N=3/N=5/N=10 experiment can finish, fail, cool down, and resume
+without silently competing with production or leaving the single GPU/model slot
+wedged.
+
+** Hypothesis
+
+A process-group runner plus explicit production-maintenance and cooldown state
+can isolate bounded eval blocks while leaving non-model web/status access live
+and making every interrupted sample reproducible.
+
+** Controlled change
+
+Implement only the operational contract in [[#experiment-protocol][the experiment protocol]]:
+preflight manifest, shared endpoint reservation, visible fast-fail maintenance
+admission, two-level deadlines and cleanup, atomic result identity/resume, and
+inspectable cooldown.  This may require one coordinated meta-repo change for the
+resource/cooldown state.  Do not change an agent prompt, eval verdict, or model
+behavior.
+
+** Test and gate
+
+- A fake active production Run prevents eval start; an acquired reservation
+  rejects model-requiring web submission visibly while unrelated GET/status
+  requests remain responsive.
+- A barrier race at maintenance activation proves a concurrent submission is
+  either admitted and fully drained before eval starts or visibly rejected, with
+  no overlap on the model slot.
+- Deliberately hung model, tool, child, HTTP stream, and sandbox fixtures are
+  terminated at the process-group deadline; cleanup and resource reacquisition
+  probes pass 100%.
+- Graceful cancellation and forced outer-supervisor death both terminate and
+  reap descendants, retain a truthful infrastructure attempt, allow lock
+  reacquisition, and recover maintenance admission after lease expiry.
+- Manifest mismatch, partial row, repeated failed seed, resume, and atomic-write
+  crash cases produce the exact report states defined above with no duplicate or
+  replacement sample.
+- Block completion leaves an inspectable cooldown expiry, one completion signal
+  releases it, and endpoint/production-queue smoke passes before admission opens.
+
+** Expected learning
+
+This proves whether the current coordination and eval runners have enough
+control over child processes and the production admission boundary.  It also
+measures the fixed overhead of safe block setup.
+
+** Alternatives
+
+A genuinely separate local model/hardware endpoint removes production admission
+maintenance but not process cleanup, atomic resume, or cooldown.  If web
+admission cannot be isolated cleanly, schedule an explicit service maintenance
+window rather than let production and evals contend silently.
+
+* P1: Confine untrusted inbound-message triage by construction
+:PROPERTIES:
+:CUSTOM_ID: phase-1
+:END:
+
+** Value
+
+Make the existing reply-only product boundary true at the final graph.  This
+closes a current untrusted-input capability exposure independently of every later
+prompt experiment.
+
+** Hypothesis
+
+Inbound-message triage can retain its useful reply decision while exposing only
+the HITL-gated reply capability, with no filesystem, execution, URL, map, travel,
+skill, memory-management, or subagent surface.
+
+** Controlled change
+
+Change only triage construction.  Use a dedicated internal restricted builder
+based on the existing vanilla LangChain pattern.  Do not infer confinement from
+=async_subagent_tools=, add generic permission/exclusion fields to =AgentSpec=,
+or broaden the embedder contract for one internal caller.  A shared restricted
+profile becomes worth designing only when a second real caller needs it.
+
+Freeze the current custom prompt template and required subscription/inbound
+inputs, not the full rendered Deep Agents request.  Capability-owned BASE, TODO,
+filesystem, skills, and memory blocks disappear with those capabilities; P0
+records that expected prompt difference.  Do not copy a flattened Deep Agents
+prompt into the vanilla role.  P7f separately tests a concise capability-true
+triage contract.
+
+The exact retained data context is evidence-gated.  The inbound message and its
+subscription template are required inputs.  Memory contents, skills, and
+filesystem context remain absent unless a baseline case demonstrates that one is
+required to decide or phrase the reply; any retained input is read-only data, not
+a management capability.
+
+** Test and gate
+
+- A structural test builds the actual final triage graph and records exactly one
+  callable capability: the HITL-gated =send_reply= tool.  It does not stop at
+  asserting the additive =AgentSpec.tools= input.
+- Filesystem, execution, =read_url=, travel, directions, map, skill-loading,
+  memory-writing, and subagent capabilities are absent rather than prompt-blocked.
+- Existing approval/rejection behavior and subscription routing remain green.
+- Natural reply, no-reply, ambiguous-message, and adversarial instruction
+  cohorts meet baseline at N=10 and the general natural floor.
+- Prompt-injection inputs cannot read a private fixture, execute a command, fetch
+  a URL, or invoke the outbound tool before its model-boundary interrupt; all
+  deterministic confinement checks pass 100%.
+- With a deliberately slow restricted agent, inbound HTTP acceptance and
+  unrelated thread/status GETs remain responsive; graph construction and model
+  invocation stay off the single uvicorn event loop.
+
+** Expected learning
+
+We expect reply decisions not to need the broad Deep Agents surface.  The phase
+will show whether the dedicated one-tool graph preserves triage behavior and
+whether any bounded read-only input is demonstrably needed.
+
+** Alternatives
+
+If removing a data source lowers a reproduced reply outcome, restore only that
+bounded read-only input.  Never restore an action capability merely to improve
+model context.
+
+* P1b: Bound inbound triage and prove the HITL transaction
+:PROPERTIES:
+:CUSTOM_ID: phase-1b
+:END:
+
+** Value
+
+Capability confinement does not by itself prevent an authenticated inbound flood,
+an oversized draft, multiple pending actions, or a stale approval from wedging or
+sending the wrong reply.  This phase makes the existing inbound-to-outbound
+transaction bounded and reconstructable.
+
+** Hypothesis
+
+One bounded inbound message can produce at most one bounded pending reply, and
+approve/edit/reject can resolve exactly that durable proposal once without
+changing its recipient or action.
+
+** Controlled change
+
+First record the phone bridge/provider's accepted legitimate message and reply
+sizes and the largest observed legitimate burst.  Set explicit body, text, draft,
+admission, durable inbound-log, and backlog bounds no lower than those observed
+contracts and no higher than the upstream accepted maximum.  Enforce them before
+any archive write, 2xx ownership transfer, model call, or checkpoint growth.  A
+full durable budget fails closed without claiming or deleting the phone-side
+message.  Make one pending =send_reply= action the only valid triage interrupt
+shape.  Do not tune triage prompt behavior in this phase.
+
+The web control plane remains under its current trusted-local-network assumption.
+This phase proves transaction integrity, not a new internet authentication or
+CSRF design.  If that trust boundary changes, authorization receives its own
+design.
+
+** Test and gate
+
+- Over-limit input is rejected with zero durable archive growth before ownership
+  transfer or an LLM call; repeated unique IDs remain within the declared
+  archive, queue, checkpoint, and UI byte/count budgets.
+- A model that emits many or oversized reply calls yields at most one bounded
+  pending action and cannot wedge resume or leave an ambiguous checkpoint.
+- The outbound tool body is never called before approval.  Approve sends the
+  checkpointed draft once; edit changes only text; reject sends nothing.
+- Recipient and tool name come from the durable accepted Run, never model or
+  edit input.  Stale, superseded, malformed, and double resume send nothing and
+  return an honest visible terminal state.
+- End to end, the matching inbound message creates one approval card in the
+  correct thread with sender and exact draft.  Approve/edit/reject clears or
+  replaces it with the truthful result; no-reply creates no card; stale approval
+  tells the user to reload and review.
+- With deliberately slow model and outbound-provider fixtures, inbound HTTP
+  acceptance, unrelated thread/status GETs, and the approval POST redirect stay
+  responsive.  Agent construction/model work, checkpoint resume, and send run
+  off the uvicorn event loop; queue/admission work on it is bounded.  Cancellation
+  or provider timeout reaches an honest terminal UI state without retaining the
+  thread slot.
+
+** Expected learning
+
+The observed bridge limits determine useful bounds.  Adversarial multi-action
+outputs reveal whether the current checkpoint/resume shape can represent exactly
+one proposal without special prompt behavior.
+
+** Alternatives
+
+If the provider contract has no stable maximum, use the smallest documented
+transport maximum that covers the retained legitimate fixture corpus and expose
+an explicit rejection.  If the current interrupt representation permits more
+than one action, replace it with one durable pending-reply record rather than
+teach the model to emit one call.
+
+* P2: Qualify the calibrated outcome judge
+:PROPERTIES:
+:CUSTOM_ID: phase-2
+:END:
+
+** Value
+
+Natural evals can reward useful outcomes without encoding one orchestration, and
+future prompt experiments can measure semantic regressions instead of tuning to
+regex vocabulary.
+
+** Hypothesis
+
+A rubric-driven local judge, given authoritative final artifacts and no
+implementation trace, can match the frozen objective/human labels closely enough
+to gate natural acceptance cases while deterministic validators retain hard
+contracts.
+
+** Controlled change
+
+Implement the observation/rubric/verdict contract and qualification corpus.
+Convert only a small representative set of already-natural async-subagent cases
+to dual reporting: retain their current validators for comparison, add judge
+verdicts, and do not delete strict capability tests in this phase.
+
+** Test and gate
+
+- The judge must satisfy every qualification threshold in [[#hybrid-evals][Hybrid eval architecture]].
+- On the representative cohort, a human review must confirm that every
+  disagreement is a judge defect or a brittle old validator, not silently choose
+  whichever result favors the experiment.
+- Deterministic hard gates must still fail before judging.
+- Re-running an unchanged case records the same model/prompt version and does not
+  leak the candidate implementation or expected route to the judge.
+
+If the judge fails qualification, P2 may still ship the observation format and
+diagnostic reports, but no natural eval gate changes.  Later prompt experiments
+continue with existing outcome validators and recorded human adjudication for
+cases they cannot decide; the judge is useful infrastructure, not a dependency
+that blocks independent prompt work.
+
+** Expected learning
+
+We expect final-artifact cases to judge well, ambiguous conversational cases to
+identify rubric gaps, and same-model judging to be the main risk.
+
+** Alternatives
+
+Use stronger local judging only after the first candidate fails.  For cases with
+an exact artifact contract, prefer improving a deterministic outcome validator
+over asking any model.
+
+* P2b: Separate natural acceptance from capability coverage
+:PROPERTIES:
+:CUSTOM_ID: phase-2b
+:END:
+
+** Value
+
+Later prompt experiments stop optimizing natural user requests for invisible
+task IDs, agent names, tool order, TODO shape, or one scheduling implementation.
+The smaller explicit capability layer continues to diagnose whether mechanisms
+work at all.
+
+** Hypothesis
+
+Every eval affected by this program can state whether it accepts a user-visible
+outcome or probes an internal capability, and natural cases can retain useful
+failure detection without architecture-shaped assertions.
+
+** Controlled change
+
+Change eval classification and validators only; freeze agent prompts and runtime
+behavior.  Inventory every cohort used by P3 onward and label each case
+=natural=, =capability=, or =deterministic-security/state=.  Natural prompts stay
+as users would ask.  Their gates use requested artifacts, truthful progress,
+final synthesis, and forbidden outcomes.  Assertions on raw task IDs, agent
+names, tool order, scheduling shape, and exact TODO vocabulary move to clearly
+named capability cases or are deleted when they prove no product contract.
+
+** Test and gate
+
+- Every later cohort names its gate layer and no case silently mixes natural and
+  capability verdicts into one pass bit.
+- A reviewer can derive each natural requested/forbidden outcome from its user
+  prompt and fixtures without knowing the intended orchestration.
+- Known successful and failed artifacts still classify correctly under the new
+  validator or qualified judge; capability probes retain 100% strictness.
+- Raw task/report identifiers appear in natural user-visible gates only when a
+  documented user journey demonstrates their value.
+
+** Expected learning
+
+The classification exposes which existing failures represent a broken outcome
+and which merely represent a different valid execution.  It also shows where a
+qualified judge adds value and where a direct validator is clearer.
+
+** Alternatives
+
+If a natural outcome remains too ambiguous for the qualified judge, use a
+case-specific deterministic artifact validator or recorded human adjudication.
+Do not make the user prompt name the desired architecture to regain determinism.
+
+* P3: Remove main/delegate procedures already owned elsewhere
+:PROPERTIES:
+:CUSTOM_ID: phase-3
+:END:
+
+** Value
+
+Every ordinary turn carries fewer irrelevant and conflicting instructions, and
+the first deletion experiment establishes which existing skill, tool, and
+framework contracts can be trusted as the sole owner of their procedures.
+
+** Hypothesis
+
+The main and delegate can preserve useful outcomes when procedures already owned
+by current skills, tool descriptions, or framework middleware are removed from
+their shared template, provided the context-first and progressive-disclosure
+rules remain salient.
+
+** Controlled change
+
+Change only the shared main/delegate template.  Pre-register the exact duplicate
+clauses and their existing sole owner before editing.  Do not change the
+provider-wide Deep Agents =HarnessProfile= or base prompt in this phase.  If P0
+finds a framework-owned contradiction that cannot be solved by deleting the
+duplicate custom clause, promote that source change to its own experiment with
+every affected profile in the cohort.  Do not add the memory or research skills
+yet, and do not remove their procedures in this phase.  Conditional behaviors
+that still lack an owner remain temporarily rather than disappearing without a
+tested destination.
+
+The delegate branch is rendered as its own short role contract, not a main prompt
+with supervisor paragraphs conditionally hidden.
+
+** Test and gate
+
+- Every removed normative clause has exactly one surviving owner in the P0
+  instruction map, with no contradictory duplicate.
+- The role prompt contains no independently owned skills, TODO, filesystem, or
+  task-tool protocol unless a reproduced small-model exception is recorded.
+- Context-first, skill loading, async lifecycle, trust handling, explicit
+  capability, delegate natural outcome, interruption, and unrelated passing
+  cohorts meet the experiment protocol with no regression.
+- Natural end-to-end delegate journeys cover independent mixed outcomes,
+  dependent outcomes, one success plus one failure, and interruption.  The
+  launch reply truthfully names pending outcomes without inventing results;
+  completions return to the originating thread; final synthesis accounts for
+  every outcome as completed, failed, or blocked; successful sibling work is
+  preserved; raw task/report IDs are omitted unless the user needs one to act.
+- No delegate prompt mentions outer task lifecycle, parent history access, or a
+  capability absent from the delegate graph.
+- The P0 mismatch report is clean for both profiles.
+
+** Expected learning
+
+We expect duplicate skill, tool, TODO, and filesystem procedure to be removable
+without loss, but expect Qwen salience to require a short first-call
+skill/context instruction near the front of the final request.  Prompt reduction
+is recorded as evidence, not used as the pass criterion.  The cumulative result
+becomes the target bootstrap kernel only after the memory and research migrations.
+
+** Alternatives
+
+If a removed rule causes a targeted regression and no skill yet owns it, restore
+the smallest causal sentence, not the whole old section.  If framework-injected
+TODO/filesystem prose conflicts with the kernel, configure or replace that prompt
+source rather than adding a later contradiction.
+
+* P4a: Confine memory mutation to owner-authored main turns
+:PROPERTIES:
+:CUSTOM_ID: phase-4a
+:END:
+
+** Value
+
+Untrusted delegate briefs or fetched/child/tool text cannot become durable
+instructions or facts, regardless of what the model follows.
+
+** Hypothesis
+
+Memory can remain automatically readable while canonical repository/thread
+targets are unmodifiable through generic filesystem and execution paths and a
+narrow save capability is present only on an accepted owner-authored interactive
+main turn.
+
+** Controlled change
+
+Wait for per-thread-memory to land or be abandoned, then census its final targets
+and provenance.  Protect every canonical memory path from generic edit, write,
+shell, delegate, specialist, scheduled, completion-wake, and triage mutation.
+Each composition root derives authority once from its existing trusted transport
+record, never message text or a caller-supplied boolean.  The web composition
+uses the durable Run's mode, origin, sender, and resume state to choose the graph
+and tool surface.  Do not add memory-authority fields to =AgentSpec=.  An
+embedder without an equivalent reviewed provenance source remains read-only.
+Expose one narrow save capability only after that decision.  Keep the existing
+recognition, durability, target-selection, exclusion, and confirmation policy
+unchanged.  Replace only its obsolete generic =write_file=/=edit_file= mechanics
+with the narrow save-tool invocation required by the new interface.  The tool
+schema and this minimum capability-protocol update land atomically; this is not
+prompt tuning.
+
+If the merged per-thread-memory work already establishes this construction, the
+phase closes by proving it rather than adding parallel machinery.
+
+** Test and gate
+
+- Direct generic filesystem and shell attempts cannot mutate either memory target
+  from any role or turn provenance.
+- Symlink, hardlink, rename, parent-directory replacement, interpreter, and
+  subprocess attempts cannot reach a canonical target or an alias.
+- Direct delegate briefs, child results, fetched pages, tool results,
+  completion wakes, scheduled/system turns, and inbound triage cannot obtain or
+  invoke the save capability and cannot mutate by an alternate path.
+- An accepted owner-authored interactive main turn can persist to the correct
+  target and subsequent turns read the verified state.
+- Spoofed provenance inside message text or a child result has no effect; the
+  capability decision comes from the trusted request/Run boundary.
+- P0 records the trusted field/source used by every save-capable composition
+  root and reports all other roots read-only.
+- Existing recall and owner-requested save cohorts meet unchanged-main N=10
+  baseline; every unauthorized mutation probe remains 100% denied.
+
+** Expected learning
+
+The census reveals whether memory paths can be made read-only through the backend
+or require a narrow path guard around all mutating tools.  Behavior results show
+whether one save capability is sufficient for current memory semantics.
+
+** Alternatives
+
+Require an OS/backend read-only mount or view below every generic sink, including
+parent and alias semantics, plus a separate narrow atomic save broker outside
+that view.  If the current sandbox/backend cannot express it, the phase fails and
+memory remains read-only while a lower-level design is reviewed.  Do not accept
+shell-command filtering, role text, skill visibility, or a blacklist of delegate
+prompt phrases as containment.
+
+* P4b: Move memory-management procedure into a skill
+:PROPERTIES:
+:CUSTOM_ID: phase-4b
+:END:
+
+** Value
+
+All turns retain relevant memory facts, but only turns that may persist memory
+pay for and reason over memory-write policy and mechanics.
+
+** Hypothesis
+
+The visible memory-skill description can trigger reliably for explicit and
+implicit durable facts while automatic memory-data injection remains sufficient
+for recall.  Unrelated turns will avoid both the skill load and memory-writing
+procedure.
+
+** Controlled change
+
+After per-thread-memory lands, define one memory-management skill against its
+final repository/thread ownership contract.  Reduce the memory middleware block
+to clearly delimited data plus the minimum fact-versus-instruction boundary.
+The visible skill description owns broad natural trigger shapes, including
+explicit remember/save requests and implicit candidate durable facts or
+forward-looking preferences.  The loaded body decides durable versus transient
+or secret content, selects the target, and invokes P4a's narrow save capability.
+The same trusted composition decision mounts both the memory-management skill
+source and save tool, or neither; read-only memory data remains independently
+preloaded.  Do not change memory storage, authority, or tool schema in this
+phase.
+
+** Test and gate
+
+- Existing repository and thread-memory deterministic tests remain 100% green.
+- Explicit save, implicit durable fact, forward-looking preference, consecutive
+  turn freshness, transient non-save, secret non-save, and scheduled-run
+  continuity cohorts meet their baseline at N=10.
+- Explicit saves receive concise confirmation only after rereading verified
+  persisted state and state repository/thread scope when it matters.  Implicit
+  persistence produces no unsolicited storage mechanics.  A failed or skipped
+  write never yields a success claim.
+- Natural recall never requires loading the management skill.
+- Reports distinguish failure to load the skill from failure to apply it after
+  loading, especially for implicit persistence cases.
+- P0 finds no graph that sees the memory skill without the save capability and
+  no save-capable graph that lacks the skill.
+- Unrelated task, research, and editing prompts do not load the memory skill or
+  mutate either memory target in at least 10/10 targeted trials.
+- The always-loaded memory /procedure/ falls by at least 80% in the P0 census;
+  dynamic memory contents are not counted.
+
+** Expected learning
+
+Explicit requests should be easy; implicit preferences are the likely trigger
+failure.  The experiment distinguishes failure to load from failure to apply by
+retaining the explicit capability trace while judging natural persistence from
+the final memory state.
+
+** Alternatives
+
+If implicit persistence regresses, keep one compact always-on trigger sentence
+and leave mechanics in the skill.  If the save schema proves insufficient,
+change it only in a separate P4a follow-up with the authority probes repeated.
+Do not add deterministic auto-saving of model-interpreted facts.
+
+* P5: Move caller research workflow into a skill
+:PROPERTIES:
+:CUSTOM_ID: phase-5
+:END:
+
+** Value
+
+Non-research turns lose a large irrelevant procedure while current/external
+questions still select and consume the existing research paths.
+
+** Hypothesis
+
+A research skill description can route natural current/external requests without
+the main/delegate role prompt describing briefing, partial results, unavailable
+search, or report consumption on every turn.
+
+** Controlled change
+
+Add the shared research workflow skill for main/delegate callers and remove only
+the corresponding caller procedure from their role prompt.  Freeze every
+research specialist prompt, tool description, search tool, provenance rule,
+report store, budget, and topology.
+
+The skill is return-shape-neutral: it tells a caller to use its registered
+research capability and ground the answer in the returned evidence.  Each
+caller's bound tool/subagent description remains the sole owner of its concrete
+contract: direct findings for production async main, report path for the
+synchronous delegate and legacy main.
+
+** Test and gate
+
+- Natural current-fact, recommendation, compare, user-URL, local-only,
+  prior-report, partial-search, fully-unavailable, and multi-part research
+  cohorts meet baseline at N=10.
+- A current/external answer never falls back to unsupported model memory when
+  research is required.
+- Production async main correctly consumes direct findings and synchronous
+  delegate/legacy main correctly consume report paths at baseline or better.
+- Verified claims reach the user with usable sources; an internal report path is
+  never substituted for the answer.  Partial research names exactly which
+  requested parts were verified and which were not, and unavailable search is
+  not reported as proof that no result exists.
+- In a mixed request, a failed research branch does not discard a successful
+  local or delegated outcome.
+- Distance/travel and other deterministic-tool ownership remains unchanged.
+- Live-search evals remain isolated and rate-limit diagnostics distinguish infra
+  failure from behavior failure.
+- P0 shows the caller role prompt and skill contain no concrete research return
+  shape; bound tool/subagent descriptions remain unchanged in this phase.
+
+** Expected learning
+
+Natural questions containing words such as "current" should route reliably;
+questions that sound timeless but still need verification are the likely skill
+selection misses.
+
+** Alternatives
+
+If research selection regresses, keep a compact always-on research trigger while
+leaving the detailed procedure in the skill.  If one caller misreads its result,
+defer correction to P6 rather than changing the skill to describe both shapes.
+
+* P6: Align research specialist role contracts
+:PROPERTIES:
+:CUSTOM_ID: phase-6
+:END:
+
+P6 is an umbrella.  Each child gets its own branch, N=10 baseline, review, and
+stop/go decision.  Profiles share a child only when P0 proves they consume the
+same inseparable prompt source.  Caller routing, the P5 skill, tool descriptions,
+search behavior, provenance, storage, budgets, and topology stay fixed throughout.
+
+** P6a: Research-lead contract
+:PROPERTIES:
+:CUSTOM_ID: phase-6a
+:END:
+
+/Value and hypothesis:/ The lead can preserve decomposition, synthesis, report
+storage, and report-path return with a concise manager-only contract.  Change
+only =research_instructions.txt.j2=.
+
+/Gate:/ Lead capability and natural multi-topic/report cohorts meet N=10 baseline;
+P0 finds no retrieval-tool claim or leaf return shape; storage and nested
+dispatch remain structurally unchanged.  Restore only a causal lead clause.
+
+** P6b: Shared research-leaf/worker contract
+:PROPERTIES:
+:CUSTOM_ID: phase-6b
+:END:
+
+/Value and hypothesis:/ Direct leaf and nested worker can share one concise
+search/read/source/stopping contract because both consume
+=sub_research.txt.j2=, while their distinct composition surfaces remain explicit.
+Change only that shared prompt source.
+
+/Gate:/ Both direct-leaf and parent-dispatched-worker capability/natural cohorts
+meet N=10 baseline; sourced-findings shape, URL provenance, search budgets, and
+their distinct exposed/effectively permitted tools remain unchanged.  If one
+path regresses, restore the causal shared clause or split the source in a new
+reviewed experiment rather than tune around the other path.
+
+** P6c: Report-critique contract
+:PROPERTIES:
+:CUSTOM_ID: phase-6c
+:END:
+
+/Value and hypothesis:/ Report critique needs only the supplied report, review
+criteria, output contract, and stopping condition.  Change only
+=sub_critique.txt.j2=.
+
+/Gate:/ Direct capability and natural report-review cohorts meet N=10 baseline;
+P0 finds no search/fact-check/lead action claim and the parent topology is
+unchanged.  Restore only a causal critique clause.
+
+** P6d: Fact-check contract
+:PROPERTIES:
+:CUSTOM_ID: phase-6d
+:END:
+
+/Value and hypothesis:/ Fact checking can keep claim/source verification quality
+with a concise contract aligned to its actual =read_url= and guarded provenance.
+Change only =fact_checker.md.j2=.
+
+/Gate:/ Direct capability, citation-alignment, fabricated-URL, and natural
+fact-check cohorts meet N=10 baseline; read-only/provenance guards and return
+shape remain unchanged.  Restore only a causal fact-check clause.
+
+* P7: Audit remaining role and eval-only prompts
+:PROPERTIES:
+:CUSTOM_ID: phase-7
+:END:
+
+** Value
+
+Every remaining model call receives a short truthful contract, and the capture
+and product-policy machinery stops directing future work back toward prompt
+accretion.
+
+** Hypothesis
+
+Context, critique, receptionist, description, capture, and triage behavior
+depends on a small capability-specific contract; repeated examples, unavailable
+actions, and legacy architecture prose can be removed without changing useful
+outcomes.
+
+** Controlled change
+
+P7 is a roadmap umbrella, not one implementation change.  Each child below gets
+its own branch, baseline, review, and stop/go decision.  A later child does not
+need an earlier one unless P0 records a real dependency.
+
+** P7a: Context contract
+:PROPERTIES:
+:CUSTOM_ID: phase-7a
+:END:
+
+/Value and hypothesis:/ A concise read-only discovery/evidence/stopping contract
+can improve salience without lowering context quality.  Change only the context
+system prompt; the context-first caller rule, tools, backend, and read-only guard
+stay fixed.
+
+/Gate:/ Direct capability probes remain 100%; natural discovery, no-context,
+large-tree, and stopping cohorts meet their N=10 baseline; P0 reports no positive
+capability mismatch; read-only enforcement remains deterministic.
+
+/Learning and alternative:/ This isolates whether repetition is helping the
+small model stop.  Restore only a clause tied to a reproduced miss.
+
+** P7b: Align the two code-critique contracts
+:PROPERTIES:
+:CUSTOM_ID: phase-7b
+:END:
+
+/Value and hypothesis:/ The dev skill and current main/delegate paths establish
+real critique callers, but async read-only critique and synchronous
+inherited-surface critique have different constructions despite sharing
+=dev_critique.md.j2=.  A capability-true shared contract can preserve both paths.
+Change only that shared prompt source.
+
+/Gate:/ Async read-only and synchronous inherited-surface capability probes and
+N=10 code-work cohorts each meet baseline; P0 reports their exposed and
+effectively permitted actions separately; the dev skill and caller topology stay
+unchanged.
+
+/Learning and alternative:/ Results show whether one prompt can truthfully serve
+both real surfaces.  If not, split their prompt sources in a new reviewed
+experiment.  Removal is available only after a separate behavior-change design
+first changes and evaluates the dev workflow itself.
+
+** P7c: Receptionist contract
+:PROPERTIES:
+:CUSTOM_ID: phase-7c
+:END:
+
+/Value and hypothesis:/ The vanilla receptionist can keep routing quality with a
+truthful compact contract.  Change only its system prompt.
+
+/Gate:/ Vanilla-receptionist tool confinement stays 100%; routing and natural
+conversation cohorts meet their N=10 baseline; catalog boundary, tools, and
+conversation state remain unchanged.
+
+/Learning and alternative:/ Results show whether receptionist examples or role
+prose are load-bearing.  Restore only the smallest causal example or clause.
+
+** P7d: Thread-description contract
+:PROPERTIES:
+:CUSTOM_ID: phase-7d
+:END:
+
+/Value and hypothesis:/ The direct description model call can retain concise,
+useful thread labels with a compact output-only contract.  Change only its prompt.
+
+/Gate:/ Description relevance, output shape/length, empty/short thread, and
+adversarial-content cohorts meet N=10 baseline; P0 captures the direct invocation
+without inventing an agent constructor.  Restore only a causal example or clause.
+
+** P7e: Capture and product-policy reconciliation
+:PROPERTIES:
+:CUSTOM_ID: phase-7e
+:END:
+
+/Value and hypothesis:/ Capture can classify a behavioral miss into the narrowest
+instruction home without defaulting to main-prompt growth, and product/eval docs
+can describe the same real surfaces.  Change the capture contract first; reconcile
+documentation only after its behavior gate passes.
+
+/Gate:/ Capture's filesystem/output-shape capability remains 100%; natural miss
+cases identify kernel, capability protocol, role, skill, tool, guard, or no-prompt
+change at N=10 baseline or better; recommendations never prescribe
+=general_instructions.md.j2= by default; README, =edd/product-policy.org=, eval
+docstrings, and design docs then pass dedicated alignment review.
+
+/Learning and alternative:/ This shows whether capture can resist the accretion
+bias.  If it cannot, retire the unused capture profile rather than keep a process
+that fights the architecture.
+
+** P7f: Inbound-triage role contract
+:PROPERTIES:
+:CUSTOM_ID: phase-7f
+:END:
+
+/Value and hypothesis:/ After P1/P1b make the graph and transaction narrow, a
+short triage-only contract can replace inherited general-agent procedure without
+lowering reply judgment.  Change only the triage system prompt; its builder,
+single tool, bounds, inputs, and HITL transaction stay fixed.
+
+/Gate:/ Reply, no-reply, ambiguous, adversarial instruction, approve/edit/reject,
+and visible terminal-state cohorts meet their unchanged-main N=10 baselines; P0
+shows no unavailable positive capability or general-agent lifecycle language.
+
+/Learning and alternative:/ This isolates whether triage needs any examples
+beyond its objective, input trust boundary, one proposal output, and stopping
+condition.  Restore only a causal example or clause.
+
+* P8: Resolve residual main/delegate procedures
+:PROPERTIES:
+:CUSTOM_ID: phase-8
+:END:
+
+P3, P4b, and P5 do not assume that every existing main-prompt procedure already
+has an owner.  P8 closes the census-confirmed remainder through independent
+experiments; it is an umbrella, not one implementation change.
+
+** P8a: Artifact-delivery default
+:PROPERTIES:
+:CUSTOM_ID: phase-8a
+:END:
+
+/Value and hypothesis:/ The broad default to write generated content to files can
+be deleted or narrowed without losing requested artifacts, because user intent
+and existing edit/file-format skills already determine when a file is the
+outcome.  Change only that default.
+
+/Gate:/ Natural answer-only, requested-file, edit-existing-file, generated
+multi-file, and no-unrequested-artifact cases meet N=10 baseline; requested
+artifacts exist and are linked, while answer-only cases create nothing.  If
+deletion fails, retain the smallest clause tied to the failing intent or move a
+coherent procedure into an existing skill in a new pre-registered attempt.
+
+** P8b: User task-file workflow
+:PROPERTIES:
+:CUSTOM_ID: phase-8b
+:END:
+
+/Value and hypothesis:/ If P0 and caller/eval census confirms user task-file
+capture is a current product behavior, a visible task-management skill can own
+recognition and procedure without every turn carrying it.  If no real caller or
+natural contract remains, deletion is the smaller evidence-backed outcome.
+
+/Gate:/ First record retain-versus-delete evidence.  A retained workflow must
+load only for natural task capture/update requests, preserve current files, and
+meet its N=10 outcome baseline; ten unrelated turns neither load it nor mutate a
+task file.  Deletion requires no current natural contract/caller.  A trigger miss
+may justify one compact kernel trigger, but not restoration of the full procedure.
+
+Any other P0 residual becomes a separately numbered P8 child with its own
+hypothesis, single instruction move, N=10 baseline, UX guard, learning, and
+alternative before implementation.  The final gate cannot classify an untested
+leftover as a measured exception.
+
+* Cross-phase security and integrity
+
+This program adds no production listener, privilege, or host tool.  Its new risk
+is evaluator authority: untrusted agent output could instruct the judge to ignore
+the rubric, and a lenient judge could turn a real failure into a reported pass.
+Containment is therefore structural:
+
+- deterministic gates run first and cannot be waived by the judge;
+- agent artifacts are delimited as data, with paired injection cases treating
+  any changed verdict as disqualifying rather than assuming delimiters suffice;
+- judge inputs omit secrets and real user/family data;
+- default judging remains local;
+- model/prompt versions and complete verdict evidence are retained;
+- qualification includes prompt-injection artifacts and fluent false-success
+  claims;
+- failed qualification leaves the judge diagnostic only.
+
+Prompt movement must not weaken capability-based security.  Trust boundaries,
+tool omission, filesystem permissions, URL provenance, HITL, and resource bounds
+remain code-enforced and covered by existing deterministic tests.
+
+P1 addresses a current exposure rather than a risk introduced by this program.
+Its untrusted-message cases probe every capability the shared constructor now
+adds, and its final-graph census is the authority.  A reply-only wrapper or
+prompt claim cannot substitute for absence at the model boundary.
+
+P4a likewise treats persistent memory as an authorization sink.  Memory data may
+be broadly readable, but generic tools cannot mutate canonical targets and only
+a trusted composition root can mount the memory skill/save capability pair.
+
+* Program completion gate
+:PROPERTIES:
+:CUSTOM_ID: final-architecture-gate
+:END:
+
+The roadmap umbrella remains open after individual phases ship.  The architecture
+is complete only when a final P0 census proves all of the following:
+
+1. every surviving normative instruction maps to exactly one of the six homes;
+2. the custom main and delegate role prompts contain only the enumerated role
+   kernel, while separately owned capability protocols remain singly owned;
+3. every positive capability and return-shape claim matches the final graph;
+4. each remaining always-on procedural exception names the failed experiment and
+   reproduced regression that justified it;
+5. all deterministic security gates pass and every natural cohort meets its
+   unchanged-main N=10 baseline and 70% floor;
+6. README, product policy, eval descriptions, docstrings, comments, roadmap, and
+   this document describe the same final architecture.
+
+This gate can close with a measured exception.  It cannot close by weakening a
+phase threshold, accepting an unexplained duplicate, or rounding a partial judge
+verdict up to a pass.
+
+* Review gate before implementation
+:PROPERTIES:
+:CUSTOM_ID: design-review-gate
+:END:
+
+This design is ready for implementation planning only when:
+
+1. the architect pass and every required design-review lens have been recorded;
+2. every BLOCKER and IMPORTANT finding has been incorporated or explicitly
+   declined here with a concrete reason;
+3. simplicity review confirms each phase adds standalone value and can stop
+   without requiring later phases;
+4. agentic review confirms the census observes the framework's final request
+   rather than reconstructing it;
+5. user-intention and UX reviews confirm natural outcomes, not orchestration,
+   are the acceptance signal;
+6. clean-interface review confirms no runtime registry or policy engine is being
+   introduced for test convenience;
+7. threat review confirms judge output cannot override deterministic gates and
+   private artifacts do not leave the local boundary by default;
+8. eval-runner liveness review confirms judge calls and repeated cohorts have
+   explicit time/resource bounds and cannot wedge the single local model slot;
+9. Pierre approves the reviewed document.
+
+After approval, P0 receives its own numbered implementation plan and repeats the
+normal design review against the then-current code.  Approval of this architecture
+does not pre-approve P0 code, and no later phase starts automatically.
+
+* Design review record
+
+The local architecture review ran to convergence before publication.  No finding
+was declined.
+
+| Lens | Material findings incorporated | Convergence result |
+|------+--------------------------------|--------------------|
+| Architect/census | final model request is the audit unit; triage's documented reply-only boundary is false in the current shared graph; legacy and async research returns differ | Clean |
+| Simplicity | N=3 is diagnostic, not a baseline gate; judge failure cannot block prompt work; combined phases were split; residual main procedures received P8; P4a's save interface is atomic | Clean |
+| Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; runtime scenario matrix added; capability protocol has one owner; provider-wide prompt changes isolated; visible skill descriptions own routing triggers | Clean |
+| User intention | P2b removes orchestration assertions from natural acceptance; each later cohort declares its gate layer; context remains preloaded unless later evidence justifies another experiment | Clean |
+| User experience | latency/round-trip guard; complete delegate, memory, research, and triage/HITL journeys; actionable per-case experiment reports | Clean |
+| Clean interfaces | dedicated internal triage builder without =AgentSpec= permission flags; trusted composition roots own memory authority; memory skill and save tool mount together | Clean |
+| Threat model | bounded durable inbound archive and one-action HITL transaction; synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; memory targets read-only below generic sinks | Clean |
+| Event-loop/eval liveness | P0b atomic maintenance admission; outer supervised process groups and recoverable leases; bare serialized judge; atomic resume identity; GPU workload/cooldown contract; slow-path web liveness gates | Clean |
+| Documentation alignment | delegate state corrected; host-added triage tuple distinguished from the final graph in current comments and historical errata; phase names/anchors and current-versus-target wording verified | Clean |
+
+Pierre's PR review is the remaining design gate.  In particular, approval should
+confirm the six instruction homes and preloaded context choice; the blind judge
+qualification and human-label burden; the P0b maintenance-reservation boundary;
+and the inclusion of P1/P1b/P4a as security prerequisites discovered by the
+audit.  No implementation starts from silence or PR creation alone.
+
+* Decisions deliberately deferred to evidence
+
+- Whether the existing local model qualifies as its own outcome judge.
+- Whether implicit memory facts trigger a skill reliably enough to remove the
+  compact always-on trigger.
+- Whether natural research selection needs one compact always-on trigger.
+- Whether context gathering can ever move behind a skill.  The default remains
+  preloaded because it is the grounding prerequisite.
+- Whether the delegate's code-critique specialist has a real dev-work caller and
+  should remain.
+- Exact final prompt wording.  The architecture fixes ownership and gates, not
+  prose before the experiments reveal what Qwen follows.

@@ -52,7 +52,7 @@ class TestNotifyTool:
         assert "no active thread" in out.lower()
 
     def test_notify_in_normal_tools_not_triage(self):
-        # containment by construction: an untrusted SMS-triage turn never gets notify.
+        # Host-tool containment: the additive SMS-triage tuple never gets notify.
         from assist.thread_manager import _web_tools, _web_triage_tools
         names = lambda ts: [getattr(t, "__name__", getattr(t, "name", "")) for t in ts]
         assert "notify" in names(_web_tools)

@@ -114,8 +114,8 @@ def test_dispatch_calls_process_message_with_rendered_template(client, monkeypat
 
 
 def test_triage_tools_exclude_host_effect_tools():
-    # The untrusted-SMS triage turn must NOT get the host-effect config tools (schedule/
-    # subscription) — only the HITL-gated reply. Normal turns keep the config tools.
+    # This checks the additive host tuple, not the final shared-agent graph: untrusted SMS
+    # excludes schedule/subscription and includes HITL reply. P0/P1 track final confinement.
     from assist import thread_manager as tm
     triage = {getattr(f, "__name__", "") for f in tm._web_triage_tools}
     normal = {getattr(f, "__name__", "") for f in tm._web_tools}

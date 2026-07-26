@@ -1937,7 +1937,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         _cfg[CONTEXT_RIDER_KEY] = rider
                     if sender:
                         _cfg[SMS_SENDER_KEY] = sender
-                    # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
+                    # A triage turn gets the reduced host-added tuple + HITL gate; the
+                    # shared constructor's broader final surface is tracked in prompt P1.
                     assistant_kwargs = ({"assistant_id": assistant_id}
                                         if assistant_id != "general-agent" else {})
                     chat = MANAGER.get(tid, sandbox_backend=sandbox,

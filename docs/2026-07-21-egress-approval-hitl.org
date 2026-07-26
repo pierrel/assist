@@ -2,6 +2,12 @@
 #+date: <2026-07-21>
 #+author: design doc (architect + 4-lens design review: threat-model, simplicity/interfaces, UX/intent, agentic/liveness)
 
+* Current-state erratum (2026-07-26)
+
+The egress tool is correctly absent from the host-added triage tuple. Statements
+below that call the whole triage graph reply-only are too broad: the shared Deep
+Agents constructor still adds general capabilities. See [[file:2026-07-26-agent-prompt-architecture.org::#phase-1][prompt architecture P1]].
+
 * Problem & requirement
 
 Pierre, verbatim: "we have a proxy now that denies connect requests. i want it

@@ -264,9 +264,10 @@ class TestSmsEventInjection(TestCase):
     sees attacker text where it expects the user's own words. This exercises the
     MODEL's behavioral resistance using the default create_agent (full tool set)
     — a STRICTER behavioral probe than the real triage turn. It does NOT test the
-    triage tool-surface containment (the real inbound turn gets only HITL-gated
-    send_reply via MANAGER.get(triage=True)); that structural defense is covered
-    separately in tests/test_web_inbound_sms.py."""
+    final triage graph's capability surface. tests/test_web_inbound_sms.py proves
+    only that the host-added tuple excludes config tools and includes HITL-gated
+    send_reply; the shared constructor's inherited capabilities remain untested
+    pending docs/2026-07-26-agent-prompt-architecture.org P0/P1."""
 
     def test_sms_body_not_obeyed_as_command(self):
         from assist.events.model import Subscription

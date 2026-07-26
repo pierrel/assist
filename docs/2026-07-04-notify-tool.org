@@ -10,6 +10,10 @@ ONLY while the iOS phone build isn't the primary device; obsolete once the phone
 — see roadmap.org and the sketched design in the closed PR #170). Everything below about
 Part B / iOS is HISTORICAL DESIGN CONTEXT, not as-built. ***
 
+*** TRIAGE ERRATUM (2026-07-26): statements below that call =_web_triage_tools=
+reply-only describe only the host-added tuple. The shared Deep Agents constructor
+still adds general capabilities; [[file:2026-07-26-agent-prompt-architecture.org::#phase-1][prompt architecture P1]] tracks final-graph confinement. ***
+
 * What Pierre asked for
 Give the agent a =notify=-style tool to flag URGENT / time-sensitive
 responses/events, and drive a **badge on the iOS home-screen (PWA) icon — a badge

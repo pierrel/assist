@@ -2,6 +2,12 @@
 #+date: <2026-07-13>
 #+author: design doc (for review)
 
+* Current-state erratum (2026-07-26)
+
+References below to the reduced triage surface mean the host-added tool tuple and
+HITL gate. They do not prove final-graph confinement: the shared Deep Agents
+constructor still adds general capabilities. See [[file:2026-07-26-agent-prompt-architecture.org::#phase-1][prompt architecture P1]].
+
 * Problem
 
 When a thread is busy and the user sends follow-up messages, the backlog lives

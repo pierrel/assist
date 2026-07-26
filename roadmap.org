@@ -792,47 +792,101 @@ and most thresholds/knobs are gone, so there's no longer a structure worth a
 dedicated refactor.
 
 
-** TODO One-level delegate agent for multiple requested outcomes
-In review in PR #215: a whole-task worker built through the shared
-Assist constructor, with synchronous specialists but no self-delegation. The
-main agent schedules independent outcomes together and dependent or
-workspace-overlapping outcomes serially, with a main-only complex-request skill
-for TODO planning and explicit briefs. Both roles keep the same guarded =read_url=
-surface and only genuine user URLs cross the task boundary. See
+** DONE One-level delegate agent for multiple requested outcomes
+Shipped in PR #215 (merged and deployed 2026-07-26, =9f8a7d9=): a whole-task
+worker built through the shared Assist constructor, with synchronous specialists
+but no self-delegation. The main agent schedules independent outcomes together
+and dependent or workspace-overlapping outcomes serially, with a main-only
+complex-request skill for TODO planning and explicit briefs. Both roles keep the
+same guarded =read_url= surface and only genuine user URLs cross the task
+boundary. See
 [[file:docs/2026-07-26-delegate-agent.org][the delegate-agent design]].
 
-** TODO Audit every agent prompt against its actual capability surface
-Follow-up to PR #215. Inventory every agent system prompt and injected guidance
-block rendered in production or the eval harness, including the main, delegate,
-context, research lead, research leaf, fact-check, code-critique, report-critique,
-receptionist, thread-description, and capture profiles. For each profile,
-compare the instructions with its actual tools, synchronous or asynchronous
-subagents, filesystem and memory access, and trust boundaries. Remove
-architecture explanations, unavailable actions, and cross-role policy that do
-not help that agent complete its own work. Keep whole-task and async-lifecycle
-orchestration guidance on the main agent, research decomposition on the research
-lead, and make each leaf's instructions concise and capability-specific.
+** TODO Agent prompt architecture and calibrated outcome evaluation
+Design review only. No implementation phase starts until Pierre approves the
+fully reviewed [[file:docs/2026-07-26-agent-prompt-architecture.org][architecture and experiment contract]]. See the
+[[file:docs/2026-07-26-agent-prompt-architecture.org::#instruction-placement][instruction-placement rule]],
+[[file:docs/2026-07-26-agent-prompt-architecture.org::#experiment-protocol][shared experiment protocol]], and
+[[file:docs/2026-07-26-agent-prompt-architecture.org::#design-review-gate][design-review gate]].
 
-Known starting points from PR #215 review: the shared general prompt promises
-the async research leaf will save a report path even though that profile returns
-findings directly; =edd/product-policy.org= still describes the read-only context
-agent as a writer; and the README/product policy collapse the synchronous
-research lead and direct research leaf into one incompatible capability list.
+*** TODO P0: Census every rendered prompt and capability surface
+Capture the final model request from each real constructor with no behavior
+change. This is the evidence base for every later phase. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0][P0 hypothesis and gate]].
 
-As part of the audit, resolve the current critique ambiguity: the delegate
-inherits the legacy top-level code-diff critique specialist while its research
-agent separately owns report critique and fact-checking. Decide the intended
-surface explicitly, with the likely simple shape being direct context + research
-specialists for the delegate and critique remaining inside research. Rewrite the
-delegate prompt as an ordinary self-contained task contract with no concept of
-the outer delegation lifecycle.
+*** TODO P0b: Bound eval execution and reserve the model slot
+Add production-maintenance admission, process-group deadlines, atomic resume,
+and inspectable GPU cooldown before real-LLM experiments. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0b][P0b hypothesis and gate]].
 
-Drive the changes with a short direct-agent eval set. Include explicit capability
-probes to prove each profile can use what it owns, then mostly natural prompts
-that validate useful task completion rather than exact tool calls, TODO shape,
-agent names, or orchestration wording. Measure partial natural reliability
-honestly and re-run unrelated currently passing evals to catch routing or prompt
-regressions; do not tune wording to the eval fixtures.
+*** TODO P1: Make untrusted inbound-message triage reply-only
+Remove its currently inherited filesystem, execution, URL, map, and travel
+capabilities by construction while preserving HITL reply behavior. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1][P1 hypothesis and gate]].
+
+*** TODO P1b: Bound inbound triage and prove the HITL transaction
+Bound admitted input, reply drafts, backlog, and pending actions, then prove one
+approve/edit/reject decision resolves exactly one durable proposal. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1b][P1b hypothesis and gate]].
+
+*** TODO P2: Qualify a calibrated natural-outcome judge
+Keep deterministic security and state gates, then allow semantic verdicts only
+after the judge passes a frozen human/objective calibration corpus. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2][P2 hypothesis and gate]].
+
+*** TODO P2b: Separate natural acceptance from capability coverage
+Remove orchestration-shaped assertions from every natural cohort used by later
+phases while retaining strict, labelled capability probes. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b][P2b hypothesis and gate]].
+
+*** TODO P3: Remove main/delegate procedures already owned elsewhere
+Deduplicate only rules already owned by skills, middleware, or tool contracts;
+prompt reduction is evidence, not the gate. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-3][P3 hypothesis and gate]].
+
+*** TODO P4a: Confine memory mutation to owner-authored main turns
+Protect canonical memory paths from generic and non-owner mutation, with one
+narrow save capability at the trusted turn boundary. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-4a][P4a hypothesis and gate]].
+
+*** TODO P4b: Move memory-management procedure into a skill
+Keep memory facts preloaded, but load persistence policy and mechanics only when
+needed. Wait for P4a and per-thread memory. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-4b][P4b hypothesis and gate]].
+
+*** TODO P5: Move caller research workflow into a skill
+Keep research discoverable while removing detailed caller procedure from ordinary
+turns; freeze specialist prompts and return contracts. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-5][P5 hypothesis and gate]].
+
+*** TODO P6: Align research specialist role contracts
+This is an umbrella of prompt-source-sized experiments with routing, tools,
+storage, and topology frozen. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6][the P6 boundary]].
+**** TODO P6a: Research-lead contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6a][P6a hypothesis and gate]].
+**** TODO P6b: Shared research-leaf/worker contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6b][P6b hypothesis and gate]].
+**** TODO P6c: Report-critique contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6c][P6c hypothesis and gate]].
+**** TODO P6d: Fact-check contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6d][P6d hypothesis and gate]].
+
+*** TODO P7: Audit remaining role and eval-only prompts
+This is an umbrella of independent stop points, not one implementation change.
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7][the P7 boundary]].
+**** TODO P7a: Context contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7a][P7a hypothesis and gate]].
+**** TODO P7b: Align the two code-critique contracts
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7b][P7b hypothesis and gate]].
+**** TODO P7c: Receptionist contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7c][P7c hypothesis and gate]].
+**** TODO P7d: Thread-description contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7d][P7d hypothesis and gate]].
+**** TODO P7e: Capture and product-policy reconciliation
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7e][P7e hypothesis and gate]].
+**** TODO P7f: Inbound-triage role contract
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7f][P7f hypothesis and gate]].
+
+*** TODO P8: Resolve residual main/delegate procedures
+P3, memory, and research do not cover every current procedure. Close the
+census-confirmed remainder as independent experiments. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-8][the P8 boundary]].
+**** TODO P8a: Test deletion of the artifact-delivery default
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-8a][P8a hypothesis and gate]].
+**** TODO P8b: Move or delete the user task-file workflow
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-8b][P8b hypothesis and gate]].
+
+*** TODO Final: Prove the cumulative architecture
+Keep the umbrella open until the final census passes the [[file:docs/2026-07-26-agent-prompt-architecture.org::#final-architecture-gate][program completion gate]].
 
 * Web UI — thread list
 ** DONE Thread list ordering by status then last-message age
