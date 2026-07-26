@@ -17,7 +17,7 @@ from assist.run_service import RunNotFound
 
 
 ASSISTANT_IDS = frozenset({
-    "context-agent", "research-agent", "critique-agent",
+    "context-agent", "research-agent", "critique-agent", "delegate-agent",
 })
 MAX_BODY_BYTES = 66_000
 MAX_MESSAGE_CHARS = 64_000

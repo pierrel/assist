@@ -21,7 +21,22 @@ def test_create_is_durable_acceptance_commit(service, tmp_path):
     assert stored[0]["id"] == run.id
     assert stored[0]["status"] == "pending"
     assert stored[0]["multitask_strategy"] == "enqueue"
+    assert "delegate_user_urls" not in stored[0]
     assert service.get("t1", run.id).rider == {"tz": "UTC"}
+
+
+def test_delegate_user_urls_round_trip_only_on_the_child_slice(service, tmp_path):
+    child = service.create(
+        "sub-t3", "delegate-agent", "read https://owner.example/page",
+        mode="child", parent_thread_id="t1", parent_run_id="parent-run",
+        dispatch_key="parent-work:delegate",
+        delegate_user_urls=("https://owner.example/page",),
+    )
+
+    stored = json.loads((tmp_path / "sub-t3" / "runs.json").read_text())
+    assert stored[0]["delegate_user_urls"] == ["https://owner.example/page"]
+    assert service.get(child.thread_id, child.id).delegate_user_urls == (
+        "https://owner.example/page",)
 
 
 def test_child_shape_is_validated(service, tmp_path):

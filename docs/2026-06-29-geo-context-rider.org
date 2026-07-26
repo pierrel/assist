@@ -8,7 +8,7 @@ restaurant nearby" / "directions from here". Pierre queued this as the geo half.
 
 * Most of the contract was already built (#3)
 ~ContextRider~ already has ~lat/lon/place_label~ (validated), ~prose_line()~ renders
-coarse geo, the middleware injects it (ephemeral, main-agent-only), and
+coarse geo, the middleware injects it ephemerally on main/delegate graphs, and
 ~_process_message~ threads any rider onto ~configurable~. So #5 is three small deltas.
 
 * Deltas (as built)
@@ -32,7 +32,8 @@ coarse geo, the middleware injects it (ephemeral, main-agent-only), and
 * Privacy (unchanged from #3, confirmed)
 Precise coords stay on ~configurable~ (per-invocation, NOT checkpointed); only the
 coarse ~lat,lon~ (2-decimal ≈ city block) reaches the model + the persisted prose;
-middleware is main-agent-only (no geo to the research sub-agent's egress). No raw
+middleware does not reach specialists (and web delegates receive no rider), so no
+geo reaches the research specialist's egress. No raw
 coords logged. Browser permission grant = consent. "from here" routes from the
 coarse coords the model sees (v1).
 

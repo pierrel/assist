@@ -54,6 +54,7 @@ from assist.egress.store import resolution_prompt
 from starlette.concurrency import run_in_threadpool
 from assist.middleware.interjection import (collect_interjection_ids,
                                             register_interjection_callbacks)
+from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.events.reply import SMS_SENDER_KEY
@@ -1395,7 +1396,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 assistant_id="general-agent", mode="turn", parent_thread_id=None,
                 parent_run_id=None, dispatch_key=None,
                 cancel_pending=False, max_runs=None,
-                max_pending=None, multitask_strategy="enqueue") -> Run:
+                max_pending=None, multitask_strategy="enqueue",
+                delegate_user_urls=()) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
         tid, assistant_id, text, work_id=work_id, mode=mode,
@@ -1405,7 +1407,15 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         origin=origin, resume=resume, resume_decision=resume_decision,
         pending_text=pending_text, active_ms=active_ms,
         cancel_pending=cancel_pending, max_runs=max_runs,
-        max_pending=max_pending, multitask_strategy=multitask_strategy)
+        max_pending=max_pending, multitask_strategy=multitask_strategy,
+        delegate_user_urls=delegate_user_urls)
+
+
+def _delegate_configurable(run: Run) -> dict | None:
+    """Expose immutable brief-form URLs admitted by canonical owner match."""
+    if run.assistant_id != "delegate-agent":
+        return None
+    return {DELEGATE_USER_URLS_KEY: run.delegate_user_urls}
 
 
 def _execute_child_run(run: Run, *, resume: bool = False) -> None:
@@ -1438,7 +1448,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                         raise
                     chat = MANAGER.get(
                         run.thread_id, working_dir=parent_working_dir,
-                        sandbox_backend=sandbox, assistant_id=run.assistant_id)
+                        sandbox_backend=sandbox, assistant_id=run.assistant_id,
+                        configurable=_delegate_configurable(run))
                     result = (chat.resume() if (resume or run.resume)
                               else chat.message(run.text or ""))
                     with _RUN_ADMISSION_LOCK:
@@ -1464,7 +1475,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     parent_thread_id=run.parent_thread_id,
                     parent_run_id=run.parent_run_id,
                     dispatch_key=f"task-resume:{run.id}", work_id=run.work_id,
-                    resume=True, active_ms=carry, origin=run.origin)
+                    resume=True, active_ms=carry, origin=run.origin,
+                    delegate_user_urls=run.delegate_user_urls)
         _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
         return
     except (ThreadHoldExpired, QueueWaitTimeout) as exc:
@@ -1515,7 +1527,8 @@ def _recover_interrupted_child(run: Run) -> None:
             parent_thread_id=run.parent_thread_id,
             parent_run_id=run.parent_run_id,
             dispatch_key=f"task-resume:{run.id}", work_id=run.work_id,
-            resume=True, active_ms=run.active_ms, origin=run.origin)
+            resume=True, active_ms=run.active_ms, origin=run.origin,
+            delegate_user_urls=run.delegate_user_urls)
     if successor.status in {"pending", "running"}:
         _RESUME_SCHEDULER.submit(successor.id, successor.thread_id)
 
@@ -1534,7 +1547,8 @@ def _recover_child_run(run: Run) -> None:
     try:
         chat = MANAGER.get(
             run.thread_id, working_dir=parent_working_dir, sandbox_backend=None,
-            assistant_id=run.assistant_id)
+            assistant_id=run.assistant_id,
+            configurable=_delegate_configurable(run))
         snap = chat.agent.get_state(chat.runconfig)
         if (getattr(snap, "next", None) or ()
                 or (getattr(snap, "interrupts", None) or ())):

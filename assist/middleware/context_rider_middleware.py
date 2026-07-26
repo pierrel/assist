@@ -4,9 +4,11 @@ The client attaches a ``ContextRider`` (when/where the message was sent) to the
 turn's ``configurable``; this middleware renders its prose line into an EPHEMERAL
 system message for the current model call only — via ``request.override``, so it is
 NOT written to the checkpoint (location isn't persisted, and a later turn without a
-rider carries no stale context).  Installed on the MAIN agent only — never on the
-research/context sub-agents that have web egress, so a location line can't ride out
-in an outbound query.  See assist/context_rider.py + docs/2026-06-29-context-rider.org.
+rider carries no stale context). Installed on main and delegate Assist graphs, but
+never on specialists (including web-egress research), so a location line
+can't ride out in an outbound query. The web delegate currently receives no rider,
+making this middleware inert there. See assist/context_rider.py +
+docs/2026-06-29-context-rider.org.
 """
 from __future__ import annotations
 

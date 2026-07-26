@@ -8,7 +8,7 @@ boot even when vLLM is unreachable.  This works today only because
 Adding HTTP-probe-based model discovery to ``select_chat_model``
 threatened that property: ``ThreadManager.__init__`` used to call
 ``select_chat_model`` eagerly, and ``ThreadManager`` is constructed at
-module-load time in ``manage/web.py``.  The fix made
+module-load time in ``manage/web/state.py``.  The fix made
 ``ThreadManager.model`` a lazy ``@property``; this test guards against
 the regression.
 
@@ -86,3 +86,18 @@ class TestThreadManagerLazy(TestCase):
                     f"{os.listdir(working_dir)} — DomainManager.is_empty "
                     "will return False and skip the git clone.",
                 )
+
+    def test_delegate_profile_omits_web_supervisor_capabilities(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            manager._model = MagicMock()
+            manager.reserve("sub-delegate")
+            with patch("assist.thread_manager.Thread") as thread:
+                manager.get("sub-delegate", assistant_id="delegate-agent")
+
+        spec = thread.call_args.kwargs["spec"]
+        self.assertEqual(spec.role, "delegate")
+        self.assertIsNone(spec.async_subagent_tools)
+        self.assertEqual(spec.tools, ())
+        self.assertEqual(dict(spec.skill_sources), {})
+        self.assertIsNone(spec.interrupt_on)

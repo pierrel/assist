@@ -73,7 +73,10 @@ children were removed afterward.
    while a terminal resumed slice resolves its historical interruption. The
    cancellation tool reports the post-operation truth, distinguishing a requested
    boundary stop from an immediately completed cancellation.
-10. Subagents are direct leaf graphs and receive no delegation tools.
+10. Context, research, and critique subagents are direct leaf graphs. The
+    =delegate-agent= is the shared Assist graph with synchronous specialists,
+    but receives no async lifecycle tools and therefore cannot start another
+    delegate.
 
 * What “interrupt” means after this change
 
@@ -225,8 +228,9 @@ message or system instruction.
    update/cancel them.
 8. Main-thread interjection delivery, HITL approval, SMS, schedules, recovery,
    deletion, and fair pause retain their existing behavior.
-9. Children lack task-management tools and cannot recursively dispatch
-   subagents.
+9. Children lack async task-management tools and cannot recursively dispatch
+   another web task. A whole-task delegate may use its fixed synchronous
+   specialist topology internally.
 10. Completion framing keeps child output untrusted.
 11. Event-loop probes hold contended locks and prove HTTP status/message routes
     remain responsive.
@@ -247,7 +251,7 @@ Add an eval suite that observes, rather than merely asks for:
 - a user correction causes a fresh list/check followed by a justified
   keep/update/cancel decision;
 - research no longer names or requests =background-research-agent=;
-- child agents do not call subagent management tools.
+- child agents do not call async subagent management tools.
 
 Run N=3 before implementation to record the current failure shape, N=3 after
 implementation, N=5 after local review, and N=10 for stability.  Bound each

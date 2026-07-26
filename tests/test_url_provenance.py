@@ -5,11 +5,16 @@ ToolCallRequest and assert allow (handler invoked) vs reject (corrective
 ToolMessage, handler NOT invoked).
 """
 from unittest import TestCase
+from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain.tools.tool_node import ToolCallRequest
 
-from assist.middleware.url_provenance import UrlProvenanceMiddleware, normalize_url
+from assist.middleware.url_provenance import (
+    DELEGATE_USER_URLS_KEY,
+    UrlProvenanceMiddleware,
+    normalize_url,
+)
 from assist.middleware.tool_result_to_file import UNTRUSTED_OFFLOAD_MARK
 
 _OFFLOADED = f"/{UNTRUSTED_OFFLOAD_MARK}r0"   # e.g. /large_tool_results/untrusted-r0
@@ -32,12 +37,12 @@ class _Handler:
                            name="read_url")
 
 
-def _request(url, messages):
+def _request(url, messages, runtime=None):
     return ToolCallRequest(
         tool_call={"name": "read_url", "args": {"url": url}, "id": "r1"},
         tool=None,
         state={"messages": messages},
-        runtime=None,
+        runtime=runtime,
     )
 
 
@@ -69,6 +74,76 @@ class TestUrlProvenanceMiddleware(TestCase):
         # A URL in the question itself is provenanced (copyable, not invented).
         msgs = [HumanMessage(content="summarize https://blog.example/post-1 for me")]
         _result, handler = self._call("https://blog.example/post-1", msgs)
+        self.assertIsNotNone(handler.called_with)
+
+    def test_delegate_ignores_model_authored_brief_url(self):
+        middleware = UrlProvenanceMiddleware(trust_human_messages=False)
+        handler = _Handler()
+
+        result = middleware.wrap_tool_call(
+            _request("https://brief.example/invented", [HumanMessage(
+                content="The main model says read https://brief.example/invented")]),
+            handler)
+
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
+    def test_delegate_allows_host_derived_user_url_seed(self):
+        url = "https://user.example/provided"
+        middleware = UrlProvenanceMiddleware(trust_human_messages=False)
+        handler = _Handler()
+        runtime = SimpleNamespace(config={"configurable": {
+            DELEGATE_USER_URLS_KEY: (url,),
+        }})
+
+        result = middleware.wrap_tool_call(
+            _request(url, [HumanMessage(content=f"Model-authored brief repeats {url}")],
+                     runtime=runtime),
+            handler)
+
+        self.assertIsNotNone(handler.called_with)
+        self.assertEqual(result.content, "FETCHED")
+
+    def test_delegate_seed_does_not_authorize_added_credentials(self):
+        seed = "https://user.example/provided"
+        requested = "https://parent-secret:@user.example/provided"
+        middleware = UrlProvenanceMiddleware(trust_human_messages=False)
+        handler = _Handler()
+        runtime = SimpleNamespace(config={"configurable": {
+            DELEGATE_USER_URLS_KEY: (seed,),
+        }})
+
+        result = middleware.wrap_tool_call(
+            _request(requested, [HumanMessage(content=seed)], runtime=runtime),
+            handler)
+
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
+    def test_provenanced_credentials_may_be_removed_but_not_changed(self):
+        provenanced = "https://owner:secret@user.example/provided"
+        middleware = UrlProvenanceMiddleware()
+        messages = [HumanMessage(content=provenanced)]
+
+        removed_handler = _Handler()
+        middleware.wrap_tool_call(
+            _request("https://user.example/provided", messages), removed_handler)
+        self.assertIsNotNone(removed_handler.called_with)
+
+        changed_handler = _Handler()
+        changed = middleware.wrap_tool_call(
+            _request("https://other:secret@user.example/provided", messages),
+            changed_handler)
+        self.assertIsNone(changed_handler.called_with)
+        self.assertEqual(changed.status, "error")
+
+    def test_delegate_still_trusts_search_results(self):
+        url = "https://search.example/result"
+        middleware = UrlProvenanceMiddleware(trust_human_messages=False)
+        handler = _Handler()
+
+        middleware.wrap_tool_call(_request(url, [_search_result([url])]), handler)
+
         self.assertIsNotNone(handler.called_with)
 
     def test_rejects_exfil_url_planted_in_a_fetched_page(self):

@@ -6,12 +6,16 @@ from memory and fetching them (the 2026-06-24 threads.db dead-URL flood; one
 thread held 101 GB of such a runaway). Guidance reduces this a lot (a worked
 example + read-cap took guessing from ~86 to 0-3 per turn) but cannot guarantee
 zero — the small model still slips. This middleware makes a fabricated fetch
-*unreachable*: ``read_url`` is refused unless the URL it's given already appears
-somewhere earlier in the conversation.
+*unreachable*: ``read_url`` is refused unless the URL is provenanced by a trusted
+message or an admission-frozen delegate seed.
 
 A provenanced URL is one the agent could have *copied* rather than *invented*:
 one textually present in a SEARCH RESULT, a non-offloaded ``read_file``/``grep``
-result, or the USER's message. Four channels are deliberately NOT provenance sources, because
+result, or the USER's message. A delegate is the exception: its HumanMessage is
+the main model's brief, so the web host supplies only brief-form URLs canonically
+matched to owner-authored Runs already accepted when the child Run is admitted;
+the brief may remove owner userinfo but cannot add or change it.
+Four channels are deliberately NOT provenance sources, because
 their content is attacker-derivable: the model's OWN prior text (else it launders a
 fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
@@ -51,12 +55,14 @@ already trusted. Direct shell output is closed by construction (``_is_page_conte
 this multi-step offload-then-file-read path is not, and shares the same behavioral gate.
 
 Scope: every ``read_url``-bearing agent — the research SEARCHER and FACT-CHECKER
-sub-agents, and the MAIN agent's navigation ``read_url`` (added 2026-07-21 for the
+sub-agents, and the main/delegate navigation ``read_url`` (added 2026-07-21 for the
 explore-website flow, whose trusted channel is the user's URLs plus same-host page
 links). Each should only ever fetch a URL already trusted in its context: the
 searcher's own search results; the fact-checker's cited URLs (which reach it via the
 report ``read_file``/initial message it is handed); the main agent's user-supplied
-URL and pages on that same host. The V2 research orchestrator holds no
+URL and pages on that same host. Delegate graphs use admission-frozen,
+brief-intersected user URL seeds and ignore model-authored briefs as authority.
+The V2 research orchestrator holds no
 ``read_url`` (it delegates all fetching), so the guard doesn't run there — an earlier
 version guarded it after thread 20260708090812 fabricated URLs under
 search-unavailable and 404-looped ~90 min. Guidance now tells the orchestrator to STOP
@@ -79,6 +85,12 @@ from assist.middleware.tool_result_to_file import UNTRUSTED_OFFLOAD_MARK
 logger = logging.getLogger(__name__)
 
 _READ_TOOL = "read_url"
+# Per-run trusted URL seeds for a delegate. The web composition root freezes the
+# intersection of its brief and already-accepted owner Runs; the model cannot write
+# the durable Run field or RunnableConfig.
+# Delegate HumanMessages are model-authored briefs, so they are deliberately not
+# provenance sources.
+DELEGATE_USER_URLS_KEY = "assist_delegate_user_urls"
 # Shell output is an arbitrary, attacker-influenceable channel (a downloaded file
 # cat'd, a large `execute` log the agent re-reads from its real-fs offload) — it is
 # NOT a URL-provenance source. It was never a documented trusted channel; excluding
@@ -134,8 +146,8 @@ def _host_of(url: str) -> str:
 
 
 def normalize_url(url: str) -> str:
-    """Canonical form for provenance comparison: lowercase scheme+host, drop the
-    fragment, a trailing slash, and trailing sentence punctuation/brackets.
+    """Canonical form for provenance comparison: lowercase scheme+host; drop
+    userinfo, the fragment, a trailing slash, and trailing punctuation/brackets.
     Tolerates junk (returns it stripped).
 
     Single source of truth for "the same URL" — the provenance eval imports this
@@ -153,9 +165,30 @@ def normalize_url(url: str) -> str:
         return s.rstrip("/")
 
 
+def url_userinfo(url: str) -> str | None:
+    """Return exact raw URL userinfo, or ``None`` when the authority has none."""
+    try:
+        netloc = urlsplit(url.strip().rstrip(_TRAILING)).netloc
+    except ValueError:
+        return None
+    return netloc.rpartition("@")[0] if "@" in netloc else None
+
+
+def _userinfo_allowed(requested: str, provenanced: str) -> bool:
+    """A fetch may drop provenanced credentials, never add or change them."""
+    requested_userinfo = url_userinfo(requested)
+    return (requested_userinfo is None
+            or requested_userinfo == url_userinfo(provenanced))
+
+
 def _message_text(message: Any) -> str:
     content = getattr(message, "content", "")
     return content if isinstance(content, str) else str(content)
+
+
+def urls_in_text(text: str) -> tuple[str, ...]:
+    """Return clean HTTP(S) URLs literally present in ``text``, in order."""
+    return tuple(_display_url(raw) for raw in _URL_RE.findall(text))
 
 
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
@@ -204,14 +237,14 @@ def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
             and getattr(m, "name", None) != _SHELL_TOOL)
 
 
-def _seen_urls(messages: list) -> dict[str, str]:
+def _seen_urls(messages: list, *, trust_human_messages: bool = True) -> dict[str, str]:
     """Every URL in a TRUSTED tool result or the USER's message: a map from the
     normalized form (the membership key) to the ORIGINAL as it appeared (first seen).
     The normalized keys are the sources the model cannot fabricate; the originals
     feed the correction message so it never surfaces a normalize_url-truncated form
     (e.g. a stripped trailing paren on a Wikipedia URL).
 
-    Scans ``HumanMessage`` content (a URL the user pasted) and TRUSTED ``ToolMessage``
+    Normally scans ``HumanMessage`` content (a URL the user pasted) and TRUSTED ``ToolMessage``
     content (search results, non-offloaded ``read_file``/``grep`` results). Four channels
     are EXCLUDED because their content is attacker-derivable: (1) the model's own
     ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
@@ -224,7 +257,8 @@ def _seen_urls(messages: list) -> dict[str, str]:
     a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
     URL appearing only inside fetched-page content — direct or offloaded — never
     becomes trusted; to reach a new page the agent re-searches (the searcher prompt
-    requires that). RESIDUAL: a model that FOLLOWS a multi-step injection to
+    requires that). Delegate mode sets ``trust_human_messages=False`` and adds only
+    admission-frozen, brief-intersected owner URL seeds later. RESIDUAL: a model that FOLLOWS a multi-step injection to
     ``write_file`` an arbitrary URL then ``read_file`` it can still self-launder —
     that path is gated by the model's behavioral injection-resistance, not this guard."""
     # Map tool_call_id -> the call, so a file read can be traced to its TARGET path
@@ -239,15 +273,17 @@ def _seen_urls(messages: list) -> dict[str, str]:
     for m in messages:
         if not isinstance(m, (HumanMessage, ToolMessage)):
             continue
+        if isinstance(m, HumanMessage) and not trust_human_messages:
+            continue
         if isinstance(m, ToolMessage) and _is_untrusted_result(m, calls_by_id):
             continue
-        for raw in _URL_RE.findall(_message_text(m)):
-            seen.setdefault(normalize_url(raw), _display_url(raw))
+        for url in urls_in_text(_message_text(m)):
+            seen.setdefault(normalize_url(url), url)
     return seen
 
 
-def _page_content_urls(messages: list) -> set[str]:
-    """Normalized URLs that literally appeared in FETCHED-PAGE content — the
+def _page_content_urls(messages: list) -> dict[str, str]:
+    """Normalized-to-original URLs that appeared in FETCHED-PAGE content — the
     untrusted read_url channel, direct or offloaded (see ``_is_page_content``).
     NOT the exact inverse of ``_seen_urls``: ``execute`` (shell) output is in
     NEITHER set — untrusted, so not trusted, but also not a page, so not navigable.
@@ -262,11 +298,11 @@ def _page_content_urls(messages: list) -> set[str]:
             cid = tc.get("id")
             if cid:
                 calls_by_id[cid] = tc
-    urls: set[str] = set()
+    urls: dict[str, str] = {}
     for m in messages:
         if isinstance(m, ToolMessage) and _is_page_content(m, calls_by_id):
-            for raw in _URL_RE.findall(_message_text(m)):
-                urls.add(normalize_url(raw))
+            for url in urls_in_text(_message_text(m)):
+                urls.setdefault(normalize_url(url), url)
     return urls
 
 
@@ -309,15 +345,19 @@ def _correction(allowed: dict[str, str]) -> str:
 
 
 class UrlProvenanceMiddleware(AgentMiddleware):
-    """Refuse a ``read_url`` whose URL appears nowhere earlier in the turn.
+    """Refuse ``read_url`` outside trusted messages or configured delegate seeds.
 
     Corrective, not turn-ending: a rejected call returns an error ToolMessage
     listing the URLs the agent may actually read, so it retries with a real one.
+    ``trust_human_messages=False`` is the delegate boundary: model-authored task
+    briefs are ignored; only admission-frozen, brief-intersected owner URL seeds
+    supplied from the durable child Run can replace them.
     Stateless across turns except an intervention counter for logging."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, trust_human_messages: bool = True) -> None:
         super().__init__()
         self.tools = []
+        self._trust_human_messages = trust_human_messages
         self._intervention_count = 0
 
     def wrap_tool_call(
@@ -335,8 +375,20 @@ class UrlProvenanceMiddleware(AgentMiddleware):
             return handler(request)
 
         messages = _messages_from_state(request)
-        allowed = _seen_urls(messages)
-        if normalize_url(url) in allowed:
+        allowed = _seen_urls(
+            messages, trust_human_messages=self._trust_human_messages)
+        runtime_config = getattr(getattr(request, "runtime", None), "config", None)
+        configurable = (runtime_config or {}).get("configurable", {}) \
+            if isinstance(runtime_config, dict) else {}
+        seeds = configurable.get(DELEGATE_USER_URLS_KEY, ()) \
+            if isinstance(configurable, dict) else ()
+        if isinstance(seeds, (list, tuple)):
+            for raw in seeds:
+                if isinstance(raw, str):
+                    allowed.setdefault(normalize_url(raw), _display_url(raw))
+        nurl = normalize_url(url)
+        provenanced = allowed.get(nurl)
+        if provenanced is not None and _userinfo_allowed(url, provenanced):
             return handler(request)
         # Same-host navigation: a link the fetched page ACTUALLY surfaced, on a
         # host already trusted, is fetchable — this is what lets read_url
@@ -350,10 +402,11 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         #    (169.254.169.254, an internal service, evil.example/leak?d=secret)
         #    has no matching trusted host, so SSRF + secret-bearing exfil stay
         #    blocked — the jump to a NEW host from page content is refused.
-        nurl = normalize_url(url)
         host = _host_of(url)
+        page_url = _page_content_urls(messages).get(nurl)
         if (host and host in {_host_of(u) for u in allowed}
-                and nurl in _page_content_urls(messages)):
+                and page_url is not None
+                and _userinfo_allowed(url, page_url)):
             return handler(request)
 
         self._intervention_count += 1

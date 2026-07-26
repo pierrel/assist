@@ -51,9 +51,9 @@ logger = logging.getLogger(__name__)
 # agent. Evidence (prod logs, 2026-07-21): every observed general-purpose
 # dispatch was misrouted work belonging to a NAMED agent — context-agent
 # exploration, critique-agent report reviews, and "fact-check" requests that
-# GP cannot actually perform (it inherits the orchestrator's tools, which
-# deliberately carry no read_url/search — so a GP "fact-check" pattern-matches
-# plausibility while LOOKING like verification). Removing the target is the
+# GP cannot reliably perform. Its implicit inherited profile also creates a
+# subtly different graph with nested delegation rather than the explicit
+# one-level delegate role. Removing the target is the
 # repo's structural-lever pattern (don't register what shouldn't be invoked):
 # a habitual task(general-purpose) call now gets the corrective error listing
 # the real agents, which the model observably follows. Registered
@@ -162,7 +162,7 @@ _MEMORY_FILE = "AGENTS.md"
 
 
 def _hardening_middleware():
-    """The main agent's hardened middleware stack, in load-bearing order.
+    """The shared Assist middleware stack, in load-bearing order.
 
     This names the CORE/APP boundary from the embedder-contract doc
     (docs/2026-06-11-embedder-contract.org) in code.  Most of the stack
@@ -246,7 +246,7 @@ def create_agent(model: BaseChatModel,
                  *,
                  spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
-    """Build the general-purpose agent.
+    """Build an Assist main or delegate agent.
 
     ``spec`` is the embedder contract (see ``assist.spec.AgentSpec``
     and docs/2026-06-11-embedder-contract.org): one declaration object
@@ -281,8 +281,10 @@ def create_agent(model: BaseChatModel,
         raise ValueError(
             "create_agent: pass sandbox_backend OR AgentSpec.default_backend, "
             "not both")
+    delegate = spec.role == "delegate"
     mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
-    logging_mw = ModelLoggingMiddleware("general-agent")
+    logging_mw = ModelLoggingMiddleware(
+        "delegate-agent" if delegate else "general-agent")
 
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
     # Single-slashed path that's safe to interpolate without producing
@@ -369,7 +371,8 @@ def create_agent(model: BaseChatModel,
                                            checkpointer,
                                            [retry_middle, json_validation_mw,
                                             tool_name_mw],
-                                           sandbox_backend=sandbox_backend)
+                                           sandbox_backend=sandbox_backend,
+                                           trust_human_messages=not delegate)
         )
 
     critique_sub_agent = {
@@ -405,6 +408,7 @@ def create_agent(model: BaseChatModel,
             workspace_dir=workspace_dir,
             references_dir=references_dir,
             delegation_mode=delegation_mode,
+            agent_role=spec.role,
         ),
         middleware=mw + [
             # Offload a large execute result (a long build/test log) to a file +
@@ -418,7 +422,7 @@ def create_agent(model: BaseChatModel,
             ToolResultToFileMiddleware(backend, tools={"execute"}, floor_chars=8000,
                                        preview_style="head_tail", untrusted=True,
                                        offload_root="/tmp"),
-            # read_url on the MAIN agent is a NAVIGATION tool: follow a known
+            # read_url on the main/delegate agent is a NAVIGATION tool: follow a known
             # URL + the links it surfaces to find a page or downloadable file
             # (the download itself is curl in the sandbox, egress-gated). It
             # can't do general research — no search_internet here — so the
@@ -434,12 +438,11 @@ def create_agent(model: BaseChatModel,
             ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000,
                                        preview_style="head", untrusted=True,
                                        name="ToolResultToFileMiddleware_read_url"),
-            *_read_url_guards(),
-            # Mid-turn interjection delivery (main agent only — deepagents
-            # never propagates this list to subagent stacks): inert unless the
-            # embedder registered callbacks (the web layer is the only one).
+            *_read_url_guards(trust_human_messages=not delegate),
+            # Mid-turn interjection delivery is installed on the user-facing main
+            # agent only. A delegate is an atomic task worker and omits it.
             skills_mw, memory_mw, ContextRiderMiddleware(),
-            InterjectionMiddleware(), logging_mw],
+            *([] if delegate else [InterjectionMiddleware()]), logging_mw],
         backend=backend,
         # A non-legacy embedder gets no deepagents subagents: web main supplies
         # five lifecycle tools; web triage deliberately supplies none.
@@ -447,7 +450,7 @@ def create_agent(model: BaseChatModel,
                    else [context_sub, research_sub, critique_sub_agent]),
         # `travel` (time/distance), `directions` (turn-by-turn steps), and
         # `map_data` (lat,lon + route polylines for a map render block) are
-        # built-ins: direct deterministic real-world lookups the main agent answers
+        # built-ins: direct deterministic real-world lookups the Assist graph answers
         # inline (gated by the travel / render skills), like a calculation — not web
         # research, so not on the research sub-agent.  Skip any a spec supplies (no dup).
         tools=list(spec.async_subagent_tools or ())
@@ -525,10 +528,10 @@ def create_context_agent(model: BaseChatModel,
     return RollbackRunnable(agent, recursion_limit=500)
 
 
-def _read_url_guards():
-    """The guard pair every read_url-bearing agent gets, in one place so the
-    three call sites can't drift: the research SEARCHER and FACT-CHECKER
-    sub-agents, and the MAIN agent's navigation read_url (added 2026-07-21 for
+def _read_url_guards(*, trust_human_messages: bool = True):
+    """The guard pair every read_url-bearing graph gets, in one place so the
+    research SEARCHER/FACT-CHECKER and main/delegate navigation surfaces cannot
+    drift. Navigation read_url was added 2026-07-21 for
     the explore-website flow).
 
     - UrlProvenanceMiddleware: refuse read_url on a URL absent from prior tool/user
@@ -539,8 +542,12 @@ def _read_url_guards():
     - ReadUrlRereadBreaker: refuse re-reading the SAME url past max_reads (the 2026-07-07
       peptides real-URL re-read shape) — this is what bounds the crawl-to-death
       that raw curl has no guard against.
+
+    A delegate passes ``trust_human_messages=False`` because its initial message
+    is a model-authored brief; admission-frozen user URL seeds arrive in run config.
     """
-    return [UrlProvenanceMiddleware(), ReadUrlRereadBreaker()]
+    return [UrlProvenanceMiddleware(
+        trust_human_messages=trust_human_messages), ReadUrlRereadBreaker()]
 
 
 def create_research_agent(model: BaseChatModel,
@@ -548,12 +555,15 @@ def create_research_agent(model: BaseChatModel,
                           checkpointer=None,
                           middleware=[],
                           sandbox_backend=None,
-                          *, leaf: bool = False) -> RollbackRunnable:
+                          *, leaf: bool = False,
+                          trust_human_messages: bool = True) -> RollbackRunnable:
     """Create a DeepAgents-based agent suitable for general-purpose research replies.
 
     The default research lead delegates searching, critique, and fact-checking.
     ``leaf=True`` instead builds the direct search/read worker used by subagent runs;
     it cannot recursively delegate on the single model slot.
+    ``trust_human_messages=False`` carries a delegate's URL trust boundary into
+    its synchronous search and fact-check specialists.
 
     Returns a RollbackRunnable-wrapped agent — on BadRequestError the agent
     rolls back to a previous checkpoint.  Research agents only write additive
@@ -699,7 +709,8 @@ def create_research_agent(model: BaseChatModel,
         "description": "Used to research more in depth questions. Only give this researcher one topic at a time. It will return research results.",
         "system_prompt": base_prompt_for("deepagents/sub_research.txt.j2"),
         "tools": [search_internet, read_url],
-        "middleware": _subagent_safety_mw() + _read_url_guards(),
+        "middleware": _subagent_safety_mw() + _read_url_guards(
+            trust_human_messages=trust_human_messages),
     }
 
     critique_sub_agent = {
@@ -716,7 +727,8 @@ def create_research_agent(model: BaseChatModel,
         "tools": [read_url],
         # Fact-checker re-fetches URLs cited in the report it's handed — those appear in
         # its context (the report ToolMessage), so they pass; an invented URL is refused.
-        "middleware": _subagent_safety_mw() + _read_url_guards(),
+        "middleware": _subagent_safety_mw() + _read_url_guards(
+            trust_human_messages=trust_human_messages),
     }
 
     # The orchestrator DELEGATES searching to the research-agent (see its
@@ -741,7 +753,9 @@ def create_research_agent(model: BaseChatModel,
         # The searcher + fact-check sub-agents carry those guards themselves.
         # logging_mw stays innermost/last.
         middleware=(base_mw + middleware
-                    + (_read_url_guards() if leaf else []) + [logging_mw]),
+                    + (_read_url_guards(
+                        trust_human_messages=trust_human_messages) if leaf else [])
+                    + [logging_mw]),
         subagents=([] if leaf else [critique_sub_agent,
                                     research_sub_agent,
                                     fact_check_sub_agent])

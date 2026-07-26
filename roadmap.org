@@ -58,8 +58,10 @@ tools over a private in-process ASGI Agent Protocol app.  Every start releases t
 main turn; every terminal child creates one ordinary parent wake; new user work
 outranks queued children/wakes without preempting active work; user interjection
 preserves tasks for explicit keep/update/cancel decisions.  Retire
-=background-research-agent= and the public =/agent= operator surface. Children are
-direct leaf graphs with no delegation tools. Design and verification contract:
+=background-research-agent= and the public =/agent= operator surface. Context,
+research, and critique tasks are direct leaf graphs. A whole-task delegate may
+use fixed synchronous specialists but has no async lifecycle or self-delegation
+tools. Design and verification contract:
 [[file:docs/2026-07-25-async-subagents-asgi.org][docs/2026-07-25-async-subagents-asgi.org]].
 ** DONE Refactor assist into a framework (deepagents / assist / client boundary)
 Shipped 2026-06-12: the =AgentSpec= embedder contract
@@ -789,8 +791,12 @@ and most thresholds/knobs are gone, so there's no longer a structure worth a
 dedicated refactor.
 
 
-** TODO Middleware agent for detecting loops
-After ~20 steps in a single turn. Could unlock bringing back the general agent. Also adding the read_url tools back to the orchestrator and general agents.
+** TODO One-level delegate agent for discrete task lists
+Build a whole-task worker through the shared Assist constructor, with synchronous
+specialists but no self-delegation. The main agent schedules independent items
+together and dependent or workspace-overlapping items serially. Both roles keep
+the same guarded =read_url= surface and only genuine user URLs cross the task
+boundary. See [[file:docs/2026-07-26-delegate-agent.org][the delegate-agent design]].
 
 * Web UI — thread list
 ** DONE Thread list ordering by status then last-message age

@@ -76,9 +76,15 @@ class Run:
     multitask_strategy: str
     created_at: str
     updated_at: str
+    # For delegate slices only: brief-form URLs canonically matched to owner Runs
+    # already accepted at admission, without added or changed userinfo.
+    delegate_user_urls: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        if not self.delegate_user_urls:
+            value.pop("delegate_user_urls")
+        return value
 
     @staticmethod
     def from_dict(value: dict) -> "Run":
@@ -111,6 +117,7 @@ class Run:
             multitask_strategy=value.get("multitask_strategy", "enqueue"),
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
+            delegate_user_urls=tuple(value.get("delegate_user_urls") or ()),
         )
 
 
@@ -176,6 +183,7 @@ class RunService(PerThreadJsonStore[Run]):
         max_runs: int | None = None,
         max_pending: int | None = None,
         multitask_strategy: str = "enqueue",
+        delegate_user_urls: tuple[str, ...] = (),
     ) -> Run:
         """Persist and return a pending run, the work-acceptance commit."""
         if not assistant_id:
@@ -204,6 +212,7 @@ class RunService(PerThreadJsonStore[Run]):
             result=None,
             multitask_strategy=multitask_strategy,
             created_at=now, updated_at=now,
+            delegate_user_urls=tuple(delegate_user_urls),
         )
         with self._lock:
             if mode == "child":

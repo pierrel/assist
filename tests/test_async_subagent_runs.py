@@ -11,6 +11,7 @@ from assist.async_subagents import (
     AsyncTaskContext, async_task_context, async_task_tools,
     configure_async_subagent_app,
 )
+from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from manage.web.protocol_service import SERVICE
 
 
@@ -436,6 +437,93 @@ def test_task_description_survives_fair_resume_generation(monkeypatch, tmp_path)
 
     task = SERVICE.get_thread(original.thread_id)["values"]["async_task"]
     assert task["description"] == "updated intent"
+
+
+def test_delegate_user_url_seeds_are_frozen_per_instruction_slice(
+        monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    first_user = threads._create_run(
+        "parent", "Use https://owner.example/first, not the unrelated "
+        "https://private.example/history for this work")
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": first_user.id,
+        "dispatch_key": f"{first_user.work_id}:delegate",
+    }
+    SERVICE.create_thread("sub-delegate", metadata)
+    original = SERVICE.create_run(
+        "sub-delegate", "delegate-agent",
+        "The model brief repeats https://owner.example/first", metadata=metadata)
+    later_user = threads._create_run(
+        "parent", "Later use https://owner.example/later too")
+
+    original_cfg = threads._delegate_configurable(original)
+    assert original_cfg[DELEGATE_USER_URLS_KEY] == (
+        "https://owner.example/first",)
+
+    resume = threads._create_run(
+        original.thread_id, None, assistant_id="delegate-agent", mode="child",
+        parent_thread_id="parent", parent_run_id=original.parent_run_id,
+        dispatch_key="resume", work_id=original.work_id, resume=True,
+        delegate_user_urls=original.delegate_user_urls)
+    resume_cfg = threads._delegate_configurable(resume)
+    assert resume_cfg[DELEGATE_USER_URLS_KEY] == (
+        "https://owner.example/first",)
+
+    update = SERVICE.create_run(
+        original.thread_id, "delegate-agent",
+        "Updated model brief uses https://owner.example/later",
+        multitask_strategy="interrupt", metadata={
+            "parent_thread_id": "parent",
+            "parent_run_id": later_user.id,
+            "dispatch_key": "update",
+        })
+    update_cfg = threads._delegate_configurable(update)
+    assert update_cfg[DELEGATE_USER_URLS_KEY] == (
+        "https://owner.example/later",)
+
+
+def test_delegate_admission_includes_owner_interjection_already_accepted(
+        monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    active = threads._create_run("parent", "Start the work")
+    threads._create_run(
+        "parent", "Use https://user:secret@owner.example/interjected#private")
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": active.id,
+        "dispatch_key": f"{active.work_id}:delegate",
+    }
+    SERVICE.create_thread("sub-delegate", metadata)
+
+    child = SERVICE.create_run(
+        "sub-delegate", "delegate-agent",
+        "Read https://owner.example/interjected, not the invented "
+        "https://model.example/guess", metadata=metadata)
+
+    assert child.delegate_user_urls == ("https://owner.example/interjected",)
+
+
+def test_delegate_admission_rejects_brief_credentials_absent_from_owner(
+        monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    owner = threads._create_run(
+        "parent", "Use https://owner.example/interjected")
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": owner.id,
+        "dispatch_key": f"{owner.work_id}:delegate",
+    }
+    SERVICE.create_thread("sub-delegate", metadata)
+
+    child = SERVICE.create_run(
+        "sub-delegate", "delegate-agent",
+        "Read https://parent-secret:@owner.example/interjected", metadata=metadata)
+
+    assert child.delegate_user_urls == ()
 
 
 def test_recovery_honors_persisted_cancel_before_resuming(

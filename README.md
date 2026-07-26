@@ -46,11 +46,13 @@ where reliability is harder than with frontier APIs.
   - **Web rendering skill** displays workspace files and generated PNG
     graphs directly in the conversation.
 
-- **Subagents in the web UI.** Context, research, and critique
+- **Subagents in the web UI.** Context, research, critique, and whole-task delegate
   tasks return a task ID immediately, then wake the conversation with a
   follow-up when each result is ready. You can keep messaging the main
   thread meanwhile; it can list, check, update, or cancel outstanding tasks
-  without interrupting an in-flight model or tool call.
+  without interrupting an in-flight model or tool call. A delegate is the same
+  Assist construction with synchronous specialists but no self-delegation or
+  web-supervisor tools.
 
 - **Resilient context handling.** Large tool results are evicted to
   disk before overflowing context, context-overflow errors are caught
@@ -666,7 +668,7 @@ practice and do not lock.
 ```
 assist/
 ├── assist/                  # Core application code
-│   ├── agent.py             # Agent factories (general, context, research, dev)
+│   ├── agent.py             # Shared main/delegate factory + specialist factories
 │   ├── promptable.py        # Jinja prompt rendering + skill body loading
 │   ├── model_manager.py     # Model selection and configuration
 │   ├── domain_manager.py    # Git repository and sandbox management
@@ -697,7 +699,7 @@ assist/
 │   ├── eval/                # Evaluation test suite — anything that calls the real model
 │   └── history/             # Test results history (JUnit XML)
 ├── manage/                  # Management interfaces
-│   ├── web.py               # Web UI (FastAPI)
+│   ├── web/                 # Web UI package (FastAPI; app.py + __main__.py)
 │   └── cli.py               # CLI interface
 ├── docs/                    # Per-improvement design records — see Documentation below
 │   └── baselines/           # Snapshot eval-suite results for diffing

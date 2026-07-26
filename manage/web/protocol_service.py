@@ -12,6 +12,11 @@ from assist.run_service import (
     NONTERMINAL_STATUSES,
     TERMINAL_STATUSES,
 )
+from assist.middleware.url_provenance import (
+    normalize_url,
+    url_userinfo,
+    urls_in_text,
+)
 from manage.web.state import BUSY_STAGES, MANAGER, _get_status
 from manage.web.threads import (
     _RESUME_SCHEDULER,
@@ -208,6 +213,24 @@ class WebAgentProtocolService:
                     for candidate in runs:
                         if candidate.status == "pending":
                             _runs().cancel_pending(thread_id, candidate.id)
+            delegate_user_urls: tuple[str, ...] = ()
+            if assistant_id == "delegate-agent":
+                owner_urls: dict[str, set[str | None]] = {}
+                for parent in _runs().list(metadata["parent_thread_id"]):
+                    if (parent.mode == "turn" and parent.origin is None
+                            and parent.sender is None and parent.text):
+                        for url in urls_in_text(parent.text):
+                            owner_urls.setdefault(normalize_url(url), set()).add(
+                                url_userinfo(url))
+                admitted: dict[str, str] = {}
+                for url in urls_in_text(text):
+                    normalized = normalize_url(url)
+                    brief_userinfo = url_userinfo(url)
+                    if (normalized in owner_urls
+                            and (brief_userinfo is None
+                                 or brief_userinfo in owner_urls[normalized])):
+                        admitted.setdefault(normalized, url)
+                delegate_user_urls = tuple(admitted.values())
             try:
                 run = _create_run(
                     thread_id, text, assistant_id=assistant_id,
@@ -217,7 +240,8 @@ class WebAgentProtocolService:
                     dispatch_key=metadata["dispatch_key"],
                     max_runs=self.MAX_RUNS_PER_THREAD,
                     max_pending=self.MAX_PENDING_PER_THREAD,
-                    multitask_strategy=(multitask_strategy or "enqueue"))
+                    multitask_strategy=(multitask_strategy or "enqueue"),
+                    delegate_user_urls=delegate_user_urls)
             except InvalidRunTransition as exc:
                 status = 429 if "limit reached" in str(exc) else 409
                 raise HTTPException(status_code=status, detail=str(exc)) from exc

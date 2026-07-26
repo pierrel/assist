@@ -37,6 +37,16 @@ SUBAGENTS = {
         "Review a supplied code diff for correctness, missing tests, simplicity, "
         "and security issues."
     ),
+    "delegate-agent": (
+        "Own one complete, self-contained unit of work. It has Assist's normal "
+        "workspace capabilities and synchronous context, research, and critique "
+        "specialists, but cannot start or manage delegate tasks. For three or more "
+        "discrete deliverables, or two substantive deliverables, start one delegate per "
+        "item instead of doing the work in the supervisor. Start independent items together; for a dependency "
+        "or overlapping workspace effect, start only the first unblocked item and launch "
+        "the next after checking completion. Use the research specialist directly for a "
+        "pure external-research request."
+    ),
 }
 
 
@@ -269,13 +279,21 @@ def _cancel_async_task(
 _AVAILABLE = "\n".join(
     f"- {name}: {description}" for name, description in SUBAGENTS.items())
 
+START_ASYNC_TASK_DESCRIPTION = (
+    "Start a subagent and return its task ID immediately. In the user reply, call "
+    "it a subagent or task, never background or async. Never poll in the launch "
+    "turn. For three or more discrete deliverables, use one delegate-agent per item "
+    "even when each looks small; do the same for two substantive deliverables. A "
+    "single deliverable with several small steps stays with the main agent. Do not "
+    "complete delegated units yourself. Launch independent items together. For dependent or workspace-"
+    "overlapping items, launch ONLY the first unblocked delegate, return, then check "
+    "it and launch the next. Available types:\n" + _AVAILABLE
+)
+
 async_task_tools = (
     StructuredTool.from_function(
         name="start_async_task", func=_start_async_task,
-        description=("Start a subagent and return its task ID immediately. In the "
-                     "user reply, call it a subagent or task, never background or "
-                     "async. Never poll in the launch turn. Available types:\n"
-                     + _AVAILABLE)),
+        description=START_ASYNC_TASK_DESCRIPTION),
     StructuredTool.from_function(
         name="check_async_task", func=_check_async_task,
         description="Fetch one task's current status and terminal result using its full ID."),
