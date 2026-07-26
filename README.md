@@ -18,16 +18,17 @@ where reliability is harder than with frontier APIs.
 - **Endpoint auto-discovery.** Model name and runtime context length
   are discovered from your local LLM endpoint on first request.
 
-- **Small-LLM-tuned memory.** Persistent facts and preferences live in
-  the workspace's `AGENTS.md` and auto-load on every
-  session. Instructions tuned to work well with small LLMs.
+- **Small-LLM-tuned memory.** Cross-conversation facts and preferences live in
+  the workspace's `AGENTS.md`; private working state for one long-running thread
+  lives under `/agent`. Visible web main-agent turns auto-load both; other
+  constructions retain repository memory alone.
 
 - **Small-LLM-tuned skills.** Shared skills are progressively-disclosed
   capability bundles under `assist/skills/<name>/SKILL.md`; supervisor-only
   workflows live under `assist/main_skills/`. Both are tuned to small LLMs.
 
-- **Built-in sandboxing.** Every tool call that touches the filesystem
-  or runs code happens inside a per-thread Docker container with the
+- **Built-in sandboxing.** When Docker is available, tool calls that touch the
+  filesystem or run code happen inside a per-turn container with the
   workspace bind-mounted at `/workspace` with reasonable guards.
 
 - **Specialized agents and skills out of the box.**
@@ -202,7 +203,7 @@ Skill-specific:
 Cross-cutting:
 - `test_async_subagents.py` — 13-case supervisor/delegation acceptance suite
 - `test_domain_integration.py` — git integration and domain management
-- `test_memory.py`, `test_various_failures.py` — memory + failure modes
+- `test_memory.py`, `test_thread_memory.py`, `test_various_failures.py` — memory + failure modes
 - `test_thread_e2e.py` — thread/conversation persistence
 - `eval_multi_turn_research.py` — long multi-turn research (10+ turns)
 - `eval_large_tool_results.py` — context overflow handling
@@ -373,14 +374,14 @@ See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 - Data: `ASSIST_THREADS_DIR` (default: `/tmp/assist_threads`)
 - Model: Your local model endpoint
 - Domains: Your local git repositories (optional)
-- Sandbox: Docker container per thread for isolated command execution
+- Sandbox: Docker container per turn for isolated command execution
 
 ### Production Deployment
 - Configuration: `.deploy.env` (gitignored)
 - Data: `/var/lib/assist/threads` (persists across deployments)
 - Model: Production model endpoint
 - Domains: Production git repositories (optional, local to server)
-- Sandbox: Docker container per thread
+- Sandbox: Docker container per turn
 - Service: systemd manages the process
 - Logs: `journalctl -u assist-web`
 
@@ -634,7 +635,22 @@ small models we run (e.g. Qwen3.6-27B) once the system prompt is
 shaped for them; we do not register a dedicated `save_memory` tool.
 
 `assist/middleware/memory_middleware.py` rewrites the system-prompt
-block and re-reads the memory file from disk on every turn:
+block and re-reads its configured memory sources from disk on every turn.
+
+Visible Assist threads have two sources:
+
+- `AGENTS.md` is user/repository memory across conversations (addressed as
+  `/workspace/AGENTS.md` in Docker and virtual `/AGENTS.md` in local mode):
+  facts, preferences, and forward-looking rules.
+- `/agent/memory.md` is private state for this thread: its goal, operating
+  protocol, corrections, decisions, progress, blockers, and useful working notes.
+  Other `/agent/*` files can hold supporting material. The main agent manages the
+  directory proactively; it survives turns and is deleted with the thread. Spawned
+  child agents receive a self-contained brief instead of the private `/agent`
+  route/mount or its prompt.
+
+The original one-source shape remains available to other embedders. Its
+`SMALL_MODEL_MEMORY_PROMPT` provides:
 
 - A short, imperative **system-prompt template** (`SMALL_MODEL_MEMORY_PROMPT`)
   that names the configured memory path (rendered as an absolute path
@@ -648,8 +664,8 @@ block and re-reads the memory file from disk on every turn:
   shows `(No memory loaded)` the model uses `write_file`; otherwise
   it uses `edit_file`.  This sidesteps the `WriteCollisionMiddleware`
   redirect for non-empty files and keeps the empty-file path simple.
-- A `before_agent` / `abefore_agent` override that re-reads the
-  memory file every turn instead of upstream's once-per-thread cache.
+- A `before_agent` / `abefore_agent` override, shared by both shapes, that re-reads
+  every configured memory file each turn instead of upstream's once-per-thread cache.
   Without this, a write made via `edit_file` on turn N would be
   invisible to turn N+1's rendered `<agent_memory>` block — the
   next-turn anchor would not match and the next save would either
@@ -658,9 +674,8 @@ block and re-reads the memory file from disk on every turn:
 The agent never receives a memory-specific tool; the read pathway
 exposes the file's contents in the system prompt, and the write
 pathway reuses tools the agent already has for every other file.
-Adding a second source (e.g. a global `~/AGENTS.md`) means extending
-`sources=` in `agent.py` and updating the `_format_agent_memory`
-override — no prompt-text edits beyond the agent_memory framing.
+Both files are ordinary model context: there is no deterministic precedence or
+conflict layer.
 
 ### Concurrency note
 
@@ -683,7 +698,7 @@ assist/
 │   ├── model_manager.py     # Model selection and configuration
 │   ├── domain_manager.py    # Git repository and sandbox management
 │   ├── sandbox.py           # Docker sandbox backend
-│   ├── sandbox_manager.py   # Sandbox lifecycle and per-thread containers
+│   ├── sandbox_manager.py   # Sandbox lifecycle and per-turn containers
 │   ├── thread.py            # Conversation thread state
 │   ├── backends.py          # CompositeBackend wiring (state + filesystem + skills)
 │   ├── checkpoint_rollback.py
@@ -769,7 +784,7 @@ When enabled, each thread creates a git branch and can merge changes back to mai
 
 ## Docker Sandbox
 
-The agent executes shell commands inside a Docker container rather than on the host. Each thread gets its own container with the domain repository bind-mounted at `/workspace`.
+The agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`. Visible main-agent turns also mount private thread state at `/agent`.
 
 The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
 ```bash

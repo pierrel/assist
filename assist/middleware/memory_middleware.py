@@ -18,9 +18,13 @@ having the model invoke its existing ``write_file`` / ``edit_file``
 tools against ``AGENTS.md``, with the loaded ``<agent_memory>`` block
 serving as the anchor for the ``edit_file`` replace.
 
-Read happens automatically: the upstream ``before_agent`` loads the
-memory file into state on the first turn, and our
-``_format_agent_memory`` injects the contents into the system message.
+Read happens automatically: our ``before_agent`` / ``abefore_agent``
+overrides discard the upstream state cache and reload every configured
+file each turn; ``_format_agent_memory`` injects the contents into the
+system message.
+Web main agents may also load a thread-private ``/agent/memory.md``;
+the established one-source prompt remains unchanged for every other
+construction path.
 """
 from __future__ import annotations
 
@@ -107,19 +111,42 @@ in prose but never persists it.  The check exists to prevent that.
 """
 
 
+THREAD_MEMORY_PROMPT = """{repo_prompt}
+
+<thread_memory>
+{thread_memory}
+</thread_memory>
+
+## Thread memory
+
+`{repo_memory_path}` is durable repository memory shared across threads.
+`{thread_memory_path}` belongs only to this thread. Use it for the current
+goal, decisions, corrections, progress, blockers, and useful working notes.
+
+`/agent` is your agent-owned working space for anything useful across this
+long-running thread. Proactively manage it without waiting for the user to ask.
+Put a fact in repository memory only when it should remain useful across
+threads. Never put current-thread state there. When one message contains both
+scopes, update the two files separately.
+"""
+
+
 class SmallModelMemoryMiddleware(MemoryMiddleware):
     """``MemoryMiddleware`` variant with a small-model-friendly system prompt.
 
-    Inherits ``before_agent`` / ``abefore_agent`` (file load into state)
-    and ``modify_request`` / ``wrap_model_call`` (system-message
-    injection) unchanged from the upstream class.  Only the formatted
-    prompt body changes; no tools are registered.  The model saves new
-    memory by invoking its existing filesystem tools against
-    ``AGENTS.md``.
+    Overrides ``before_agent`` / ``abefore_agent`` to reload files every
+    turn and the formatted prompt body to distinguish the optional thread
+    source. Inherits the request/model-injection hooks unchanged; no tools
+    are registered. The model saves repository and optional thread
+    memory through its existing filesystem tools.
     """
 
-    def __init__(self, *, backend, memories_path: str) -> None:
-        super().__init__(backend=backend, sources=[memories_path])
+    def __init__(self, *, backend, memories_path: str,
+                 thread_memories_path: str | None = None) -> None:
+        sources = [memories_path]
+        if thread_memories_path is not None:
+            sources.append(thread_memories_path)
+        super().__init__(backend=backend, sources=sources)
 
     def before_agent(self, state, runtime, config):
         # Force a fresh read every turn.  Upstream short-circuits when
@@ -138,11 +165,12 @@ class SmallModelMemoryMiddleware(MemoryMiddleware):
     def _format_agent_memory(self, contents: dict[str, str]) -> str:
         """Format loaded memory using the small-model prompt template.
 
-        Mirrors upstream's logic (memory.py:218-236) but substitutes
+        The one-source branch mirrors upstream's logic (memory.py:218-236) but substitutes
         ``SMALL_MODEL_MEMORY_PROMPT`` and drops upstream's per-source
         path prefix (``"{path}\\n{content}"``) — the path is rendered
         once in the prompt body via ``{memory_path}`` instead of
-        per-source, since we configure exactly one source.
+        per-source. The optional second source is rendered separately so
+        repository and thread scope cannot be mistaken for each other.
 
         Keeps the ``<agent_memory>...</agent_memory>`` wrapper because
         the read-path tests (and the save-path prompt above) both
@@ -154,21 +182,22 @@ class SmallModelMemoryMiddleware(MemoryMiddleware):
         empty-string anchor).
         """
         memory_path = self.sources[0]
-        if not contents:
-            return SMALL_MODEL_MEMORY_PROMPT.format(
-                agent_memory="(No memory loaded)", memory_path=memory_path,
-            )
-
-        sections = [
-            contents[path] for path in self.sources
-            if contents.get(path) and contents[path].strip()
-        ]
-        if not sections:
-            return SMALL_MODEL_MEMORY_PROMPT.format(
-                agent_memory="(No memory loaded)", memory_path=memory_path,
-            )
-
-        memory_body = "\n\n".join(sections)
-        return SMALL_MODEL_MEMORY_PROMPT.format(
+        memory_body = contents.get(memory_path, "")
+        if not memory_body.strip():
+            memory_body = "(No memory loaded)"
+        repo_prompt = SMALL_MODEL_MEMORY_PROMPT.format(
             agent_memory=memory_body, memory_path=memory_path,
+        )
+        if len(self.sources) == 1:
+            return repo_prompt
+
+        thread_memory_path = self.sources[1]
+        thread_memory = contents.get(thread_memory_path, "")
+        if not thread_memory.strip():
+            thread_memory = "(No thread memory loaded)"
+        return THREAD_MEMORY_PROMPT.format(
+            repo_prompt=repo_prompt,
+            repo_memory_path=memory_path,
+            thread_memory_path=thread_memory_path,
+            thread_memory=thread_memory,
         )

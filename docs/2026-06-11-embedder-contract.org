@@ -23,9 +23,10 @@ file move (=ThreadManager= out of =assist/thread.py=).  No package
 split, no new distribution.
 
 *Current extension:* the frozen spec now also accepts =async_subagent_tools=.
-=None= retains the legacy synchronous subagents, an explicit empty sequence
-disables delegation for the restricted web triage profile, and a nonempty
-sequence replaces blocking =task= with the subagent lifecycle tools. See
+=None= retains the legacy synchronous subagents in the one-source construction;
+thread-memory construction suppresses them so they cannot inherit its private backend.
+An explicit empty sequence disables delegation for the restricted web triage profile,
+and a nonempty sequence replaces blocking =task= with the subagent lifecycle tools. See
 [[file:2026-07-25-async-subagents-asgi.org][the subagent ASGI design]] for that field's runtime contract.
 
 The one-level delegate adds =role= (=main= by default, or =delegate=). This is a
@@ -78,7 +79,8 @@ class AgentSpec:
     # paths go.  Mutually exclusive with sandbox_backend (a Thread/
     # create_agent param), validated at create_agent time.
     default_backend: BackendProtocol | None = None
-    # None = legacy sync; () = no delegation; nonempty = async tools.
+    # None = legacy sync in the one-source shape (thread memory suppresses it);
+    # () = no delegation; nonempty = async tools.
     async_subagent_tools: tuple[BaseTool, ...] | None = None
 #+end_src
 
@@ -104,13 +106,15 @@ Every field maps to a live client need:
 
 #+begin_src python
 create_agent(model, working_dir, checkpointer=None, sandbox_backend=None,
-             *, spec: AgentSpec | None = None)
+             *, agent_dir: str | None = None,
+             spec: AgentSpec | None = None)
 
 Thread(working_dir, *,
        spec: AgentSpec | None = None,
        configurable: Mapping[str, Any] | None = None,
        thread_id=None, checkpointer=None, model=None,
-       max_concurrency=5, sandbox_backend=None, on_queue_state=None)
+       max_concurrency=5, sandbox_backend=None, agent_dir=None,
+       on_queue_state=None, agent=None)
 #+end_src
 
 =spec= is keyword-only in both (an out-of-tree positional call must not
@@ -121,7 +125,8 @@ passes its web tools, skills, and subagent profile through one spec.
 *The split rule* (articulable, by design): /spec = the agent's shape,
 consumed by =create_agent=; Thread kwargs = per-instance and per-run
 wiring/ (identity, persistence, model, concurrency, status callback,
-per-request context).  One documented exception: =sandbox_backend=
+per-request context, and app-owned =agent_dir= private state). One documented
+exception: =sandbox_backend=
 stays a param despite being agent-shape-adjacent, because ~15 eval
 files use it positionally and it is per-turn runtime isolation in the
 web app; folding it into the spec is possible later if the boundary
@@ -157,7 +162,7 @@ asymmetry dies with the adapter at the legacy-kwarg removal step.
   =async_subagent_tools= field selects the established synchronous profile,
   no delegation, or the web's asynchronous profile; it does not accept arbitrary
   child graph definitions. Web main passes the five lifecycle tools, web triage
-  passes an empty tuple, and delegate/legacy graphs use the synchronous profile;
+  passes an empty tuple, and delegate/one-source legacy graphs use the synchronous profile;
   emacsos keeps that default because research is routine phone traffic. If arbitrary
   child definitions come back, settle: naming (spec names vs the registered
   =*-agent= names), the empty-set semantics against deepagents'

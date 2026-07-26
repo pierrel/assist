@@ -7,7 +7,8 @@ kwargs that used to accrete on ``Thread`` / ``create_agent``
 docs/2026-06-11-embedder-contract.org for the design and the split
 rule: *spec = the agent's shape, consumed by create_agent; Thread
 kwargs = per-instance and per-run wiring* (identity, persistence,
-model, concurrency, status callback, per-request ``configurable``).
+model, concurrency, status callback, app-owned ``agent_dir``, and
+per-request ``configurable``).
 
 Admission rule: a field requires a real, existing client need.  Do not
 add fields for needs no client has yet — deferred candidates
@@ -78,11 +79,12 @@ class AgentSpec:
     default_backend: BackendProtocol | None = None
 
     # Deep Agents-compatible subagent selection surface for this graph.
-    # ``None`` keeps the established synchronous subagents for legacy embedders;
-    # an explicit empty sequence disables delegation (the web triage profile),
-    # and the web main profile supplies all five lifecycle tools. The delegate
-    # profile deliberately uses ``None`` for synchronous specialists. This one field
-    # selects the delegation mechanism without a second mode flag.
+    # ``None`` selects the established synchronous subagents for one-source legacy
+    # embedders; thread-memory construction suppresses them so they cannot inherit
+    # its private backend. An explicit empty sequence disables delegation (web
+    # triage), and web main supplies all five lifecycle tools. The delegate profile
+    # uses ``None`` for synchronous specialists. This field selects the delegation
+    # mechanism without a second mode flag.
     async_subagent_tools: tuple[BaseTool, ...] | None = None
 
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |

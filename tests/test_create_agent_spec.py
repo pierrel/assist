@@ -1,9 +1,11 @@
 """Wiring tests for the AgentSpec embedder contract — the canonical
 surface pins (docs/2026-06-11-embedder-contract.org): spec fields
 reaching `create_deep_agent`, checkpointer/sandbox_backend forwarding,
-and `Thread`-level `spec=` / `configurable=` wiring.
+agent-directory and memory-source wiring, and `Thread`-level `spec=` /
+`configurable=` wiring.
 """
 
+import os
 import tempfile
 from unittest.mock import patch, MagicMock
 
@@ -304,6 +306,73 @@ class TestSpecWiring(_CreateAgentHarness):
             self._build(spec=AgentSpec(default_backend=MagicMock()),
                         sandbox_backend=MagicMock())
 
+    def test_thread_memory_source_reaches_main_middleware(self):
+        from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
+
+        with tempfile.TemporaryDirectory() as agent_dir:
+            kwargs = self._build(
+                agent_dir=agent_dir,
+                spec=AgentSpec(async_subagent_tools=()))
+        memory = next(m for m in kwargs["middleware"]
+                      if isinstance(m, SmallModelMemoryMiddleware))
+        assert memory.sources == ["/AGENTS.md", "/agent/memory.md"]
+
+    def test_thread_memory_omits_legacy_in_process_subagents(self):
+        with tempfile.TemporaryDirectory() as agent_dir:
+            kwargs = self._build(agent_dir=agent_dir, spec=AgentSpec())
+        assert kwargs["subagents"] == []
+
+    def test_native_sandbox_capability_enables_thread_memory(self):
+        from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
+
+        backend = MagicMock()
+        backend.native_agent_dir = True
+        backend.work_dir = "/workspace"
+        kwargs = self._build(
+            sandbox_backend=backend,
+            spec=AgentSpec(async_subagent_tools=()))
+        memory = next(m for m in kwargs["middleware"]
+                      if isinstance(m, SmallModelMemoryMiddleware))
+        assert memory.sources == ["/workspace/AGENTS.md", "/agent/memory.md"]
+
+    def test_local_agent_route_writes_outside_repository(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent_dir = os.path.join(temp_dir, "missing", "agent")
+            kwargs = self._build(
+                agent_dir=agent_dir,
+                spec=AgentSpec(async_subagent_tools=()))
+            assert not os.path.exists(agent_dir)
+            backend = kwargs["backend"]
+            result = backend.write("/agent/memory.md", "private state")
+            assert result.error is None
+            with open(f"{agent_dir}/memory.md") as stream:
+                assert stream.read() == "private state"
+
+    def test_local_specialized_child_cannot_read_parent_agent_dir(self):
+        from assist.agent import create_context_agent
+
+        with tempfile.TemporaryDirectory() as thread_dir:
+            working_dir = os.path.join(thread_dir, "domain")
+            agent_dir = os.path.join(thread_dir, "agent")
+            os.makedirs(working_dir)
+            os.makedirs(agent_dir)
+            with open(os.path.join(agent_dir, "memory.md"), "w") as stream:
+                stream.write("private-parent-canary")
+
+            parent_kwargs = self._build(
+                agent_dir=agent_dir,
+                spec=AgentSpec(async_subagent_tools=()))
+            parent_read = parent_kwargs["backend"].read("/agent/memory.md")
+            assert "private-parent-canary" in parent_read.file_data["content"]
+
+            with patch("assist.agent.create_deep_agent") as child_factory:
+                child_factory.return_value = MagicMock()
+                create_context_agent(MagicMock(), working_dir)
+            child_backend = child_factory.call_args.kwargs["backend"]
+            child_read = child_backend.read("/agent/memory.md")
+            assert child_read.error is not None
+            assert "private-parent-canary" not in str(child_read)
+
 
 class TestForwardingGaps(_CreateAgentHarness):
     """create_agent-level forwarding that was previously unpinned:
@@ -350,6 +419,10 @@ class _ThreadHarness:
 
 
 class TestThreadSpecForwarding(_ThreadHarness):
+    def test_agent_dir_forwarded(self):
+        _, ca_kwargs = self._build(agent_dir="/host/thread/agent")
+        assert ca_kwargs["agent_dir"] == "/host/thread/agent"
+
     def test_spec_forwarded_to_create_agent(self):
         spec = AgentSpec(tools=(_tool_a,))
         _, ca_kwargs = self._build(spec=spec)

@@ -139,6 +139,7 @@ class Thread:
                  model: BaseChatModel | None = None,
                  max_concurrency: int = 5,
                  sandbox_backend=None,
+                 agent_dir: str | None = None,
                  on_queue_state: Callable[[str], None] | None = None,
                  agent=None):
         """The embedder surface (docs/2026-06-11-embedder-contract.org):
@@ -160,6 +161,10 @@ class Thread:
         `agent` — an internal prebuilt-graph injection for specialized web child
         runs. It is mutually exclusive with `spec`; ordinary embedders use the
         single `AgentSpec` declaration surface.
+
+        Passing ``agent_dir`` enables per-thread private working state. It is
+        per-instance wiring, not part of the reusable ``AgentSpec`` declaration;
+        the web composition passes it only to visible main agents.
 
         The remaining params are per-instance/run wiring: identity
         (``thread_id``), persistence (``checkpointer``), model,
@@ -216,7 +221,8 @@ class Thread:
 
         self.agent = agent or create_agent(
             self.model, working_dir=working_dir, checkpointer=checkpointer,
-            sandbox_backend=sandbox_backend, spec=spec)
+            sandbox_backend=sandbox_backend, agent_dir=agent_dir,
+            spec=spec)
 
     def _run(self, graph_input) -> str:
         """Acquire the per-thread LLM affinity queue for the agent loop (so concurrent

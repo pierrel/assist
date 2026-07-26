@@ -8,7 +8,8 @@ explicitly (see _run_uid_gid / upload_files).
 
 Paths are prefixed with work_dir (/workspace) so that agent paths like
 /myfile.txt map to /workspace/myfile.txt inside the container, which is
-where the host bind mount lives.
+where the host bind mount lives. ``/agent`` passes through only on a
+backend explicitly constructed for a container with that private main-agent mount.
 """
 
 import logging
@@ -113,7 +114,8 @@ class DockerSandboxBackend(BaseSandbox):
     """
 
     def __init__(self, container, work_dir: str = "/workspace",
-                 strip_prefixes: tuple[str, ...] = ()):
+                 strip_prefixes: tuple[str, ...] = (),
+                 native_agent_dir: bool = False):
         """Args:
             container: A running Docker container object.
             work_dir: Root directory inside the container that paths are
@@ -125,11 +127,20 @@ class DockerSandboxBackend(BaseSandbox):
                 references-rooted ``work_dir``.  Each prefix is checked
                 in both bare (``"references/"``) and absolute
                 (``"/references/"``) form.
+            native_agent_dir: Whether the container has an explicit
+                ``/agent`` bind mount. Unmounted backends preserve the
+                historical workspace-relative meaning of that path.
         """
         self.container = container
         self.work_dir = work_dir.rstrip("/")
         self._strip_prefixes = strip_prefixes
+        self._native_agent_dir = native_agent_dir
         self._run_ids: tuple[int, int] | None = None
+
+    @property
+    def native_agent_dir(self) -> bool:
+        """Whether this backend exposes a dedicated ``/agent`` mount."""
+        return self._native_agent_dir
 
     def _strip(self, path: str | None) -> str | None:
         if not path or not self._strip_prefixes:
@@ -164,6 +175,9 @@ class DockerSandboxBackend(BaseSandbox):
         # (strip_prefixes=("references",)) a "/references/tmp/x" strips to "/tmp/x" —
         # that must stay confined under work_dir, NOT escape into the shared /tmp.
         if path == "/tmp" or path.startswith("/tmp/"):
+            return stripped
+        if (self._native_agent_dir
+                and (path == "/agent" or path.startswith("/agent/"))):
             return stripped
         return self.work_dir + (stripped if stripped.startswith("/") else "/" + stripped)
 

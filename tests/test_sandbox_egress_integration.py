@@ -20,6 +20,7 @@ Docker is genuinely missing, setUpClass fails loudly with a real
 error — that's better than a silent skip that masks the regression.
 """
 import shutil
+import os
 import tempfile
 import unittest
 
@@ -138,3 +139,35 @@ class TestSandboxEgressEndToEnd(unittest.TestCase):
             f"Direct-IP curl unexpectedly reached upstream: "
             f"exit={resp.exit_code}, output={resp.output!r}",
         )
+
+
+class TestThreadMemorySandboxContainment(unittest.TestCase):
+    """A child container cannot read the parent's private bind mount."""
+
+    def test_parent_file_and_shell_access_child_has_neither(self):
+        thread_dir = tempfile.mkdtemp(prefix="agent-memory-e2e-")
+        work_dir = os.path.join(thread_dir, "domain")
+        agent_dir = os.path.join(thread_dir, "agent")
+        os.makedirs(work_dir)
+        os.makedirs(agent_dir)
+        with open(os.path.join(agent_dir, "memory.md"), "w") as stream:
+            stream.write("private-parent-canary")
+        try:
+            parent = SandboxManager.get_sandbox_backend(
+                work_dir, agent_dir=agent_dir)
+            parent_read = parent.read("/agent/memory.md")
+            self.assertIsNone(parent_read.error)
+            self.assertIn("private-parent-canary", parent_read.file_data["content"])
+            self.assertEqual(
+                parent.execute("grep -q private-parent-canary /agent/memory.md").exit_code,
+                0)
+            SandboxManager.cleanup(work_dir)
+
+            child = SandboxManager.get_sandbox_backend(work_dir)
+            child_read = child.read("/agent/memory.md")
+            child_content = ((child_read.file_data or {}).get("content") or "")
+            self.assertNotIn("private-parent-canary", child_content)
+            self.assertEqual(child.execute("test ! -e /agent/memory.md").exit_code, 0)
+        finally:
+            SandboxManager.cleanup(work_dir)
+            shutil.rmtree(thread_dir, ignore_errors=True)

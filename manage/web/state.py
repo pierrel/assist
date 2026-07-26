@@ -252,11 +252,15 @@ def _get_domain_manager(tid: str, domain: str | None = None) -> DomainManager | 
         return None
 
 
-def _get_sandbox_backend(tid: str, tz: str | None = None):
+def _get_sandbox_backend(tid: str, tz: str | None = None, *,
+                         include_agent: bool = True):
     """Get sandbox backend for a thread, or None if Docker is unavailable.
 
     ``tz`` is the per-turn context-rider timezone, so this turn's sandbox ``date``
     runs in the user's local time (else the host/server zone).
+
+    ``include_agent`` mounts the visible thread's private main-agent directory.
+    Hidden child runs pass false and receive self-contained task briefs instead.
 
     Runs off the event loop (from ``_process_message``'s background task), so the
     turn-start origin pre-fetch is safe here: the host refreshes ``origin/main`` in the
@@ -269,7 +273,9 @@ def _get_sandbox_backend(tid: str, tz: str | None = None):
             dm.fetch_origin()
         except Exception as e:
             logging.getLogger(__name__).warning("origin pre-fetch failed for %s: %s", tid, e)
-    return SandboxManager.get_sandbox_backend(work_dir, tz=tz)
+    return SandboxManager.get_sandbox_backend(
+        work_dir, tz=tz,
+        agent_dir=(MANAGER.thread_agent_dir(tid) if include_agent else None))
 
 
 def _has_unmerged_changes(tid: str) -> bool:

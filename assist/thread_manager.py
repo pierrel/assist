@@ -320,6 +320,10 @@ class ThreadManager:
             return Thread(
                 working_dir, **thread_kwargs,
                 spec=AgentSpec(role="delegate", async_subagent_tools=None))
+        if sandbox_backend is None:
+            agent_dir = self.thread_agent_dir(thread_id)
+            os.makedirs(agent_dir, exist_ok=True)
+            thread_kwargs["agent_dir"] = agent_dir
         return Thread(
             working_dir, **thread_kwargs,
             spec=AgentSpec(
@@ -350,17 +354,9 @@ class ThreadManager:
     def new(self, working_dir: str|None = None, sandbox_backend=None,
             on_queue_state: Callable[[str], None] | None = None) -> Thread:
         tid = self.reserve()
-        tdir = os.path.join(self.root_dir, tid)
-        if not working_dir:
-            working_dir = self.make_default_working_dir(tdir)
-
-        # A freshly-created thread is never a triage turn → normal tools, no reply HITL.
-        return Thread(working_dir, thread_id=tid, checkpointer=self.checkpointer,
-                      model=self.model, sandbox_backend=sandbox_backend,
-                      on_queue_state=on_queue_state,
-                      spec=AgentSpec(skill_sources=_web_skill_sources(), tools=_web_tools,
-                                     async_subagent_tools=async_task_tools,
-                                     interrupt_on=None))
+        return self.get(
+            tid, working_dir=working_dir, sandbox_backend=sandbox_backend,
+            on_queue_state=on_queue_state)
 
     def reserve(self, thread_id: str | None = None,
                 *, hidden: dict | None = None) -> str:
@@ -433,6 +429,11 @@ class ThreadManager:
     # thread dir on hard_delete.
     def thread_tmp_dir(self, tid: str) -> str:
         return os.path.join(self.thread_dir(tid), "tmp")
+
+    # Private main-agent state, outside both the repo and renderable scratch.
+    # The thread directory owns its lifecycle, so hard_delete removes it naturally.
+    def thread_agent_dir(self, tid: str) -> str:
+        return os.path.join(self.thread_dir(tid), "agent")
 
     def make_default_working_dir(self, tdir: str) -> str:
         wdir = self.DEFAULT_THREAD_WORKING_DIRECTORY
