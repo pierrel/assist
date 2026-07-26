@@ -801,6 +801,39 @@ for TODO planning and explicit briefs. Both roles keep the same guarded =read_ur
 surface and only genuine user URLs cross the task boundary. See
 [[file:docs/2026-07-26-delegate-agent.org][the delegate-agent design]].
 
+** TODO Audit every agent prompt against its actual capability surface
+Follow-up to PR #215. Inventory every agent system prompt and injected guidance
+block rendered in production or the eval harness, including the main, delegate,
+context, research lead, research leaf, fact-check, code-critique, report-critique,
+receptionist, thread-description, and capture profiles. For each profile,
+compare the instructions with its actual tools, synchronous or asynchronous
+subagents, filesystem and memory access, and trust boundaries. Remove
+architecture explanations, unavailable actions, and cross-role policy that do
+not help that agent complete its own work. Keep whole-task and async-lifecycle
+orchestration guidance on the main agent, research decomposition on the research
+lead, and make each leaf's instructions concise and capability-specific.
+
+Known starting points from PR #215 review: the shared general prompt promises
+the async research leaf will save a report path even though that profile returns
+findings directly; =edd/product-policy.org= still describes the read-only context
+agent as a writer; and the README/product policy collapse the synchronous
+research lead and direct research leaf into one incompatible capability list.
+
+As part of the audit, resolve the current critique ambiguity: the delegate
+inherits the legacy top-level code-diff critique specialist while its research
+agent separately owns report critique and fact-checking. Decide the intended
+surface explicitly, with the likely simple shape being direct context + research
+specialists for the delegate and critique remaining inside research. Rewrite the
+delegate prompt as an ordinary self-contained task contract with no concept of
+the outer delegation lifecycle.
+
+Drive the changes with a short direct-agent eval set. Include explicit capability
+probes to prove each profile can use what it owns, then mostly natural prompts
+that validate useful task completion rather than exact tool calls, TODO shape,
+agent names, or orchestration wording. Measure partial natural reliability
+honestly and re-run unrelated currently passing evals to catch routing or prompt
+regressions; do not tune wording to the eval fixtures.
+
 * Web UI — thread list
 ** DONE Thread list ordering by status then last-message age
 Shipped: PR #188 (merged 2026-07-09). =_thread_status_rank= in

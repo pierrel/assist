@@ -45,7 +45,7 @@ A third, orthogonal read_url bound, alongside provenance (fabricated first fetch
 - *FINALIZE, don't kill.* Return a corrective tool result, never terminate the turn with a stub —
   the volume-cap-destroys-output lesson (doc 2026-06-05, Pattern E). The model gets a nudge and a
   chance to wrap up.
-- *Unambiguous signal only.* The guard fires only on a *verbatim* same-URL repeat (a normalised-URL
+- *Unambiguous signal only.* The guard fires only on a *normalised* same-URL repeat (a normalised-URL
   membership count), the coarse/unambiguous class our guardrail ethos sanctions — NOT a fuzzy
   "looks like looping" heuristic. N re-reads of one URL is real work never; it is always a loop.
 - *Scope.* Attach to the research SEARCHER + FACT-CHECKER (same as provenance) — the read_url loopers.

@@ -9,8 +9,8 @@ rebased onto GitHub =main= at =c82e07a=; the final branch is ready to redeploy.
 
 The shared-constructor role, one-level capability boundary, durable
 admission-frozen URL seeds, and deterministic coverage are implemented. The
-current post-rebase implementation passes 1462 tests with 2 skips; focused
-delegate, provenance, and skill coverage passes 124/124. Earlier local
+current post-rebase implementation passes 1464 tests with 2 skips; focused
+delegate, provenance, and skill coverage passes 126/126. Earlier local
 review rounds found and fixed causal timestamp ordering, unrelated parent-history
 disclosure, normalized userinfo/fragment disclosure, child-result instruction
 laundering, eval/production prompt drift, and documentation drift.

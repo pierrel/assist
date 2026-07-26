@@ -139,6 +139,7 @@ _MAX_LISTED = 8
 # ``…/Mercury_(element)`` and the model's copied ``…/Mercury_(element)`` both
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 # File-read tools whose result can surface OFFLOADED untrusted content: a large read_url,
 # execute, or child task result is written to a …/large_tool_results/untrusted-*
 # namespace and the model greps/
@@ -175,14 +176,14 @@ def _origin_of(url: str) -> tuple[str, str, int | None]:
     except ValueError:
         return "", "", None
     if port is None:
-        port = {"http": 80, "https": 443}.get(scheme)
+        port = _DEFAULT_PORTS.get(scheme)
     return scheme, host, port
 
 
 def normalize_url(url: str) -> str:
     """Canonical form for provenance comparison: lowercase scheme+host; drop
-    userinfo, the fragment, a trailing slash, and trailing punctuation/brackets.
-    Tolerates junk (returns it stripped).
+    userinfo, an explicit default port, the fragment, a trailing slash, and
+    trailing punctuation/brackets. Tolerates junk (returns it stripped).
 
     Single source of truth for "the same URL" — the provenance eval imports this
     so the guard and the eval can't drift on what counts as a match."""
@@ -191,9 +192,13 @@ def normalize_url(url: str) -> str:
         p = urlsplit(s)
         if not p.scheme:
             return s.rstrip("/")
+        scheme = p.scheme.lower()
         host = (p.hostname or "").lower()
-        netloc = host + (f":{p.port}" if p.port else "")
-        rebuilt = urlunsplit((p.scheme.lower(), netloc, p.path.rstrip("/"), p.query, ""))
+        port = p.port
+        if port == _DEFAULT_PORTS.get(scheme):
+            port = None
+        netloc = host + (f":{port}" if port is not None else "")
+        rebuilt = urlunsplit((scheme, netloc, p.path.rstrip("/"), p.query, ""))
         return rebuilt.rstrip(_TRAILING)
     except ValueError:
         return s.rstrip("/")

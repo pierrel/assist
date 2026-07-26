@@ -582,6 +582,25 @@ def test_delegate_admission_rejects_brief_credentials_absent_from_owner(
     assert child.delegate_user_urls == ()
 
 
+def test_delegate_admission_keeps_port_zero_distinct(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    owner = threads._create_run(
+        "parent", "Use https://owner.example/interjected")
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": owner.id,
+        "dispatch_key": f"{owner.work_id}:delegate",
+    }
+    SERVICE.create_thread("sub-delegate", metadata)
+
+    child = SERVICE.create_run(
+        "sub-delegate", "delegate-agent",
+        "Read https://owner.example:0/interjected", metadata=metadata)
+
+    assert child.delegate_user_urls == ()
+
+
 def test_delegate_admission_keeps_plain_and_credentialed_variants(
         monkeypatch, tmp_path):
     _root(monkeypatch, tmp_path)

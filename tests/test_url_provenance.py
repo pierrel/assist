@@ -83,6 +83,26 @@ class TestUrlProvenanceMiddleware(TestCase):
         _result, handler = self._call("https://blog.example/post-1", msgs)
         self.assertIsNotNone(handler.called_with)
 
+    def test_explicit_default_port_matches_user_provided_url(self):
+        for provided, requested in (
+                ("https://blog.example/post", "https://blog.example:443/post"),
+                ("http://blog.example/post", "http://blog.example:80/post")):
+            with self.subTest(provided=provided, requested=requested):
+                self.assertEqual(normalize_url(provided), normalize_url(requested))
+                _result, handler = self._call(
+                    requested, [HumanMessage(content=f"summarize {provided}")])
+                self.assertIsNotNone(handler.called_with)
+
+        self.assertNotEqual(normalize_url("https://blog.example:8443/post"),
+                            normalize_url("https://blog.example/post"))
+        self.assertNotEqual(normalize_url("https://blog.example:0/post"),
+                            normalize_url("https://blog.example/post"))
+        result, handler = self._call(
+            "https://blog.example:0/post",
+            [HumanMessage(content="summarize https://blog.example/post")])
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
     def test_delegate_ignores_model_authored_brief_url(self):
         middleware = UrlProvenanceMiddleware(trust_human_messages=False)
         handler = _Handler()

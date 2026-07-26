@@ -65,8 +65,9 @@ ones bypassed the guard entirely (the eval's global =read_url= spy counts all).
 
 ** Normalization
 =normalize_url= (single source of truth, imported by the eval so they can't
-drift) lowercases scheme+host, drops the fragment + a trailing slash, and strips
-trailing sentence punctuation/brackets on BOTH sides — so a search result's
+drift) lowercases scheme+host, drops userinfo, an explicit HTTP/HTTPS default
+port, the fragment + a trailing slash, and strips trailing sentence
+punctuation/brackets on BOTH sides — so a search result's
 =…/Mercury_(element)= and the model's copied =…/Mercury_(element)= reduce to the
 same key, and a prose =…/page.= matches the clean =…/page= (this closed a
 Copilot-flagged over-rejection introduced by widening the URL regex to keep
