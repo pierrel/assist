@@ -3,7 +3,7 @@
 
 * State
 
-Implemented and in final local review; not yet deployed or published.
+Implemented and locally reviewed to convergence; not yet deployed or published.
 
 The shared-constructor role, one-level capability boundary, durable
 admission-frozen URL seeds, and deterministic coverage are implemented. The full

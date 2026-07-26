@@ -791,12 +791,13 @@ and most thresholds/knobs are gone, so there's no longer a structure worth a
 dedicated refactor.
 
 
-** TODO One-level delegate agent for discrete task lists
-Build a whole-task worker through the shared Assist constructor, with synchronous
-specialists but no self-delegation. The main agent schedules independent items
-together and dependent or workspace-overlapping items serially. Both roles keep
-the same guarded =read_url= surface and only genuine user URLs cross the task
-boundary. See [[file:docs/2026-07-26-delegate-agent.org][the delegate-agent design]].
+** DONE One-level delegate agent for discrete task lists
+Shipped 2026-07-26 in =a7c4a99=: a whole-task worker built through the shared
+Assist constructor, with synchronous specialists but no self-delegation. The
+main agent schedules independent items together and dependent or
+workspace-overlapping items serially. Both roles keep the same guarded
+=read_url= surface and only genuine user URLs cross the task boundary. See
+[[file:docs/2026-07-26-delegate-agent.org][the delegate-agent design]].
 
 * Web UI — thread list
 ** DONE Thread list ordering by status then last-message age
