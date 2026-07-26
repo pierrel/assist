@@ -506,6 +506,25 @@ def test_delegate_admission_includes_owner_interjection_already_accepted(
     assert child.delegate_user_urls == ("https://owner.example/interjected",)
 
 
+def test_delegate_admission_rejects_untrusted_sms_url(monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    inbound = threads._create_run(
+        "parent", "Use https://owner.example/from-sms", sender="+15551234567")
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": inbound.id,
+        "dispatch_key": f"{inbound.work_id}:delegate",
+    }
+    SERVICE.create_thread("sub-delegate", metadata)
+
+    child = SERVICE.create_run(
+        "sub-delegate", "delegate-agent",
+        "Read https://owner.example/from-sms", metadata=metadata)
+
+    assert child.delegate_user_urls == ()
+
+
 def test_delegate_admission_rejects_brief_credentials_absent_from_owner(
         monkeypatch, tmp_path):
     _root(monkeypatch, tmp_path)
