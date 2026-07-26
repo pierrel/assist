@@ -5,7 +5,7 @@ ToolCallRequest and assert allow (handler invoked) vs reject (corrective
 ToolMessage, handler NOT invoked).
 """
 from unittest import TestCase
-from types import SimpleNamespace
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain.tools.tool_node import ToolCallRequest
@@ -37,17 +37,20 @@ class _Handler:
                            name="read_url")
 
 
-def _request(url, messages, runtime=None):
+def _request(url, messages):
     return ToolCallRequest(
         tool_call={"name": "read_url", "args": {"url": url}, "id": "r1"},
         tool=None,
         state={"messages": messages},
-        runtime=runtime,
+        runtime=None,
     )
 
 
 class TestUrlProvenanceMiddleware(TestCase):
     def setUp(self):
+        config = patch("assist.middleware.url_provenance.get_config", return_value={})
+        config.start()
+        self.addCleanup(config.stop)
         self.mw = UrlProvenanceMiddleware()
 
     def _call(self, url, messages):
@@ -92,14 +95,13 @@ class TestUrlProvenanceMiddleware(TestCase):
         url = "https://user.example/provided"
         middleware = UrlProvenanceMiddleware(trust_human_messages=False)
         handler = _Handler()
-        runtime = SimpleNamespace(config={"configurable": {
-            DELEGATE_USER_URLS_KEY: (url,),
-        }})
 
-        result = middleware.wrap_tool_call(
-            _request(url, [HumanMessage(content=f"Model-authored brief repeats {url}")],
-                     runtime=runtime),
-            handler)
+        with patch("assist.middleware.url_provenance.get_config", return_value={
+                "configurable": {DELEGATE_USER_URLS_KEY: (url,)}}):
+            result = middleware.wrap_tool_call(
+                _request(url, [HumanMessage(
+                    content=f"Model-authored brief repeats {url}")]),
+                handler)
 
         self.assertIsNotNone(handler.called_with)
         self.assertEqual(result.content, "FETCHED")
@@ -109,13 +111,11 @@ class TestUrlProvenanceMiddleware(TestCase):
         requested = "https://parent-secret:@user.example/provided"
         middleware = UrlProvenanceMiddleware(trust_human_messages=False)
         handler = _Handler()
-        runtime = SimpleNamespace(config={"configurable": {
-            DELEGATE_USER_URLS_KEY: (seed,),
-        }})
 
-        result = middleware.wrap_tool_call(
-            _request(requested, [HumanMessage(content=seed)], runtime=runtime),
-            handler)
+        with patch("assist.middleware.url_provenance.get_config", return_value={
+                "configurable": {DELEGATE_USER_URLS_KEY: (seed,)}}):
+            result = middleware.wrap_tool_call(
+                _request(requested, [HumanMessage(content=seed)]), handler)
 
         self.assertIsNone(handler.called_with)
         self.assertEqual(result.status, "error")

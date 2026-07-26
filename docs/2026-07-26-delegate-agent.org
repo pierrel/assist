@@ -21,6 +21,9 @@ credential variant.
 The same-host navigation rule now treats page content as path evidence only;
 Basic Auth userinfo must already be trusted on the exact scheme, host, and
 effective port.
+The delegate's synchronous specialists read those URL seeds through LangGraph's
+supported run-config accessor; the graph-level regression no longer supplies a
+test-only runtime config object.
 
 Per Pierre's decision, TODOs are advisory. Durable task state is authoritative,
 and the supervisor must check success and error wakes, reconcile its plan, preserve

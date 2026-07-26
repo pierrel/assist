@@ -5,7 +5,6 @@ and `Thread`-level `spec=` / `configurable=` wiring.
 """
 
 import tempfile
-from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -162,6 +161,7 @@ class TestSpecWiring(_CreateAgentHarness):
         fetched = []
 
         def research(_state, config):
+            assert config["configurable"][DELEGATE_USER_URLS_KEY] == (url,)
             middleware = UrlProvenanceMiddleware(trust_human_messages=False)
 
             def fetch(request):
@@ -174,7 +174,7 @@ class TestSpecWiring(_CreateAgentHarness):
                                "id": "read-1"},
                     tool=None,
                     state={"messages": [HumanMessage(content=f"Research {url}")]},
-                    runtime=SimpleNamespace(config=config),
+                    runtime=None,
                 ),
                 fetch,
             )

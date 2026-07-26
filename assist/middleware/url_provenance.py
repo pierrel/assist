@@ -80,6 +80,7 @@ from urllib.parse import urlsplit, urlunsplit
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.config import get_config
 from langgraph.types import Command
 
 from assist.middleware.loop_detection import _messages_from_state
@@ -405,11 +406,8 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         messages = _messages_from_state(request)
         allowed = _seen_urls(
             messages, trust_human_messages=self._trust_human_messages)
-        runtime_config = getattr(getattr(request, "runtime", None), "config", None)
-        configurable = (runtime_config or {}).get("configurable", {}) \
-            if isinstance(runtime_config, dict) else {}
-        seeds = configurable.get(DELEGATE_USER_URLS_KEY, ()) \
-            if isinstance(configurable, dict) else ()
+        configurable = (get_config() or {}).get("configurable") or {}
+        seeds = configurable.get(DELEGATE_USER_URLS_KEY, ())
         if isinstance(seeds, (list, tuple)):
             for raw in seeds:
                 if isinstance(raw, str):
