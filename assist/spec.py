@@ -18,7 +18,7 @@ recorded in the design doc with the trigger that revives them.
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import BaseTool
 from deepagents.backends.protocol import BackendProtocol
@@ -49,17 +49,24 @@ class AgentSpec:
     # ADDITIVE to the selected built-in tool profile (filesystem and execute;
     # delegation is selected independently below). () means "no extra tools",
     # not "no tools". Reaches
-    # the MAIN agent only (deepagents' auto-injected general-purpose
+    # the constructed agent only (deepagents' auto-injected general-purpose
     # subagent — which used to inherit these — is disabled harness-wide;
     # see the profile registration in ``assist.agent``); the bespoke
     # context/research/critique subagents do not see these
     # (see ``create_agent``).
     tools: tuple[BaseTool | Callable | dict[str, Any], ...] = ()
 
+    # Which Assist role this construction serves. ``main`` is the ordinary
+    # user-facing supervisor. ``delegate`` is a whole-task worker built by the
+    # same constructor; the web composition root gives it synchronous
+    # specialists and withholds supervisor-only tools.
+    role: Literal["main", "delegate"] = "main"
+
     # ADDITIVE skill routes: virtual path -> backend holding SKILL.md
     # trees, merged with built-in and domain skills.  Precedence on a
-    # name collision is domain < built-in < embedder sources (the
-    # deepagents listing is last-source-wins).  Re-passing the built-in
+    # name collision is main-only < domain < built-in < embedder sources for
+    # the async main, and domain < built-in < embedder sources otherwise (the
+    # deepagents listing is last-source-wins). Re-passing the built-in
     # SKILLS_ROUTE as a key overrides the built-in backend.
     skill_sources: Mapping[str, BackendProtocol] = field(default_factory=dict)
 
@@ -70,10 +77,11 @@ class AgentSpec:
     # in ``create_agent``).
     default_backend: BackendProtocol | None = None
 
-    # Deep Agents-compatible subagent management surface for the MAIN agent.
+    # Deep Agents-compatible subagent selection surface for this graph.
     # ``None`` keeps the established synchronous subagents for legacy embedders;
     # an explicit empty sequence disables delegation (the web triage profile),
-    # and the web main profile supplies all five lifecycle tools. This one field
+    # and the web main profile supplies all five lifecycle tools. The delegate
+    # profile deliberately uses ``None`` for synchronous specialists. This one field
     # selects the delegation mechanism without a second mode flag.
     async_subagent_tools: tuple[BaseTool, ...] | None = None
 
@@ -95,6 +103,10 @@ class AgentSpec:
                 f"{type(self.tools).__name__}"
             )
         object.__setattr__(self, "tools", tuple(self.tools))
+
+        if self.role not in {"main", "delegate"}:
+            raise ValueError(
+                f"AgentSpec.role must be 'main' or 'delegate', got {self.role!r}")
 
         if self.async_subagent_tools is not None and (
                 isinstance(self.async_subagent_tools, (str, bytes))

@@ -11,7 +11,8 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from assist.middleware.tool_result_to_file import (
-    ToolResultToFileMiddleware, _DEFAULT_FLOOR_CHARS, _PREVIEW_CHARS, UNTRUSTED_OFFLOAD_MARK)
+    ToolResultToFileMiddleware, _DEFAULT_FLOOR_CHARS, _PREVIEW_CHARS,
+    UNTRUSTED_OFFLOAD_MARK, UNTRUSTED_PAGE_OFFLOAD_MARK)
 
 
 class _StubBackend:
@@ -58,9 +59,9 @@ def test_large_result_offloaded_to_file_and_bounded():
 
 
 def test_untrusted_offload_marks_the_path():
-    # untrusted=True writes to /large_tool_results/untrusted-<id> so UrlProvenanceMiddleware
+    # untrusted=True writes to the /large_tool_results/untrusted-data-* namespace so UrlProvenanceMiddleware
     # can recognize a later read/grep of it and never provenance its URLs. The model still
-    # gets the exact (untrusted-) path to grep.
+    # gets the exact marked path to grep.
     backend = _StubBackend()
     mw = ToolResultToFileMiddleware(backend, tools=frozenset({"read_url"}),
                                     floor_chars=4000, untrusted=True)
@@ -68,6 +69,44 @@ def test_untrusted_offload_marks_the_path():
     path = next(iter(backend.written))
     assert path.startswith(f"/{UNTRUSTED_OFFLOAD_MARK}"), path
     assert path in out.content and "grep(" in out.content
+
+
+def test_large_async_task_result_gets_untrusted_marker():
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(
+        backend,
+        tools=frozenset({"check_async_task"}),
+        floor_chars=4000,
+        untrusted=True,
+    )
+    planted = "https://attacker.example/leak"
+
+    out = _run(
+        mw,
+        _Req(name="check_async_task", task_id="sub-1"),
+        _msg(planted + ("x" * 5000)),
+    )
+
+    path, written = next(iter(backend.written.items()))
+    assert path.startswith(f"/{UNTRUSTED_OFFLOAD_MARK}")
+    assert planted in written
+    assert path in out.content
+
+
+def test_read_url_page_offload_has_distinct_navigation_marker():
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(
+        backend,
+        tools=frozenset({"read_url"}),
+        floor_chars=4000,
+        untrusted=True,
+        page_navigation=True,
+    )
+
+    _run(mw, _Req(), _msg("x" * 5000))
+
+    path = next(iter(backend.written))
+    assert path.startswith(f"/{UNTRUSTED_PAGE_OFFLOAD_MARK}")
 
 
 def test_trusted_offload_has_no_untrusted_marker():
@@ -116,6 +155,34 @@ def test_command_result_passes_through():
     assert out is cmd and not backend.written
 
 
+def test_nested_task_tool_message_is_offloaded():
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(
+        backend, tools=frozenset({"task"}), floor_chars=4000, untrusted=True)
+    nested = _msg("https://attacker.example/leak" + ("x" * 5000), tcid="task-1")
+    cmd = Command(update={"messages": [nested], "other": "preserved"})
+
+    out = _run(mw, _Req(name="task", description="research this"), cmd)
+
+    path = next(iter(backend.written))
+    assert path.startswith(f"/{UNTRUSTED_OFFLOAD_MARK}")
+    assert path in out.update["messages"][0].content
+    assert out.update["other"] == "preserved"
+
+
+def test_generic_child_id_cannot_overlap_page_marker_namespace():
+    backend = _StubBackend()
+    mw = ToolResultToFileMiddleware(
+        backend, tools=frozenset({"task"}), floor_chars=4000, untrusted=True)
+    cmd = Command(update={"messages": [_msg("x" * 5000, tcid="page-child")]})
+
+    _run(mw, _Req(name="task", description="research this"), cmd)
+
+    path = next(iter(backend.written))
+    assert path.startswith(f"/{UNTRUSTED_OFFLOAD_MARK}")
+    assert not path.startswith(f"/{UNTRUSTED_PAGE_OFFLOAD_MARK}")
+
+
 def test_execute_tool_offloaded_with_head_tail_preview():
     # execute on its own floor (8000) + head_tail preview: the salient line is at the
     # TAIL of a log, so the preview must include the tail.
@@ -135,7 +202,7 @@ def test_execute_tool_offloaded_with_head_tail_preview():
 def test_offload_root_tmp_writes_real_fs_path():
     # offload_root="/tmp" (the sandbox-backed execute instance) lands the file on the
     # real /tmp bind-mount — one path the model can shell-`cat` AND grep — while keeping
-    # the untrusted- marker so UrlProvenanceMiddleware still recognizes a read of it.
+    # the untrusted-data marker so UrlProvenanceMiddleware still recognizes a read of it.
     backend = _StubBackend()
     mw = ToolResultToFileMiddleware(backend, tools=frozenset({"execute"}),
                                     floor_chars=8000, untrusted=True, offload_root="/tmp")

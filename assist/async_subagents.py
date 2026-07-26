@@ -37,6 +37,11 @@ SUBAGENTS = {
         "Review a supplied code diff for correctness, missing tests, simplicity, "
         "and security issues."
     ),
+    "delegate-agent": (
+        "Own one complete, self-contained outcome. It has Assist's normal "
+        "workspace capabilities and synchronous context, research, and critique "
+        "specialists, but cannot start or manage delegate tasks."
+    ),
 }
 
 
@@ -262,32 +267,54 @@ def _cancel_async_task(
         return f"Task `{task_id}` already completed with status {before['status']}."
     if before.get("status") == "cancelled":
         return f"Task `{task_id}` is already cancelled."
-    verb = "Cancellation requested" if after.get("status") == "running" else "Task cancelled"
-    return verb + ": " + _format_task(after, include_result=False)
+    status = after.get("status")
+    if status in {"pending", "running", "interrupted"}:
+        return "Cancellation requested: " + _format_task(after, include_result=False)
+    if status == "cancelled":
+        return "Task cancelled: " + _format_task(after, include_result=False)
+    return (f"Task completed with status {status} before cancellation: "
+            + _format_task(after))
 
 
 _AVAILABLE = "\n".join(
     f"- {name}: {description}" for name, description in SUBAGENTS.items())
 
+START_ASYNC_TASK_DESCRIPTION = (
+    "Start a subagent and return its task ID immediately. In the user reply, call "
+    "it a subagent or task, never background or async. Never poll in the launch "
+    "turn. Give the subagent an explicit, self-contained description because it has "
+    "no parent conversation history. Available types:\n" + _AVAILABLE
+)
+
+CANCEL_ASYNC_TASK_DESCRIPTION = (
+    "Cancel pending work or request that active work stop at its next model "
+    "boundary; in-flight inference/tools are not preempted. Report the returned "
+    "status exactly. If it starts `Cancellation requested`, say `Cancellation "
+    "requested`; never say cancelled or stopped because active work may continue."
+)
+
+CHECK_ASYNC_TASK_DESCRIPTION = (
+    "Fetch one task's current status and terminal result using its full ID.")
+UPDATE_ASYNC_TASK_DESCRIPTION = (
+    "Queue replacement instructions for a task. Active inference or tool work "
+    "finishes its current graph slice first.")
+LIST_ASYNC_TASKS_DESCRIPTION = (
+    "List this conversation's durable tasks with fresh statuses and full IDs.")
+
 async_task_tools = (
     StructuredTool.from_function(
         name="start_async_task", func=_start_async_task,
-        description=("Start a subagent and return its task ID immediately. In the "
-                     "user reply, call it a subagent or task, never background or "
-                     "async. Never poll in the launch turn. Available types:\n"
-                     + _AVAILABLE)),
+        description=START_ASYNC_TASK_DESCRIPTION),
     StructuredTool.from_function(
         name="check_async_task", func=_check_async_task,
-        description="Fetch one task's current status and terminal result using its full ID."),
+        description=CHECK_ASYNC_TASK_DESCRIPTION),
     StructuredTool.from_function(
         name="update_async_task", func=_update_async_task,
-        description=("Queue replacement instructions for a task. Active inference "
-                     "or tool work finishes its current graph slice first.")),
+        description=UPDATE_ASYNC_TASK_DESCRIPTION),
     StructuredTool.from_function(
         name="cancel_async_task", func=_cancel_async_task,
-        description=("Cancel pending work or request that active work stop at its "
-                     "next model boundary; in-flight inference/tools are not preempted.")),
+        description=CANCEL_ASYNC_TASK_DESCRIPTION),
     StructuredTool.from_function(
         name="list_async_tasks", func=_list_async_tasks,
-        description="List this conversation's durable tasks with fresh statuses and full IDs."),
+        description=LIST_ASYNC_TASKS_DESCRIPTION),
 )

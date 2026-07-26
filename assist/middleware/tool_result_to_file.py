@@ -4,7 +4,8 @@ Some tools return a lot of text — ``read_url`` (a full web page), ``execute`` 
 long build/test log).  Left inline, a few of those flood the agent's context (the
 slow-zone the context work fights).  Truncating loses everything past the cap.
 Instead, for an opt-in set of tools, this middleware writes the full result to
-``<offload_root>/large_tool_results/<tool_call_id>`` (or ``.../large_tool_results/untrusted-<id>``
+``<offload_root>/large_tool_results/<tool_call_id>`` (or a source-specific
+``.../large_tool_results/untrusted-{data,page}-<id>``
 for an ``untrusted=True`` instance — the ``large_tool_results`` prefix deepagents'
 built-in eviction uses, and which its filesystem system prompt already tells the
 model to ``grep``/``read_file``) and replaces the tool result with a short PREVIEW +
@@ -13,12 +14,13 @@ context is bounded to ~1kB per call BY CONSTRUCTION.
 
 ``offload_root`` selects WHERE the file lands (see ``__init__``): the default ``""``
 keeps ``/large_tool_results/…``, which ``STATEFUL_PATHS`` routes to the in-memory
-``StateBackend`` — right for a backend with no real shell (the research sub-agent).
-A sandbox-backed instance passes ``"/tmp"`` so the offload is a REAL file on the
-sandbox's ``/tmp`` bind-mount, reachable by BOTH the ``grep``/``read_file``
-tools and shell ``cat`` at the SAME path — otherwise the model, seeing a
-``/large_tool_results/…`` path after ``execute`` and reaching for shell, hits a file
-that lives only in graph state (docs/2026-07-22-offload-to-real-fs.org).
+``StateBackend`` — right for ``read_url`` and child-result offloads.  The
+``execute`` instance on sandbox-backed main and delegate agents passes ``"/tmp"``
+so its offload is a REAL file on the sandbox's ``/tmp`` bind-mount, reachable by
+BOTH the ``grep``/``read_file`` tools and shell ``cat`` at the SAME path —
+otherwise the model, seeing a ``/large_tool_results/…`` path after ``execute``
+and reaching for shell, hits a file that lives only in graph state
+(docs/2026-07-22-offload-to-real-fs.org).
 
 Deliberately NOT deepagents' ``FilesystemMiddleware`` (which we DON'T subclass):
 that is a fat 3-job middleware (system-prompt injection + message eviction in
@@ -44,6 +46,7 @@ fs — either way a later ``read_file``/``grep`` in the same turn reads it back.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Callable
 
 from deepagents.backends.utils import sanitize_tool_call_id
@@ -60,11 +63,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_FLOOR_CHARS = 4000   # below this, return inline — grepping a tiny file is worse
 _PREVIEW_CHARS = 600
 _OFFLOAD_DIR = "large_tool_results"   # deepagents' offload prefix (its grep guidance names it)
-# An UNTRUSTED offload (read_url page content / execute output — both attacker-influenceable)
+# An UNTRUSTED offload (read_url, execute, or child output)
 # is written under this exact path fragment, so a later read_file/grep of it is recognizable
 # to UrlProvenanceMiddleware, which imports THIS constant and never provenances a URL from such
 # a read. Single source of truth so the writer and the guard can't drift.
-UNTRUSTED_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/untrusted-"
+UNTRUSTED_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/untrusted-data-"
+# Read-url content remains page-link evidence for same-host navigation. Keep it
+# distinguishable from arbitrary child/shell output under the shared untrusted prefix.
+UNTRUSTED_PAGE_OFFLOAD_MARK = f"{_OFFLOAD_DIR}/untrusted-page-"
 
 
 def _preview(content: str, style: str) -> str:
@@ -101,15 +107,20 @@ class ToolResultToFileMiddleware(AgentMiddleware):
     """Offload results of the opt-in ``tools`` larger than ``floor_chars`` to a file.
 
     Sync (``wrap_tool_call``) + async (``awrap_tool_call``) — subagents invoke through
-    the async path.  Anything not a large ToolMessage from a listed tool passes through
-    untouched; any failure falls back to the original result (never break the tool path).
+    the async path. A listed tool may return a ToolMessage directly or wrap it in a
+    LangGraph Command state update; both shapes are offloaded. Anything else passes
+    through untouched; any failure falls back to the original result.
 
     ``tools`` is a POSITIVE allowlist — a tool not listed is never touched (containment
     by construction).  ``preview_style`` is per-instantiation: ``head`` for read_url
     (proven), ``head_tail`` for execute (log tails hold the salient line).  ``untrusted``
-    is per-instantiation too: when True the offload path is ``.../large_tool_results/untrusted-<id>``
+    is per-instantiation too: when True the offload path uses the
+    ``.../large_tool_results/untrusted-`` family
     (see ``UNTRUSTED_OFFLOAD_MARK``) so ``UrlProvenanceMiddleware`` won't provenance a URL read
-    back from it; the default writes ``.../large_tool_results/<id>``.  ``offload_root``
+    back from it; the default writes ``.../large_tool_results/<id>``.
+    ``page_navigation=True`` gives a read_url offload a narrower page marker so its
+    links can support same-host navigation without granting that property to shell or
+    child output. ``offload_root``
     (per-instantiation) sets the parent: ``""`` (default) → StateBackend-routed
     ``/large_tool_results/…``; ``"/tmp"`` → the sandbox's real per-turn fs so shell +
     file tools share one path (see the module docstring).
@@ -119,7 +130,8 @@ class ToolResultToFileMiddleware(AgentMiddleware):
 
     def __init__(self, backend, *, tools: frozenset[str] | set[str],
                  floor_chars: int = _DEFAULT_FLOOR_CHARS, preview_style: str = "head",
-                 untrusted: bool = False, offload_root: str = "", name: str | None = None):
+                 untrusted: bool = False, page_navigation: bool = False,
+                 offload_root: str = "", name: str | None = None):
         super().__init__()
         # langchain REJECTS duplicate middleware ``.name``s (it raises at agent
         # construction, not silently drop one), so an agent that wants two
@@ -136,16 +148,16 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # /large_tool_results/… StateBackend path.  A "/tmp/…" offload deliberately
         # matches no STATEFUL_PATHS prefix, so it lands on the sandbox fs, not state.
         self._offload_root = offload_root.rstrip("/")
-        # When True, offloads from this instance are written to …/large_tool_results/untrusted-<id>
+        # When True, offloads from this instance are written under the untrusted prefix
         # (see UNTRUSTED_OFFLOAD_MARK) so UrlProvenanceMiddleware recognizes a later read/grep of
-        # them and won't provenance their URLs — read_url page content / execute output is the
-        # untrusted channel even after it's offloaded to a file.
+        # them and won't provenance their URLs — page, shell, and child output
+        # remain untrusted even after offload.
         self._untrusted = untrusted
+        self._page_navigation = page_navigation
 
-    def _offload(self, request: ToolCallRequest, result):
-        if request.tool_call.get("name") not in self._tools:
-            return result
-        if not isinstance(result, ToolMessage) or not isinstance(result.content, str):
+    def _offload_message(self, request: ToolCallRequest,
+                         result: ToolMessage) -> ToolMessage:
+        if not isinstance(result.content, str):
             return result
         content = result.content
         if len(content) <= self._floor:
@@ -154,12 +166,16 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         # ANSI/control bytes (the BadRequest-outage class) from the offloaded file.
         content = _sanitize(content)
         fname = sanitize_tool_call_id(result.tool_call_id)
-        # Untrusted offloads land at <offload_root>/large_tool_results/untrusted-<id>
-        # (e.g. /large_tool_results/untrusted-<id>, or /tmp/large_tool_results/untrusted-<id>
+        # Untrusted offloads land in the disjoint untrusted-data/page namespaces
+        # (under /large_tool_results, or /tmp/large_tool_results
         # for the "/tmp" root) so a later read_file/grep of them is recognizable to the
         # provenance guard (no mixing of trusted and untrusted large results in one namespace).
-        path = (f"{self._offload_root}/{UNTRUSTED_OFFLOAD_MARK}{fname}" if self._untrusted
-                else f"{self._offload_root}/{_OFFLOAD_DIR}/{fname}")
+        if self._untrusted:
+            marker = (UNTRUSTED_PAGE_OFFLOAD_MARK if self._page_navigation
+                      else UNTRUSTED_OFFLOAD_MARK)
+            path = f"{self._offload_root}/{marker}{fname}"
+        else:
+            path = f"{self._offload_root}/{_OFFLOAD_DIR}/{fname}"
         write = self.backend.write(path, content)
         if getattr(write, "error", None):
             logger.warning("ToolResultToFile: write to %s failed: %s", path, write.error)
@@ -168,6 +184,25 @@ class ToolResultToFileMiddleware(AgentMiddleware):
         source = next((str(v) for v in args.values() if isinstance(v, str)), "")[:120]
         return _preview_message(result, content, request.tool_call.get("name", "tool"),
                                 source, path, self._style)
+
+    def _offload(self, request: ToolCallRequest, result):
+        if request.tool_call.get("name") not in self._tools:
+            return result
+        if isinstance(result, ToolMessage):
+            return self._offload_message(request, result)
+        if not isinstance(result, Command) or not isinstance(result.update, dict):
+            return result
+        messages = result.update.get("messages")
+        if not isinstance(messages, list):
+            return result
+        changed = [
+            self._offload_message(request, message)
+            if isinstance(message, ToolMessage) else message
+            for message in messages
+        ]
+        if all(before is after for before, after in zip(messages, changed)):
+            return result
+        return replace(result, update={**result.update, "messages": changed})
 
     def _safe_offload(self, request, result):
         try:

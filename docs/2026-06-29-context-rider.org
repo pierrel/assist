@@ -25,8 +25,9 @@ mechanism, don't touch ~AgentSpec~.
 - *Model rendering*: ~ContextRiderMiddleware~ (~wrap_model_call~) injects the
   rider's ~prose_line()~ as an EPHEMERAL system message via ~request.override~ —
   so it is NOT checkpointed (location isn't persisted; a later riderless turn
-  carries no stale context). Installed on the MAIN agent only — never on the
-  web-egress sub-agents, so a location line can't ride out in a search query.
+  carries no stale context). Installed on main and delegate Assist graphs, but
+  never on web-egress specialists, so a location line can't ride out in a search
+  query. The current web delegate receives no rider config, so it is inert there.
 - *Deterministic consumer (TZ)*: ~_sandbox_timezone(override)~ +
   ~get_sandbox_backend(tz=)~ — the per-turn rider tz sets the sandbox container's
   ~TZ~, so this turn's ~date~ runs in the user's local time. Explicit parameter,
@@ -56,8 +57,9 @@ browser geolocation permission / the phone). ~prose_line()~ already renders geo
 * Privacy
 ~configurable~ is per-invocation, not checkpointed → precise coords stay
 ephemeral; only the coarse prose line could ever persist, and even that is
-ephemeral (override, not state). Middleware is main-agent-only (no geo to the
-research sub-agent's egress).
+ephemeral (override, not state). Middleware is installed on main and delegate
+graphs, not their specialists; web delegates currently receive no rider, so no geo
+reaches the research specialist's egress.
 
 * Validation
 - Unit (~tests/test_context_rider.py~): contract/validation, prose (zone render +

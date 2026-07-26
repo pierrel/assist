@@ -138,6 +138,31 @@ def test_non_frame_binary_closes_the_call(size):
     assert exc.value.code == 1008
 
 
+def test_terminal_close_exposes_a_released_call_slot(monkeypatch):
+    original_close = wire._close_websocket
+    slot_available = []
+
+    async def close(websocket, code):
+        available = wire._claim_call()
+        slot_available.append(available)
+        if available:
+            wire._release_call()
+        await original_close(websocket, code)
+
+    monkeypatch.setattr(wire, "_close_websocket", close)
+    wire.configure_call_runner(_blocking_runner)
+    with TestClient(app).websocket_connect(
+        "/call", headers=HEADERS
+    ) as websocket:
+        bridge = FakeBridge(websocket)
+        bridge.ring()
+        bridge.send_pcm(b"x")
+        with pytest.raises(WebSocketDisconnect):
+            bridge.receive_control()
+
+    assert slot_available == [True]
+
+
 def test_unknown_controls_count_toward_the_rate_limit(monkeypatch):
     monkeypatch.setattr(wire, "MAX_CONTROLS_PER_SECOND", 3)
     wire.configure_call_runner(_blocking_runner)

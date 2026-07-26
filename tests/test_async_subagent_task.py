@@ -112,6 +112,19 @@ def test_start_is_deterministic_and_uses_asgi(protocol):
                for call in calls if call[0] == "run")
 
 
+def test_start_admits_delegate_agent(protocol):
+    calls, _ = protocol
+    with async_task_context(AsyncTaskContext("parent", "parent-run", "work")):
+        result = TOOLS["start_async_task"].func(
+            "complete one task", "delegate-agent", _runtime("delegate"))
+
+    assert "task_id: sub-" in result
+    run = next(call for call in calls if call[0] == "run")
+    assert run[2]["assistant_id"] == "delegate-agent"
+    assert run[2]["input"]["messages"] == [
+        {"role": "user", "content": "complete one task"}]
+
+
 def test_tool_node_injects_runtime_when_model_calls_start(protocol):
     """Exercise LangGraph's real tool boundary, not ``StructuredTool.func``."""
     graph = StateGraph(MessagesState)

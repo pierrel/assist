@@ -188,9 +188,9 @@ class ThreadManager:
            thread succeeds (idempotency).
         4. ``on_delete`` callbacks (if any) fire last, each guarded
            by try/except so a misbehaving consumer can't break the
-           sweep.  ``manage/web.py`` passes one that evicts the
-           in-process domain/description caches; the retention CLI
-           passes none.
+           sweep.  ``manage/web/threads.py`` passes callbacks that evict
+           the in-process domain/description and egress caches; the
+           retention CLI passes none.
         """
         tdir = self.thread_dir(tid)
         work_dir = self.thread_default_working_dir(tid)
@@ -298,7 +298,7 @@ class ThreadManager:
             specialized = create_research_agent(
                 self.model, working_dir, self.checkpointer,
                 sandbox_backend=sandbox_backend, leaf=True)
-        elif assistant_id != "general-agent":
+        elif assistant_id not in {"general-agent", "delegate-agent"}:
             raise ValueError(f"unknown assistant: {assistant_id}")
         async_tools = (async_task_tools if assistant_id == "general-agent"
                        and not triage else ())
@@ -311,6 +311,15 @@ class ThreadManager:
                       configurable=configurable)
         if specialized is not None:
             return Thread(working_dir, agent=specialized, **thread_kwargs)
+        if assistant_id == "delegate-agent":
+            # A whole-task worker is the same Assist graph with a narrower web
+            # composition: shared built-in/domain capabilities and synchronous
+            # specialists stay; the main-only planning skill, supervisor
+            # lifecycle/front-end tools, render skill, HITL, and
+            # self-delegation are simply absent.
+            return Thread(
+                working_dir, **thread_kwargs,
+                spec=AgentSpec(role="delegate", async_subagent_tools=None))
         return Thread(
             working_dir, **thread_kwargs,
             spec=AgentSpec(

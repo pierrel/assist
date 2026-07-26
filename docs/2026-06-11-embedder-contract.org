@@ -28,6 +28,13 @@ disables delegation for the restricted web triage profile, and a nonempty
 sequence replaces blocking =task= with the subagent lifecycle tools. See
 [[file:2026-07-25-async-subagents-asgi.org][the subagent ASGI design]] for that field's runtime contract.
 
+The one-level delegate adds =role= (=main= by default, or =delegate=). This is a
+shape choice consumed by the same =create_agent= constructor, not a second
+factory. The web composition root pairs =delegate= with the established
+synchronous specialist profile and no supervisor tools. Trusted delegate URL
+seeds are frozen durably on each child Run at admission, then copied into
+=Thread.configurable= for execution and recovery; they are not part of the spec.
+
 Rejected alternatives (from the framing doc):
 - *Composable middleware export* — both real clients want the identical
   hardened stack; middleware ordering is load-bearing
@@ -61,8 +68,11 @@ class AgentSpec:
     # ADDITIVE to assist's built-in tool surface (filesystem, execute,
     # task, ...) — () means "no extra tools", not "no tools".
     tools: tuple[BaseTool | Callable | dict[str, Any], ...] = ()
-    # ADDITIVE to built-in + domain skills.  Precedence:
-    # domain < built-in < embedder sources (last source wins).
+    # main = user-facing supervisor; delegate = whole-task worker.
+    role: Literal["main", "delegate"] = "main"
+    # ADDITIVE to built-in + domain skills. Async main also lists its
+    # main-only source first. Last-source-wins precedence:
+    # main-only < domain < built-in < embedder sources.
     skill_sources: Mapping[str, BackendProtocol] = field(default_factory=dict)
     # The composite backend's DEFAULT ROUTE target — where non-routed
     # paths go.  Mutually exclusive with sandbox_backend (a Thread/
@@ -85,6 +95,7 @@ Every field maps to a live client need:
 | Field             | Client need                                        |
 |-------------------+----------------------------------------------------|
 | =tools=           | emacsos legacy chat: eval_elisp / apply_config / get_config |
+| =role=            | assist web: shared-constructor whole-task delegate |
 | =skill_sources=   | emacsos config-apply skill served at its own route |
 | =default_backend= | emacsos file-backed chat: EmacsBackend             |
 | =async_subagent_tools= | assist web: subagent lifecycle or triage no-delegation profile |
@@ -142,15 +153,13 @@ asymmetry dies with the adapter at the legacy-kwarg removal step.
 
 ** Dropped from v1 (deferrals, each with the trigger that revives it)
 
-- Arbitrary =subagents= selection remains dropped. The later
+- Arbitrary =subagents= selection remains dropped. The shipped
   =async_subagent_tools= field selects the established synchronous profile,
   no delegation, or the web's asynchronous profile; it does not accept arbitrary
-  child graph definitions. No
-  client uses a non-default value (emacsos keeps all three subagents;
-  research is routine phone traffic, reversing the framing doc's
-  assumption).  Adding the field later is a backward-compatible
-  one-field change the day a client actually deviates.  When it comes
-  back, settle: naming (spec names vs the registered
+  child graph definitions. Web main passes the five lifecycle tools, web triage
+  passes an empty tuple, and delegate/legacy graphs use the synchronous profile;
+  emacsos keeps that default because research is routine phone traffic. If arbitrary
+  child definitions come back, settle: naming (spec names vs the registered
   =*-agent= names), the empty-set semantics against deepagents'
   auto-injected general-purpose subagent + =task= tool (update
   2026-07-21: the auto-injected general-purpose subagent is now

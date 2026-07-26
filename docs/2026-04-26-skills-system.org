@@ -5,23 +5,23 @@ The general agent's system prompt grew to a size where the small model (=stelter
 We needed a way to keep the conversation at the top-level agent while still keeping the active prompt focused — so the model only has the instructions relevant to the current task in front of it.
 
 * Solution
-Use =deepagents='s built-in =SkillsMiddleware= (Anthropic agent-skills spec) with progressive disclosure.  Skills live as markdown files at =assist/skills/{name}/SKILL.md= with YAML frontmatter (=name=, =description=) plus body content.  At session start the middleware reads each =SKILL.md='s frontmatter and injects a manifest into the system prompt: =name: description -> Read /skills/.../SKILL.md for full instructions=.  The agent calls the regular =read_file= tool to load full content on demand.
+Use =deepagents='s built-in =SkillsMiddleware= (Anthropic agent-skills spec) with progressive disclosure. Shared skills live as markdown files at =assist/skills/{name}/SKILL.md=; the async main may additionally mount supervisor-only workflows from =assist/main_skills/=, which delegates do not receive. Each file has YAML frontmatter (=name=, =description=) plus body content. The current middleware injects a name/description manifest and exposes =load_skill= for the full body.
 
 ** Backend wiring
-A new route in =assist/backends.py= maps =/skills/= to a =FilesystemBackend= rooted at the package's =assist/skills/= directory.  The composite backend handles this transparently — agents can read skill files via their normal backend API.
+A read-only route in =assist/backends.py= maps =/skills/= to the package's shared skills. The async main also mounts the read-only =/main-skills/= route. Delegates and restricted/legacy agents have no route to supervisor-only content, so direct loading fails as well as discovery.
 
 ** Custom middleware template (=SmallModelSkillsMiddleware=)
 The deepagents-shipped skills system prompt is verbose, abstract, and uses a fictional quantum-computing example.  Fine for strong models; the small model latches onto the example without absorbing the actionable instruction underneath.  We subclass =SkillsMiddleware= in =assist/middleware/skills_middleware.py= and override =system_prompt_template= with a tighter, imperative version:
-- States the mechanism in concrete tool terms ("call =read_file= with the path").
+- States the mechanism in concrete tool terms ("call =load_skill= with the name").
 - Tells the model the descriptions don't contain the rules — the SKILL.md does.
 - Removes fictional examples and abstract praise.
 - Generic — no skill-specific examples, so adding new skills doesn't require template updates.
 
-** Pre-loading skill content into the host prompt
-For known-domain sessions (e.g. =project_indicators= detected → software project), we embed the relevant skill body directly into the host agent's system prompt rather than relying on the model to exercise progressive disclosure.  Reason: the small model is unreliable at deciding to call =read_file= on the SKILL.md path, even with explicit "MUST read" directives.  Pre-loading sidesteps the discretion.  For ambiguous sessions, the manifest is still in the prompt and the model can load on demand.
+** Loading contract
+The prompt requires the matching =load_skill(name=...)= call before planning or work. The manifest supplies only trigger descriptions; the tool returns the complete body. Nothing is preloaded. This preserves progressive disclosure while making the first action explicit enough for the small model.
 
 * Notes
-- Files: =assist/middleware/skills_middleware.py=, =assist/backends.py= (=SKILLS_ROUTE=), =assist/promptable.py= (=read_skill_body=).
-- Pattern for adding a new skill: drop a directory under =assist/skills/{name}/= with a =SKILL.md= containing trigger-only YAML frontmatter and the body content.  No code changes needed; the middleware picks it up at session start.
+- Files: =assist/middleware/skills_middleware.py= and =assist/backends.py= (=SKILLS_ROUTE=, =MAIN_SKILLS_ROUTE=).
+- Pattern for adding a shared skill: drop a directory under =assist/skills/{name}/=. Main-only workflows go under =assist/main_skills/{name}/=. Each contains a =SKILL.md= with trigger-only YAML frontmatter and the full body.
 - Trigger-only descriptions are mandatory.  The manifest is always loaded into context, so descriptions should describe *when* to load, not contain the rules.
-- Skills are not tools.  There is no =load_skill= tool — the model uses =read_file= with the path shown in the manifest.
+- =load_skill= is the sole name-based loading interface. The backing routes are read-only and role-scoped.

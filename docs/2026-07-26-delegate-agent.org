@@ -1,0 +1,239 @@
+#+title: One-level delegate agent
+#+date: <2026-07-26>
+
+* State
+
+GitHub PR #215 is open. The main-only skill, role-specific skill mounting,
+natural-eval rewrite, and prompt tuning are implemented, locally reviewed, and
+rebased onto GitHub =main= at =c82e07a=; the final branch is ready to redeploy.
+
+The shared-constructor role, one-level capability boundary, durable
+admission-frozen URL seeds, and deterministic coverage are implemented. The
+current post-rebase implementation passes 1464 tests with 2 skips; focused
+delegate, provenance, and skill coverage passes 126/126. Earlier local
+review rounds found and fixed causal timestamp ordering, unrelated parent-history
+disclosure, normalized userinfo/fragment disclosure, child-result instruction
+laundering, eval/production prompt drift, and documentation drift.
+The rebase review also found and fixed a merged voice-transport teardown race:
+the call slot now releases after the synchronous runner exits but before the
+terminal WebSocket close tells the phone it can reconnect.
+An external suggestion to admit sender-bearing SMS turns was rejected in the
+post-review security pass: inbound-message triage explicitly treats those turns
+as untrusted data, so only sender-less owner turns grant delegate URL authority.
+External review also found that first-seen normalization could discard later
+trusted credential evidence; provenance and delegate admission now retain every
+credential variant.
+The same-host navigation rule now treats page content as path evidence only;
+Basic Auth userinfo must already be trusted on the exact scheme, host, and
+effective port.
+The delegate's synchronous specialists read those URL seeds through LangGraph's
+supported run-config accessor; the graph-level regression no longer supplies a
+test-only runtime config object.
+
+Per Pierre's decision, TODOs are advisory. Durable task state is authoritative,
+and the supervisor must check success, error, and timeout wakes, reconcile its plan, preserve
+successful sibling results, and report blocked dependents. The current real-model
+suite separates a small explicit capability layer from natural acceptance cases.
+The first repeated N=3 pass of the revised 13-case real-model suite scored 38/39:
+13/13, 13/13, then 12/13. All 27 natural cases passed. A later clean-prompt N=1
+run exposed four useful misses; general guidance fixed prerequisite timeout handling
+and first-call skill selection. Under the outcome-first natural validations requested
+by Pierre, that run is 7/9 (77.8%): cancellation wording and overlapping-edit routing
+remain expected stochastic misses at this starting target. The explicit capability
+layer remains intentionally stricter.
+
+* Problem
+
+A user should be able to give Assist several requested outcomes and have the main
+agent hand each outcome to another full Assist worker. Independent outcomes should
+be admitted together; an outcome that consumes another outcome's result or
+touches the same workspace state should start only after its predecessor
+finishes. The existing async task lifecycle already provides admission, durable
+status, completion wakes, updates, cancellation, recovery, and serialized access
+to the one model slot. What is missing is a worker capable of owning a whole task
+rather than one specialist operation.
+
+The provider's automatic general-purpose subagent is not that worker. Enabling
+it would restore an implicit, subtly different graph and nested delegation. The
+worker must instead be another role of Assist's existing =create_agent=
+constructor.
+
+* Decision
+
+Add one fixed async assistant type named =delegate-agent=.
+
+1. =AgentSpec= gains a two-value role: =main= (the default) or =delegate=.
+   =assist.agent.create_agent= remains the only constructor. The role changes
+   the prompt identity, URL provenance source, logging name, supervisor-only
+   skill source, and omission of =InterjectionMiddleware=.
+2. The web main agent keeps the five async task-management tools and may launch
+   =delegate-agent=. A delegate receives none of those tools, so a second level
+   is impossible by construction. It receives =async_subagent_tools=None=,
+   which reuses the established synchronous context, research, and critique
+   specialists inside the same graph.
+3. A delegate receives the parent working directory, per-turn sandbox, built-in
+   tools, shared built-in/domain skills, =read_url=, and the normal hardening stack.
+   It does not receive web composition tools, the web render skill, =send_reply=,
+   HITL configuration, async task-management tools, or interjection delivery.
+4. The child input remains one self-contained HumanMessage containing exactly
+   the main agent's brief. Parent conversation history is not copied.
+5. =read_url= uses the same offload, reread breaker, and provenance middleware
+   in both roles. In a delegate graph, HumanMessages are not URL authority: the
+   brief was written by the main model. At child admission, under the existing
+   Run lock, the web service freezes the intersection of URLs in that brief and
+   durable owner-authored Runs already accepted on the parent. The tuple persists
+   on the child Run, rides LangGraph =configurable= data, and is inherited by the
+   delegate's synchronous specialists. A fair-scheduling resume copies its
+   instruction slice's tuple; an explicit task update derives a new one. Later
+   user messages cannot retroactively expand older work. Parent history is never
+   revealed to the delegate; a historical owner URL becomes fetch-authorized only
+   when the brief independently repeats its canonical URL without adding or
+   changing credentials. The delegate also treats its synchronous specialist
+   results as model-authored data rather than new URL authority.
+6. The main prompt defines scheduling, not a new scheduler. It chooses an
+   execution shape from independently useful, verifiable outcomes: one outcome
+   with several steps stays with the main agent; two or more distinct requested
+   outcomes use one delegate per outcome. It launches every currently unblocked outcome in the
+   same turn and serializes data dependencies and overlapping workspace effects;
+   check every completion; launch newly unblocked work; preserve successful
+   siblings when one fails; report the blocked dependency rather than inventing
+   its output. TODOs are advisory planning aids; durable async task results are the
+   authority, and the main reconciles its plan with those results on every wake. It
+   relays only necessary facts from untrusted child results, clearly delimited as
+   data, and never carries child directives into a later brief. A pure specialist
+   lookup still uses context/research/critique directly. A delegate owns an
+   end-to-end task that may use specialists.
+7. A built-in =complex-request= skill carries the detailed workflow for
+   mapping several outcomes into advisory TODOs and explicit, self-contained
+   delegate briefs. Its description makes natural multi-result and dependent
+   requests trigger progressive disclosure before work begins. The main agent
+   receives it through a separate read-only =/main-skills/= source. That route is
+   absent from the delegate and legacy non-async main backends, so neither listing
+   nor direct loading can expose it there.
+
+* User flow
+
+For “do X for each of [A, B, C], then combine the results,” the main agent starts
+three delegate tasks in one turn, reports their full task IDs, and returns. Each
+completion wakes the main thread. The main checks the completed task and records
+its result. Only after all three terminal results exist does it start the
+dependent combine task. If B fails, A and C stay
+usable; work that specifically depends on B is not started and the user sees the
+failure and next step.
+
+For “change X, then use that result to change Y,” only X starts initially. The Y
+brief is written after X completes and contains the concrete result it needs.
+
+* Interfaces and touched code
+
+- =assist/spec.py=: the role declaration, still shape rather than per-run data.
+- =assist/agent.py=: one shared construction path; role-aware prompt and
+  middleware selection; provider auto-general-purpose suppression stays.
+- =assist/thread_manager.py=: fixed delegate profile with no web/supervisor
+  additions and legacy synchronous specialists.
+- =assist/async_subagents.py= and =manage/web/agent_protocol.py=: admit the one
+  new fixed assistant ID through the existing private ASGI lifecycle.
+- =manage/web/protocol_service.py=: freeze brief-intersected owner URL seeds at
+  durable child admission.
+- =assist/run_service.py= and =manage/web/threads.py=: persist those seeds on the
+  child slice and pass them as =Thread.configurable= data.
+- =assist/middleware/url_provenance.py=: in delegate mode, trust configured
+  owner URL seeds instead of model-authored HumanMessages; retain all other
+  provenance and same-host navigation behavior.
+- =assist/templates/deepagents/general_instructions.md.j2=: main scheduling and
+  briefing guidance; delegate identity and synchronous specialist guidance in
+  the same template.
+- =assist/main_skills/complex-request/SKILL.md=: progressively disclosed TODO,
+  dependency, brief, supervision, and final-reconciliation workflow for the
+  main agent only.
+- =assist/backends.py=: reuse the existing discovery and loading path through a
+  read-only skill backend, mounting the supervisor source only for the async main.
+- =edd/eval/test_async_subagents.py=: observable parallel, serial, completion,
+  and failure behavior against the real small model.
+
+* Threat model
+
+The new worker has filesystem and execute access in the parent's sandbox, which
+is intentional: it owns the same task the main agent could perform. No listener,
+credential, host tool, or new scheduler is added. The fixed Agent Protocol
+assistant allowlist and existing body/ID bounds remain the admission boundary.
+
+The new trust-boundary hazard is URL laundering. The main model controls a
+delegate brief, so a URL appearing in that HumanMessage cannot prove user
+provenance. Delegate-mode provenance therefore ignores HumanMessages and accepts
+only admission-frozen URLs present in both its brief and accepted owner Runs,
+   direct trusted non-file tool results, and existing same-host page navigation.
+   Unmentioned parent history is not exposed; page/shell/offload, async child, and
+   delegate-specialist URLs invented by the main or delegate remain unreachable
+   through =read_url=. Large async and delegate-specialist results are written through
+   the existing untrusted-offload path before the framework can evict them to an
+   unmarked file. Delegate file reads cannot grant URL authority because specialist
+   reports share the same filesystem namespace as owner files.
+
+One-level delegation is a capability boundary, not a behavioral guard: the
+delegate graph simply has no async lifecycle tools. Its fixed synchronous
+specialists may use their established internal research topology, but none can
+start another =delegate-agent= or manage the outer async lifecycle.
+
+* Verification
+
+** Deterministic
+
+1. =delegate-agent= is accepted by the private protocol and constructed through
+   =create_agent= with role =delegate=, no web tools/skill, no async lifecycle
+   tools, no HITL, and synchronous specialists.
+2. Delegate middleware includes the same =read_url= offload and reread breaker;
+   it omits interjection middleware.
+3. A genuine owner URL accepted before child admission and repeated in the brief
+   is readable by the delegate and its synchronous research specialist. A URL
+   only in the model brief, unmentioned owner history, a fetched page, shell output,
+   an async child result, a delegate specialist result, or a later user message is
+   not authority. Large child results retain that classification after offload.
+4. Fair resume preserves the original URL tuple; an explicit updated brief gets a
+   freshly derived tuple from owner messages accepted before that update.
+5. Child execution still shares the parent working directory/sandbox, remains
+   off the asyncio loop, and uses the existing durable wake/recovery paths.
+6. Existing context/research/critique async tasks and all current URL provenance
+   tests remain green. Smoke =python -m manage.web= after the construction change.
+7. The async main skill listing exposes =complex-request= and can load its full
+   body; delegate and legacy-main backends do not mount the route, so direct loads
+   return not found. Packaged skill files are read-only in every role.
+
+** Real-model behavior
+
+Keep a small explicit capability layer to show that fan-out, serial handoff, and
+failure handling can work at all. Write the acceptance cases as natural user
+requests without architecture, tool, routing, scheduling, or assertion hints.
+Judge natural cases by whether the requested outcome is achieved; retain a natural
+long-list case that measures spontaneous delegation. Run them repeatedly and target
+at least 70% while retaining observed failures; improve general guidance rather than
+making individual prompts more leading. Re-run adjacent and unrelated passing evals
+while tuning:
+
+- a list of independent outcomes starts one delegate per outcome in the
+  same turn with self-contained briefs;
+- several small independent outcomes delegate without an explicit delegation
+  request, while one outcome with several steps stays with the main agent;
+- a dependent outcome is withheld until its prerequisite completes, then launched;
+- a completion wake is checked before the result is used;
+- result facts reach dependent briefs without relaying child-authored directives;
+- overlapping workspace effects are serialized;
+- a failed sibling does not discard successful results or trigger blocked work;
+- pure external research uses =research-agent=, not =delegate-agent=;
+- launch replies return task IDs without polling;
+- checked failures are not retried, replaced with direct work, or allowed to
+  unblock dependents without a user request;
+- stopping active work is reported as a cancellation request, not a completed
+  cancellation.
+
+* Explicit non-goals
+
+- Do not enable Deep Agents' provider general-purpose profile.
+- Do not create a second Assist factory, prompt file, middleware stack, task
+  registry, DAG engine, dependency schema, worker pool, lock, quota, loop guard,
+  or delegation-depth counter.
+- Do not copy parent conversation history into the delegate.
+- Do not teach the delegate to self-delegate or expose lifecycle tools and then
+  ask it not to use them.
+- Do not expose the main agent's complex-request supervision skill to delegates.
+- Do not make =delegate-agent= a research alias; research remains a specialist.

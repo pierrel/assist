@@ -1,4 +1,4 @@
-"""Tests for the diff polish + review page in ``manage/web.py``.
+"""Tests for the diff polish + review page in the ``manage.web`` package.
 
 The web app is otherwise tested behaviorally; these tests cover the
 small pure-functions added for the review feature so we can refactor

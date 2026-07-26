@@ -104,6 +104,7 @@ class TestSubagentSafetyMiddleware(TestCase):
         is deliberately excluded."""
         from assist.agent import create_research_agent
         from assist.middleware.read_url_reread_breaker import ReadUrlRereadBreaker
+        from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
         from assist.middleware.url_provenance import UrlProvenanceMiddleware
 
         subagents = self._capture_subagents(
@@ -119,6 +120,25 @@ class TestSubagentSafetyMiddleware(TestCase):
                     guard, present,
                     f"Subagent '{name}' missing {guard.__name__} — the read_url "
                     f"guards were silently dropped from the dict spec")
+            offload = next(
+                middleware for middleware in by_name[name]["middleware"]
+                if isinstance(middleware, ToolResultToFileMiddleware)
+                and "read_url" in middleware._tools)
+            self.assertTrue(offload._page_navigation)
+
+    def test_leaf_research_agent_offloads_pages_with_navigation_marker(self):
+        from assist.agent import create_research_agent
+        from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
+
+        with patch("assist.agent.create_deep_agent") as create:
+            create.return_value = MagicMock()
+            create_research_agent(MagicMock(), working_dir="/tmp/x", leaf=True)
+
+        offload = next(
+            middleware for middleware in create.call_args.kwargs["middleware"]
+            if isinstance(middleware, ToolResultToFileMiddleware)
+            and "read_url" in middleware._tools)
+        self.assertTrue(offload._page_navigation)
 
     def test_main_agent_dict_subagents_have_safety_mw(self):
         from assist.agent import create_agent

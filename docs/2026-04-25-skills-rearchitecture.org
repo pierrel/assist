@@ -2,7 +2,7 @@ State: Done (2026-04-26)
 * Summary of what landed
 The skills re-architecture is complete.  Migration executed in four phases (A → D) over a single working day; details preserved below for posterity.
 
-- *Skills mechanism wired*: =deepagents=' built-in =SkillsMiddleware= is in use, fronted by our =SmallModelSkillsMiddleware= subclass with an imperative, small-model-friendly system-prompt template.  Skills live at =assist/skills/{name}/SKILL.md= and are routed via =/skills/= in the agent backend.  See [[file:2026-04-26-skills-system.org][skills-system.org]].
+- *Skills mechanism wired*: =deepagents=' built-in =SkillsMiddleware= is in use, fronted by our =SmallModelSkillsMiddleware= subclass with an imperative, small-model-friendly system-prompt template. Shared skills live at =assist/skills/{name}/SKILL.md= and are routed via =/skills/=; the async main may also mount supervisor-only workflows from =assist/main_skills/= via =/main-skills/=. See [[file:2026-04-26-skills-system.org][skills-system.org]].
 - *Two skills shipped*:
   - =org-format= — file-format guide for =.org= files; covers the heading-body insertion rule.  See [[file:2026-04-26-org-format-skill.org][org-format-skill.org]].
   - =dev= — full TDD workflow, refactored out of the dev-agent's inline prompt.  See [[file:2026-04-26-dev-skill.org][dev-skill.org]].
@@ -39,7 +39,7 @@ This is essentially Option 1 from [[file:2026-04-25-dev-improvements.org][dev-im
 - Multi-turn dev work no longer loses user replies because the conversation never leaves the top-level agent.
 
 ** Loading model: model-driven by default
-Skills follow the standard pattern: the agent sees skill names + descriptions on every turn and decides via tool call (=load_skill("name")=) when to pull the content in.  The trigger logic lives in the *description* the model reads ("Load when working with =.org= files"), not in our code.  This is uniform across skills and matches how Claude Code's skills work.
+Skills follow the standard pattern: the agent sees the skill names + descriptions available to its role on every turn and decides via tool call (=load_skill("name")=) when to pull the content in.  The trigger logic lives in the *description* the model reads ("Load when working with =.org= files"), not in our code.  This is uniform across skills and matches how Claude Code's skills work. A role may omit an entire skill source when that workflow is not one of its capabilities.
 
 *** Risk: the trigger decision is still a decision
 Skills only help if the model picks the right one.  Qwen3-Coder is reasonable but not great at meta-reasoning ("which skill applies?").  Mitigations that *don't* compromise the model-driven design:

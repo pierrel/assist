@@ -7,8 +7,7 @@
 Implemented, locally reviewed to convergence, deployed, and live-smoked. The
 first deployment exposed a hidden-runtime schema integration defect; its fix is
 verified through a compiled LangGraph tool node and the repeated live flow.
-Draft [[https://github.com/pierrel/assist/pull/213][PR #213]] is open for external
-review; the feature stops before merge.
+[[https://github.com/pierrel/assist/pull/213][PR #213]] is merged and deployed.
 
 Baseline N=3 on 2026-07-25: 0/3.  Each run started the context task and avoided
 polling, but the visible reply omitted its full task ID and said the supervisor
@@ -50,9 +49,9 @@ children were removed afterward.
    started and returns.  It never waits or polls in that turn.
 3. A subagent call releases the parent and uses the existing durable Run service
    and =THREAD_QUEUE=. =parallel=1= remains true; two model calls never overlap.
-4. Each child terminal result creates exactly one ordinary follow-up Run on its
-   parent thread.  That Run wakes the main agent, which checks the completed task
-   and continues the user's request.
+4. Each child success, error, or timeout creates exactly one ordinary follow-up Run
+   on its parent thread. That Run wakes the main agent, which checks the completed
+   task and continues the user's request. Cancellation and interruption do not wake it.
 5. A new user message outranks queued child work and completion follow-ups for
    that thread.  It never preempts the active model call or tool call.  The
    existing main-thread interjection middleware still delivers it at the next
@@ -72,8 +71,12 @@ children were removed afterward.
    Run: active work remains =running= behind a queued update or cancellation,
    while a terminal resumed slice resolves its historical interruption. The
    cancellation tool reports the post-operation truth, distinguishing a requested
-   boundary stop from an immediately completed cancellation.
-10. Subagents are direct leaf graphs and receive no delegation tools.
+   boundary stop, an immediately completed cancellation, and a task that reached
+   success, error, or timeout before cancellation took effect.
+10. Context, research, and critique subagents are direct leaf graphs. The
+    =delegate-agent= is the shared Assist graph with synchronous specialists,
+    but receives no async lifecycle tools and therefore cannot start another
+    delegate.
 
 * What “interrupt” means after this change
 
@@ -225,8 +228,9 @@ message or system instruction.
    update/cancel them.
 8. Main-thread interjection delivery, HITL approval, SMS, schedules, recovery,
    deletion, and fair pause retain their existing behavior.
-9. Children lack task-management tools and cannot recursively dispatch
-   subagents.
+9. Children lack async task-management tools and cannot recursively dispatch
+   another web task. A whole-task delegate may use its fixed synchronous
+   specialist topology internally.
 10. Completion framing keeps child output untrusted.
 11. Event-loop probes hold contended locks and prove HTTP status/message routes
     remain responsive.
@@ -247,7 +251,7 @@ Add an eval suite that observes, rather than merely asks for:
 - a user correction causes a fresh list/check followed by a justified
   keep/update/cancel decision;
 - research no longer names or requests =background-research-agent=;
-- child agents do not call subagent management tools.
+- child agents do not call async subagent management tools.
 
 Run N=3 before implementation to record the current failure shape, N=3 after
 implementation, N=5 after local review, and N=10 for stability.  Bound each
