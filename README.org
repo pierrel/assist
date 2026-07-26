@@ -44,12 +44,10 @@ Run the CLI
 python -m manage.cli
 #+end_src
 
-Run the Web UI (auto-reload)
+Run the Web UI
 
 #+begin_src shell
 python -m manage.web
-# or
-uvicorn manage.web:app --host 0.0.0.0 --port 5050 --reload
 #+end_src
 ** Developing
 Install the package in editable mode so Emacs/Elpy can discover the modules:

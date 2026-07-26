@@ -22,14 +22,16 @@ records the build plan grounded in the real code, the reconciliations, and statu
 | TTS producer (1/call) | synthesize sentence chunks → split into 20 ms generation-tagged frames → serialized outbound accept boundary | flow.py, session state, observer callbacks |
 | Turn-runner (1/turn) | execute a committed durable Run by id; observer fires at its terminal exit | — |
 =inbound= is a bounded closeable buffer; =outbound= adds generation-aware audio
-invalidation. Every operation on either crosses the thread boundary through
-=run_in_threadpool=, so the WS tasks remain pure shuttles and never acquire their
-locks on the uvicorn loop. Inbound =close()= and outbound =abort()= atomically mark
+invalidation. Every async WS-task operation on either crosses the thread boundary
+through =run_in_threadpool=; the synchronous runner uses them directly. The WS tasks
+remain pure shuttles and never acquire their locks on the uvicorn loop. Inbound
+=close()= and outbound =abort()= atomically mark
 closed, discard call-local backlog, and wake all waiters. Graceful outbound
 =close(final=hangup)= instead replaces ordinary backlog with exactly one priority
 terminal control, keeps it retrievable until the sender takes it, then makes later
 gets report closed. The WS owner gives terminal send/socket close a 2 s grace;
-timeout or send failure falls through to =abort()= and releases the one-call slot.
+timeout or send failure falls through to =abort()= and wakes the runner. The
+one-call slot is released only after the runner honors that termination signal.
 Disconnect/failure also uses =abort()=. Every teardown selects one of these idempotent
 paths, since cancelling the awaiting coroutine cannot stop its worker call.
 
@@ -43,9 +45,10 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 2. *PR2 — =speech.py= + =tests/voice/test_speech.py=* — lazy in-proc =faster-whisper=
    (STT) + =piper= (TTS), synchronously off the event loop; PR4 owns thread scheduling.
    Deps: faster-whisper, piper-tts.
-   *← current PR.*
+   *DONE (PR #211).*
 3. *PR3 — frame codec + =tests/voice/fake_bridge.py= + =wire.py= skeleton* — the WS
    protocol (§2) + §8 resource caps, echo-level.
+   *← current PR.*
 4. *PR4 — =session.py=* — the state machine + call-event log + conversational contract,
    tying flow/speech/wire together, driving the shared Run service (the big one; full
    three-phase rigor — touches the queue/observer/hot path).
@@ -90,6 +93,40 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    inserts =flush_uplink= at the front. A frame returned later by an in-flight Piper
    =next()= is rejected; only a frame the WS shuttle already dequeued can escape. The
    session never waits for synthesis or buffer capacity before flushing.
+
+* PR3 wire contract (design-reviewed 2026-07-25)
+- =wire.py= owns only transport: header-secret authentication, one active connection
+  in the deployed single-worker process, JSON/binary framing, fixed resource bounds,
+  bounded closeable buffers, and teardown. It imports no Flow, Speech, receptionist,
+  Run service, observer, PIN, allowlist, or call-log code.
+- Known phone controls are strictly decoded; malformed known controls close the
+  connection. Unknown control types are counted against the rate bound and ignored
+  for two-repo deploy skew. Binary messages must be exactly 320 s16le samples / 640
+  bytes. Caller normalization, DTMF meaning, hardware-rate policy, answer state, and
+  pre-answer/post-call frame handling belong to PR4/PR5.
+- Safety constants are fixed policy, not deploy knobs: decoded WS message ≤4096 B,
+  first valid =ring= ≤5 s, valid-inbound idle ≤5 s, connection ≤1800 s, and ≤20 text
+  controls in a rolling second. JSON rejects duplicate keys and non-finite numbers;
+  all strings and required scalar fields are bounded before reaching the runner.
+  Uvicorn WebSocket compression is disabled so compressed frames cannot amplify
+  before the decoded-message cap.
+- Authentication happens before the call slot is claimed and before =accept=. The
+  slot is process-local by construction because the production entry point runs one
+  Uvicorn worker; multi-worker deployment is outside this documented invariant.
+- The async receiver performs one =receive= at a time and awaits the offloaded
+  bounded =inbound.put= before receiving again, preserving backpressure. The sender
+  similarly offloads =outbound.get=. Every exit first closes/aborts both buffers and
+  wakes their condition waiters, then bounds transport-task/terminal shutdown.
+  Graceful close keeps one terminal control queued for best-effort delivery; a
+  stalled in-flight send may prevent delivery but is cancelled after the 2 s grace.
+- After the first valid =ring=, the route invokes one synchronous call-runner seam
+  with the decoded ring plus the two buffers. Tests inject an echo runner; production
+  has no session runner until PR4 and therefore closes without inventing answer or
+  call-state policy. On an abrupt exit the network connection closes before waiting
+  for the runner. Closing both buffers is the runner's termination contract. The
+  route retains the sole call slot until the runner returns, so old and new session
+  code cannot overlap; PR4 must bound each downstream synchronous operation so the
+  runner honors that contract promptly.
 
 * Reuse map (do NOT re-derive)
 - =manage/web/threads.py=: =_create_run= + =_execute_run= (durable ordinary-turn path),
@@ -138,7 +175,8 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 - [X] PR2: =manage/voice/speech.py= — independently lazy faster-whisper =base.en= CPU STT +
       Piper TTS, synchronous/off-event-loop; raw s16le/16 kHz boundary; sentence-chunk iterator
       preserves cancellation for PR4. Unit contract complete; real Whisper + Piper model checks pass.
-- [ ] PR3–PR5 per the slicing above.
+- [ ] PR3: bounded WSS wire + fake bridge (current).
+- [ ] PR4–PR5 per the slicing above.
 
 * Notes for Pierre
 - Deps landed in =requirements.txt=: =onnxruntime==1.27.0= (+ flatbuffers, protobuf) — lean, torch-free.
