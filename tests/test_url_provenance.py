@@ -212,6 +212,41 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNotNone(handler.called_with,
                              "same-host link from a fetched page must be navigable")
 
+    def test_page_link_cannot_introduce_same_host_credentials(self):
+        target = "https://attacker:secret@shop.example/private"
+        msgs = [HumanMessage(content="explore https://shop.example/"),
+                ToolMessage(content=f"Private link: {target}",
+                            name="read_url", tool_call_id="r0")]
+
+        result, handler = self._call(target, msgs)
+
+        self.assertIsNone(handler.called_with)
+        self.assertEqual(result.status, "error")
+
+    def test_trusted_credentials_allow_same_host_navigation(self):
+        target = "https://owner:secret@shop.example:443/private"
+        msgs = [HumanMessage(content="explore https://owner:secret@shop.example/"),
+                ToolMessage(content="Private link: https://shop.example:443/private",
+                            name="read_url", tool_call_id="r0")]
+
+        _result, handler = self._call(target, msgs)
+
+        self.assertIsNotNone(handler.called_with)
+
+    def test_trusted_credentials_do_not_cross_scheme_or_port(self):
+        trusted = "https://owner:secret@shop.example/"
+        for target in ("http://owner:secret@shop.example/private",
+                       "https://owner:secret@shop.example:8443/private"):
+            page_link = target.replace("owner:secret@", "")
+            msgs = [HumanMessage(content=f"explore {trusted}"),
+                    ToolMessage(content=f"Private link: {page_link}",
+                                name="read_url", tool_call_id="r0")]
+
+            result, handler = self._call(target, msgs)
+
+            self.assertIsNone(handler.called_with, target)
+            self.assertEqual(result.status, "error")
+
     def test_blocks_fabricated_same_host_path_not_on_any_page(self):
         # SECURITY (the dead-URL flood): a FABRICATED path on a trusted host —
         # one no page ever surfaced — must stay blocked. Host-match alone is

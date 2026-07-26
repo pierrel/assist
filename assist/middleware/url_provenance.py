@@ -27,9 +27,11 @@ of OFFLOADED untrusted content (read_url page, execute output), written under
 ``/tmp/large_tool_results/…`` for a real-fs offload) — the SAME content laundered
 through a file.
 
-SAME-HOST NAVIGATION (2026-07-21): a URL that literally appeared in fetched-page
-content is fetchable IF its host is already trusted (a user URL or search result was
-on that host). BOTH conditions are required — this is what lets ``read_url`` navigate
+SAME-HOST NAVIGATION (2026-07-21): a normalized destination that appeared in
+fetched-page content is fetchable IF its host is already trusted (a user URL or search
+result was on that host). A credentialed fetch additionally requires that exact
+userinfo from a trusted URL on the same origin (scheme, host, and effective port);
+page content can prove a path, never credentials. These conditions let ``read_url`` navigate
 WITHIN a site the user pointed at (the "explore a website, find and download a file"
 flow) without re-searching every next page, while keeping the two attacks the guard
 exists for blocked: (1) a FABRICATED same-host path (the searcher inventing
@@ -50,8 +52,9 @@ multi-step injection to ``write_file`` an arbitrary URL then ``read_file`` it �
 behavioral injection-resistance, not this guard. A narrower same-class residual: a
 same-host URL in a LARGE ``execute`` log gets offloaded to ``untrusted-`` and, read
 back via ``read_file``/``grep``, counts as page content (the ``untrusted-`` marker
-can't tell a read_url offload from an execute one) — so it is navigable if its host is
-already trusted. Direct shell output is closed by construction (``_is_page_content``);
+can't tell a read_url offload from an execute one) — so its credentialless path is
+navigable if its host is already trusted. Direct shell output is closed by
+construction (``_is_page_content``);
 this multi-step offload-then-file-read path is not, and shares the same behavioral gate.
 
 Scope: every ``read_url``-bearing agent — the research SEARCHER and FACT-CHECKER
@@ -145,6 +148,20 @@ def _host_of(url: str) -> str:
         return ""
 
 
+def _origin_of(url: str) -> tuple[str, str, int | None]:
+    """Lowercase HTTP(S) origin with default ports made explicit."""
+    try:
+        parsed = urlsplit(url.strip().rstrip(_TRAILING))
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return "", "", None
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return scheme, host, port
+
+
 def normalize_url(url: str) -> str:
     """Canonical form for provenance comparison: lowercase scheme+host; drop
     userinfo, the fragment, a trailing slash, and trailing punctuation/brackets.
@@ -225,8 +242,9 @@ def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
 
 def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
     """Genuine FETCHED-PAGE content — the subset of untrusted results whose URLs a real
-    page actually surfaced, so a same-host member is NAVIGABLE (see _page_content_urls /
-    wrap_tool_call). That is direct ``read_url`` and a ``read_file``/``grep`` of an
+    page actually surfaced, so a same-host path may be NAVIGABLE (see
+    _page_content_urls / wrap_tool_call; page userinfo is never authority). That is
+    direct ``read_url`` and a ``read_file``/``grep`` of an
     offloaded page — but NOT ``execute`` (shell) output. This split from
     ``_is_untrusted_result`` is load-bearing: that predicate has OPPOSITE polarity in its
     two callers — ``_seen_urls`` EXCLUDES it (untrusted → not a provenance source),
@@ -296,10 +314,12 @@ def _page_content_urls(messages: list) -> dict[str, list[str]]:
     NOT the exact inverse of ``_seen_urls``: ``execute`` (shell) output is in
     NEITHER set — untrusted, so not trusted, but also not a page, so not navigable.
     These are the links a page actually surfaced; a fabricated path never appears
-    here. Same-host members are navigable (see wrap_tool_call) — that admits
+    here. Credentialless same-host members are navigable (see wrap_tool_call);
+    credentialed requests also need exact trusted same-origin userinfo. This admits
     following a real link on an already-trusted site while still blocking a
-    fabricated same-host path (the dead-URL flood) and an exfil URL the model
-    invents (or one printed into shell output on a trusted host)."""
+    fabricated same-host path (the dead-URL flood), page-introduced credentials,
+    and an exfil URL the model invents (or one printed into shell output on a
+    trusted host)."""
     calls_by_id: dict[str, dict] = {}
     for m in messages:
         for tc in getattr(m, "tool_calls", None) or []:
@@ -398,10 +418,11 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         provenanced = allowed.get(nurl, ())
         if any(_userinfo_allowed(url, raw) for raw in provenanced):
             return handler(request)
-        # Same-host navigation: a link the fetched page ACTUALLY surfaced, on a
-        # host already trusted, is fetchable — this is what lets read_url
-        # navigate WITHIN a site the user pointed at (find a manual, follow
-        # Support → the download). BOTH conditions are load-bearing:
+        # Same-host navigation: a path the fetched page ACTUALLY surfaced, on a
+        # host already trusted, is fetchable without credentials. Credentialed
+        # navigation additionally needs trusted same-origin userinfo. This lets
+        # read_url navigate WITHIN a site the user pointed at (find a manual,
+        # follow Support → the download). All conditions are load-bearing:
         #  - in page content (not just host-matched): a fabricated same-host
         #    path never appeared on any page, so the dead-URL flood the guard
         #    exists to stop stays blocked — the model can only follow links a
@@ -410,12 +431,19 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         #    (169.254.169.254, an internal service, evil.example/leak?d=secret)
         #    has no matching trusted host, so SSRF + secret-bearing exfil stay
         #    blocked — the jump to a NEW host from page content is refused.
+        #  - trusted same-origin userinfo for a credentialed request: page
+        #    content proves only the destination path and cannot introduce
+        #    Basic Auth credentials or move them to HTTP / another port.
         host = _host_of(url)
         page_urls = _page_content_urls(messages).get(nurl, ())
-        trusted_hosts = {
-            _host_of(raw) for variants in allowed.values() for raw in variants}
-        if (host and host in trusted_hosts
-                and any(_userinfo_allowed(url, raw) for raw in page_urls)):
+        trusted_host_urls = [
+            raw for variants in allowed.values() for raw in variants
+            if _host_of(raw) == host]
+        requested_userinfo = url_userinfo(url)
+        userinfo_allowed = (requested_userinfo is None or any(
+            _origin_of(url) == _origin_of(raw) and _userinfo_allowed(url, raw)
+            for raw in trusted_host_urls))
+        if host and page_urls and trusted_host_urls and userinfo_allowed:
             return handler(request)
 
         self._intervention_count += 1
