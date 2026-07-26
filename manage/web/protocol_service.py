@@ -222,14 +222,14 @@ class WebAgentProtocolService:
                         for url in urls_in_text(parent.text):
                             owner_urls.setdefault(normalize_url(url), set()).add(
                                 url_userinfo(url))
-                admitted: dict[str, str] = {}
+                admitted: dict[tuple[str, str | None], str] = {}
                 for url in urls_in_text(text):
                     normalized = normalize_url(url)
                     brief_userinfo = url_userinfo(url)
                     if (normalized in owner_urls
                             and (brief_userinfo is None
                                  or brief_userinfo in owner_urls[normalized])):
-                        admitted.setdefault(normalized, url)
+                        admitted.setdefault((normalized, brief_userinfo), url)
                 delegate_user_urls = tuple(admitted.values())
             try:
                 run = _create_run(

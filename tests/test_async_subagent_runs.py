@@ -545,6 +545,27 @@ def test_delegate_admission_rejects_brief_credentials_absent_from_owner(
     assert child.delegate_user_urls == ()
 
 
+def test_delegate_admission_keeps_plain_and_credentialed_variants(
+        monkeypatch, tmp_path):
+    _root(monkeypatch, tmp_path)
+    threads.MANAGER.reserve("parent")
+    plain = "https://owner.example/interjected"
+    credentialed = "https://user:secret@owner.example/interjected"
+    owner = threads._create_run("parent", f"Use {plain} and {credentialed}")
+    metadata = {
+        "parent_thread_id": "parent",
+        "parent_run_id": owner.id,
+        "dispatch_key": f"{owner.work_id}:delegate",
+    }
+    SERVICE.create_thread("sub-delegate", metadata)
+
+    child = SERVICE.create_run(
+        "sub-delegate", "delegate-agent", f"Read {plain} and {credentialed}",
+        metadata=metadata)
+
+    assert child.delegate_user_urls == (plain, credentialed)
+
+
 def test_recovery_honors_persisted_cancel_before_resuming(
         monkeypatch, tmp_path):
     submitted, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
