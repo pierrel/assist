@@ -3,7 +3,8 @@
 
 * State
 
-Implemented and locally reviewed to convergence; not yet deployed or published.
+Implemented, locally reviewed to convergence, and deployed for parallel testing.
+GitHub PR #215 is open with Copilot review queued.
 
 The shared-constructor role, one-level capability boundary, durable
 admission-frozen URL seeds, and deterministic coverage are implemented. The full
@@ -24,8 +25,7 @@ The expanded 12-case stability run passed 47/48 before stopping on one natural
 four-item fan-out miss; that exact case then passed 3/3 immediately
 (=/tmp/assist-delegate-agent-outcome-n10-r2.log= and
 =/tmp/assist-delegate-agent-natural-final-n3.log=). This meets the agreed
-reasonable-satisfaction bar while keeping the miss visible. Deployment and
-publication remain.
+reasonable-satisfaction bar while keeping the miss visible.
 
 * Problem
 
