@@ -137,6 +137,15 @@ class TestUrlProvenanceMiddleware(TestCase):
         self.assertIsNone(changed_handler.called_with)
         self.assertEqual(changed.status, "error")
 
+    def test_later_provenanced_credentials_are_not_lost(self):
+        plain = "https://user.example/provided"
+        credentialed = "https://owner:secret@user.example/provided"
+        messages = [HumanMessage(content=plain), HumanMessage(content=credentialed)]
+
+        _result, handler = self._call(credentialed, messages)
+
+        self.assertIsNotNone(handler.called_with)
+
     def test_delegate_still_trusts_search_results(self):
         url = "https://search.example/result"
         middleware = UrlProvenanceMiddleware(trust_human_messages=False)

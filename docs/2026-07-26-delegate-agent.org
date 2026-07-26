@@ -8,13 +8,15 @@ GitHub PR #215 is open.
 
 The shared-constructor role, one-level capability boundary, durable
 admission-frozen URL seeds, and deterministic coverage are implemented. The full
-suite passes 1398 tests with 2 skips; compile and diff checks pass. Earlier local
+suite passes 1399 tests with 2 skips; compile and diff checks pass. Earlier local
 review rounds found and fixed causal timestamp ordering, unrelated parent-history
 disclosure, normalized userinfo/fragment disclosure, child-result instruction
 laundering, eval/production prompt drift, and documentation drift.
 An external suggestion to admit sender-bearing SMS turns was rejected in the
 post-review security pass: inbound-message triage explicitly treats those turns
 as untrusted data, so only sender-less owner turns grant delegate URL authority.
+External review also found that first-seen normalization could discard later
+trusted credential evidence; provenance now retains every credential variant.
 
 Per Pierre's decision, TODOs are advisory. Durable task state is authoritative,
 and the supervisor must check success and error wakes, reconcile its plan, preserve

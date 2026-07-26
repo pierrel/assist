@@ -237,9 +237,17 @@ def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
             and getattr(m, "name", None) != _SHELL_TOOL)
 
 
-def _seen_urls(messages: list, *, trust_human_messages: bool = True) -> dict[str, str]:
+def _record_url(urls: dict[str, list[str]], raw: str) -> None:
+    """Retain every credential variant for one normalized URL in encounter order."""
+    variants = urls.setdefault(normalize_url(raw), [])
+    if raw not in variants:
+        variants.append(raw)
+
+
+def _seen_urls(messages: list, *, trust_human_messages: bool = True
+               ) -> dict[str, list[str]]:
     """Every URL in a TRUSTED tool result or the USER's message: a map from the
-    normalized form (the membership key) to the ORIGINAL as it appeared (first seen).
+    normalized form (the membership key) to every ORIGINAL credential variant seen.
     The normalized keys are the sources the model cannot fabricate; the originals
     feed the correction message so it never surfaces a normalize_url-truncated form
     (e.g. a stripped trailing paren on a Wikipedia URL).
@@ -269,7 +277,7 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True) -> dict[str
             cid = tc.get("id")
             if cid:
                 calls_by_id[cid] = tc
-    seen: dict[str, str] = {}
+    seen: dict[str, list[str]] = {}
     for m in messages:
         if not isinstance(m, (HumanMessage, ToolMessage)):
             continue
@@ -278,12 +286,12 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True) -> dict[str
         if isinstance(m, ToolMessage) and _is_untrusted_result(m, calls_by_id):
             continue
         for url in urls_in_text(_message_text(m)):
-            seen.setdefault(normalize_url(url), url)
+            _record_url(seen, url)
     return seen
 
 
-def _page_content_urls(messages: list) -> dict[str, str]:
-    """Normalized-to-original URLs that appeared in FETCHED-PAGE content — the
+def _page_content_urls(messages: list) -> dict[str, list[str]]:
+    """Normalized-to-original URL variants from FETCHED-PAGE content — the
     untrusted read_url channel, direct or offloaded (see ``_is_page_content``).
     NOT the exact inverse of ``_seen_urls``: ``execute`` (shell) output is in
     NEITHER set — untrusted, so not trusted, but also not a page, so not navigable.
@@ -298,11 +306,11 @@ def _page_content_urls(messages: list) -> dict[str, str]:
             cid = tc.get("id")
             if cid:
                 calls_by_id[cid] = tc
-    urls: dict[str, str] = {}
+    urls: dict[str, list[str]] = {}
     for m in messages:
         if isinstance(m, ToolMessage) and _is_page_content(m, calls_by_id):
             for url in urls_in_text(_message_text(m)):
-                urls.setdefault(normalize_url(url), url)
+                _record_url(urls, url)
     return urls
 
 
@@ -318,7 +326,7 @@ def _display_url(raw: str) -> str:
     return u
 
 
-def _correction(allowed: dict[str, str]) -> str:
+def _correction(allowed: dict[str, list[str]]) -> str:
     # No sourced URLs in context yet. Shared by both read_url agents: the searcher HAS
     # search_internet (so "search first" is the right nudge if it simply hasn't searched),
     # while the fact-checker does NOT (an empty list there means search already came back
@@ -333,7 +341,7 @@ def _correction(allowed: dict[str, str]) -> str:
             "search has already come back empty or unavailable, report that you could not "
             "find reliable sources for this and stop."
         )
-    listed = sorted(allowed.values())[:_MAX_LISTED]
+    listed = sorted(variants[0] for variants in allowed.values())[:_MAX_LISTED]
     urls = "\n".join(f"- {u}" for u in listed)
     return (
         "That URL was not fetched: it does not appear in any search result, the "
@@ -385,10 +393,10 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         if isinstance(seeds, (list, tuple)):
             for raw in seeds:
                 if isinstance(raw, str):
-                    allowed.setdefault(normalize_url(raw), _display_url(raw))
+                    _record_url(allowed, _display_url(raw))
         nurl = normalize_url(url)
-        provenanced = allowed.get(nurl)
-        if provenanced is not None and _userinfo_allowed(url, provenanced):
+        provenanced = allowed.get(nurl, ())
+        if any(_userinfo_allowed(url, raw) for raw in provenanced):
             return handler(request)
         # Same-host navigation: a link the fetched page ACTUALLY surfaced, on a
         # host already trusted, is fetchable — this is what lets read_url
@@ -403,10 +411,11 @@ class UrlProvenanceMiddleware(AgentMiddleware):
         #    has no matching trusted host, so SSRF + secret-bearing exfil stay
         #    blocked — the jump to a NEW host from page content is refused.
         host = _host_of(url)
-        page_url = _page_content_urls(messages).get(nurl)
-        if (host and host in {_host_of(u) for u in allowed}
-                and page_url is not None
-                and _userinfo_allowed(url, page_url)):
+        page_urls = _page_content_urls(messages).get(nurl, ())
+        trusted_hosts = {
+            _host_of(raw) for variants in allowed.values() for raw in variants}
+        if (host and host in trusted_hosts
+                and any(_userinfo_allowed(url, raw) for raw in page_urls)):
             return handler(request)
 
         self._intervention_count += 1
