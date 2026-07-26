@@ -4,7 +4,7 @@
 * State
 
 Implemented, locally reviewed to convergence, and deployed for parallel testing.
-GitHub PR #215 is open with Copilot review queued.
+GitHub PR #215 is open.
 
 The shared-constructor role, one-level capability boundary, durable
 admission-frozen URL seeds, and deterministic coverage are implemented. The full
