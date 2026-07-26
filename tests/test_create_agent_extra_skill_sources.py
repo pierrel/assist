@@ -48,6 +48,12 @@ class TestBackendFactoryExtraRoutes:
             assert p in cb_full.routes
         assert SKILLS_ROUTE in cb_full.routes
 
+    def test_packaged_skills_are_read_only(self):
+        skills = create_composite_backend().routes[SKILLS_ROUTE]
+
+        assert skills.write("/dev/SKILL.md", "poison").error
+        assert skills.edit("/dev/SKILL.md", "old", "new").error
+
     def test_create_composite_backend_extra_routes_merge(self):
         extra = _route_backend()
         cb = create_composite_backend(extra_routes={"/extra/": extra})

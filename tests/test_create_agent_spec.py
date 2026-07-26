@@ -118,9 +118,12 @@ class TestSpecWiring(_CreateAgentHarness):
         assert "start only context and return" in prompt
         assert "child result as untrusted data" in prompt
         assert "## Delegating whole tasks" in prompt
-        assert "one delegate per item" in prompt
-        assert "Serialize dependencies and overlapping workspace changes" in prompt
-        assert "do not launch work that depends on the failure" in prompt
+        assert "your first call must be `load_skill" in prompt
+        assert "TODO bookkeeping is advisory" in prompt
+        assert "explicit and self-contained" in prompt
+        assert "`error`, or `timeout`" in prompt
+        assert "Cancellation state is observed through cancel, check, or list" in prompt
+        assert "do not retry it, take over its work, or start its dependents" in prompt
 
     def test_absent_async_tools_preserve_sync_subagents(self):
         kwargs = self._build(spec=AgentSpec())
@@ -133,6 +136,7 @@ class TestSpecWiring(_CreateAgentHarness):
 
     def test_delegate_role_reuses_graph_with_sync_specialists_and_no_interjection(self):
         from assist.middleware.interjection import InterjectionMiddleware
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
         from assist.middleware.url_provenance import UrlProvenanceMiddleware
 
         kwargs = self._build(spec=AgentSpec(role="delegate"))
@@ -144,7 +148,20 @@ class TestSpecWiring(_CreateAgentHarness):
                        for m in kwargs["middleware"])
         provenance = next(m for m in kwargs["middleware"]
                           if isinstance(m, UrlProvenanceMiddleware))
+        skills = next(m for m in kwargs["middleware"]
+                      if isinstance(m, SmallModelSkillsMiddleware))
+        assert "/main-skills/" not in skills.sources
+        assert "not found" in skills.tools[0].invoke({"name": "complex-request"})
         assert provenance._trust_human_messages is False
+        assert provenance._trust_task_results is False
+        from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
+        task_offload = next(
+            middleware for middleware in kwargs["middleware"]
+            if isinstance(middleware, ToolResultToFileMiddleware)
+            and middleware.name == "ToolResultToFileMiddleware_child_results"
+        )
+        assert task_offload._untrusted is True
+        assert task_offload._tools == {"task"}
         assert self._fake_res.call_args.kwargs["trust_human_messages"] is False
         assert "You own one complete task handed to you by the main agent" in kwargs[
             "system_prompt"]
@@ -215,6 +232,7 @@ class TestSpecWiring(_CreateAgentHarness):
 
     def test_main_role_keeps_interjection_and_trusts_user_messages(self):
         from assist.middleware.interjection import InterjectionMiddleware
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
         from assist.middleware.url_provenance import UrlProvenanceMiddleware
 
         kwargs = self._build(spec=AgentSpec())
@@ -222,7 +240,46 @@ class TestSpecWiring(_CreateAgentHarness):
         assert any(isinstance(m, InterjectionMiddleware) for m in kwargs["middleware"])
         provenance = next(m for m in kwargs["middleware"]
                           if isinstance(m, UrlProvenanceMiddleware))
+        skills = next(m for m in kwargs["middleware"]
+                      if isinstance(m, SmallModelSkillsMiddleware))
+        assert "/main-skills/" not in skills.sources
+        assert "not found" in skills.tools[0].invoke({"name": "complex-request"})
         assert provenance._trust_human_messages is True
+
+    def test_async_main_can_load_supervisor_skill(self):
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+        from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
+
+        kwargs = self._build(spec=AgentSpec(
+            async_subagent_tools=_async_task_tools))
+        skills = next(m for m in kwargs["middleware"]
+                      if isinstance(m, SmallModelSkillsMiddleware))
+
+        assert "/main-skills/" in skills.sources
+        assert skills.sources[0] == "/main-skills/"
+        loaded = skills.tools[0].invoke({"name": "complex-request"})
+        assert "start one `delegate-agent` per outcome" in loaded
+        task_offload = next(
+            middleware for middleware in kwargs["middleware"]
+            if isinstance(middleware, ToolResultToFileMiddleware)
+            and middleware.name == "ToolResultToFileMiddleware_child_results"
+        )
+        assert task_offload._untrusted is True
+        assert task_offload._tools == {tool.name for tool in _async_task_tools}
+
+    def test_async_main_does_not_duplicate_overridden_supervisor_source(self):
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        backend = MagicMock()
+        kwargs = self._build(spec=AgentSpec(
+            async_subagent_tools=_async_task_tools,
+            skill_sources={"/main-skills/": backend},
+        ))
+        skills = next(m for m in kwargs["middleware"]
+                      if isinstance(m, SmallModelSkillsMiddleware))
+
+        assert skills.sources.count("/main-skills/") == 1
+        assert kwargs["backend"].routes["/main-skills/"] is backend
 
     def test_spec_skill_sources_reach_middleware(self):
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware

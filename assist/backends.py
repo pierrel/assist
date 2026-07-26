@@ -2,7 +2,12 @@ import os
 import tempfile
 
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
-from deepagents.backends.protocol import BackendProtocol
+from deepagents.backends.protocol import (
+    BackendProtocol,
+    EditResult,
+    FileUploadResponse,
+    WriteResult,
+)
 
 
 class _ReferencesNormalizingBackend(FilesystemBackend):
@@ -76,6 +81,28 @@ STATEFUL_PATHS = [
 
 SKILLS_ROUTE = "/skills/"
 SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
+MAIN_SKILLS_ROUTE = "/main-skills/"
+MAIN_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "main_skills")
+
+
+class ReadOnlyFilesystemBackend(FilesystemBackend):
+    """Package files exposed to agents for reading, never mutation."""
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        return WriteResult(error="This filesystem is read-only.", path=file_path)
+
+    def edit(self, file_path: str, old_string: str, new_string: str,
+             replace_all: bool = False) -> EditResult:
+        return EditResult(error="This filesystem is read-only.", path=file_path)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        return [FileUploadResponse(path=path, error="permission_denied")
+                for path, _content in files]
+
+
+def create_skills_backend(root_dir: str) -> BackendProtocol:
+    """Return the shared read-only backend used for packaged agent skills."""
+    return ReadOnlyFilesystemBackend(root_dir=root_dir, virtual_mode=True)
 
 # Domain skills live in the cloned repo at <working_dir>/.claude/skills/ — the
 # agentskills.io open-standard path that Claude Code and the Agent SDK also read
@@ -90,7 +117,7 @@ DOMAIN_SKILLS_PATH = "/.claude/skills/"
 
 def routes(stateful_paths: list[str]) -> dict:
     routes = {path: StateBackend() for path in stateful_paths}
-    routes[SKILLS_ROUTE] = FilesystemBackend(root_dir=SKILLS_DIR, virtual_mode=True)
+    routes[SKILLS_ROUTE] = create_skills_backend(SKILLS_DIR)
     return routes
 
 
@@ -175,4 +202,3 @@ def create_references_backend(working_dir: str) -> CompositeBackend:
         ),
         routes=routes(STATEFUL_PATHS),
     )
-

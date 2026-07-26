@@ -74,14 +74,16 @@ The change is therefore:
    registration" below):
 
    #+begin_src python
-   # Precedence (last-wins in the listing): domain < built-in < embedder-extras.
+   # Async-main order is main-only, domain, built-in, embedder-extras.
+   # Other roles omit main-only. Collision precedence remains last-wins:
+   # main-only < domain < built-in < embedder-extras.
    # Domain skills EXTEND the built-ins; they do not override a built-in of the
    # same name (built-in safety skills like dev/git-conflict are the floor).
-   skill_sources = [SKILLS_ROUTE]
+   skill_sources = ([MAIN_SKILLS_ROUTE] if async_main else []) + [SKILLS_ROUTE]
    if extra_skill_sources:
        skill_sources.extend(k for k in extra_skill_sources if k != SKILLS_ROUTE)
    if _domain_skills_present(backend):           # backend.ls, see below
-       skill_sources.insert(0, DOMAIN_SKILLS_PATH)
+       skill_sources.insert(1 if async_main else 0, DOMAIN_SKILLS_PATH)
    #+end_src
 
 3. **No change to =Thread= / =ThreadManager= / the =manage/web= layer.**
@@ -121,10 +123,11 @@ source — a no-op.
 
 ** Precedence on name collision — the one decision to confirm
 deepagents resolves listing collisions **last-source-wins** (it builds a
-=dict[name] -> skill=). With ordering =[DOMAIN_SKILLS_PATH, SKILLS_ROUTE,
-*extras]= the precedence is:
+=dict[name] -> skill=). Async main uses =[MAIN_SKILLS_ROUTE,
+DOMAIN_SKILLS_PATH, SKILLS_ROUTE, *extras]=; other roles omit the first source.
+The precedence is:
 
-: domain  <  built-in (assist/skills/)  <  embedder-extras (e.g. emacsos)
+: main-only < domain < built-in (assist/skills/) < embedder-extras (e.g. emacsos)
 
 i.e. **built-ins win** over a same-named domain skill, and embedder-supplied
 extras keep their existing highest precedence (preserving the documented

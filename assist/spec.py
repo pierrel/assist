@@ -64,8 +64,9 @@ class AgentSpec:
 
     # ADDITIVE skill routes: virtual path -> backend holding SKILL.md
     # trees, merged with built-in and domain skills.  Precedence on a
-    # name collision is domain < built-in < embedder sources (the
-    # deepagents listing is last-source-wins).  Re-passing the built-in
+    # name collision is main-only < domain < built-in < embedder sources for
+    # the async main, and domain < built-in < embedder sources otherwise (the
+    # deepagents listing is last-source-wins). Re-passing the built-in
     # SKILLS_ROUTE as a key overrides the built-in backend.
     skill_sources: Mapping[str, BackendProtocol] = field(default_factory=dict)
 

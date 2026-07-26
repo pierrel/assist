@@ -22,9 +22,9 @@ where reliability is harder than with frontier APIs.
   the workspace's `AGENTS.md` and auto-load on every
   session. Instructions tuned to work well with small LLMs.
 
-- **Small-LLM-tuned skills.** Skills are progressively-disclosed
-  capability bundles under `assist/skills/<name>/SKILL.md`. Similarly
-  tuned to small LLMs.
+- **Small-LLM-tuned skills.** Shared skills are progressively-disclosed
+  capability bundles under `assist/skills/<name>/SKILL.md`; supervisor-only
+  workflows live under `assist/main_skills/`. Both are tuned to small LLMs.
 
 - **Built-in sandboxing.** Every tool call that touches the filesystem
   or runs code happens inside a per-thread Docker container with the
@@ -200,6 +200,7 @@ Skill-specific:
 - `test_dev_skill_multi_turn.py` — dev skill on the general agent: multi-turn TDD with approvals + mid-task clarification
 
 Cross-cutting:
+- `test_async_subagents.py` — 13-case supervisor/delegation acceptance suite
 - `test_domain_integration.py` — git integration and domain management
 - `test_memory.py`, `test_various_failures.py` — memory + failure modes
 - `test_thread_e2e.py` — thread/conversation persistence
@@ -414,8 +415,11 @@ the outer rings.
 
 1. **System prompt** (`assist/templates/deepagents/general_instructions.md.j2`)
    — what agents exist, what general process to follow, and the
-   project-wide rules. Should never name a specific skill or describe
-   skill rules. May reference the **Skills** section abstractly.
+   project-wide rules. It normally references the **Skills** section abstractly and
+   leaves skill rules to the body. The async main has one measured exception: a
+   short trigger for its main-only `complex-request` orchestration skill. Natural
+   small-model evals showed that manifest discovery alone missed these requests;
+   the prompt names the loading action, while the skill still owns the workflow.
 2. **Skills middleware prompt** (`SMALL_MODEL_SKILLS_PROMPT` in
    `skills_middleware.py`) — how skills work in general: the
    description-then-load contract, the `load_skill` tool, the pre-action
@@ -426,14 +430,17 @@ the outer rings.
 4. **Skill body** (everything after the frontmatter in `SKILL.md`) —
    the actual rules the agent applies once it has loaded the skill.
 
-A new skill is added by creating `assist/skills/<name>/SKILL.md` —
-nothing else needs to change. If you find yourself editing layer 1 or
-layer 2 to make a skill match, the description (layer 3) is wrong.
+A skill shared by every role is added by creating
+`assist/skills/<name>/SKILL.md` — nothing else needs to change. If you find
+yourself editing layer 1 or layer 2 to make a shared domain skill match, the
+description (layer 3) is wrong. A core orchestration hook needs repeated natural-eval
+evidence and must leave its detailed policy in the skill body.
 
 ### Writing a skill description
 
-The description is the only thing the model has to decide whether to
-load. It is matched against the user's latest message by the
+The description is normally the model's routing signal for whether to load. The
+main-only orchestration exception also has the short system-prompt hook above. A
+description is matched against the user's latest message by the
 pre-action check (and by the model's general attention). Every built-in
 skill uses the same shape — **a one-line capability sentence, a few
 concrete `EXAMPLES`, and a `MUST load before` clause**:
@@ -490,16 +497,19 @@ to re-justify loading.
 1. Create `assist/skills/<skill-name>/SKILL.md` with frontmatter
    (`name:` matching the directory, `description:` following the rules
    above) and a body of rules.
-2. That's it. `SkillsMiddleware` discovers the skill via the
-   `/skills/` source path on next agent construction; the system prompt
-   automatically lists it; `load_skill(name="<skill-name>")` works.
+2. That's it for a skill shared by every Assist role. `SkillsMiddleware`
+   discovers it via the `/skills/` source path on next agent construction;
+   the system prompt automatically lists it and
+   `load_skill(name="<skill-name>")` works. Put a main-only workflow under
+   `assist/main_skills/` and mount its read-only source only for the async main
+   profile; an unmounted skill is neither listed nor loadable by other roles.
 3. Add an eval under `edd/eval/` that exercises the trigger conditions
    and the rules, similar to `test_org_format_skill.py` and
    `test_skill_loading.py`.
 
 ### Why the layered structure matters
 
-The four-layer split is what lets us add the eleventh skill without
+The four-layer split is what lets us add another skill without
 rewriting the outer prompts. If the skills prompt named "org-mode" or
 "markdown" as examples, every new file-format skill would tempt an
 edit. If the description summarized the rules, the body would drift
@@ -689,7 +699,10 @@ assist/
 │   │   └── …                           # other middleware
 │   ├── skills/              # Agent skills loaded via SkillsMiddleware
 │   │   ├── dev/SKILL.md     # TDD workflow + code-task routing
-│   │   └── org-format/SKILL.md
+│   │   ├── org-format/SKILL.md
+│   │   └── …
+│   ├── main_skills/         # Supervisor-only skills for the async main
+│   │   └── complex-request/SKILL.md
 │   └── templates/           # Jinja prompt templates
 │       ├── deepagents/      # Per-agent system prompts
 │       └── reference/       # Inline references (legacy; being moved into skills)

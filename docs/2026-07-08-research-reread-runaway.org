@@ -166,7 +166,7 @@ exclusion. Also update the exclusion paragraph in =url_provenance.py='s module d
 (=:23-28=), which currently documents "NOT the orchestrator … bounded by recursion_limit."
 
 *Why provenance is transparent on the healthy path (resolves the original fear + open
-Q1).* =_seen_urls= (=url_provenance.py:95-117=) allows any URL present in *any*
+Q1).* =_seen_urls= (=url_provenance.py:95-117=) allows any URL present in a trusted
 =ToolMessage= (or the user message) in the agent's context. The searcher returns its
 findings to the orchestrator **as a =task= tool result — a =ToolMessage=** — so every
 URL the searcher actually found lands in the orchestrator's context and provenance lets
@@ -222,10 +222,13 @@ any URL. Question: a factual lookup ("where is X buried?").
 
 * 4. Risks & open questions for Pierre
 
-1. *(RESOLVED — verified against =url_provenance.py=.)* Does provenance on the
-   orchestrator hurt legitimate deep research? No: =_seen_urls= allows any URL in a
-   =ToolMessage=, and the searcher's findings reach the orchestrator *as* a =task=
-   =ToolMessage=, so search-sourced URLs pass; prior-report URLs (via =read_file=) pass.
+1. *(HISTORICAL — the current V2 orchestrator has no =read_url=.)* The earlier
+   orchestrator guard allowed search-sourced citations from trusted =task= results and
+   prior-report URLs from =read_file=. The current URL guard's trusted task-result path
+   instead serves the legacy main agent's synchronous research specialist; delegates
+   exclude specialist and file-read results as authority.
+   Async task-management output, direct =read_url=/=execute= output, and reads of
+   untrusted offloads are excluded because they are attacker-derivable.
    The one residual: the searcher's findings text must *contain* the URLs (citations
    normally do) — the healthy-path regression eval is the gate. Residual open Q: if the
    orchestrator ever legitimately builds a URL from a *pattern* (base + id) rather than

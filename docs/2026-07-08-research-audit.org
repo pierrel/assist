@@ -103,9 +103,11 @@ lost.
 
 ** The four shipped guardrails
 - =UrlProvenanceMiddleware= (#182, =url_provenance.py=): refuses =read_url= on a URL absent from any prior
-  =ToolMessage=/=HumanMessage= (=_seen_urls= =:100-122=; excludes AIMessage to stop self-laundering).
-  Corrective (not turn-ending). Now on ALL THREE read_url agents (=_read_url_guards()=). Rejection copy
-  handles the empty-allow-list case (=_correction= =:137-160=): "you have no sourced URLs … stop".
+  trusted =ToolMessage=/=HumanMessage= (excludes AIMessage,
+  async task-management output, direct =read_url=/=execute= output, and reads of
+  untrusted offloads to stop laundering).
+  Corrective (not turn-ending). Now on every read_url-bearing graph via =_read_url_guards()=. Rejection copy
+  handles the empty-allow-list case: search-capable callers search first; callers without search report no sources and stop.
 - =ReadUrlRereadBreaker= (#178, =read_url_reread_breaker.py=): refuses the (=max_reads=+1)th fetch of the
   SAME normalized URL in the current TURN (default 3, =:34=). Corrective (finalize-not-kill, =:111-121=).
   Counts COMPLETED fetches via =loop_detection._extract_events= (=:49-71=). *Per-run/per-turn scope →
@@ -158,7 +160,7 @@ where the small model actually over-calls (incident-cited).
 
 ** 2.3 Re-READ (same-URL rereads)
 - Guard: =ReadUrlRereadBreaker= caps 3 fetches/URL/run (coarse+real, unambiguous — a page's content is
-  unchanged, so re-read N>3 is never real work). On all three read_url agents.
+  unchanged, so re-read N>3 is never real work). On every read_url-bearing graph.
 - Residual: per-run scope resets across re-dispatches (2.2). Bounded across dispatches only by
   recursion_limit.
 - Where it over-calls: peptides PMID 37657235 read *78×* (doc 2026-07-07); b37c712b re-read/guessed URLs

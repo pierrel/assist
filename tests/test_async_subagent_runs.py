@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from manage.web import threads
 import manage.web as web
+import assist.async_subagents as async_tasks
 from assist.async_subagents import (
     AsyncTaskContext, async_task_context, async_task_tools,
     configure_async_subagent_app,
@@ -348,6 +349,42 @@ def test_cancel_interrupted_task_reports_immediate_cancellation(
     assert response.startswith("Task cancelled:")
     assert SERVICE.get_thread(child.thread_id)["values"]["async_task"][
         "status"] == "cancelled"
+
+
+def test_cancel_reports_task_that_completed_during_request(monkeypatch):
+    before = {"parent_thread_id": "parent", "status": "running"}
+    after = {
+        "task_id": "sub-race",
+        "agent_name": "delegate-agent",
+        "description": "finish report",
+        "status": "success",
+        "result": "report complete",
+    }
+    monkeypatch.setattr(async_tasks, "_run", lambda _operation: (before, after))
+
+    with async_task_context(AsyncTaskContext("parent", "run", "work")):
+        response = async_tasks._cancel_async_task(
+            "sub-race", SimpleNamespace(tool_call_id="cancel"))
+
+    assert response.startswith("Task completed with status success before cancellation:")
+    assert '"result": "report complete"' in response
+
+
+def test_cancel_reports_pending_stop_marker_as_requested(monkeypatch):
+    before = {"parent_thread_id": "parent", "status": "running"}
+    after = {
+        "task_id": "sub-race",
+        "agent_name": "delegate-agent",
+        "description": "finish report",
+        "status": "pending",
+    }
+    monkeypatch.setattr(async_tasks, "_run", lambda _operation: (before, after))
+
+    with async_task_context(AsyncTaskContext("parent", "run", "work")):
+        response = async_tasks._cancel_async_task(
+            "sub-race", SimpleNamespace(tool_call_id="cancel"))
+
+    assert response.startswith("Cancellation requested:")
 
 
 def test_cancel_queued_update_cancels_the_running_logical_task(

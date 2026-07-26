@@ -313,9 +313,10 @@ class ThreadManager:
             return Thread(working_dir, agent=specialized, **thread_kwargs)
         if assistant_id == "delegate-agent":
             # A whole-task worker is the same Assist graph with a narrower web
-            # composition: built-in/domain capabilities and synchronous
-            # specialists stay; supervisor lifecycle/front-end tools, render
-            # skill, HITL, and self-delegation are simply absent.
+            # composition: shared built-in/domain capabilities and synchronous
+            # specialists stay; the main-only planning skill, supervisor
+            # lifecycle/front-end tools, render skill, HITL, and
+            # self-delegation are simply absent.
             return Thread(
                 working_dir, **thread_kwargs,
                 spec=AgentSpec(role="delegate", async_subagent_tools=None))

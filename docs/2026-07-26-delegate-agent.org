@@ -3,13 +3,14 @@
 
 * State
 
-Implemented, locally reviewed to convergence, and deployed for parallel testing.
-GitHub PR #215 is open.
+GitHub PR #215 is open. The main-only skill, role-specific skill mounting,
+natural-eval rewrite, and prompt tuning are implemented, locally reviewed, and
+rebased onto GitHub =main= at =c82e07a=; the final branch is ready to redeploy.
 
 The shared-constructor role, one-level capability boundary, durable
-admission-frozen URL seeds, and deterministic coverage are implemented. The full
-suite passes 1438 tests with 2 skips after rebasing onto GitHub/Forgejo =main= at
-=259b9ec=; compile and diff checks pass. Earlier local
+admission-frozen URL seeds, and deterministic coverage are implemented. The
+current post-rebase implementation passes 1462 tests with 2 skips; focused
+delegate, provenance, and skill coverage passes 124/124. Earlier local
 review rounds found and fixed causal timestamp ordering, unrelated parent-history
 disclosure, normalized userinfo/fragment disclosure, child-result instruction
 laundering, eval/production prompt drift, and documentation drift.
@@ -30,24 +31,22 @@ supported run-config accessor; the graph-level regression no longer supplies a
 test-only runtime config object.
 
 Per Pierre's decision, TODOs are advisory. Durable task state is authoritative,
-and the supervisor must check success and error wakes, reconcile its plan, preserve
-successful sibling results, and report blocked dependents. Real-model eval fixtures
-now perform the filesystem effects they claim and judge required facts rather than
-one incidental wording. The prior 11-case async-subagent subset passes N=5
-(55/55; =/tmp/assist-delegate-agent-outcome-n5-r9.log=). It covers natural and
-explicit fan-out, serial result dependencies, overlapping workspace effects,
-failure recovery, cancellation, specialist routing, and non-polling launch replies.
-The expanded 12-case stability run passed 47/48 before stopping on one natural
-four-item fan-out miss; that exact case then passed 3/3 immediately
-(=/tmp/assist-delegate-agent-outcome-n10-r2.log= and
-=/tmp/assist-delegate-agent-natural-final-n3.log=). This meets the agreed
-reasonable-satisfaction bar while keeping the miss visible.
+and the supervisor must check success, error, and timeout wakes, reconcile its plan, preserve
+successful sibling results, and report blocked dependents. The current real-model
+suite separates a small explicit capability layer from natural acceptance cases.
+The first repeated N=3 pass of the revised 13-case real-model suite scored 38/39:
+13/13, 13/13, then 12/13. All 27 natural cases passed. A later clean-prompt N=1
+run exposed four useful misses; general guidance fixed prerequisite timeout handling
+and first-call skill selection. Under the outcome-first natural validations requested
+by Pierre, that run is 7/9 (77.8%): cancellation wording and overlapping-edit routing
+remain expected stochastic misses at this starting target. The explicit capability
+layer remains intentionally stricter.
 
 * Problem
 
-A user should be able to give Assist a long list of substantive work and have
-the main agent hand each discrete unit to another full Assist worker. Independent
-units should be admitted together; a unit that consumes another unit's result or
+A user should be able to give Assist several requested outcomes and have the main
+agent hand each outcome to another full Assist worker. Independent outcomes should
+be admitted together; an outcome that consumes another outcome's result or
 touches the same workspace state should start only after its predecessor
 finishes. The existing async task lifecycle already provides admission, durable
 status, completion wakes, updates, cancellation, recovery, and serialized access
@@ -65,15 +64,15 @@ Add one fixed async assistant type named =delegate-agent=.
 
 1. =AgentSpec= gains a two-value role: =main= (the default) or =delegate=.
    =assist.agent.create_agent= remains the only constructor. The role changes
-   only the prompt identity, URL provenance source, logging name, and omission
-   of =InterjectionMiddleware=.
+   the prompt identity, URL provenance source, logging name, supervisor-only
+   skill source, and omission of =InterjectionMiddleware=.
 2. The web main agent keeps the five async task-management tools and may launch
    =delegate-agent=. A delegate receives none of those tools, so a second level
    is impossible by construction. It receives =async_subagent_tools=None=,
    which reuses the established synchronous context, research, and critique
    specialists inside the same graph.
 3. A delegate receives the parent working directory, per-turn sandbox, built-in
-   tools, built-in/domain skills, =read_url=, and the normal hardening stack.
+   tools, shared built-in/domain skills, =read_url=, and the normal hardening stack.
    It does not receive web composition tools, the web render skill, =send_reply=,
    HITL configuration, async task-management tools, or interjection delivery.
 4. The child input remains one self-contained HumanMessage containing exactly
@@ -89,13 +88,13 @@ Add one fixed async assistant type named =delegate-agent=.
    user messages cannot retroactively expand older work. Parent history is never
    revealed to the delegate; a historical owner URL becomes fetch-authorized only
    when the brief independently repeats its canonical URL without adding or
-   changing credentials.
-6. The main prompt defines scheduling, not a new scheduler: one specific,
-   self-contained brief per discrete item; three or more deliverables always use
-   delegates even when individually small, as do two substantive deliverables,
-   while a single deliverable with several steps stays with the main agent; launch
-   all independent items in the
-   same turn; serialize data dependencies and overlapping workspace effects;
+   changing credentials. The delegate also treats its synchronous specialist
+   results as model-authored data rather than new URL authority.
+6. The main prompt defines scheduling, not a new scheduler. It chooses an
+   execution shape from independently useful, verifiable outcomes: one outcome
+   with several steps stays with the main agent; two or more distinct requested
+   outcomes use one delegate per outcome. It launches every currently unblocked outcome in the
+   same turn and serializes data dependencies and overlapping workspace effects;
    check every completion; launch newly unblocked work; preserve successful
    siblings when one fails; report the blocked dependency rather than inventing
    its output. TODOs are advisory planning aids; durable async task results are the
@@ -104,6 +103,13 @@ Add one fixed async assistant type named =delegate-agent=.
    data, and never carries child directives into a later brief. A pure specialist
    lookup still uses context/research/critique directly. A delegate owns an
    end-to-end task that may use specialists.
+7. A built-in =complex-request= skill carries the detailed workflow for
+   mapping several outcomes into advisory TODOs and explicit, self-contained
+   delegate briefs. Its description makes natural multi-result and dependent
+   requests trigger progressive disclosure before work begins. The main agent
+   receives it through a separate read-only =/main-skills/= source. That route is
+   absent from the delegate and legacy non-async main backends, so neither listing
+   nor direct loading can expose it there.
 
 * User flow
 
@@ -111,7 +117,7 @@ For “do X for each of [A, B, C], then combine the results,” the main agent s
 three delegate tasks in one turn, reports their full task IDs, and returns. Each
 completion wakes the main thread. The main checks the completed task and records
 its result. Only after all three terminal results exist does it start the
-dependent combine task or perform the synthesis itself. If B fails, A and C stay
+dependent combine task. If B fails, A and C stay
 usable; work that specifically depends on B is not started and the user sees the
 failure and next step.
 
@@ -137,6 +143,11 @@ brief is written after X completes and contains the concrete result it needs.
 - =assist/templates/deepagents/general_instructions.md.j2=: main scheduling and
   briefing guidance; delegate identity and synchronous specialist guidance in
   the same template.
+- =assist/main_skills/complex-request/SKILL.md=: progressively disclosed TODO,
+  dependency, brief, supervision, and final-reconciliation workflow for the
+  main agent only.
+- =assist/backends.py=: reuse the existing discovery and loading path through a
+  read-only skill backend, mounting the supervisor source only for the async main.
 - =edd/eval/test_async_subagents.py=: observable parallel, serial, completion,
   and failure behavior against the real small model.
 
@@ -151,9 +162,13 @@ The new trust-boundary hazard is URL laundering. The main model controls a
 delegate brief, so a URL appearing in that HumanMessage cannot prove user
 provenance. Delegate-mode provenance therefore ignores HumanMessages and accepts
 only admission-frozen URLs present in both its brief and accepted owner Runs,
-trusted tool results, and existing same-host page navigation. Unmentioned parent
-history is not exposed; page/shell/offload URLs and URLs invented by the main or
-delegate remain unreachable through =read_url=.
+   direct trusted non-file tool results, and existing same-host page navigation.
+   Unmentioned parent history is not exposed; page/shell/offload, async child, and
+   delegate-specialist URLs invented by the main or delegate remain unreachable
+   through =read_url=. Large async and delegate-specialist results are written through
+   the existing untrusted-offload path before the framework can evict them to an
+   unmarked file. Delegate file reads cannot grant URL authority because specialist
+   reports share the same filesystem namespace as owner files.
 
 One-level delegation is a capability boundary, not a behavioral guard: the
 delegate graph simply has no async lifecycle tools. Its fixed synchronous
@@ -172,29 +187,44 @@ start another =delegate-agent= or manage the outer async lifecycle.
 3. A genuine owner URL accepted before child admission and repeated in the brief
    is readable by the delegate and its synchronous research specialist. A URL
    only in the model brief, unmentioned owner history, a fetched page, shell output,
-   or a later user message is not authority.
+   an async child result, a delegate specialist result, or a later user message is
+   not authority. Large child results retain that classification after offload.
 4. Fair resume preserves the original URL tuple; an explicit updated brief gets a
    freshly derived tuple from owner messages accepted before that update.
 5. Child execution still shares the parent working directory/sandbox, remains
    off the asyncio loop, and uses the existing durable wake/recovery paths.
 6. Existing context/research/critique async tasks and all current URL provenance
    tests remain green. Smoke =python -m manage.web= after the construction change.
+7. The async main skill listing exposes =complex-request= and can load its full
+   body; delegate and legacy-main backends do not mount the route, so direct loads
+   return not found. Packaged skill files are read-only in every role.
 
 ** Real-model behavior
 
-Add failing cases before implementation, then run N=3 baseline, N=3 after
-implementation, N=5 after local review, and N=10 stability:
+Keep a small explicit capability layer to show that fan-out, serial handoff, and
+failure handling can work at all. Write the acceptance cases as natural user
+requests without architecture, tool, routing, scheduling, or assertion hints.
+Judge natural cases by whether the requested outcome is achieved; retain a natural
+long-list case that measures spontaneous delegation. Run them repeatedly and target
+at least 70% while retaining observed failures; improve general guidance rather than
+making individual prompts more leading. Re-run adjacent and unrelated passing evals
+while tuning:
 
-- a list of independent substantive items starts one delegate per item in the
+- a list of independent outcomes starts one delegate per outcome in the
   same turn with self-contained briefs;
-- three small independent deliverables delegate without an explicit delegation
-  request, while one deliverable with several steps stays with the main agent;
-- a dependent item is withheld until its prerequisite completes, then launched;
+- several small independent outcomes delegate without an explicit delegation
+  request, while one outcome with several steps stays with the main agent;
+- a dependent outcome is withheld until its prerequisite completes, then launched;
 - a completion wake is checked before the result is used;
 - result facts reach dependent briefs without relaying child-authored directives;
 - overlapping workspace effects are serialized;
 - a failed sibling does not discard successful results or trigger blocked work;
-- pure external research uses =research-agent=, not =delegate-agent=.
+- pure external research uses =research-agent=, not =delegate-agent=;
+- launch replies return task IDs without polling;
+- checked failures are not retried, replaced with direct work, or allowed to
+  unblock dependents without a user request;
+- stopping active work is reported as a cancellation request, not a completed
+  cancellation.
 
 * Explicit non-goals
 
@@ -205,4 +235,5 @@ implementation, N=5 after local review, and N=10 stability:
 - Do not copy parent conversation history into the delegate.
 - Do not teach the delegate to self-delegate or expose lifecycle tools and then
   ask it not to use them.
+- Do not expose the main agent's complex-request supervision skill to delegates.
 - Do not make =delegate-agent= a research alias; research remains a specialist.

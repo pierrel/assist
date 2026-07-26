@@ -31,19 +31,24 @@ AND an independent review, both concluded STANDALONE, on the code:
 * Design — =ToolResultToFileMiddleware(backend, *, tools, floor_chars, preview_style)=
 (=assist/middleware/tool_result_to_file.py=.) For a POSITIVE allowlist of tool names, a
 result >=floor_chars= is written to =/large_tool_results/<sanitize_tool_call_id>= and
-replaced with a preview + path + grep instruction. Sanitizes before write; write-error /
-=Command= / not-listed / under-floor all pass through; sync + async; never breaks the tool
+replaced with a preview + path + grep instruction. Sanitizes before write; listed tools'
+direct =ToolMessage= and =Command.update["messages"]= result shapes are handled;
+write-error / not-listed / under-floor pass through. Sync + async; never breaks the tool
 path (try/except → original). Bounded to ~1kB per call BY CONSTRUCTION.
 
 Wiring (differs per agent — the tool surfaces differ):
-- read_url — research agent (orchestrator + =_subagent_safety_mw=), floor 4000, =head=
-  preview. Pure rename of the shipped read_url→file; proven.
-- execute — dev/main agent (=create_agent=), floor 8000, =head_tail= preview. NEW.
+- read_url — every read_url-bearing graph, floor 4000, =head= preview, untrusted page
+  marker so rereads remain non-authoritative while real same-host links stay navigable.
+- execute — main/delegate (=create_agent=), floor 8000, =head_tail= preview, generic
+  untrusted marker on the real sandbox filesystem.
+- child results — async lifecycle results on the main and synchronous =task= results on
+  the delegate, floor 4000, generic untrusted marker. The latter arrives inside a
+  =Command=, which is why that result shape is handled explicitly.
 
-Exclusions by construction (never listed): =task= (the orchestrator needs the whole
-subagent report inline to synthesize — filing it forces it to grep its own subagent), the
-file tools (read_file/grep/ls — self-truncating), =search_internet= (bounded lists the
-model scans to PICK a url).
+Exclusions by construction (never listed): file tools (read_file/grep/ls —
+self-truncating) and =search_internet= (bounded lists the model scans to pick a URL).
+Main/legacy trusted synchronous task results remain inline; only delegate task output is
+offloaded through the untrusted child-result instance.
 
 * The notification/guidance mechanism (how the agent is told — LOAD-BEARING)
 Three reinforcing layers; the tool-result message is the load-bearing one (in-context, at

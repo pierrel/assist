@@ -11,21 +11,29 @@ message or an admission-frozen delegate seed.
 
 A provenanced URL is one the agent could have *copied* rather than *invented*:
 one textually present in a SEARCH RESULT, a non-offloaded ``read_file``/``grep``
-result, or the USER's message. A delegate is the exception: its HumanMessage is
+result outside delegate mode, or the USER's message. A delegate is the exception: its HumanMessage is
 the main model's brief, so the web host supplies only brief-form URLs canonically
 matched to owner-authored Runs already accepted when the child Run is admitted;
 the brief may remove owner userinfo but cannot add or change it.
-Four channels are deliberately NOT provenance sources, because
+Five channels are deliberately NOT provenance sources, because
 their content is attacker-derivable: the model's OWN prior text (else it launders a
 fabricated URL by writing it into its reasoning, then fetching it — see
 ``_seen_urls``); ``read_url`` PAGE CONTENT (the untrusted channel — an injected page
 can't name an exfil URL and have a follow-up read of it pass, a read-becomes-write);
 ``execute`` (shell) OUTPUT (arbitrary bytes — a cat'd download, a large log the agent
 re-reads from its real-fs offload — never a URL source); and a ``read_file``/``grep``
-of OFFLOADED untrusted content (read_url page, execute output), written under
-``…/large_tool_results/untrusted-`` (``/large_tool_results/…`` in state, or
+of OFFLOADED untrusted content, written under
+the ``…/large_tool_results/untrusted-{data,page}-`` family (in state, or
 ``/tmp/large_tool_results/…`` for a real-fs offload) — the SAME content laundered
-through a file.
+through a file; and async task-management results, whose descriptions and child
+results are model-authored data. Read-url offloads use the narrower
+``untrusted-page-`` marker: they remain excluded as authority but can supply only
+same-host link evidence. Shell and child results use the generic marker and cannot.
+Delegate graphs exclude a sixth channel: their synchronous ``task`` specialist
+results, because the delegate authored those briefs and could ask a specialist to
+echo an invented URL. The legacy main retains trusted synchronous ``task`` results so
+research-specialist citations can reach its navigation tool; the V2 research
+orchestrator itself has no ``read_url``.
 
 SAME-HOST NAVIGATION (2026-07-21): a normalized destination that appeared in
 fetched-page content is fetchable IF its host is already trusted (a user URL or search
@@ -48,14 +56,8 @@ invented/malicious" heuristic), and it does not end the turn: it returns a corre
 tool result so the model retries with a real URL. RESIDUAL: a model that FOLLOWS a
 multi-step injection to ``write_file`` an arbitrary URL then ``read_file`` it — or to
 ``execute``-copy the real-fs untrusted offload into a workspace path (shedding the
-``untrusted-`` marker) then ``read_file`` the copy — can self-launder; gated by
-behavioral injection-resistance, not this guard. A narrower same-class residual: a
-same-host URL in a LARGE ``execute`` log gets offloaded to ``untrusted-`` and, read
-back via ``read_file``/``grep``, counts as page content (the ``untrusted-`` marker
-can't tell a read_url offload from an execute one) — so its credentialless path is
-navigable if its host is already trusted. Direct shell output is closed by
-construction (``_is_page_content``);
-this multi-step offload-then-file-read path is not, and shares the same behavioral gate.
+untrusted namespace) then ``read_file`` the copy — can self-launder; gated by
+behavioral injection-resistance, not this guard.
 
 Scope: every ``read_url``-bearing agent — the research SEARCHER and FACT-CHECKER
 sub-agents, and the main/delegate navigation ``read_url`` (added 2026-07-21 for the
@@ -84,11 +86,22 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from assist.middleware.loop_detection import _messages_from_state
-from assist.middleware.tool_result_to_file import UNTRUSTED_OFFLOAD_MARK
+from assist.middleware.tool_result_to_file import (
+    UNTRUSTED_OFFLOAD_MARK,
+    UNTRUSTED_PAGE_OFFLOAD_MARK,
+)
 
 logger = logging.getLogger(__name__)
 
 _READ_TOOL = "read_url"
+_SYNC_SUBAGENT_TOOL = "task"
+_ASYNC_TASK_TOOLS = {
+    "start_async_task",
+    "check_async_task",
+    "update_async_task",
+    "cancel_async_task",
+    "list_async_tasks",
+}
 # Per-run trusted URL seeds for a delegate. The web composition root freezes the
 # intersection of its brief and already-accepted owner Runs; the model cannot write
 # the durable Run field or RunnableConfig.
@@ -126,17 +139,20 @@ _MAX_LISTED = 8
 # ``…/Mercury_(element)`` and the model's copied ``…/Mercury_(element)`` both
 # reduce to the same key, and a prose ``…/page.`` matches the clean ``…/page``.
 _TRAILING = ".,;:!?)]}'\""
-# File-read tools whose result can surface OFFLOADED untrusted content: a large read_url/
-# execute result is written to …/large_tool_results/untrusted-<id> and the model greps/
+# File-read tools whose result can surface OFFLOADED untrusted content: a large read_url,
+# execute, or child task result is written to a …/large_tool_results/untrusted-*
+# namespace and the model greps/
 # read_files it back (ToolResultToFileMiddleware). That read is still the untrusted content,
 # laundered through a file — so URLs in it must stay untrusted.
 _FILE_READ_TOOLS = {"read_file", "grep"}
-# UNTRUSTED offloads (read_url/execute) are written at .../large_tool_results/untrusted-<id>
+# UNTRUSTED offloads use disjoint .../large_tool_results/untrusted-data-* and
+# .../large_tool_results/untrusted-page-* namespaces.
 # by ToolResultToFileMiddleware, which sets the untrusted-ness AT WRITE TIME (where it knows
 # the tool). We key on that exact fragment (imported, so writer + guard can't drift): a bare
 # prose mention of "large_tool_results" can't match it, and a normal (future-trusted) offload
 # at .../large_tool_results/<id> is NOT excluded — no mixing of trusted/untrusted.
 _OFFLOAD_MARK = UNTRUSTED_OFFLOAD_MARK
+_PAGE_OFFLOAD_MARK = UNTRUSTED_PAGE_OFFLOAD_MARK
 # The LOCATION args of read_file/grep (NOT the grep `pattern`, which is a search term):
 # a marker here means the read TARGETS offloaded content.
 _OFFLOAD_PATH_KEYS = ("path", "file_path", "glob")
@@ -209,31 +225,63 @@ def urls_in_text(text: str) -> tuple[str, ...]:
     return tuple(_display_url(raw) for raw in _URL_RE.findall(text))
 
 
+def _is_offload_path(value: Any, marker: str) -> bool:
+    path = str(value)
+    return (path.startswith(marker)
+            or path.startswith(f"/{marker}")
+            or path.startswith(f"/tmp/{marker}"))
+
+
 def _reads_offloaded(tool_call: dict, content: str) -> bool:
     """True if a ``read_file``/``grep`` (whose originating call IS known) touched
-    OFFLOADED untrusted content (read_url page, execute output) — the same untrusted page content laundered through a
-    file. Two ways it shows up: the read's TARGET PATH contains ``large_tool_results/untrusted-``
+    OFFLOADED untrusted content (read_url page, execute output, or child output) —
+    the same untrusted content laundered through a file. Two ways it shows up: the read's TARGET PATH contains an untrusted namespace
     (checked on the LOCATION args only — path/file_path/glob, not the grep ``pattern``),
     OR the result names an offloaded file (grep's default ``files_with_matches`` lists
     matching paths, so a grep-all that hit the offload dir shows it). Over-matches only
     make the model re-search — never trust more."""
     args = tool_call.get("args") or {}
-    if any(_OFFLOAD_MARK in str(args.get(k, "")) for k in _OFFLOAD_PATH_KEYS):
+    if any(_is_offload_path(args.get(k, ""), marker)
+           for k in _OFFLOAD_PATH_KEYS
+           for marker in (_OFFLOAD_MARK, _PAGE_OFFLOAD_MARK)):
         return True
-    return _OFFLOAD_MARK in (content or "")
+    return any(marker in (content or "")
+               for marker in (_OFFLOAD_MARK, _PAGE_OFFLOAD_MARK))
 
 
-def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
+def _reads_page_offload(tool_call: dict) -> bool:
+    """True only for a reread of content originally returned by ``read_url``."""
+    args = tool_call.get("args") or {}
+    return any(_is_offload_path(args.get(k, ""), _PAGE_OFFLOAD_MARK)
+               for k in _OFFLOAD_PATH_KEYS)
+
+
+def _is_untrusted_result(
+        m: ToolMessage,
+        calls_by_id: dict,
+        *,
+        trust_task_results: bool = True,
+) -> bool:
     """A ToolMessage whose content must NOT provenance URLs — the untrusted channels:
-    read_url page content directly, ``execute`` (shell) output, or a ``read_file``/
-    ``grep`` of OFFLOADED untrusted content (read_url page OR execute output — both land
-    under ``…/large_tool_results/untrusted-``). Fails CLOSED: a file read whose originating ``tool_call`` is missing from
+    read_url page content directly, ``execute`` (shell) output, async task-management
+    output, or a delegate's synchronous specialist and file-read output when
+    task-result trust is disabled. Other roles also exclude a ``read_file``/``grep``
+    of OFFLOADED untrusted content (read_url page or execute/child output). Fails
+    CLOSED: a file read whose originating ``tool_call`` is missing from
     the message list (e.g. summarization dropped it) is treated as untrusted — we can't
     verify its target wasn't the offload dir, so we don't provenance its URLs."""
     name = getattr(m, "name", None)
-    if name in (_READ_TOOL, _SHELL_TOOL):        # direct untrusted output: read_url page / shell
+    if name in {_READ_TOOL, _SHELL_TOOL, *_ASYNC_TASK_TOOLS}:
+        return True
+    if name == _SYNC_SUBAGENT_TOOL and not trust_task_results:
         return True
     if name in _FILE_READ_TOOLS:                 # a file read — verify its target
+        if not trust_task_results:
+            # Delegate specialists save reports in the same filesystem namespace as
+            # owner files. Their origin is not recoverable from a later file read, so
+            # delegate file results cannot mint URL authority. User URL seeds and
+            # page-marked same-host navigation remain available separately.
+            return True
         tc = calls_by_id.get(getattr(m, "tool_call_id", None))
         if tc is None:                           # unknown target -> fail CLOSED
             return True
@@ -242,18 +290,20 @@ def _is_untrusted_result(m: ToolMessage, calls_by_id: dict) -> bool:
 
 
 def _is_page_content(m: ToolMessage, calls_by_id: dict) -> bool:
-    """Genuine FETCHED-PAGE content — the subset of untrusted results whose URLs a real
-    page actually surfaced, so a same-host path may be NAVIGABLE (see
-    _page_content_urls / wrap_tool_call; page userinfo is never authority). That is
-    direct ``read_url`` and a ``read_file``/``grep`` of an
-    offloaded page — but NOT ``execute`` (shell) output. This split from
-    ``_is_untrusted_result`` is load-bearing: that predicate has OPPOSITE polarity in its
-    two callers — ``_seen_urls`` EXCLUDES it (untrusted → not a provenance source),
-    ``_page_content_urls`` INCLUDES it (page content → navigable if same-host) — and shell
-    output must be excluded by BOTH. Untrusted it is; a fetched page it is not, so a URL
-    printed by ``execute`` must not become navigable just because its host is trusted."""
-    return (_is_untrusted_result(m, calls_by_id)
-            and getattr(m, "name", None) != _SHELL_TOOL)
+    """Content allowed to contribute same-host navigation paths.
+
+    Direct ``read_url`` output qualifies. A ``read_file``/``grep`` qualifies only
+    when its target has the page-specific offload marker written by the ``read_url``
+    middleware. Shell and child-task results never qualify. This classifier is separate from
+    ``_is_untrusted_result``: `_seen_urls` uses that broader predicate to exclude trust
+    sources, while `_page_content_urls` uses only this predicate for navigation paths."""
+    name = getattr(m, "name", None)
+    if name == _READ_TOOL:
+        return True
+    if name in _FILE_READ_TOOLS:
+        tc = calls_by_id.get(getattr(m, "tool_call_id", None))
+        return tc is not None and _reads_page_offload(tc)
+    return False
 
 
 def _record_url(urls: dict[str, list[str]], raw: str) -> None:
@@ -263,7 +313,8 @@ def _record_url(urls: dict[str, list[str]], raw: str) -> None:
         variants.append(raw)
 
 
-def _seen_urls(messages: list, *, trust_human_messages: bool = True
+def _seen_urls(messages: list, *, trust_human_messages: bool = True,
+               trust_task_results: bool = True,
                ) -> dict[str, list[str]]:
     """Every URL in a TRUSTED tool result or the USER's message: a map from the
     normalized form (the membership key) to every ORIGINAL credential variant seen.
@@ -272,19 +323,22 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True
     (e.g. a stripped trailing paren on a Wikipedia URL).
 
     Normally scans ``HumanMessage`` content (a URL the user pasted) and TRUSTED ``ToolMessage``
-    content (search results, non-offloaded ``read_file``/``grep`` results). Four channels
-    are EXCLUDED because their content is attacker-derivable: (1) the model's own
+    content (search results, non-offloaded ``read_file``/``grep`` results). Five channels
+    are always EXCLUDED because their content is attacker-derivable: (1) the model's own
     ``AIMessage`` — else it launders a fabricated URL by writing it into its reasoning
     first, then fetching it (observed on Qwen3.6, 14 of 24 fetches slipped through this
     way); (2) ``read_url`` results — arbitrary, possibly attacker-controlled page
     content; (3) ``execute`` (shell) output — arbitrary bytes (a cat'd download, a log the
-    agent re-reads from its real-fs offload), never a URL source; and (4) a
-    ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page, execute output)
-    under ``…/large_tool_results/untrusted-`` — the SAME content laundered through
+    agent re-reads from its real-fs offload), never a URL source; (4) async
+    task-management results — model-authored briefs and child output; and (5) a
+    ``read_file``/``grep`` of OFFLOADED untrusted content (read_url page,
+    execute output, or child result)
+    under an ``…/large_tool_results/untrusted-{data,page}-`` namespace — the SAME content laundered through
     a file (ToolResultToFileMiddleware writes it there and the model greps it). So a
     URL appearing only inside fetched-page content — direct or offloaded — never
-    becomes trusted; to reach a new page the agent re-searches (the searcher prompt
-    requires that). Delegate mode sets ``trust_human_messages=False`` and adds only
+    becomes trusted authority. A real same-host page link is separately navigable;
+    a new host requires another trusted source such as search. Delegate mode also excludes its synchronous specialist results,
+    sets ``trust_human_messages=False``, and adds only
     admission-frozen, brief-intersected owner URL seeds later. RESIDUAL: a model that FOLLOWS a multi-step injection to
     ``write_file`` an arbitrary URL then ``read_file`` it can still self-launder —
     that path is gated by the model's behavioral injection-resistance, not this guard."""
@@ -302,7 +356,8 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True
             continue
         if isinstance(m, HumanMessage) and not trust_human_messages:
             continue
-        if isinstance(m, ToolMessage) and _is_untrusted_result(m, calls_by_id):
+        if isinstance(m, ToolMessage) and _is_untrusted_result(
+                m, calls_by_id, trust_task_results=trust_task_results):
             continue
         for url in urls_in_text(_message_text(m)):
             _record_url(seen, url)
@@ -310,10 +365,10 @@ def _seen_urls(messages: list, *, trust_human_messages: bool = True
 
 
 def _page_content_urls(messages: list) -> dict[str, list[str]]:
-    """Normalized-to-original URL variants from FETCHED-PAGE content — the
-    untrusted read_url channel, direct or offloaded (see ``_is_page_content``).
-    NOT the exact inverse of ``_seen_urls``: ``execute`` (shell) output is in
-    NEITHER set — untrusted, so not trusted, but also not a page, so not navigable.
+    """Normalized-to-original URL variants from page-compatible content: direct
+    ``read_url`` output or a page-marked read_url offload reread (see
+    ``_is_page_content``). NOT the exact inverse of ``_seen_urls``: shell and child-task
+    output, direct or offloaded, are in NEITHER set.
     These are the links a page actually surfaced; a fabricated path never appears
     here. Credentialless same-host members are navigable (see wrap_tool_call);
     credentialed requests also need exact trusted same-origin userinfo. This admits
@@ -378,15 +433,19 @@ class UrlProvenanceMiddleware(AgentMiddleware):
 
     Corrective, not turn-ending: a rejected call returns an error ToolMessage
     listing the URLs the agent may actually read, so it retries with a real one.
-    ``trust_human_messages=False`` is the delegate boundary: model-authored task
-    briefs are ignored; only admission-frozen, brief-intersected owner URL seeds
-    supplied from the durable child Run can replace them.
+    ``trust_human_messages=False`` and ``trust_task_results=False`` form the delegate
+    boundary: model-authored task briefs, synchronous specialist results, and later
+    file reads are ignored; only admission-frozen, brief-intersected owner URL seeds
+    supplied from the durable child Run can replace them. Page-marked same-host links
+    remain navigation evidence but never cross-host authority.
     Stateless across turns except an intervention counter for logging."""
 
-    def __init__(self, *, trust_human_messages: bool = True) -> None:
+    def __init__(self, *, trust_human_messages: bool = True,
+                 trust_task_results: bool = True) -> None:
         super().__init__()
         self.tools = []
         self._trust_human_messages = trust_human_messages
+        self._trust_task_results = trust_task_results
         self._intervention_count = 0
 
     def wrap_tool_call(
@@ -405,7 +464,10 @@ class UrlProvenanceMiddleware(AgentMiddleware):
 
         messages = _messages_from_state(request)
         allowed = _seen_urls(
-            messages, trust_human_messages=self._trust_human_messages)
+            messages,
+            trust_human_messages=self._trust_human_messages,
+            trust_task_results=self._trust_task_results,
+        )
         configurable = (get_config() or {}).get("configurable") or {}
         seeds = configurable.get(DELEGATE_USER_URLS_KEY, ())
         if isinstance(seeds, (list, tuple)):

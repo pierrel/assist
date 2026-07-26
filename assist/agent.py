@@ -16,7 +16,17 @@ from openai import APIConnectionError, InternalServerError
 from assist.promptable import base_prompt_for
 from assist.spec import AgentSpec
 from assist.tools import directions, map_data, read_url, search_internet, travel
-from assist.backends import create_composite_backend, create_sandbox_composite_backend, create_references_backend, STATEFUL_PATHS, SKILLS_ROUTE, DOMAIN_SKILLS_PATH
+from assist.backends import (
+    DOMAIN_SKILLS_PATH,
+    MAIN_SKILLS_DIR,
+    MAIN_SKILLS_ROUTE,
+    SKILLS_ROUTE,
+    STATEFUL_PATHS,
+    create_composite_backend,
+    create_references_backend,
+    create_sandbox_composite_backend,
+    create_skills_backend,
+)
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
 from assist.sandbox import DockerSandboxBackend, SandboxContainerLostError
@@ -262,10 +272,11 @@ def create_agent(model: BaseChatModel,
     route — ``DOMAIN_SKILLS_PATH`` falls through to the default backend
     (= ``working_dir``), so the same files are reachable in both local and
     sandbox modes.  It is registered only when present (a gated ``ls``;
-    the absent case stays silent).  Precedence on a name collision is
-    ``domain < built-in < embedder-extras`` — a same-named domain skill
-    does NOT override a built-in (the safety skills ``dev`` /
-    ``git-sync`` are the floor).
+    the absent case stays silent). The async main lists its main-only
+    orchestration source first for small-model salience. Last-source-wins collision
+    precedence is ``main-only < domain < built-in < embedder-extras``; other roles
+    omit main-only. A same-named domain skill does not override a built-in (the
+    safety skills ``dev`` / ``git-sync`` are the floor).
     """
     if spec is None:
         spec = AgentSpec()
@@ -282,6 +293,7 @@ def create_agent(model: BaseChatModel,
             "create_agent: pass sandbox_backend OR AgentSpec.default_backend, "
             "not both")
     delegate = spec.role == "delegate"
+    async_main = not delegate and bool(spec.async_subagent_tools)
     mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
     logging_mw = ModelLoggingMiddleware(
         "delegate-agent" if delegate else "general-agent")
@@ -296,6 +308,9 @@ def create_agent(model: BaseChatModel,
     # Plain dict copy of the spec's read-only mapping; the backend
     # factories treat an empty mapping and None identically.
     extra_routes = dict(spec.skill_sources)
+    if async_main:
+        extra_routes.setdefault(
+            MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend,
                                                    extra_routes=extra_routes)
@@ -304,21 +319,26 @@ def create_agent(model: BaseChatModel,
                                            extra_routes=extra_routes,
                                            default_backend=spec.default_backend)
 
-    skill_sources = [SKILLS_ROUTE]
+    # Put the async main's orchestration skill before broad shared/domain skills.
+    # Natural multi-outcome evals showed Qwen selecting `dev` from the earlier shared
+    # entry despite the explicit complex-request first-call rule. Source order is prompt
+    # salience, not an access guard; delegates never mount this route at all.
+    skill_sources = ([MAIN_SKILLS_ROUTE] if async_main else []) + [SKILLS_ROUTE]
     if spec.skill_sources:
         # De-dupe: an embedder that re-passes SKILLS_ROUTE as a key
         # has overridden the built-in *backend* (the route map
         # update wins), but shouldn't make the middleware scan the
         # same prefix twice.
         skill_sources.extend(
-            k for k in spec.skill_sources if k != SKILLS_ROUTE
+            k for k in spec.skill_sources if k not in skill_sources
         )
     # Auto-discover skills the cloned domain repo defines at
     # <working_dir>/.claude/skills/ (served by the composite *default* backend;
     # no route needed — see DOMAIN_SKILLS_PATH).  Registered only when the dir
     # actually holds skills, so an absent/empty one adds no useless source.
-    # Prepended so it sits FIRST: the deepagents listing is last-source-wins, so
-    # precedence is domain < built-in < embedder-extras — built-in safety skills
+    # Placed before shared built-ins: the deepagents listing is last-source-wins, so
+    # precedence is main-only < domain < built-in < embedder-extras for async main,
+    # and domain < built-in < embedder-extras otherwise. Built-in safety skills
     # (dev, git-sync) are NOT overridable by a same-named domain skill.  (An
     # embedder that explicitly routes DOMAIN_SKILLS_PATH via extra_skill_sources
     # has already placed it after SKILLS_ROUTE; the guard avoids a double-insert
@@ -327,7 +347,7 @@ def create_agent(model: BaseChatModel,
     # Cheap membership check first so the (possibly sandbox-exec'd) `ls` in
     # _has_domain_skills is skipped when an embedder already supplied the path.
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
-        skill_sources.insert(0, DOMAIN_SKILLS_PATH)
+        skill_sources.insert(1 if async_main else 0, DOMAIN_SKILLS_PATH)
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
 
@@ -437,8 +457,20 @@ def create_agent(model: BaseChatModel,
             # few hops. Offload a large page like the research agent does.
             ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000,
                                        preview_style="head", untrusted=True,
+                                       page_navigation=True,
                                        name="ToolResultToFileMiddleware_read_url"),
-            *_read_url_guards(trust_human_messages=not delegate),
+            *([ToolResultToFileMiddleware(
+                backend,
+                tools=({tool.name for tool in spec.async_subagent_tools}
+                       if async_main else {"task"}),
+                floor_chars=4000,
+                untrusted=True,
+                name="ToolResultToFileMiddleware_child_results",
+            )] if async_main or delegate else []),
+            *_read_url_guards(
+                trust_human_messages=not delegate,
+                trust_task_results=not delegate,
+            ),
             # Mid-turn interjection delivery is installed on the user-facing main
             # agent only. A delegate is an atomic task worker and omits it.
             skills_mw, memory_mw, ContextRiderMiddleware(),
@@ -528,7 +560,8 @@ def create_context_agent(model: BaseChatModel,
     return RollbackRunnable(agent, recursion_limit=500)
 
 
-def _read_url_guards(*, trust_human_messages: bool = True):
+def _read_url_guards(*, trust_human_messages: bool = True,
+                     trust_task_results: bool = True):
     """The guard pair every read_url-bearing graph gets, in one place so the
     research SEARCHER/FACT-CHECKER and main/delegate navigation surfaces cannot
     drift. Navigation read_url was added 2026-07-21 for
@@ -543,11 +576,16 @@ def _read_url_guards(*, trust_human_messages: bool = True):
       peptides real-URL re-read shape) — this is what bounds the crawl-to-death
       that raw curl has no guard against.
 
-    A delegate passes ``trust_human_messages=False`` because its initial message
-    is a model-authored brief; admission-frozen user URL seeds arrive in run config.
+    A delegate passes both switches false: its initial message and synchronous
+    specialist output are model-authored, and later file reads cannot distinguish
+    specialist reports from owner files. Admission-frozen user URL seeds arrive in
+    run config; direct trusted non-file tools and page-marked same-host links retain
+    their established behavior.
     """
     return [UrlProvenanceMiddleware(
-        trust_human_messages=trust_human_messages), ReadUrlRereadBreaker()]
+        trust_human_messages=trust_human_messages,
+        trust_task_results=trust_task_results,
+    ), ReadUrlRereadBreaker()]
 
 
 def create_research_agent(model: BaseChatModel,
@@ -675,7 +713,7 @@ def create_research_agent(model: BaseChatModel,
                 # agent a preview + path to grep (full page reachable, context bounded).
                 # Sanitizes before writing, so it's order-independent vs the sanitizer.
                 ToolResultToFileMiddleware(backend, tools={"read_url"}, floor_chars=4000,
-                                           untrusted=True),
+                                           untrusted=True, page_navigation=True),
                 # Strip ANSI from sub-tool output (read_url HTML can carry
                 # raw escape sequences) before it lands in subagent state.
                 OutputSanitizationMiddleware(),
@@ -753,8 +791,14 @@ def create_research_agent(model: BaseChatModel,
         # The searcher + fact-check sub-agents carry those guards themselves.
         # logging_mw stays innermost/last.
         middleware=(base_mw + middleware
-                    + (_read_url_guards(
-                        trust_human_messages=trust_human_messages) if leaf else [])
+                    + ([ToolResultToFileMiddleware(
+                        backend, tools={"read_url"}, floor_chars=4000,
+                        preview_style="head", untrusted=True,
+                        page_navigation=True,
+                        name="ToolResultToFileMiddleware_read_url")]
+                       + _read_url_guards(
+                           trust_human_messages=trust_human_messages)
+                       if leaf else [])
                     + [logging_mw]),
         subagents=([] if leaf else [critique_sub_agent,
                                     research_sub_agent,

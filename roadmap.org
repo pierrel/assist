@@ -55,7 +55,8 @@ See [[https://github.com/langchain-ai/agent-protocol][Agent Protocol]], [[https:
 Shipped for review 2026-07-25 in [[https://github.com/pierrel/assist/pull/213][assist PR #213]].
 Replace PR #212's required-child suspension with the five Deep Agents async-task
 tools over a private in-process ASGI Agent Protocol app.  Every start releases the
-main turn; every terminal child creates one ordinary parent wake; new user work
+main turn; every success, error, or timeout creates one ordinary parent wake;
+cancellation and interruption do not. New user work
 outranks queued children/wakes without preempting active work; user interjection
 preserves tasks for explicit keep/update/cancel decisions.  Retire
 =background-research-agent= and the public =/agent= operator surface. Context,
@@ -791,12 +792,13 @@ and most thresholds/knobs are gone, so there's no longer a structure worth a
 dedicated refactor.
 
 
-** DONE One-level delegate agent for discrete task lists
-Shipped 2026-07-26 in PR #215: a whole-task worker built through the shared
+** TODO One-level delegate agent for multiple requested outcomes
+In review in PR #215: a whole-task worker built through the shared
 Assist constructor, with synchronous specialists but no self-delegation. The
-main agent schedules independent items together and dependent or
-workspace-overlapping items serially. Both roles keep the same guarded
-=read_url= surface and only genuine user URLs cross the task boundary. See
+main agent schedules independent outcomes together and dependent or
+workspace-overlapping outcomes serially, with a main-only complex-request skill
+for TODO planning and explicit briefs. Both roles keep the same guarded =read_url=
+surface and only genuine user URLs cross the task boundary. See
 [[file:docs/2026-07-26-delegate-agent.org][the delegate-agent design]].
 
 * Web UI — thread list
