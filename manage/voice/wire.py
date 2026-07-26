@@ -374,16 +374,6 @@ async def _run_call(
                 await run_in_threadpool(buffers.outbound.abort)
         else:
             await run_in_threadpool(buffers.outbound.abort)
-            # End the network resource before waiting for the synchronous
-            # runner to honor its closed-buffer termination contract.
-            if not isinstance(failure, WebSocketDisconnect):
-                code = (
-                    1008
-                    if failure is None
-                    or isinstance(failure, WireProtocolError)
-                    else 1011
-                )
-                await _close_websocket(websocket, code)
 
         for task in (receiver, sender):
             if not task.done():
@@ -462,6 +452,8 @@ async def call(websocket: WebSocket) -> None:
         close_code = 1011
     finally:
         await _close_buffers(buffers)
+        # _run_call joins its synchronous runner before returning. Release the
+        # slot before the terminal close tells the client it can reconnect.
+        _release_call()
         if close_code is not None:
             await _close_websocket(websocket, close_code)
-        _release_call()

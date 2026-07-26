@@ -8,10 +8,14 @@ GitHub PR #215 is open.
 
 The shared-constructor role, one-level capability boundary, durable
 admission-frozen URL seeds, and deterministic coverage are implemented. The full
-suite passes 1403 tests with 2 skips; compile and diff checks pass. Earlier local
+suite passes 1438 tests with 2 skips after rebasing onto GitHub/Forgejo =main= at
+=259b9ec=; compile and diff checks pass. Earlier local
 review rounds found and fixed causal timestamp ordering, unrelated parent-history
 disclosure, normalized userinfo/fragment disclosure, child-result instruction
 laundering, eval/production prompt drift, and documentation drift.
+The rebase review also found and fixed a merged voice-transport teardown race:
+the call slot now releases after the synchronous runner exits but before the
+terminal WebSocket close tells the phone it can reconnect.
 An external suggestion to admit sender-bearing SMS turns was rejected in the
 post-review security pass: inbound-message triage explicitly treats those turns
 as untrusted data, so only sender-less owner turns grant delegate URL authority.

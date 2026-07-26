@@ -126,11 +126,11 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 - After the first valid =ring=, the route invokes one synchronous call-runner seam
   with the decoded ring plus the two buffers. Tests inject an echo runner; production
   has no session runner until PR4 and therefore closes without inventing answer or
-  call-state policy. On an abrupt exit the network connection closes before waiting
-  for the runner. Closing both buffers is the runner's termination contract. The
-  route retains the sole call slot until the runner returns, so old and new session
-  code cannot overlap; PR4 must bound each downstream synchronous operation so the
-  runner honors that contract promptly.
+  call-state policy. On an abrupt exit both buffers close first; that is the runner's
+  termination contract. The route retains the sole call slot until the runner returns,
+  then releases it before exposing the terminal network close, so old and new session
+  code cannot overlap and an immediate reconnect cannot see stale occupancy. PR4 must
+  bound each downstream synchronous operation so the runner honors that contract promptly.
 
 * Reuse map (do NOT re-derive)
 - =manage/web/threads.py=: =_create_run= + =_execute_run= (durable ordinary-turn path),
@@ -183,8 +183,9 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
       from synchronized GitHub/Forgejo =main= on 2026-07-26. Exact control/PCM framing,
       one-call admission, fixed rate/idle/connection caps, bounded closeable buffers,
       cancellation-safe teardown, and the synchronous PR4 runner seam are complete.
-      Validation: 34 focused wire tests; 1,415 deterministic tests; CI green; five
-      Copilot rounds ending clean with all threads resolved.
+      PR #214 merged with green CI after five Copilot rounds ending clean with all
+      threads resolved. Validation after the PR #215 integration fix: 35 focused
+      wire tests and 1,438 deterministic tests.
 - [ ] PR4: =session.py= state machine/integration — NEXT.
 - [ ] PR5: security + scripted-call reconstruction (or fold into PR4 only if reviewable).
 

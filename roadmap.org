@@ -792,7 +792,7 @@ dedicated refactor.
 
 
 ** DONE One-level delegate agent for discrete task lists
-Shipped 2026-07-26 in =a7c4a99=: a whole-task worker built through the shared
+Shipped 2026-07-26 in PR #215: a whole-task worker built through the shared
 Assist constructor, with synchronous specialists but no self-delegation. The
 main agent schedules independent items together and dependent or
 workspace-overlapping items serially. Both roles keep the same guarded
