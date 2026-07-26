@@ -23,6 +23,23 @@ possible, we should enable it. Plan when we pick this up:
 - When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
   subagent rather than strip).
 * Architecture
+** TODO Complete Voice-call assistant P1 against the fake bridge
+Goal: phone a number, pass the PIN-gated receptionist, select or create a thread,
+and hold a natural voice conversation. The hardware-independent build/state contract
+is [[file:docs/2026-07-23-voice-p1.org][docs/2026-07-23-voice-p1.org]]; the authoritative cross-repo design is
+[[file:../emacsos/docs/2026-07-21-voice-call-tech-design.org][emacsos/docs/2026-07-21-voice-call-tech-design.org]] (merged emacsos PR #33).
+
+Shipped and deployed in assist: durable Run/observer foundation (PR #213 is
+authoritative), read-only catalog + contained receptionist (PR #208), hermetic
+VAD/endpointing/barge-in/DTMF flow (PR #209), in-process Whisper/Piper speech
+(PR #211), and bounded authenticated WSS =/call= transport (PR #214).
+
+*NEXT: PR4 =manage/voice/session.py=*: integrate flow, speech, wire,
+receptionist, durable ordinary Runs, terminal observers, serialized TTS,
+barge-in, and the call-event log into the per-call state machine. Then PR5 closes
+global PIN lockout, caller-ID handling, detector-scope security proofs, and full
+scripted-call reconstruction. Live phone/PCM-bridge work remains hardware-gated P3
+in emacsos; do not start it before the fake-bridge contract is complete.
 ** DONE One Agent Protocol-shaped runs interface
 Shipped for review 2026-07-24 in [[https://github.com/pierrel/assist/pull/212][assist PR #212]]. This records that PR's
 historical design; the adjacent replacement item supersedes its child lifecycle.

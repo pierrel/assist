@@ -3,8 +3,8 @@
 
 * Where this sits
 Phase P1 of the voice-call assistant (phone the agent, talk to your threads). The
-authoritative *design* is the six-lens-reviewed tech doc in the emacsos repo:
-=docs/2026-07-21-voice-call-tech-design.org= (branch =voice-call-assistant-prd=, PR #33).
+authoritative *design* is the six-lens-reviewed
+[[file:../../emacsos/docs/2026-07-21-voice-call-tech-design.org][tech design in the emacsos repo]] (merged PR #33).
 This doc is the *assist-side P1 build/state doc* — it does NOT restate the design; it
 records the build plan grounded in the real code, the reconciliations, and status.
 
@@ -13,6 +13,10 @@ records the build plan grounded in the real code, the reconciliations, and statu
 - P0.5 (=catalog.py= + =receptionist.py= + eval N=10=80/80) — DONE, merged, deployed.
 - *P1 (this doc)* — the voice client: a new =manage/voice/= package, validated entirely
   against a FAKE BRIDGE (no phone hardware; that is P3). All in assist.
+- *Current implementation status (2026-07-26):* P1 PR1–PR3 are merged and deployed:
+  Flow, Speech, and the bounded =/call= Wire transport exist. They are foundations,
+  not yet an end-to-end call: production deliberately has no configured session runner.
+  *NEXT is PR4 =session.py=*, then the PR5 security/reconstruction gate.
 
 * Threading model (blocker-class — single-worker uvicorn)
 | Thread | Owns | May NOT |
@@ -48,10 +52,10 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    *DONE (PR #211).*
 3. *PR3 — frame codec + =tests/voice/fake_bridge.py= + =wire.py= skeleton* — the WS
    protocol (§2) + §8 resource caps, echo-level.
-   *← current PR.*
+   *DONE (PR #214; merged + deployed 2026-07-26).*
 4. *PR4 — =session.py=* — the state machine + call-event log + conversational contract,
    tying flow/speech/wire together, driving the shared Run service (the big one; full
-   three-phase rigor — touches the queue/observer/hot path).
+   three-phase rigor — touches the queue/observer/hot path). *← NEXT.*
 5. *PR5 — security + full scripted-call reconstruction* (global PIN lockout,
    detector-scoping spies, caller-id handling) — or folded into PR4 if reviewable.
 
@@ -175,8 +179,14 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
 - [X] PR2: =manage/voice/speech.py= — independently lazy faster-whisper =base.en= CPU STT +
       Piper TTS, synchronous/off-event-loop; raw s16le/16 kHz boundary; sentence-chunk iterator
       preserves cancellation for PR4. Unit contract complete; real Whisper + Piper model checks pass.
-- [ ] PR3: bounded WSS wire + fake bridge (current).
-- [ ] PR4–PR5 per the slicing above.
+- [X] PR3: bounded authenticated WSS wire + fake bridge — merged as PR #214 and deployed
+      from synchronized GitHub/Forgejo =main= on 2026-07-26. Exact control/PCM framing,
+      one-call admission, fixed rate/idle/connection caps, bounded closeable buffers,
+      cancellation-safe teardown, and the synchronous PR4 runner seam are complete.
+      Validation: 34 focused wire tests; 1,415 deterministic tests; CI green; five
+      Copilot rounds ending clean with all threads resolved.
+- [ ] PR4: =session.py= state machine/integration — NEXT.
+- [ ] PR5: security + scripted-call reconstruction (or fold into PR4 only if reviewable).
 
 * Notes for Pierre
 - Deps landed in =requirements.txt=: =onnxruntime==1.27.0= (+ flatbuffers, protobuf) — lean, torch-free.
