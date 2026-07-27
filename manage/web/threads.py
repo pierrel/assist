@@ -2680,7 +2680,8 @@ def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
                    status.get("pending_email_body", ""))
         seen = (seen_to, seen_subject, seen_body.replace("\r\n", "\n"))
         current = (pending[0], pending[1], pending[2].replace("\r\n", "\n"))
-        if seen != current:
+        submitted = (to, subject, body.replace("\r\n", "\n"))
+        if seen != current or submitted != current:
             raise HTTPException(status_code=409,
                                 detail="This email was updated — reload and review it.")
     if decision == "edit" and not valid_email_content(to, subject, body):

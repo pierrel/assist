@@ -158,8 +158,14 @@ def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch)
         "token": "approval-token", "seen_to": "other@example.test",
         "seen_subject": "Subject", "seen_body": "Body"})
     assert stale.status_code == 409
+    changed = client.post("/thread/t-sub/email/approve", data={
+        "token": "approval-token", "to": "other@example.test", "subject": "Subject",
+        "body": "Body", "seen_to": "a@example.test", "seen_subject": "Subject",
+        "seen_body": "Body"})
+    assert changed.status_code == 409
     approved = client.post("/thread/t-sub/email/approve", data={
-        "token": "approval-token", "seen_to": "a@example.test",
+        "token": "approval-token", "to": "a@example.test", "subject": "Subject",
+        "body": "Body", "seen_to": "a@example.test",
         "seen_subject": "Subject", "seen_body": "Body"}, follow_redirects=False)
     assert approved.status_code == 303 and len(queued) == 1
     run = threads._runs().get("t-sub", queued[0][0])

@@ -19,6 +19,7 @@ variables=(
 )
 
 {
+    printf 'set -euo pipefail\n'
     for name in "${variables[@]}"; do
         encoded=$(printf %s "${!name-}" | base64 --wrap=0)
         printf '%s=$(printf %%s %s | base64 -d)\nexport %s\n' "$name" "$encoded" "$name"

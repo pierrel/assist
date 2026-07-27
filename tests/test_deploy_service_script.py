@@ -21,6 +21,7 @@ def test_deploy_service_transports_display_name_with_apostrophe(tmp_path):
                    env=environment)
 
     configuration = captured.read_text().partition("# end configuration")[0]
+    assert configuration.startswith("set -euo pipefail\n")
     result = subprocess.run(
         ["bash", "-c", configuration + 'printf %s "$EMAIL_FROM_NAME"'],
         check=True, capture_output=True, text=True)
