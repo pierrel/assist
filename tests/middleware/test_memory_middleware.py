@@ -123,6 +123,7 @@ class TestMemoryPromptFormatting(TestCase):
         self.assertNotIn("Prefer compact tables", out[thread_start:thread_end])
         self.assertIn("durable repository memory shared across threads", out)
         self.assertIn("belongs only to this thread", out)
+        self.assertIn("goal, processes, decisions", " ".join(out.split()))
         self.assertIn("update the two files separately", out)
 
 

@@ -3,8 +3,7 @@
 
 * Status
 
-Implementation and local verification are complete. Deployment and external review
-remain in progress.
+The implementation is deployed and PR review is in progress.
 
 * Why
 
@@ -25,8 +24,8 @@ replace or reinterpret repository memory.
    addressed as =/AGENTS.md= locally and =/workspace/AGENTS.md= in Docker.
 3. Prompt guidance distinguishes the scopes:
    - repository memory is durable across threads;
-   - thread memory holds this thread's goal, decisions, corrections, progress,
-     blockers, and useful working notes;
+   - thread memory holds this thread's goal, processes, decisions, corrections,
+     progress, blockers, and useful working notes;
    - =/agent= is agent-owned working space to manage proactively.
 4. Spawned children receive neither the private =/agent= route/mount nor the
    thread-memory prompt. Their parent must continue to provide a self-contained brief.
@@ -67,18 +66,24 @@ The retained deterministic tests cover:
 - visible-main versus delegate/specialized-child containment in =ThreadManager=,
   child-run mount omission, and a real mounted/unmounted Docker boundary.
 
-One natural small-model eval gives a single user message containing both a durable
-cross-thread preference and a current-thread workflow decision. It passes only when
-the preference lands in repository memory, the workflow decision lands in thread
+One required natural small-model eval gives a single user message containing both a
+durable cross-thread preference and a current-thread workflow decision. It passes only
+when the preference lands in repository memory, the workflow decision lands in thread
 memory, and neither fact leaks into the other scope.
+
+A second natural eval is intentionally aspirational. “We'll use this thread … The
+process is …” asks the model to infer that a user-established process belongs in thread
+memory and asserts that it writes something there. The current small model is
+inconsistent; keep this as a prompt-rearchitecture target, not a release gate for this
+storage and lifecycle feature.
 
 * Results
 
 The simplicity-first review converged in two rounds. It removed the earlier schedule,
 retry, promotion, path-enforcement, collision, queue, and triage machinery, reused
 =ThreadManager.get= from =new=, and reduced the production diff to the eight runtime
-files named by the design. Against the rebased main that diff is +150/-59 lines (net
-91), including docstrings and prompt text.
+files named by the design. Against the rebased main that diff is +151/-59 lines (net
+92), including docstrings and prompt text.
 
 The full local review found and fixed two real construction leaks, documentation drift,
 and an eval assertion that could miss paraphrased leakage. Correctness, containment,
@@ -90,9 +95,14 @@ Deterministic verification: 1,478 passed, 2 skipped. Focused post-prompt verific
 140 passed. =git diff --check= and Python compile checks passed; mypy was unavailable in
 the deploy environment.
 
-The natural eval first caught a real mixed-scope failure: one of three trials copied the
-thread workflow stage into repository memory. A two-sentence prompt correction made
-mixed-scope messages update the files separately. The final cadence then passed N=3
-(3/3), N=5 (5/5), and N=10 (10/10). The feature-branch deployment restarted cleanly
-and the live HTTPS root smoke passed; PR/Copilot state will be recorded after
-publication.
+The required natural eval first caught a real mixed-scope failure: one of three trials
+copied the thread workflow stage into repository memory. A two-sentence prompt
+correction made mixed-scope messages update the files separately. The final cadence
+then passed N=3 (3/3), N=5 (5/5), and N=10 (10/10).
+
+Pierre's review added the ordinary “We'll use this thread … The process is …” case.
+Descriptive “processes” guidance alone did not make it reliable: several prompt
+variants created a todo artifact or used =write_todos= instead. The strongest
+enforcement passed N=3 (3/3) but failed N=5 on trial 3 after two passes. That extra
+enforcement was removed rather than accumulated. The retained eval and this result
+make the behavior an explicit prompt-rearchitecture target.

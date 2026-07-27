@@ -121,7 +121,8 @@ THREAD_MEMORY_PROMPT = """{repo_prompt}
 
 `{repo_memory_path}` is durable repository memory shared across threads.
 `{thread_memory_path}` belongs only to this thread. Use it for the current
-goal, decisions, corrections, progress, blockers, and useful working notes.
+goal, processes, decisions, corrections, progress, blockers, and useful working
+notes.
 
 `/agent` is your agent-owned working space for anything useful across this
 long-running thread. Proactively manage it without waiting for the user to ask.

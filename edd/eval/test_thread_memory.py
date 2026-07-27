@@ -43,3 +43,32 @@ class TestThreadMemory(TestCase):
         self.assertNotIn("candidate-replied", repo)
         self.assertIn("candidate-replied", thread)
         self.assertNotIn("atlas-grid", thread.lower())
+
+    def test_natural_process_prompt_writes_thread_memory(self):
+        """Aspirational thread-memory-write target for prompt rearchitecture.
+
+        The current small model is inconsistent here: it may create a todo
+        artifact instead of recording the process. This eval asserts only that
+        the message produces a non-empty thread-memory write; it does not verify
+        that the process itself was captured or gate the thread-storage feature.
+        """
+        root = tempfile.mkdtemp()
+        agent_dir = tempfile.mkdtemp()
+        create_filesystem(root, {"AGENTS.md": ""})
+        graph = create_agent(
+            self.model,
+            root,
+            agent_dir=agent_dir,
+            spec=AgentSpec(async_subagent_tools=()),
+        )
+        agent = AgentHarness(graph, thread_id="thread-process-eval")
+
+        agent.message(
+            "We'll use this thread to manage my todo list. The process is: new "
+            "items start in inbox, move to doing when I begin, and move to done "
+            "only after I confirm completion.",
+        )
+
+        memory_path = os.path.join(agent_dir, "memory.md")
+        thread = read_file(memory_path) if os.path.exists(memory_path) else ""
+        self.assertTrue(thread.strip(), agent.all_messages())
