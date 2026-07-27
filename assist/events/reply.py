@@ -1,6 +1,5 @@
-"""The ``send_reply`` tool — the only host-added triage action and the only outbound-SMS
-effect. The shared agent graph currently has broader general capabilities, tracked for
-confinement in the prompt-architecture P1. ``send_reply`` is gated by human-in-the-loop
+"""The ``send_reply`` tool — the one action a message-triage turn can take, and the only
+effect that escapes the sandbox. It is gated by deepagents human-in-the-loop
 (:data:`REPLY_INTERRUPT_ON`): the agent calls ``send_reply(text)``, the graph interrupts
 BEFORE the tool body runs, the user approves/edits/rejects, and only on approve does the
 body execute — POSTing the reply to the phone's outbound-SMS endpoint.

@@ -817,9 +817,11 @@ change. This is the evidence base for every later phase. See [[file:docs/2026-07
 Add production-maintenance admission, process-group deadlines, atomic resume,
 and inspectable GPU cooldown before real-LLM experiments. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0b][P0b hypothesis and gate]].
 
-*** TODO P1: Make untrusted inbound-message triage reply-only
-Remove its currently inherited filesystem, execution, URL, map, and travel
-capabilities by construction while preserving HITL reply behavior. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1][P1 hypothesis and gate]].
+*** TODO P1: Give inbound triage a read-only capability surface
+Use natural cases and per-source ablation to select the smallest bounded local
+read allowlist, declare any network retrieval separately as egress, exclude
+mutation and unrelated effects by construction, and keep =send_reply= as the
+only separately HITL-gated action affecting another person. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1][P1 hypothesis and gate]].
 
 *** TODO P1b: Bound inbound triage and prove the HITL transaction
 Bound admitted input, reply drafts, backlog, and pending actions, then prove one

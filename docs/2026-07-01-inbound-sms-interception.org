@@ -13,13 +13,6 @@ Product decisions (Pierre): pre-execution gate (via framework HITL); regexp send
 individual events first; reply in v1; the agent does number→name mapping itself. SMS source
 = emacsos phone modem; guidance = prose the agent authors into the template.
 
-* Current-state erratum (2026-07-26)
-
-The reply-only statements below describe the host-added =_web_triage_tools= tuple,
-not the final graph. The shared Deep Agents constructor also adds filesystem,
-execution, URL, map, and travel capabilities. The current mismatch and structural
-fix are tracked in [[file:2026-07-26-agent-prompt-architecture.org::#phase-1][prompt architecture P1]]; this document otherwise preserves the original decision history.
-
 * Safety: the sandbox contains it; only the reply is gated
 Earlier drafts added a deny-by-default "propose-only" enforcer. Dropped (Pierre): the triage
 turn runs in the per-turn sandbox, so an injected text steering the agent to do something

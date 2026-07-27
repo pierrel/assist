@@ -29,10 +29,12 @@ workflows and repeats several rules in more than one prompt source.
 
 Known drift already proves that source-by-source review is insufficient:
 
-- inbound-message triage is documented as reply-only, but its real Deep Agents
-  graph still receives filesystem, execution, =read_url=, travel, directions,
-  and map tools because =AgentSpec.tools= is additive and the shared constructor
-  installs its own capabilities;
+- inbound-message triage has no reviewed capability contract: its wrapper adds
+  only the reply tool, while the shared Deep Agents constructor also supplies
+  filesystem, execution, =read_url=, travel, directions, and map tools.  The
+  intended boundary is read-only analysis with a separately gated reply effect;
+  the required read surface is an experiment question, not something to infer
+  from either the wrapper or the inherited graph;
 - the shared main prompt describes a report-file result for an async research
   leaf that returns findings directly;
 - =edd/product-policy.org= describes the read-only context agent as a writer;
@@ -70,8 +72,9 @@ The architecture therefore needs two separations:
 
 1. Make the fully rendered model request auditable for every production and eval
    profile, including middleware-injected guidance and tool descriptions.
-2. Make untrusted inbound-message triage actually reply-only by construction,
-   before changing prompt policy around it.
+2. Give untrusted inbound-message triage an explicit, least-privilege read-only
+   analysis surface, with =send_reply= as the only separately HITL-gated action
+   affecting another person, before changing prompt policy around it.
 3. Reduce the main and delegate system prompt to a bootstrap kernel: what the
    agent must know in order to choose the next source of instructions safely.
 4. Keep local context gathering preloaded unless a controlled experiment proves
@@ -140,12 +143,15 @@ cannot self-delegate because it has no async lifecycle tools, and a context agen
 cannot write because the read-only enforcer rejects mutating tools.  The prompt
 should accurately explain those shapes, not pretend to enforce them.
 
-The current triage profile violates this rule.  Its wrapper supplies only the
-HITL-gated reply tool, but the shared Deep Agents constructor independently adds
-filesystem, execution, URL, map, and travel tools.  A helper test of the supplied
-tool list does not prove the final graph is confined.  P0 records the real graph;
-P1 makes reply-only confinement a structural invariant before any prompt
-reduction can treat the documented boundary as true.
+The current triage profile does not express a reviewed boundary.  Its wrapper
+supplies only the HITL-gated reply tool, but the shared Deep Agents constructor
+independently adds filesystem, execution, URL, map, and travel tools.  A helper
+test of the supplied tool list proves neither the final graph nor the intended
+product.  P0 records the real graph.  P1 uses real triage cases to select and
+then structurally enforce the smallest useful read-only surface; =send_reply=
+remains the only separately HITL-gated action affecting another person.  Any
+justified network retrieval is separately declared and bounded as egress;
+ordinary thread-visible analysis remains an output, not a proposed reply.
 
 ** Main bootstrap kernel
 
@@ -532,7 +538,7 @@ fingerprints.  Provenance is a test-side ownership map over captured output and
 source snapshots, not runtime metadata, a production registry, or a constructor
 flag; unknown or ambiguous spans are findings for review.
 
-The required paths are main, delegate, restricted triage, legacy main, context,
+The required paths are main, delegate, current production triage, legacy main, context,
 research lead, direct research leaf, nested research worker, nested fact-check,
 async read-only code critique, synchronous inherited-surface code critique,
 nested report critique, receptionist, thread-description direct model call, and
@@ -635,30 +641,41 @@ maintenance but not process cleanup, atomic resume, or cooldown.  If web
 admission cannot be isolated cleanly, schedule an explicit service maintenance
 window rather than let production and evals contend silently.
 
-* P1: Confine untrusted inbound-message triage by construction
+* P1: Give inbound triage an explicit read-only capability surface
 :PROPERTIES:
 :CUSTOM_ID: phase-1
 :END:
 
 ** Value
 
-Make the existing reply-only product boundary true at the final graph.  This
-closes a current untrusted-input capability exposure independently of every later
-prompt experiment.
+Let triage inspect the information it needs to judge an inbound message without
+inheriting unrelated mutation or host-effect capabilities.  A reply is a
+separate proposed effect and still requires HITL approval.
 
 ** Hypothesis
 
-Inbound-message triage can retain its useful reply decision while exposing only
-the HITL-gated reply capability, with no filesystem, execution, URL, map, travel,
-skill, memory-management, or subagent surface.
+Inbound-message triage can retain useful reply/no-reply judgment with an exact,
+least-privilege read surface justified by natural triage cases, plus the
+HITL-gated reply capability.  It needs no filesystem mutation, execution,
+memory mutation, configuration, scheduling, notification, or subagent surface.
 
 ** Controlled change
 
-Change only triage construction.  Use a dedicated internal restricted builder
-based on the existing vanilla LangChain pattern.  Do not infer confinement from
-=async_subagent_tools=, add generic permission/exclusion fields to =AgentSpec=,
-or broaden the embedder contract for one internal caller.  A shared restricted
-profile becomes worth designing only when a second real caller needs it.
+Change only triage construction.  Before selecting tools, pre-register the
+natural triage cases and the information each case actually requires.  Establish
+the baseline through the current production composition, but do not treat every
+tool it happens to expose or call as a requirement.  The candidate then declares
+an exact allowlist of local/model-visible read capabilities and data inputs, with
+one reason and one bounded trust scope for each.  Any network-backed retrieval
+has a separate exact egress allowlist; calling it a read does not erase its
+outward effect.
+
+Use a dedicated internal restricted builder based on the existing vanilla
+LangChain pattern.  Do not infer confinement from =async_subagent_tools=, add
+generic permission/exclusion fields to =AgentSpec=, or broaden the embedder
+contract for one internal caller.  A shared restricted profile becomes worth
+designing only when a second real caller needs it.  Prefer narrow read adapters
+over generic filesystem or execution access.
 
 Freeze the current custom prompt template and required subscription/inbound
 inputs, not the full rendered Deep Agents request.  Capability-owned BASE, TODO,
@@ -668,24 +685,37 @@ prompt into the vanilla role.  P7f separately tests a concise capability-true
 triage contract.
 
 The exact retained data context is evidence-gated.  The inbound message and its
-subscription template are required inputs.  Memory contents, skills, and
-filesystem context remain absent unless a baseline case demonstrates that one is
-required to decide or phrase the reply; any retained input is read-only data, not
-a management capability.
+subscription template are required inputs.  Thread context, catalog data,
+memory, local files, skills, URL content, travel data, and map data are candidates
+only when a natural case demonstrates the need.  Any admitted source is bounded
+and cannot mutate Assist or user state.  A network retrieval also needs explicit
+provenance, validated destination and request-data limits, timeout and resource
+bounds, and a place in the separate egress allowlist.  It is not classified as
+effect-free merely because it does not mutate Assist state.
 
 ** Test and gate
 
-- A structural test builds the actual final triage graph and records exactly one
-  callable capability: the HITL-gated =send_reply= tool.  It does not stop at
-  asserting the additive =AgentSpec.tools= input.
-- Filesystem, execution, =read_url=, travel, directions, map, skill-loading,
-  memory-writing, and subagent capabilities are absent rather than prompt-blocked.
+- A structural test builds the actual final triage graph and records exactly the
+  pre-registered local/model-visible read allowlist, network-retrieval egress
+  allowlist, and HITL-gated =send_reply= tool.  It does not stop at asserting the
+  additive =AgentSpec.tools= input.
+- Every allowed source is bounded to its declared data and trust scope.  Every
+  network attempt outside the retrieval egress allowlist is denied.  Filesystem
+  writes, execution, memory writes, subscription/configuration changes,
+  scheduling, notification, communication to another person outside the gated
+  reply, other undeclared outward effects, and subagent capabilities are absent
+  rather than prompt-blocked.
+- Each admitted source has a pre-registered ablation with every other variable
+  fixed.  It remains only if withholding it measurably degrades requested-outcome
+  completion, evidence quality, reliability, or latency under the declared
+  phase gate.  A source with no causal benefit is removed from the allowlist;
+  the fixture need not manufacture a fact exclusive to that source.
 - Existing approval/rejection behavior and subscription routing remain green.
-- Natural reply, no-reply, ambiguous-message, and adversarial instruction
-  cohorts meet baseline at N=10 and the general natural floor.
-- Prompt-injection inputs cannot read a private fixture, execute a command, fetch
-  a URL, or invoke the outbound tool before its model-boundary interrupt; all
-  deterministic confinement checks pass 100%.
+- Natural reply, no-reply, ambiguous-message, context-needed, and adversarial
+  instruction cohorts meet baseline at N=10 and the general natural floor.
+- Prompt-injection inputs cannot cross an allowed read's declared data boundary,
+  invoke a prohibited action, or invoke the outbound tool before its
+  model-boundary interrupt; all deterministic confinement checks pass 100%.
 - With a deliberately slow restricted agent, inbound HTTP acceptance and
   unrelated thread/status GETs remain responsive; graph construction and model
   invocation stay off the single uvicorn event loop.
@@ -693,14 +723,16 @@ a management capability.
 ** Expected learning
 
 We expect reply decisions not to need the broad Deep Agents surface.  The phase
-will show whether the dedicated one-tool graph preserves triage behavior and
-whether any bounded read-only input is demonstrably needed.
+will identify the smallest useful read set and may show that supplied message
+and subscription data are enough.  Either result is evidence; the design does
+not pre-decide that triage has no read work.
 
 ** Alternatives
 
-If removing a data source lowers a reproduced reply outcome, restore only that
-bounded read-only input.  Never restore an action capability merely to improve
-model context.
+If a reproduced outcome needs more context, add the narrowest bounded read
+adapter that supplies it and repeat the experiment.  If no extra read source is
+needed, retain only the supplied data.  Never restore a mutating, execution, or
+ungated user-facing capability merely to improve model context.
 
 * P1b: Bound inbound triage and prove the HITL transaction
 :PROPERTIES:
@@ -1322,7 +1354,8 @@ that fights the architecture.
 /Value and hypothesis:/ After P1/P1b make the graph and transaction narrow, a
 short triage-only contract can replace inherited general-agent procedure without
 lowering reply judgment.  Change only the triage system prompt; its builder,
-single tool, bounds, inputs, and HITL transaction stay fixed.
+fixed read allowlist, bounds, inputs, and =send_reply= as the only separately
+HITL-gated action affecting another person stay fixed.
 
 /Gate:/ Reply, no-reply, ambiguous, adversarial instruction, approve/edit/reject,
 and visible terminal-state cohorts meet their unchanged-main N=10 baselines; P0
@@ -1399,10 +1432,12 @@ Prompt movement must not weaken capability-based security.  Trust boundaries,
 tool omission, filesystem permissions, URL provenance, HITL, and resource bounds
 remain code-enforced and covered by existing deterministic tests.
 
-P1 addresses a current exposure rather than a risk introduced by this program.
-Its untrusted-message cases probe every capability the shared constructor now
-adds, and its final-graph census is the authority.  A reply-only wrapper or
-prompt claim cannot substitute for absence at the model boundary.
+P1 addresses a current undefined boundary rather than a risk introduced by this
+program.  Its untrusted-message cases probe every capability the shared
+constructor now adds, and its final-graph census is the authority.  Neither a
+narrow wrapper nor a prompt claim can substitute for explicit local-read and
+network-retrieval allowlists, absence of prohibited effects, and a gated reply at
+the model boundary.
 
 P4a likewise treats persistent memory as an authorization sink.  Memory data may
 be broadly readable, but generic tools cannot mutate canonical targets and only
@@ -1466,15 +1501,15 @@ was declined.
 
 | Lens | Material findings incorporated | Convergence result |
 |------+--------------------------------|--------------------|
-| Architect/census | final model request is the audit unit; triage's documented reply-only boundary is false in the current shared graph; legacy and async research returns differ | Clean |
-| Simplicity | N=3 is diagnostic, not a baseline gate; judge failure cannot block prompt work; combined phases were split; residual main procedures received P8; P4a's save interface is atomic | Clean |
-| Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; runtime scenario matrix added; capability protocol has one owner; provider-wide prompt changes isolated; visible skill descriptions own routing triggers | Clean |
-| User intention | P2b removes orchestration assertions from natural acceptance; each later cohort declares its gate layer; context remains preloaded unless later evidence justifies another experiment | Clean |
+| Architect/census | final model request is the audit unit; triage's wrapper and inherited graph do not define its intended read-only contract; each admitted source needs causal ablation, not an artificial exclusive-fact fixture; legacy and async research returns differ | Clean |
+| Simplicity | final PR reduced to the architecture doc and roadmap; N=3 is diagnostic, not a baseline gate; judge failure cannot block prompt work; combined phases were split; residual main procedures received P8; P4a's save interface is atomic | Clean |
+| Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; triage local reads, bounded retrieval egress, ordinary output, and gated reply are distinct; runtime scenario matrix added; capability protocol has one owner; provider-wide prompt changes isolated; visible skill descriptions own routing triggers | Clean |
+| User intention | Pierre's PR review corrected the inferred reply-only boundary to evidence-selected read-only analysis plus gated reply; P2b removes orchestration assertions from natural acceptance; each later cohort declares its gate layer; context remains preloaded unless later evidence justifies another experiment | Clean |
 | User experience | latency/round-trip guard; complete delegate, memory, research, and triage/HITL journeys; actionable per-case experiment reports | Clean |
 | Clean interfaces | dedicated internal triage builder without =AgentSpec= permission flags; trusted composition roots own memory authority; memory skill and save tool mount together | Clean |
-| Threat model | bounded durable inbound archive and one-action HITL transaction; synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; memory targets read-only below generic sinks | Clean |
+| Threat model | local reads and network retrieval have separate allowlists; bounded durable inbound archive and one-action HITL transaction; synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; memory targets read-only below generic sinks | Clean |
 | Event-loop/eval liveness | P0b atomic maintenance admission; outer supervised process groups and recoverable leases; bare serialized judge; atomic resume identity; GPU workload/cooldown contract; slow-path web liveness gates | Clean |
-| Documentation alignment | delegate state corrected; host-added triage tuple distinguished from the final graph in current comments and historical errata; phase names/anchors and current-versus-target wording verified | Clean |
+| Documentation alignment | PR scope reduced to this design and the roadmap; triage intent corrected to read-only analysis plus gated reply; phase names, anchors, and current-versus-target wording verified | Clean |
 
 Pierre's PR review is the remaining design gate.  In particular, approval should
 confirm the six instruction homes and preloaded context choice; the blind judge

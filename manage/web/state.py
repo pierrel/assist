@@ -118,9 +118,9 @@ MESSAGE_BACKLOG = MessageBacklog(ROOT)
 # Durable execution authority.  ``status.json`` remains the web UI projection;
 # the legacy backlog is read only during startup migration.
 RUN_SERVICE = RunService(ROOT)
-# Normal turns get the config tools (schedule + subscription). The host-added TRIAGE tuple
-# gets only HITL-gated send_reply, so an injected text cannot plant/delete those configs.
-# The shared constructor still adds its general capabilities pending prompt-architecture P1.
+# Normal turns get the config tools (schedule + subscription). A TRIAGE turn (untrusted
+# inbound SMS) gets ONLY send_reply, HITL-gated — never the host-effect config tools — so an
+# injected text can't plant/delete a subscription or schedule (MANAGER.get(triage=True)).
 # notify_tools takes an injected mark-urgent callback (notify.py never imports web
 # state → no import cycle).  The lambda is NOT redundant: `_mark_urgent` is defined
 # ~300 lines below (kept beside the symmetric _UNSEEN block), but this runs at import

@@ -70,10 +70,10 @@ def _web_skill_sources() -> dict:
 # render skill: a schedule's effect needs the web's co-resident Scheduler, so emacsos and
 # the eval agents (which build their own agents) must NOT get a tool that never fires.
 _web_tools: tuple = ()
-# Host-added tools for an untrusted inbound-SMS turn: only the HITL-gated reply tool,
-# never schedule/subscription tools. This tuple is additive; the shared Deep Agents
-# constructor still adds filesystem, execute, URL, map, and travel capabilities pending
-# docs/2026-07-26-agent-prompt-architecture.org P1.
+# A message-triage turn (inbound SMS) runs on UNTRUSTED input, so it gets a SEPARATE,
+# reduced tool set: only the reply tool (HITL-gated) — NOT the schedule/subscription tools,
+# which are host-effect and NOT sandbox-contained (an injected text must not be able to
+# plant/delete a subscription or schedule). See docs/2026-07-01-inbound-sms-interception.org.
 _web_triage_tools: tuple = ()
 # HITL gating for the triage AgentSpec (e.g. {"send_reply": {...}}); the eval agents build
 # their own agents and must NOT inherit it.
@@ -280,9 +280,8 @@ class ThreadManager:
         if not working_dir:
             working_dir = self.make_default_working_dir(tdir)
 
-        # A triage turn gets only the HITL reply tool from the host composition, not the
-        # normal config tools. This does not confine the shared constructor's final graph;
-        # see docs/2026-07-26-agent-prompt-architecture.org P1.
+        # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
+        # the reply HITL gate; a normal turn gets the full config tools and no HITL.
         tools = _web_triage_tools if triage else _web_tools
         interrupt_on = _web_interrupt_on if triage else None
         specialized = None
