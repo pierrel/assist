@@ -14,9 +14,13 @@ echo "Installing service: $SERVICE_NAME"
 echo "Deploy path: $DEPLOY_PATH"
 echo "Data directory: $ASSIST_THREADS_DIR"
 
-# Create the data directory. Its existing ownership is the durable sandbox
-# contract; the one-time legacy ownership migration has already completed.
-sudo mkdir -p "$ASSIST_THREADS_DIR"
+# Thread storage is provisioned with the service user's ownership. Do not create it
+# through sudo here: a root-owned fresh directory makes the running service unable to
+# create its database or thread directories.
+if [ ! -d "$ASSIST_THREADS_DIR" ] || [ ! -w "$ASSIST_THREADS_DIR" ]; then
+    echo "Thread data directory must already exist and be writable: $ASSIST_THREADS_DIR" >&2
+    exit 1
+fi
 
 # Build environment variables section
 ENV_VARS=""
