@@ -64,6 +64,14 @@ class TestDockerSandboxBackend(TestCase):
         self.assertEqual(ref._resolve("/references/tmp/x"), "/workspace/references/tmp/x")
         self.assertEqual(ref._resolve("/tmp/x"), "/tmp/x")
 
+    def test_agent_passthrough_requires_explicit_capability(self):
+        self.assertEqual(self.sandbox._resolve("/agent/memory.md"),
+                         "/workspace/agent/memory.md")
+        mounted = DockerSandboxBackend(self.container, native_agent_dir=True)
+        self.assertEqual(mounted._resolve("/agent"), "/agent")
+        self.assertEqual(mounted._resolve("/agent/memory.md"), "/agent/memory.md")
+        self.assertEqual(mounted._resolve("/agentfoo"), "/workspace/agentfoo")
+
     def test_execute_success(self):
         self.container.exec_run.return_value = (0, b"hello world\n")
         resp = self.sandbox.execute("echo hello world")
@@ -464,6 +472,30 @@ class TestSandboxManager(TestCase):
                          "Expected exactly one assist-sandbox containers.run call")
         # Verify container is registered
         self.assertIn(test_path, SandboxManager._containers)
+
+    @patch('assist.sandbox.DockerSandboxBackend')
+    def test_agent_dir_is_created_mounted_and_enables_native_paths(self,
+                                                                  mock_backend_cls):
+        test_path = os.path.join(self.temp_dir, "thread", "domain")
+        agent_dir = os.path.join(self.temp_dir, "thread", "agent")
+        os.makedirs(test_path)
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "test123456ab"
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_client.containers.run.return_value = mock_container
+
+        with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+            SandboxManager.get_sandbox_backend(test_path, agent_dir=agent_dir)
+
+        sandbox_call = next(
+            c for c in mock_client.containers.run.call_args_list
+            if c.args and c.args[0] == "assist-sandbox")
+        self.assertEqual(sandbox_call.kwargs["volumes"][agent_dir],
+                         {"bind": "/agent", "mode": "rw"})
+        self.assertTrue(os.path.isdir(agent_dir))
+        mock_backend_cls.assert_called_once_with(
+            mock_container, native_agent_dir=True)
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_get_sandbox_backend_passes_host_uid(self, mock_backend_cls):

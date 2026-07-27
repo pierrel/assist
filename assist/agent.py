@@ -254,6 +254,7 @@ def create_agent(model: BaseChatModel,
                  checkpointer=None,
                  sandbox_backend=None,
                  *,
+                 agent_dir: str | None = None,
                  spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
     """Build an Assist main or delegate agent.
@@ -264,6 +265,11 @@ def create_agent(model: BaseChatModel,
     backend — canonical field semantics live on the spec.  ``spec=None``
     means ``AgentSpec()`` — the defaults.  ``spec.default_backend`` is
     mutually exclusive with ``sandbox_backend``.
+
+    Passing ``agent_dir`` enables local-mode private state at ``/agent`` and
+    auto-loads ``/agent/memory.md``. A sandbox enables the same state through
+    its native ``/agent`` capability. The web composition supplies either only
+    to visible main agents and omits them for delegates and specialists.
 
     **Domain skills are auto-discovered** from
     ``<working_dir>/.claude/skills/`` (the agent-agnostic agentskills.io
@@ -294,16 +300,19 @@ def create_agent(model: BaseChatModel,
             "not both")
     delegate = spec.role == "delegate"
     async_main = not delegate and bool(spec.async_subagent_tools)
+    thread_memory_enabled = bool(
+        getattr(sandbox_backend, "native_agent_dir", False) is True
+        if sandbox_backend is not None else agent_dir is not None)
     mw, (retry_middle, json_validation_mw, tool_name_mw) = _hardening_middleware()
     logging_mw = ModelLoggingMiddleware(
         "delegate-agent" if delegate else "general-agent")
-
     workspace_dir = sandbox_backend.work_dir if sandbox_backend else "/"
     # Single-slashed path that's safe to interpolate without producing
     # `//references/` in local mode (where workspace_dir == "/").
     references_dir = os.path.join(workspace_dir, "references")
 
     memories_path = os.path.join(workspace_dir, _MEMORY_FILE)
+    thread_memories_path = "/agent/memory.md" if thread_memory_enabled else None
 
     # Plain dict copy of the spec's read-only mapping; the backend
     # factories treat an empty mapping and None identically.
@@ -311,6 +320,10 @@ def create_agent(model: BaseChatModel,
     if async_main:
         extra_routes.setdefault(
             MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
+    if agent_dir is not None and sandbox_backend is None:
+        from deepagents.backends import FilesystemBackend
+        extra_routes["/agent/"] = FilesystemBackend(
+            root_dir=agent_dir, virtual_mode=True)
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend,
                                                    extra_routes=extra_routes)
@@ -349,14 +362,18 @@ def create_agent(model: BaseChatModel,
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
         skill_sources.insert(1 if async_main else 0, DOMAIN_SKILLS_PATH)
     skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
-    memory_mw = SmallModelMemoryMiddleware(backend=backend, memories_path=memories_path)
+    memory_mw = SmallModelMemoryMiddleware(
+        backend=backend, memories_path=memories_path,
+        thread_memories_path=thread_memories_path)
 
-    # ``None`` retains the legacy in-process subagents. Any explicit sequence
-    # suppresses them: web main supplies five subagent lifecycle tools, while the
-    # restricted web triage profile deliberately supplies none.
+    # ``None`` retains the legacy in-process subagents for the one-source shape.
+    # Thread-memory agents suppress them because deepagents would make the child
+    # inherit the private /agent backend. Any explicit sequence also suppresses
+    # them: web main supplies lifecycle tools, while web triage supplies none.
     context_sub = None
     research_sub = None
-    legacy_subagents = spec.async_subagent_tools is None
+    legacy_subagents = (
+        spec.async_subagent_tools is None and not thread_memory_enabled)
     if legacy_subagents:
         context_sub = CompiledSubAgent(
             name="context-agent",

@@ -68,8 +68,9 @@ tools. Design and verification contract:
 Shipped 2026-06-12: the =AgentSpec= embedder contract
 ([[file:docs/2026-06-11-embedder-contract.org][docs/2026-06-11-embedder-contract.org]], assist PR #134 + the
 legacy-kwarg removal PR; emacsos ported in its PR #24).  The accreted
-kwargs are gone — =Thread= / =create_agent= take =spec= +
-=configurable= only.  The deepagents-upstream classification is
+embedder shape kwargs are gone: =create_agent= takes =spec=, while =Thread=
+additionally takes per-request =configurable=. App-owned per-instance wiring remains
+separate. The deepagents-upstream classification is
 recorded in the design doc (decision only; upstreaming not planned).
 Deferred with named triggers: =subagents= selection, =system_prompt=,
 middleware tuning, package split.
@@ -91,8 +92,9 @@ further.  Must keep =manage.web= working — incremental migration, not a
 big-bang rewrite.
 
 * Memory
-** TODO Per-thread memory — a =/tmp= memory file that survives only the thread
-An additional memory location in =/tmp= so that it only survives the thread and not in the workspace. Guidance on when to use one memory file over the other: =/workspace/AGENTS.md= for facts about the user, preferences, and forward-looking rules that outlive any single conversation; =/tmp/memory.md= for thread-local learnings (codebase state, current SHA, roadmap understanding, session context) that evolve with the work in progress and should not persist beyond the thread.
+** DONE Per-thread memory — private =/agent= state that survives only the thread
+Visible main-agent turns auto-load =/agent/memory.md= beside unchanged repo memory;
+spawned child agents receive self-contained briefs instead of that private state.
 
 * Dev updates
 The dev agent needs significant improvements

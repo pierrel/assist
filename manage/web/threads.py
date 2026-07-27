@@ -1440,7 +1440,8 @@ def _execute_child_run(run: Run, *, resume: bool = False) -> None:
                     parent_working_dir = MANAGER.thread_default_working_dir(
                         run.parent_thread_id)
                     try:
-                        sandbox = _get_sandbox_backend(run.parent_thread_id)
+                        sandbox = _get_sandbox_backend(
+                            run.parent_thread_id, include_agent=False)
                         sandbox_generation = sandbox.container if sandbox else None
                     except Exception:
                         sandbox_generation = SandboxManager.current_container(
@@ -1922,7 +1923,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # creation registers a container and then raises — cleanup
                 # keys on work_dir, not on the `sandbox` handle.
                 try:
-                    sandbox = _get_sandbox_backend(tid, tz=rider.tz if rider else None)
+                    sandbox = _get_sandbox_backend(
+                        tid, tz=rider.tz if rider else None)
                     sandbox_generation = sandbox.container if sandbox else None
                 except Exception:
                     sandbox_generation = SandboxManager.current_container(

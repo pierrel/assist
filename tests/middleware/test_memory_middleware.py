@@ -2,7 +2,7 @@
 
 The middleware no longer registers a `save_memory` tool — memory is
 written via the model's existing `write_file` / `edit_file` tools
-against the configured memory file.  These tests guard against
+against the configured repository and optional thread-memory files. These tests guard against
 regression (re-introducing the tool), verify the system-prompt body
 formats loaded memory correctly, and lock in two reliability fixes:
 re-reading from disk on every turn, and rendering the absolute memory
@@ -98,6 +98,33 @@ class TestMemoryPromptFormatting(TestCase):
         self.assertIn("write_file", SMALL_MODEL_MEMORY_PROMPT)
         self.assertIn("edit_file", SMALL_MODEL_MEMORY_PROMPT)
         self.assertNotIn("save_memory", SMALL_MODEL_MEMORY_PROMPT)
+
+    def test_repo_and_thread_memory_are_loaded_and_distinguished(self):
+        mw = SmallModelMemoryMiddleware(
+            backend=MagicMock(),
+            memories_path="/workspace/AGENTS.md",
+            thread_memories_path="/agent/memory.md",
+        )
+        self.assertEqual(
+            mw.sources, ["/workspace/AGENTS.md", "/agent/memory.md"])
+
+        out = mw._format_agent_memory({
+            "/workspace/AGENTS.md": "Prefer compact tables across threads.",
+            "/agent/memory.md": "Current goal: finish the application workflow.",
+        })
+
+        repo_start = out.index("<agent_memory>")
+        repo_end = out.index("</agent_memory>")
+        thread_start = out.index("<thread_memory>")
+        thread_end = out.index("</thread_memory>")
+        self.assertIn("Prefer compact tables", out[repo_start:repo_end])
+        self.assertNotIn("Current goal", out[repo_start:repo_end])
+        self.assertIn("Current goal", out[thread_start:thread_end])
+        self.assertNotIn("Prefer compact tables", out[thread_start:thread_end])
+        self.assertIn("durable repository memory shared across threads", out)
+        self.assertIn("belongs only to this thread", out)
+        self.assertIn("goal, processes, decisions", " ".join(out.split()))
+        self.assertIn("update the two files separately", out)
 
 
 class TestStaleMemoryReread(TestCase):

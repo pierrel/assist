@@ -1,0 +1,108 @@
+#+title: Per-thread main-agent memory
+#+date: 2026-07-26
+
+* Status
+
+The implementation is deployed and PR review is in progress.
+
+* Why
+
+Long-running threads need working state that survives turns without becoming durable
+repository guidance. Threads =20260723170746-d10af2fb= and
+=20260722202239-f12319a8= had to encode that state in repository working files or a
+schedule prompt. Neither location represented its actual lifetime.
+
+This feature adds thread memory alongside existing repository memory. It does not
+replace or reinterpret repository memory.
+
+* Contract
+
+1. Each visible thread owns =<thread-dir>/agent=. Its main agent sees that directory
+   read-write at =/agent= through a local virtual route or Docker bind mount. It
+   persists across turns and is removed with the thread.
+2. The main agent auto-loads =/agent/memory.md= alongside existing repository memory,
+   addressed as =/AGENTS.md= locally and =/workspace/AGENTS.md= in Docker.
+3. Prompt guidance distinguishes the scopes:
+   - repository memory is durable across threads;
+   - thread memory holds this thread's goal, processes, decisions, corrections,
+     progress, blockers, and useful working notes;
+   - =/agent= is agent-owned working space to manage proactively.
+4. Spawned children receive neither the private =/agent= route/mount nor the
+   thread-memory prompt. Their parent must continue to provide a self-contained brief.
+5. Agent constructions without a thread agent directory retain the existing single
+   memory source and prompt.
+
+Scheduled turns need no special behavior: they enter through the ordinary visible
+main-agent construction path and therefore see the same thread directory naturally.
+There is no deterministic precedence or conflict mechanism between the two memory
+files.
+
+* Design
+
+=ThreadManager.thread_agent_dir= locates the directory under the thread root. Local
+agents receive a virtual =/agent/= filesystem route. Docker main-agent turns receive
+an explicit bind mount, represented by a small backend capability so =/agent= resolves
+to the mount rather than =/workspace/agent=. Child construction omits the mount;
+memory-enabled agents also omit the legacy in-process child profile, which would share
+the main backend.
+
+=SmallModelMemoryMiddleware= accepts one optional second source. With one source it
+renders the established prompt unchanged. With two, it keeps repository contents in
+=<agent_memory>= and thread contents in =<thread_memory>=, followed by the short scope
+guidance above.
+
+No schedule schema or tool changes, retry loops, queue integration, promotion
+transactions, triage profile, path aliases, collision handling, or other enforcement
+mechanisms belong to this feature.
+
+* Verification contract
+
+The retained deterministic tests cover:
+
+- thread-directory location, isolation by thread ID, and deletion with the thread;
+- local =/agent= routing and Docker mount/path resolution;
+- repository and thread sources both loading into separately labelled prompt blocks;
+- the unchanged one-source prompt tests;
+- visible-main versus delegate/specialized-child containment in =ThreadManager=,
+  child-run mount omission, and a real mounted/unmounted Docker boundary.
+
+One required natural small-model eval gives a single user message containing both a
+durable cross-thread preference and a current-thread workflow decision. It passes only
+when the preference lands in repository memory, the workflow decision lands in thread
+memory, and neither fact leaks into the other scope.
+
+A second natural eval is intentionally aspirational. “We'll use this thread … The
+process is …” asks the model to infer that a user-established process belongs in thread
+memory and asserts that it writes something there. The current small model is
+inconsistent; keep this as a prompt-rearchitecture target, not a release gate for this
+storage and lifecycle feature.
+
+* Results
+
+The simplicity-first review converged in two rounds. It removed the earlier schedule,
+retry, promotion, path-enforcement, collision, queue, and triage machinery, reused
+=ThreadManager.get= from =new=, and reduced the production diff to the eight runtime
+files named by the design. Against the rebased main that diff is +151/-59 lines (net
+92), including docstrings and prompt text.
+
+The full local review found and fixed two real construction leaks, documentation drift,
+and an eval assertion that could miss paraphrased leakage. Correctness, containment,
+simplicity, and doc-alignment convergence passes then reported no real findings. The
+unsupported =agent_dir= plus non-native-sandbox combination remains unenforced by
+design; real web callers select exactly one construction mode.
+
+Deterministic verification: 1,478 passed, 2 skipped. Focused post-prompt verification:
+140 passed. =git diff --check= and Python compile checks passed; mypy was unavailable in
+the deploy environment.
+
+The required natural eval first caught a real mixed-scope failure: one of three trials
+copied the thread workflow stage into repository memory. A two-sentence prompt
+correction made mixed-scope messages update the files separately. The final cadence
+then passed N=3 (3/3), N=5 (5/5), and N=10 (10/10).
+
+Pierre's review added the ordinary “We'll use this thread … The process is …” case.
+Descriptive “processes” guidance alone did not make it reliable: several prompt
+variants created a todo artifact or used =write_todos= instead. The strongest
+enforcement passed N=3 (3/3) but failed N=5 on trial 3 after two passes. That extra
+enforcement was removed rather than accumulated. The retained eval and this result
+make the behavior an explicit prompt-rearchitecture target.

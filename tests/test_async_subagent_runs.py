@@ -64,6 +64,26 @@ def test_agent_protocol_start_is_idempotent(monkeypatch, tmp_path):
     assert {item[:2] for item in submitted} == {(first.id, "sub-stable")}
 
 
+def test_child_sandbox_explicitly_omits_parent_agent_mount(monkeypatch, tmp_path):
+    _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
+    child = SERVICE.create_run(
+        "sub-stable", "context-agent", "inspect files", metadata=metadata)
+    sandbox_calls = []
+
+    def sandbox(tid, tz=None, **kwargs):
+        sandbox_calls.append((tid, kwargs))
+        return None
+
+    monkeypatch.setattr(threads, "_get_sandbox_backend", sandbox)
+    monkeypatch.setattr(
+        threads.MANAGER, "get",
+        lambda *args, **kwargs: SimpleNamespace(message=lambda text: "done"))
+
+    threads._execute_child_run(child)
+
+    assert sandbox_calls == [("parent", {"include_agent": False})]
+
+
 def test_task_thread_replay_does_not_rewrite_its_identity(monkeypatch, tmp_path):
     _, _, metadata = _parent_and_metadata(monkeypatch, tmp_path)
     marker = os.path.join(threads.MANAGER.thread_dir("sub-stable"), ".subagent")

@@ -264,10 +264,13 @@ class SandboxManager:
         )
 
     @classmethod
-    def get_sandbox_backend(cls, work_dir: str, tz: str | None = None):
+    def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
+                            agent_dir: str | None = None):
         """Return a DockerSandboxBackend for work_dir, creating a container if needed.
 
-        Returns None if Docker is not available.
+        Passing ``agent_dir`` mounts it at ``/agent``. The web composition passes
+        it only for visible main-agent turns; child turns omit it. Returns None if
+        Docker is not available.
         """
         # Per-turn lifecycle: never reuse a container across turns.  The web
         # layer tears each container down at the end of its turn
@@ -390,13 +393,25 @@ class SandboxManager:
                     pass  # not permitted (web non-root, uids differ) — mount still
                           # works when web uid == work_dir owner (the deployment case)
 
+            volumes = {work_dir: {"bind": "/workspace", "mode": "rw"},
+                       tmp_dir: {"bind": "/tmp", "mode": "rw"}}
+            if agent_dir is not None:
+                os.makedirs(agent_dir, exist_ok=True)
+                try:
+                    os.chown(agent_dir, st.st_uid, st.st_gid)
+                except OSError:
+                    pass
+                volumes[agent_dir] = {
+                    "bind": "/agent",
+                    "mode": "rw",
+                }
+
             container = client.containers.run(
                 SANDBOX_IMAGE,
                 detach=True,
                 remove=True,
                 user=user_arg,
-                volumes={work_dir: {"bind": "/workspace", "mode": "rw"},
-                         tmp_dir: {"bind": "/tmp", "mode": "rw"}},
+                volumes=volumes,
                 working_dir="/workspace",
                 stdin_open=True,
                 tty=False,
@@ -408,7 +423,8 @@ class SandboxManager:
             cls._containers[work_dir] = container
             cls._record_egress_client(container, work_dir)
             from assist.sandbox import DockerSandboxBackend
-            return DockerSandboxBackend(container)
+            return DockerSandboxBackend(
+                container, native_agent_dir=agent_dir is not None)
         except DockerException as e:
             logger.warning("Docker sandbox unavailable: %s", e)
             return None

@@ -25,6 +25,45 @@ from assist.thread_manager import ThreadManager
 
 
 class TestThreadManagerLazy(TestCase):
+    def test_thread_agent_dir_is_a_sibling_of_workspace_and_isolated_by_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            try:
+                assert manager.thread_agent_dir("one") == os.path.join(tmp, "one", "agent")
+                assert manager.thread_agent_dir("two") == os.path.join(tmp, "two", "agent")
+                assert manager.thread_agent_dir("one") != manager.thread_agent_dir("two")
+            finally:
+                manager.close()
+
+    def test_visible_main_get_receives_agent_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            manager.reserve("visible")
+            manager._model = MagicMock()
+            try:
+                with patch("assist.thread_manager.Thread", return_value=MagicMock()) as thread:
+                    manager.get("visible")
+                assert thread.call_args.kwargs["agent_dir"] == manager.thread_agent_dir(
+                    "visible")
+                assert os.path.isdir(manager.thread_agent_dir("visible"))
+            finally:
+                manager.close()
+
+    def test_specialized_child_get_does_not_receive_agent_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            manager.reserve("child", hidden={"parent_thread_id": "visible"})
+            manager._model = MagicMock()
+            try:
+                with patch("assist.thread_manager.create_context_agent",
+                           return_value=MagicMock()), \
+                     patch("assist.thread_manager.Thread", return_value=MagicMock()) as thread:
+                    manager.get("child", working_dir=os.path.join(tmp, "visible", "domain"),
+                                assistant_id="context-agent")
+                assert "agent_dir" not in thread.call_args.kwargs
+            finally:
+                manager.close()
+
     def test_init_does_not_call_select_assistant_model(self):
         """Constructing a ``ThreadManager`` must not touch the model."""
         with patch(
@@ -101,3 +140,4 @@ class TestThreadManagerLazy(TestCase):
         self.assertEqual(spec.tools, ())
         self.assertEqual(dict(spec.skill_sources), {})
         self.assertIsNone(spec.interrupt_on)
+        self.assertNotIn("agent_dir", thread.call_args.kwargs)

@@ -83,6 +83,10 @@ class TestHardDeleteRemovesAllThree(TestCase):
             try:
                 tid = "20260504000000-aaaaaaaa"
                 tdir = _seed_thread(mgr, tid)
+                agent_dir = mgr.thread_agent_dir(tid)
+                os.makedirs(agent_dir)
+                with open(os.path.join(agent_dir, "memory.md"), "w") as stream:
+                    stream.write("private state")
                 expected_workdir = mgr.thread_default_working_dir(tid)
 
                 self.assertTrue(os.path.isdir(tdir))
@@ -95,6 +99,7 @@ class TestHardDeleteRemovesAllThree(TestCase):
 
                 mock_cleanup.assert_called_once_with(expected_workdir)
                 self.assertFalse(os.path.exists(tdir))
+                self.assertFalse(os.path.exists(agent_dir))
                 self.assertEqual(_count_rows(mgr, "checkpoints", tid), 0)
                 self.assertEqual(_count_rows(mgr, "writes", tid), 0)
             finally:
