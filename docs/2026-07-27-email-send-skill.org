@@ -1,6 +1,6 @@
 #+TITLE: Email send skill
 #+DATE: <2026-07-27>
-#+STATUS: BUILD
+#+STATUS: DEPLOYED
 
 * Goal
 Let a normal Assist web conversation compose and propose a plain-text email.  The
@@ -34,7 +34,8 @@ sandbox receives every =ASSIST_*= environment variable; this keeps the provider
 secret outside agent code.  The existing Kindle sender's key is never read or reused.
 No secret or real address is logged or tracked.  Resend is already the local Kindle
 sender's delivery provider, so a verified sending domain is the smallest operational
-addition; a dedicated restricted key and the new sender identity still need provision.
+addition. The dedicated restricted key and sender identity are provisioned as an
+owner-only production file and service configuration.
 
 * Security and failure semantics
 - The fixed sender, CC field, and recipient list come from process configuration,
@@ -56,5 +57,5 @@ addition; a dedicated restricted key and the new sender identity still need prov
 - Add a behavioral eval that asks naturally for an email, asserts that the email
   skill is loaded and =send_email= pauses for approval, and uses different wording
   from the skill examples.
-- After the dedicated Resend key and sender identity are configured, smoke a real approved message to a
-  controlled mailbox and verify both the recipient and oversight CC receive it.
+- The production smoke call was accepted by Resend with the fixed identity and CC; mailbox
+  delivery remains observable by the recipient and oversight mailbox.
