@@ -32,6 +32,7 @@ from assist.schedule.tools import schedule_tools
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.events.reply import reply_tools, REPLY_INTERRUPT_ON
+from assist.events.email import email_tools, EMAIL_INTERRUPT_ON
 from assist.events.notify import notify_tools
 from assist.events.inbound import InboundLog
 from assist.backlog import MessageBacklog
@@ -44,7 +45,8 @@ from assist.geo.proposals import ProposalStore
 from assist.geo.registry import RegionRegistry
 from assist.geo.tools import geo_tools
 from assist.thread_manager import (
-    ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on)
+    ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on,
+    set_web_triage_interrupt_on)
 
 
 def _configure_logging() -> None:
@@ -176,9 +178,10 @@ _egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
 
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
-              + _geo_tools + _egress_tools)
+              + _geo_tools + _egress_tools + email_tools())
 set_web_triage_tools(reply_tools())
-set_web_interrupt_on(REPLY_INTERRUPT_ON)
+set_web_interrupt_on(EMAIL_INTERRUPT_ON)
+set_web_triage_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")
 DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}

@@ -506,7 +506,7 @@ def create_agent(model: BaseChatModel,
               + list(spec.tools)
               + [t for t in (travel, directions, map_data, read_url)
                  if t not in spec.tools],
-        # HITL gating (e.g. the web spec gates send_reply → approve/edit/reject); None off.
+        # HITL gating for web outward-effect tools; None off.
         **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     )
 

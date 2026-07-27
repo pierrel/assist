@@ -75,9 +75,11 @@ _web_tools: tuple = ()
 # which are host-effect and NOT sandbox-contained (an injected text must not be able to
 # plant/delete a subscription or schedule). See docs/2026-07-01-inbound-sms-interception.org.
 _web_triage_tools: tuple = ()
-# HITL gating for the triage AgentSpec (e.g. {"send_reply": {...}}); the eval agents build
-# their own agents and must NOT inherit it.
+# HITL gating for the normal web AgentSpec (e.g. {"send_email": {...}}); the eval agents
+# build their own agents and must NOT inherit it.
 _web_interrupt_on: dict | None = None
+# Triage has a distinct gate because its untrusted tool profile is reply-only.
+_web_triage_interrupt_on: dict | None = None
 
 
 def set_web_tools(tools) -> None:
@@ -93,6 +95,11 @@ def set_web_triage_tools(tools) -> None:
 def set_web_interrupt_on(interrupt_on: dict | None) -> None:
     global _web_interrupt_on
     _web_interrupt_on = interrupt_on
+
+
+def set_web_triage_interrupt_on(interrupt_on: dict | None) -> None:
+    global _web_triage_interrupt_on
+    _web_triage_interrupt_on = interrupt_on
 
 
 class InvalidThreadId(ValueError):
@@ -281,9 +288,9 @@ class ThreadManager:
             working_dir = self.make_default_working_dir(tdir)
 
         # A triage turn (untrusted inbound message) gets the reduced reply-only tool set +
-        # the reply HITL gate; a normal turn gets the full config tools and no HITL.
+        # its distinct reply HITL gate; normal turns get the full web tools and email HITL.
         tools = _web_triage_tools if triage else _web_tools
-        interrupt_on = _web_interrupt_on if triage else None
+        interrupt_on = _web_triage_interrupt_on if triage else _web_interrupt_on
         specialized = None
         if assistant_id == "context-agent":
             specialized = create_context_agent(

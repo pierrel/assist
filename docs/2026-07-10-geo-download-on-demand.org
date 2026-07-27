@@ -130,7 +130,7 @@ to match; this is the change record.
   for free (a name that geocodes to no catalog bbox ⇒ likely a typo ⇒ no proposal).
 - *B2 — "reuse the SMS-reply approval seam" is broken as wired* (agentic-fit +
   clean-interfaces + threat-model). VERIFIED: =thread_manager.py:281=
-  =interrupt_on = _web_interrupt_on if triage else None= — the deepagents HITL
+  =interrupt_on = _web_interrupt_on if triage else None= at that time — the deepagents HITL
   interrupt is armed *only on triage (inbound-SMS) turns*; a region proposal fires
   on a *normal* chat turn where =interrupt_on= is =None=, so the interrupt cannot
   fire there. =thread.py:253= =pending_reply()= is =send_reply=-specific end to

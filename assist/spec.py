@@ -88,9 +88,10 @@ class AgentSpec:
     async_subagent_tools: tuple[BaseTool, ...] | None = None
 
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
-    # InterruptOnConfig}`` passed straight to ``create_deep_agent(interrupt_on=…)``.  The
-    # web spec gates ``send_reply`` (approve/edit/reject) so an inbound-message triage turn
-    # can propose a reply but never send without approval.  ``None`` = no HITL.
+    # InterruptOnConfig}`` passed straight to ``create_deep_agent(interrupt_on=…)``.  Web
+    # profiles gate outward-effect tools (normal: ``send_email``; inbound triage:
+    # ``send_reply``) so they can propose an action but never perform it without approval.
+    # ``None`` = no HITL.
     interrupt_on: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:

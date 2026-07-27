@@ -250,30 +250,39 @@ class Thread:
         ``tests/test_subagent_durable_resume.py`` + ``tests/test_restart_recovery.py``."""
         return self._run(None)
 
-    def pending_reply(self) -> dict | None:
-        """If this thread is paused awaiting approval of a ``send_reply`` (HITL interrupt),
-        return ``{"text": <draft>}`` — read from the durable checkpoint, so it survives the
-        request that produced it. ``None`` when the thread isn't awaiting an approval.
-        """
+    def pending_action(self, name: str) -> dict | None:
+        """Return arguments for a named HITL action paused in this durable checkpoint."""
         try:
             snap = self.agent.get_state(self.runconfig)
         except Exception:
-            logger.warning("pending_reply: get_state failed for %s; treating as no pending "
+            logger.warning("pending_action: get_state failed for %s; treating as no pending "
                            "approval", self.thread_id, exc_info=True)
             return None
         for intr in (getattr(snap, "interrupts", None) or ()):
             value = intr.value or {}
             for ar in value.get("action_requests", []):
-                if ar.get("name") == "send_reply":
-                    return {"text": ar.get("args", {}).get("text", "")}
+                if ar.get("name") == name and isinstance(ar.get("args"), dict):
+                    return dict(ar["args"])
         return None
+
+    def resume_action(self, decision: dict) -> str:
+        """Resume a paused HITL action with a framework decision."""
+        return self._run(Command(resume={"decisions": [decision]}))
+
+    def pending_reply(self) -> dict | None:
+        """Return a pending ``send_reply`` draft, if this thread is paused for approval."""
+        return self.pending_action("send_reply")
+
+    def pending_email(self) -> dict | None:
+        """Return a pending ``send_email`` proposal, if this thread is paused for approval."""
+        return self.pending_action("send_email")
 
     def resume_reply(self, decision: dict) -> str:
         """Resume a paused ``send_reply`` with a HITL decision — ``{"type": "approve"}``,
         ``{"type": "reject", "message": …}``, or ``{"type": "edit", "edited_action":
         {"name": "send_reply", "args": {"text": …}}}``. On approve/edit the tool body runs
         (the reply is sent); returns the agent's final content."""
-        return self._run(Command(resume={"decisions": [decision]}))
+        return self.resume_action(decision)
 
     def stream_message(self, text: str) -> Iterator[dict[str, Any] | Any]:
         if not isinstance(text, str):

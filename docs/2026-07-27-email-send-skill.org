@@ -1,0 +1,60 @@
+#+TITLE: Email send skill
+#+DATE: <2026-07-27>
+#+STATUS: BUILD
+
+* Goal
+Let a normal Assist web conversation compose and propose a plain-text email.  The
+user must approve the exact recipient, subject, and body before delivery.  Every
+delivered message has the fixed assistant sender and a fixed oversight CC.
+
+* Design
+** Web-only host operation
+Add =assist/events/email.py= beside the existing web-only message-event tools.
+=send_email(to, subject, body)= submits one plain-text message to Resend on the
+host.  It fixes the From and CC fields and sends a complete recipient list.  The
+agent never receives provider credentials and cannot set the sender, CC, BCC,
+headers, attachments, or provider endpoint.  The tool returns a corrective result
+when delivery is unconfigured or fails; it does not raise into the agent loop.
+
+The normal web tool profile receives =send_email= and its Human-in-the-Loop
+configuration.  The reduced inbound-SMS triage profile keeps only =send_reply=.
+This makes an untrusted inbound message unable to propose or send email by
+construction.  Both outward-effect tools are paused before their bodies run.  A
+pending-action seam reads the durable tool name and arguments; the email approval
+card shows From, To, immutable CC, subject, and body, and lets the user edit only
+To, subject, and body.  The form is tied to the exact pending action so a stale or
+forged submission cannot resume another tool.
+
+** Resend configuration
+The deployment provides =EMAIL_RESEND_API_KEY_FILE=, =EMAIL_FROM_ADDRESS=,
+=EMAIL_FROM_NAME=, and =EMAIL_ALWAYS_CC= through the ignored deploy environment.
+The key is a dedicated restricted Resend sending key in the referenced mode-0600
+service-only file.  The names deliberately do not start with =ASSIST_= because the
+sandbox receives every =ASSIST_*= environment variable; this keeps the provider
+secret outside agent code.  The existing Kindle sender's key is never read or reused.
+No secret or real address is logged or tracked.  Resend is already the local Kindle
+sender's delivery provider, so a verified sending domain is the smallest operational
+addition; a dedicated restricted key and the new sender identity still need provision.
+
+* Security and failure semantics
+- The fixed sender, CC field, and recipient list come from process configuration,
+  not tool arguments or skill guidance.  The configuration is required and fail-closed.
+- The tool accepts one bare recipient address, avoiding model-side list parsing and
+  accidental fan-out.  It rejects control characters and malformed headers before
+  contacting the provider.
+- The Resend call has a bounded timeout and an idempotency key derived from the
+  durable tool call.  A transport failure returns an honest unknown-delivery result
+  and makes no automatic retry, because the provider may already have accepted it.
+- This v1 sends plain text only.  Attachments, inbound-email handling, threads,
+  and scheduled email are not implied by the request and remain out of scope.
+
+* Validation
+- Unit-test the exact provider payload: process-fixed From/CC, one recipient,
+  malformed header rejection, no automatic retry, idempotency, and honest error results.
+- Pin tool containment, separate normal/triage HITL profiles, and the absence of
+  =EMAIL_*= credentials from the sandbox environment un-mocked.
+- Add a behavioral eval that asks naturally for an email, asserts that the email
+  skill is loaded and =send_email= pauses for approval, and uses different wording
+  from the skill examples.
+- After the dedicated Resend key and sender identity are configured, smoke a real approved message to a
+  controlled mailbox and verify both the recipient and oversight CC receive it.

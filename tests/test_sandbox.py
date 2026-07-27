@@ -498,6 +498,31 @@ class TestSandboxManager(TestCase):
             mock_container, native_agent_dir=True)
 
     @patch('assist.sandbox.DockerSandboxBackend')
+    def test_get_sandbox_backend_does_not_forward_email_configuration(self, mock_backend_cls):
+        test_path = os.path.join(self.temp_dir, "domain")
+        os.makedirs(test_path)
+        mock_client = MagicMock()
+        mock_container = MagicMock(id="test123456ab", status="running")
+        mock_container.logs.return_value = b"egress-proxy: listening on 0.0.0.0:8888\n"
+        mock_client.containers.run.return_value = mock_container
+
+        with patch.dict(os.environ, {
+                "ASSIST_MODEL_URL": "http://model.example.test",
+                "EMAIL_RESEND_API_KEY_FILE": "/private/key",
+                "EMAIL_FROM_ADDRESS": "assistant@example.test",
+                "EMAIL_FROM_NAME": "Assistant",
+                "EMAIL_ALWAYS_CC": "oversight@example.test",
+        }):
+            with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
+                SandboxManager.get_sandbox_backend(test_path)
+
+        sandbox_call = next(c for c in mock_client.containers.run.call_args_list
+                            if c.args and c.args[0] == "assist-sandbox")
+        environment = sandbox_call.kwargs["environment"]
+        self.assertEqual(environment["ASSIST_MODEL_URL"], "http://model.example.test")
+        self.assertFalse(any(key.startswith("EMAIL_") for key in environment))
+
+    @patch('assist.sandbox.DockerSandboxBackend')
     def test_get_sandbox_backend_passes_host_uid(self, mock_backend_cls):
         """The container must run as the host bind-mount's owner —
         privilege-separation layer that closes the cp+exec-a bypass.

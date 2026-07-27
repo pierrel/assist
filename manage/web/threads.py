@@ -58,6 +58,7 @@ from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.events.reply import SMS_SENDER_KEY
+from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
 from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
@@ -763,6 +764,38 @@ def render_thread(
         )
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
+    elif stage == "awaiting_approval" and status.get("pending_email_token"):
+        identity = email_identity()
+        sender, cc = identity if identity else ("Email sender is not configured", "")
+        to = status.get("pending_email_to", "")
+        subject = status.get("pending_email_subject", "")
+        body = status.get("pending_email_body", "")
+        token = status["pending_email_token"]
+        status_banner = f"""
+        <div class="approval-banner">
+          <div><strong>Email awaiting your approval</strong></div>
+          <div>From: {html.escape(sender)}<br/>To: {html.escape(to)}<br/>
+          Cc: {html.escape(cc)}</div>
+          <form action="/thread/{tid}/email/edit" method="post" class="approval-form">
+            <input type="hidden" name="token" value="{html.escape(token)}">
+            <input type="hidden" name="seen_to" value="{html.escape(to)}">
+            <input type="hidden" name="seen_subject" value="{html.escape(subject)}">
+            <input type="hidden" name="seen_body" value="{html.escape(body)}">
+            <label for="email-to-{tid}">To:</label>
+            <input id="email-to-{tid}" name="to" value="{html.escape(to)}" required>
+            <label for="email-subject-{tid}">Subject:</label>
+            <input id="email-subject-{tid}" name="subject" value="{html.escape(subject)}" required>
+            <label for="email-body-{tid}">Message:</label>
+            <textarea id="email-body-{tid}" name="body" rows="8" class="approval-draft">{html.escape(body)}</textarea>
+            <div class="approval-actions">
+              <button class="btn merge-btn" formaction="/thread/{tid}/email/approve"
+                      type="submit">Approve &amp; send</button>
+              <button class="btn btn-secondary" type="submit">Send edited</button>
+              <button class="btn btn-secondary" formaction="/thread/{tid}/email/reject"
+                      type="submit">Reject</button>
+            </div>
+          </form>
+        </div>"""
     elif stage == "awaiting_approval":
         draft = html.escape(status.get("pending_reply", ""))
         to = html.escape(status.get("pending_sender", "") or "the sender")
@@ -1371,6 +1404,12 @@ class _SupersedeCapReached(Exception):
     holding the global single-flight slot."""
 
 
+def _pending_email(chat) -> dict | None:
+    """Return a pending email when this web Thread supports the email action."""
+    pending = getattr(chat, "pending_email", None)
+    return pending() if pending is not None else None
+
+
 _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
 _RUN_SERVICES_LOCK = threading.Lock()
 
@@ -1902,13 +1941,18 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                 # hold the slot. (Resumes skip this check — a paused continuation
                 # must always be able to continue.)
                 try:
+                    pending_chat = MANAGER.get(tid, sandbox_backend=None)
                     _has_pending_reply = bool(
-                        MANAGER.get(tid, sandbox_backend=None).pending_reply())
+                        pending_chat.pending_reply() or _pending_email(pending_chat))
                 except FileNotFoundError:
                     return   # thread deleted while queued — silent skip like every path
                 if _has_pending_reply:
-                    logging.info("continuation on %s deferred: a reply is awaiting "
+                    logging.info("continuation on %s deferred: an action is awaiting "
                                  "approval", tid)
+                    return
+            if not resume and resume_decision is None:
+                if _get_status(tid).get("pending_email_token"):
+                    logging.info("run on %s deferred: email is awaiting approval", tid)
                     return
             if _run is not None:
                 try:
@@ -1959,7 +2003,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     # resolved (a double-click, or a superseding text got there first),
                     # there's nothing to resume — resuming a non-interrupted graph would
                     # raise. Treat it as a no-op.
-                    resp = chat.resume_reply(resume_decision) if chat.pending_reply() else ""
+                    if chat.pending_reply():
+                        resp = chat.resume_reply(resume_decision)
+                    elif _pending_email(chat):
+                        resp = chat.resume_action(resume_decision)
+                    else:
+                        resp = ""
                 else:
                     # A NEW message while a reply is still awaiting approval supersedes that
                     # draft: reject it to unblock the paused graph, then run this message so
@@ -2045,6 +2094,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
         _claim_seen_interjections(tid, chat)
         _TURN_INTERJECTION.pop(tid, None)
         pending = chat.pending_reply()
+        pending_email = _pending_email(chat)
         if pending:
             # Preserve started_at so the HITL approve/reject resume reuses the original
             # submit time — the approved reply's badge then shows human→final-reply, not
@@ -2053,6 +2103,14 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         pending_reply=pending.get("text", ""), pending_sender=sender or "",
                         started_at=started_at)
             _terminal = ("awaiting_approval", pending.get("text", ""))
+        elif pending_email:
+            _set_status(tid, "awaiting_approval",
+                        pending_email_to=pending_email.get("to", ""),
+                        pending_email_subject=pending_email.get("subject", ""),
+                        pending_email_body=pending_email.get("body", ""),
+                        pending_email_token=secrets.token_urlsafe(16),
+                        started_at=started_at)
+            _terminal = ("awaiting_approval", pending_email.get("body", ""))
         else:
             _set_status(tid, "ready")
             _terminal = ("ready", resp)
@@ -2398,9 +2456,15 @@ def _mark_pending(tid: str, text: str, busy: bool,
 _RUN_ADMISSION_LOCK = threading.Lock()
 
 
+class _EmailApprovalPending(Exception):
+    """A web submission tried to bypass a displayed email approval."""
+
+
 def _accept_message_run(tid: str, text: str, rider=None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
+        if _get_status(tid).get("pending_email_token"):
+            raise _EmailApprovalPending
         prior_stage = _get_status(tid).get("stage")
         busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
         run = _create_run(tid, text, rider=rider)
@@ -2557,6 +2621,15 @@ _REPLY_DECISIONS = {
                           "edited_action": {"name": "send_reply", "args": {"text": text}}},
 }
 
+_EMAIL_DECISIONS = {
+    "approve": lambda to, subject, body: {"type": "approve"},
+    "reject": lambda to, subject, body: {
+        "type": "reject", "message": "The user declined to send this email."},
+    "edit": lambda to, subject, body: {
+        "type": "edit", "edited_action": {"name": "send_email", "args": {
+            "to": to, "subject": subject, "body": body}}},
+}
+
 
 @app.post("/thread/{tid}/reply/{decision}")
 def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
@@ -2583,6 +2656,37 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     sender = status.get("pending_sender") or ""
     run = _create_run(tid, None, sender=sender,
                       resume_decision=_REPLY_DECISIONS[decision](text))
+    background_tasks.add_task(_execute_run, run.id, tid)
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+@app.post("/thread/{tid}/email/{decision}")
+def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
+                   token: str = Form(default=""), to: str = Form(default=""),
+                   subject: str = Form(default=""), body: str = Form(default=""),
+                   seen_to: str = Form(default=""), seen_subject: str = Form(default=""),
+                   seen_body: str = Form(default="")):
+    """Approve, edit, or reject the exact pending email proposal off the event loop."""
+    _existing_thread_dir(tid)
+    if decision not in _EMAIL_DECISIONS:
+        raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
+    status = _get_status(tid)
+    expected_token = status.get("pending_email_token")
+    if (status.get("stage") != "awaiting_approval" or not isinstance(expected_token, str)
+            or not hmac.compare_digest(token, expected_token)):
+        raise HTTPException(status_code=409, detail="This thread has no email awaiting approval.")
+    if decision == "approve":
+        pending = (status.get("pending_email_to", ""), status.get("pending_email_subject", ""),
+                   status.get("pending_email_body", ""))
+        seen = (seen_to, seen_subject, seen_body.replace("\r\n", "\n"))
+        current = (pending[0], pending[1], pending[2].replace("\r\n", "\n"))
+        if seen != current:
+            raise HTTPException(status_code=409,
+                                detail="This email was updated — reload and review it.")
+    if decision == "edit" and not valid_email_content(to, subject, body):
+        raise HTTPException(status_code=400, detail="The edited email is invalid.")
+    run = _create_run(tid, None,
+                      resume_decision=_EMAIL_DECISIONS[decision](to, subject, body))
     background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
@@ -3042,9 +3146,13 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     rider = _build_rider(sent_at, tz, lat, lon)
-    run, busy = await anyio.to_thread.run_sync(
-        lambda: _accept_message_run(tid, text, rider),
-        limiter=_get_run_admission_limiter())
+    try:
+        run, busy = await anyio.to_thread.run_sync(
+            lambda: _accept_message_run(tid, text, rider),
+            limiter=_get_run_admission_limiter())
+    except _EmailApprovalPending:
+        raise HTTPException(status_code=409,
+                            detail="Resolve the email awaiting approval before sending a message.")
     if not busy:
         background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)

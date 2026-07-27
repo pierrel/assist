@@ -120,9 +120,13 @@ def test_triage_tools_exclude_host_effect_tools():
     triage = {getattr(f, "__name__", "") for f in tm._web_triage_tools}
     normal = {getattr(f, "__name__", "") for f in tm._web_tools}
     assert "send_reply" in triage
+    assert "send_email" not in triage
     assert "create_subscription" not in triage and "create_schedule" not in triage
     assert "delete_subscription" not in triage
     assert "create_subscription" in normal and "send_reply" not in normal
+    assert "send_email" in normal
+    assert "send_email" in tm._web_interrupt_on
+    assert "send_reply" in tm._web_triage_interrupt_on
 
 
 def test_reply_approve_refuses_superseded_draft(client, monkeypatch):
@@ -138,3 +142,74 @@ def test_reply_approve_refuses_superseded_draft(client, monkeypatch):
     r2 = client.post("/thread/t-sub/reply/approve", data={"seen": "NEW draft"},
                      follow_redirects=False)
     assert r2.status_code == 303 and len(queued) == 1
+
+
+def test_email_approval_requires_its_token_and_exact_review(client, monkeypatch):
+    monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
+    queued = []
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
+    _set_status("t-sub", "awaiting_approval", pending_email_to="a@example.test",
+                pending_email_subject="Subject", pending_email_body="Body",
+                pending_email_token="approval-token")
+
+    missing = client.post("/thread/t-sub/email/approve")
+    assert missing.status_code == 409
+    stale = client.post("/thread/t-sub/email/approve", data={
+        "token": "approval-token", "seen_to": "other@example.test",
+        "seen_subject": "Subject", "seen_body": "Body"})
+    assert stale.status_code == 409
+    approved = client.post("/thread/t-sub/email/approve", data={
+        "token": "approval-token", "seen_to": "a@example.test",
+        "seen_subject": "Subject", "seen_body": "Body"}, follow_redirects=False)
+    assert approved.status_code == 303 and len(queued) == 1
+    run = threads._runs().get("t-sub", queued[0][0])
+    assert run.resume_decision == {"type": "approve"}
+
+
+def test_email_edit_rewrites_only_user_editable_fields(client, monkeypatch):
+    monkeypatch.setattr(web.MANAGER, "get", lambda tid, **k: object())
+    queued = []
+    monkeypatch.setattr(threads, "_execute_run", lambda *a: queued.append(a))
+    _set_status("t-sub", "awaiting_approval", pending_email_to="a@example.test",
+                pending_email_subject="Subject", pending_email_body="Body",
+                pending_email_token="approval-token")
+
+    edited = client.post("/thread/t-sub/email/edit", data={
+        "token": "approval-token", "to": "b@example.test", "subject": "Edited",
+        "body": "Edited body"}, follow_redirects=False)
+
+    assert edited.status_code == 303 and len(queued) == 1
+    run = threads._runs().get("t-sub", queued[0][0])
+    assert run.resume_decision == {
+        "type": "edit", "edited_action": {"name": "send_email", "args": {
+            "to": "b@example.test", "subject": "Edited", "body": "Edited body"}}}
+
+
+def test_message_post_refuses_while_email_is_awaiting_approval(client):
+    _set_status("t-sub", "awaiting_approval", pending_email_token="approval-token")
+
+    response = client.post("/thread/t-sub/message", data={"text": "new message"})
+
+    assert response.status_code == 409
+
+
+def test_email_approval_card_renders_full_message(client, monkeypatch):
+    monkeypatch.setattr(
+        web.MANAGER, "get", lambda tid, sandbox_backend=None, **k:
+        type("C", (), {"get_messages": lambda self: [],
+                        "pending_reply": lambda self: None})())
+    monkeypatch.setattr("manage.web.threads.get_cached_description", lambda tid: "Thread")
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "assistant@example.test")
+    monkeypatch.setenv("EMAIL_FROM_NAME", "Assistant")
+    monkeypatch.setenv("EMAIL_ALWAYS_CC", "oversight@example.test")
+    _set_status("t-sub", "awaiting_approval", pending_email_to="to@example.test",
+                pending_email_subject="Subject", pending_email_body="A full\nmessage",
+                pending_email_token="approval-token")
+
+    page = client.get("/thread/t-sub").text
+
+    assert "Email awaiting your approval" in page
+    assert "Assistant &lt;assistant@example.test&gt;" in page
+    assert "oversight@example.test" in page
+    assert "A full\nmessage" in page
+    assert 'name="token" value="approval-token"' in page
