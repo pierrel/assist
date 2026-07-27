@@ -260,7 +260,7 @@ def _get_sandbox_backend(tid: str, tz: str | None = None, *,
     runs in the user's local time (else the host/server zone).
 
     ``include_agent`` mounts the visible thread's private main-agent directory.
-    Hidden child runs pass false and receive self-contained task briefs instead.
+    Hidden child runs pass ``False`` and receive self-contained task briefs instead.
 
     Runs off the event loop (from ``_process_message``'s background task), so the
     turn-start origin pre-fetch is safe here: the host refreshes ``origin/main`` in the
