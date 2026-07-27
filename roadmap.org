@@ -803,8 +803,8 @@ boundary. See
 [[file:docs/2026-07-26-delegate-agent.org][the delegate-agent design]].
 
 ** TODO Agent prompt architecture and calibrated outcome evaluation
-Design review only. No implementation phase starts until Pierre approves the
-fully reviewed [[file:docs/2026-07-26-agent-prompt-architecture.org][architecture and experiment contract]]. See the
+Design review only. Local design review has converged; no implementation phase
+starts until Pierre approves the [[file:docs/2026-07-26-agent-prompt-architecture.org][architecture and experiment contract]]. Key sections are the
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#instruction-placement][instruction-placement rule]],
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#experiment-protocol][shared experiment protocol]], and
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#design-review-gate][design-review gate]].
