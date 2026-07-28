@@ -809,7 +809,7 @@ start a separate design from that reproduced case rather than borrowing this
 program's prompt, memory, or capability work.
 
 ** TODO Agent prompt architecture and calibrated outcome evaluation
-Design review only. This revision requires a fresh local review; no implementation
+Design review only. Local review of this revision has converged; no implementation
 phase starts until Pierre approves the [[file:docs/2026-07-26-agent-prompt-architecture.org][architecture and experiment contract]]. Key sections are the
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#instruction-placement][instruction-placement rule]],
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#experiment-protocol][shared experiment protocol]], and
