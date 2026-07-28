@@ -1,9 +1,8 @@
 """Bounded WebSocket transport for the voice-call client.
 
 This module owns framing, transport authentication, backpressure, and teardown.
-Call state and policy will live in ``session.py``. This module exposes one
-synchronous runner seam for that later layer without importing the agent,
-speech, or flow layers.
+Call state and policy live in ``session.py``. This module exposes its synchronous
+runner seam without importing the agent, speech, or flow layers.
 """
 from __future__ import annotations
 
@@ -164,10 +163,17 @@ class _CloseableBuffer:
             self._items.append(item)
             self._condition.notify_all()
 
-    def get(self) -> Any:
+    def get(self, timeout: float | None = None) -> Any:
         with self._condition:
+            deadline = None if timeout is None else time.monotonic() + timeout
             while not self._items and not self._closed:
-                self._condition.wait()
+                if deadline is None:
+                    self._condition.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                self._condition.wait(remaining)
             if not self._items:
                 raise BufferClosed
             item = self._items.popleft()
@@ -190,12 +196,80 @@ class InboundBuffer(_CloseableBuffer):
     def __init__(self) -> None:
         super().__init__(INBOUND_CAPACITY)
 
+    def close_with_final(self, final: dict[str, Any]) -> None:
+        """Discard stale PCM but leave one terminal control for the session."""
+        with self._condition:
+            if self._closed:
+                return
+            self._items.clear()
+            self._items.append(final)
+            self._closed = True
+            self._condition.notify_all()
+
 
 class OutboundBuffer(_CloseableBuffer):
     """Bounded session-to-phone buffer with graceful or abrupt teardown."""
 
     def __init__(self) -> None:
         super().__init__(OUTBOUND_CAPACITY)
+        self._generation = 0
+
+    def start_generation(self) -> int:
+        """Return the generation that may enqueue the next TTS reply."""
+        with self._condition:
+            if self._closed:
+                raise BufferClosed
+            self._generation += 1
+            return self._generation
+
+    def put_audio(self, generation: int, frame: bytes) -> bool:
+        """Enqueue one TTS frame while *generation* remains current.
+
+        False means a barge-in or teardown invalidated this producer.  Waiting
+        releases the same lock used by ``interrupt_audio``, so a full buffer
+        never delays the flush that stops the caller hearing stale speech.
+        """
+        with self._condition:
+            while (len(self._items) >= self._capacity and not self._closed
+                   and generation == self._generation):
+                self._condition.wait()
+            if self._closed or generation != self._generation:
+                return False
+            self._items.append((generation, frame))
+            self._condition.notify_all()
+            return True
+
+    def is_current_generation(self, generation: int) -> bool:
+        """Whether a producer still owns the current TTS generation."""
+        with self._condition:
+            return not self._closed and generation == self._generation
+
+    def put_control(self, control: dict[str, Any]) -> None:
+        """Put a server control ahead of queued audio without waiting."""
+        encode_server_control(control)
+        with self._condition:
+            if self._closed:
+                raise BufferClosed
+            self._items.appendleft(control)
+            self._condition.notify_all()
+
+    def interrupt_audio(self) -> None:
+        """Atomically reject old TTS, purge it, and tell the bridge to flush."""
+        with self._condition:
+            if self._closed:
+                return
+            self._generation += 1
+            self._items = deque(
+                item for item in self._items
+                if not isinstance(item, tuple)
+                and item != {"type": "flush_uplink"}
+            )
+            self._items.appendleft({"type": "flush_uplink"})
+            self._condition.notify_all()
+
+    def get(self, timeout: float | None = None) -> Any:
+        item = super().get(timeout)
+        return item[1] if isinstance(item, tuple) else item
 
     def abort(self) -> None:
         with self._condition:
@@ -309,6 +383,12 @@ async def _receive_loop(
             if control is None:
                 last_valid = time.monotonic()
                 continue
+            if control["type"] == "call_end":
+                # Hangup must not wait behind up to one second of already-buffered
+                # PCM.  Leave it as the session's one final item, then wait for the
+                # runner to close outbound with its terminal hangup control.
+                await run_in_threadpool(inbound.close_with_final, control)
+                await asyncio.Future()
             item: Any = control
         else:
             item = message.get("bytes")
@@ -452,8 +532,9 @@ async def call(websocket: WebSocket) -> None:
         close_code = 1011
     finally:
         await _close_buffers(buffers)
-        # _run_call joins its synchronous runner before returning. Release the
-        # slot before the terminal close tells the client it can reconnect.
+         # _run_call has already waited for the runner's closed-buffer exit. Release
+         # before the socket close handshake so a caller that observes that close can
+         # immediately reconnect instead of briefly receiving a false busy rejection.
         _release_call()
         if close_code is not None:
             await _close_websocket(websocket, close_code)
