@@ -22,8 +22,9 @@ one scripted call from its durable event log.  The phone PCM bridge remains P3.
 3. *Activation is all-or-nothing at startup.*  The runner is configured only
    when the WS secret, six-or-more digit PIN, canonical allowlist, persistent
    call-log directory, and provisioned Whisper/Piper paths are all present.
-   A missing or invalid value leaves =/call= authenticated but inert, matching
-   PR4 rather than guessing a partial security policy.
+   Without the secret, =/call= rejects its WS connection.  With a secret but
+   any other missing or invalid value, the authenticated transport has no
+   runner and therefore accepts no call.
 4. *The call log remains boundary-only.*  It records state transitions and
    outcomes, never PCM, PIN digits, or caller ID.  The scripted fake bridge
    asserts its complete boundary sequence instead of adding a second trace store.
