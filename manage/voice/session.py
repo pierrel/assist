@@ -9,6 +9,7 @@ seam.
 from __future__ import annotations
 
 import queue
+import re
 import secrets
 import threading
 import time
@@ -31,6 +32,13 @@ _REPEAT = "Sorry, say that again."
 _STILL_WORKING = "Still with me? I'm working on it."
 SILENCE_SECONDS = 7.0
 PIN_INTERDIGIT_SECONDS = 5.0
+_E164 = re.compile(r"\+[1-9][0-9]{1,14}\Z")
+_LOCKED = "Too many tries. Call back in a minute."
+
+
+def normalize_e164(caller: str) -> str | None:
+    """Return canonical E.164 caller identity, rejecting every other shape."""
+    return caller if _E164.fullmatch(caller) else None
 
 
 @dataclass(frozen=True)
@@ -139,6 +147,7 @@ class VoiceSession:
         router_turn: Callable[[str], str] | None = None,
         submit_turn: Callable[[str, str], str] | None = None,
         call_log_root: str | Path | None = None,
+        lockout: Any | None = None,
     ) -> None:
         self._pin = pin
         self._allowed_callers = allowed_callers
@@ -154,6 +163,8 @@ class VoiceSession:
         self._stopped = threading.Event()
         self._tid: str | None = None
         self._call_log_root = call_log_root
+        self._lockout = lockout
+        self._pin_locked = False
         self._log: _CallLog | None = None
         self._router: Any | None = None
         self._speaking = False
@@ -173,8 +184,12 @@ class VoiceSession:
         log = _CallLog(self._call_log_root, ring["call_id"])
         self._log = log
         try:
-            if ring["caller"] not in self._allowed_callers:
+            caller = normalize_e164(ring["caller"])
+            if caller not in self._allowed_callers:
                 log.append("decline", reason="not_allowed")
+                return
+            if self._lockout is not None and self._lockout.locked():
+                log.append("decline", reason="pin_locked")
                 return
             log.append("ring")
             buffers.outbound.put_control({"type": "answer"})
@@ -288,7 +303,7 @@ class VoiceSession:
                 self._transcribe(event.pcm)
 
     def _handle_digit(self, digit: str, buffers: CallBuffers) -> None:
-        if self._authenticated:
+        if self._authenticated or self._pin_locked:
             return
         if digit == "*":
             self._digits = ""
@@ -305,6 +320,12 @@ class VoiceSession:
         if self._log is not None:
             self._log.append("pin_attempt", ok=accepted)
         if not accepted:
+            if self._lockout is not None and self._lockout.record_failure():
+                self._pin_locked = True
+                if self._log is not None:
+                    self._log.append("pin_locked")
+                self._speak(_LOCKED, buffers)
+                return
             self._prompt_for_pin(buffers)
             return
         self._authenticated = True

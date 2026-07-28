@@ -365,6 +365,15 @@ after the operator swaps the model on the serving host).
 
 See [ENVIRONMENT_VARIABLES.md](ENVIRONMENT_VARIABLES.md) for complete reference.
 
+### Voice calls
+
+The `/call` transport stays inert until all of these production-only values are
+set together: `ASSIST_VOICE_SECRET`, `ASSIST_VOICE_PIN`,
+`ASSIST_VOICE_CALLERS`, `ASSIST_VOICE_CALL_LOG_DIR`,
+`ASSIST_VOICE_PIPER_MODEL`, and `ASSIST_VOICE_WHISPER_MODEL`. Callers must be
+canonical E.164 values (for example, `+15555550100`). The PIN is at least six
+digits; it and the transport secret belong only in the ignored `.deploy.env`.
+
 ---
 
 ## Architecture

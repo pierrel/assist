@@ -1,0 +1,69 @@
+#+TITLE: Voice-call assistant — PR5 security and reconstruction
+#+DATE: 2026-07-28
+
+* Scope
+
+PR4 merged the fake-bridge session state machine but intentionally left the
+production runner disabled.  This PR makes that transition safe: it supplies
+the complete caller/PIN policy, proves the detector boundary, and reconstructs
+one scripted call from its durable event log.  The phone PCM bridge remains P3.
+
+* Decisions
+
+1. *The lockout is global and process-local.*  Three failed PIN attempts in a
+   60-second rolling window lock the whole voice entry point for 60 seconds.
+   Caller identity is attacker-controlled at this boundary, so a per-caller
+   counter would be bypassable by rotation.  The deployed service is one worker;
+   this is the advertised process scope, not a fake distributed guarantee.
+2. *Caller identity is canonical E.164 or rejected.*  The bridge input and
+   configured allowlist must each be a =+= followed by 2–15 digits.  Comparison
+   is exact after that validation; punctuation, whitespace, and malformed values
+   do not get heuristic interpretation.
+3. *Activation is all-or-nothing at startup.*  The runner is configured only
+   when the WS secret, six-or-more digit PIN, canonical allowlist, persistent
+   call-log directory, and provisioned Whisper/Piper paths are all present.
+   A missing or invalid value leaves =/call= authenticated but inert, matching
+   PR4 rather than guessing a partial security policy.
+4. *The call log remains boundary-only.*  It records state transitions and
+   outcomes, never PCM, PIN digits, or caller ID.  The scripted fake bridge
+   asserts its complete boundary sequence instead of adding a second trace store.
+
+* Implementation plan
+
+1. Add =manage/voice/service.py=: immutable startup configuration parsing,
+   canonical E.164 validation, one global rolling lockout, and a call-runner
+   factory that creates a fresh =VoiceSession= for each wire call while sharing
+   the gate and lazy speech resource.
+2. Extend =manage/voice/session.py= to receive the gate, reject malformed or
+   non-allowlisted callers before answer/Flow construction, record failed PINs,
+   speak the final-strike recovery clip, and reject calls during the global
+   cooldown before answer.  Keep the existing =vad=False= greeting Flow as the
+   only pre-auth detector.
+3. Configure the runner in =manage/web/state.py='s lifespan and clear it on
+   shutdown.  Pass the explicit voice settings through the service installer;
+   document only placeholders in the deploy template and README.
+4. Expand =tests/voice/= with clock-controlled rotating-caller lockout,
+   canonical-caller rejection, construction spies for unknown/locked/pre-auth
+   detector scopes, and a complete FakeBridge scripted-call log reconstruction.
+   Update this P1 state document and the roadmap when the slice ships.
+
+* Threat and liveness review
+
+| Surface | Containment |
+|---------+-------------|
+| Rotating/spoofed caller IDs | One global rolling failure gate, not a caller-keyed counter. |
+| Malformed caller input | Existing wire byte cap plus canonical E.164 validation before allowlist lookup. |
+| PIN/voice capture before auth | Unknown and locked calls create no Flow; greeting creates only =Flow(vad=False)=. |
+| Accidental production activation | Every required value is validated before one runner is registered. |
+| Event-loop outage | Startup only builds lightweight configuration and lazy =Speech=; the synchronous runner remains wire's threadpool seam. |
+| Sensitive forensic data | Hash call IDs; log state only, never caller, PIN, or PCM. |
+
+* Review decisions
+
+- No persistent/distributed lockout is added: the single-worker process scope is
+  the existing wire admission contract and no restart-bypass incident has been
+  observed.
+- No heuristic phone-number parser is added: the phone bridge contract is E.164,
+  and accepting ambiguous punctuation would widen the trusted input language.
+- No live secret/PIN/caller values are written by this PR.  Pierre supplies them
+  in the ignored deployment environment when he is ready to activate the bridge.

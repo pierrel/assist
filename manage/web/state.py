@@ -674,6 +674,14 @@ async def lifespan(app: FastAPI):
     # Recover threads a previous server run left busy, instead of erroring them
     # (extracted so the test pins the REAL scan, not a copy).
     from manage.web.threads import start_scheduler, stop_scheduler
+    from manage.voice.service import VoiceConfig, VoiceService
+    from manage.voice.wire import configure_call_runner
+    try:
+        config = VoiceConfig.from_environ()
+    except ValueError as exc:
+        logging.getLogger(__name__).error("voice runner disabled: %s", exc)
+        config = None
+    configure_call_runner(VoiceService(config) if config else None)
     await run_in_threadpool(_recover_interrupted_threads)
 
     # Populate description cache at startup
@@ -688,6 +696,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        configure_call_runner(None)
         try:
             stop_scheduler()
         except Exception:

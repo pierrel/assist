@@ -17,8 +17,8 @@ records the build plan grounded in the real code, the reconciliations, and statu
   This branch adds PR4's fake-bridge =session.py= integration: Flow, Speech, Wire,
   the receptionist, durable Runs, and terminal observer delivery now form one
   call-local state machine. Production still deliberately has no configured session
-  runner: PR5 must first supply the complete PIN/caller policy and scripted security
-  reconstruction.
+  runner: this branch adds PR5's complete PIN/caller policy and scripted security
+  reconstruction.  Activation still requires every production-only voice setting.
 
 * Threading model (blocker-class — single-worker uvicorn)
 | Thread | Owns | May NOT |
@@ -60,7 +60,7 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    covers the whole seam; production activation remains in PR5 because the security
    policy is not partial. *Implemented on this branch.*
 5. *PR5 — security + full scripted-call reconstruction* (global PIN lockout,
-   detector-scoping spies, caller-id handling) — or folded into PR4 if reviewable.
+   detector-scoping spies, caller-id handling). *Implemented on this branch.*
 
 * Reconciliations — PR #213 is authoritative; the CODE wins
 1. *=submit_turn= (design) → commit and execute a durable ordinary Run.*
@@ -195,7 +195,9 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
       terminal-observer-only reply delivery, call log, and prompt teardown.
       Production runner configuration remains intentionally absent pending PR5's
       global lockout, normalized caller policy, and reconstruction tests.
-- [ ] PR5: security + scripted-call reconstruction (or fold into PR4 only if reviewable).
+- [X] PR5: security + scripted-call reconstruction — this branch adds global rolling
+      lockout, canonical E.164 caller validation, startup-only runner activation,
+      detector-scope proofs, and fake-bridge event-log reconstruction.
 
 * Notes for Pierre
 - Deps landed in =requirements.txt=: =onnxruntime==1.27.0= (+ flatbuffers, protobuf) — lean, torch-free.

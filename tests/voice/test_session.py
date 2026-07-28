@@ -7,6 +7,7 @@ import pytest
 
 from assist.events.thread_log import read_events
 from manage.voice.session import VoiceSession, _Reply, _REPLIES, _frames
+from manage.voice.service import PinLockout
 from manage.voice.speech import Transcription
 from manage.voice.wire import BufferClosed, CallBuffers, InboundBuffer, OutboundBuffer
 
@@ -91,6 +92,24 @@ def test_session_never_answers_an_unknown_caller():
 
     with pytest.raises(BufferClosed):
         _eventually_get(buffers.outbound)
+
+
+def test_locked_or_malformed_callers_do_not_construct_a_detector():
+    class NoFlow:
+        def __init__(self, **_kwargs):
+            raise AssertionError("pre-auth call constructed Flow")
+
+    gate = PinLockout()
+    for _ in range(3):
+        gate.record_failure()
+    for caller in ("+15555550100", "+1 (555) 555-0100"):
+        buffers = CallBuffers(InboundBuffer(), OutboundBuffer())
+        VoiceSession(
+            pin="000000", allowed_callers=frozenset({"+15555550100"}),
+            speech=FakeSpeech(), flow_factory=NoFlow, lockout=gate,
+        ).run({"type": "ring", "call_id": "call", "caller": caller}, buffers)
+        with pytest.raises(BufferClosed):
+            _eventually_get(buffers.outbound)
 
 
 def test_call_log_hashes_hostile_bridge_ids_and_omits_caller(tmp_path):
