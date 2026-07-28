@@ -245,11 +245,17 @@ class OutboundBuffer(_CloseableBuffer):
             return not self._closed and generation == self._generation
 
     def put_control(self, control: dict[str, Any]) -> None:
-        """Put a server control ahead of queued audio without waiting."""
+        """Put a server control ahead of queued audio without waiting.
+
+        A control must be deliverable even while TTS has filled the buffer, so
+        discard the tail entry rather than exceeding the fixed capacity.
+        """
         encode_server_control(control)
         with self._condition:
             if self._closed:
                 raise BufferClosed
+            if len(self._items) >= self._capacity:
+                self._items.pop()
             self._items.appendleft(control)
             self._condition.notify_all()
 
@@ -264,6 +270,8 @@ class OutboundBuffer(_CloseableBuffer):
                 if not isinstance(item, tuple)
                 and item != {"type": "flush_uplink"}
             )
+            if len(self._items) >= self._capacity:
+                self._items.pop()
             self._items.appendleft({"type": "flush_uplink"})
             self._condition.notify_all()
 
@@ -532,9 +540,9 @@ async def call(websocket: WebSocket) -> None:
         close_code = 1011
     finally:
         await _close_buffers(buffers)
-         # _run_call has already waited for the runner's closed-buffer exit. Release
-         # before the socket close handshake so a caller that observes that close can
-         # immediately reconnect instead of briefly receiving a false busy rejection.
+        # _run_call has already waited for the runner's closed-buffer exit. Release
+        # before the socket close handshake so a caller that observes that close can
+        # immediately reconnect instead of briefly receiving a false busy rejection.
         _release_call()
         if close_code is not None:
             await _close_websocket(websocket, close_code)

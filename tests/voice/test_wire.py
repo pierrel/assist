@@ -550,6 +550,17 @@ def test_barge_in_flushes_and_invalidates_a_blocked_tts_generation():
         outbound.get(timeout=0.01)
 
 
+def test_control_evicts_stale_audio_when_outbound_is_full():
+    outbound = wire.OutboundBuffer()
+    for _ in range(wire.OUTBOUND_CAPACITY):
+        outbound.put(PCM)
+
+    outbound.put_control({"type": "hangup"})
+
+    assert len(outbound._items) == wire.OUTBOUND_CAPACITY
+    assert outbound.get() == {"type": "hangup"}
+
+
 def test_terminal_inbound_control_discards_buffered_pcm():
     inbound = wire.InboundBuffer()
     for _ in range(wire.INBOUND_CAPACITY):
