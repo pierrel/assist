@@ -5,6 +5,21 @@
 
 Status: design review.
 
+** Change log
+
+*** 2026-07-28: Pierre review revision
+
+- Removed all SMS-triage changes from this program.  It has not caused a
+  problem, so any future triage work is a separate roadmap item, not a prompt
+  architecture prerequisite.
+- Removed the proposed code-critique/dev-guidance rewrite.  That surface needs
+  a wider design when there is evidence to justify one, not a piecemeal prompt
+  alignment experiment here.
+- Narrowed memory work to the useful read/write split: memory facts remain
+  available as context, while the recognition and write procedure move into a
+  skill.  This program does not introduce role-specific read-only mounts,
+  provenance gates, or a new memory authorization model.
+
 This document is the architecture and experiment contract only.  No prompt,
 skill, evaluator, model-selection, or agent-construction implementation belongs
 in the design change that introduces it.  Implementation starts only after this
@@ -29,12 +44,6 @@ workflows and repeats several rules in more than one prompt source.
 
 Known drift already proves that source-by-source review is insufficient:
 
-- inbound-message triage has no reviewed capability contract: its wrapper adds
-  only the reply tool, while the shared Deep Agents constructor also supplies
-  filesystem, execution, =read_url=, travel, directions, and map tools.  The
-  intended boundary is read-only analysis with a separately gated reply effect;
-  the required read surface is an experiment question, not something to infer
-  from either the wrapper or the inherited graph;
 - the shared main prompt describes a report-file result for an async research
   leaf that returns findings directly;
 - =edd/product-policy.org= describes the read-only context agent as a writer;
@@ -72,22 +81,19 @@ The architecture therefore needs two separations:
 
 1. Make the fully rendered model request auditable for every production and eval
    profile, including middleware-injected guidance and tool descriptions.
-2. Give untrusted inbound-message triage an explicit, least-privilege read-only
-   analysis surface, with =send_reply= as the only separately HITL-gated action
-   affecting another person, before changing prompt policy around it.
-3. Reduce the main and delegate system prompt to a bootstrap kernel: what the
+2. Reduce the main and delegate system prompt to a bootstrap kernel: what the
    agent must know in order to choose the next source of instructions safely.
-4. Keep local context gathering preloaded unless a controlled experiment proves
+3. Keep local context gathering preloaded unless a controlled experiment proves
    an equally reliable smaller boundary.
-5. Keep memory /contents/ available as context while progressively disclosing
+4. Keep memory /contents/ available as context while progressively disclosing
    the conditional procedure for deciding and performing memory writes.
-6. Put optional workflows such as complex task breakdown and external research
+5. Put optional workflows such as complex task breakdown and external research
    behind skills whose descriptions provide the routing trigger.
-7. Give every specialist a concise role contract aligned with its actual tools,
+6. Give every specialist a concise role contract aligned with its actual tools,
    filesystem, return shape, caller, and trust boundary.
-8. Qualify a semantic outcome judge against fixed human labels before its
+7. Qualify a semantic outcome judge against fixed human labels before its
    verdict can gate a natural eval.
-9. Change one instruction boundary per implementation phase so every result
+8. Change one instruction boundary per implementation phase so every result
    teaches us whether that boundary works for Qwen3.6-27B.
 
 * Non-goals
@@ -109,6 +115,10 @@ The architecture therefore needs two separations:
   primary job.
 - Do not remove the context-first rule, critique capability, or any other current
   behavior based on architectural taste.  Each removal needs a measured phase.
+- Do not change SMS triage in this program.  Its future work belongs on the
+  separate roadmap item until an observed problem establishes a narrower goal.
+- Do not revise development guidance in this program.  It needs a larger
+  end-to-end design, not an isolated prompt cleanup.
 
 * Instruction placement architecture
 :PROPERTIES:
@@ -142,16 +152,6 @@ Capability and trust boundaries prefer construction over prompting.  A delegate
 cannot self-delegate because it has no async lifecycle tools, and a context agent
 cannot write because the read-only enforcer rejects mutating tools.  The prompt
 should accurately explain those shapes, not pretend to enforce them.
-
-The current triage profile does not express a reviewed boundary.  Its wrapper
-supplies only the HITL-gated reply tool, but the shared Deep Agents constructor
-independently adds filesystem, execution, URL, map, and travel tools.  A helper
-test of the supplied tool list proves neither the final graph nor the intended
-product.  P0 records the real graph.  P1 uses real triage cases to select and
-then structurally enforce the smallest useful read-only surface; =send_reply=
-remains the only separately HITL-gated action affecting another person.  Any
-justified network retrieval is separately declared and bounded as egress;
-ordinary thread-visible analysis remains an output, not a proposed reply.
 
 ** Main bootstrap kernel
 
@@ -196,17 +196,10 @@ skill description must match explicit requests ("remember this") and natural
 persistent facts or forward-looking preferences.  The skill body owns write
 mechanics and exclusions such as credentials and transient state.
 
-Read access and mutation authority are also different.  Repository and thread
-memory targets are read-only through generic filesystem and execution paths.
-Only an owner-authored interactive main turn receives the narrow save capability;
-delegate briefs, child/fetched/tool results, completion wakes, scheduled/system
-turns, and inbound triage cannot authorize persistence.  Turn provenance and
-path protection are enforced outside the model.  A prompt instruction or an
-unmounted memory skill is not an authorization boundary.
-
 This boundary must be re-evaluated against the merged per-thread-memory design.
-Repository memory, thread working memory, and any promotion rule must have one
-unambiguous owner before the memory phase begins.
+The resulting memory skill must fit the final repository/thread targets and
+promotion rule, but this program preserves the existing access model rather
+than introducing a new authorization boundary.
 
 ** Research boundary
 
@@ -227,13 +220,11 @@ real need.
 
 ** Other specialists
 
-The context, code-critique, report-critique, fact-check, receptionist,
-thread-description, and capture profiles each receive a direct capability audit.
-No shared prose is assumed correct for them.  The code-critique decision remains
-open until the dev skill and delegate code-work flow are tested: if delegates
-need that named specialist to complete the existing dev workflow, retain it and
-make the description precise; if there is no real caller, remove it rather than
-explaining an unused capability.
+The context, report-critique, fact-check, receptionist, thread-description, and
+capture profiles each receive a direct capability audit.  No shared prose is
+assumed correct for them.  Development guidance stays unchanged: its coupled
+main/delegate/skill workflow needs a separate end-to-end redesign if evidence
+ever establishes the need.
 
 The capture profile must stop treating "add text to the main system prompt" as
 the default remedy.  Its output should identify the observed outcome failure and
@@ -522,9 +513,9 @@ Add an eval/test-side census with three distinct artifacts:
 3. exercised enforcement probes record exposed tools separately from actions
    actually permitted by read-only, provenance, HITL, and other guards.
 
-The minimal scenario matrix covers every branch known to change the contract:
-production web sandbox main, triage, and delegate; legacy non-execution; active
-and inactive context rider; empty and populated memory; and representative
+The minimal scenario matrix covers every branch in this program known to change
+the contract: production web sandbox main and delegate; legacy non-execution;
+active and inactive context rider; empty and populated memory; and representative
 built-in, domain, and embedder skill-source precedence.  It records tools after
 runtime middleware filtering.  Nested dict subagents are reached through a
 scripted real parent dispatch rather than a test-only constructor or hand-rendered
@@ -538,14 +529,13 @@ fingerprints.  Provenance is a test-side ownership map over captured output and
 source snapshots, not runtime metadata, a production registry, or a constructor
 flag; unknown or ambiguous spans are findings for review.
 
-The required paths are main, delegate, current production triage, legacy main, context,
-research lead, direct research leaf, nested research worker, nested fact-check,
-async read-only code critique, synchronous inherited-surface code critique,
-nested report critique, receptionist, thread-description direct model call, and
-capture.  Each is reached through the same production/eval composition or
-invocation path, including real parent dispatch for nested declarative profiles;
-do not invent a constructor for a direct call or add a runtime profile registry
-to serve the test.
+The required paths are main, delegate, legacy main, context, research lead,
+direct research leaf, nested research worker, nested fact-check, nested report
+critique, receptionist, thread-description direct model call, and capture.  Each
+is reached through the same production/eval composition or invocation path,
+including real parent dispatch for nested declarative profiles; do not invent a
+constructor for a direct call or add a runtime profile registry to serve the
+test.  Development-guidance paths and SMS triage are deliberately excluded.
 
 ** Test and gate
 
@@ -641,173 +631,9 @@ maintenance but not process cleanup, atomic resume, or cooldown.  If web
 admission cannot be isolated cleanly, schedule an explicit service maintenance
 window rather than let production and evals contend silently.
 
-* P1: Give inbound triage an explicit read-only capability surface
+* P1: Qualify the calibrated outcome judge
 :PROPERTIES:
 :CUSTOM_ID: phase-1
-:END:
-
-** Value
-
-Let triage inspect the information it needs to judge an inbound message without
-inheriting unrelated mutation or host-effect capabilities.  A reply is a
-separate proposed effect and still requires HITL approval.
-
-** Hypothesis
-
-Inbound-message triage can retain useful reply/no-reply judgment with an exact,
-least-privilege read surface justified by natural triage cases, plus the
-HITL-gated reply capability.  It needs no filesystem mutation, execution,
-memory mutation, configuration, scheduling, notification, or subagent surface.
-
-** Controlled change
-
-Change only triage construction.  Before selecting tools, pre-register the
-natural triage cases and the information each case actually requires.  Establish
-the baseline through the current production composition, but do not treat every
-tool it happens to expose or call as a requirement.  The candidate then declares
-an exact allowlist of local/model-visible read capabilities and data inputs, with
-one reason and one bounded trust scope for each.  Any network-backed retrieval
-has a separate exact egress allowlist; calling it a read does not erase its
-outward effect.
-
-Use a dedicated internal restricted builder based on the existing vanilla
-LangChain pattern.  Do not infer confinement from =async_subagent_tools=, add
-generic permission/exclusion fields to =AgentSpec=, or broaden the embedder
-contract for one internal caller.  A shared restricted profile becomes worth
-designing only when a second real caller needs it.  Prefer narrow read adapters
-over generic filesystem or execution access.
-
-Freeze the current custom prompt template and required subscription/inbound
-inputs, not the full rendered Deep Agents request.  Capability-owned BASE, TODO,
-filesystem, skills, and memory blocks disappear with those capabilities; P0
-records that expected prompt difference.  Do not copy a flattened Deep Agents
-prompt into the vanilla role.  P7f separately tests a concise capability-true
-triage contract.
-
-The exact retained data context is evidence-gated.  The inbound message and its
-subscription template are required inputs.  Thread context, catalog data,
-memory, local files, skills, URL content, travel data, and map data are candidates
-only when a natural case demonstrates the need.  Any admitted source is bounded
-and cannot mutate Assist or user state.  A network retrieval also needs explicit
-provenance, validated destination and request-data limits, timeout and resource
-bounds, and a place in the separate egress allowlist.  It is not classified as
-effect-free merely because it does not mutate Assist state.
-
-** Test and gate
-
-- A structural test builds the actual final triage graph and records exactly the
-  pre-registered local/model-visible read allowlist, network-retrieval egress
-  allowlist, and HITL-gated =send_reply= tool.  It does not stop at asserting the
-  additive =AgentSpec.tools= input.
-- Every allowed source is bounded to its declared data and trust scope.  Every
-  network attempt outside the retrieval egress allowlist is denied.  Filesystem
-  writes, execution, memory writes, subscription/configuration changes,
-  scheduling, notification, communication to another person outside the gated
-  reply, other undeclared outward effects, and subagent capabilities are absent
-  rather than prompt-blocked.
-- Each admitted source has a pre-registered ablation with every other variable
-  fixed.  It remains only if withholding it measurably degrades requested-outcome
-  completion, evidence quality, reliability, or latency under the declared
-  phase gate.  A source with no causal benefit is removed from the allowlist;
-  the fixture need not manufacture a fact exclusive to that source.
-- Existing approval/rejection behavior and subscription routing remain green.
-- Natural reply, no-reply, ambiguous-message, context-needed, and adversarial
-  instruction cohorts meet baseline at N=10 and the general natural floor.
-- Prompt-injection inputs cannot cross an allowed read's declared data boundary,
-  invoke a prohibited action, or invoke the outbound tool before its
-  model-boundary interrupt; all deterministic confinement checks pass 100%.
-- With a deliberately slow restricted agent, inbound HTTP acceptance and
-  unrelated thread/status GETs remain responsive; graph construction and model
-  invocation stay off the single uvicorn event loop.
-
-** Expected learning
-
-We expect reply decisions not to need the broad Deep Agents surface.  The phase
-will identify the smallest useful read set and may show that supplied message
-and subscription data are enough.  Either result is evidence; the design does
-not pre-decide that triage has no read work.
-
-** Alternatives
-
-If a reproduced outcome needs more context, add the narrowest bounded read
-adapter that supplies it and repeat the experiment.  If no extra read source is
-needed, retain only the supplied data.  Never restore a mutating, execution, or
-ungated user-facing capability merely to improve model context.
-
-* P1b: Bound inbound triage and prove the HITL transaction
-:PROPERTIES:
-:CUSTOM_ID: phase-1b
-:END:
-
-** Value
-
-Capability confinement does not by itself prevent an authenticated inbound flood,
-an oversized draft, multiple pending actions, or a stale approval from wedging or
-sending the wrong reply.  This phase makes the existing inbound-to-outbound
-transaction bounded and reconstructable.
-
-** Hypothesis
-
-One bounded inbound message can produce at most one bounded pending reply, and
-approve/edit/reject can resolve exactly that durable proposal once without
-changing its recipient or action.
-
-** Controlled change
-
-First record the phone bridge/provider's accepted legitimate message and reply
-sizes and the largest observed legitimate burst.  Set explicit body, text, draft,
-admission, durable inbound-log, and backlog bounds no lower than those observed
-contracts and no higher than the upstream accepted maximum.  Enforce them before
-any archive write, 2xx ownership transfer, model call, or checkpoint growth.  A
-full durable budget fails closed without claiming or deleting the phone-side
-message.  Make one pending =send_reply= action the only valid triage interrupt
-shape.  Do not tune triage prompt behavior in this phase.
-
-The web control plane remains under its current trusted-local-network assumption.
-This phase proves transaction integrity, not a new internet authentication or
-CSRF design.  If that trust boundary changes, authorization receives its own
-design.
-
-** Test and gate
-
-- Over-limit input is rejected with zero durable archive growth before ownership
-  transfer or an LLM call; repeated unique IDs remain within the declared
-  archive, queue, checkpoint, and UI byte/count budgets.
-- A model that emits many or oversized reply calls yields at most one bounded
-  pending action and cannot wedge resume or leave an ambiguous checkpoint.
-- The outbound tool body is never called before approval.  Approve sends the
-  checkpointed draft once; edit changes only text; reject sends nothing.
-- Recipient and tool name come from the durable accepted Run, never model or
-  edit input.  Stale, superseded, malformed, and double resume send nothing and
-  return an honest visible terminal state.
-- End to end, the matching inbound message creates one approval card in the
-  correct thread with sender and exact draft.  Approve/edit/reject clears or
-  replaces it with the truthful result; no-reply creates no card; stale approval
-  tells the user to reload and review.
-- With deliberately slow model and outbound-provider fixtures, inbound HTTP
-  acceptance, unrelated thread/status GETs, and the approval POST redirect stay
-  responsive.  Agent construction/model work, checkpoint resume, and send run
-  off the uvicorn event loop; queue/admission work on it is bounded.  Cancellation
-  or provider timeout reaches an honest terminal UI state without retaining the
-  thread slot.
-
-** Expected learning
-
-The observed bridge limits determine useful bounds.  Adversarial multi-action
-outputs reveal whether the current checkpoint/resume shape can represent exactly
-one proposal without special prompt behavior.
-
-** Alternatives
-
-If the provider contract has no stable maximum, use the smallest documented
-transport maximum that covers the retained legitimate fixture corpus and expose
-an explicit rejection.  If the current interrupt representation permits more
-than one action, replace it with one durable pending-reply record rather than
-teach the model to emit one call.
-
-* P2: Qualify the calibrated outcome judge
-:PROPERTIES:
-:CUSTOM_ID: phase-2
 :END:
 
 ** Value
@@ -840,7 +666,7 @@ verdicts, and do not delete strict capability tests in this phase.
 - Re-running an unchanged case records the same model/prompt version and does not
   leak the candidate implementation or expected route to the judge.
 
-If the judge fails qualification, P2 may still ship the observation format and
+If the judge fails qualification, P1 may still ship the observation format and
 diagnostic reports, but no natural eval gate changes.  Later prompt experiments
 continue with existing outcome validators and recorded human adjudication for
 cases they cannot decide; the judge is useful infrastructure, not a dependency
@@ -857,9 +683,9 @@ Use stronger local judging only after the first candidate fails.  For cases with
 an exact artifact contract, prefer improving a deterministic outcome validator
 over asking any model.
 
-* P2b: Separate natural acceptance from capability coverage
+* P1b: Separate natural acceptance from capability coverage
 :PROPERTIES:
-:CUSTOM_ID: phase-2b
+:CUSTOM_ID: phase-1b
 :END:
 
 ** Value
@@ -878,7 +704,7 @@ failure detection without architecture-shaped assertions.
 ** Controlled change
 
 Change eval classification and validators only; freeze agent prompts and runtime
-behavior.  Inventory every cohort used by P3 onward and label each case
+behavior.  Inventory every cohort used by P2 onward and label each case
 =natural=, =capability=, or =deterministic-security/state=.  Natural prompts stay
 as users would ask.  Their gates use requested artifacts, truthful progress,
 final synthesis, and forbidden outcomes.  Assertions on raw task IDs, agent
@@ -908,9 +734,9 @@ If a natural outcome remains too ambiguous for the qualified judge, use a
 case-specific deterministic artifact validator or recorded human adjudication.
 Do not make the user prompt name the desired architecture to regain determinism.
 
-* P3: Remove main/delegate procedures already owned elsewhere
+* P2: Remove main/delegate procedures already owned elsewhere
 :PROPERTIES:
-:CUSTOM_ID: phase-3
+:CUSTOM_ID: phase-2
 :END:
 
 ** Value
@@ -975,106 +801,32 @@ the smallest causal sentence, not the whole old section.  If framework-injected
 TODO/filesystem prose conflicts with the kernel, configure or replace that prompt
 source rather than adding a later contradiction.
 
-* P4a: Confine memory mutation to owner-authored main turns
+* P3: Split memory read and write through a skill
 :PROPERTIES:
-:CUSTOM_ID: phase-4a
+:CUSTOM_ID: phase-3
 :END:
 
 ** Value
 
-Untrusted delegate briefs or fetched/child/tool text cannot become durable
-instructions or facts, regardless of what the model follows.
+All turns retain relevant memory facts, but the persistence procedure is loaded
+only when memory should be written.
 
 ** Hypothesis
 
-Memory can remain automatically readable while canonical repository/thread
-targets are unmodifiable through generic filesystem and execution paths and a
-narrow save capability is present only on an accepted owner-authored interactive
-main turn.
-
-** Controlled change
-
-Wait for per-thread-memory to land or be abandoned, then census its final targets
-and provenance.  Protect every canonical memory path from generic edit, write,
-shell, delegate, specialist, scheduled, completion-wake, and triage mutation.
-Each composition root derives authority once from its existing trusted transport
-record, never message text or a caller-supplied boolean.  The web composition
-uses the durable Run's mode, origin, sender, and resume state to choose the graph
-and tool surface.  Do not add memory-authority fields to =AgentSpec=.  An
-embedder without an equivalent reviewed provenance source remains read-only.
-Expose one narrow save capability only after that decision.  Keep the existing
-recognition, durability, target-selection, exclusion, and confirmation policy
-unchanged.  Replace only its obsolete generic =write_file=/=edit_file= mechanics
-with the narrow save-tool invocation required by the new interface.  The tool
-schema and this minimum capability-protocol update land atomically; this is not
-prompt tuning.
-
-If the merged per-thread-memory work already establishes this construction, the
-phase closes by proving it rather than adding parallel machinery.
-
-** Test and gate
-
-- Direct generic filesystem and shell attempts cannot mutate either memory target
-  from any role or turn provenance.
-- Symlink, hardlink, rename, parent-directory replacement, interpreter, and
-  subprocess attempts cannot reach a canonical target or an alias.
-- Direct delegate briefs, child results, fetched pages, tool results,
-  completion wakes, scheduled/system turns, and inbound triage cannot obtain or
-  invoke the save capability and cannot mutate by an alternate path.
-- An accepted owner-authored interactive main turn can persist to the correct
-  target and subsequent turns read the verified state.
-- Spoofed provenance inside message text or a child result has no effect; the
-  capability decision comes from the trusted request/Run boundary.
-- P0 records the trusted field/source used by every save-capable composition
-  root and reports all other roots read-only.
-- Existing recall and owner-requested save cohorts meet unchanged-main N=10
-  baseline; every unauthorized mutation probe remains 100% denied.
-
-** Expected learning
-
-The census reveals whether memory paths can be made read-only through the backend
-or require a narrow path guard around all mutating tools.  Behavior results show
-whether one save capability is sufficient for current memory semantics.
-
-** Alternatives
-
-Require an OS/backend read-only mount or view below every generic sink, including
-parent and alias semantics, plus a separate narrow atomic save broker outside
-that view.  If the current sandbox/backend cannot express it, the phase fails and
-memory remains read-only while a lower-level design is reviewed.  Do not accept
-shell-command filtering, role text, skill visibility, or a blacklist of delegate
-prompt phrases as containment.
-
-* P4b: Move memory-management procedure into a skill
-:PROPERTIES:
-:CUSTOM_ID: phase-4b
-:END:
-
-** Value
-
-All turns retain relevant memory facts, but only turns that may persist memory
-pay for and reason over memory-write policy and mechanics.
-
-** Hypothesis
-
-The visible memory-skill description can trigger reliably for explicit and
-implicit durable facts while automatic memory-data injection remains sufficient
-for recall.  Unrelated turns will avoid both the skill load and memory-writing
-procedure.
+The visible memory skill can trigger reliably for explicit save requests and
+durable facts while automatic memory-data injection remains sufficient for
+recall.  Unrelated turns will avoid the write procedure.
 
 ** Controlled change
 
 After per-thread-memory lands, define one memory-management skill against its
-final repository/thread ownership contract.  Reduce the memory middleware block
-to clearly delimited data plus the minimum fact-versus-instruction boundary.
-The visible skill description owns broad natural trigger shapes, including
-explicit remember/save requests and implicit candidate durable facts or
-forward-looking preferences.  The loaded body decides durable versus transient
-or secret content, selects the target, and invokes P4a's narrow save capability.
-The same trusted composition decision mounts both the memory-management skill
-source and save tool, or neither; read-only memory data remains independently
-preloaded.  Do not change memory storage, authority, or tool schema in this
-phase.
+final repository/thread targets.  Keep memory data preloaded, reduce the
+always-loaded middleware block to clearly delimited data plus the minimum
+fact-versus-instruction boundary, and move recognition, target selection,
+exclusions, writing, rereading, and confirmation into the loaded skill.  The
+visible description covers explicit remember/save requests and candidate durable
+facts or forward-looking preferences.  Do not change memory storage, existing
+access, or the underlying write mechanism in this phase.
 
 ** Test and gate
 
@@ -1089,10 +841,8 @@ phase.
 - Natural recall never requires loading the management skill.
 - Reports distinguish failure to load the skill from failure to apply it after
   loading, especially for implicit persistence cases.
-- P0 finds no graph that sees the memory skill without the save capability and
-  no save-capable graph that lacks the skill.
-- Unrelated task, research, and editing prompts do not load the memory skill or
-  mutate either memory target in at least 10/10 targeted trials.
+- Unrelated task, research, and editing prompts do not load the memory skill in
+  at least 10/10 targeted trials.
 - The always-loaded memory /procedure/ falls by at least 80% in the P0 census;
   dynamic memory contents are not counted.
 
@@ -1106,13 +856,14 @@ the final memory state.
 ** Alternatives
 
 If implicit persistence regresses, keep one compact always-on trigger sentence
-and leave mechanics in the skill.  If the save schema proves insufficient,
-change it only in a separate P4a follow-up with the authority probes repeated.
+and leave mechanics in the skill.  If the existing write mechanism proves
+insufficient, give that observed problem its own design rather than expanding
+this prompt-architecture phase.
 Do not add deterministic auto-saving of model-interpreted facts.
 
-* P5: Move caller research workflow into a skill
+* P4: Move caller research workflow into a skill
 :PROPERTIES:
-:CUSTOM_ID: phase-5
+:CUSTOM_ID: phase-4
 :END:
 
 ** Value
@@ -1170,21 +921,21 @@ selection misses.
 
 If research selection regresses, keep a compact always-on research trigger while
 leaving the detailed procedure in the skill.  If one caller misreads its result,
-defer correction to P6 rather than changing the skill to describe both shapes.
+defer correction to P5 rather than changing the skill to describe both shapes.
 
-* P6: Align research specialist role contracts
+* P5: Align research specialist role contracts
 :PROPERTIES:
-:CUSTOM_ID: phase-6
+:CUSTOM_ID: phase-5
 :END:
 
-P6 is an umbrella.  Each child gets its own branch, N=10 baseline, review, and
+P5 is an umbrella.  Each child gets its own branch, N=10 baseline, review, and
 stop/go decision.  Profiles share a child only when P0 proves they consume the
 same inseparable prompt source.  Caller routing, the P5 skill, tool descriptions,
 search behavior, provenance, storage, budgets, and topology stay fixed throughout.
 
-** P6a: Research-lead contract
+** P5a: Research-lead contract
 :PROPERTIES:
-:CUSTOM_ID: phase-6a
+:CUSTOM_ID: phase-5a
 :END:
 
 /Value and hypothesis:/ The lead can preserve decomposition, synthesis, report
@@ -1195,9 +946,9 @@ only =research_instructions.txt.j2=.
 P0 finds no retrieval-tool claim or leaf return shape; storage and nested
 dispatch remain structurally unchanged.  Restore only a causal lead clause.
 
-** P6b: Shared research-leaf/worker contract
+** P5b: Shared research-leaf/worker contract
 :PROPERTIES:
-:CUSTOM_ID: phase-6b
+:CUSTOM_ID: phase-5b
 :END:
 
 /Value and hypothesis:/ Direct leaf and nested worker can share one concise
@@ -1211,9 +962,9 @@ their distinct exposed/effectively permitted tools remain unchanged.  If one
 path regresses, restore the causal shared clause or split the source in a new
 reviewed experiment rather than tune around the other path.
 
-** P6c: Report-critique contract
+** P5c: Report-critique contract
 :PROPERTIES:
-:CUSTOM_ID: phase-6c
+:CUSTOM_ID: phase-5c
 :END:
 
 /Value and hypothesis:/ Report critique needs only the supplied report, review
@@ -1224,9 +975,9 @@ criteria, output contract, and stopping condition.  Change only
 P0 finds no search/fact-check/lead action claim and the parent topology is
 unchanged.  Restore only a causal critique clause.
 
-** P6d: Fact-check contract
+** P5d: Fact-check contract
 :PROPERTIES:
-:CUSTOM_ID: phase-6d
+:CUSTOM_ID: phase-5d
 :END:
 
 /Value and hypothesis:/ Fact checking can keep claim/source verification quality
@@ -1237,9 +988,9 @@ Change only =fact_checker.md.j2=.
 fact-check cohorts meet N=10 baseline; read-only/provenance guards and return
 shape remain unchanged.  Restore only a causal fact-check clause.
 
-* P7: Audit remaining role and eval-only prompts
+* P6: Audit remaining role and eval-only prompts
 :PROPERTIES:
-:CUSTOM_ID: phase-7
+:CUSTOM_ID: phase-6
 :END:
 
 ** Value
@@ -1250,20 +1001,19 @@ accretion.
 
 ** Hypothesis
 
-Context, critique, receptionist, description, capture, and triage behavior
-depends on a small capability-specific contract; repeated examples, unavailable
-actions, and legacy architecture prose can be removed without changing useful
-outcomes.
+Context, receptionist, description, and capture behavior depends on a small
+capability-specific contract; repeated examples, unavailable actions, and legacy
+architecture prose can be removed without changing useful outcomes.
 
 ** Controlled change
 
-P7 is a roadmap umbrella, not one implementation change.  Each child below gets
+P6 is a roadmap umbrella, not one implementation change.  Each child below gets
 its own branch, baseline, review, and stop/go decision.  A later child does not
 need an earlier one unless P0 records a real dependency.
 
-** P7a: Context contract
+** P6a: Context contract
 :PROPERTIES:
-:CUSTOM_ID: phase-7a
+:CUSTOM_ID: phase-6a
 :END:
 
 /Value and hypothesis:/ A concise read-only discovery/evidence/stopping contract
@@ -1278,30 +1028,9 @@ capability mismatch; read-only enforcement remains deterministic.
 /Learning and alternative:/ This isolates whether repetition is helping the
 small model stop.  Restore only a clause tied to a reproduced miss.
 
-** P7b: Align the two code-critique contracts
+** P6b: Receptionist contract
 :PROPERTIES:
-:CUSTOM_ID: phase-7b
-:END:
-
-/Value and hypothesis:/ The dev skill and current main/delegate paths establish
-real critique callers, but async read-only critique and synchronous
-inherited-surface critique have different constructions despite sharing
-=dev_critique.md.j2=.  A capability-true shared contract can preserve both paths.
-Change only that shared prompt source.
-
-/Gate:/ Async read-only and synchronous inherited-surface capability probes and
-N=10 code-work cohorts each meet baseline; P0 reports their exposed and
-effectively permitted actions separately; the dev skill and caller topology stay
-unchanged.
-
-/Learning and alternative:/ Results show whether one prompt can truthfully serve
-both real surfaces.  If not, split their prompt sources in a new reviewed
-experiment.  Removal is available only after a separate behavior-change design
-first changes and evaluates the dev workflow itself.
-
-** P7c: Receptionist contract
-:PROPERTIES:
-:CUSTOM_ID: phase-7c
+:CUSTOM_ID: phase-6b
 :END:
 
 /Value and hypothesis:/ The vanilla receptionist can keep routing quality with a
@@ -1314,9 +1043,9 @@ conversation state remain unchanged.
 /Learning and alternative:/ Results show whether receptionist examples or role
 prose are load-bearing.  Restore only the smallest causal example or clause.
 
-** P7d: Thread-description contract
+** P6c: Thread-description contract
 :PROPERTIES:
-:CUSTOM_ID: phase-7d
+:CUSTOM_ID: phase-6c
 :END:
 
 /Value and hypothesis:/ The direct description model call can retain concise,
@@ -1326,9 +1055,9 @@ useful thread labels with a compact output-only contract.  Change only its promp
 adversarial-content cohorts meet N=10 baseline; P0 captures the direct invocation
 without inventing an agent constructor.  Restore only a causal example or clause.
 
-** P7e: Capture and product-policy reconciliation
+** P6d: Capture and product-policy reconciliation
 :PROPERTIES:
-:CUSTOM_ID: phase-7e
+:CUSTOM_ID: phase-6d
 :END:
 
 /Value and hypothesis:/ Capture can classify a behavioral miss into the narrowest
@@ -1346,37 +1075,18 @@ docstrings, and design docs then pass dedicated alignment review.
 bias.  If it cannot, retire the unused capture profile rather than keep a process
 that fights the architecture.
 
-** P7f: Inbound-triage role contract
+* P7: Resolve residual main/delegate procedures
 :PROPERTIES:
-:CUSTOM_ID: phase-7f
+:CUSTOM_ID: phase-7
 :END:
 
-/Value and hypothesis:/ After P1/P1b make the graph and transaction narrow, a
-short triage-only contract can replace inherited general-agent procedure without
-lowering reply judgment.  Change only the triage system prompt; its builder,
-fixed read allowlist, bounds, inputs, and =send_reply= as the only separately
-HITL-gated action affecting another person stay fixed.
-
-/Gate:/ Reply, no-reply, ambiguous, adversarial instruction, approve/edit/reject,
-and visible terminal-state cohorts meet their unchanged-main N=10 baselines; P0
-shows no unavailable positive capability or general-agent lifecycle language.
-
-/Learning and alternative:/ This isolates whether triage needs any examples
-beyond its objective, input trust boundary, one proposal output, and stopping
-condition.  Restore only a causal example or clause.
-
-* P8: Resolve residual main/delegate procedures
-:PROPERTIES:
-:CUSTOM_ID: phase-8
-:END:
-
-P3, P4b, and P5 do not assume that every existing main-prompt procedure already
-has an owner.  P8 closes the census-confirmed remainder through independent
+P2, P3, and P4 do not assume that every existing main-prompt procedure already
+has an owner.  P7 closes the census-confirmed remainder through independent
 experiments; it is an umbrella, not one implementation change.
 
-** P8a: Artifact-delivery default
+** P7a: Artifact-delivery default
 :PROPERTIES:
-:CUSTOM_ID: phase-8a
+:CUSTOM_ID: phase-7a
 :END:
 
 /Value and hypothesis:/ The broad default to write generated content to files can
@@ -1390,9 +1100,9 @@ artifacts exist and are linked, while answer-only cases create nothing.  If
 deletion fails, retain the smallest clause tied to the failing intent or move a
 coherent procedure into an existing skill in a new pre-registered attempt.
 
-** P8b: User task-file workflow
+** P7b: User task-file workflow
 :PROPERTIES:
-:CUSTOM_ID: phase-8b
+:CUSTOM_ID: phase-7b
 :END:
 
 /Value and hypothesis:/ If P0 and caller/eval census confirms user task-file
@@ -1406,7 +1116,7 @@ meet its N=10 outcome baseline; ten unrelated turns neither load it nor mutate a
 task file.  Deletion requires no current natural contract/caller.  A trigger miss
 may justify one compact kernel trigger, but not restoration of the full procedure.
 
-Any other P0 residual becomes a separately numbered P8 child with its own
+Any other P0 residual becomes a separately numbered P7 child with its own
 hypothesis, single instruction move, N=10 baseline, UX guard, learning, and
 alternative before implementation.  The final gate cannot classify an untested
 leftover as a measured exception.
@@ -1432,16 +1142,13 @@ Prompt movement must not weaken capability-based security.  Trust boundaries,
 tool omission, filesystem permissions, URL provenance, HITL, and resource bounds
 remain code-enforced and covered by existing deterministic tests.
 
-P1 addresses a current undefined boundary rather than a risk introduced by this
-program.  Its untrusted-message cases probe every capability the shared
-constructor now adds, and its final-graph census is the authority.  Neither a
-narrow wrapper nor a prompt claim can substitute for explicit local-read and
-network-retrieval allowlists, absence of prohibited effects, and a gated reply at
-the model boundary.
+SMS triage is explicitly outside this program.  Its existing behavior remains
+covered by its current tests and can be reconsidered only as separate roadmap
+work when an observed problem supplies a concrete goal.
 
-P4a likewise treats persistent memory as an authorization sink.  Memory data may
-be broadly readable, but generic tools cannot mutate canonical targets and only
-a trusted composition root can mount the memory skill/save capability pair.
+P3 changes instruction placement only: it keeps memory data preloaded and moves
+the write decision and procedure into a skill.  It does not alter who can read
+or write memory, nor add a new authorization mechanism.
 
 * Program completion gate
 :PROPERTIES:
@@ -1496,26 +1203,27 @@ does not pre-approve P0 code, and no later phase starts automatically.
 
 * Design review record
 
-The local architecture review ran to convergence before publication.  No finding
-was declined.
+The original local architecture review ran to convergence before publication.
+Pierre's review reopened the design; this revision replaces the triage,
+dev-guidance, and memory-authority proposals rather than carrying them forward.
 
 | Lens | Material findings incorporated | Convergence result |
 |------+--------------------------------|--------------------|
-| Architect/census | final model request is the audit unit; triage's wrapper and inherited graph do not define its intended read-only contract; each admitted source needs causal ablation, not an artificial exclusive-fact fixture; legacy and async research returns differ | Clean |
-| Simplicity | final PR reduced to the architecture doc and roadmap; N=3 is diagnostic, not a baseline gate; judge failure cannot block prompt work; combined phases were split; residual main procedures received P8; P4a's save interface is atomic | Clean |
-| Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; triage local reads, bounded retrieval egress, ordinary output, and gated reply are distinct; runtime scenario matrix added; capability protocol has one owner; provider-wide prompt changes isolated; visible skill descriptions own routing triggers | Clean |
-| User intention | Pierre's PR review corrected the inferred reply-only boundary to evidence-selected read-only analysis plus gated reply; P2b removes orchestration assertions from natural acceptance; each later cohort declares its gate layer; context remains preloaded unless later evidence justifies another experiment | Clean |
-| User experience | latency/round-trip guard; complete delegate, memory, research, and triage/HITL journeys; actionable per-case experiment reports | Clean |
-| Clean interfaces | dedicated internal triage builder without =AgentSpec= permission flags; trusted composition roots own memory authority; memory skill and save tool mount together | Clean |
-| Threat model | local reads and network retrieval have separate allowlists; bounded durable inbound archive and one-action HITL transaction; synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; memory targets read-only below generic sinks | Clean |
+| Architect/census | final model request is the audit unit; memory read/write split remains a bounded prompt-placement experiment; legacy and async research returns differ | Clean |
+| Simplicity | removed unobserved triage and memory-hardening work; kept only the memory skill split; development guidance stays unchanged | Clean |
+| Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; capability protocol has one owner; provider-wide prompt changes remain isolated; visible skill descriptions own routing triggers | Clean |
+| User intention | SMS triage moves to a separate roadmap item; memory retains its existing access model; later cohorts declare their gate layer; context remains preloaded unless later evidence justifies another experiment | Clean |
+| User experience | latency/round-trip guard; complete delegate, memory, and research journeys; actionable per-case experiment reports | Clean |
+| Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, or trusted-composition-root machinery; the memory skill owns procedure only | Clean |
+| Threat model | synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; existing memory and SMS controls remain unchanged | Clean |
 | Event-loop/eval liveness | P0b atomic maintenance admission; outer supervised process groups and recoverable leases; bare serialized judge; atomic resume identity; GPU workload/cooldown contract; slow-path web liveness gates | Clean |
-| Documentation alignment | PR scope reduced to this design and the roadmap; triage intent corrected to read-only analysis plus gated reply; phase names, anchors, and current-versus-target wording verified | Clean |
+| Documentation alignment | changelog records Pierre's revision; triage and development guidance are excluded; phase names, anchors, and current-versus-target wording verified | Clean |
 
 Pierre's PR review is the remaining design gate.  In particular, approval should
 confirm the six instruction homes and preloaded context choice; the blind judge
 qualification and human-label burden; the P0b maintenance-reservation boundary;
-and the inclusion of P1/P1b/P4a as security prerequisites discovered by the
-audit.  No implementation starts from silence or PR creation alone.
+and the narrower memory skill split.  No implementation starts from silence or
+PR creation alone.
 
 * Decisions deliberately deferred to evidence
 
@@ -1525,7 +1233,6 @@ audit.  No implementation starts from silence or PR creation alone.
 - Whether natural research selection needs one compact always-on trigger.
 - Whether context gathering can ever move behind a skill.  The default remains
   preloaded because it is the grounding prerequisite.
-- Whether the delegate's code-critique specialist has a real dev-work caller and
-  should remain.
+- Whether a future end-to-end development-guidance redesign is warranted.
 - Exact final prompt wording.  The architecture fixes ownership and gates, not
   prose before the experiments reveal what Qwen follows.
