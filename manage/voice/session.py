@@ -13,7 +13,7 @@ import secrets
 import threading
 import time
 from hashlib import sha256
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,9 +108,22 @@ def _install_observer() -> None:
         _observer_installed = True
 
 
-def _frames(pcm: bytes):
-    for offset in range(0, len(pcm) - FRAME_BYTES + 1, FRAME_BYTES):
-        yield pcm[offset:offset + FRAME_BYTES]
+def _frames(chunks: Iterable[bytes]) -> Iterator[bytes]:
+    """Join arbitrary Piper chunks into exact wire frames.
+
+    Piper's chunks do not necessarily align to the bridge's fixed PCM frame
+    size.  Preserve every sample across boundaries and pad only the final
+    partial frame with silence.
+    """
+    pending = bytearray()
+    for chunk in chunks:
+        pending.extend(chunk)
+        complete = len(pending) // FRAME_BYTES * FRAME_BYTES
+        for offset in range(0, complete, FRAME_BYTES):
+            yield bytes(pending[offset:offset + FRAME_BYTES])
+        del pending[:complete]
+    if pending:
+        yield bytes(pending).ljust(FRAME_BYTES, b"\0")
 
 
 class VoiceSession:
@@ -422,14 +435,10 @@ class VoiceSession:
                     generation, text = self._pending_tts
                     self._pending_tts = None
                 try:
-                    for chunk in self._speech.synthesize(text):
-                        for frame in _frames(chunk):
-                            if self._stopped.is_set() or not buffers.outbound.put_audio(
-                                    generation, frame):
-                                break
-                        else:
-                            continue
-                        break
+                    for frame in _frames(self._speech.synthesize(text)):
+                        if self._stopped.is_set() or not buffers.outbound.put_audio(
+                                generation, frame):
+                            break
                     else:
                         self._events.put(("tts_done", generation))
                 except Exception:

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from assist.events.thread_log import read_events
-from manage.voice.session import VoiceSession, _Reply, _REPLIES
+from manage.voice.session import VoiceSession, _Reply, _REPLIES, _frames
 from manage.voice.speech import Transcription
 from manage.voice.wire import BufferClosed, CallBuffers, InboundBuffer, OutboundBuffer
 
@@ -263,6 +263,18 @@ def test_tts_producer_serializes_latest_speech_request():
     session._stopped.set()
     with session._tts_condition:
         session._tts_condition.notify_all()
+
+
+def test_tts_frames_preserve_chunk_remainders_and_pad_only_the_end():
+    first = b"a" * 100
+    second = b"b" * 600
+
+    frames = list(_frames([first, second]))
+
+    assert frames == [
+        first + second[:540],
+        second[540:] + b"\0" * 580,
+    ]
 
 
 def test_hangup_does_not_wait_for_a_stalled_tts_call():
