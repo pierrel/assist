@@ -36,10 +36,11 @@ VAD/endpointing/barge-in/DTMF flow (PR #209), in-process Whisper/Piper speech
 
 PR4 =manage/voice/session.py= now integrates Flow, Speech, Wire, the receptionist,
 durable ordinary Runs, terminal observers, serialized TTS, barge-in, and the
-call-event log into the fake-bridge state machine. *NEXT: PR5* closes global PIN
-lockout, caller-ID handling, detector-scope security proofs, and full scripted-call
-reconstruction. Live phone/PCM-bridge work remains hardware-gated P3 in emacsos; do
-not start it before the fake-bridge contract is complete.
+call-event log into the fake-bridge state machine. PR5 adds global PIN lockout,
+canonical caller-ID handling, detector-scope security proofs, and full scripted-call
+reconstruction (PR #220, 2026-07-28). *NEXT: P2* async delivery and the
+two go-back paths. Live phone/PCM-bridge work remains hardware-gated P3 in emacsos;
+do not start it before the fake-bridge contract is complete.
 ** DONE One Agent Protocol-shaped runs interface
 Shipped for review 2026-07-24 in [[https://github.com/pierrel/assist/pull/212][assist PR #212]]. This records that PR's
 historical design; the adjacent replacement item supersedes its child lifecycle.

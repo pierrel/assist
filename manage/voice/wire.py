@@ -244,6 +244,11 @@ class OutboundBuffer(_CloseableBuffer):
         with self._condition:
             return not self._closed and generation == self._generation
 
+    def empty(self) -> bool:
+        """Whether no queued control or audio remains for the bridge."""
+        with self._condition:
+            return not self._items
+
     def put_control(self, control: dict[str, Any]) -> None:
         """Put a server control ahead of queued audio without waiting.
 

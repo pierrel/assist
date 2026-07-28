@@ -2,14 +2,17 @@ import asyncio
 import json
 import threading
 import time
+from hashlib import sha256
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from manage.web import app
+from assist.events.thread_log import read_events
 from manage.voice import wire
 from manage.voice.session import VoiceSession
+from manage.voice.service import VoiceService
 from tests.voice.fake_bridge import FakeBridge
 
 
@@ -125,14 +128,32 @@ def test_fake_bridge_exercises_duplex_transport():
             bridge.receive_control()
 
 
-def test_fake_bridge_drives_the_session_handshake_and_hangup():
+def test_app_lifespan_activates_voice_only_with_complete_configuration(monkeypatch):
+    values = {
+        "ASSIST_VOICE_SECRET": "test-secret",
+        "ASSIST_VOICE_PIN": "123456",
+        "ASSIST_VOICE_CALLERS": "+15555550100",
+        "ASSIST_VOICE_CALL_LOG_DIR": "/var/lib/assist/call-log",
+        "ASSIST_VOICE_PIPER_MODEL": "/opt/assist/models/voice.onnx",
+        "ASSIST_VOICE_WHISPER_MODEL": "/opt/assist/models/whisper",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    with TestClient(app):
+        assert isinstance(wire._CALL_RUNNER, VoiceService)
+
+    assert wire._CALL_RUNNER is None
+
+
+def test_fake_bridge_reconstructs_the_session_boundary_log(tmp_path):
     class Speech:
         def synthesize(self, _text):
             yield PCM
 
     session = VoiceSession(
         pin="000000", allowed_callers=frozenset({"+15555550100"}),
-        speech=Speech(), router_turn=lambda _text: "",
+        speech=Speech(), router_turn=lambda _text: "", call_log_root=tmp_path,
     )
     wire.configure_call_runner(session.run)
     with TestClient(app).websocket_connect("/call", headers=HEADERS) as websocket:
@@ -146,6 +167,14 @@ def test_fake_bridge_drives_the_session_handshake_and_hangup():
         assert bridge.receive_pcm() == PCM
         bridge.send_control("call_end", cause="remote")
         assert bridge.receive_control() == {"type": "hangup"}
+
+    events = read_events(str(tmp_path / "calls" / sha256(b"boot-1").hexdigest()))
+    assert [event["kind"] for event in events] == [
+        "ring", "answered", "pin_prompt", "tts", "pin_attempt", "auth_ok",
+        "tts", "router_enter", "router_return", "hangup",
+    ]
+    assert "000000" not in str(events)
+    assert "+15555550100" not in str(events)
 
 
 @pytest.mark.parametrize("size", [639, 641, 4096])

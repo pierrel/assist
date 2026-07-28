@@ -7,6 +7,7 @@ import pytest
 
 from assist.events.thread_log import read_events
 from manage.voice.session import VoiceSession, _Reply, _REPLIES, _frames
+from manage.voice.service import PinLockout
 from manage.voice.speech import Transcription
 from manage.voice.wire import BufferClosed, CallBuffers, InboundBuffer, OutboundBuffer
 
@@ -91,6 +92,24 @@ def test_session_never_answers_an_unknown_caller():
 
     with pytest.raises(BufferClosed):
         _eventually_get(buffers.outbound)
+
+
+def test_locked_or_malformed_callers_do_not_construct_a_detector():
+    class NoFlow:
+        def __init__(self, **_kwargs):
+            raise AssertionError("pre-auth call constructed Flow")
+
+    gate = PinLockout()
+    for _ in range(3):
+        gate.record_failure()
+    for caller in ("+15555550100", "+1 (555) 555-0100"):
+        buffers = CallBuffers(InboundBuffer(), OutboundBuffer())
+        VoiceSession(
+            pin="000000", allowed_callers=frozenset({"+15555550100"}),
+            speech=FakeSpeech(), flow_factory=NoFlow, lockout=gate,
+        ).run({"type": "ring", "call_id": "call", "caller": caller}, buffers)
+        with pytest.raises(BufferClosed):
+            _eventually_get(buffers.outbound)
 
 
 def test_call_log_hashes_hostile_bridge_ids_and_omits_caller(tmp_path):
@@ -188,6 +207,31 @@ def test_greeting_constructs_only_a_dtmf_flow_and_never_transcribes():
     assert flow_kwargs == [{"vad": False}, {}]
     buffers.inbound.close_with_final({"type": "call_end", "cause": "remote"})
     runner.join(1)
+
+
+def test_final_pin_failure_plays_recovery_then_hangs_up():
+    buffers = CallBuffers(InboundBuffer(), OutboundBuffer())
+    session = VoiceSession(
+        pin="000000", allowed_callers=frozenset({"+15555550100"}),
+        speech=FakeSpeech(), lockout=PinLockout(),
+    )
+    runner = threading.Thread(
+        target=session.run,
+        args=({"type": "ring", "call_id": "call", "caller": "+15555550100"}, buffers),
+    )
+    runner.start()
+    assert _eventually_get(buffers.outbound) == {"type": "answer"}
+    buffers.inbound.put({"type": "answered", "call_id": "call"})
+    assert _eventually_get(buffers.outbound) == PCM
+
+    for _ in range(3):
+        for _ in range(6):
+            buffers.inbound.put({"type": "dtmf", "digit": "1"})
+        assert _eventually_get(buffers.outbound) == PCM
+
+    runner.join(1)
+    assert not runner.is_alive()
+    assert _eventually_get(buffers.outbound) == {"type": "hangup"}
 
 
 def test_default_submit_registers_before_its_turn_runner(monkeypatch):
