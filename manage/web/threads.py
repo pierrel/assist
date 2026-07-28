@@ -1145,15 +1145,18 @@ def render_thread(
     """
 
 
-def _initialize_thread(tid: str, text: str, domain: str | None,
-                       rider: ContextRider | None = None) -> None:
+def _initialize_thread(
+    tid: str, run_id: str, domain: str | None,
+    rider: ContextRider | None = None,
+) -> None:
     """Background task: clone the repo, start sandbox, process the first message."""
     try:
         if domain:
             # Carry started_at through the cloning write (_set_status is a full replace):
             # otherwise a domain thread's elapsed baseline resets at clone-completion,
             # excluding the clone+init the user has been waiting through since submit.
-            _set_status(tid, "cloning", pending_message=text, domain=domain,
+            pending = _runs().get(tid, run_id).text or ""
+            _set_status(tid, "cloning", pending_message=pending, domain=domain,
                         started_at=_get_status(tid).get("started_at"))
             try:
                 dm = DomainManager(
@@ -1165,13 +1168,30 @@ def _initialize_thread(tid: str, text: str, domain: str | None,
                 DOMAIN_MANAGERS[tid] = dm
             except Exception as e:
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
-                _set_status(tid, "error", error=f"Clone failed: {e}", pending_message=text)
+                _fail_initialization(tid, run_id, e, f"Clone failed: {e}", pending)
                 return
-        run = _create_run(tid, text, rider=rider)
-        _execute_run(run.id, tid)
+        _execute_run(run_id, tid)
     except Exception as e:
         logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
-        _set_status(tid, "error", error=str(e), pending_message=text)
+        try:
+            pending = _runs().get(tid, run_id).text or ""
+        except Exception:
+            pending = ""
+        _fail_initialization(tid, run_id, e, str(e), pending)
+
+
+def _fail_initialization(
+    tid: str, run_id: str, error: Exception, status_error: str, pending: str,
+) -> None:
+    """Terminalize a Run that failed before or during initialization."""
+    with _RUN_ADMISSION_LOCK:
+        run = _runs().get(tid, run_id)
+        if run.status == "pending":
+            run = _runs().claim(tid, run_id)
+        if run.status == "running":
+            _runs().transition(tid, run_id, "error", error=str(error))
+    _set_status(tid, "error", error=status_error, pending_message=pending)
+    _notify_turn_observers(tid, "error", None, None, run_id)
 
 
 _SUPERSEDE_RIDER = (
@@ -2356,15 +2376,27 @@ async def create_thread_with_message(
     sent_at: str | None = Form(None), tz: str | None = Form(None),
     lat: str | None = Form(None), lon: str | None = Form(None),
 ):
-    # Reserve the thread directory synchronously so the redirect target is valid,
-    # but defer everything slow (clone, sandbox, agent, description) to the background.
-    tid = await run_in_threadpool(MANAGER.reserve)
+    rider = _build_rider(sent_at, tz, lat, lon)
+    tid, run_id, selected = await run_in_threadpool(
+        create_thread_with_message_core,
+        text, domain, rider,
+    )
+    background_tasks.add_task(
+        _initialize_thread, tid, run_id, selected, rider,
+    )
+    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+def create_thread_with_message_core(
+    text: str, domain: str | None, rider: ContextRider | None = None,
+) -> tuple[str, str, str | None]:
+    """Persist a new thread's first Run before its slow initialization starts."""
+    tid = MANAGER.reserve()
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
-    background_tasks.add_task(_initialize_thread, tid, text, selected,
-                             _build_rider(sent_at, tz, lat, lon))
-    return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+    run = _create_run(tid, text, rider=rider)
+    return tid, run.id, selected
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)

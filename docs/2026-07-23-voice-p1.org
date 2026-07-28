@@ -13,10 +13,12 @@ records the build plan grounded in the real code, the reconciliations, and statu
 - P0.5 (=catalog.py= + =receptionist.py= + eval N=10=80/80) — DONE, merged, deployed.
 - *P1 (this doc)* — the voice client: a new =manage/voice/= package, validated entirely
   against a FAKE BRIDGE (no phone hardware; that is P3). All in assist.
-- *Current implementation status (2026-07-26):* P1 PR1–PR3 are merged and deployed:
-  Flow, Speech, and the bounded =/call= Wire transport exist. They are foundations,
-  not yet an end-to-end call: production deliberately has no configured session runner.
-  *NEXT is PR4 =session.py=*, then the PR5 security/reconstruction gate.
+- *Current implementation status (2026-07-27):* P1 PR1–PR3 are merged and deployed.
+  This branch adds PR4's fake-bridge =session.py= integration: Flow, Speech, Wire,
+  the receptionist, durable Runs, and terminal observer delivery now form one
+  call-local state machine. Production still deliberately has no configured session
+  runner: PR5 must first supply the complete PIN/caller policy and scripted security
+  reconstruction.
 
 * Threading model (blocker-class — single-worker uvicorn)
 | Thread | Owns | May NOT |
@@ -54,8 +56,9 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    protocol (§2) + §8 resource caps, echo-level.
    *DONE (PR #214; merged + deployed 2026-07-26).*
 4. *PR4 — =session.py=* — the state machine + call-event log + conversational contract,
-   tying flow/speech/wire together, driving the shared Run service (the big one; full
-   three-phase rigor — touches the queue/observer/hot path). *← NEXT.*
+   tying Flow/Speech/Wire together, driving the shared Run service. The fake bridge
+   covers the whole seam; production activation remains in PR5 because the security
+   policy is not partial. *Implemented on this branch.*
 5. *PR5 — security + full scripted-call reconstruction* (global PIN lockout,
    detector-scoping spies, caller-id handling) — or folded into PR4 if reviewable.
 
@@ -72,8 +75,8 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
    =backlog_id=-based double-speak distinction while preserving exactly-once delivery.
 3. *=on_new= "wraps create_thread_with_message" (design) → that is a FastAPI route*
    (=Form=/=BackgroundTasks=). Extract a plain
-   =create_thread_with_message_core(text, domain, rider) -> tid= from its body
-   plus =_initialize_thread=; route becomes a thin Form adapter over it.
+   =create_thread_with_message_core(text, domain, rider) -> (tid, run_id, domain)=
+   from its body plus =_initialize_thread=; route becomes a thin Form adapter over it.
 4. *Receptionist signature: =receptionist_tools(catalog, domains, on_open, on_new)=*
    (shipped in =receptionist.py=) — pass =DOMAINS= from =state.py=.
 5. *VAD dep: use =onnxruntime= + the silero ONNX model, NOT the =silero-vad= pip package.*
@@ -125,7 +128,7 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
   stalled in-flight send may prevent delivery but is cancelled after the 2 s grace.
 - After the first valid =ring=, the route invokes one synchronous call-runner seam
   with the decoded ring plus the two buffers. Tests inject an echo runner; production
-  has no session runner until PR4 and therefore closes without inventing answer or
+  has no session runner until PR5 and therefore closes without inventing answer or
   call-state policy. On an abrupt exit both buffers close first; that is the runner's
   termination contract. The route retains the sole call slot until the runner returns,
   then releases it before exposing the terminal network close, so old and new session
@@ -186,7 +189,12 @@ Dependency-ordered; each new dep enters the smallest PR that needs it.
       PR #214 merged with green CI after five Copilot rounds ending clean with all
       threads resolved. Validation after the PR #215 integration fix: 35 focused
       wire tests and 1,438 deterministic tests.
-- [ ] PR4: =session.py= state machine/integration — NEXT.
+- [X] PR4: =session.py= state machine/integration — fake-bridge implementation on
+      this branch: allowlisted answer, PIN-only pre-auth Flow, serialized per-call
+      TTS with generation invalidation, receptionist handoff, ordinary durable Runs,
+      terminal-observer-only reply delivery, call log, and prompt teardown.
+      Production runner configuration remains intentionally absent pending PR5's
+      global lockout, normalized caller policy, and reconstruction tests.
 - [ ] PR5: security + scripted-call reconstruction (or fold into PR4 only if reviewable).
 
 * Notes for Pierre

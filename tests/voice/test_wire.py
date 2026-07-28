@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from manage.web import app
 from manage.voice import wire
+from manage.voice.session import VoiceSession
 from tests.voice.fake_bridge import FakeBridge
 
 
@@ -122,6 +123,29 @@ def test_fake_bridge_exercises_duplex_transport():
         assert bridge.receive_control() == {"type": "hangup"}
         with pytest.raises(WebSocketDisconnect):
             bridge.receive_control()
+
+
+def test_fake_bridge_drives_the_session_handshake_and_hangup():
+    class Speech:
+        def synthesize(self, _text):
+            yield PCM
+
+    session = VoiceSession(
+        pin="000000", allowed_callers=frozenset({"+15555550100"}),
+        speech=Speech(), router_turn=lambda _text: "",
+    )
+    wire.configure_call_runner(session.run)
+    with TestClient(app).websocket_connect("/call", headers=HEADERS) as websocket:
+        bridge = FakeBridge(websocket)
+        bridge.ring()
+        assert bridge.receive_control() == {"type": "answer"}
+        bridge.send_control("answered", call_id="boot-1")
+        assert bridge.receive_pcm() == PCM
+        for _ in range(6):
+            bridge.send_control("dtmf", digit="0")
+        assert bridge.receive_pcm() == PCM
+        bridge.send_control("call_end", cause="remote")
+        assert bridge.receive_control() == {"type": "hangup"}
 
 
 @pytest.mark.parametrize("size", [639, 641, 4096])
@@ -500,3 +524,51 @@ def _record_closed(operation, result):
         operation()
     except wire.BufferClosed:
         result.append(wire.BufferClosed)
+
+
+def test_barge_in_flushes_and_invalidates_a_blocked_tts_generation():
+    outbound = wire.OutboundBuffer()
+    generation = outbound.start_generation()
+    for _ in range(wire.OUTBOUND_CAPACITY):
+        assert outbound.put_audio(generation, PCM)
+
+    accepted = []
+    producer = threading.Thread(
+        target=lambda: accepted.append(outbound.put_audio(generation, PCM))
+    )
+    producer.start()
+    time.sleep(0.01)
+
+    outbound.interrupt_audio()
+    producer.join(1)
+
+    assert accepted == [False]
+    outbound.interrupt_audio()
+    outbound.interrupt_audio()
+    assert outbound.get() == {"type": "flush_uplink"}
+    with pytest.raises(TimeoutError):
+        outbound.get(timeout=0.01)
+
+
+def test_control_evicts_stale_audio_when_outbound_is_full():
+    outbound = wire.OutboundBuffer()
+    for _ in range(wire.OUTBOUND_CAPACITY):
+        outbound.put(PCM)
+
+    outbound.put_control({"type": "hangup"})
+
+    assert len(outbound._items) == wire.OUTBOUND_CAPACITY
+    assert outbound.get() == {"type": "hangup"}
+
+
+def test_terminal_inbound_control_discards_buffered_pcm():
+    inbound = wire.InboundBuffer()
+    for _ in range(wire.INBOUND_CAPACITY):
+        inbound.put(PCM)
+
+    final = {"type": "call_end", "cause": "remote"}
+    inbound.close_with_final(final)
+
+    assert inbound.get() == final
+    with pytest.raises(wire.BufferClosed):
+        inbound.get()

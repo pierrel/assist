@@ -34,12 +34,12 @@ authoritative), read-only catalog + contained receptionist (PR #208), hermetic
 VAD/endpointing/barge-in/DTMF flow (PR #209), in-process Whisper/Piper speech
 (PR #211), and bounded authenticated WSS =/call= transport (PR #214).
 
-*NEXT: PR4 =manage/voice/session.py=*: integrate flow, speech, wire,
-receptionist, durable ordinary Runs, terminal observers, serialized TTS,
-barge-in, and the call-event log into the per-call state machine. Then PR5 closes
-global PIN lockout, caller-ID handling, detector-scope security proofs, and full
-scripted-call reconstruction. Live phone/PCM-bridge work remains hardware-gated P3
-in emacsos; do not start it before the fake-bridge contract is complete.
+PR4 =manage/voice/session.py= now integrates Flow, Speech, Wire, the receptionist,
+durable ordinary Runs, terminal observers, serialized TTS, barge-in, and the
+call-event log into the fake-bridge state machine. *NEXT: PR5* closes global PIN
+lockout, caller-ID handling, detector-scope security proofs, and full scripted-call
+reconstruction. Live phone/PCM-bridge work remains hardware-gated P3 in emacsos; do
+not start it before the fake-bridge contract is complete.
 ** DONE One Agent Protocol-shaped runs interface
 Shipped for review 2026-07-24 in [[https://github.com/pierrel/assist/pull/212][assist PR #212]]. This records that PR's
 historical design; the adjacent replacement item supersedes its child lifecycle.
