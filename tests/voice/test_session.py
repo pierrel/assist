@@ -112,6 +112,21 @@ def test_call_log_hashes_hostile_bridge_ids_and_omits_caller(tmp_path):
     assert not (tmp_path / "caller-control").exists()
 
 
+def test_unwritable_call_log_does_not_fail_the_call(tmp_path):
+    root = tmp_path / "not-a-directory"
+    root.write_text("occupied")
+    buffers = CallBuffers(InboundBuffer(), OutboundBuffer())
+    session = VoiceSession(
+        pin="000000", allowed_callers=frozenset(), speech=FakeSpeech(),
+        call_log_root=root,
+    )
+
+    session.run({"type": "ring", "call_id": "call", "caller": "+1555"}, buffers)
+
+    with pytest.raises(BufferClosed):
+        _eventually_get(buffers.outbound)
+
+
 def test_session_logs_the_auth_boundary_without_digits_or_caller(tmp_path):
     buffers = CallBuffers(InboundBuffer(), OutboundBuffer())
     session = VoiceSession(

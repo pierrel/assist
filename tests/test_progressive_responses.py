@@ -363,6 +363,23 @@ def test_turn_observer_isolated_and_reports_error(wired, monkeypatch):
     assert _get_status(tid)["stage"] == "error"         # turn still terminalized
 
 
+def test_initialize_clone_failure_notifies_turn_observers(wired, monkeypatch):
+    tid, _ = wired
+    run = threads._create_run(tid, "first message")
+    _set_status(tid, "initializing", pending_message="first message")
+    seen = []
+    monkeypatch.setattr(threads, "_TURN_OBSERVERS", [lambda *args: seen.append(args)])
+    monkeypatch.setattr(
+        threads, "DomainManager", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("clone failed")),
+    )
+
+    threads._initialize_thread(tid, run.id, "domain")
+
+    assert threads._runs().get(tid, run.id).status == "error"
+    assert seen == [(tid, "error", None, None, run.id)]
+
+
 def test_turn_observer_registration_during_notify_is_isolated(wired, monkeypatch):
     # Snapshot semantics: turns run concurrently over the shared _TURN_OBSERVERS
     # global, so a registration racing a notify pass must not extend that pass. An

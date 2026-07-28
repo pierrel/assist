@@ -1168,18 +1168,30 @@ def _initialize_thread(
                 DOMAIN_MANAGERS[tid] = dm
             except Exception as e:
                 logging.error("Clone failed for thread %s: %s", tid, e, exc_info=True)
-                _runs().transition(tid, run_id, "error", error=str(e))
-                _set_status(tid, "error", error=f"Clone failed: {e}", pending_message=pending)
+                _fail_initialization(tid, run_id, e, f"Clone failed: {e}", pending)
                 return
         _execute_run(run_id, tid)
     except Exception as e:
         logging.error("Initialization failed for thread %s: %s", tid, e, exc_info=True)
         try:
             pending = _runs().get(tid, run_id).text or ""
-            _runs().transition(tid, run_id, "error", error=str(e))
         except Exception:
             pending = ""
-        _set_status(tid, "error", error=str(e), pending_message=pending)
+        _fail_initialization(tid, run_id, e, str(e), pending)
+
+
+def _fail_initialization(
+    tid: str, run_id: str, error: Exception, status_error: str, pending: str,
+) -> None:
+    """Terminalize a Run that failed before or during initialization."""
+    with _RUN_ADMISSION_LOCK:
+        run = _runs().get(tid, run_id)
+        if run.status == "pending":
+            run = _runs().claim(tid, run_id)
+        if run.status == "running":
+            _runs().transition(tid, run_id, "error", error=str(error))
+    _set_status(tid, "error", error=status_error, pending_message=pending)
+    _notify_turn_observers(tid, "error", None, None, run_id)
 
 
 _SUPERSEDE_RIDER = (

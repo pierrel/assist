@@ -49,7 +49,10 @@ class _CallLog:
         if root is not None:
             safe_id = sha256(call_id.encode()).hexdigest()
             directory = Path(root) / "calls" / safe_id
-            directory.mkdir(parents=True, exist_ok=True)
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                return
             self._directory = str(directory)
 
     def append(self, kind: str, **fields: Any) -> None:
