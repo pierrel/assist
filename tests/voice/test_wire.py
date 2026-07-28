@@ -130,6 +130,7 @@ def test_fake_bridge_exercises_duplex_transport():
 
 def test_app_lifespan_activates_voice_only_with_complete_configuration(monkeypatch):
     values = {
+        "ASSIST_VOICE_SECRET": "test-secret",
         "ASSIST_VOICE_PIN": "123456",
         "ASSIST_VOICE_CALLERS": "+15555550100",
         "ASSIST_VOICE_CALL_LOG_DIR": "/var/lib/assist/call-log",
