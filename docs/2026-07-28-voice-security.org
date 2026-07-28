@@ -36,7 +36,7 @@ one scripted call from its durable event log.  The phone PCM bridge remains P3.
    the gate and lazy speech resource.
 2. Extend =manage/voice/session.py= to receive the gate, reject malformed or
    non-allowlisted callers before answer/Flow construction, record failed PINs,
-   speak the final-strike recovery clip, and reject calls during the global
+   speak the final-strike recovery clip then hang up, and reject calls during the global
    cooldown before answer.  Keep the existing =vad=False= greeting Flow as the
    only pre-auth detector.
 3. Configure the runner in =manage/web/state.py='s lifespan and clear it on

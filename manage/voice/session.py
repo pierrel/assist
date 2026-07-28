@@ -165,6 +165,7 @@ class VoiceSession:
         self._call_log_root = call_log_root
         self._lockout = lockout
         self._pin_locked = False
+        self._end_after_speech = False
         self._log: _CallLog | None = None
         self._router: Any | None = None
         self._speaking = False
@@ -196,6 +197,10 @@ class VoiceSession:
             self._start_tts_producer(buffers)
             while not self._stopped.is_set():
                 self._drain_events(buffers)
+                if (self._end_after_speech and not self._speaking
+                        and buffers.outbound.empty()):
+                    log.append("hangup", by="pin_lockout")
+                    return
                 try:
                     item = buffers.inbound.get(timeout=0.05)
                 except TimeoutError:
@@ -322,6 +327,7 @@ class VoiceSession:
         if not accepted:
             if self._lockout is not None and self._lockout.record_failure():
                 self._pin_locked = True
+                self._end_after_speech = True
                 if self._log is not None:
                     self._log.append("pin_locked")
                 self._speak(_LOCKED, buffers)
