@@ -498,7 +498,7 @@ class TestSandboxManager(TestCase):
             mock_container, native_agent_dir=True)
 
     @patch('assist.sandbox.DockerSandboxBackend')
-    def test_get_sandbox_backend_does_not_forward_email_configuration(self, mock_backend_cls):
+    def test_get_sandbox_backend_does_not_forward_host_only_configuration(self, mock_backend_cls):
         test_path = os.path.join(self.temp_dir, "domain")
         os.makedirs(test_path)
         mock_client = MagicMock()
@@ -512,6 +512,8 @@ class TestSandboxManager(TestCase):
                 "EMAIL_FROM_ADDRESS": "assistant@example.test",
                 "EMAIL_FROM_NAME": "Assistant",
                 "EMAIL_ALWAYS_CC": "oversight@example.test",
+                "URGENT_SMS_RECIPIENT": "+15555550100",
+                "URGENT_SMS_THREAD_URL_BASE": "https://web.example.test:5050",
         }):
             with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
                 SandboxManager.get_sandbox_backend(test_path)
@@ -520,7 +522,8 @@ class TestSandboxManager(TestCase):
                             if c.args and c.args[0] == "assist-sandbox")
         environment = sandbox_call.kwargs["environment"]
         self.assertEqual(environment["ASSIST_MODEL_URL"], "http://model.example.test")
-        self.assertFalse(any(key.startswith("EMAIL_") for key in environment))
+        self.assertFalse(any(key.startswith(("EMAIL_", "URGENT_SMS_"))
+                             for key in environment))
 
     @patch('assist.sandbox.DockerSandboxBackend')
     def test_get_sandbox_backend_passes_host_uid(self, mock_backend_cls):

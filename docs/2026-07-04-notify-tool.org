@@ -83,14 +83,16 @@ safe across the on-loop reads/clear and the off-loop =_process_message= mark.
 NEW =assist/events/notify.py= (beside =reply.py=). WEB-only (touches web state;
 core =assist/tools.py= built-ins run in emacsos/CLI which have NO Manager/web-state
 — same rationale as schedule/subscription/reply tools).
-- Surface: =def notify(reason: str) -> str= — one string arg (the small model gets
+- Surface: =def notify(message: str) -> str= — one string arg (the small model gets
   one-arg tools right). Reads =tid= from =get_config()= (=_thread_id()=); if none,
   RETURNS a corrective string (="Couldn't flag this: no active thread."=) — never
   raises, never marks a =None= key (design-review F8, matches every sibling tool's
-  =if not tid: return "…"= opener). On success: =_mark_urgent(tid)=, return
-  =f"Flagged this thread as urgent: {reason}"=. =reason= is NOT persisted to the
-  marker (existence is the whole signal — no PII in the badge); it lives in the
-  transcript the user reads.
+  =if not tid: return "…"= opener). On success: =_mark_urgent(tid)=, then the
+  2026-07-29 urgent-SMS extension sends =message= plus the configured thread link to
+  its fixed host-side recipient without HITL. If the recipient is unconfigured or
+  delivery fails, the marker remains urgent and the tool returns that condition.
+  =message= is NOT persisted to the marker (existence is the whole signal — no PII in
+  the badge); it lives in the transcript and sent SMS.
 - Builder: =def notify_tools(mark_urgent) -> list= — a CLOSURE over the
   mark-urgent callback (design-review F9), mirroring =schedule_tools(store)=. This
   AVOIDS the =state=↔=notify= import cycle BY CONSTRUCTION (no in-function import),

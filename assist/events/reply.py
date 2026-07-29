@@ -1,5 +1,7 @@
-"""The ``send_reply`` tool — the one action a message-triage turn can take, and the only
-effect that escapes the sandbox. It is gated by deepagents human-in-the-loop
+"""Outbound SMS helpers plus the HITL-gated ``send_reply`` tool.
+
+``send_reply`` is the one action a message-triage turn can take. It is gated by deepagents
+human-in-the-loop
 (:data:`REPLY_INTERRUPT_ON`): the agent calls ``send_reply(text)``, the graph interrupts
 BEFORE the tool body runs, the user approves/edits/rejects, and only on approve does the
 body execute — POSTing the reply to the phone's outbound-SMS endpoint.
@@ -32,6 +34,31 @@ def _sender() -> str | None:
     return ((get_config() or {}).get("configurable") or {}).get(SMS_SENDER_KEY)
 
 
+def send_outbound_sms(recipient: str, text: str) -> str | None:
+    """Send one SMS through the configured phone endpoint.
+
+    Return ``None`` after a confirmed send, otherwise a corrective detail.  Callers own
+    their recipient-specific policy and presentation; this shared host-side boundary owns
+    endpoint authentication, bounded delivery, and redirect refusal.
+    """
+    url = os.getenv("ASSIST_SMS_OUTBOUND_URL")
+    secret = os.getenv("ASSIST_SMS_SECRET")
+    if not url or not secret:
+        return "outbound SMS isn't configured (ASSIST_SMS_OUTBOUND_URL / ASSIST_SMS_SECRET)"
+    try:
+        response = requests.post(
+            url, json={"to": recipient, "text": text},
+            headers={"X-Assist-SMS-Secret": secret}, timeout=10,
+            allow_redirects=False)
+    except requests.RequestException as error:
+        logger.warning("outbound SMS failed: %s", error)
+        return f"couldn't reach the phone ({error})"
+    if response.status_code == 200:
+        return None
+    logger.warning("outbound SMS returned HTTP %s", response.status_code)
+    return f"the phone returned HTTP {response.status_code}"
+
+
 def send_reply(text: str) -> str:
     """Reply to the sender of the message you're triaging, by text.
 
@@ -42,21 +69,10 @@ def send_reply(text: str) -> str:
     sender = _sender()
     if not sender:
         return "There is no inbound message to reply to in this turn."
-    url = os.getenv("ASSIST_SMS_OUTBOUND_URL")
-    secret = os.getenv("ASSIST_SMS_SECRET")
-    if not url or not secret:
-        return ("Reply not sent: outbound SMS isn't configured "
-                "(ASSIST_SMS_OUTBOUND_URL / ASSIST_SMS_SECRET).")
-    try:
-        r = requests.post(url, json={"to": sender, "text": text},
-                          headers={"X-Assist-SMS-Secret": secret}, timeout=10)
-    except requests.RequestException as e:
-        logger.warning("outbound SMS to %s failed: %s", sender, e)
-        return f"Reply not sent: couldn't reach the phone ({e})."
-    if r.status_code == 200:
+    failure = send_outbound_sms(sender, text)
+    if failure is None:
         return f"Reply sent to {sender}."
-    logger.warning("outbound SMS to %s returned %s", sender, r.status_code)
-    return f"Reply not sent: the phone returned HTTP {r.status_code}."
+    return f"Reply not sent: {failure}."
 
 
 def reply_tools() -> list:
