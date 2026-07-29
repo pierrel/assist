@@ -31,8 +31,9 @@ message, and close the item in the same PR.
    a corrective result instead of raising into the agent turn.  Disable redirects for
    the host-side request so the shared secret cannot be forwarded to a configured
    endpoint's redirect target.
-2. Change =notify(message)= to mark the active thread first, then build exactly
-   =message + newline + configured-thread-base + /thread/ + tid= and send it through
+2. Change =notify(message)= to mark the active thread first, reject an empty message
+   without sending, then build exactly =stripped-message + newline + configured-thread-base +
+   /thread/ + tid= and send it through
    the shared transport.  Its success/failure result remains visible in the transcript;
    its agent-supplied message is escaped there as today.  It stays outside
    =interrupt_on=, so it sends without HITL.

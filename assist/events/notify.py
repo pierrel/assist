@@ -54,10 +54,13 @@ def notify_tools(mark_urgent) -> list:
         routine responses. Pass a short, informative MESSAGE that says what needs attention;
         it is sent as text and shown in the confirmation.
         """
+        message = message.strip()
         tid = _thread_id()
         if not tid:
             return "Couldn't flag this urgent: no active thread."
         mark_urgent(tid)
+        if not message:
+            return "Flagged this thread as urgent. SMS not sent: message is empty."
         # Escape message: the tool result renders through markdown (raw HTML passes),
         # and message could carry agent-echoed untrusted content — don't let it inject.
         confirmation = f"Flagged this thread as urgent: {html.escape(message)}"

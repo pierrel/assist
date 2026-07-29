@@ -52,7 +52,7 @@ def send_outbound_sms(recipient: str, text: str) -> str | None:
             allow_redirects=False)
     except requests.RequestException as error:
         logger.warning("outbound SMS failed: %s", error)
-        return f"couldn't reach the phone ({error})"
+        return "couldn't reach the phone"
     if response.status_code == 200:
         return None
     logger.warning("outbound SMS returned HTTP %s", response.status_code)

@@ -8,6 +8,7 @@ import asyncio
 import os
 
 import pytest
+import requests
 
 from manage import web
 from manage.web import state
@@ -76,6 +77,19 @@ class TestNotifyTool:
         assert called == []
         assert "URGENT_SMS_RECIPIENT is not configured" in caplog.text
 
+    def test_empty_message_marks_urgent_without_sending(self, threads_root, monkeypatch):
+        _make_thread(threads_root, "t1")
+        monkeypatch.setattr(notify_mod, "_thread_id", lambda: "t1")
+        monkeypatch.setenv("URGENT_SMS_RECIPIENT", "+15555550100")
+        called = []
+        monkeypatch.setattr("assist.events.reply.requests.post", lambda *args, **kwargs: called.append(1))
+
+        out = _notify_tool()("  ")
+
+        assert "message is empty" in out
+        assert state._has_urgent("t1")
+        assert called == []
+
     def test_marks_urgent_when_sms_delivery_fails(self, threads_root, monkeypatch):
         _make_thread(threads_root, "t1")
         monkeypatch.setattr(notify_mod, "_thread_id", lambda: "t1")
@@ -90,6 +104,25 @@ class TestNotifyTool:
         out = _notify_tool()("Reply to the landlord by 5pm")
 
         assert "SMS not sent" in out
+        assert state._has_urgent("t1")
+
+    def test_sms_exception_does_not_expose_endpoint(self, threads_root, monkeypatch):
+        _make_thread(threads_root, "t1")
+        monkeypatch.setattr(notify_mod, "_thread_id", lambda: "t1")
+        monkeypatch.setenv("URGENT_SMS_RECIPIENT", "+15555550100")
+        monkeypatch.setenv("URGENT_SMS_THREAD_URL_BASE", "https://web.example.test:5050")
+        monkeypatch.setenv("ASSIST_SMS_OUTBOUND_URL", "http://internal.phone.example.test/outbound/sms")
+        monkeypatch.setenv("ASSIST_SMS_SECRET", "test-secret")
+
+        def fail(*args, **kwargs):
+            raise requests.ConnectionError("internal.phone.example.test failed")
+
+        monkeypatch.setattr("assist.events.reply.requests.post", fail)
+
+        out = _notify_tool()("Reply to the landlord by 5pm")
+
+        assert "reach the phone" in out
+        assert "internal.phone.example.test" not in out
         assert state._has_urgent("t1")
 
     def test_no_active_thread_returns_corrective_not_raises(self, monkeypatch):
