@@ -387,7 +387,7 @@ scheduled/triggered turns, carry the last-seen tz alongside the last-seen locati
 
 * Notifications
 ** DONE Notify/urgent evals + firm up the guidance on WHEN to flag urgent
-Shipped for review 2026-07-29 in the urgent-notification-sms PR. Natural real-model
+Shipped for review 2026-07-29 in PR #221. Natural real-model
 coverage distinguishes an imminent deadline from a routine request, while =notify(message)=
 now requires an informative, directly texted message and preserves the urgent state when
 SMS is unconfigured or fails. Baseline first; the eval remains the small-model contract.

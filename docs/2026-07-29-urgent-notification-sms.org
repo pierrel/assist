@@ -1,6 +1,6 @@
 #+TITLE: Urgent notification SMS
 #+DATE: <2026-07-29>
-#+STATUS: IMPLEMENTED (2026-07-29) — local review and deployment pending
+#+STATUS: IMPLEMENTED (2026-07-29, PR #221) — deployed for testing
 
 * Goal
 
