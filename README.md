@@ -374,6 +374,15 @@ set together: `ASSIST_VOICE_SECRET`, `ASSIST_VOICE_PIN`,
 canonical E.164 values (for example, `+15555550100`). The PIN is at least six
 digits; it and the transport secret belong only in the ignored `.deploy.env`.
 
+### Urgent SMS notifications
+
+The web-only `notify(message)` tool always marks the current thread urgent. When the
+host also configures `URGENT_SMS_RECIPIENT` and `URGENT_SMS_THREAD_URL_BASE` in its
+ignored environment file, it immediately texts that fixed recipient with the message
+and a link to the thread. These values intentionally do not use an `ASSIST_` prefix, so
+they are not passed into sandboxes. If the recipient is absent, Assist logs the missing
+configuration and keeps the in-app urgent behavior without sending SMS.
+
 ---
 
 ## Architecture

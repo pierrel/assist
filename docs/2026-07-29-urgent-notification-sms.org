@@ -1,0 +1,95 @@
+#+TITLE: Urgent notification SMS
+#+DATE: <2026-07-29>
+#+STATUS: IMPLEMENTED (2026-07-29, PR #221) — deployed for testing
+
+* Goal
+
+When the web-only =notify= tool flags the current thread urgent, it also sends the
+agent-provided notification message by SMS to the owner's configured recipient.  The
+SMS ends with a link to that thread.  It is an immediate send, not a HITL proposal.
+The durable urgent marker and in-app urgent pill continue to update even when SMS is
+not configured or delivery fails.
+
+* As-built baseline
+
+=assist/events/notify.py= has one =reason= argument, marks the thread through an
+injected callback, and returns a rendered confirmation.  It is registered only in the
+normal web tool profile; the untrusted inbound-SMS triage profile has only the
+HITL-gated =send_reply= tool.  =assist/events/reply.py= already performs the
+authenticated host-to-phone =POST /outbound/sms= request.
+
+The relevant roadmap item is =Notifications / Notify/urgent evals + firm up the
+guidance on WHEN to flag urgent=.  This change will add its requested natural urgent
+and routine behavioral coverage, tighten the tool guidance around the required
+message, and close the item in the same PR.
+
+* Plan
+
+1. Extract the shared authenticated outbound-SMS request from =reply.py= without
+   changing =send_reply='s HITL boundary or its recipient semantics.  The helper has
+   the existing ten-second timeout, does not retry an uncertain delivery, and returns
+   a corrective result instead of raising into the agent turn.  Disable redirects for
+   the host-side request so the shared secret cannot be forwarded to a configured
+   endpoint's redirect target.
+2. Change =notify(message)= to mark the active thread first, reject an empty message
+   without sending, then build exactly =stripped-message + newline + configured-thread-base +
+   /thread/ + tid= and send it through
+   the shared transport.  Its success/failure result remains visible in the transcript;
+   its agent-supplied message is escaped there as today.  It stays outside
+   =interrupt_on=, so it sends without HITL.
+3. Keep the recipient and the thread-link base host-only.  Add optional
+   =URGENT_SMS_RECIPIENT= and =URGENT_SMS_THREAD_URL_BASE= to the ignored env files'
+   documented examples using placeholders, pass them through the deployment relay and
+   systemd installer, but never expose them to a sandbox.  If the recipient is absent,
+   log a clear configuration warning, do not call the phone endpoint, and retain the
+   original urgent-status behavior.  Missing link, endpoint, or secret similarly
+   preserves urgent status and reports the configuration/delivery condition.
+4. Pin mechanics with unit tests: marking precedes every SMS outcome; the SMS payload
+   has the configured recipient, agent message, and final thread link; an absent
+   recipient logs and sends nothing; transport failure does not erase urgent; normal
+   profile contains =notify= while triage does not.  Add deployment-script coverage for
+   the two non-secret host configuration values.
+5. Add the roadmap-requested real-model acceptance suite, first baselined at three
+   trials: a natural genuinely time-sensitive prompt must call =notify= with an
+   informative message, while a routine prompt must not.  The suite constructs only
+   the web notify tool with a fake marker and never has SMS configuration, so no text
+   can be sent during evals.
+6. Mark the roadmap item DONE with this PR reference, run the full local review and
+   eval cadence, deploy the feature branch through the coordinated deployment
+   transaction, then open the PR and complete the Copilot bridge loop.
+
+* Boundaries and risks
+
+- *Trust boundary:* the tool remains absent from inbound-SMS triage by construction.
+  The normal trusted agent may send a notification directly because Pierre explicitly
+  requested no HITL.  The recipient, base URL, endpoint, and shared secret never come
+  from the agent's arguments.
+- *Untrusted message text:* the agent can include content it has read.  That is the
+  requested notification content, but it cannot choose a recipient or endpoint.  The
+  transcript escapes it; the SMS payload intentionally preserves it as text.
+- *Delivery:* an uncertain request is never retried, preventing duplicate SMS.  The
+  marker is written before network I/O, so an outage cannot make the thread look
+  non-urgent.
+- *Link correctness:* no notification is sent unless the configured link base exists;
+  that guarantees every sent urgent SMS ends with a usable configured-thread link.
+- *Liveness:* the tool body runs in the synchronous web background worker, not an
+  async route handler.  Its bounded network request therefore cannot block the
+  single-worker asyncio loop.
+
+* Design-review decisions
+
+The simplicity, agentic-fit, intention, UX, interface, threat-model, and event-loop
+lenses found no architectural change required.  The reviews sharpened two intentional
+trade-offs:
+
+- Direct sending means that content the trusted normal agent has read can influence the
+  SMS wording.  This is accepted because Pierre explicitly requested no HITL.  The tool
+  remains absent from untrusted SMS-triage turns, and that content still cannot choose
+  recipient, endpoint, shared secret, or link base.
+- Do not add a per-thread dedupe or rate limit.  It would silently discard a later
+  =notify= call even though Pierre requested all urgent notifications be texted.  The
+  behavioral eval and concise tool guidance instead keep =notify= limited to genuinely
+  time-sensitive events; each explicit trusted-tool call produces one notification.
+
+The threat-model reviewer additionally required redirect refusal on the shared request;
+that is included in step 1 and will be unit-pinned.
