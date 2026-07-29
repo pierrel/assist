@@ -92,8 +92,9 @@ class TestRenderMapBlock(TestCase):
         # every point 100x off the globe, dragging fitBounds off-map and blanking
         # the view (thread 20260703130532 bug). Pin the precision in the init.
         html = _render_map_block("t", _block("type: map\npath: abc123 route"))
-        self.assertIn("1e7", html)
-        self.assertNotIn("1e5", html)
+        decoder = html.partition("function decode(str){")[2].partition("function popup")[0]
+        self.assertIn("1e7", decoder)
+        self.assertNotIn("1e5", decoder)
 
     def test_polyline_decoder_is_arithmetic_not_32bit_bitwise(self):
         # At precision 7 a coordinate's zigzag value exceeds 2^31, so JS 32-bit
