@@ -153,12 +153,15 @@ Assist includes two types of testing — and **the distinction is by what the te
 
 | Where | What | Touches the LLM? |
 |-------|------|------------------|
-| `tests/` | Unit + integration tests. Pure-Python, mocked tool calls, mocked model responses. Run on every change. | **No** |
+| `tests/` | Unit + integration tests. Pure-Python with offline model responses; tools may be mocked or exercised locally through compiled graphs. Run on every change. | **No** |
 | `edd/eval/` | Agent evaluations. Drive the real model end-to-end and assert on observed agent behaviour. Network- and model-bound. | **Yes** |
 
 Where to put a new test:
 - Does it construct a `MagicMock` handler / synthetic `ToolMessage` / `ModelRequest` and assert on a transformation? → `tests/` (or `tests/middleware/` for middleware).
-- Does it call `select_chat_model`, `Thread`, `AgentHarness`, `create_agent`, `agent.invoke()`, or otherwise reach a model server? → `edd/eval/`.
+- Does it reach the configured model server? → `edd/eval/`. A deterministic
+  integration test may construct `Thread` / `AgentHarness` / `create_agent` and
+  call `agent.invoke()` in `tests/` when its model is an offline recorder or
+  fixed fake and no model endpoint is contacted.
 
 Mis-classification was an issue early on; the table above is the rule.
 
@@ -172,9 +175,9 @@ make test
 .venv/bin/pytest tests/middleware/test_loop_detection.py -v
 ```
 
-**Agent Evaluations** (`edd/`):
+**Agent Evaluations** (`edd/eval/`):
 
-The `edd/` directory contains evaluations that test agent behavior under realistic conditions. These are longer-running tests that validate the agent's ability to handle complex, multi-turn interactions.
+The `edd/eval/` directory contains evaluations that test agent behavior under realistic conditions. These are longer-running tests that validate the agent's ability to handle complex, multi-turn interactions.
 
 ```bash
 # Run all evaluations
@@ -203,13 +206,14 @@ Skill-specific:
 Cross-cutting:
 - `test_async_subagents.py` — 13-case supervisor/delegation acceptance suite
 - `test_domain_integration.py` — git integration and domain management
-- `test_memory.py`, `test_thread_memory.py`, `test_various_failures.py` — memory + failure modes
+- `test_memory.py`, `test_thread_memory.py` — memory behavior
 - `test_thread_e2e.py` — thread/conversation persistence
 - `eval_multi_turn_research.py` — long multi-turn research (10+ turns)
 - `eval_large_tool_results.py` — context overflow handling
-- `eval_summarization_long_context.py` — summarization in long contexts
 
-Results are saved to `edd/history/results-YYYYMMDD-HHMM.xml` in JUnit format.  Snapshot baselines for diffing live in `docs/baselines/`.
+For completed tests, the bounded eval runner saves one JUnit file per test at
+`edd/history/<sanitized-nodeid>-<timestamp>.xml`; its summary also reports
+timeouts and harness failures that produced no XML.
 
 See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evaluations.
 

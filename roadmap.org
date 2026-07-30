@@ -808,15 +808,18 @@ start a separate design from that reproduced case rather than borrowing this
 program's prompt, memory, or capability work.
 
 ** TODO Agent prompt architecture and calibrated outcome evaluation
-Design review only. Local review of this revision has converged; no implementation
-phase starts until Pierre approves the [[file:docs/2026-07-26-agent-prompt-architecture.org][architecture and experiment contract]]. Key sections are the
+The architecture and experiment contract was approved and merged in PR #216
+(2026-07-30, =100aa885=). P0 is now building the evidence base; every later
+behavior-changing phase remains independently experiment-gated. Key sections are the
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#instruction-placement][instruction-placement rule]],
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#experiment-protocol][shared experiment protocol]], and
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#design-review-gate][design-review gate]].
 
-*** TODO P0: Census every rendered prompt and capability surface
-Capture the final model request from each real constructor with no behavior
-change. This is the evidence base for every later phase. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0][P0 hypothesis and gate]].
+*** DONE P0: Census every rendered prompt and capability surface
+Completed for review 2026-07-30 on =prompt-architecture-p0=: 28 provider calls
+across all 12 paths, exact prompt/tool/source provenance, 21 reported audit
+findings, and a 2.8 MiB no-replace baseline on the home partition.  No runtime
+behavior changed. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0-result][P0 experiment report]].
 
 *** TODO P0b: Bound eval execution and reserve the model slot
 Add production-maintenance admission, process-group deadlines, atomic resume,
@@ -852,7 +855,8 @@ Use the same winning-skill declaration and current composed tool registry for
 
 *** TODO P3: Split memory read and write through a skill
 Keep memory facts preloaded, but load persistence policy and mechanics only when
-needed. Preserve the current memory access model. Wait for per-thread memory.
+needed. Preserve the current memory access model; per-thread memory is already
+part of the P0 baseline.
 See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-3][P3 hypothesis and gate]].
 
 *** TODO P4: Move caller research workflow into a skill
