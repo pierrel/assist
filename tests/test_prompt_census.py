@@ -836,7 +836,9 @@ def test_parent_revalidates_isolated_artifact(census, monkeypatch):
         capture_census()
 
 
-def test_persistent_capture_is_home_backed_no_replace_and_atomic(tmp_path):
+def test_persistent_capture_is_home_backed_no_replace_and_atomic(
+        census, tmp_path, monkeypatch):
+    monkeypatch.setattr(prompt_census, "capture_census", lambda: census)
     assert DEFAULT_OUTPUT_ROOT.is_relative_to(Path.home())
     destination = write_capture("p0-test", output_root=tmp_path)
     assert (destination / "census.json").is_file()
