@@ -3,7 +3,7 @@
 
 * State
 
-Status: architecture approved; P0 implementation in progress.
+Status: architecture approved; P0 implementation complete.
 
 ** Change log
 

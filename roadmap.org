@@ -809,7 +809,7 @@ program's prompt, memory, or capability work.
 
 ** TODO Agent prompt architecture and calibrated outcome evaluation
 The architecture and experiment contract was approved and merged in PR #216
-(2026-07-30, =100aa885=). P0 is now building the evidence base; every later
+(2026-07-30, =100aa885=). P0 established the evidence base; every later
 behavior-changing phase remains independently experiment-gated. Key sections are the
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#instruction-placement][instruction-placement rule]],
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#experiment-protocol][shared experiment protocol]], and
