@@ -816,10 +816,11 @@ behavior-changing phase remains independently experiment-gated. Key sections are
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#design-review-gate][design-review gate]].
 
 *** DONE P0: Census every rendered prompt and capability surface
-Completed for review 2026-07-30 on =prompt-architecture-p0=: 28 provider calls
-across all 12 paths, exact prompt/tool/source provenance, 21 reported audit
-findings, and a 2.8 MiB no-replace baseline on the home partition.  No runtime
-behavior changed. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0-result][P0 experiment report]].
+Completed for review 2026-07-30 in [[https://github.com/pierrel/assist/pull/222][assist PR #222]]
+(=222952e=): 28 provider calls across all 12 paths, exact prompt/tool/source
+provenance, 21 reported audit findings, and a 2.8 MiB no-replace baseline on the
+home partition.  No runtime behavior changed. See
+[[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0-result][P0 experiment report]].
 
 *** TODO P0b: Bound eval execution and reserve the model slot
 Add production-maintenance admission, process-group deadlines, atomic resume,
