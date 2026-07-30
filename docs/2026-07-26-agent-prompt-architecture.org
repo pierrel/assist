@@ -43,11 +43,12 @@ Status: architecture approved; P0 implementation in progress.
   ownership findings P0 is expected to reveal.  Findings are inputs to later
   phases, not reasons to suppress a truthful baseline.
 - Fixed persistent capture storage under the home-backed
-  =~/deploy/assist/prompt-census/= tree.  The current root partition has only
-  4.6 GiB free while =/home= has 988 GiB free.  Runs are synthetic, published
-  under atomic no-replace labels, bounded to 16 MiB, and refused rather than
-  truncated or overwritten.  The label contract prevents accidental replacement;
-  it is not an out-of-band tamper-proof store.
+  =~/deploy/assist/prompt-census/= tree.  At P0 pre-registration on 2026-07-30,
+  this host reported 4.6 GiB free on the small root partition and 988 GiB free
+  on =/home=.  Runs are synthetic, published under atomic no-replace labels,
+  bounded to 16 MiB, and refused rather than truncated or overwritten.  The
+  label contract prevents accidental replacement; it is not an out-of-band
+  tamper-proof store.
 - Added the requested final-document deliverables: the complete proposed custom
   bootstrap role kernel, the complete captured bootstrap system request, and a
   provenance-owner summary with exact character counts and clearly labelled
