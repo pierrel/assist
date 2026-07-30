@@ -7,6 +7,17 @@ Status: design review.
 
 ** Change log
 
+*** 2026-07-29: Progressive tool disclosure revision
+
+- Added P2b, an eval-gated milestone that keeps a generated kernel of Deep
+  Agents built-ins plus =load_skill= visible and reveals every other tool only
+  after its owning skill is loaded.
+- Reused the Agent Skills specification's experimental =allowed-tools=
+  frontmatter field rather than adding an Assist-only manifest.
+- Extended the design to built-in, main-only, in-repo domain, and
+  embedder-supplied skills, including deterministic declaration validation and
+  collision/source-precedence tests.
+
 *** 2026-07-28: Pierre review revision
 
 - Removed all SMS-triage changes from this program.  It has not caused a
@@ -72,10 +83,11 @@ that mirrors the fixture.  Replacing all checks with an unqualified model judge
 would be worse: it could reward fluent claims contradicted by the workspace,
 share the tested model's blind spots, or change verdicts between identical runs.
 
-The architecture therefore needs two separations:
+The architecture therefore needs three separations:
 
 1. stable bootstrap instructions versus conditional skill-loaded workflows;
-2. deterministic contracts versus calibrated semantic outcome judgment.
+2. always-visible kernel tools versus skill-disclosed workflow tools;
+3. deterministic contracts versus calibrated semantic outcome judgment.
 
 * Goals
 
@@ -89,11 +101,16 @@ The architecture therefore needs two separations:
    the conditional procedure for deciding and performing memory writes.
 5. Put optional workflows such as complex task breakdown and external research
    behind skills whose descriptions provide the routing trigger.
-6. Give every specialist a concise role contract aligned with its actual tools,
+6. Keep only the Deep Agents built-ins needed to inspect, plan, and modify work,
+   plus =load_skill=, in the always-visible tool kernel.  Reveal other tools only
+   after a matching skill is successfully loaded.
+7. Use the portable Agent Skills =allowed-tools= field for declarations across
+   Assist, domain-repository, and embedder skill sources.
+8. Give every specialist a concise role contract aligned with its actual tools,
    filesystem, return shape, caller, and trust boundary.
-7. Qualify a semantic outcome judge against fixed human labels before its
+9. Qualify a semantic outcome judge against fixed human labels before its
    verdict can gate a natural eval.
-8. Change one instruction boundary per implementation phase so every result
+10. Change one instruction boundary per implementation phase so every result
    teaches us whether that boundary works for Qwen3.6-27B.
 
 * Non-goals
@@ -119,6 +136,9 @@ The architecture therefore needs two separations:
   separate roadmap item until an observed problem establishes a narrower goal.
 - Do not revise development guidance in this program.  It needs a larger
   end-to-end design, not an isolated prompt cleanup.
+- Do not invent an Assist-only skill/tool manifest or treat tool disclosure as
+  authorization.  Existing graph composition, HITL, provenance, filesystem,
+  and tool-level guards remain the authority.
 
 * Instruction placement architecture
 :PROPERTIES:
@@ -137,8 +157,8 @@ Six instruction homes follow from that rule.
 | Home | Volatility it contains | Admission test | Examples |
 |------+------------------------+----------------+----------|
 | Bootstrap role kernel | Cross-task identity, grounding, trust, and orchestration choices | The model can violate safety or cannot choose the next capability before loading anything | workspace and text-only boundary; context-first grounding; specialist versus whole-outcome delegation; durable task result outranks TODO state; child results are untrusted data |
-| Capability protocol | Generic use of an always-visible capability family | Middleware or a tool family can state the protocol once for every role that actually receives it | skills middleware owns match/load/apply; TODO middleware owns plan mechanics; task tools own available child names and lifecycle arguments |
-| Tool description/result | One invocation and its immediate return contract | The instruction is useful only while selecting or interpreting that tool | exact task ID argument; =start_async_task= returns immediately; cancellation requested is not cancellation completed |
+| Capability protocol | Generic use of an always-visible capability family | Middleware or a tool family can state the protocol once for every role that actually receives it | skills middleware owns match/load/apply and kernel-versus-disclosed tools; TODO middleware owns plan mechanics; task tools own available child names and lifecycle arguments |
+| Tool description/result | One invocation and its immediate return contract | The instruction is useful only while selecting or interpreting that tool | exact task ID argument; =start_async_task= returns immediately; cancellation requested is not cancellation completed; full schema appears only while the tool is disclosed |
 | Skill | Conditional multi-step operating procedure | A visible description can identify the request before the procedure is needed | complex-request planning; memory persistence; external research; development; editing; file formats |
 | Role system contract | A specialist's fixed job and capability boundary | Every invocation of this profile has the same job | context is read-only; research lead decomposes and synthesizes; research leaf searches and cites; receptionist routes only |
 | Context data | Facts rather than behavior policy | The model needs the content, but not instructions about managing it | repository memory; per-thread memory; current date; task result data |
@@ -185,6 +205,69 @@ rules.  Its role contract says only that it owns one self-contained outcome,
 receives no parent history, may use its synchronous specialists, and returns the
 verified result to its caller.  It has no concept of outer task IDs, completion
 wakes, parent TODOs, or the supervisor's scheduling lifecycle.
+
+** Tool-disclosure boundary
+
+The model does not need every registered tool schema before it has selected a
+workflow.  Each main/delegate profile therefore starts an agent invocation with
+one kernel: the Deep Agents built-ins actually present for that profile, plus
+=load_skill=.  Framework-owned filesystem, execution, TODO, and delegation tools
+remain kernel capabilities when the profile supplies them.  Fixed-role
+specialists that do not mount skills keep their existing small tool sets and are
+outside this mechanism.
+
+The kernel is declared once where the Deep Agents middleware/tool composition is
+built.  The skills middleware uses that same exact set both to filter the final
+model request and to generate a compact system-prompt block listing the kernel
+tool names and the disclosure rule.  Jinja prose does not carry a second
+hand-maintained list.  Tool schemas remain authoritative for arguments and
+immediate results.
+
+Every non-kernel tool stays registered with LangChain's execution graph but is
+absent from the model request and rejected if called until a successful
+=load_skill= activates it.  Activation comes from the trusted result of the real
+load tool, never from model prose, a fabricated tool message, or a skill body.
+The next model request contains the kernel plus the union of tools activated by
+skills loaded during that agent invocation.  The set resets at the next graph
+invocation, so a long-lived thread does not gradually accumulate every tool.
+It lives in invocation-scoped graph state, never on the reusable middleware
+instance or in a process global.  Concurrent invocations are isolated, parallel
+successful loads merge deterministically, and a load cannot disclose a sibling
+tool call from the same model response; disclosure begins on the following
+model step.
+
+Skill declarations reuse the optional experimental =allowed-tools= field from
+the [[https://agentskills.io/specification#allowed-tools-field][Agent Skills specification]].  The upstream Deep Agents parser already
+loads this field as a space-separated string.  Assist initially accepts only
+tokens that exactly match model-visible tool names; command-pattern syntax is
+not interpreted.  Kernel tools need not be repeated in =allowed-tools=.  A skill
+body can continue to describe portable actions in neutral prose; the frontmatter
+is the machine-readable disclosure declaration.
+
+The startup skill list remains name plus description only.  It does not reveal
+the =allowed-tools= values early.  After a successful load, the tool result names
+the newly available tools and their schemas appear on the following model call.
+This keeps both the procedure and its non-kernel tool surface progressively
+disclosed.
+
+All skill sources obey the same resolution contract:
+
+- bundled shared and main-only Assist skills declare their non-kernel tools in
+  their own =SKILL.md=;
+- an in-repo =.claude/skills/= skill can disclose only a tool already registered
+  in the current composed agent;
+- an embedder skill from =AgentSpec.skill_sources= can disclose a custom tool
+  supplied through that same composition's =AgentSpec.tools=;
+- a name collision uses only the winning skill's body and =allowed-tools= under
+  the existing last-source-wins resolution.  Declarations are never unioned
+  across shadowed skills.
+
+A declaration cannot create a tool, bypass HITL, relax URL provenance, change
+filesystem access, or expand a role's registered graph.  Unknown or unavailable
+names disclose nothing and produce a bounded skill-loading diagnostic.  Because
+=allowed-tools= is experimental and other Agent Skills implementations may
+ignore it, Assist documents and tests its exact-name interpretation without
+claiming it is portable authorization.
 
 ** Memory boundary
 
@@ -511,7 +594,8 @@ Add an eval/test-side census with three distinct artifacts:
    manifests annotate provenance without pretending the flattened request
    retains it; an unattributed span is a census failure;
 3. exercised enforcement probes record exposed tools separately from actions
-   actually permitted by read-only, provenance, HITL, and other guards.
+   actually permitted by read-only, provenance, HITL, and other guards, and
+   classify each registered tool as framework kernel or skill-scoped.
 
 The minimal scenario matrix covers every branch in this program known to change
 the contract: production web sandbox main and delegate; legacy non-execution;
@@ -550,6 +634,10 @@ test.  Development-guidance paths and SMS triage are deliberately excluded.
 - Exposed tools and effectively permitted actions are reported separately, so a
   visible mutating filesystem tool denied by a read-only guard is not described
   as either absent or permitted.
+- Every skills-enabled profile records the registered tool set, generated kernel
+  set, initially model-visible set, and the source/skill that would disclose each
+  non-kernel tool.  Unowned and multiply owned entries are findings, not silently
+  assigned by the census.
 - A second run is byte-stable after normalizing date, generated IDs, memory
   contents, and other declared volatile data.
 - A deterministic fixture-hygiene scan proves saved baselines contain only
@@ -800,6 +888,217 @@ If a removed rule causes a targeted regression and no skill yet owns it, restore
 the smallest causal sentence, not the whole old section.  If framework-injected
 TODO/filesystem prose conflicts with the kernel, configure or replace that prompt
 source rather than adding a later contradiction.
+
+* P2b: Progressively disclose non-kernel tools through loaded skills
+:PROPERTIES:
+:CUSTOM_ID: phase-2b-tools
+:END:
+
+P2b is a milestone with three independently reviewed stop points.  Each child
+gets its own baseline, branch, report, and stop/go decision.  No child needs the
+next one to deliver value.
+
+** P2b.1: Declare the kernel and validate skill tool names
+:PROPERTIES:
+:CUSTOM_ID: phase-2b-tools-declare
+:END:
+
+*** Value
+
+Tool ownership becomes inspectable before any schema disappears from the model.
+Skill authors use a standard field, and a misspelled or stale tool name fails a
+deterministic test instead of becoming a behavioral mystery.
+
+*** Hypothesis
+
+The P0 census can classify the actual Deep Agents built-ins as the profile's
+kernel and assign every other currently used tool to at least one skill without
+adding a runtime registry or changing behavior.
+
+*** Controlled change
+
+Define one construction-time kernel set from the actual Deep Agents built-in
+tool instances present for the profile plus =load_skill=.  Pass that set to the
+skills middleware; generate the system-prompt kernel list from it.  Do not copy
+the names into the main Jinja template.
+
+Add =allowed-tools= to each bundled shared/main-only Assist skill that calls for
+a non-kernel tool.  Kernel tools are omitted from the field.  Parse frontmatter
+through the same upstream Agent Skills parser used at runtime.  Keep the current
+model-visible tool set unchanged in this child.
+
+Add a deterministic repository test that walks every
+=assist/skills/*/SKILL.md= and =assist/main_skills/*/SKILL.md=.  For every
+=allowed-tools= token it proves:
+
+1. the value is one exact model-visible tool name, not a command pattern;
+2. a tool with that name exists in at least one recorded real Assist
+   composition;
+3. the declaration is non-kernel in that composition; and
+4. source precedence leaves the same winning declaration that =load_skill=
+   returns.
+
+The test validates declarations, not prose by regex.  Completeness comes from
+the P0 tool-owner census and the behavior cohorts; parsing Markdown examples for
+tool-like words would create a brittle second skill language.
+
+*** Test and gate
+
+- The full bundled-skill declaration scan is deterministic and 100% green.
+- A misspelled, patterned, stale, or kernel-redundant fixture fails with the
+  skill path and tool name.
+- P0 reports no registered non-kernel tool used by a current workflow without a
+  skill owner.  A deliberately shared tool may name multiple owners; the report
+  records the reason rather than treating this as accidental duplication.
+- The generated kernel block exactly matches the kernel schemas in the final
+  request for main, delegate, executable/non-executable backend, and legacy
+  compositions.
+- Final model-visible tools and all natural outcomes remain byte/behavior
+  equivalent to baseline except for the new generated kernel prose.
+
+*** Expected learning and alternative
+
+This child reveals whether “Deep Agents built-in” is a stable construction
+boundary or whether the current graph intermixes framework and app tools too
+early.  If provenance cannot be recovered without a second registry, stop and
+first make the existing composition return its kernel/tool groups explicitly;
+do not infer ownership from a hand-maintained list of names.
+
+** P2b.2: Gate Assist-owned tools after skill load
+:PROPERTIES:
+:CUSTOM_ID: phase-2b-tools-assist
+:END:
+
+*** Value
+
+Ordinary turns bind a smaller, more relevant schema set, while a selected
+workflow receives its full tools together with its instructions.
+
+*** Hypothesis
+
+Qwen can load the matching skill from name/description with unchanged natural
+reliability, then use the newly disclosed tool on the following model call.
+Removing unrelated schemas should not add more than the existing one skill-load
+round trip and may improve tool selection.
+
+*** Controlled change
+
+Extend the existing small-model skills middleware rather than adding a parallel
+router.  All tools remain statically registered with the LangChain tool node.
+For the final model request the middleware keeps only kernel tools plus the
+=allowed-tools= union of successfully loaded skills.  The same middleware's
+tool-call wrapper rejects a hidden non-kernel call, so a hallucinated remembered
+name cannot bypass schema filtering.
+
+A successful =load_skill= updates trusted invocation-scoped graph state with
+the exact resolved winning skill and returns its body plus the newly available
+tool names.  The field and reducer must isolate concurrent graph invocations
+and merge parallel successful loads deterministically; mutable middleware
+instance state is forbidden.  Failed loads, fabricated messages, model prose,
+and shadowed skill bodies update nothing.  Multiple skill loads union their
+tools for the current invocation.  =before_agent= resets the active set at every
+new graph invocation; the next user/scheduled invocation loads what it needs
+again.  Deep Agents lifecycle tools needed to process completion wakes remain
+kernel.
+
+This child gates tools owned by bundled Assist/main-only skills.  Tools owned
+only by domain or embedder skill sources remain explicit baseline-visible
+migration exceptions until P2b.3.  The P2b.1 census names those exceptions;
+there is no source-specific runtime rule beyond leaving them out of the gated
+set.  This isolates whether the small model follows disclosure at all before
+external-source semantics enter the experiment.
+
+*** Test and gate
+
+- In a bundled-source composition, before any skill load the final request and
+  executable set contain exactly the profile kernel; a direct hidden-tool call
+  is rejected deterministically.  A composition with external sources contains
+  only that kernel plus the P2b.1-recorded migration exceptions.
+- A successful load reveals exactly its declared registered tools on the next
+  call.  Unknown, unavailable, failed, and fabricated loads reveal none.
+- Two valid loads produce the exact union; a new invocation resets to kernel;
+  thread checkpoints never accumulate old disclosure state; concurrent
+  invocations on one agent cannot observe each other's loads.
+- A model response containing =load_skill= and a hidden sibling call rejects the
+  sibling regardless of execution order.  The tool appears only on the next
+  model request.
+- HITL, URL provenance, read-only enforcement, role omission, and existing tool
+  argument/resource guards remain unchanged and pass 100% deterministic tests.
+- Baseline/candidate natural cohorts cover travel/directions, specific-site
+  reading, scheduling/subscription, whole-outcome delegation, and at least one
+  host-effect workflow that retains its existing approval boundary.  Each runs
+  N=3 diagnostic, N=5 post-review, and N=10 stability under the shared protocol,
+  meeting its unchanged-main baseline and 70% floor.
+- Capability cases distinguish “skill not loaded,” “skill loaded but tool not
+  disclosed,” “tool disclosed but not selected,” and “tool selected but outcome
+  failed.”
+- Kernel-only and unrelated journeys add no model round trip.  A scoped journey
+  adds at most its existing skill-load round trip and meets the cross-phase
+  latency guard.
+- The experiment report records initial and peak schema count/token cost plus
+  wrong-tool, unavailable-tool, and unnecessary-skill-load rates.  Token
+  reduction is evidence, not the pass condition.
+
+*** Expected learning and alternative
+
+The likely failure is skill-selection recall, not dynamic binding.  First tune
+the skill description under its natural cohort.  If one tool family still has a
+reproduced N=10 regression, retain that family in the kernel as a named measured
+exception; do not add an LLM tool router or restore every tool.
+
+** P2b.3: Apply the same contract to domain and embedder skills
+:PROPERTIES:
+:CUSTOM_ID: phase-2b-tools-external
+:END:
+
+*** Value
+
+The tool surface follows the skill regardless of where the skill came from, so
+domain repositories and Assist embedders do not become permanent exceptions to
+progressive disclosure.
+
+*** Hypothesis
+
+The existing source-order metadata and =AgentSpec= composition are sufficient:
+the winning external skill can activate an already registered tool by exact
+name without a new =AgentSpec= field or source-specific loader.
+
+*** Controlled change
+
+Enable the P2b.2 behavior for =.claude/skills/= and
+=AgentSpec.skill_sources=.  A domain skill's =allowed-tools= is intersected with
+the tools already registered in that profile.  An embedder skill can therefore
+activate a custom tool supplied in =AgentSpec.tools=, but neither source can
+create a tool or expand the graph by naming it.
+
+The field remains portable optional metadata: another Agent Skills client may
+ignore it, as the official experimental contract permits.  Keep domain skill
+bodies action-oriented rather than baking in Assist tool names; =allowed-tools=
+is the only Assist-interpreted declaration.  A kernel-only domain skill may omit
+the field.
+
+*** Test and gate
+
+- A real in-repo fixture under =.claude/skills/= lists, loads, and discloses one
+  registered non-kernel tool only after load.
+- An embedder fixture supplies a custom tool and skill source through
+  =AgentSpec=; the tool is absent before load, present/executable afterward, and
+  absent again on the next invocation.
+- An external declaration for an unregistered tool produces one bounded
+  diagnostic and never reaches the final request or tool executor; other valid
+  skills remain usable.
+- Collision tests prove only the winning skill's declaration activates tools.
+  A shadowed domain or embedder declaration cannot leak into the winner.
+- Natural domain and embedder journeys meet N=10 baseline and the common floor;
+  a kernel-only portable script skill still works with no =allowed-tools=.
+
+*** Expected learning and alternative
+
+This shows whether external skill descriptions reliably trigger before their
+custom tools are visible.  If an embedder has a real workflow whose skill cannot
+select reliably, keep only that tool in that profile's kernel as a measured
+exception.  Do not add source-specific permission fields until a real tool-level
+authorization need exists; disclosure is context selection, not authority.
 
 * P3: Split memory read and write through a skill
 :PROPERTIES:
@@ -1142,6 +1441,14 @@ Prompt movement must not weaken capability-based security.  Trust boundaries,
 tool omission, filesystem permissions, URL provenance, HITL, and resource bounds
 remain code-enforced and covered by existing deterministic tests.
 
+P2b's schema filtering is paired with execution filtering so a hallucinated
+hidden name cannot run merely because LangChain registered it.  This is still
+not an authorization boundary: =allowed-tools= selects context from the tools
+the profile already owns, while HITL and each tool's existing guards decide
+whether a disclosed call may take effect.  In-repo and embedder skills cannot
+create tools by naming them, and untrusted skill text cannot fabricate a
+successful load-state update.
+
 SMS triage is explicitly outside this program.  Its existing behavior remains
 covered by its current tests and can be reconsidered only as separate roadmap
 work when an observed problem supplies a concrete goal.
@@ -1162,11 +1469,16 @@ is complete only when a final P0 census proves all of the following:
 2. the custom main and delegate role prompts contain only the enumerated role
    kernel, while separately owned capability protocols remain singly owned;
 3. every positive capability and return-shape claim matches the final graph;
-4. each remaining always-on procedural exception names the failed experiment and
+4. each skills-enabled profile has one exact generated kernel; every registered
+   non-kernel tool has a validated skill declaration or a measured kernel
+   exception, and only successfully loaded skills disclose/execute their tools;
+5. bundled, domain, and embedder skill collisions resolve body and tool
+   declarations from the same winner;
+6. each remaining always-on procedural exception names the failed experiment and
    reproduced regression that justified it;
-5. all deterministic security gates pass and every natural cohort meets its
+7. all deterministic security gates pass and every natural cohort meets its
    unchanged-main N=10 baseline and 70% floor;
-6. README, product policy, eval descriptions, docstrings, comments, roadmap, and
+8. README, product policy, eval descriptions, docstrings, comments, roadmap, and
    this document describe the same final architecture.
 
 This gate can close with a measured exception.  It cannot close by weakening a
@@ -1192,7 +1504,8 @@ This design is ready for implementation planning only when:
 6. clean-interface review confirms no runtime registry or policy engine is being
    introduced for test convenience;
 7. threat review confirms judge output cannot override deterministic gates and
-   private artifacts do not leave the local boundary by default;
+   private artifacts do not leave the local boundary by default, and confirms
+   external =allowed-tools= metadata cannot create or authorize a tool;
 8. eval-runner liveness review confirms judge calls and repeated cohorts have
    explicit time/resource bounds and cannot wedge the single local model slot;
 9. Pierre approves the reviewed document.
@@ -1204,26 +1517,30 @@ does not pre-approve P0 code, and no later phase starts automatically.
 * Design review record
 
 The original local architecture review ran to convergence before publication.
-Pierre's review reopened the design; this revision replaces the triage,
-dev-guidance, and memory-authority proposals rather than carrying them forward.
+Pierre's first review replaced the triage, dev-guidance, and memory-authority
+proposals rather than carrying them forward.  The 2026-07-29 review reopened the
+design for progressive tool disclosure and converged on the same incremental,
+eval-gated boundary.
 
 | Lens | Material findings incorporated | Convergence result |
 |------+--------------------------------|--------------------|
-| Architect/census | final model request is the audit unit; memory read/write split remains a bounded prompt-placement experiment; legacy and async research returns differ | Clean |
-| Simplicity | removed unobserved triage and memory-hardening work; kept only the memory skill split; development guidance stays unchanged | Clean |
-| Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; capability protocol has one owner; provider-wide prompt changes remain isolated; visible skill descriptions own routing triggers | Clean |
-| User intention | SMS triage moves to a separate roadmap item; memory retains its existing access model; later cohorts declare their gate layer; context remains preloaded unless later evidence justifies another experiment | Clean |
-| User experience | latency/round-trip guard; complete delegate, memory, and research journeys; actionable per-case experiment reports | Clean |
-| Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, or trusted-composition-root machinery; the memory skill owns procedure only | Clean |
-| Threat model | synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; existing memory and SMS controls remain unchanged | Clean |
-| Event-loop/eval liveness | P0b atomic maintenance admission; outer supervised process groups and recoverable leases; bare serialized judge; atomic resume identity; GPU workload/cooldown contract; slow-path web liveness gates | Clean |
-| Documentation alignment | changelog records Pierre's revision; triage and development guidance are excluded; phase names, anchors, and current-versus-target wording verified | Clean |
+| Architect/census | final model request is the audit unit; memory read/write split remains a bounded prompt-placement experiment; legacy and async research returns differ; tool census now records registered, kernel, initially visible, and skill-owned sets | Clean |
+| Simplicity | removed unobserved triage and memory-hardening work; kept only the memory skill split; reused =allowed-tools=, the existing parser, and the existing skills middleware instead of adding a registry or router | Clean |
+| Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; capability protocol has one owner; provider-wide prompt changes remain isolated; Deep Agents already parses =allowed-tools=; request-time schema filtering is paired with tool-node rejection | Clean |
+| User intention | SMS triage moves to a separate roadmap item; memory retains its existing access model; the framework kernel remains immediately usable; non-kernel tools arrive with the workflow that explains them; domain and embedder skills follow the same contract | Clean |
+| User experience | latency/round-trip guard; complete delegate, memory, research, domain, and embedder journeys; skill selection adds no round trip beyond the existing load; load results name newly available tools | Clean |
+| Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, trusted-composition-root machinery, tool registry, or source-specific disclosure field; composition supplies one kernel set to the existing middleware | Clean |
+| Threat model | synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; hidden and same-response sibling calls fail at execution; external declarations can select only already registered tools and do not bypass existing authority | Clean |
+| Event-loop/eval liveness | P0b atomic maintenance admission; outer supervised process groups and recoverable leases; bare serialized judge; atomic resume identity; GPU workload/cooldown contract; slow-path web liveness gates; disclosure state is graph-run-local, parallel loads merge deterministically, and filtering adds no I/O | Clean |
+| Documentation alignment | changelog records both Pierre revisions; triage and development guidance are excluded; P2b covers bundled, domain, and embedder sources; phase names, anchors, and current-versus-target wording verified | Clean |
 
 Pierre's PR review is the remaining design gate.  In particular, approval should
 confirm the six instruction homes and preloaded context choice; the blind judge
 qualification and human-label burden; the P0b maintenance-reservation boundary;
-and the narrower memory skill split.  No implementation starts from silence or
-PR creation alone.
+the narrower memory skill split; and P2b's generated framework kernel,
+exact-name =allowed-tools= interpretation, paired schema/execution filtering,
+and staged extension to domain and embedder skills.  No implementation starts
+from silence or PR creation alone.
 
 * Decisions deliberately deferred to evidence
 
@@ -1231,6 +1548,10 @@ PR creation alone.
 - Whether implicit memory facts trigger a skill reliably enough to remove the
   compact always-on trigger.
 - Whether natural research selection needs one compact always-on trigger.
+- The exact final kernel membership.  P0 records the actual framework-built
+  profiles; P2b.1 derives the set from composition instead of naming it here.
+- Whether a measured tool family must remain in one profile's kernel after a
+  reproduced N=10 disclosure regression.
 - Whether context gathering can ever move behind a skill.  The default remains
   preloaded because it is the grounding prerequisite.
 - Whether a future end-to-end development-guidance redesign is warranted.

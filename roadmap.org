@@ -835,6 +835,22 @@ phases while retaining strict, labelled capability probes. See [[file:docs/2026-
 Deduplicate only rules already owned by skills, middleware, or tool contracts;
 prompt reduction is evidence, not the gate. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2][P2 hypothesis and gate]].
 
+*** TODO P2b: Progressively disclose non-kernel tools through loaded skills
+Keep the actual Deep Agents built-ins plus =load_skill= as a generated kernel.
+Declare every other tool with the Agent Skills =allowed-tools= frontmatter field
+and reveal/execute it only after the matching skill loads.  This is an
+eval-gated milestone covering Assist, domain-repository, and embedder skills.
+See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools][the P2b milestone]].
+**** TODO P2b.1: Declare the kernel and validate bundled skill tool names
+Add declarations with no visibility change and deterministically prove every
+declared tool exists.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-declare][P2b.1]].
+**** TODO P2b.2: Gate Assist-owned tools after skill load
+Filter model schemas and execution from trusted invocation-scoped load state,
+then run the natural/capability cohorts.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-assist][P2b.2]].
+**** TODO P2b.3: Apply the contract to domain and embedder skills
+Use the same winning-skill declaration and current composed tool registry for
+=.claude/skills/= and =AgentSpec.skill_sources=.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-external][P2b.3]].
+
 *** TODO P3: Split memory read and write through a skill
 Keep memory facts preloaded, but load persistence policy and mechanics only when
 needed. Preserve the current memory access model. Wait for per-thread memory.
