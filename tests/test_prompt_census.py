@@ -48,7 +48,8 @@ def _unsigned_copy(artifact):
 
 
 def _named_text_block(name):
-    document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text()
+    document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
+        encoding="utf-8")
     marker = f"#+name: {name}\n#+begin_src text\n"
     return document.split(marker, 1)[1].split("\n#+end_src", 1)[0]
 
@@ -925,7 +926,8 @@ def test_keyboard_interrupt_cleans_publication_staging(tmp_path, monkeypatch):
 
 
 def test_design_appendix_and_every_section_summary_match_the_capture(census):
-    document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text()
+    document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
+        encoding="utf-8")
     current = _call(census, "web-main-core")
     current_prompt = _named_text_block("p0-current-web-main-bootstrap")
     assert current_prompt == _system_prompt(current)
