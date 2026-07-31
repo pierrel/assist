@@ -7,6 +7,22 @@ Status: architecture approved; P0 implementation complete.
 
 ** Change log
 
+*** 2026-07-31: Skill-description lifecycle experiment
+
+- Added P2c after progressive tool disclosure.  Once a skill loads, its
+  name/description catalog entry is temporarily omitted while the loaded body
+  is still recent, then returns after an experiment-selected turn or
+  provider-reported token threshold, or when compaction removes the trusted
+  load evidence.
+- Kept this eval-gated rather than choosing a lifetime by intuition.  The
+  candidates compare turn-count, provider-reported input-plus-output-token,
+  compaction-aware, and hybrid gates while measuring redundant reloads, missed
+  reloads, prompt cost, and unchanged natural outcomes.
+- Required suppression to derive from trusted visible message history instead
+  of a process-global timer or a second durable skill registry.  P2b's
+  invocation-scoped tool activation remains unchanged unless a separate
+  experiment proves that carrying activation is necessary.
+
 *** 2026-07-30: P0 implementation review
 
 - Made the provider request the sole canonical full prompt/schema copy.  The
@@ -156,6 +172,10 @@ The architecture therefore needs three separations:
    verdict can gate a natural eval.
 10. Change one instruction boundary per implementation phase so every result
    teaches us whether that boundary works for Qwen3.6-27B.
+11. Manage the lifecycle of the skill catalog itself: temporarily omit a
+    recently loaded skill description while its body is still salient, then
+    restore discoverability before the model can no longer reliably reuse or
+    reload that workflow.
 
 * Non-goals
 
@@ -293,6 +313,11 @@ the =allowed-tools= values early.  After a successful load, the tool result name
 the newly available tools and their schemas appear on the following model call.
 This keeps both the procedure and its non-kernel tool surface progressively
 disclosed.
+
+P2b deliberately leaves the startup catalog's cross-turn lifetime unchanged.
+P2c separately experiments with omitting a recently loaded skill's catalog
+entry while its trusted load result remains salient.  Separating the phases
+keeps tool visibility failures distinguishable from catalog-lifecycle failures.
 
 All skill sources obey the same resolution contract:
 
@@ -1620,6 +1645,15 @@ new graph invocation; the next user/scheduled invocation loads what it needs
 again.  Deep Agents lifecycle tools needed to process completion wakes remain
 kernel.
 
+The successful tool response also attaches a non-model-visible
+=ToolMessage.artifact= with the closed schema =schema=, =requested_name=,
+=winner_fingerprint=, and =result_sha256=.  The winner fingerprint covers the
+winning name, description, loaded body digest, and declared tool names, but not
+its host path; the result digest covers the exact model-visible tool content.
+Failure responses carry no success artifact.  This message artifact is the sole
+cross-invocation load evidence used by P2c; active tool state itself remains
+invocation-scoped.
+
 This child gates tools owned by bundled Assist/main-only skills.  Tools owned
 only by domain or embedder skill sources remain explicit baseline-visible
 migration exceptions until P2b.3.  The P2b.1 census names those exceptions;
@@ -1718,6 +1752,134 @@ custom tools are visible.  If an embedder has a real workflow whose skill cannot
 select reliably, keep only that tool in that profile's kernel as a measured
 exception.  Do not add source-specific permission fields until a real tool-level
 authorization need exists; disclosure is context selection, not authority.
+
+* P2c: Suppress recently loaded skill descriptions until they are useful again
+:PROPERTIES:
+:CUSTOM_ID: phase-2c-skill-description-lifecycle
+:END:
+
+** Value
+
+A skill body that was just loaded already supplies the workflow.  Repeating its
+routing description in every following system prompt spends context and can
+invite redundant reloads.  Restoring the description later preserves
+discoverability when that prior body is no longer reliably available.
+
+** Hypothesis
+
+The model can continue applying or explicitly reloading a recently loaded skill
+without seeing the same name/description entry on every near-term turn, provided
+the entry returns at a measured recency boundary and immediately after
+compaction removes the trusted load evidence.
+
+** Controlled change
+
+Run this only after P2b so tool disclosure and catalog disclosure are measured
+independently.  On each model request, derive recently loaded skills from the
+trusted, tool-call-paired =load_skill= results still present in that invocation's
+visible message history.  A result counts only when its successful
+=ToolMessage.artifact= has the exact P2b schema and its winner fingerprint still
+matches that thread's resolved catalog snapshot.  Its =result_sha256= must also
+match the still-visible =ToolMessage.content=; a summary, truncation, copied
+body, or artifact without the original body is not load evidence.  A snapshot
+mismatch, compaction, or eviction therefore returns the entry to the catalog.
+User prose, model prose, fabricated or malformed tool messages, failed loads,
+stale fingerprints, and another thread's history cannot suppress an entry.  Do
+not add a process-global timer, middleware-instance set, or second durable skill
+registry.
+
+P2c retains Deep Agents' existing session-snapshot contract: skill discovery is
+cached in the thread checkpoint, and source additions, removals, or new shadows
+do not hot-reload into that thread.  P2c neither weakens nor claims to repair
+that independent limitation.  A new thread resolves a fresh snapshot and has no
+prior load evidence, so its current winning entries are all discoverable.
+
+Omit a matched skill's name/description from the generated =Available skills=
+catalog while one pre-registered candidate gate remains active.  Compare, one
+at a time:
+
+1. a fixed number of completed user turns since the successful load;
+2. a fixed number of provider-reported input-plus-output tokens since the load;
+3. a compaction-aware gate that suppresses only while the trusted load result
+   and body remain in the visible history; and
+4. only if the single-axis candidates leave a reproduced gap, the smallest
+   hybrid of turn/token recency plus the compaction boundary.
+
+The entry returns when the selected threshold expires.  It also returns by
+construction when compaction or message eviction removes the trusted successful
+load evidence, regardless of counters.  A newly relevant thread with no such
+evidence always sees the skill.  The system prompt may carry one compact generic
+sentence saying that recently loaded catalog entries can be omitted and may be
+reloaded by their previously returned exact name.  Suppression removes only the
+exact row from the generated =Available skills= catalog.  Independently owned
+prompt guidance, including the surviving =dev= and =complex-request= hooks,
+remains byte-equivalent; P2c does not reopen the development-guidance boundary.
+
+P2b's invocation-scoped =allowed-tools= activation still resets at each graph
+invocation.  The model can reload an omitted recent skill by the exact name in
+its trusted prior tool result because =load_skill= remains in the kernel.  If
+natural evals show that description suppression reliably prevents this required
+reload, the candidate fails.  Persisting tool activation across turns is not
+silently bundled into P2c; it would be a separate experiment with its own
+accumulation and revocation contract.
+
+The chosen threshold is one reviewed constant, not a per-skill tuning table.
+Turn counts use completed user turns, not provider calls or child wake messages.
+The token candidate sums =prompt_tokens + completion_tokens= from the deployed
+provider's normalized usage metadata on main-agent responses after the
+successful load; it excludes subagent and judge traffic.  This deliberately
+measures actual model I/O, including a repeated prefix, rather than estimating
+tokens from characters.  The counter advances only from trusted response
+metadata retained in the visible thread history.  Missing, malformed, negative,
+or non-integral usage fails open by restoring the catalog entry.  Deterministic
+tests use fixed usage-metadata fixtures and cover a threshold crossed within a
+turn as well as between turns, so they do not depend on an installed tokenizer.
+Compaction is observed from the actual visible history boundary rather than
+inferred from wall time.
+
+** Test and gate
+
+- Deterministic history tests prove a real successful paired load suppresses
+  exactly its winning catalog entry; failed, fabricated, malformed, shadowed,
+  snapshot-mismatch, result-digest-mismatch, cross-thread, and parallel loads
+  suppress nothing outside their own history.  Checkpoint round trips preserve
+  the closed artifact without exposing it in model-bound content.  A new thread
+  created after a source add/remove/shadow sees its fresh winning catalog with
+  no inherited suppression; mid-session hot reload remains out of scope.
+- Boundary tests cover exactly-before/at/after each turn and token threshold,
+  multiple independently loaded skills, a re-load that refreshes recency, and
+  compaction/eviction that restores the entry on the next model request.
+- The final provider-bound =Available skills= catalog contains neither the
+  omitted row nor its description.  Unrelated catalog entries, source
+  precedence, and independently owned prompt guidance remain byte-equivalent;
+  deterministic fixtures cover =dev= and =complex-request= explicitly.
+- P2b kernel, schema filtering, execution filtering, same-response disclosure,
+  and invocation reset tests remain 100% green.  A recent skill that needs a
+  non-kernel tool either reloads successfully by its trusted prior exact name or
+  the natural journey fails visibly; hidden tools never become executable from
+  catalog suppression alone.
+- Natural multi-turn cohorts exercise immediate reuse, an unrelated intervening
+  turn, a return near each candidate boundary, a post-compaction return, two
+  recently loaded skills, and domain/embedder skills.  Each candidate runs N=3
+  diagnostic and N=5 post-review; only the selected policy proceeds to N=10.
+- The selected policy may not reduce any full-pass count below unchanged P2b or
+  the common 70% floor.  It reports prompt characters/tokens saved, redundant
+  =load_skill= calls, required reload success, wrong-skill selection, and missed
+  rediscovery separately.  Token reduction is evidence, not the pass condition.
+
+** Expected learning and alternatives
+
+Turn count is the simplest likely policy.  Token recency may better track a
+long tool-heavy turn, while the visible-history/compaction boundary avoids a
+stale counter after summarization.  The experiment chooses from measured
+reliability, not maximum prompt reduction.
+
+If every suppression policy causes a natural regression, leave the catalog
+always visible.  If only one skill has a reproduced exception, keep that entry
+visible and record it rather than building per-skill lifetimes.  If compaction
+does not expose a trustworthy visible-history boundary, restore descriptions
+conservatively on any ambiguous history instead of guessing that the body
+survived.
 
 * P3: Split memory read and write through a skill
 :PROPERTIES:
@@ -2139,7 +2301,8 @@ The original local architecture review ran to convergence before publication.
 Pierre's first review replaced the triage, dev-guidance, and memory-authority
 proposals rather than carrying them forward.  The 2026-07-29 review reopened the
 design for progressive tool disclosure and converged on the same incremental,
-eval-gated boundary.
+eval-gated boundary.  The 2026-07-31 review added skill-catalog lifecycle as a
+separate P2c experiment and left invocation-scoped tool activation unchanged.
 
 | Lens | Material findings incorporated | Convergence result |
 |------+--------------------------------|--------------------|
@@ -2151,13 +2314,12 @@ eval-gated boundary.
 | Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, trusted-composition-root machinery, tool registry, or source-specific disclosure field; composition supplies one kernel set to the existing middleware | Clean |
 | Threat model | synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; hidden and same-response sibling calls fail at execution; external declarations can select only already registered tools and do not bypass existing authority | Clean |
 | Event-loop/eval liveness | P0b atomic maintenance admission; outer supervised process groups and recoverable leases; bare serialized judge; atomic resume identity; GPU workload/cooldown contract; slow-path web liveness gates; disclosure state is graph-run-local, parallel loads merge deterministically, and filtering adds no I/O | Clean |
-| Documentation alignment | changelog records both Pierre revisions; triage and development guidance are excluded; P2b covers bundled, domain, and embedder sources; phase names, anchors, and current-versus-target wording verified | Clean |
+| Documentation alignment | changelog records Pierre's boundary revisions; triage and development guidance are excluded; P2b covers bundled, domain, and embedder sources; P2c changes only catalog-row lifetime; phase names, anchors, and current-versus-target wording verified | Clean |
 
-Pierre satisfied this design gate by approving and merging PR #216.  The current
-gate is the separate P0 implementation review: it must confirm the synthetic
-capture's exactness, hygiene, atomic home-backed no-replace publication, reported
-findings, and no-runtime-change boundary.  P0 approval does not start P0b or any
-later phase automatically.
+Pierre satisfied the original design gate by approving and merging PR #216, and
+P0 subsequently shipped in PR #222.  The active implementation gate is P0b's
+bounded, resumable eval runner.  Adding P2c to the program does not start its
+implementation or any other later phase automatically.
 
 * Decisions deliberately deferred to evidence
 

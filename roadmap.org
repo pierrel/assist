@@ -854,6 +854,15 @@ then run the natural/capability cohorts.  See [[file:docs/2026-07-26-agent-promp
 Use the same winning-skill declaration and current composed tool registry for
 =.claude/skills/= and =AgentSpec.skill_sources=.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-external][P2b.3]].
 
+*** TODO P2c: Suppress recently loaded skill descriptions until useful again
+After P2b, compare turn-count, provider-reported input-plus-output-token,
+compaction, and only-if-needed hybrid gates.  Temporarily omit a successfully
+loaded skill's catalog entry while its trusted body is still recent, then
+restore it at the measured boundary or immediately when compaction removes the
+load evidence.
+Keep P2b tool activation invocation-scoped unless a separate experiment proves
+otherwise.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2c-skill-description-lifecycle][P2c]].
+
 *** TODO P3: Split memory read and write through a skill
 Keep memory facts preloaded, but load persistence policy and mechanics only when
 needed. Preserve the current memory access model; per-thread memory is already
