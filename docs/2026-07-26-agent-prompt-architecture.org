@@ -3,9 +3,23 @@
 
 * State
 
-Status: architecture approved; P0 implementation complete.
+Status: architecture approved; P0 complete; P0b deferred; P1 active.
 
 ** Change log
+
+*** 2026-07-31: P0b deferred until an observed problem
+
+- Removed P0b as a gate for P1 and later prompt experiments.  Shared-model
+  contention between production and evals has not materially invalidated or
+  blocked prior work, so a production-maintenance protocol is not justified.
+- Kept the existing bounded per-test runner, cooperative workspace LLM lock,
+  home-backed logs/scratch, one-hour eval-block limit, and GPU-rest practice.
+  These reduce ordinary operational risk without changing production.
+- Defined the evidence that reopens P0b: a reproduced production/eval overlap
+  that invalidates a comparison, repeatedly wedges the provider beyond the
+  existing timeout, or causes material user-facing production failure.  A
+  future design starts from that observed case rather than the abandoned
+  full-containment implementation.
 
 *** 2026-07-31: Skill-description lifecycle experiment
 
@@ -555,17 +569,16 @@ existing reliable behavior merely because the aggregate suite remains above
 ** Eval execution and liveness
 
 Offline execution does not isolate the shared =--parallel 1= llama.cpp slot from
-production web traffic.  Prefer a genuinely separate local subject/judge
-endpoint.  Otherwise each block is a declared maintenance reservation: acquire
-the workspace real-LLM resource, verify the configured endpoint, then close
-model-requiring web admission atomically under the same synchronization that
-governs durable Run admission.  Once closed, boundedly drain active/queued work
-or abort; only then may the first eval model call start.  New submissions fail
-fast with an honest visible maintenance state while unrelated UI/status requests
-remain responsive.  After the final cooldown, smoke the endpoint and verify the
-production queue before reopening admission under the same synchronization.  A
-concurrent submission is therefore either admitted and drained before eval or
-visibly rejected, never check-then-raced into the slot.
+production web traffic.  That contention has not been a material problem in
+practice, so this program does not add production admission, maintenance state,
+or a provider gate preemptively.  Real-model commands still acquire the
+workspace =llm= resource to serialize cooperating development sessions and run
+during an ordinarily quiet period.  Production is not covered by that lock.
+Any observed overlap that can affect a verdict is an infrastructure failure:
+preserve it, exclude it from behavioral percentages, and rerun the same sample
+only after the provider is idle.  Reopen P0b only when a reproduced overlap
+invalidates a comparison, repeatedly wedges the provider beyond the existing
+timeout, or causes material production failure.
 
 The judge is one bare, non-streaming model call with no Assist agent, tools,
 middleware, checkpointer, sandbox, =THREAD_QUEUE=, or subagents.  A subject run
@@ -573,39 +586,41 @@ fully closes its response stream and atomically persists its observation before
 the judge starts.  Subject and judge calls serialize on the hardware reservation
 even if configured through different local endpoint URLs.
 
-Before launch, a manifest records case count times repetitions, expected subject
-turns/subagents and judge calls, measured one-case p50/p90 duration, projected GPU
-minutes, per-case deadline, block partition, and total expected wall time.  A
-case deadline is shorter than the one-hour block cap.  If the projection does
-not fit bounded blocks, narrow the pre-registered cohort before launch.
+Before launch, the phase state document records case count times repetitions,
+expected subject turns/subagents and judge calls, measured one-case p50/p90
+duration, projected GPU minutes, per-case deadline, block partition, and total
+expected wall time.  A case deadline is shorter than the one-hour block cap.  If
+the projection does not fit bounded blocks, narrow or partition the
+pre-registered cohort before launch.
 
-Each model/tool/case operation has a deadline, and the cohort runs in its own
-process group under a second deadline.  An outer supervisor outside that group
-owns the reservation, lease-backed maintenance/cooldown state, result manifest,
-and child group.  It handles INT/TERM by sending TERM, waiting one short fixed
-grace, then KILL and reaping the group.  An OS-backed parent-death or cgroup
-mechanism prevents abrupt supervisor death from leaving descendants alive;
-expired owner leases make maintenance recoverable.  On either path, close HTTP
-clients/streams, terminate eval-owned sandboxes, atomically record the
-interrupted case as infrastructure failure, verify the resource lock can be
-reacquired, and smoke the endpoint before any resume.  Process/progress diagnosis
-happens before choosing to resume.
+The existing =scripts/run-evals.sh= owns the useful eval hygiene: home-backed
+scratch, its single-writer lock, exact-mount orphan cleanup, per-node logs/JUnit,
+and GNU =timeout --kill-after=.  It is not yet a cohort selector or outer block
+supervisor.  Before P1's first model call, its reviewed plan must make the
+smallest test-side adaptation that reuses that preamble while accepting
+explicit node IDs, bounding the whole selected block below one hour, and
+returning the aggregate failure status.  The operator then invokes that focused
+entry point through =tools/agentic resource run llm=.  A later phase reuses the
+same path; it does not acquire production-maintenance machinery by default.
+Diagnose a timeout from its home-backed log and process/provider state before
+rerunning, and let the next focused attempt perform the same exact-mount cleanup.
 
-Result identity is the phase, baseline/candidate side, case ID, repetition,
+Result identity remains the phase, baseline/candidate side, case ID, repetition,
 seed, and fingerprints of subject model/prompt/fixture/validator plus judge
-model/prompt/rubric.  Observation and verdict writes are atomic; a repetition is
-complete only when all required evidence is durable.  Resume rejects a changed
-manifest, ignores incomplete rows, preserves every interrupted attempt, and
-never replaces a failed seed with a favorable new sample.
+model/prompt/rubric.  Each phase owns the smallest test-side evidence writer
+needed to preserve that identity with its transcript/capture and verdict; P1's
+judge-qualification plan must define it before the first model call.  A missing
+or partial sample is an infrastructure failure and is rerun explicitly with the
+same identity after diagnosis.  Do not overwrite the failed attempt or replace
+its seed.  P0b adds no general manifest or automatic-resume framework.
 
-No continuous real-LLM block exceeds one hour.  Block plus roughly fifteen-minute
-GPU cooldown is one visible reservation: the eval process exits immediately,
-the coordination state exposes the cooldown expiry, and one completion signal
-releases it without polling.  An infrastructure failure may be rerun only after
-diagnosis or an external-state change, with the same identity and manifest; the
-failed attempt remains and the replacement completes the missing sample.  An
-unchanged repeat failure stops the block.  Honor the nightly exclusion window if
-the paused cron is re-enabled.
+Take roughly fifteen minutes of actual GPU rest between at-most-one-hour manual
+blocks; do not call time in which production is actively using the model a
+cooldown.  An infrastructure failure may be rerun only after diagnosis or an
+external-state change, with the same identity; preserve the failed attempt and
+use the replacement only to complete the missing sample.  An unchanged repeat
+failure stops the block.  Honor the nightly exclusion window if the paused cron
+is re-enabled.
 
 ** Experiment report contract
 
@@ -818,9 +833,10 @@ from one Jinja file.  The context-rider finding also proves why flattened
 template reconstruction would have been an invalid census method.
 
 No behavioral eval was added or run.  P0 changes no prompt, model, tool,
-middleware, constructor, or runtime behavior.  The full-suite real-model
-baseline waits for P0b's bounded model-slot runner and is most valuable
-immediately before the first behavior-changing prompt phase.
+middleware, constructor, or runtime behavior.  The required real-model cohort
+baseline is most valuable immediately before the first behavior-changing prompt
+phase and proceeds through focused bounded node invocations; it no longer waits
+for P0b.
 
 *** Proposed custom main bootstrap role kernel
 
@@ -1304,64 +1320,24 @@ scopes, update the two files separately.
 #+end_src
 
 
-* P0b: Bound eval execution and reserve the model slot
+* P0b: Deferred until shared-model contention becomes a problem
 :PROPERTIES:
 :CUSTOM_ID: phase-0b
 :END:
 
-** Value
+P0b is skipped and does not gate P1.  The only demonstrated value is preventing
+production traffic from sharing the model during evals, and that contention has
+not materially disrupted prior eval work.  Designing for hypothetical overlap
+expanded into production admission, cross-process recovery, containment, and
+durable orchestration with much greater cost and failure surface than the
+observed risk.
 
-Every later N=3/N=5/N=10 experiment can finish, fail, cool down, and resume
-without silently competing with production or leaving the single GPU/model slot
-wedged.
-
-** Hypothesis
-
-A process-group runner plus explicit production-maintenance and cooldown state
-can isolate bounded eval blocks while leaving non-model web/status access live
-and making every interrupted sample reproducible.
-
-** Controlled change
-
-Implement only the operational contract in [[#experiment-protocol][the experiment protocol]]:
-preflight manifest, shared endpoint reservation, visible fast-fail maintenance
-admission, two-level deadlines and cleanup, atomic result identity/resume, and
-inspectable cooldown.  This may require one coordinated meta-repo change for the
-resource/cooldown state.  Do not change an agent prompt, eval verdict, or model
-behavior.
-
-** Test and gate
-
-- A fake active production Run prevents eval start; an acquired reservation
-  rejects model-requiring web submission visibly while unrelated GET/status
-  requests remain responsive.
-- A barrier race at maintenance activation proves a concurrent submission is
-  either admitted and fully drained before eval starts or visibly rejected, with
-  no overlap on the model slot.
-- Deliberately hung model, tool, child, HTTP stream, and sandbox fixtures are
-  terminated at the process-group deadline; cleanup and resource reacquisition
-  probes pass 100%.
-- Graceful cancellation and forced outer-supervisor death both terminate and
-  reap descendants, retain a truthful infrastructure attempt, allow lock
-  reacquisition, and recover maintenance admission after lease expiry.
-- Manifest mismatch, partial row, repeated failed seed, resume, and atomic-write
-  crash cases produce the exact report states defined above with no duplicate or
-  replacement sample.
-- Block completion leaves an inspectable cooldown expiry, one completion signal
-  releases it, and endpoint/production-queue smoke passes before admission opens.
-
-** Expected learning
-
-This proves whether the current coordination and eval runners have enough
-control over child processes and the production admission boundary.  It also
-measures the fixed overhead of safe block setup.
-
-** Alternatives
-
-A genuinely separate local model/hardware endpoint removes production admission
-maintenance but not process cleanup, atomic resume, or cooldown.  If web
-admission cannot be isolated cleanly, schedule an explicit service maintenance
-window rather than let production and evals contend silently.
+Continue with the existing bounded runner and the operational rules in
+[[#experiment-protocol][the experiment protocol]].  If a concrete collision
+invalidates a baseline/candidate comparison, repeatedly survives the per-node
+kill bound and wedges the provider, or causes material user-facing production
+failure, preserve that evidence and start a new P0b design from the reproduced
+failure.  Do not revive the abandoned implementation by default.
 
 * P1: Qualify the calibrated outcome judge
 :PROPERTIES:
@@ -2266,12 +2242,12 @@ This gate can close with a measured exception.  It cannot close by weakening a
 phase threshold, accepting an unexplained duplicate, or rounding a partial judge
 verdict up to a pass.
 
-* Review gate before implementation
+* Original architecture review gate (satisfied before P0)
 :PROPERTIES:
 :CUSTOM_ID: design-review-gate
 :END:
 
-This design is ready for implementation planning only when:
+Architecture approval required:
 
 1. the architect pass and every required design-review lens have been recorded;
 2. every BLOCKER and IMPORTANT finding has been incorporated or explicitly
@@ -2288,12 +2264,15 @@ This design is ready for implementation planning only when:
    private artifacts do not leave the local boundary by default, and confirms
    external =allowed-tools= metadata cannot create or authorize a tool;
 8. eval-runner liveness review confirms judge calls and repeated cohorts have
-   explicit time/resource bounds and cannot wedge the single local model slot;
+   explicit time/resource bounds, infrastructure failures remain distinguishable
+   from behavioral verdicts, and a repeated provider wedge stops the experiment
+   and reopens the deferred P0b decision;
 9. Pierre approves the reviewed document.
 
-After approval, P0 receives its own numbered implementation plan and repeats the
-normal design review against the then-current code.  Approval of this architecture
-does not pre-approve P0 code, and no later phase starts automatically.
+Pierre satisfied this gate before P0.  P0 then received its own numbered plan
+and repeated the normal design review against then-current code.  That approval
+did not pre-approve later-phase code: every later phase receives its own plan,
+review, and experiment gate before it starts.
 
 * Design review record
 
@@ -2313,12 +2292,13 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 | User experience | latency/round-trip guard; complete delegate, memory, research, domain, and embedder journeys; skill selection adds no round trip beyond the existing load; load results name newly available tools | Clean |
 | Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, trusted-composition-root machinery, tool registry, or source-specific disclosure field; composition supplies one kernel set to the existing middleware | Clean |
 | Threat model | synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; hidden and same-response sibling calls fail at execution; external declarations can select only already registered tools and do not bypass existing authority | Clean |
-| Event-loop/eval liveness | P0b atomic maintenance admission; outer supervised process groups and recoverable leases; bare serialized judge; atomic resume identity; GPU workload/cooldown contract; slow-path web liveness gates; disclosure state is graph-run-local, parallel loads merge deterministically, and filtering adds no I/O | Clean |
+| Event-loop/eval liveness | P0b is deferred pending observed contention; current per-node TERM/KILL bounds, cooperative development lock, infrastructure-failure classification, one-hour blocks, and actual GPU-rest interval govern P1; bare serialized judge remains bounded; disclosure state is graph-run-local, parallel loads merge deterministically, and filtering adds no I/O | Clean |
 | Documentation alignment | changelog records Pierre's boundary revisions; triage and development guidance are excluded; P2b covers bundled, domain, and embedder sources; P2c changes only catalog-row lifetime; phase names, anchors, and current-versus-target wording verified | Clean |
 
 Pierre satisfied the original design gate by approving and merging PR #216, and
-P0 subsequently shipped in PR #222.  The active implementation gate is P0b's
-bounded, resumable eval runner.  Adding P2c to the program does not start its
+P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
+shared-model contention has not been a material problem; P1 is now the active
+implementation phase.  Adding P2c to the program does not start its
 implementation or any other later phase automatically.
 
 * Decisions deliberately deferred to evidence

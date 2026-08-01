@@ -822,9 +822,13 @@ provenance, 21 reported audit findings, and a 2.8 MiB no-replace baseline on the
 home partition.  No runtime behavior changed. See
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0-result][P0 experiment report]].
 
-*** TODO P0b: Bound eval execution and reserve the model slot
-Add production-maintenance admission, process-group deadlines, atomic resume,
-and inspectable GPU cooldown before real-LLM experiments. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0b][P0b hypothesis and gate]].
+*** P0b: Deferred until shared-model contention becomes an observed problem
+Skipped by Pierre on 2026-07-31. Production/eval contention has not materially
+invalidated or blocked prior work, so P1 proceeds with the existing bounded eval
+runner and operational LLM lock. Reopen this phase only from a reproduced
+collision that invalidates a comparison, repeatedly wedges the provider beyond
+the existing timeout, or causes material production failure. See
+[[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0b][the deferred-phase decision]].
 
 *** TODO P1: Qualify a calibrated natural-outcome judge
 Keep deterministic security and state gates, then allow semantic verdicts only
