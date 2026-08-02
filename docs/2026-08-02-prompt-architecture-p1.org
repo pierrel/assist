@@ -1,0 +1,182 @@
+#+title: Assist Prompt Architecture P1: Simple Natural-Outcome Judge
+#+date: 2026-08-02
+#+options: toc:2 num:nil
+
+* State
+
+Status: candidate frozen after clean local review; blind qualification is next.
+
+P0b remains skipped until shared-model contention becomes an observed problem.
+That decision is already on =main= at =639709b=.  P1 does not revive admission,
+runner, or production-coordination work.
+
+* Change log
+
+- 2026-08-02: Replaced the rejected P1 branch with a clean branch from =main=.
+  The rejected branch added about 9,960 lines across 16 files, including roughly
+  2,900 lines of judge implementation and 2,600 lines of judge unit tests.  Most
+  of that size implemented custody, sealing, runner, report, source-hygiene, and
+  retry-prevention machinery rather than the judge itself.
+- 2026-08-02: Reduced P1 to one direct judge call, one strict verdict contract,
+  the already calibrated rubric and development fixture, one real-model eval,
+  and focused unit tests.  No production runtime or general eval infrastructure
+  is modified.
+- 2026-08-02: Reproduced 18/18 development labels, passed 17 focused and 1,565
+  repository tests, and froze the reviewed candidate for blind qualification.
+
+* Goal
+
+Learn whether the configured private local model can grade a natural request
+from the final evidence a user cares about.  The judge must distinguish =pass=,
+=partial=, and =fail= without seeing the expected label or an intended tool
+route.
+
+P1 only qualifies the judge.  It does not replace any current eval validator.
+P1b owns observation building and adoption by natural acceptance evals.
+Deterministic security, authorization, exact-state, lifecycle, resource, and
+capability checks remain authoritative.
+
+* Design
+
+** Boundary
+
+P1 changes only test and judge code:
+
+- =edd/outcome_judge.py= owns the closed input/output schemas, one model call,
+  and mechanical validation;
+- =edd/outcome_judge_prompt.md= is the calibrated rubric;
+- =edd/eval/fixtures/outcome-judge/development.json= contains eighteen labelled
+  observations, balanced six each across =pass=, =partial=, and =fail=;
+- =edd/eval/test_outcome_judge.py= runs one independent judge call per case; and
+- =tests/test_outcome_judge.py= proves the mechanical contract without a model.
+
+There are no changes under =assist/=, =manage/=, =scripts/=, the existing eval
+runner, prompt census, history, artifact publishing, or production deployment.
+
+** Observation
+
+=OutcomeObservation= contains only:
+
+1. requested outcomes in user language, each naming its evidence IDs;
+2. forbidden outcomes in user language, each naming its evidence IDs; and
+3. evidence records for prompts, initial state, final artifacts, the visible
+   response, or terminal events.
+
+The model receives no case ID, expected label, pairing metadata, tool trace,
+TODO state, agent name, or candidate implementation route.  Evidence kind and
+evidence IDs are intentionally supplied so the model can weigh authoritative
+final state against claims in a response.  All observation text is delimited as
+untrusted data.  P1 accepts already assembled synthetic observations; it does
+not build them from a workspace before a real caller exists.
+
+** Verdict
+
+The model returns:
+
+- one =satisfied=, =partial=, or =missing= verdict for every requested outcome;
+- one =present= or =absent= verdict for every forbidden outcome;
+- contradictions and their evidence IDs;
+- produced evidence containing benign unrelated or unsafe instruction-shaped
+  extra output;
+- a concise cited rationale, confidence, and overall =pass=, =partial=, or
+  =fail=.
+
+Post-validation is deliberately mechanical.  It requires exact ordered outcome
+IDs, non-empty unique citations drawn from the declared evidence for that
+outcome, valid produced-evidence IDs, and an overall grade consistent with the
+component grades.  Semantic judgment remains the model's one job.
+
+The model still emits =overall= because the calibrated 18/18 contract includes
+it.  Code recomputes the required overall value and rejects disagreement.  A
+review suggestion to remove that field was declined because it would change a
+proven output contract while losing a useful inconsistency signal.
+
+** Invocation
+
+=OutcomeJudge.judge(observation)= selects the configured model at temperature
+zero with thinking enabled, binds the strict JSON schema, =max_tokens=4096=, and
+=seed=0=, then makes exactly one non-streaming call.  JSON, schema, provider, or
+validation errors propagate and fail the pytest case.  There is no retry,
+fallback judge, subprocess worker, attempt record, or report framework.
+
+The ordinary eval runner remains the outer process backstop.  P1 adds no new
+timeout or process-management code.
+
+* Calibration and qualification
+
+The preserved development work established the final general rubric:
+
+- initial reviewed candidate: 14/18 exact;
+- revised output budget and citation guidance: 17/18 exact;
+- explicit benign unrelated output: 17/18 exact, with the unsafe pair
+  structurally inconsistent; and
+- separate benign and unsafe produced-evidence fields: 18/18 exact.
+
+The simplified implementation reuses that final rubric and the same eighteen
+development observations.  It must reproduce 18/18 before blind qualification.
+
+The twelve blind cases remain outside the repository until the candidate is
+frozen.  =ASSIST_OUTCOME_JUDGE_FIXTURE=/path/to/blind.json= runs the same test
+against the local labelled file.  Qualification is three explicit pytest runs,
+not a new runner or custody system.  The original gates remain the analysis
+contract: at least 10/12 majority matches, no human =fail= majority =pass=, no
+two-grade majority error, at least 30/36 individual majority matches, no
+individual =fail= to =pass=, valid citations, and non-pass on the injection,
+fluent-false-success, and forged-evidence cases.
+
+If the judge fails those gates, it remains diagnostic.  P1b cannot adopt it.
+
+* Tests
+
+Deterministic tests cover:
+
+- closed schemas and state/content consistency;
+- unique outcome and evidence IDs with declared references;
+- exact verdict identity and scoped citations;
+- deterministic pass/partial/fail aggregation;
+- benign versus unsafe extra output;
+- one schema-bound call, temperature zero, thinking, token bound, and seed;
+- label/identity omission from model input; and
+- propagation of invalid JSON and non-text provider output.
+
+The real-model eval explains each case through its fixture: a stable case ID,
+the full natural prompt evidence and authoritative final evidence, requested and
+forbidden outcomes, and the expected human/objective label.
+
+* Review decisions
+
+The simplicity, agentic-fit, intention, UX, and event-loop lenses approved the
+narrow design.  Clean-interface and threat-model review required authoritative
+requested/forbidden/evidence IDs, explicit untrusted-data framing, exact
+citation membership, and injection coverage.  Those are direct judge contract
+requirements and are included.
+
+Deferred findings are not implementation work in P1:
+
+- workspace observation building has adoption value but no caller yet;
+- async invocation becomes necessary only if a future production or event-loop
+  path adopts the judge; and
+- broader input bounds matter when observations stop being fixed test data.
+
+* Implementation notes and learnings
+
+The hard part was not model invocation.  The useful judge is a strict schema,
+one calibrated prompt, one model call, and mechanical validation.  The prior
+effort became hard because reviews repeatedly converted hypothetical evidence
+custody and runner concerns into implementation requirements.  That produced a
+large custom protocol far from the stated objective.
+
+The simplified design is intentionally ordinary.  The model client is the
+existing repository client; the fixture is JSON; failures are pytest failures;
+and blind qualification is repeated invocation of the same test.  There is no
+strange production path or new maintenance subsystem.
+
+The main learning is procedural: review should improve the concrete objective,
+not silently replace it with a generalized infrastructure project.  Valuable
+adjacent findings should be reported with their risk and value, then deferred
+unless the objective is explicitly cleanup or debt reduction.
+
+* Completion record
+
+To be filled after implementation, deterministic review, development rerun,
+blind qualification, PR review, and Kindle delivery.
