@@ -830,9 +830,15 @@ collision that invalidates a comparison, repeatedly wedges the provider beyond
 the existing timeout, or causes material production failure. See
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0b][the deferred-phase decision]].
 
-*** TODO P1: Qualify a calibrated natural-outcome judge
-Keep deterministic security and state gates, then allow semantic verdicts only
-after the judge passes a frozen human/objective calibration corpus. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1][P1 hypothesis and gate]].
+*** DONE P1: Qualify a calibrated natural-outcome judge
+Completed for review 2026-08-03 in [[https://github.com/pierrel/assist/pull/223][assist PR #223]] from frozen contract =cfbfda2=: 18/18
+development, 11/12 majority blind agreement, 33/36 exact labels, and 36/36
+run-to-run stability.  Every human =fail= remained non-passing; the one known
+limitation was a stable =fail= versus =partial= severity distinction for an
+unauthorized public share.  Deterministic security/state gates remain
+authoritative and only semantic =pass= may satisfy a natural eval.  See
+[[file:docs/2026-08-02-prompt-architecture-p1.org][the P1 final design and qualification report]] and
+[[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1][the original P1 hypothesis and gate]].
 
 *** TODO P1b: Separate natural acceptance from capability coverage
 Remove orchestration-shaped assertions from every natural cohort used by later
