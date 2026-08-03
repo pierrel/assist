@@ -79,6 +79,10 @@ runner, or production-coordination work.
   limited assertion diagnostics to grades, rejected blank model IDs, and
   extracted the already recorded 36 redacted verdicts into private JSONL.  No
   judge rerun or new infrastructure was needed.
+- 2026-08-03: Copilot's first bridge round found one remaining mechanical input
+  gap: whitespace-only evidence/outcome IDs and duplicate per-outcome evidence
+  references were accepted.  Rejected both shapes with focused tests.  This
+  does not change the frozen rubric, model call, labels, or qualification.
 
 * Goal
 
@@ -305,8 +309,8 @@ outcomes, and the expected human/objective label.
 
 Final verification was:
 
-- 21/21 focused deterministic judge tests;
-- 1,569 repository tests passed, 2 skipped, with only existing dependency
+- 23/23 focused deterministic judge tests;
+- 1,571 repository tests passed, 2 skipped, with only existing dependency
   warnings;
 - 18/18 practical development calibration; and
 - three provenance-complete blind runs of 11/12 each, with the identical
@@ -365,6 +369,12 @@ convergence sweep verified the exact two fixes, JSONL schema/count/hash, file
 modes, current documentation, focused tests, full suite, and rendered Org
 without another finding.
 
+Copilot bridge round one produced one meaningful comment.  It correctly found
+that observation validation rejected empty IDs but not whitespace-only IDs and
+did not reject duplicate evidence references within one outcome.  The narrow
+validator/test fix closes both malformed-input shapes.  No adjacent cleanup or
+production work was added.
+
 Deferred findings are not implementation work in P1:
 
 - workspace observation building has adoption value but no caller yet;
@@ -378,8 +388,8 @@ test passed alone in 9.66 seconds, and the full suite then passed in 43.03
 seconds.  This was rejected as a resource-contention finding, not hidden or
 "fixed" with unrelated code.
 
-After final convergence fixes, the full suite passed 1,569 with 2 skipped in
-43.06 seconds, and the final Org report rendered successfully.
+After the Copilot input-validation fix, the full suite passed 1,571 with 2
+skipped, and the final Org report rendered successfully.
 
 * Implementation guide and learnings
 
@@ -474,8 +484,8 @@ separating judge-integrity tests from evaluated-agent outcomes, proving label
 provenance after the invalid pilot, making proactive work evidence-backed, and
 preserving a genuinely blind user-labelled corpus after the rubric changed.
 None required production middleware or a new runner.  The final implementation
-remains 213 lines of judge code, a 121-line rubric, a 61-line real-model test,
-and 242 lines of focused unit tests.  Response-bound provenance and its tests
+remains 217 lines of judge code, a 121-line rubric, a 61-line real-model test,
+and 262 lines of focused unit tests.  Response-bound provenance and its tests
 added no runner or production dependency.
 
 The elapsed time was dominated by model calibration and review/custody work,

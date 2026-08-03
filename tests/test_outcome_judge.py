@@ -105,6 +105,26 @@ def test_observation_rejects_duplicate_and_unknown_evidence() -> None:
             ),),
             evidence=evidence,
         )
+    with pytest.raises(ValidationError, match="outcome evidence IDs"):
+        OutcomeObservation(
+            requested=(OutcomeRequirement(
+                id="ready", description="Ready.",
+                evidence_ids=("final:result.txt", "final:result.txt"),
+            ),),
+            evidence=evidence,
+        )
+
+
+@pytest.mark.parametrize("field", ["evidence", "outcome"])
+def test_observation_rejects_blank_ids(field: str) -> None:
+    evidence = list(_observation().evidence)
+    requested = _observation().requested
+    if field == "evidence":
+        evidence[0] = evidence[0].model_copy(update={"id": "  "})
+    else:
+        requested = (requested[0].model_copy(update={"id": "  "}),)
+    with pytest.raises(ValidationError, match="must not be blank"):
+        OutcomeObservation(requested=requested, evidence=tuple(evidence))
 
 
 def test_observation_rejects_duplicate_outcomes_and_inconsistent_state() -> None:

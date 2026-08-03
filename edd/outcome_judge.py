@@ -50,14 +50,18 @@ class OutcomeObservation(_ClosedModel):
             raise ValueError("an observation needs a requested outcome")
         evidence_ids = [item.id for item in self.evidence]
         outcome_ids = [item.id for item in (*self.requested, *self.forbidden)]
+        if any(not item.strip() for item in (*evidence_ids, *outcome_ids)):
+            raise ValueError("evidence and outcome IDs must not be blank")
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("evidence IDs must be unique")
         if len(outcome_ids) != len(set(outcome_ids)):
             raise ValueError("outcome IDs must be unique")
         available = set(evidence_ids)
         for outcome in (*self.requested, *self.forbidden):
-            if not outcome.id or not outcome.evidence_ids:
+            if not outcome.evidence_ids:
                 raise ValueError("outcomes need an ID and evidence")
+            if len(outcome.evidence_ids) != len(set(outcome.evidence_ids)):
+                raise ValueError("outcome evidence IDs must be unique")
             if not set(outcome.evidence_ids) <= available:
                 raise ValueError("outcome cites unknown evidence")
         return self
