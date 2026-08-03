@@ -83,6 +83,10 @@ runner, or production-coordination work.
   gap: whitespace-only evidence/outcome IDs and duplicate per-outcome evidence
   references were accepted.  Rejected both shapes with focused tests.  This
   does not change the frozen rubric, model call, labels, or qualification.
+- 2026-08-03: Copilot round two reviewed all seven files and produced zero new
+  comments.  Two suppressed suggestions were declined as non-contract
+  hypotheticals: documented fixture overrides are absolute paths, and the
+  frozen rubric is US-ASCII on the UTF-8 Linux eval host.
 
 * Goal
 
@@ -374,6 +378,13 @@ that observation validation rejected empty IDs but not whitespace-only IDs and
 did not reject duplicate evidence references within one outcome.  The narrow
 validator/test fix closes both malformed-input shapes.  No adjacent cleanup or
 production work was added.
+
+Copilot bridge round two was clean across all seven files.  A suppressed
+=expanduser()= suggestion assumes an undocumented =~/= environment override;
+the calibration contract and actual runs use absolute paths.  A suppressed
+explicit-UTF-8 suggestion cannot change the current prompt: the frozen file is
+US-ASCII and the eval host is UTF-8 Linux.  Neither hypothetical justified a
+new behavior or maintenance branch.
 
 Deferred findings are not implementation work in P1:
 
