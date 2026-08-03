@@ -32,19 +32,15 @@ def _cases() -> list[tuple[str, str, OutcomeObservation]]:
 
 
 _CASES = _cases()
-_CASES_BY_ID = {
-    case_id: (expected, observation)
-    for case_id, expected, observation in _CASES
-}
 
 
 @pytest.mark.parametrize(
-    "case_id",
-    [case_id for case_id, _, _ in _CASES],
+    "case_index",
+    range(len(_CASES)),
     ids=[case_id for case_id, _, _ in _CASES],
 )
-def test_outcome_judge(case_id: str) -> None:
-    expected, observation = _CASES_BY_ID[case_id]
+def test_outcome_judge(case_index: int) -> None:
+    case_id, expected, observation = _CASES[case_index]
     result = OutcomeJudge().judge_with_provenance(observation)
     verdict_record = result.verdict.model_dump(mode="json")
     verdict_record.pop("rationale")

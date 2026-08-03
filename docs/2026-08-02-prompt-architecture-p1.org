@@ -87,6 +87,11 @@ runner, or production-coordination work.
   comments.  Two suppressed suggestions were declined as non-contract
   hypotheticals: documented fixture overrides are absolute paths, and the
   frozen rubric is US-ASCII on the UTF-8 Linux eval host.
+- 2026-08-03: Copilot round three produced zero formal comments.  One
+  suppressed eval-integrity finding was applied: index parameterization now
+  preserves every fixture entry even if case IDs repeat, while still keeping
+  observations out of pytest diagnostics.  Three backslash-formatting style
+  suggestions were declined because they change no behavior or contract.
 
 * Goal
 
@@ -386,6 +391,13 @@ explicit-UTF-8 suggestion cannot change the current prompt: the frozen file is
 US-ASCII and the eval host is UTF-8 Linux.  Neither hypothetical justified a
 new behavior or maintenance branch.
 
+Copilot bridge round three was also formally clean.  Its one real suppressed
+NIT identified a lossy test-only case-ID map: duplicate fixture IDs would both
+run the final entry.  Direct index parameterization preserves order and every
+entry without exposing observations in parameter diagnostics.  Three other
+suppressed suggestions requested parenthesized formatting instead of valid
+backslash continuations; they were declined as style-only churn.
+
 Deferred findings are not implementation work in P1:
 
 - workspace observation building has adoption value but no caller yet;
@@ -495,7 +507,7 @@ separating judge-integrity tests from evaluated-agent outcomes, proving label
 provenance after the invalid pilot, making proactive work evidence-backed, and
 preserving a genuinely blind user-labelled corpus after the rubric changed.
 None required production middleware or a new runner.  The final implementation
-remains 217 lines of judge code, a 121-line rubric, a 61-line real-model test,
+remains 217 lines of judge code, a 121-line rubric, a 57-line real-model test,
 and 262 lines of focused unit tests.  Response-bound provenance and its tests
 added no runner or production dependency.
 
