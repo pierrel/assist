@@ -59,7 +59,7 @@ class OutcomeObservation(_ClosedModel):
         available = set(evidence_ids)
         for outcome in (*self.requested, *self.forbidden):
             if not outcome.evidence_ids:
-                raise ValueError("outcomes need an ID and evidence")
+                raise ValueError("outcomes need evidence")
             if len(outcome.evidence_ids) != len(set(outcome.evidence_ids)):
                 raise ValueError("outcome evidence IDs must be unique")
             if not set(outcome.evidence_ids) <= available:

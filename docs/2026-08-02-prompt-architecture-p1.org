@@ -92,6 +92,9 @@ runner, or production-coordination work.
   preserves every fixture entry even if case IDs repeat, while still keeping
   observations out of pytest diagnostics.  Three backslash-formatting style
   suggestions were declined because they change no behavior or contract.
+- 2026-08-03: Copilot round four produced zero formal comments.  Its one
+  suppressed documentation NIT was applied: the empty-evidence error no longer
+  claims the already validated outcome ID is missing.
 
 * Goal
 
@@ -397,6 +400,11 @@ run the final entry.  Direct index parameterization preserves order and every
 entry without exposing observations in parameter diagnostics.  Three other
 suppressed suggestions requested parenthesized formatting instead of valid
 backslash continuations; they were declined as style-only churn.
+
+Copilot bridge round four was formally clean.  Its one suppressed NIT correctly
+found stale error wording: the empty-evidence branch still said the outcome
+needed an ID after ID validation moved earlier.  The message now names only the
+missing evidence condition; behavior and qualification are unchanged.
 
 Deferred findings are not implementation work in P1:
 
