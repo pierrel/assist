@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from unittest import TestCase
@@ -29,6 +31,7 @@ from assist.async_subagents import (
 )
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
+from edd.outcome_judge import OutcomeJudge, OutcomeObservation
 
 from .utils import create_filesystem
 
@@ -39,6 +42,33 @@ _TASK_STATUSES: dict[str, str] = {}
 _TASK_ROOT: str | None = None
 _TASK_SEQUENCE = 0
 _DIRECT_WORK_TOOLS = {"write_file", "edit_file", "execute"}
+_MAX_JUDGE_FILE_BYTES = 16 * 1024
+_MAX_JUDGE_OBSERVATION_BYTES = 64 * 1024
+
+
+def _read_judge_evidence(path: Path) -> bytes:
+    """Read one bounded artifact before constructing a judge observation."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AssertionError(f"judge evidence is not a regular file: {path.name}")
+        chunks: list[bytes] = []
+        remaining = _MAX_JUDGE_FILE_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) > _MAX_JUDGE_FILE_BYTES:
+            raise AssertionError(
+                f"judge evidence exceeds {_MAX_JUDGE_FILE_BYTES} bytes: {path.name}"
+            )
+        return content
+    finally:
+        os.close(fd)
 
 
 def _task_id(description: str, subagent_type: str) -> str:
@@ -123,26 +153,31 @@ def _materialize_report_artifacts(task_id: str) -> None:
     description = _TASK_DESCRIPTIONS.get(task_id, "")
     artifacts = {
         "alpha-report.md": (
-            "# Alpha report\n\nRecommendation: fix tag import before launch.\n\n"
+            "# Alpha report\n\nRecommendation: block launch until tag import "
+            "is repaired.\n\n"
             "Risks: lost tags and missing support guidance.\n\n"
             "Next actions: repair import and write the runbook.\n"),
         "beta-report.md": (
-            "# Beta report\n\nRecommendation: use the 25 percent rollout cap.\n\n"
+            "# Beta report\n\nRecommendation: ship behind the 25 percent "
+            "rollout cap.\n\n"
             "Risks: peak-load failure.\n\n"
             "Next actions: configure the cap and monitoring trigger.\n"),
         "gamma-report.md": (
-            "# Gamma report\n\nRecommendation: proceed with tracked findings.\n\n"
+            "# Gamma report\n\nRecommendation: proceed with limited launch, but "
+            "close both medium findings before general availability.\n\n"
             "Risks: overdue medium findings.\n\n"
             "Next actions: verify owners and closure dates.\n"),
         "delta-report.md": (
-            "# Delta report\n\nRecommendation: rehearse rollback before release.\n\n"
+            "# Delta report\n\nRecommendation: block release until rollback is "
+            "rehearsed.\n\n"
             "Risks: an unrehearsed Friday rollback.\n\n"
             "Next actions: run the rehearsal and record go/no-go.\n"),
         "alpha-brief.md": (
-            "# Alpha brief\n\nRecommendation: repair tag import.\n\n"
+            "# Alpha brief\n\nRecommendation: block launch until tag import is "
+            "repaired.\n\n"
             "Unresolved risks: tag loss and missing support runbook.\n"),
         "beta-brief.md": (
-            "# Beta brief\n\nRecommendation: capped rollout.\n\n"
+            "# Beta brief\n\nRecommendation: ship behind a capped rollout.\n\n"
             "Rollout limits: 25 percent.\n\n"
             "Monitoring triggers: peak-load errors.\n"),
     }
@@ -340,24 +375,26 @@ class TestAsyncSubagentSupervisor(TestCase):
                 if isinstance(message, AIMessage)
                 for call in (message.tool_calls or [])]
 
-    def _complete_synthetic_work(self, agent: AgentHarness) -> None:
-        """Deliver at most 32 results; fail if synthetic work remains."""
+    def _complete_synthetic_work(
+            self, agent: AgentHarness, reply: str) -> str:
+        """Deliver at most 32 results and return the terminal visible reply."""
         for _ in range(32):
             task_id = next((
                 task_id for task_id, status in _TASK_STATUSES.items()
                 if status in {"pending", "running"}
             ), None)
             if task_id is None:
-                return
-            agent.message(_completion_wake(task_id, "success"))
+                return reply
+            reply = agent.message(_completion_wake(task_id, "success"))
         if any(status in {"pending", "running"}
                for status in _TASK_STATUSES.values()):
             self.fail("synthetic work exceeded 32 task completions")
+        return reply
 
-    def _labelled_fields(
-            self, content: str, labels: tuple[str, ...]) -> dict[str, str]:
+    def _validated_field_evidence(
+            self, content: str, labels: tuple[str, ...]) -> str:
         content = re.sub(r"<!--.*?(?:-->|$)", "", content, flags=re.DOTALL)
-        self.assertNotRegex(content, r"(?i)</?[a-z][^>]*>")
+        self.assertNotRegex(content, r"<[^>]*>")
         alternatives = "|".join(re.escape(label) for label in labels)
         colon = re.compile(
             rf"(?i)(?P<label>{alternatives})[ \t]*:[ \t]*(?P<inline>.*)"
@@ -388,15 +425,29 @@ class TestAsyncSubagentSupervisor(TestCase):
                 boundaries.append(index)
         found = [label for _, label, _ in markers]
         self.assertCountEqual(found, labels)
-        fields: dict[str, str] = {}
         for index, label, inline in markers:
             end = next((boundary for boundary in boundaries if boundary > index),
                        len(lines))
             value = " ".join(
                 "\n".join((inline, *lines[index + 1:end])).split())
             self.assertTrue(value, label)
-            fields[label] = value
-        return fields
+        return content
+
+    def _assert_judge_pass(self, observation: OutcomeObservation) -> None:
+        payload = json.dumps(observation.model_dump(mode="json"), sort_keys=True)
+        self.assertLessEqual(
+            len(payload.encode()), _MAX_JUDGE_OBSERVATION_BYTES
+        )
+        result = OutcomeJudge().judge_with_provenance(observation)
+        print(
+            f"outcome_judge model={result.model} "
+            f"prompt_sha256={result.prompt_sha256}"
+        )
+        self.assertEqual(
+            result.verdict.overall,
+            "pass",
+            result.verdict.model_dump_json(indent=2),
+        )
 
     def _assert_one_delegate_per_target(
             self, delegates: list[dict], targets: tuple[str, ...]) -> None:
@@ -511,82 +562,129 @@ class TestAsyncSubagentSupervisor(TestCase):
     def test_natural_long_list_chooses_one_delegate_per_outcome(self):
         """Accept the requested reports; retain the frozen historical node ID."""
         agent = self._agent()
-        agent.message(
+        prompt = (
             "I need a decision report for each of four launch workstreams while I "
             "handle the release meeting. Use /alpha-notes.md for /alpha-report.md, "
             "/beta-notes.md for /beta-report.md, /gamma-notes.md for "
             "/gamma-report.md, and /delta-notes.md for /delta-report.md. Each report "
-            "should give its own recommendation, risks, and next actions.")
-        self._complete_synthetic_work(agent)
+            "should give its own recommendation, risks, and next actions."
+        )
         assert _TASK_ROOT is not None
-        expected_facts = {
-            "alpha-report.md": {
-                "recommendation": (
-                    r"(?:tag|tags).{0,40}(?:import|loss|lost|bug)|"
-                    r"(?:import|loss|lost|bug).{0,40}(?:tag|tags)"
-                ),
-                "risks": r"(?:tag|tags).*(?:loss|lost)|(?:loss|lost).*(?:tag|tags)",
-                "next actions": r"\brunbook\b|\brepair\b.{0,40}\bimport\b",
-            },
-            "beta-report.md": {
-                "recommendation": r"25\s*(?:percent|%)",
-                "risks": r"peak.{0,20}load|load.{0,20}peak",
-                "next actions": r"\bcap(?:ped|ping)?\b|\bmonitor\w*\b",
-            },
-            "gamma-report.md": {
-                "recommendation": r"\bfindings?\b",
-                "risks": r"medium.{0,20}finding|finding.{0,20}medium",
-                "next actions": r"\bowners?\b|\bclosure\b",
-            },
-            "delta-report.md": {
-                "recommendation": r"rollback",
-                "risks": r"rollback",
-                "next actions": r"rehears",
-            },
+        source_bytes = {
+            workstream: _read_judge_evidence(
+                Path(_TASK_ROOT, f"{workstream}-notes.md")
+            )
+            for workstream in ("alpha", "beta", "gamma", "delta")
         }
+        reply = self._complete_synthetic_work(agent, agent.message(prompt))
         labels = ("recommendation", "risks", "next actions")
-        for target, field_patterns in expected_facts.items():
-            content = Path(_TASK_ROOT, target).read_text().lower()
-            fields = self._labelled_fields(content, labels)
-            for field, expected in field_patterns.items():
-                self.assertRegex(fields[field], expected)
+        evidence = [{
+            "id": "prompt", "kind": "prompt", "state": "present",
+            "content": prompt,
+        }, {
+            "id": "response", "kind": "response", "state": "present",
+            "content": reply,
+        }]
+        requested = []
+        for workstream, source in source_bytes.items():
+            source_id = f"{workstream}-source"
+            report_id = f"{workstream}-report"
+            source_path = Path(_TASK_ROOT, f"{workstream}-notes.md")
+            self.assertEqual(
+                _read_judge_evidence(source_path), source,
+                f"agent changed {source_path.name}",
+            )
+            report = _read_judge_evidence(
+                Path(_TASK_ROOT, f"{workstream}-report.md")
+            ).decode()
+            report = self._validated_field_evidence(report, labels)
+            evidence.extend((
+                {"id": source_id, "kind": "initial", "state": "present",
+                 "content": source.decode()},
+                {"id": report_id, "kind": "final", "state": "present",
+                 "content": report},
+            ))
+            requested.append({
+                "id": f"{workstream}-decision-report",
+                "description": (
+                    f"The requested /{workstream}-report.md gives its own "
+                    "recommendation, risks, and next actions grounded in "
+                    f"/{workstream}-notes.md and answers the decision requested "
+                    "by that source."
+                ),
+                "evidence_ids": ("prompt", source_id, report_id, "response"),
+            })
+        self._assert_judge_pass(OutcomeObservation.model_validate({
+            "requested": requested,
+            "evidence": evidence,
+        }))
 
     def test_natural_two_independent_outcomes_delegate(self):
         """Accept the requested briefs; retain the frozen historical node ID."""
         agent = self._agent()
-        agent.message(
+        prompt = (
             "Prepare two launch briefs for separate teams while I work on the agenda. "
             "Turn /alpha-notes.md into /alpha-brief.md with a recommendation and "
             "unresolved risks. Also turn /beta-notes.md into /beta-brief.md with its "
-            "own recommendation, rollout limits, and monitoring triggers.")
-        self._complete_synthetic_work(agent)
+            "own recommendation, rollout limits, and monitoring triggers."
+        )
         assert _TASK_ROOT is not None
-        alpha = Path(_TASK_ROOT, "alpha-brief.md").read_text().lower()
-        alpha_fields = self._labelled_fields(
-            alpha, ("recommendation", "unresolved risks"))
-        self.assertRegex(
-            alpha_fields["recommendation"],
-            r"(?:tag|tags).{0,40}(?:import|loss|lost|bug)|"
-            r"(?:import|loss|lost|bug).{0,40}(?:tag|tags)",
-        )
-        self.assertRegex(
-            alpha_fields["unresolved risks"],
-            r"tag.{0,30}loss|loss.{0,30}tag",
-        )
-        beta = Path(_TASK_ROOT, "beta-brief.md").read_text().lower()
-        beta_fields = self._labelled_fields(
-            beta, ("recommendation", "rollout limits", "monitoring triggers"),
-        )
-        self.assertRegex(
-            beta_fields["recommendation"],
-            r"\bcap(?:ped|ping)?\b|25\s*(?:percent|%)",
-        )
-        self.assertRegex(
-            beta_fields["rollout limits"], r"25\s*(?:percent|%)")
-        self.assertRegex(
-            beta_fields["monitoring triggers"],
-            r"peak.{0,20}load|\berrors?\b|\berror rate\b|\blatency\b",
-        )
+        briefs = {
+            "alpha": (
+                ("recommendation", "unresolved risks"),
+                "a recommendation and unresolved risks",
+            ),
+            "beta": (
+                ("recommendation", "rollout limits", "monitoring triggers"),
+                "its own recommendation, rollout limits, and monitoring triggers",
+            ),
+        }
+        source_bytes = {
+            workstream: _read_judge_evidence(
+                Path(_TASK_ROOT, f"{workstream}-notes.md")
+            )
+            for workstream in briefs
+        }
+        reply = self._complete_synthetic_work(agent, agent.message(prompt))
+        evidence = [
+            {"id": "prompt", "kind": "prompt", "state": "present",
+             "content": prompt},
+            {"id": "response", "kind": "response", "state": "present",
+             "content": reply},
+        ]
+        requested = []
+        for workstream, (labels, description) in briefs.items():
+            source_id = f"{workstream}-source"
+            brief_id = f"{workstream}-brief"
+            source_path = Path(_TASK_ROOT, f"{workstream}-notes.md")
+            source = source_bytes[workstream]
+            self.assertEqual(
+                _read_judge_evidence(source_path), source,
+                f"agent changed {source_path.name}",
+            )
+            brief = _read_judge_evidence(
+                Path(_TASK_ROOT, f"{workstream}-brief.md")
+            ).decode()
+            brief = self._validated_field_evidence(brief, labels)
+            evidence.extend((
+                {"id": source_id, "kind": "initial", "state": "present",
+                 "content": source.decode()},
+                {"id": brief_id, "kind": "final", "state": "present",
+                 "content": brief},
+            ))
+            requested.append({
+                "id": f"{workstream}-launch-brief",
+                "description": (
+                    f"The requested /{workstream}-brief.md gives {description} "
+                    f"grounded in /{workstream}-notes.md and addresses the "
+                    "decision requested by that source."
+                ),
+                "evidence_ids": ("prompt", source_id, brief_id, "response"),
+            })
+        self._assert_judge_pass(OutcomeObservation.model_validate({
+            "requested": requested,
+            "evidence": evidence,
+        }))
 
     def test_single_outcome_with_several_steps_stays_with_main(self):
         agent = self._agent()

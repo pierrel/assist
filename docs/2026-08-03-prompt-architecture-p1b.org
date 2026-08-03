@@ -3,7 +3,10 @@
 
 * Status
 
-Candidate implementation completed and five local code-review rounds converged.
+The prior direct-validator candidate completed five local code-review rounds;
+the judge-adoption redesign and terminal-response follow-up have completed
+focused review and fixes.  The final deterministic suite is green: 1,571
+passed, 2 skipped, 5 existing warnings, and 2 subtests passed.
 The counted baseline was natural 3/6 and capability 6/6.  The initial candidate
 was natural 6/6 and capability 6/6, but review found hidden route constraints in
 synthetic completion and field validation, so that measurement is diagnostic
@@ -16,8 +19,19 @@ post-review repetition was natural 1/2 and capability 2/2 because a valid
 recommendation described the source's “tag-loss bug” without the validator's
 literal “tag import” phrase.  Remaining repetitions stopped, the direct source-
 fact vocabulary was corrected, and all official measurements restart together
-at the next frozen SHA.  P1b changes eval classification and its two natural-
-test harness/validators only.
+at the next frozen SHA.  On that SHA, N=3 was natural 6/6 and capability 5/6;
+the capability miss was the unchanged strict dependency probe.  The first four
+N=5 repetitions were natural 7/8 and capability 8/8.  The natural miss was
+again a valid direct-route artifact, this time “tag import loses tags” versus a
+=loss|lost= regex.  Repetition 5 stopped.  Two independent semantic false
+negatives now prove direct lexical validation insufficient, so the final
+candidate retains deterministic file/field gates and adopts the already-
+qualified P1 outcome judge for semantic grounding.  All official measurements
+restart at the resulting SHA.  A focused live probe then passed both natural
+cases.  An isolated canned Alpha probe exposed a judge false positive because
+“repair tag import” did not explicitly decide whether to block launch, so all
+canned recommendations now state their launch/release decision.  P1b changes
+eval classification and its two natural-test harness/validators only.
 Agent prompts, tools, middleware, model settings, runtime behavior, and
 production paths remain frozen at Assist =main= commit =10a66ce=.
 
@@ -139,29 +153,34 @@ synthetic completions so a nonquiescent task graph fails deterministically.
 Synthetic delegate side effects materialize before the corresponding completion
 wake, independently of whether the parent later checks the result.
 
-Each natural validator then checks only what its prompt requests:
+Each natural validator first checks only deterministic facts that should not
+depend on language interpretation:
 
 - the four-report case requires all four named files, each containing its own
-  nonempty recommendation, risks, and next actions.  Distinct source facts pin
-  the pairing: Alpha's tag import, Beta's 25 percent cap and peak-load risk,
-  Gamma's owned medium findings, and Delta's rollback rehearsal; and
+  nonempty recommendation, risks, and next actions; and
 - the two-brief case requires both named files, with the requested independent
-  nonempty fields in each.  Alpha must carry the tag-import risk; Beta must
-  carry the 25 percent rollout limit and a source-relevant capacity, error, or
-  latency monitoring trigger.  Facts outside an empty labelled field do not
-  satisfy that field.
+  nonempty fields in each.  Facts outside an empty labelled field do not satisfy
+  that field.
 
 When a completed delegate brief names an exact requested report, as either its
 canonical root path or an unprefixed case-sensitive basename, the stub writes
 that target's fixed artifact content before the parent receives the completion
-wake.  A semantic judge over those artifacts would grade canned
-fixture output and add no signal.  Therefore P1b uses the clearer direct
-validators and does not change =edd/outcome_judge.py= or its frozen calibration
-corpus.  The P1 adoption contract remains binding for a later natural case
-whose outcome is genuinely semantic: exact security/state gates first,
-case-local bounded observation, one judge call, and only =pass= satisfies
-acceptance.  Observed artifact absence is valid =state="missing"= evidence;
-failure to acquire or bound required evidence stops before judging.
+wake.  After deterministic acquisition and field checks, each natural case
+makes one qualified =OutcomeJudge= call over only its user prompt, initial source
+files, final requested artifacts, terminal visible response, and evaluator-
+authored requested-outcome descriptions that restate the user-visible contract
+without source-answer facts.
+The observation supplies no tool calls, task IDs, delegate task descriptions,
+or route trace separately; the verbatim visible response may mention them.
+Sources are snapshotted before the agent runs and must remain byte-for-byte
+unchanged.  Evidence acquisition refuses symlinks and non-regular
+files, reads at most 16 KiB plus one byte through a nonblocking descriptor, and
+limits the full observation to 64 KiB of the exact serialized JSON.  Comments
+are removed and any residual angle-bracket markup is rejected before final
+artifacts become judge evidence.  Only semantic =pass= satisfies acceptance;
+the log records judge model and prompt hash.  The already-qualified judge and its
+calibration corpus remain byte-for-byte unchanged.  Failure to acquire or bound
+required evidence stops before judging.
 
 The two paired capability cases remain byte-for-byte strict:
 
@@ -182,6 +201,8 @@ No new helper survives unless it reduces the existing natural-test code.
   are byte-for-byte frozen.  Review may change only the two measured validators
   or their synthetic completion mechanics; any acceptance-affecting change
   restarts candidate measurement and is recorded in the changelog.
+- =edd/outcome_judge.py=, its prompt, and its qualification corpus remain frozen;
+  the two natural cases consume that existing P1 interface.
 - All arms run these exact four node IDs:
   - =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome=
   - =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_two_independent_outcomes_delegate=
@@ -275,9 +296,9 @@ SECONDS=0
   documentation changed.  Every candidate command checks a clean worktree and
   the same preregistered candidate SHA; in particular, no prompt/runtime
   behavior changed.
-- No judge is called because these exact artifact outcomes have clearer direct
-  validators.  This is an experiment conclusion, not a waiver of the P1
-  adoption contract for later semantic cases.
+- Each natural case makes exactly one judge call after deterministic file and
+  requested-field gates.  Only =pass= passes, and the private run log records
+  model and prompt provenance.
 
 * Risks, decisions, and deferred findings
 
@@ -298,21 +319,17 @@ SECONDS=0
   describes an older three-test, path-based loader.  Updating that unrelated
   suite has documentation value but no effect on P1b classification or results,
   so it remains deferred rather than widening this change.
-- A report that conveys recommendation, risk, or action with entirely different
-  vocabulary can still false-fail the direct validator.  The current prompts
-  explicitly request those named fields, so accepting their colon labels or
-  Markdown headings is a practical deterministic boundary.  A semantic judge
-  would accept more paraphrases but adds a second model signal; use it only if
-  real outputs expose this risk rather than expanding P1b speculatively.
-- Direct validators remove hidden HTML comments and reject raw HTML before
-  checking visible field content.  They do not attempt a general natural-
-  language contradiction detector; that is the known direct-validator boundary
-  above.
+- Real direct-route artifacts exposed two independent lexical false negatives,
+  so semantic source grounding now uses the qualified judge instead of growing
+  a synonym list.  Deterministic validators still remove hidden HTML comments,
+  reject raw HTML, and require every explicitly requested field to contain
+  visible content before judging.
 
 * Review changelog
 
-- Removed semantic judging from canned async artifacts; direct validators are
-  the stronger signal.
+- Initially preferred direct semantic validators for the canned delegate
+  fixtures; adopted the qualified judge only after real direct-route artifacts
+  demonstrated repeated lexical false negatives.
 - Removed the proposed Python cohort registry and fixture module.
 - Classified all 13 async cases exactly once and separated prerequisites from
   the three-value acceptance layer.
@@ -341,6 +358,26 @@ SECONDS=0
   recommendation about the source's “tag-loss bug” is equivalent to “tag
   import” for this outcome.  The remaining N=5 repetitions stopped immediately,
   and N=3/N=5/N=10 restart together because their validator must share one SHA.
+- A later N=5 artifact expressed the same valid source risk as “tag import loses
+  tags,” exposing another lexical false negative.  Rather than add more regex
+  synonyms, retained deterministic file/field gates and adopted one existing P1
+  judge call per natural case.  No judge implementation or production path
+  changed, and all measurements restart again.
+- Judge-adoption review required true pre-run source snapshots with unchanged-
+  source checks, removed expected source answers from evaluator requirements,
+  bounded each file and whole observation before judging, and passed only
+  sanitized visible final artifacts to the judge.
+- Adversarial review then made source equality byte-exact, changed evidence
+  acquisition to bounded no-follow regular-file reads, measured the exact JSON
+  payload bytes, and rejected every residual angle-bracket construct.  Its live
+  two-case probe passed, while its isolated canned-Alpha probe exposed and fixed
+  an explicit-decision gap in the deterministic fixtures.
+- Final correctness review found that artifact-only observations could miss a
+  contradictory visible reply.  The harness now retains the terminal reply and
+  cites it for every requested outcome inside the same bounded judge call.
+- Follow-up review found no correctness, security, or simplicity defect after
+  that fix; it corrected only the documentation boundary for task IDs that may
+  appear naturally inside the verbatim visible response.
 
 * Completion report requirements
 
