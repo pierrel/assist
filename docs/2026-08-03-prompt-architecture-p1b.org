@@ -1,0 +1,352 @@
+#+title: Prompt architecture P1b: natural acceptance and capability coverage
+#+date: 2026-08-03
+
+* Status
+
+Candidate implementation completed and five local code-review rounds converged.
+The counted baseline was natural 3/6 and capability 6/6.  The initial candidate
+was natural 6/6 and capability 6/6, but review found hidden route constraints in
+synthetic completion and field validation, so that measurement is diagnostic
+only.  The first post-review repetition was natural 1/2 and capability 2/2; its
+direct-route artifact exposed a real validator defect where a colon inside a
+Markdown bullet prematurely ended the requested field.  That repetition is also
+diagnostic only, and candidate measurement restarts after the case-derived fix.
+That candidate then passed natural 6/6 and capability 6/6 at N=3.  Its first
+post-review repetition was natural 1/2 and capability 2/2 because a valid
+recommendation described the source's “tag-loss bug” without the validator's
+literal “tag import” phrase.  Remaining repetitions stopped, the direct source-
+fact vocabulary was corrected, and all official measurements restart together
+at the next frozen SHA.  P1b changes eval classification and its two natural-
+test harness/validators only.
+Agent prompts, tools, middleware, model settings, runtime behavior, and
+production paths remain frozen at Assist =main= commit =10a66ce=.
+
+P1c is proceeding in another lane and owns
+=docs/2026-07-26-agent-prompt-architecture.org= and =roadmap.org=.  P1b neither
+touches those files nor waits on P1c.
+
+* Objective and hypothesis
+
+P1b makes a natural acceptance case answer whether the user received the
+requested visible outcome without a forbidden outcome.  Separately named
+capability and deterministic security/state cases retain strict internal and
+lifecycle diagnostics.  The hypothesis is that this separation preserves
+failure detection while no longer failing a natural request merely because the
+agent used a different valid route.
+
+* Scope
+
+P1b does now:
+
+1. classify the existing cases selected for P2 through P7;
+2. remove orchestration-shaped assertions from two P2 natural artifact cases;
+3. retain two strict P2 capability probes as the paired diagnostic signal; and
+4. run the frozen four-case experiment through baseline N=3, candidate N=3,
+   post-review N=5, and stability N=10.
+
+P1b does not add a registry, pytest plugin, marker system, eval runner, workspace
+collector, evidence-custody/history system, production guard, or prompt/runtime
+change.  It does not alter SMS triage or development guidance.  Later phases add
+their missing phase-specific cases when they change the corresponding prompt.
+
+* Classification contract
+
+Every selected case has exactly one acceptance layer:
+
+- =natural=: user-shaped prompt and user-visible outcome;
+- =capability=: exact mechanism, route, tool, or orchestration coverage; or
+- =deterministic-security/state=: exact safety, authorization, lifecycle,
+  resource, or persisted-state coverage.
+
+A natural case may run a deterministic prerequisite first.  That prerequisite
+is metadata, not a second acceptance layer, and it cannot be waived by semantic
+judging.  Exact task IDs remain a deterministic user-visible lifecycle contract
+where the user needs them to inspect, update, or cancel work.  Exact agent names,
+tool order, delegate counts, and brief vocabulary are capability coverage.
+
+The P2 async test harness uses Assist's web async-subagent tools, not Deep
+Agents' native synchronous =task= mechanism.  Its capability results apply only
+to that boundary.
+
+* P2 async inventory
+
+Each of the 13 existing cases is named exactly once.  The =Prerequisite= column
+records exact gates that run before the acceptance assertion; it does not alter
+the case's layer.
+
+| Test method in =TestAsyncSubagentSupervisor= | Layer | Prerequisite or gate |
+|-
+| =test_starts_subagents_and_returns_without_polling= | deterministic-security/state | Visible task-shaped ID; no launch-turn polling, invented completion, or misleading terminology |
+| =test_starts_independent_context_and_research_without_polling= | capability | At least two starts, no polling, and each started task's visible ID |
+| =test_completion_wake_checks_then_uses_result= | capability | Exact context start/check path plus returned fact |
+| =test_user_stop_request_reports_cancellation_requested_for_running_tasks= | deterministic-security/state | Request cancellation for every running task; never claim terminal cancellation |
+| =test_explicit_delegate_fanout_capability= | capability | Exact three-way delegate fan-out and target mapping |
+| =test_natural_long_list_chooses_one_delegate_per_outcome= | natural | Requested four files must exist; no route assertion |
+| =test_natural_two_independent_outcomes_delegate= | natural | Requested two files must exist; no route assertion |
+| =test_single_outcome_with_several_steps_stays_with_main= | capability | Exact no-delegate route plus requested summary and source fact |
+| =test_explicit_dependent_delegate_starts_after_prerequisite_completion= | capability | Exact check-before-start ordering, brief propagation, and isolation |
+| =test_explicit_timed_out_prerequisite_blocks_dependent_delegate= | deterministic-security/state | No dependent artifact or continuation after timeout |
+| =test_overlapping_workspace_changes_are_serialized= | deterministic-security/state | Final shared-file state proves both ordered edits without corruption |
+| =test_explicit_failed_sibling_preserves_success_and_blocks_join= | deterministic-security/state | Preserve success, report failure, and do not create joined output |
+| =test_pure_external_research_uses_research_not_delegate= | capability | Exact research rather than delegate route plus returned fact |
+
+Only the two named natural multi-artifact cases and their synthetic artifact
+completion change in P1b.  Launch, stop, completion, overlap, failure, and
+pure-research cases are classified but their validators are not rewritten by
+this experiment.
+
+* Later-phase cohort inventory
+
+This table selects the existing cohorts later phases may compare.  Module and
+class selectors are used only when that entire selected scope has one layer.
+Explicit gaps prevent a weak current assertion from being mistaken for future
+acceptance coverage.  Every selector resolves from the repository root.
+
+| Phase | Existing selected cases | Layer | Deterministic prerequisite / known gap |
+|-
+| P2 | =edd/eval/test_context_agent.py::TestContextInvocation=; =edd/eval/test_skill_loading.py= | capability | Context-first and skill-loading mechanism only |
+| P2 | =edd/eval/test_interjection.py::TestInterjection::test_redirect_mid_turn=; =edd/eval/test_interjection.py::TestInterjection::test_incorporate_addition=; =edd/eval/test_interjection.py::TestInterjection::test_coalesce_two_rapid_interjections= | natural | Presentation is a deterministic prerequisite; the pass bit grades the redirected or combined answer |
+| P2 | =edd/eval/test_interjection.py::TestInterjection::test_stop_halts_with_account=; =edd/eval/test_prompt_injection.py= | deterministic-security/state | Bounded stop/liveness and injection containment |
+| P2b | =edd/eval/test_domain_skills.py=; =edd/eval/test_travel_agent.py=; =edd/eval/test_directions_agent.py=; =edd/eval/test_schedule_agent.py= | capability | Exact skill/tool availability and invocation |
+| P2b | =edd/eval/test_egress_approval.py= | deterministic-security/state | Host effect remains denied until explicit approval |
+| P3 | =edd/eval/test_memory.py=; =edd/eval/test_thread_memory.py::TestThreadMemory::test_infers_repo_and_thread_scope= | natural | Exact file/scope state first; add secret/transient non-save and scheduled-continuity cases in P3 |
+| P3 | =edd/eval/test_thread_memory.py::TestThreadMemory::test_natural_process_prompt_writes_thread_memory= | capability | Current assertion proves only a nonempty write, not correct process capture; P3 must replace or strengthen it |
+| P4 | =edd/eval/test_research_agent.py=; =edd/eval/test_research_partial_results.py=; =edd/eval/test_research_large_multipart.py=; =edd/eval/test_read_url_deep_content.py=; =edd/eval/test_agent.py::TestAgent::test_research_saved_to_references=; =edd/eval/test_agent.py::TestAgent::test_combines_context_and_research=; =edd/eval/test_agent.py::TestResearchRunsToCompletion= | natural | Exact source/provenance, cleanup, and retrieval bounds remain deterministic prerequisites |
+| P4 | =edd/eval/test_research_reliability.py=; =edd/eval/test_read_url_fabrication_loop.py=; =edd/eval/test_read_url_reread_loop.py=; =edd/eval/test_search_runaway_loop.py=; =edd/eval/test_agent.py::TestResearchSearchUnavailableHandoff=; =edd/eval/test_agent.py::TestSearchDownMidflightDoesNotGrind= | deterministic-security/state | Provenance, unavailable state, and resource bounds |
+| P5 | =edd/eval/test_research_agent.py=; =edd/eval/test_research_large_multipart.py= | natural | Existing lead coverage; P5 must add or identify leaf, critique, and fact-check acceptance coverage |
+| P6 | =edd/eval/test_context_agent.py::TestContextAgent= | natural | Relevance remains direct; later P6 role changes may need richer synthesis cases |
+| P6 | =edd/eval/test_receptionist.py::TestReceptionist::test_picks_thread_by_topic=; =edd/eval/test_receptionist.py::TestReceptionist::test_ambiguous_asks_which=; =edd/eval/test_receptionist.py::TestReceptionist::test_new_thread_uses_named_domain=; =edd/eval/test_receptionist.py::TestReceptionist::test_new_thread_asks_domain_when_missing=; =edd/eval/test_receptionist.py::TestReceptionist::test_no_content_fabrication=; =edd/eval/test_receptionist.py::TestReceptionist::test_spoken_output_no_markdown= | natural | Open/create/reply state is exact and user-visible |
+| P6 | =edd/eval/test_receptionist.py::TestReceptionist::test_yields_without_reading_the_list=; =edd/eval/test_receptionist.py::TestReceptionist::test_offers_when_unsure= | capability | Exact =list_threads= routing behavior |
+| P6 | =edd/eval/test_thread_e2e.py::TestThreadE2E::test_description_generation= | capability | Current nonempty-string assertion is not relevance coverage; P6 must add relevant, bounded, empty/short, and adversarial cases |
+| P6 | =tests/test_capture.py= | deterministic-security/state | Deterministic serialization only, not real-model acceptance |
+| P7 | =edd/eval/test_edit_files.py=; =edd/eval/test_agent.py::TestAgent::test_adds_item_correctly=; =edd/eval/test_agent.py::TestAgent::test_finds_and_updates_relevant_files_direct= | natural | Exact requested filesystem state and truthful summary first; P7 adds answer-only/no-unrequested-artifact cases |
+
+The inventory is maintained here because there is no execution consumer for a
+Python registry.  Before baseline, =pytest --collect-only= confirms every exact
+node ID used by the experiment exists.  P1c is a separate experiment and does
+not gate P1b.
+
+* Focused implementation
+
+At baseline, the two natural async cases asserted complex-skill loading,
+delegate count, one delegate per target, brief vocabulary, and result-check
+calls before checking the requested files.  P1b removes those route assertions
+from their pass bits.  Harness code uses pending synthetic task state solely to
+deliver completion events and supports duplicate, serial, and whole-task
+delegation without grading the chosen route.  Terminal failed, timed-out, or
+cancelled tasks are never resurrected.  The harness accepts at most 32
+synthetic completions so a nonquiescent task graph fails deterministically.
+Synthetic delegate side effects materialize before the corresponding completion
+wake, independently of whether the parent later checks the result.
+
+Each natural validator then checks only what its prompt requests:
+
+- the four-report case requires all four named files, each containing its own
+  nonempty recommendation, risks, and next actions.  Distinct source facts pin
+  the pairing: Alpha's tag import, Beta's 25 percent cap and peak-load risk,
+  Gamma's owned medium findings, and Delta's rollback rehearsal; and
+- the two-brief case requires both named files, with the requested independent
+  nonempty fields in each.  Alpha must carry the tag-import risk; Beta must
+  carry the 25 percent rollout limit and a source-relevant capacity, error, or
+  latency monitoring trigger.  Facts outside an empty labelled field do not
+  satisfy that field.
+
+When a completed delegate brief names an exact requested report, as either its
+canonical root path or an unprefixed case-sensitive basename, the stub writes
+that target's fixed artifact content before the parent receives the completion
+wake.  A semantic judge over those artifacts would grade canned
+fixture output and add no signal.  Therefore P1b uses the clearer direct
+validators and does not change =edd/outcome_judge.py= or its frozen calibration
+corpus.  The P1 adoption contract remains binding for a later natural case
+whose outcome is genuinely semantic: exact security/state gates first,
+case-local bounded observation, one judge call, and only =pass= satisfies
+acceptance.  Observed artifact absence is valid =state="missing"= evidence;
+failure to acquire or bound required evidence stops before judging.
+
+The two paired capability cases remain byte-for-byte strict:
+
+- =test_explicit_delegate_fanout_capability=; and
+- =test_explicit_dependent_delegate_starts_after_prerequisite_completion=.
+
+No test method is renamed, so baseline and candidate use identical node IDs.
+No new helper survives unless it reduces the existing natural-test code.
+
+* Preregistered experiment
+
+** Fixed variables
+
+- Baseline source is =10a66ce=; candidate differs only in the two natural cases,
+  their synthetic artifact-completion harness, aligned module documentation,
+  and this state document.
+- Agent prompts, production tools, middleware, model settings, and runtime code
+  are byte-for-byte frozen.  Review may change only the two measured validators
+  or their synthetic completion mechanics; any acceptance-affecting change
+  restarts candidate measurement and is recorded in the changelog.
+- All arms run these exact four node IDs:
+  - =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome=
+  - =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_two_independent_outcomes_delegate=
+  - =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_delegate_fanout_capability=
+  - =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_dependent_delegate_starts_after_prerequisite_completion=
+- Logs live under a mode-0700 =$HOME/deploy/assist/eval/p1b/= directory, never on
+  the small root partition.  Each run creates a fresh mode-0600 log and records
+  source SHA, arm, iteration, node IDs, run result, and wall time without
+  printing secrets.
+- Each block uses the workspace =llm= resource and an OS timeout, stays below 60
+  minutes, and is not rerun to seek a favorable answer.
+
+** Sequence and cadence
+
+1. Baseline N=3 on =10a66ce= with current mixed validators.
+2. Candidate N=3 after only the two natural cases, their synthetic
+   artifact-completion harness, and aligned module documentation change.
+3. Deterministic checks and the full local code-review loop.  If review changes
+   a measured validator, restart the affected candidate measurement.
+4. Post-review N=5 on the unchanged candidate.
+5. Stability N=10 on the unchanged candidate, split into bounded blocks with a
+   GPU rest between blocks when needed.
+
+The exact invocation below is run from the lane's Assist worktree.  Only =ARM=
+and =ITER= change between baseline invocations.  After committing the candidate,
+=EXPECTED_SHA= is set once to that commit and remains identical for N=3, N=5,
+and N=10.
+
+#+begin_src shell
+umask 077
+ASSIST_WORKTREE="$PWD"
+AGENTIC_ROOT="$(realpath "$ASSIST_WORKTREE/../../..")"
+PYTEST="$HOME/deploy/assist/code/.venv/bin/pytest"
+ARM=baseline
+ITER=1
+EXPECTED_SHA=10a66ceee3e9801f1af0d5b5f9406b320735f8dc
+LOG_DIR="$HOME/deploy/assist/eval/p1b"
+install -d -m 0700 "$LOG_DIR"
+LOG="$(mktemp "$LOG_DIR/${ARM}-${ITER}-XXXXXX.log")"
+chmod 0600 "$LOG"
+SECONDS=0
+{
+  set -e
+  set -a
+  source "$AGENTIC_ROOT/assist/.dev.env"
+  set +a
+  actual_sha="$(git rev-parse HEAD)"
+  test "$actual_sha" = "$EXPECTED_SHA"
+  if [ "$ARM" = baseline ]; then
+    test "$(git status --porcelain)" = \
+      "?? docs/2026-08-03-prompt-architecture-p1b.org"
+  else
+    test -z "$(git status --porcelain)"
+    changed="$(git diff --name-only 10a66ceee3e9801f1af0d5b5f9406b320735f8dc "$actual_sha")"
+    expected="$(printf '%s\n' \
+      docs/2026-08-03-prompt-architecture-p1b.org \
+      edd/eval/test_async_subagents.py)"
+    test "$changed" = "$expected"
+  fi
+  echo "source_sha=$actual_sha"
+  echo "arm=$ARM iteration=$ITER"
+  echo "node=edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome"
+  echo "node=edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_two_independent_outcomes_delegate"
+  echo "node=edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_delegate_fanout_capability"
+  echo "node=edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_dependent_delegate_starts_after_prerequisite_completion"
+  set +e
+  "$AGENTIC_ROOT/tools/agentic" resource run llm -- /usr/bin/bash -lc \
+    "cd '$ASSIST_WORKTREE' && timeout --kill-after=30s 3500 '$PYTEST' -qq -s \
+    edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome \
+    edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_two_independent_outcomes_delegate \
+    edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_delegate_fanout_capability \
+    edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_dependent_delegate_starts_after_prerequisite_completion"
+  rc=$?
+  echo "run_rc=$rc wall_seconds=$SECONDS"
+  exit "$rc"
+} >"$LOG" 2>&1
+#+end_src
+
+** Gates
+
+- Collection resolves the same four node IDs in every arm.
+- Both capability probes pass 100% at N=3, N=5, and N=10.
+- Natural acceptance is reported separately and reaches at least 70%, with no
+  false pass when a requested file or field is absent.
+- The candidate natural pass bit contains no agent-name, tool-order,
+  delegate-count, task-ID, or brief-vocabulary assertion.
+- The candidate diff against =10a66ce= contains exactly
+  =edd/eval/test_async_subagents.py= and this state document.  Any other path is
+  a gate failure; local review of that file verifies only the two named natural
+  cases, their synthetic artifact-completion helpers, and aligned module
+  documentation changed.  Every candidate command checks a clean worktree and
+  the same preregistered candidate SHA; in particular, no prompt/runtime
+  behavior changed.
+- No judge is called because these exact artifact outcomes have clearer direct
+  validators.  This is an experiment conclusion, not a waiver of the P1
+  adoption contract for later semantic cases.
+
+* Risks, decisions, and deferred findings
+
+- Model variance remains despite frozen prompts.  Repeated arms measure whether
+  the revised pass signal stays useful; they do not claim runtime improvement.
+- Synthetic completions require internal task IDs.  That is harness control,
+  not an acceptance assertion.
+- Removing route checks from the natural cases reduces diagnosis in those two
+  methods.  The paired strict fan-out/dependency cases retain mechanism
+  diagnosis; skill/context routing also remains covered by its selected
+  capability cohorts.
+- Launch and stop have important UX semantics, but changing them is outside the
+  measured four-case objective.  Their exact current state gates remain intact.
+- A repository-wide executable classification system could prevent future
+  drift, but it has no current consumer and adds maintenance.  The reviewed
+  state document plus exact experiment IDs is sufficient now.
+- Review found that the selected skill-loading suite's module doc still
+  describes an older three-test, path-based loader.  Updating that unrelated
+  suite has documentation value but no effect on P1b classification or results,
+  so it remains deferred rather than widening this change.
+- A report that conveys recommendation, risk, or action with entirely different
+  vocabulary can still false-fail the direct validator.  The current prompts
+  explicitly request those named fields, so accepting their colon labels or
+  Markdown headings is a practical deterministic boundary.  A semantic judge
+  would accept more paraphrases but adds a second model signal; use it only if
+  real outputs expose this risk rather than expanding P1b speculatively.
+- Direct validators remove hidden HTML comments and reject raw HTML before
+  checking visible field content.  They do not attempt a general natural-
+  language contradiction detector; that is the known direct-validator boundary
+  above.
+
+* Review changelog
+
+- Removed semantic judging from canned async artifacts; direct validators are
+  the stronger signal.
+- Removed the proposed Python cohort registry and fixture module.
+- Classified all 13 async cases exactly once and separated prerequisites from
+  the three-value acceptance layer.
+- Preserved task IDs where they are a real user-visible lifecycle contract.
+- Corrected cancellation-request versus terminal-cancelled semantics.
+- Narrowed P5's gap to leaf/critique/fact-check and recorded concrete P3/P6
+  weak-coverage gaps.
+- Split natural receptionist outcomes from exact =list_threads= capability
+  probes.
+- Named the exact four experiment node IDs and retained them across both arms.
+- Added private home-backed log handling and removed committed host paths.
+- Made synthetic completion route-neutral for duplicate, serial, terminal, and
+  whole-task delegation, with an explicit 32-completion quiescence bound; this
+  review-driven harness change restarts candidate measurement.
+- Restricted report recognition to exact case-sensitive target names with
+  path-safe, punctuation-aware boundaries, and made successful side effects
+  idempotent across duplicate wakes.
+- Bound source facts to exact colon-labelled or Markdown-heading fields without
+  requiring field order or canned fixture wording, and excluded hidden or raw
+  HTML from visible field content.
+- Used the first post-review artifact to correct a real field-boundary defect:
+  colons inside ordinary Markdown bullets remain field content, while an
+  unrelated standalone label still ends an empty field.  This validator change
+  restarts candidate measurement rather than selectively rerunning its failure.
+- Used the first N=5 artifact to correct a real lexical false negative: a
+  recommendation about the source's “tag-loss bug” is equivalent to “tag
+  import” for this outcome.  The remaining N=5 repetitions stopped immediately,
+  and N=3/N=5/N=10 restart together because their validator must share one SHA.
+
+* Completion report requirements
+
+The final report records the classification changes, exact run counts and
+results by layer, deterministic status, review rounds, declined out-of-scope
+findings with their risk/value, and what was hard.  Review
+findings do not expand implementation beyond this objective.  A directly
+related issue requiring significant unplanned rework triggers a blocked report
+with options before throwaway implementation.

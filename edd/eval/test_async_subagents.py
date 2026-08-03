@@ -3,13 +3,14 @@
 The subagents are deterministic stubs. This suite evaluates supervisor scheduling,
 requested workspace outcomes, and visible replies across launch/completion turns,
 not child quality or queue plumbing.
-Explicitly named capability tests isolate delegate fan-out and dependency handling;
-the remaining tests use natural requests as the acceptance signal.
+Cases are classified as natural outcome acceptance, exact capability coverage, or
+deterministic security/state coverage in the P1b state document.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tempfile
 from pathlib import Path
 from unittest import TestCase
@@ -60,7 +61,10 @@ def _delegate_starts(calls: list[dict]) -> list[dict]:
 
 
 def _completion_wake(task_id: str, status: str) -> str:
-    """Production-shaped task-completion message delivered to the parent model."""
+    """Complete synthetic side effects, then return the production-shaped wake."""
+    if (status == "success"
+            and _TASK_STATUSES.get(task_id) in {"pending", "running"}):
+        _materialize_report_artifacts(task_id)
     _TASK_STATUSES[task_id] = status
     return (
         f"Task ID: {task_id}\n"
@@ -114,21 +118,9 @@ def _task_result(task_id: str, status: str, *, result: str | None = None,
     return json.dumps(payload)
 
 
-def _check(task_id: str) -> str:
+def _materialize_report_artifacts(task_id: str) -> None:
+    """Write deterministic report fixtures named by a delegate brief."""
     description = _TASK_DESCRIPTIONS.get(task_id, "")
-    status = _TASK_STATUSES.get(task_id, "pending")
-    if status == "error":
-        return _task_result(
-            task_id, status,
-            error="The prerequisite task failed its verification.")
-    if status == "timeout":
-        return _task_result(
-            task_id, status,
-            error="The task exceeded its execution limit.")
-    if status in {"pending", "running", "interrupted"}:
-        return _task_result(task_id, status)
-    if status == "cancelled":
-        return _task_result(task_id, status)
     artifacts = {
         "alpha-report.md": (
             "# Alpha report\n\nRecommendation: fix tag import before launch.\n\n"
@@ -154,15 +146,38 @@ def _check(task_id: str) -> str:
             "Rollout limits: 25 percent.\n\n"
             "Monitoring triggers: peak-load errors.\n"),
     }
-    if _TASK_TYPES.get(task_id) == "delegate-agent":
-        target = next((name for name in artifacts
-                       if name in description.lower()), None)
-        if target is not None:
-            if _TASK_ROOT is None:
-                raise RuntimeError("eval task root is unavailable")
+    if _TASK_TYPES.get(task_id) != "delegate-agent":
+        return
+    targets = [
+        name for name in artifacts
+        if re.search(
+            rf"(?<![\w./:\\-])/?{re.escape(name)}"
+            r'(?=$|\s|[\])}>"\'`*.,;:!?…]+(?=\s|$))',
+            description,
+        )
+    ]
+    if targets:
+        if _TASK_ROOT is None:
+            raise RuntimeError("eval task root is unavailable")
+        for target in targets:
             Path(_TASK_ROOT, target).write_text(artifacts[target])
-            return _task_result(
-                task_id, "success", result=f"Created and verified /{target}.")
+
+
+def _check(task_id: str) -> str:
+    description = _TASK_DESCRIPTIONS.get(task_id, "")
+    status = _TASK_STATUSES.get(task_id, "pending")
+    if status == "error":
+        return _task_result(
+            task_id, status,
+            error="The prerequisite task failed its verification.")
+    if status == "timeout":
+        return _task_result(
+            task_id, status,
+            error="The task exceeded its execution limit.")
+    if status in {"pending", "running", "interrupted"}:
+        return _task_result(task_id, status)
+    if status == "cancelled":
+        return _task_result(task_id, status)
     if ("alpha-notes.md" in description.lower()
             and "audit" in description.lower()
             and _TASK_TYPES.get(task_id) == "delegate-agent"):
@@ -325,33 +340,63 @@ class TestAsyncSubagentSupervisor(TestCase):
                 if isinstance(message, AIMessage)
                 for call in (message.tool_calls or [])]
 
-    def _assert_complex_skill_loaded_first(self, agent: AgentHarness) -> None:
-        first_calls = next(
-            message.tool_calls for message in agent.all_messages()
-            if isinstance(message, AIMessage) and message.tool_calls)
-        self.assertEqual(len(first_calls), 1, first_calls)
-        self.assertEqual(first_calls[0].get("name"), "load_skill", first_calls)
-        self.assertEqual(
-            first_calls[0].get("args", {}).get("name"),
-            "complex-request",
-            first_calls,
-        )
-
-    def _complete_delegates(
-            self, agent: AgentHarness, delegates: list[dict]) -> list[dict]:
-        completion_calls: list[dict] = []
-        for delegate in delegates:
-            task_id = _task_id_for_call(delegate)
-            before = len(self._calls(agent))
+    def _complete_synthetic_work(self, agent: AgentHarness) -> None:
+        """Deliver at most 32 results; fail if synthetic work remains."""
+        for _ in range(32):
+            task_id = next((
+                task_id for task_id, status in _TASK_STATUSES.items()
+                if status in {"pending", "running"}
+            ), None)
+            if task_id is None:
+                return
             agent.message(_completion_wake(task_id, "success"))
-            current = self._calls(agent)[before:]
-            self.assertTrue(any(
-                call.get("name") == "check_async_task"
-                and call.get("args", {}).get("task_id") == task_id
-                for call in current
-            ), current)
-            completion_calls.extend(current)
-        return completion_calls
+        if any(status in {"pending", "running"}
+               for status in _TASK_STATUSES.values()):
+            self.fail("synthetic work exceeded 32 task completions")
+
+    def _labelled_fields(
+            self, content: str, labels: tuple[str, ...]) -> dict[str, str]:
+        content = re.sub(r"<!--.*?(?:-->|$)", "", content, flags=re.DOTALL)
+        self.assertNotRegex(content, r"(?i)</?[a-z][^>]*>")
+        alternatives = "|".join(re.escape(label) for label in labels)
+        colon = re.compile(
+            rf"(?i)(?P<label>{alternatives})[ \t]*:[ \t]*(?P<inline>.*)"
+        )
+        heading = re.compile(
+            rf"(?i)(?:#{{1,6}}|\*{{2,}})[ \t]+"
+            rf"(?P<label>{alternatives})"
+            rf"(?:[ \t]*:[ \t]*(?P<inline>.*?))?[ \t]*(?:[#*]+)?"
+        )
+        any_heading = re.compile(r"(?:#{1,6}|\*{2,})[ \t]+\S.*")
+        any_label = re.compile(r"(?![-+*][ \t])[^:]{1,80}:[ \t]*.*")
+        lines = content.splitlines()
+        markers: list[tuple[int, str, str]] = []
+        boundaries: list[int] = []
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            match = colon.fullmatch(stripped)
+            if match is not None:
+                markers.append((
+                    index, match.group("label").lower(), match.group("inline")))
+            else:
+                match = heading.fullmatch(stripped)
+                if match is not None:
+                    markers.append((
+                        index, match.group("label").lower(),
+                        match.group("inline") or ""))
+            if any_heading.fullmatch(stripped) or any_label.fullmatch(stripped):
+                boundaries.append(index)
+        found = [label for _, label, _ in markers]
+        self.assertCountEqual(found, labels)
+        fields: dict[str, str] = {}
+        for index, label, inline in markers:
+            end = next((boundary for boundary in boundaries if boundary > index),
+                       len(lines))
+            value = " ".join(
+                "\n".join((inline, *lines[index + 1:end])).split())
+            self.assertTrue(value, label)
+            fields[label] = value
+        return fields
 
     def _assert_one_delegate_per_target(
             self, delegates: list[dict], targets: tuple[str, ...]) -> None:
@@ -464,76 +509,84 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertEqual(len(task_ids), 3)
 
     def test_natural_long_list_chooses_one_delegate_per_outcome(self):
+        """Accept the requested reports; retain the frozen historical node ID."""
         agent = self._agent()
-        reply = agent.message(
+        agent.message(
             "I need a decision report for each of four launch workstreams while I "
             "handle the release meeting. Use /alpha-notes.md for /alpha-report.md, "
             "/beta-notes.md for /beta-report.md, /gamma-notes.md for "
             "/gamma-report.md, and /delta-notes.md for /delta-report.md. Each report "
             "should give its own recommendation, risks, and next actions.")
-        calls = self._calls(agent)
-        delegates = _delegate_starts(calls)
-        self._assert_complex_skill_loaded_first(agent)
-        if not delegates:
-            grounding = [
-                call for call in calls
-                if call.get("name") == "start_async_task"
-                and call.get("args", {}).get("subagent_type") != "delegate-agent"
-            ]
-            self.assertTrue(grounding, calls)
-            for call in grounding:
-                agent.message(_completion_wake(_task_id_for_call(call), "success"))
-            calls = self._calls(agent)
-            delegates = _delegate_starts(calls)
-        self.assertEqual(len(delegates), 4, (calls, reply))
-        targets = ("alpha-report.md", "beta-report.md", "gamma-report.md",
-                   "delta-report.md")
-        self._assert_one_delegate_per_target(delegates, targets)
-        for source, target in zip(
-                ("alpha-notes.md", "beta-notes.md", "gamma-notes.md",
-                 "delta-notes.md"), targets):
-            brief = next(call["args"]["description"].lower()
-                         for call in delegates
-                         if target in call["args"]["description"].lower())
-            for expected in (source, target, "recommend", "risk", "next action",
-                             "verif"):
-                self.assertIn(expected, brief)
-        self._complete_delegates(agent, delegates)
+        self._complete_synthetic_work(agent)
         assert _TASK_ROOT is not None
-        for target in targets:
+        expected_facts = {
+            "alpha-report.md": {
+                "recommendation": (
+                    r"(?:tag|tags).{0,40}(?:import|loss|lost|bug)|"
+                    r"(?:import|loss|lost|bug).{0,40}(?:tag|tags)"
+                ),
+                "risks": r"(?:tag|tags).*(?:loss|lost)|(?:loss|lost).*(?:tag|tags)",
+                "next actions": r"\brunbook\b|\brepair\b.{0,40}\bimport\b",
+            },
+            "beta-report.md": {
+                "recommendation": r"25\s*(?:percent|%)",
+                "risks": r"peak.{0,20}load|load.{0,20}peak",
+                "next actions": r"\bcap(?:ped|ping)?\b|\bmonitor\w*\b",
+            },
+            "gamma-report.md": {
+                "recommendation": r"\bfindings?\b",
+                "risks": r"medium.{0,20}finding|finding.{0,20}medium",
+                "next actions": r"\bowners?\b|\bclosure\b",
+            },
+            "delta-report.md": {
+                "recommendation": r"rollback",
+                "risks": r"rollback",
+                "next actions": r"rehears",
+            },
+        }
+        labels = ("recommendation", "risks", "next actions")
+        for target, field_patterns in expected_facts.items():
             content = Path(_TASK_ROOT, target).read_text().lower()
-            for expected in ("recommendation", "risks", "next actions"):
-                self.assertIn(expected, content)
+            fields = self._labelled_fields(content, labels)
+            for field, expected in field_patterns.items():
+                self.assertRegex(fields[field], expected)
 
     def test_natural_two_independent_outcomes_delegate(self):
+        """Accept the requested briefs; retain the frozen historical node ID."""
         agent = self._agent()
-        reply = agent.message(
+        agent.message(
             "Prepare two launch briefs for separate teams while I work on the agenda. "
             "Turn /alpha-notes.md into /alpha-brief.md with a recommendation and "
             "unresolved risks. Also turn /beta-notes.md into /beta-brief.md with its "
             "own recommendation, rollout limits, and monitoring triggers.")
-        calls = self._calls(agent)
-        delegates = _delegate_starts(calls)
-        self._assert_complex_skill_loaded_first(agent)
-        self.assertEqual(len(delegates), 2, (calls, reply))
-        targets = ("alpha-brief.md", "beta-brief.md")
-        self._assert_one_delegate_per_target(delegates, targets)
-        alpha = next(call["args"]["description"].lower() for call in delegates
-                     if "alpha-brief.md" in call["args"]["description"].lower())
-        beta = next(call["args"]["description"].lower() for call in delegates
-                    if "beta-brief.md" in call["args"]["description"].lower())
-        for expected in ("alpha-notes.md", "alpha-brief.md", "recommend", "risk",
-                         "verif"):
-            self.assertIn(expected, alpha)
-        for expected in ("beta-notes.md", "beta-brief.md", "recommend", "rollout",
-                         "monitor", "verif"):
-            self.assertIn(expected, beta)
-        self._complete_delegates(agent, delegates)
+        self._complete_synthetic_work(agent)
         assert _TASK_ROOT is not None
-        self.assertRegex(Path(_TASK_ROOT, "alpha-brief.md").read_text(),
-                         r"(?is)recommendation.*unresolved risks")
-        self.assertRegex(Path(_TASK_ROOT, "beta-brief.md").read_text(),
-                         r"(?is)recommendation.*rollout limits.*monitoring triggers")
+        alpha = Path(_TASK_ROOT, "alpha-brief.md").read_text().lower()
+        alpha_fields = self._labelled_fields(
+            alpha, ("recommendation", "unresolved risks"))
+        self.assertRegex(
+            alpha_fields["recommendation"],
+            r"(?:tag|tags).{0,40}(?:import|loss|lost|bug)|"
+            r"(?:import|loss|lost|bug).{0,40}(?:tag|tags)",
+        )
+        self.assertRegex(
+            alpha_fields["unresolved risks"],
+            r"tag.{0,30}loss|loss.{0,30}tag",
+        )
+        beta = Path(_TASK_ROOT, "beta-brief.md").read_text().lower()
+        beta_fields = self._labelled_fields(
+            beta, ("recommendation", "rollout limits", "monitoring triggers"),
+        )
+        self.assertRegex(
+            beta_fields["recommendation"],
+            r"\bcap(?:ped|ping)?\b|25\s*(?:percent|%)",
+        )
+        self.assertRegex(
+            beta_fields["rollout limits"], r"25\s*(?:percent|%)")
+        self.assertRegex(
+            beta_fields["monitoring triggers"],
+            r"peak.{0,20}load|\berrors?\b|\berror rate\b|\blatency\b",
+        )
 
     def test_single_outcome_with_several_steps_stays_with_main(self):
         agent = self._agent()
