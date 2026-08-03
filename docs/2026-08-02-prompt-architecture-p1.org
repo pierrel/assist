@@ -61,6 +61,24 @@ runner, or production-coordination work.
   majority.  The sole stable disagreement was human =fail= versus judge
   =partial= for an itinerary made public against a privacy request.  It remained
   non-passing, so every qualification gate passed without tuning on blind data.
+- 2026-08-03: Final local review found that the three pytest logs did not retain
+  the pre-registered model and prompt provenance with every successful verdict.
+  Added one JSON audit line to the eval wrapper, without changing the frozen
+  rubric, labels, judge, or production code, and reran the same corpus three
+  times.  All 36 provenance-complete verdicts reproduced the qualified result.
+- 2026-08-03: Review of that audit addition found that it named the configured
+  model rather than the provider-returned model, hashed the file separately
+  from the exact prompt string sent, allowed pytest progress prefixes, and
+  retained unnecessary free-text rationale in permissive logs.  Bound
+  provenance to the response and sent prompt, required clean completion,
+  redacted free text, made logs private, and ran a final three unchanged blind
+  passes.  All three private logs are byte-identical and reproduce 11/12.
+- 2026-08-03: Convergence review found that pytest's failed-case diagnostic
+  could still print the observation and rationale, and that whitespace-only
+  model metadata passed validation.  Parameterized only the opaque case ID,
+  limited assertion diagnostics to grades, rejected blank model IDs, and
+  extracted the already recorded 36 redacted verdicts into private JSONL.  No
+  judge rerun or new infrastructure was needed.
 
 * Goal
 
@@ -85,7 +103,9 @@ P1 changes only test and judge code:
 - =edd/outcome_judge_prompt.md= is the calibrated rubric;
 - =edd/eval/fixtures/outcome-judge/development.json= contains eighteen labelled
   observations, balanced six each across =pass=, =partial=, and =fail=;
-- =edd/eval/test_outcome_judge.py= runs one independent judge call per case; and
+- =edd/eval/test_outcome_judge.py= runs one independent judge call per case and
+  prints its redacted structural verdict, case ID, provider-returned model ID,
+  and exact sent-prompt SHA-256; and
 - =tests/test_outcome_judge.py= proves the mechanical contract without a model.
 
 There are no changes under =assist/=, =manage/=, =scripts/=, the existing eval
@@ -138,11 +158,22 @@ proven output contract while losing a useful inconsistency signal.
 
 ** Invocation
 
-=OutcomeJudge.judge(observation)= selects the configured model at temperature
-zero with thinking enabled, binds the strict JSON schema, =max_tokens=4096=, and
-=seed=0=, then makes exactly one non-streaming call.  JSON, schema, provider, or
-validation errors propagate and fail the pytest case.  There is no retry,
-fallback judge, subprocess worker, attempt record, or report framework.
+=OutcomeJudge.judge_with_provenance(observation)= selects the configured model
+at temperature zero with thinking enabled, binds the strict JSON schema,
+=max_tokens=4096=, and =seed=0=, then makes exactly one non-streaming call.  It
+returns the validated verdict with the provider response's model ID and a hash
+of the exact in-memory prompt sent.  A missing model ID or any completion reason
+other than =stop= is an error.  =judge(observation)= retains the simple verdict-
+only interface.  JSON, schema, provider, metadata, or validation errors
+propagate and fail the pytest case.  There is no retry, fallback judge,
+subprocess worker, attempt record, or report framework.
+
+The pytest wrapper prints one standalone sorted JSON audit line after each valid
+verdict.  It retains outcome grades, evidence citations, confidence, model ID,
+and prompt hash, but omits free-text rationale and contradiction descriptions
+that could repeat observation content.  This is ordinary test output, not a new
+persistence subsystem.  Qualification disables capture and uses a private
+umask so successful verdicts remain in owner-only logs.
 
 The ordinary eval runner remains the outer process backstop.  P1 adds no new
 timeout or process-management code.
@@ -207,12 +238,13 @@ was opened.
 The candidate model was =Qwen_Qwen3.6-27B-Q4_K_M.gguf=.  The frozen rubric
 SHA-256 was
 =f6d7f5ff9f1bebcda15ea095b25b2aefd35300c8e2f2852f727e4726eff3f884=.
-The three separate pytest logs remain home-backed under
-=~/deploy/assist/prompt-architecture-p1-simple/qualification-c514b0e/=; their
-SHA-256 values are, in run order,
-=34772e1179d8c2d1790857210e5d919e0e96173a115ad2bbd2d7aebeec922be3=,
-=5389f7f75b9e728d4a887e7160a5ffea24158610f028b8cc6bffeef25b12ef2d=,
-and =f3c27ddda7ba7c8aec020f99b19d143361875c39aaac889d012a63f768cdce36=.
+The final provenance-complete evidence remains home-backed under
+=~/deploy/assist/prompt-architecture-p1-simple/qualification-provenance-v2-c514b0e/=.
+The directory is mode =0700= and every source log and audit file is mode =0600=.
+Each =runN.jsonl= contains only twelve redacted standalone records with
+provider-returned model identity and the exact sent-prompt hash above.  All
+three JSONL files are byte-identical with SHA-256
+=7bbe98bebb4743d725d1e4d3ddc7c431fa0b32b7b61c8691a610e9b6b78eaf02=.
 
 Three explicit frozen runs produced the same result:
 
@@ -273,11 +305,12 @@ outcomes, and the expected human/objective label.
 
 Final verification was:
 
-- 17/17 focused deterministic judge tests;
-- 1,565 repository tests passed, 2 skipped, with only existing dependency
+- 21/21 focused deterministic judge tests;
+- 1,569 repository tests passed, 2 skipped, with only existing dependency
   warnings;
 - 18/18 practical development calibration; and
-- three blind runs of 11/12 each, with the identical one-grade disagreement.
+- three provenance-complete blind runs of 11/12 each, with the identical
+  one-grade disagreement and 36/36 stable verdicts.
 
 * Review decisions
 
@@ -302,6 +335,36 @@ added.  The main-agent reconciliation mechanically replayed the frozen hashes,
 all qualification log patterns, the confusion matrix, every documented count,
 and an Org-to-HTML render.
 
+One final diff review found a real audit gap: successful pytest cases were
+captured, so the original logs did not record the required model and prompt
+version with every verdict.  The first narrow fix reproduced all 36 verdicts.
+Review of that fix then found four direct defects: the configured model was not
+proof of the served model, the file hash was not bound to the exact string sent,
+pytest progress prefixed most records, and full rationales needlessly enlarged
+the private-data surface.  The final implementation uses response metadata,
+hashes the in-memory prompt, requires =finish_reason=stop=, starts every record
+on its own line, omits free text, and writes the evidence under owner-only
+permissions.  Three more unchanged runs produced 36 valid, stable records.  A
+suggestion to replace the documented =~/deploy/= location was rejected:
+workspace guidance explicitly uses =~/= as the portable home-directory
+placeholder and prohibits literal =/home/<user>= paths.
+
+The convergence pass then found two direct edge defects.  Pytest's failure
+diagnostic could repeat the parameterized observation and full verdict outside
+the redacted audit line, and whitespace-only model metadata passed the nonempty
+check.  The eval now parameterizes only an opaque case ID, reports only expected
+and actual grades on failure, rejects blank model IDs after stripping, and
+separates the twelve redacted records into an owner-only JSONL audit file.  The
+existing 36 response-bound records were sufficient; no favorable rerun was
+performed.
+
+The two final narrow automated reviewers reached their 150-second bounds after
+verifying the private artifacts and deterministic suite but before emitting a
+finding summary.  They are recorded as overruns, not approvals.  The main-agent
+convergence sweep verified the exact two fixes, JSONL schema/count/hash, file
+modes, current documentation, focused tests, full suite, and rendered Org
+without another finding.
+
 Deferred findings are not implementation work in P1:
 
 - workspace observation building has adoption value but no caller yet;
@@ -314,6 +377,9 @@ its 60-second timeout while three review processes ran concurrently.  The exact
 test passed alone in 9.66 seconds, and the full suite then passed in 43.03
 seconds.  This was rejected as a resource-contention finding, not hidden or
 "fixed" with unrelated code.
+
+After final convergence fixes, the full suite passed 1,569 with 2 skipped in
+43.06 seconds, and the final Org report rendered successfully.
 
 * Implementation guide and learnings
 
@@ -353,13 +419,19 @@ as a pytest failure.  There is no retry or favorable-verdict loop.
 The default real-model test loads the tracked balanced development fixture:
 
 #+begin_src shell
-pytest -q edd/eval/test_outcome_judge.py
+umask 077
+pytest -qq -s edd/eval/test_outcome_judge.py > <LOG_PATH>
+sed -n '/^{/p' <LOG_PATH> > <AUDIT_PATH>
 #+end_src
 
 Set =ASSIST_OUTCOME_JUDGE_FIXTURE= to run the identical test against a labelled
 blind fixture.  Each case becomes one pytest parameter and one independent model
-call.  Run shared-model work through the workspace LLM resource lock, keep each
-manual block bounded, log outside the small root partition under the user's home
+call.  The =-s= flag preserves one standalone JSON audit line per verdict,
+including its case ID, structural grades and citations, provider-returned model
+ID, and exact sent-prompt SHA-256; =-qq= suppresses unnecessary pytest progress.
+The private umask protects even identifiers and filenames in citations.  Run
+shared-model work through the workspace LLM resource lock, keep each manual
+block bounded, log outside the small root partition under the user's home
 deployment directory, and preserve failed logs rather than rerunning until a
 favorable answer appears.
 
@@ -402,14 +474,21 @@ separating judge-integrity tests from evaluated-agent outcomes, proving label
 provenance after the invalid pilot, making proactive work evidence-backed, and
 preserving a genuinely blind user-labelled corpus after the rubric changed.
 None required production middleware or a new runner.  The final implementation
-remains 192 lines of judge code, a 121-line rubric, a 48-line real-model test,
-and 207 lines of focused unit tests.
+remains 213 lines of judge code, a 121-line rubric, a 61-line real-model test,
+and 242 lines of focused unit tests.  Response-bound provenance and its tests
+added no runner or production dependency.
 
 The elapsed time was dominated by model calibration and review/custody work,
-not implementation complexity: two eighteen-case development runs, three
-twelve-case blind runs, GPU cooldown, human label collection, immutable label
+not implementation complexity: two eighteen-case development runs, nine
+twelve-case blind runs across initial qualification and two provenance
+reproductions, GPU cooldown, human label collection, immutable label
 provenance, and bounded reviewers that sometimes overran without conclusions.
-The only code-path work remains the small eval-only implementation above.
+Closing the audit gap and then binding it correctly each required 36 unchanged
+model calls.  Two launch attempts failed immediately before model contact
+because the resource wrapper changed working directory and the lane correctly
+lacked the ignored =.dev.env=; record-count validation caught both, and neither
+was counted.  The only code-path work remains the small eval-only implementation
+above.
 
 The qualified result also exposes a real limit without hiding it: the model is
 consistent but sometimes calls a completed useful artifact plus an unauthorized

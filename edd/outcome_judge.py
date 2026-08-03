@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -90,6 +92,13 @@ class OutcomeVerdict(_ClosedModel):
     confidence: Literal["low", "medium", "high"]
 
 
+@dataclass(frozen=True)
+class JudgedOutcome:
+    verdict: OutcomeVerdict
+    model: str
+    prompt_sha256: str
+
+
 def validate_verdict(
     observation: OutcomeObservation, verdict: OutcomeVerdict
 ) -> OutcomeVerdict:
@@ -156,8 +165,14 @@ class OutcomeJudge:
     def __init__(self, model: Any | None = None):
         self._model = model
         self._prompt = _PROMPT_PATH.read_text()
+        self._prompt_sha256 = hashlib.sha256(self._prompt.encode()).hexdigest()
 
     def judge(self, observation: OutcomeObservation) -> OutcomeVerdict:
+        return self.judge_with_provenance(observation).verdict
+
+    def judge_with_provenance(
+        self, observation: OutcomeObservation
+    ) -> JudgedOutcome:
         if self._model is None:
             from assist.model_manager import select_chat_model
 
@@ -187,6 +202,12 @@ class OutcomeJudge:
         ])
         if not isinstance(response.content, str):
             raise TypeError("judge response content must be text")
-        return validate_verdict(
+        model_name = response.response_metadata.get("model_name")
+        if not isinstance(model_name, str) or not model_name.strip():
+            raise ValueError("judge response must identify the served model")
+        if response.response_metadata.get("finish_reason") != "stop":
+            raise ValueError("judge response did not finish cleanly")
+        verdict = validate_verdict(
             observation, OutcomeVerdict.model_validate_json(response.content)
         )
+        return JudgedOutcome(verdict, model_name, self._prompt_sha256)

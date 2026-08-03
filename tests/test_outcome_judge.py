@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +62,17 @@ def _verdict(**changes) -> OutcomeVerdict:
     }
     value.update(changes)
     return OutcomeVerdict(**value)
+
+
+def _message(content=None, **metadata) -> AIMessage:
+    return AIMessage(
+        content=_verdict().model_dump_json() if content is None else content,
+        response_metadata={
+            "finish_reason": "stop",
+            "model_name": "served-model",
+            **metadata,
+        },
+    )
 
 
 def test_models_reject_unknown_fields() -> None:
@@ -161,7 +173,7 @@ def test_forbidden_outcome_controls_overall_grade() -> None:
 def test_judge_makes_one_bounded_structured_call() -> None:
     selected = MagicMock()
     bound = selected.bind.return_value
-    bound.invoke.return_value = AIMessage(content=_verdict().model_dump_json())
+    bound.invoke.return_value = _message()
 
     verdict = OutcomeJudge(selected).judge(_observation())
 
@@ -178,11 +190,36 @@ def test_judge_makes_one_bounded_structured_call() -> None:
     assert "UNTRUSTED OUTCOME OBSERVATION" in messages[1].content
 
 
+def test_judge_records_response_model_and_exact_prompt() -> None:
+    selected = MagicMock()
+    selected.bind.return_value.invoke.return_value = _message()
+
+    with patch("edd.outcome_judge._PROMPT_PATH") as prompt_path:
+        prompt_path.read_text.return_value = "exact prompt"
+        result = OutcomeJudge(selected).judge_with_provenance(_observation())
+
+    assert result.model == "served-model"
+    assert result.prompt_sha256 == hashlib.sha256(b"exact prompt").hexdigest()
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"model_name": ""},
+        {"model_name": "   "},
+        {"finish_reason": "length"},
+    ],
+)
+def test_judge_rejects_incomplete_provenance(metadata) -> None:
+    selected = MagicMock()
+    selected.bind.return_value.invoke.return_value = _message(**metadata)
+    with pytest.raises(ValueError):
+        OutcomeJudge(selected).judge_with_provenance(_observation())
+
+
 def test_default_model_is_temperature_zero_with_thinking() -> None:
     selected = MagicMock()
-    selected.bind.return_value.invoke.return_value = AIMessage(
-        content=_verdict().model_dump_json()
-    )
+    selected.bind.return_value.invoke.return_value = _message()
     with patch("assist.model_manager.select_chat_model", return_value=selected) as pick:
         OutcomeJudge().judge(_observation())
     pick.assert_called_once_with(0, enable_thinking=True)
@@ -191,16 +228,14 @@ def test_default_model_is_temperature_zero_with_thinking() -> None:
 @pytest.mark.parametrize("content", ["not json", [{"text": "not text"}]])
 def test_model_output_errors_propagate(content) -> None:
     selected = MagicMock()
-    selected.bind.return_value.invoke.return_value = AIMessage(content=content)
+    selected.bind.return_value.invoke.return_value = _message(content)
     with pytest.raises((TypeError, ValidationError)):
         OutcomeJudge(selected).judge(_observation())
 
 
 def test_observation_payload_omits_labels_and_identity() -> None:
     selected = MagicMock()
-    selected.bind.return_value.invoke.return_value = AIMessage(
-        content=_verdict().model_dump_json()
-    )
+    selected.bind.return_value.invoke.return_value = _message()
     OutcomeJudge(selected).judge(_observation())
     message = selected.bind.return_value.invoke.call_args.args[0][1]
     payload = message.content.splitlines()[1]
