@@ -831,7 +831,7 @@ the existing timeout, or causes material production failure. See
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-0b][the deferred-phase decision]].
 
 *** DONE P1: Qualify a calibrated natural-outcome judge
-Completed for review 2026-08-03 from frozen contract =cfbfda2=: 18/18
+Completed for review 2026-08-03 in [[https://github.com/pierrel/assist/pull/223][assist PR #223]] from frozen contract =cfbfda2=: 18/18
 development, 11/12 majority blind agreement, 33/36 exact labels, and 36/36
 run-to-run stability.  Every human =fail= remained non-passing; the one known
 limitation was a stable =fail= versus =partial= severity distinction for an
