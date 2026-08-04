@@ -1,6 +1,6 @@
 #+Title: Assist
 Assist is an extensible, local-focused, llm-based assistant. The principles guiding this project include:
-- Privacy - The user has full control and no information leaves their computer.
+- Privacy - User data stays local by default; authorized external capabilities receive only the minimum content required.
 - Extensibility - All agentic behavior is easy to modify or add to.
 - Generic - Assist can help with anything.
 
@@ -142,4 +142,6 @@ I want to be able to ask for meaningfully large changes like refactors or implem
 * Deepagents updates
 As of 2026, this project relies heavily on langchain deepagents. Some of the details of how to work with deepagents here.
 ** Architecture
-There will be a single, generalist deepagent with multiple sub-agents.
+The generalist deepagent loads skills such as development itself.  The current
+web path supplies lifecycle specialists; legacy one-source constructions retain
+the context, research, and critique specialists.

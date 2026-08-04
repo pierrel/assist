@@ -1,4 +1,4 @@
-"""Eval: dev-agent can run an inner eval inside its sandbox.
+"""Eval: the general agent with the dev skill can run an inner sandbox eval.
 
 This proves the sandbox has access to ASSIST_* env vars (model URL, API key)
 and can therefore invoke LLM-backed agents end-to-end.
@@ -57,7 +57,7 @@ def _rsync_project(dest: str) -> None:
 
 
 class TestDevAgentRunsEval(TestCase):
-    """The dev-agent runs an inner eval in the sandbox (deps pre-installed)."""
+    """The general agent uses the dev skill to run an inner sandbox eval."""
 
     @classmethod
     def setUpClass(cls):
@@ -104,9 +104,8 @@ class TestDevAgentRunsEval(TestCase):
     # ------------------------------------------------------------------
 
     def _create_agent(self):
-        # General agent + dev skill (post-Phase-D).  The rsync'd workspace
-        # has pyproject.toml at the top level, which trips create_agent's
-        # project_indicator detection and pre-loads the dev skill body.
+        # The eval prompt asks for project code work, so the general agent loads
+        # the dev skill on demand before acting.
         return AgentHarness(create_agent(
             self.model,
             self.workspace,
@@ -165,7 +164,7 @@ class TestDevAgentRunsEval(TestCase):
     # ------------------------------------------------------------------
 
     def test_runs_context_agent_eval(self):
-        """Dev-agent runs context agent eval, eval passes."""
+        """The general agent uses the dev skill and passes the inner eval."""
         agent = self._create_agent()
 
         response = self._invoke(agent, (
