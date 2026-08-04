@@ -3,11 +3,12 @@
 
 * Status
 
-Candidate 3 is implemented at =d7b09ef=.  Its fresh primary N=3 passed 21/21;
-N=5 and N=10 remain.  The isolated rejected-candidate reference passed 10/10,
-so it did not reproduce the empty-field failure required to keep that sentence.
-The unstable timeout-dependency case has a completed 7/10 matched baseline,
-which remains candidate 3's adjacent no-regression threshold.
+Candidate 3 is implemented at =d7b09ef=.  Its fresh primary N=3 passed 21/21
+and N=5 passed 35/35; N=10 remains.  The isolated rejected-candidate reference
+passed 10/10, so it did not reproduce the empty-field failure required to keep
+that sentence.  The unstable timeout-dependency case passed 2/5 at candidate
+N=5 and has a completed 7/10 matched baseline.  Its registered candidate N=10
+no-regression gate remains 7/10.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -496,6 +497,29 @@ Every median and p90 meets its registered early bound.  Candidate 3 continues
 to N=5 after the required GPU cooldown; the promoted timeout diagnostic joins
 N=5 and N=10.
 
+** Candidate 3 qualification result
+
+The candidate N=5 artifacts are =candidate3-n5-1-EQA2OZ=,
+=candidate3-n5-2-gClLbL=, =candidate3-n5-3-r9BUzx=,
+=candidate3-n5-4-NRy5F7=, and =candidate3-n5-5-Hctstb=.  All 35 primary
+executions passed.
+
+| Node (short name) | Pass | Seconds p50/p90 |
+|-
+| =starts_subagents_and_returns_without_polling= | 5/5 | 11 / 11 |
+| =natural_long_list_chooses_one_delegate_per_outcome= | 5/5 | 141 / 161 |
+| =explicit_delegate_fanout_capability= | 5/5 | 18 / 18 |
+| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 5/5 | 16 / 19 |
+| =implicit_skill_request= | 5/5 | 10 / 11 |
+| =delegate_implicit_skill_request= | 5/5 | 33 / 33 |
+| =first_turn_substantive_invokes_context= | 5/5 | 11 / 33 |
+
+Every primary median and p90 remains inside the registered final timing bounds.
+The promoted timeout diagnostic passed 2/5, with a 57-second median and
+64-second p90.  This intermediate diagnostic result does not alter the frozen
+prompt: its registered decision is the candidate N=10 comparison against the
+7/10 matched pre-deletion baseline.
+
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
 wake result use, cancellation-request truth, mixed-sibling preservation, and
@@ -625,3 +649,6 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   and removed a byte-identical census copy that carried no commit identity.
 - 2026-08-04 revision 16: candidate 3 passed its fresh primary N=3 at 21/21,
   with every median and p90 inside the registered early timing bounds.
+- 2026-08-04 revision 17: candidate 3 passed its primary N=5 at 35/35 with
+  registered timing bounds intact.  Recorded the promoted timeout diagnostic's
+  2/5 intermediate result without changing its frozen N=10 decision rule.
