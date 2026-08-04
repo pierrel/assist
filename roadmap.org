@@ -23,6 +23,22 @@ possible, we should enable it. Plan when we pick this up:
 - When it lands, drop =ImageInputGuardMiddleware= (or repoint it to dispatch to the vision
   subagent rather than strip).
 * Architecture
+** TODO Migrate from Deep Agents to Pi through a usable side-by-side path
+Use the design and stop gates in
+[[file:docs/2026-08-02-pi-deepagents-alternative.org][docs/2026-08-02-pi-deepagents-alternative.org]].  First prove exact prompt ownership and
+the local Qwen provider contract, and measure and report harness-authoring
+reliability; then put an operator-selected Pi thread in the existing web UI for
+real use.  M1 keeps Deep Agents and Pi in the same web service with an immutable
+per-new-thread selector.  Start Pi with the prompt-rearchitecture target, a closed
+first-party capability-extension suite, and an accounted counterpart of every
+existing eval, behind the current Runs, sandbox, and UI.  M2 keeps both complete
+runtimes for a final comparison after emacsos-server chat, simulator and live-phone
+parity, a separate voice gate after its hardware blocker clears, and unattended
+clients.  Existing threads keep their original engine, with pre-schema threads
+treated as Deep Agents.  Only then reach the explicit Pi-only end state and delete
+Deep Agents.  Local llama.cpp stays gateway-fair at capacity one initially; test
+higher local capacity and any explicit OpenRouter cloud-thread option separately
+after the local Pi web path works.
 ** TODO Complete Voice-call assistant P1 against the fake bridge
 Goal: phone a number, pass the PIN-gated receptionist, select or create a thread,
 and hold a natural voice conversation. The hardware-independent build/state contract

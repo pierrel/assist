@@ -1,0 +1,2028 @@
+#+title: Migrating from Deep Agents to Pi through a side-by-side path
+#+date: <2026-08-02>
+#+updated: <2026-08-03>
+
+* State
+
+Status: proposed, revised 2026-08-03.  This document authorizes no implementation.
+
+Recommendation: make Pi the intended replacement for Deep Agents, through a
+side-by-side migration with hard stop gates.  M1/P3 makes the same deployed web UI
+serve Deep Agents and Pi, selected immutably per new thread, so Pierre can use Pi for
+ordinary work including the current research child.  M2/P5e keeps both /complete/
+implementations available for a final full-system comparison after web,
+emacsos/phone, voice, and unattended-client parity.  The selector remains through
+M2.  Qwen harness authoring is measured and reported before M1 but its maintenance
+score does not gate the runtime.  Deep Agents remains the default and rollback path
+until the reviewed default switch.
+
+The Pi path starts with the approved prompt-rearchitecture target rather than
+reproducing today's large Deep Agents prompt.  It owns the complete provider-bound
+system prompt, progressively discloses skills and tool schemas, and runs a
+harness-neutral counterpart of every existing behavioral eval.  A fresh immutable
+runner release becomes available without restarting the web service to new threads
+and to quiescent existing threads; an outstanding async chain keeps its whole thread
+on the pinned release until it is terminal.
+
+Pi capabilities are organized as a statically assembled first-party extension
+suite with one lifecycle kernel and distinct skills, tools, async-task, and optional
+TODO extensions.  Host authorities such as model admission, Runs, approvals,
+sandbox management, and async-child lifecycle deliberately remain outside Pi.  The
+consolidated “Target end state: Pi-only Assist” section states exactly what remains
+and what is deleted.
+
+Pi is not yet proven with the local =Qwen3.6-27B= model.  The migration therefore
+keeps evidence gates, but its success path deliberately ends in cutover and deletion
+of Deep Agents rather than permanent coexistence.  Existing threads keep their
+original engine; pre-schema threads are Deep Agents.  Assist retains its durable
+Runs, Docker boundary, approvals, skills, web UI, and client-specific trust
+boundaries unless a later measured
+simplification replaces one explicitly.
+
+One constraint outranks the attractive prompt and reload features: Pi does not
+provide LangGraph's current synchronous mid-turn checkpoint/resume and fair-yield
+contract.  If preserving restart recovery, the two-hour active-work bound, queue
+fairness, and at-most-once host effects requires recreating a second graph runtime in
+the bridge, stop.  Pi is then not a simpler replacement.
+
+* Why consider a different harness
+
+Deep Agents currently supplies a useful bundle: the LangGraph loop and checkpoints,
+filesystem tools, TODOs, skills, memory, subagents, summarization, human approval,
+and middleware composition.  Assist has since grown stronger product-level versions
+of several of those responsibilities:
+
+- =RunService= owns durable work, observers, interruption, and asynchronous child
+  delivery;
+- =ThreadQueue= owns single-model fairness and liveness;
+- =DockerSandboxBackend= owns per-turn containment, filesystem access, and egress;
+- the web app owns threads, rendering, status, approval cards, and retries;
+- Assist owns its small-model hardening, skills, memory policy, and specialist roles.
+
+The remaining Deep Agents bundle is no longer free.  =create_deep_agent= appends a
+framework base prompt after Assist's prompt and adds more instructions through its
+middleware.  The prompt census found a 31,279-character system prompt and 28,037
+characters of tool schemas on the main web path before the user message.  That makes
+the final request harder to reason about and works against the prompt-architecture
+rule: preload only what is necessary to choose the next instructions safely, then
+progressively disclose the chosen workflow.
+
+Pi is attractive because its core is closer to an agent loop plus typed tools,
+messages, streaming events, sessions, and compaction.  Its SDK permits a custom
+resource loader and custom tools, while its extension API can change the active tool
+set.  This is enough to test whether Assist can remove framework-owned prompt
+material and middleware glue without rebuilding an entire agent runtime.
+
+* Goals
+
+1. Determine whether a pinned Pi runtime improves control over the exact
+   provider-bound system prompt and tool schemas.
+2. Determine whether the local Qwen model preserves current natural outcomes and
+   can reliably make reviewed changes to the small Pi harness.
+3. Preserve the existing web experience, durable Run contract, queue, sandbox,
+   approvals, and async child behavior.
+4. Make prompts, skills, and trusted runner code take effect on a new thread or the
+   next independent work of a quiescent thread without restarting =assist-web=;
+   continuations and async causal chains keep their pinned release.
+5. Keep Deep Agents available beside Pi until parity is measured and rollback is no
+   longer useful.
+6. Reach a final implementation that deletes more Assist and framework glue than it
+   adds.  A permanent two-harness abstraction is a failed outcome.
+7. Put an actually useful Pi web thread in Pierre's hands at the first safe product
+   milestone, before specialist, phone, and unattended-client parity is complete.
+8. Carry the complete prompt-rearchitecture target and an accounted counterpart of
+   every current behavioral eval onto Pi; do not create a smaller favorable test set.
+9. Keep an explicit per-new-thread Deep Agents/Pi choice from the first usable web
+   preview through a complete dual-runtime release candidate, then define the exact
+   Pi-only system that replaces it.
+10. Give cohesive Pi capabilities separate typed extension ownership without
+    pretending an in-process extension can own durable product or security policy.
+
+* Non-goals
+
+- Do not implement any part of this design in this change.
+- Do not migrate or reinterpret existing thread histories.
+- Do not replace the Assist web UI with Pi's terminal UI or a community web UI.
+- Do not replace =RunService= with Pi sessions or replace durable async children with
+  a Pi subagent package.
+- Do not weaken the Docker, egress, authorization, approval, queue, or git controls.
+- Do not load project-discovered, global, or unaudited community extensions in the
+  production process.
+- Do not allow the model to rewrite the running production harness.
+- Do not treat a shorter prompt, a successful demo, or terminal chat as an
+  acceptance result.
+
+* Decision drivers
+
+| Driver | Deep Agents today | Pi candidate | Gate |
+|--------+-------------------+--------------+------|
+| Final system prompt | Assist prompt plus framework and middleware additions | Assist supplies the complete prompt through a controlled resource loader | Provider-bound census proves byte ownership and provenance |
+| Progressive tools | Requires middleware around a graph and tool node | Active tools can change through the extension API | Hidden schemas are also uncallable; natural evals remain reliable |
+| Hot reload | Jinja reloads, Python changes need service restart | A fresh runner per Run slice loads its causal chain's pinned code and resources | New and quiescent threads see the promoted release; continuations and async children never mix versions |
+| Web UI | Complete and deployed | Must use the same UI through an adapter | Live end-to-end web flow, including errors and approvals |
+| Durability | LangGraph checkpoints plus Assist Runs | Pi JSONL session plus Assist Runs | Crash and approval tests prevent duplicate external effects |
+| Qwen fit | Known, heavily hardened baseline | Unknown on this exact local endpoint | Provider probe and paired natural evals |
+| Simplicity | One language, large framework composition | Small TypeScript runner plus a bounded bridge | Winning end state has lower dependency and LOC burden |
+| Library boundary | Imported Python library; no local fork | Imported pinned TypeScript SDK; no local Pi fork or ambient package discovery | Only public SDK/events, upgrade contract tests, and one removable adapter |
+| Lifecycle | Ordered LangChain middleware around graph/model/tool phases | A closed suite of cohesive Assist-owned typed extensions maps explicit Pi session/agent/message/tool/provider events | Every retained policy has one extension owner, named phase, order, failure rule, and parity test |
+| Type safety | Python typing plus runtime framework objects | Strict TypeScript inside the runner and closed runtime validation at every cross-language boundary | No =any= or unchecked cast in protocol/policy code; exhaustive unions and generated schemas pass |
+| Security | Existing reviewed controls | Extensions execute with process authority | Only pinned Pi plus audited Assist code loads; model tools remain sandboxed |
+
+* Pi capability assessment
+
+This assessment is pinned to =@earendil-works/pi-coding-agent= 0.83.0 (npm
+=gitHead= =845d6ff1f6643aba440341cce877ce1c43ebbc39=, Node 22.19.0 or newer)
+and repository =main= at
+=4c01c709380621c5ff2719162cd7a7973dcb2799=, inspected on 2026-08-02.  Pi is
+moving quickly, so an implementation phase must record an exact npm version,
+lockfile, source commit, and integrity hash rather than depending on =latest=.
+
+** Project fit and stewardship
+
+Pi's appeal is not only a feature comparison.  Its deliberately small core, short
+prompt, typed extension surface, and expectation that users reshape the harness
+match Assist's preference for explicit ownership over accumulated framework magic.
+The ability to edit an extension while another task continues on the old release is
+especially relevant: the product can remain useful while its next agent shape is
+being built and tested.
+
+Earendil acquired Pi in April 2026 and kept Mario Zechner as a major stakeholder and
+team member.  Earendil is a Public Benefit Corporation whose published purpose
+emphasizes open protocols and human agency; its operating principles include
+focused outcomes, original curiosity, craft, ambitious goals with credible steps,
+and technology as a means rather than an end.  Those values are a positive
+stewardship signal and align unusually well with Pierre's reasons for building
+Assist.
+
+Values are not a supply-chain control.  The current Pi core is MIT licensed and
+Earendil has publicly committed to keeping the core MIT, while also stating that
+future adjacent features may be Fair Source or proprietary.  Assist therefore pins
+only the MIT core and public SDK, maintains an upgrade and fork escape hatch, and
+does not make cutover depend on an Earendil cloud or proprietary component.
+
+** Core and SDK
+
+The coding-agent SDK exposes =createAgentSession=, an =AgentSession= event stream,
+custom tools, =SessionManager= JSONL sessions, compaction, and session replacement.
+Its documented RPC mode is newline-delimited JSON over stdin/stdout, which provides
+a useful transport shape for Python integration without a new listener.  The SDK is
+the relevant surface; the TUI is not.
+
+A =DefaultResourceLoader= can override the system prompt, context files, skills,
+prompts, and extensions, but Pi 0.83.0's =buildSystemPrompt()= unconditionally
+appends the current working directory even for a custom prompt.  The loader and
+command-line =--system-prompt= therefore cannot establish complete ownership by
+themselves.  Assist must construct the loader explicitly, disable ambient discovery,
+and make =assist-kernel= the sole audited owner of =before_agent_start=; it returns
+the exact Python-rendered prompt after Pi's builder.  Pi keeps that per-turn override
+when =setActiveTools= rebuilds its base prompt.  P0 verifies the behavior and censuses
+the final =session.agent.state.systemPrompt= plus provider request; if the public
+hook ever fails to dominate the builder, stop rather than accept the extra text.
+
+The extension API supports custom tools, tool-call interception, and
+=setActiveTools=.  That is a direct fit for [[file:2026-07-26-agent-prompt-architecture.org::*P2b: Progressively disclose non-kernel tools through loaded skills][prompt-architecture P2b]]: =load_skill=
+can reveal both the skill body and its declared =allowed-tools= schemas for the
+current invocation.  Tool visibility is not authorization; the existing Python
+guards remain authoritative.
+
+** Library, TypeScript, and a possible Rust boundary
+
+Deep Agents' clearest architectural virtue is that Assist imports a library and does
+not maintain a fork.  Preserve that property.  The compiled runner imports the
+pinned Pi SDK as a normal dependency, calls public factories and events, and owns
+only Assist policy and translation.  It does not copy Pi's loop, patch
+=node_modules=, invoke private fields, or load the Pi CLI's ambient configuration.
+An upstream upgrade is a lockfile change that must pass the provider, prompt,
+session, lifecycle, and protocol contract suites before promotion.
+
+Inside the runner, use strict TypeScript with =strict=,
+=noUncheckedIndexedAccess=, =exactOptionalPropertyTypes=, and exhaustive
+discriminated unions.  Tool and protocol definitions have one schema source and
+produce both compile-time types and runtime validators.  Unknown event, message,
+tool, or session variants fail closed.  TypeScript safety stops at the process
+boundary, so Python independently validates the same closed wire schema; generated
+artifacts include a version and digest so either side rejects drift.
+
+The existence of Deep Agents for TypeScript is not by itself a reason to port the
+current design to it.  That would change language while retaining the framework
+prompt and graph/middleware composition this migration is intended to simplify.  It
+remains a fallback comparison if Pi fails specifically on durability while a typed
+Deep Agents implementation proves a materially smaller integration.
+
+Pi's documented RPC shape is deliberately language-neutral, which leaves room for
+Rust without asking Rust to reimplement the SDK.  The first product slice should not
+put Python, Rust, and Node in the production turn path merely for aspiration.  A
+small disposable Rust conformance client may proceed in parallel with P1 through P3
+to parse and fuzz the bounded runner protocol and supervise a fixture process.  It
+is a useful learning and safety artifact but does not gate the first web thread.
+Promote Rust into the product only if a later focused
+design proves that one Rust supervisor replaces, rather than wraps, the equivalent
+Python process/protocol code; it must not add a daemon, listener, store, or third
+policy owner.  Pi remains the pinned Node SDK process either way.
+
+** Hot reload
+
+Pi can reload extensions, skills, prompts, themes, and context resources.  Its own
+documentation says the command that calls =ctx.reload()= continues in the old call
+frame and only later events use the new runtime.  That behavior is suitable for an
+interactive coding terminal but creates a mixed-version boundary inside a durable
+web Run.
+
+Assist should use a simpler contract:
+
+1. Deploy builds and validates one immutable versioned runner directory, then
+   atomically switches a =current= symlink.  There is no watcher or runtime build.
+2. After the =work_id= is reserved but before it is executable, Python atomically
+   resolves the thread's release cohort.  If that thread is nonquiescent for any
+   reason, including an active, pending, interrupted, approval, child, retry, wake,
+   or resumable Run, the new work inherits its held fingerprint; otherwise
+   Python resolves =current=, verifies the artifact digest itself through no-follow
+   opened descriptors, and acquires an ephemeral release hold.  A child-reported
+   digest is diagnostic only.
+3. A read-only preflight opens and validates the thread session through that held
+   release without appending a session entry, calling the provider, or invoking a
+   tool.  If it rejects an unanticipated old session, preflight the thread's held
+   last-compatible release instead.
+4. In one release-registry/Run transaction, commit exactly one successfully
+   preflighted fingerprint on the logical work and thread cohort, convert its hold
+   into the durable reference, and release other holds.  Only then may a runner
+   append the input or make a provider/tool request.  Crash recovery either finishes
+   this transaction or repeats read-only selection; it never repins a work that has
+   begun execution.
+5. Every fair-yield, restart, approval continuation, spawned child, child retry,
+   terminal child handoff, and completion-wake Run atomically increments or
+   transfers the causal parent's release reference before admission, records that
+   fingerprint itself, and validates it before starting a short-lived pinned Node
+   runner.  Engine inheritance without release inheritance is invalid.
+6. The runner reads the current trusted prompt, skill catalog, and bridge code once.
+7. It reports the immutable directory digest plus hashes of those inputs when the
+   runner starts; Python compares them with its independently verified, already
+   pinned Run value before any provider request.
+8. That fingerprint remains fixed until the whole causal async chain is terminal.
+   Its last durable release happens only after the terminal result or wake is
+   appended.  A thread cannot advance its cohort while any active, pending,
+   interrupted, approval, child, retry, wake, or resumable reference exists.
+9. The next independent =work_id= on a quiescent thread starts a new runner and
+   therefore receives deployed changes without restarting the web service.  A thread
+   with outstanding async work deliberately remains on its old release; other
+   threads can adopt the promoted release immediately.
+
+There is no file watcher and no model-callable reload tool.  Partial editor writes
+cannot enter a running turn, and a transcript cannot acquire an =A -> B -> A=
+release sequence from a late old child or wake.
+Prompt and skill edits, runner changes, and dependency upgrades become live only
+after the ordinary reviewed deploy atomically promotes a validated directory.  A
+candidate must open and continue fixtures for every retained Pi session, protocol,
+custom-entry, and tool-call version before promotion.  Each thread records its last
+compatible release.  If read-only selection falls back before the authoritative
+work pin, the UI reports it; one work never partially runs both releases.  An active
+logical work keeps its resolved old directory.  Garbage collection shares the
+release-registry lock and retains every active/resumable causal reference,
+per-thread cohort and fallback, rollback reader, and version
+in the compatibility suite; it cannot race resolve/pin/spawn.
+This is restart-free Run-boundary reload, not arbitrary in-process hot swapping.
+
+This boundary still leans into “build the agent while also doing other work.”  A
+development agent may edit a disposable runner worktree, compile it, run the entire
+deterministic contract suite and selected evals, and produce a candidate immutable
+release while production work continues on the old fingerprint.  Pierre can promote
+the reviewed candidate without restarting =assist-web= and open a new experimental
+thread or start work on a quiescent thread to test it immediately.  Promotion is explicit;
+the model cannot publish its own change, and an active work item never changes code
+underfoot.  Fast iteration comes from parallel old/new releases and cheap process
+startup, not from weakening the release boundary.
+
+** Community extensions
+
+Community packages are useful design evidence, but Pi packages execute with full
+process access.  None should become a production dependency merely because it is
+popular.  For each candidate, either keep Assist's existing capability or adapt a
+small audited pattern into the runner.  The inventory below is representative, not
+an exhaustive marketplace survey; versions are those inspected on 2026-08-02.
+
+| Deep Agents responsibility | Pi/community candidate | Decision |
+|----------------------------+------------------------+----------|
+| Agent loop and streaming | Pi agent core and coding-agent SDK | Use the pinned upstream SDK |
+| Filesystem and shell tools | Pi built-ins and pluggable operations | Adapt schemas into =assist-tools=, but delegate every operation to =DockerSandboxBackend=; never expose Pi's host operations |
+| TODO list | Pi's official =todo.ts= example and [[https://www.npmjs.com/package/@diegopetrucci/pi-todo][=@diegopetrucci/pi-todo= 0.1.8]] | Add the removable =assist-todo= extension only if paired evals prove Qwen still needs it; persist state in tool results, not a second database |
+| Skills | Pi Agent Skills loader | Implement =assist-skills= with Assist's trigger-only catalog and explicit =load_skill(name)= because the current model does not reliably infer that reading =SKILL.md= is the load operation |
+| Dynamic tool disclosure | =setActiveTools= and dynamically registered tools | Use in the Assist-owned skills bridge; preserve =allowed-tools= and invocation scope from the prompt design |
+| Memory | [[https://www.npmjs.com/package/pi-memory][=pi-memory= 0.4.0]] and similar community stores | Reject.  Keep repository and per-thread memory with current privacy and write policy |
+| Subagents | [[https://www.npmjs.com/package/pi-subagents][=pi-subagents= 0.40.0]], [[https://www.npmjs.com/package/pi-subagent-workflows][=pi-subagent-workflows= 0.2.0]], and [[https://www.npmjs.com/package/@e9n/pi-subagent][=@e9n/pi-subagent= 0.1.0]] | Reject for the web runtime.  Keep durable Assist async children and contained leaf roles; Pi packages duplicate lifecycle and UI semantics |
+| Sandboxing | Pi's official example, [[https://www.npmjs.com/package/pi-guard-sandbox][=pi-guard-sandbox= 0.3.0]], and [[https://www.npmjs.com/package/@kjrjay/pi-sandbox][=@kjrjay/pi-sandbox= 0.2.0]] | Reject as the authority.  Existing Docker, internal egress network, approvals, and git shim are stronger and already product-integrated |
+| Web UI | Pi's TUI and [[https://www.npmjs.com/package/pi-gui-extension][=pi-gui-extension= 0.4.1]] | Reject.  They are coding-session UIs and do not implement Assist's threads, Runs, approvals, renders, or auth boundary |
+| Web research | [[https://www.npmjs.com/package/pi-web-research][=pi-web-research= 1.0.1]] | Reject initially.  Keep =search_internet=, =read_url=, SearXNG, citations, and existing breakers |
+| Qwen sampling controls | [[https://www.npmjs.com/package/pi-qwen-mode-proxy][=pi-qwen-mode-proxy= 1.0.1]] | Do not adopt.  It is evidence of Qwen-focused Pi use, not evidence that this Qwen endpoint handles tools or can maintain the harness; pin the provider profile directly |
+| Compaction | Pi session compaction and hooks | Candidate for use only after long-thread parity tests; preserve Assist's final-request contract and durable summaries |
+| Approvals | Pi permission-gate examples | Use only as examples.  The existing persisted web approval card remains the authority |
+
+The mature =pi-subagents= package demonstrates that Pi can support foreground and
+background delegation, named agents, and custom rendering.  It also confirms why it
+is the wrong boundary here: Assist already has durable task IDs, user steering,
+completion wakes, queue priority, cancellation, and web status.  Replacing those
+with subprocess-local extension state would be a regression and would leave two
+sources of truth.
+
+The official sandbox example and community sandbox packages are similarly useful
+for comparison, not adoption.  Pi extensions run in the trusted Node process, and
+the documented sandbox guarantee does not cover every extension.  Assist's current
+model-facing commands must continue to execute only in its per-turn Docker
+container on an internal network whose only egress is the allowlist proxy.
+
+** Responsibility and deletion census
+
+The compatibility work is not allowed to hide the current middleware in a generic
+“bridge.”  P0 snapshots every responsibility below and its parity test.  P5a counts
+the TypeScript runner, bridge, operation records, generated schemas, build path, and
+tests against the Python/framework code and dependencies that can actually be
+deleted.
+
+| Current responsibility | Pi disposition | Parity evidence | Expected final deletion |
+|------------------------+----------------+-----------------|-------------------------|
+| Agent loop and provider streaming | Pi core | text, reasoning, sequential/parallel tool, cancellation, and malformed-stream probes | Deep Agents graph builder and ordinary LangGraph invocation |
+| Connection retry | Pi core with fixed audited settings | current retry timing/error cases | generic model retry middleware where behavior is identical |
+| Bad-request recovery | Pure =assist-kernel= policy module for only reproduced Qwen/provider failures | current bad-request regressions against the exact endpoint | =BadRequestRetryMiddleware= after parity |
+| JSON, tool-name, and malformed tool-call repair | Pure =assist-kernel= policy modules; do not generalize beyond observed repairs | existing JSON/tool correction tests plus provider probes | the three corresponding LangChain middleware layers |
+| Output sanitization and large-result offload | Retain in the Python result bridge and current backend | sanitization, untrusted-result, truncation, and offload tests | only LangChain wrappers; policy stays |
+| Loop and repeated-read detection | Pure =assist-kernel= call-history module for generic loops; retain URL-specific Python guard | existing loop and re-read breaker tests | generic LangChain loop middleware only |
+| Fair queue pause, cumulative cap, restart resume, and cross-process model admission | Engine-specific Pi execution-control adapter; =ThreadQueue= keeps web policy; one measured client-neutral admission owner coordinates web/phone | P0 boundary proof, P2 product-path crash tests, P5a stability, and P5b concurrent web/phone starvation tests | LangGraph-specific queue middleware and checkpoint calls only after every client gate and P6 retirement approval; the selected shared-admission cost remains and is counted |
+| Empty-response recovery | Pure =assist-kernel= policy module | existing empty-response cases on Qwen | current middleware after parity |
+| Interjection | Pi core steering/follow-up events mapped by the adapter | current keep/update/cancel and queue-priority tests | LangGraph interjection middleware |
+| Skills and active-tool disclosure | =assist-skills= contributes capabilities; =assist-kernel= alone applies the final active set | skill precedence, role scope, prompt-architecture P2b schema/execution, and natural evals | Deep Agents skills middleware; Assist skill policy stays |
+| Repository and thread memory | Retain Python-owned data/policy and expose its selected presentation through =assist-skills= | memory placement, isolation, promotion, and scheduled-turn tests | Deep Agents memory middleware wrapper only |
+| Context rider | Retain Python rendering as explicit per-Run context | timezone/location/provenance tests | LangChain middleware wrapper only |
+| URL provenance and re-read bounds | Retain unchanged in Python tool bridge | current provenance, redirect, breadth, and breaker tests | no policy deletion |
+| Write collision and git-push blocking | Retain unchanged in the Docker/backend execution path | current collision and git safety tests | LangChain interception wrappers where duplicated |
+| Image-input guard | Small pre-provider adapter check until a vision role replaces it | current image rejection tests | current middleware after parity |
+| Approvals | New harness-neutral =ToolBatchStore= plus current web-card projection and =assist-kernel= batch transition adapter | single and multi-tool approve/edit/reject/restart tests | Deep Agents HITL/checkpoint integration only |
+| Compaction | Pi core with at most one small summary/final-request hook | long-thread context, memory, tool-result, and restart tests | Deep Agents summarization middleware after parity |
+| Async children and specialists | =assist-async-tasks= exposes narrow tools; retain =RunService=, private Agent Protocol, and role manifests outside Pi | child lifecycle, wake, cancellation, interjection, and web status tests | Deep Agents subagent middleware and graph wrappers, not product lifecycle |
+
+If a row needs both the old middleware and a permanent behaviorally equivalent Pi
+implementation after P5a, count both.  Do not describe coexistence as simplification.
+
+** Capability-oriented extension suite
+
+The first revision proposed one large =assist-runtime= extension.  That keeps load
+order simple but weakens the library-like boundaries that make Pi attractive.  The
+revised recommendation is a small non-extension runner bootstrap plus a closed suite
+of cohesive first-party Pi extensions.  Most agent capabilities get their own typed
+extension; product authorities stay outside Pi.
+
+This is a source, type, ownership, and test boundary, not a security boundary.  Pi
+extensions share one Node process and its authority, and Pi 0.83 normally logs an
+extension error and continues.  Splitting a policy into extensions does not isolate
+it from a malicious or broken sibling.  The contained process, closed manifest,
+=fatal=/=halt= contract, Python authorities, and Docker boundary still provide the
+security and failure containment.
+
+The minimal runner bootstrap owns only the pinned SDK construction, bounded wire
+protocol, release/extension manifest verification, namespaced capability registry,
+and fail-closed handler wrapper.  It has no model-callable tool or product policy.
+One immutable release manifest lists exact extension IDs, versions, digests,
+dependencies, exclusive event ownership, registered tool names, state schema
+versions, and prompt contributions.  The build rejects cycles, duplicate tool names,
+undeclared event overlap, undeclared cross-extension imports, and any ambient or
+community extension.  Promotion and rollback always move the whole compatible
+release atomically; there is no per-extension hot swap inside an active session.
+
+Keep the suite in one private =assist-pi-runtime= package and statically import its
+extension factories.  Pi performs no directory/package discovery.  This preserves
+independent source contracts without giving separately installed packages an
+unreviewed lifecycle or dependency graph.
+
+The intended suite is:
+
+| Extension | Owns inside Pi | Deliberately does not own |
+|-----------+----------------+---------------------------|
+| =assist-kernel= | The only cross-cutting lifecycle hooks: exact prompt assembly, final active-tool application, provider census, normalized events, session fsync, whole-batch tool transition ordering, and measured Qwen recovery modules | Product policy selection, durable operation truth, model admission, or arbitrary prompt fragments |
+| =assist-skills= | Trigger-only catalog, =load_skill=, skill parsing, =allowed-tools= capability declarations, and memory-as-a-skill presentation | The final =setActiveTools= call or repository/thread memory persistence, privacy, promotion, and authorization |
+| =assist-tools= | Typed schemas and bounded RPC adapters for workspace, retrieval, render/artifact, and other Python-owned tools | Filesystem, shell, Docker, network, host effects, approvals, credentials, provenance stores, git policy, or result persistence |
+| =assist-async-tasks= | Start/check/update/cancel/list tool schemas, typed RPC adapters, and model guidance | Child admission, task IDs, role/engine/release selection, queue priority, cancellation truth, completion wakes, or =RunService= lifecycle |
+| =assist-todo= | TODO tools, mechanics, guidance contribution, and namespaced session entries, /only if/ paired evals select TODOs | A second task database, durable async work, schedules, or =RunService= state |
+
+=assist-todo= is absent if the TODO experiment loses.  Memory is exposed by
+=assist-skills= because the prompt-architecture program selects memory as a skill;
+its durable store stays in Python.  Sandbox /management/ is intentionally not an
+extension: =assist-tools= only presents and invokes a narrow model-facing adapter.
+Pure prompt, recovery, batch-gate, and result-validation modules remain separately
+typed and tested inside =assist-kernel= because only one extension may own their
+cross-cutting event order and fail-closed boundary.
+
+Capability extensions contribute typed prompt fragments, tool declarations, and
+activation requests to the kernel registry.  They do not append directly to the
+system prompt, call =setActiveTools=, or register cross-cutting lifecycle hooks.
+=assist-kernel= deterministically composes those contributions and is the only owner
+of =before_agent_start=, =before_provider_request=, =message_end=, =tool_call=, and
+=tool_result=.  A capability callback returns a closed result; invariant, protocol,
+or fsync failure synchronously takes the kernel's =fatal= path rather than relying on
+Pi to propagate an exception.
+
+=load_skill= needs a same-invocation commit point because =before_agent_start= runs
+before the repeating agent loop.  During =assist-skills= execution, Python first
+validates the selected source/digest and returns the canonical capability set.
+Before the tool result returns, =assist-skills= invokes a synchronous kernel-owned
+=commitActivation= API.  The kernel appends and fsyncs a namespaced activation record
+bound to work ID, release, skill digest, and durable tool batch, recomputes the union,
+and alone calls =setActiveTools=.  The next provider request cannot begin until the
+load result and activation commit are complete.  Resume reconstructs the active set
+from that trusted record; a new independent work starts from the base set.  Python
+independently requires the same activation identity before executing a disclosed
+tool.  Failure before the durable record leaves nothing active; failure after it is
+recovered from the record and never reruns the skill load blindly.
+
+Each extension is tested alone with a fake narrow host contract and again in the
+exact assembled manifest.  An extension can be developed while production uses the
+old release, but promotion waits for the whole suite's type, lifecycle,
+prompt-census, crash, retained-session, and eval gates.  Runtime =load_skill=
+activation is a state change within that pinned release, not code hot reload.
+
+Several important responsibilities are therefore /not/ Pi extensions:
+
+- fair use of the single-slot llama.cpp server is owned by the host provider gateway
+  and =RuntimePolicyAuthority=;
+- =ThreadQueue=, Runs, async-child lifecycle, schedules, subscriptions, SMS, and
+  voice admission remain product orchestration;
+- Docker sandbox creation, network policy, credentials, filesystem mounts, process
+  cleanup, and git enforcement remain Python/OS authorities;
+- approval decisions and durable operation results remain =ToolBatchStore= plus the
+  existing web projection;
+- the browser and phone UI remain their current clients.
+
+This makes those boundaries stricter than pretending in-process code can enforce
+them.  A malicious sibling extension can exercise any runner-wide RPC surface, so
+extension ID or namespace is never authorization evidence.  It still cannot exceed
+the Python-issued invocation manifest, durable batch/CAS state, approval decision,
+or backend checks.  The assembled-suite adversarial probe calls every adapter
+outside a kernel-journaled batch and proves Python rejects it without an effect.
+
+** Preserve lifecycle, not the middleware stack
+
+Deep Agents' middleware lifecycle is valuable because policies have recognizable
+model, tool, state, and completion phases.  Pi exposes enough typed events to keep
+that clarity without recreating a chain of opaque wrappers.  The closed release
+manifest fixes the suite's phase table, and each retained behavior declares one
+extension owner, input/output type, order, failure rule, and parity test:
+
+| Pi phase | Extension owner | Assist responsibility |
+|----------+-----------------+-----------------------|
+| =session_start= | =assist-kernel= | Validate release, manifest, engine session, and durable input identity before work |
+| =before_agent_start= | =assist-kernel= | Compose approved capability contributions, replace the complete system prompt, and set invocation-scoped active tools |
+| =context= | =assist-kernel= | Apply only the approved skills/memory/compaction projection without mutating durable history |
+| =before_provider_request= | =assist-kernel= | Validate and census the final provider payload; never silently repair policy drift |
+| assistant =message_end= | =assist-kernel= | Journal the complete ordered tool batch before Pi may persist the assistant leaf |
+| =tool_call= | =assist-kernel= | Run sequential whole-batch preflight, capability, authorization, and approval decisions before execution |
+| =load_skill= execute/result boundary | =assist-skills= through =assist-kernel.commitActivation= | Durably bind the skill digest/capabilities to this work, apply the recomputed active set before returning, and reconstruct it on resume |
+| custom-tool =execute= then =tool_result= | Named capability extension, then =assist-kernel= | Capability extension calls its narrow Python adapter; Python durably records the operation result before =execute= returns; kernel validates the normalized, sanitized, bounded value before session append |
+| =turn_end= and =agent_end= | =assist-kernel= | Fsync the completed session boundary, then project normalized events and terminal outcome to the parent |
+| =session_shutdown= | =assist-kernel= plus bootstrap | Flush extension state and report shutdown; the Python parent still cancels and reaps the process group |
+
+Pi 0.83 preflights sibling =tool_call= events sequentially before its default parallel
+execution, which is promising for the batch gate, but P0 still proves the exact
+journal and pause ordering through public hooks.  Extension ordering is explicit;
+ambient or community extensions cannot enter the closed release manifest.
+
+Ordinary extension exceptions do /not/ fail closed in Pi 0.83: the extension runner
+reports =extension_error= and continues.  The runner bootstrap therefore has one
+audited synchronous =halt(frame)= primitive.  Every extension handler is registered
+only through a typed =mustHandle= wrapper whose =fatal(reason)= path invokes it
+on invariant, journal, fsync, protocol, or policy failure.  =halt= writes a bounded
+terminal frame to the dedicated control FD when possible and sends its own process
+=SIGKILL=; it never throws and returns.  The
+durable journal, session, and child exit remain the parent's sources of truth.  P0
+injects a failure into =before_agent_start=, =before_provider_request=,
+=message_end=, first =tool_call=, custom-tool return, =tool_result=, and =turn_end=,
+and proves that no later provider request, tool effect, result append, or queue
+release occurs before the parent terminalizes handlers/backends and reaps the whole
+process group.  The parent then performs the one ordinary release.  If synchronous
+termination cannot enforce that contract without a Pi fork, stop.
+
+Policies that remain authoritative in Python, including backend containment, host
+authorization, approval decisions, URL provenance, and git controls, are not
+duplicated in the extension suite.
+
+This is the Deep Agents lesson to retain: a legible lifecycle and explicit
+composition.  It is not permission to port fifteen middleware classes one for one.
+The responsibility census must show which policies disappeared, moved to a cohesive
+typed Pi extension, or stayed at the Python operation boundary.
+
+* Proposed boundary
+
+The stable engine boundary is a small =RuntimeSession= protocol used by both client
+stacks, not a new flag threaded through =AgentSpec=.  Assist web/voice/SMS and
+emacsos-server chat keep their existing product orchestration on opposite sides of
+that boundary:
+
+#+begin_src text
+Assist browser / voice / SMS                 EmacsOS chat / .assist files
+              |                                          |
+              v                                          v
+ Assist FastAPI + web UI                    emacsos FastAPI + phone NDJSON
+              |                                          |
+              v                                          v
+ RunService -> ThreadQueue                   _STREAM_LOCK + generation store
+              |                                          |
+              +----------------+-------------------------+
+                               v
+                        RuntimeSession factory
+                         |                   |
+                         v                   v
+                 DeepAgentsThread     PiSessionAdapter
+                                             |
+                                      pinned Node SDK runner
+                                             |
+                                      bounded data protocol
+                                             |
+                          Python Docker / host / client backend tools
+                                             |
+                                  shared provider admission owner
+#+end_src
+
+=RuntimeSession= contains only the operations the current clients actually use:
+send or stream a message, continue a recoverable turn, inspect or resolve a pending
+approval, obtain normalized visible/raw message metadata, and return a recovery
+snapshot containing leaf state, pending batch, resumability, and durable input
+identity.  It does not expose =agent=, =runconfig=, LangGraph, or Pi types.
+
+Python builds one serialized runtime manifest per engine invocation: for Assist this
+is a durable Run; for emacsos it is the authenticated conversation generation and
+request.  The manifest carries the immutable provider-profile digest, rendered
+prompt, normalized tool schemas, skill
+descriptors, approval policy, role, context, and trusted capability IDs.  Python
+retains callbacks and backend objects; Node receives data only.  =AgentSpec=
+continues to be the Python embedder declaration during coexistence, but its
+=BaseTool=, =BackendProtocol=, and Deep Agents =interrupt_on= objects never cross
+the pipe.  A conversation's runtime engine is separate immutable metadata because
+engine choice is an operational migration concern, not agent identity.
+
+The current replacement seams are deliberately narrow:
+
+| Current owner | Existing seam | Candidate change |
+|---------------+---------------+------------------|
+| =assist/agent.py:252-513= | Builds the main/delegate graph, tools, prompt, middleware, skills, memory, and HITL | Remains the Deep Agents implementation; the Pi runner receives the equivalent role declaration without importing this graph |
+| =assist/thread.py:124-337= | Invocation, queue ownership, checkpoint resume, approval inspection, and message projection | Define the small structural protocol and add =PiSessionAdapter= beside =Thread=; do not rename or move =Thread= first |
+| =assist/thread_manager.py:276-339= | Selects assistant shape and constructs =Thread= for Assist-managed threads | Becomes the sole Assist engine-selection point after reading immutable thread metadata; emacsos has its separate generation factory in P5b |
+| =manage/web/threads.py:1802-2263= | Durable admission, active-time accounting, sandbox lifecycle, status, approval, and synchronization; its current pause/resume calls are LangGraph-specific | Stays product-level Python orchestration, while each engine adapter implements cooperative pause/resume; remove direct LangChain-message inspection only where the adapter requires a narrow query |
+| =manage/web/threads.py:2357-2399= | Currently reserves a directory, writes status, and admits the first Run as separate operations | Replace reservation for new-schema threads with atomic directory publication containing =runtime.json=, then admit the Run and redirect |
+
+For new threads, =ThreadManager= atomically publishes the visible thread directory
+with an immutable =runtime.json= before admitting its first Run, using the existing
+temporary-directory-and-rename pattern for hidden threads.  Every new thread writes
+an explicit engine and provider-profile digest; the initial profile is the exact
+local Qwen profile.  An absent marker means Deep Agents plus the historical local
+profile only for a directory that predates this schema.  Hidden child metadata copies
+and validates the parent/client engine, exact provider profile, and causal parent's
+release fingerprint, and atomically holds that release before admission, so recovery
+never guesses.  No adapter converts
+LangGraph checkpoints into Pi JSONL or vice versa.
+
+The Pi runner is a contained child process of the existing synchronous per-turn
+worker.  Dedicated inherited pipe FDs carry bounded newline-delimited control and
+tool frames; stdout and stderr are separate bounded logs and can never be parsed as
+protocol.  There is no TCP listener, shell-built command string, secret in argv, or
+inherited Pi user config.  Every request carries a parent-generated unguessable
+nonce, engine-session ID, monotonically increasing sequence, operation name, JSON
+value, and exactly one closed authenticated client identity:
+
+- ={kind: "assist", run_id, work_id, thread_id}=; or
+- ={kind: "emacsos", conversation_generation, request_id, client_thread_id}=.
+
+No fake Assist Run is created for emacsos.  The nonce is never model-visible.  Both
+sides reject unknown fields, oversized or duplicate frames, invalid ordering, and
+any tool not registered for that role.
+
+Dedicated off-loop drainers consume stdout and stderr to EOF for every runner.  They
+retain only a fixed diagnostic tail but continue discarding after the cap, so noisy
+output cannot fill a pipe and deadlock the holder.  Teardown joins both drainers and
+closes every FD before any queue or client lock releases.
+
+The runner constructs every Pi service explicitly.  It uses
+=SettingsManager.inMemory()= with one audited complete configuration, an explicitly
+constructed model and credential source, and =SessionManager.open()= on the one
+server-selected thread path.  It starts with all built-in tools disabled and then
+adds only Assist custom tools.  Every =no*= resource switch is set even though the
+custom loader also supplies explicit empty resources.  Effective settings, model
+compatibility, session path identity, disabled resource families, and active tools
+are part of the P0 census.  Neither =~/.pi= nor project settings can alter retry,
+compaction, shell, model, or discovery behavior.
+
+Running Pi inside the model's workspace sandbox would mix trusted harness state with
+model-controlled files.  Instead the runner gets its own OS containment envelope:
+dedicated unprivileged identity, empty allowlisted environment, read-only immutable
+release, private temporary directory, read-write access to only the one bound engine
+session directory, cgroup/resource limits, and no direct network route to the model
+or general network.  Its only provider path is the lease-enforcing gateway below.
+It cannot read the service home, worktree, deployment environment, other threads,
+Docker socket, or phone credentials.
+
+The web client's model-facing filesystem and commands continue through the existing
+Docker container.  Other embedders continue through their Python-owned backend;
+emacsos keeps =EmacsBackend= on Deep Agents until P5b replaces its shared full-trust
+identity with the narrowed worker.  Host-effect tools call the
+same Python functions and authorization checks used by Deep Agents.  If this runner
+containment or the enforced model data plane requires a second elaborate runtime, P0
+fires the simplicity stop gate.
+
+The runner source, installed Pi package, lockfile, and system prompt are outside the
+model workspace and read-only to the sandbox.  Qwen can edit a copy only in an
+explicit development fixture.  A reviewed deploy makes that change live at the next
+independent logical-work boundary.
+
+** Shared model data plane
+
+A queue token that honest code may bypass is not admission control.  The llama.cpp
+listener must be reachable only by one small local provider gateway running under a
+separate OS identity or network namespace.  Kernel routing/firewall policy denies
+the Pi runner, =assist-web=, emacsos-server, sandboxes, and phone backend a direct
+connection.  Every Pi and Deep Agents provider request crosses the gateway before
+P3.
+
+Trusted Python orchestration asks the gateway for a one-use lease bound to its OS
+peer, client service, authenticated execution identity, engine, release, model ID,
+body digest, request/token/time budget, and cancellation authority.  A Pi runner
+receives only that lease for the next request.  The gateway consumes it once, checks
+the exact non-redirecting destination and request digest, forwards within the bound,
+cancels the upstream on revocation or disconnect, and rejects replay, extra requests,
+identity substitution, or cross-lease cancellation.  A later provider call needs a
+new parent-authorized lease.  The gateway logs metadata, never prompts, tool results,
+credentials, or response bodies.
+
+Closing a client socket is not proof that llama.cpp stopped generating.  The gateway
+keeps the admission slot until it observes the upstream's terminal response or a
+provider-owned idle/cancel acknowledgement for that exact request.  If neither
+arrives by the bounded cancellation deadline, it quarantines the model as
+unavailable and uses the existing bounded model-maintenance path to restart and
+prove zero active generation before admitting another lease.  A failed restart
+keeps the model unavailable; elapsed time does not transfer ownership by itself.
+
+The same gateway is the fair admission owner across authenticated work identities.
+It holds no conversation, session, Run, tool, or approval state.  Build its slot
+accounting for a configured capacity =N=, but deploy and qualify P3 with =N=1= and
+llama.cpp =--parallel 1=.  The provider's queue is defense in depth, not the fairness
+boundary.  The gateway applies bounded per-client/per-work queues, user-priority
+aging, and queue caps so one dispatcher cannot occupy every pending position.  A
+lease owns one exact slot until terminal/idle proof; cancellation cannot target a
+sibling slot.  The gateway verifies configured capacity against the protected
+server view and fails closed on mismatch.
+
+After the local Pi web path is stable, a separate experiment may benchmark
+llama.cpp =N=2=, then higher only if measured VRAM, maximum-context behavior,
+latency, output quality, and voice/user fairness remain acceptable.  Test queue
+floods, two long generations followed by phone work, cross-slot cancellation,
+OOM/context interference, gateway/model crash, and restart with every slot active.
+An unproved zombie quarantines the whole model.  =--parallel N= is resource sharing,
+not authorization or fairness, and an in-process Pi extension must never own it.
+
+Any fault requiring a whole-model quarantine is one atomic server-generation
+transition: close admission, revoke and fence /every/ active slot lease, mark each
+affected provider operation interrupted or quarantined, reap every associated
+runner/stream, and prove the old llama.cpp generation dead or idle before restart.
+A closed socket is not terminal proof.  No sibling request auto-retries, appends a
+partial assistant/tool leaf, or reuses its old lease after an OOM, zombie
+cancellation, gateway crash, or server restart; each receives a visible recoverable
+or ambiguous outcome from its own durable state before any new lease is issued.
+
+P0 proves the mechanism with a disposable gateway; P2 routes every live Assist and
+emacsos provider client through the reviewed gateway before the first Pi web thread.
+If a small gateway plus kernel-enforced exclusive model reachability cannot be built
+and operated simply, stop rather than ship an advisory lock or direct runner access.
+
+** Optional OpenRouter experiment, after the local Pi path
+
+OpenRouter could add independent cloud capacity and access to stronger models.  It
+does not make the one local llama.cpp slot parallel, and it must not be coupled to
+the Pi migration's Qwen qualification.  Pi already supports OpenRouter provider
+configuration and forwards explicit routing preferences, so no community extension
+is needed.
+
+Recommendation: finish the local-Qwen P3 dual-runtime milestone first.  Then run an
+independent, synthetic-data OpenRouter conformance/privacy/cost probe and, only if it
+passes, offer an explicitly selected /new web thread/ provider experiment.  A busy
+local queue never implies consent to export a prompt.  There is no automatic local
+to cloud or cloud to local overflow, fallback, model substitution, or mid-thread
+provider change.  Every child, retry, and completion wake copies the exact immutable
+provider-profile digest, model, provider allowlist, privacy flags, cost policy, and
+broker class before admission; a local parent copies an explicit local-only profile.
+=RuntimePolicyAuthority= and the one-use provider lease bind the same fields.  Phone,
+voice, schedules, subscriptions, SMS, triage, and other unattended clients remain
+local until separately designed and approved; OpenRouter success never gates Deep
+Agents retirement.
+
+The Pi runner keeps its empty environment and no-network boundary.  A completion-only
+key lives in the provider gateway or a smaller dedicated cloud broker, supplied by a
+system credential, never argv, tracked files, Pi JSONL, logs, or runner environment.
+The broker validates a one-use lease and exact body digest, injects the key, permits
+only the fixed HTTPS origin/path/model/provider profile, rejects redirects, and
+reserves a conservative worst-case charge before dispatch from a persisted current
+pricing snapshot and the bounded input/output/reasoning budget.  Authenticated terminal usage
+or an authoritative generation lookup may reconcile the reservation downward;
+missing usage retains the reservation and estimated charge.  Per-request, per-work,
+and daily local caps plus the inference key's provider-side hard spend cap bound
+partial-stream failures.  The broker holds no OpenRouter management credential.
+
+OpenRouter's documented defaults are too permissive for Assist: provider fallback is
+on, collection-eligible providers are allowed, and ZDR is opt-in.  The first probe
+therefore forces =allow_fallbacks=false=, =data_collection="deny"=, =zdr=true=,
+=require_parameters=true=, one exact =only= provider allowlist, bounded =max_price=,
+no OpenRouter plugins, server-side tools, or context transforms, and =store=false=
+where supported.  Assist's declared model tool schemas remain in the exact
+body-digest contract.
+Returned routing metadata must match the requested model/provider/profile; a partial
+stream, unexpected route/transform, 402, 429, or 503 is a visible bounded failure,
+not a replay or fallback loop.  ZDR still sends content to OpenRouter and the chosen
+upstream, and OpenRouter permits some in-memory prompt caching under ZDR, so the UI
+must describe cloud handling honestly rather than equating it with local privacy.
+
+* Target end state: Pi-only Assist
+
+The coexistence architecture is scaffolding, not the destination.  After every gate
+and the retirement decision, the full system is:
+
+#+begin_src text
+Web / EmacsOS / voice / SMS / schedules / subscriptions
+                         |
+                         v
+       Python product orchestration and durable state
+ RunService, ThreadQueue, ToolBatchStore, approvals, clients
+                         |
+                         v
+                 PiSessionAdapter only
+                         |
+                         v
+          immutable TypeScript runner release
+     assist-kernel + skills + tools + async-tasks
+                    + optional todo
+              |                         |
+              v                         v
+  Python capability RPC          provider lease gateway
+ Docker / host backends          local Qwen by default
+#+end_src
+
+There is no =DeepAgentsThread= construction path and no LangGraph execution state.
+Pi is the sole model loop.  This does /not/ mean rewriting the product in
+TypeScript: Python keeps Runs, fair work policy, approvals, operation truth,
+sandbox/backends, tool implementations, client authentication, web/phone/voice UI,
+and all durable product state.  Pi JSONL contains model context plus authenticated
+recovery markers, never Run or operation truth.
+
+The permanent Pi code is one private strict-TypeScript =assist-pi-runtime= package
+with the pinned upstream SDK, short-lived runner, closed extension manifest,
+capability extensions described above, protocol validators, and normalized event
+bridge.  Generated wire schemas are checked by both languages.  Prompts, role
+manifests, skills, memory data/policy, authorization, and host tool implementations
+enter immutable releases explicitly from their existing owners.  No ambient
+extension discovery or production community package stack remains.
+
+The product surfaces end as follows:
+
+- Every new web thread is Pi.  The ordinary engine selector and redundant Pi badge
+  are gone.  Runs, approvals, rendering, artifacts, files, research, specialists,
+  async children, compaction, and reload use the current UI.  Historical Deep Agents
+  transcripts remain visibly read-only with “Continue in a new Pi thread”; no
+  checkpoint is converted.
+- Every new emacsos conversation generation is Pi through the narrowed worker and
+  named primitives.  The phone has no engine picker.  Physical two-tap config apply
+  and rollback remain.  Historical Deep Agents generations are archival/read-only.
+- Voice uses Pi only after its separate hardware and live-call gate.  Receptionist,
+  durable Runs, child wakes, interruption, speech, teardown, and recovery retain
+  their client-specific contracts.
+- Schedules, subscriptions, SMS, triage, catch-up, children, and wakes resolve only
+  Pi bindings.  Every former Deep Agents binding was recreated, canceled, or made
+  permanently inert before deletion.
+- Immutable releases stay pinned across every nonquiescent thread and async causal
+  chain.  A new thread or next work on a quiescent thread receives the promoted
+  release without restarting =assist-web=.
+- Local Qwen remains the default provider behind the shared lease gateway.  A later
+  qualified cloud option, if retained, is explicit immutable per-thread provider
+  metadata and a separate privacy/cost policy, never silent overflow.
+
+Permanent infrastructure is limited to what still has one product job: the release
+registry and compatibility reader, Pi session files, =ToolBatchStore=, Python
+capability bridge, client-specific containment, and provider admission gateway.
+One narrowed permanent admission-capability owner authenticates each client peer,
+binds execution/request/provider identity and cancellation authority, enforces fair
+capacity, and fences restart generations before the gateway accepts a lease.
+The optional Rust work becomes permanent only if it /replaces/ the Python
+process/protocol supervisor; a Rust wrapper around an unchanged Python bridge is
+deleted.
+
+The final deletion removes Deep Agents and unused LangGraph dependencies, graph and
+specialist builders, checkpoint/resume/interrupt glue, Deep Agents templates and
+middleware wrappers, dual-runtime factory branches, executable compatibility
+runtime, operator escape hatch, and Deep-Agents-only mechanism tests.  Keep the
+engine-neutral outcome/eval corpus and archival transcript/export reader.
+=RuntimePolicyAuthority= also loses its dual-engine selection, rollback-epoch, and
+retirement machinery after the rollback window, but its narrowed cross-client
+admission-capability contract above remains with the gateway boundary.  A “Pi-only”
+system that keeps the whole
+cutover control plane or two behaviorally equivalent policy stacks has not finished
+the simplicity goal.
+
+* Prompt ownership and the prompt-architecture program
+
+Pi must implement the approved instruction-placement architecture, not fork it or
+first reproduce today's prompt.  Prompt-architecture P1 and P1b remain prerequisites
+for paired natural conversation outcomes because they establish the outcome judge
+and separate natural acceptance from capability probes.  They do not block the Pi
+provider probe or harness-authoring experiment, whose compiled artifacts and actual
+deterministic behavior decide the result.  Pi and Deep Agents then use the same
+frozen product cohorts and the same six instruction homes.
+
+For each Pi runtime invocation, Python renders the exact role kernel and the audited
+inline =before_agent_start= hook returns it as the final per-turn system-prompt override.
+The custom resource loader supplies an explicit empty set
+for ambient context files, prompt templates, global skills, and extensions, then
+adds only the role's audited Assist resources.  Pi's default prompt, current working
+directory prose, global =AGENTS.md=, =SYSTEM.md=, =APPEND_SYSTEM.md=, and =~/.pi=
+resources must not reach the provider.
+
+P0 changes the active tool set before and after =load_skill= and proves that Pi's
+base-prompt rebuild cannot displace the per-turn override or reintroduce the working
+directory.  The provider request, not =DefaultResourceLoader= configuration, remains
+the contract.
+
+The provider-bound census is the gate, not the source configuration.  It records:
+
+- exact final system text and provenance spans;
+- exact active tool names, descriptions, and schemas;
+- model/provider compatibility flags;
+- role, skill catalog, memory, and context sources;
+- Pi package version, source commit, lockfile digest, and runner fingerprint.
+
+Prompt-architecture P2 through P5 should remain harness-neutral.  Once Pi
+qualification starts, each later prompt-architecture phase compares the two
+harnesses on the same proposed instruction change.  Do not finish a large Deep
+Agents-specific prompt-architecture P2b implementation before the Pi P0/P1
+qualification answers whether Pi supplies the simpler tool-disclosure boundary.
+
+The first usable Pi web release must include every prompt-architecture improvement
+approved by then, plus the already-approved target shape for phases whose Deep
+Agents mechanics are the obstacle: generated role kernel, natural-versus-capability
+eval separation, progressively loaded instructions, invocation-scoped
+=allowed-tools= schema and execution filtering, and explicit memory/context homes.
+It does not inherit the current 31,279-character prompt for the sake of mechanical
+parity.  Any Pi-only realization is still judged against the same user outcomes and
+security contracts; it does not silently redefine the prompt-architecture program.
+
+The phase mapping is explicit so “included” cannot mean “left for the old harness”:
+
+| Prompt-architecture phase | Pi disposition |
+|---------------------------+----------------|
+| P0 census; P0b deferral | Reuse the final-boundary census in Pi P0/P2/P5a; add no P0b model lock unless the original observed-problem gate reopens |
+| P1 calibrated judge; P1b natural/capability split | Reuse unchanged in Pi P1 and the complete eval matrix |
+| P2 remove duplicated main/delegate procedures | Select the main-agent policy through the original or equivalent Pi experiment before P3; apply selected delegate-role dispositions when each role enters P4 |
+| P2b progressively disclosed tools | Select through the original or equivalent Pi experiment before P3, then implement catalog, exact-name =load_skill=, invocation-scoped schema filtering, and matching execution filtering for every P3 tool; expand the same mechanism with each later role/client |
+| P2c skill-description lifecycle | If its independent experiment selects a policy before P3, use that policy in the same catalog; otherwise retain the P2b catalog lifetime and add no Pi-only suppression state |
+| P3 memory through a skill | Select the policy through the original or equivalent Pi experiment, then implement it in Pi P2 before P3; later clients receive only their declared memory surface |
+| P4 caller research workflow | Select the policy before P3 and preserve the current topology: the main caller skill invokes the one qualified durable async research child; do not temporarily expose direct search on main |
+| P5 research specialist contracts | Select the contract for the one research child before P3; implement remaining research/specialist roles in Pi P4 before they are visible |
+| P6 context, receptionist, thread description, and capture/eval reconciliation | Reuse capture rules in Pi P1; select and qualify thread description for P3, context roles in P4, and voice receptionist in P5c before each is visible |
+| P7 residual main/delegate procedures | Select main-agent artifact delivery before P3 and delegate task-file workflow before its P4 role; no residual procedure is copied without its owning instruction home |
+
+Rows whose original prompt-architecture experiment has not selected a policy do not
+authorize Pi to guess the winner.  A Pi-specific equivalent may run sooner, but it
+uses the same preregistration, natural/capability cohorts, deterministic gates, and
+N=10 selection rule.  P3 cannot expose a main-agent capability until its applicable
+P2, P2b, P3, P4, P6c, or P7a policy has a selected winner.  P2 may build candidates
+behind tests while selection is pending; neither candidate can claim parity or ship.
+
+* Eval parity and migration
+
+Pi gets a counterpart of the complete eval corpus, not a curated subset.  Avoid
+copying test files into a tree that will drift.  Instead discover every Python module
+under =edd/eval/= from the filesystem.  Each file is either an eval entrypoint, a
+pytest suite whose collected nodes are enumerated, or a reviewed support-file
+allowlist entry with a reason.  Cross-check the README and eval runner, but do not
+trust either as the discovery root.  This explicitly includes the standalone
+=eval_large_tool_results.py= and =eval_multi_turn_research.py= programs, which pytest
+collection alone would miss.  Classify each eval entry as:
+
+1. engine-neutral product behavior, run unchanged against both runtimes with the
+   exact same natural prompts, fixtures, captured surfaces, and validators;
+2. a Deep Agents mechanism test whose user outcome applies to Pi, run through a Pi
+   adapter with unchanged user input and outcome validation;
+3. an engine-specific diagnostic, retained on Deep Agents and paired with a named Pi
+   deterministic contract test for the corresponding boundary; or
+4. genuinely inapplicable, with a reviewed reason and no contribution to Pi's pass
+   rate.
+
+Inventory or collection fails if a discovered module/node lacks either a manifest
+entry or reviewed support-file reason, if a paired case
+changes only one engine's prompt or validator, or if an exclusion is unreviewed.  Raw
+attempts identify engine, runner release, prompt fingerprint, schema fingerprint,
+model build, fixture digest, and baseline commit.  Aggregate reports show the full
+matrix, exclusions, and regressions instead of one favorable Pi score.
+
+The prompt-architecture natural outcome judge and its deterministic gates are reused,
+not cloned.  Harness-specific recovery, lifecycle, protocol, security, and type
+checks remain deterministic and cannot be waived by semantic success.  This gives
+Pierre “a copy of all evals” in the useful sense: every existing contract is
+accounted for and runnable against Pi without maintaining a second source of truth.
+
+* Qwen qualification
+
+Pi documentation and community reports show Qwen-family and OpenAI-compatible
+support, but that does not prove this exact =Qwen3.6-27B Q4_K_M= endpoint formats
+reasoning, tool calls, tool results, and continuation correctly.  It also says
+nothing about whether the model can modify the harness reliably.  Both questions
+need local evidence.
+
+** Provider probe
+
+Against the deployed llama.cpp endpoint, pin the explicit compatibility profile,
+including ordinary system-role handling and the Qwen reasoning format.  Exercise:
+
+1. plain streaming text with thinking separated from visible output;
+2. one tool call and result;
+3. sequential calls whose second arguments depend on the first result;
+4. parallel read-only calls and serialized mutations;
+5. malformed arguments, an unknown tool, a tool error, cancellation, and context
+   compaction;
+6. continuation from a persisted user or tool-result leaf;
+7. a full provider-bound prompt and schema census.
+
+Any provider workaround becomes pinned runner configuration and a regression test.
+Do not depend on Pi's provider auto-detection for the production model.
+
+** Harness-authoring experiment
+
+Give Qwen a disposable, trusted fixture containing the small runner, its exact Pi
+types and relevant documentation, tests, and no production secrets or extension
+directories.  Network remains off.  Natural tasks should ask for user outcomes,
+not mention the desired tool, event hook, or implementation:
+
+- add one bounded model tool and make it visible only after its skill loads;
+- change one owned system-prompt section without restoring Pi defaults;
+- preserve a tool result across a runner restart;
+- add a guard against a concrete dangerous command or protected path;
+- repair a deliberately broken extension and make the next Run use it;
+- change an event mapping while preserving the web-visible message contract.
+
+Keep a smaller, explicitly labelled capability cohort that names Pi APIs to diagnose
+whether the mechanism can work.  Validate the artifact, not its explanation:
+TypeScript compilation, unit tests, prompt census, schema snapshot, reload smoke,
+security gates, and the actual web event/result fixture all decide the result.
+
+Report capability-extension work separately from kernel work.  TODO, skill, tool,
+and async-task changes may qualify even if Qwen cannot safely change prompt
+ownership, wire protocol, batch journaling, or =fatal=/=halt=.  A passing capability
+score never authorizes Qwen to maintain the load-bearing kernel cohort; that cohort
+needs its own successful tasks and review evidence.
+
+Run each natural task three times while developing the cohort, five times after
+review, then ten times for stability.  Claiming that Qwen can maintain the harness
+requires every deterministic artifact gate to pass, at least 8/10 for each core task
+family, and no human repair within a counted attempt or regression against the
+current Deep Agents development baseline.  The 70% product
+acceptance target remains the floor for broader natural evals, not sufficient proof
+that Qwen can maintain load-bearing harness code.
+
+If Qwen cannot meet that bar, humans and stronger development agents may still
+maintain a Pi runtime.  The result only rejects “Qwen can consistently modify its
+own harness” as a product capability.  It does not by itself reject Pi as a runtime.
+
+* Sessions, recovery, and approvals
+
+Pi's JSONL session is the model-context record.  Assist's =RunService= remains the
+product source of truth for admission, status, observers, and terminal outcome.
+One new harness-neutral =ToolBatchStore= is operation truth, not a third Run
+lifecycle: it owns ordered sibling calls, canonical arguments, approval decisions,
+execution state, and durable results.  =RunService= stores only Run lifecycle and a
+batch reference; Pi JSONL stores model context plus authenticated recovery markers,
+never Run or operation truth; web status remains a projection.
+
+Before the provider can run, the server appends a public Pi custom session entry
+carrying the authenticated =run_id=, =work_id=, engine-session ID, and canonical
+input hash.  Recovery distinguishes input not appended, appended but not started,
+and completed without comparing message text.  P0 kills the runner before and after
+each append boundary.  If public Pi session APIs cannot provide this identity
+without ambiguous replay, the experiment stops.
+
+Pi can continue a session whose leaf is a user message or completed tool result.
+It must not blindly replay a tool call whose result was not durably recorded.  The
+=ToolBatchStore= records every host-effect operation before its result is appended to
+the Pi session.  Once bound after append, the server keys a call by authenticated
+thread, immutable engine session, durable assistant session-entry ID, batch index,
+tool-call ID, canonical tool name, and requested-argument digest.  Requested
+arguments remain immutable.  An
+approval edit adds a compare-and-swap decision version with separate effective
+arguments and digest; execution idempotency is the batch item plus decision version.
+It rejects duplicate IDs within a batch or session, and
+an approval continuation carries the original durable batch identity.  A repeated
+completed call receives the recorded result.  An ambiguous non-idempotent call stops
+with a visible recovery error instead of executing twice.
+
+Cross-store ordering is journal first:
+
+1. On the public assistant =message_end= hook, before Pi has assigned a session-entry
+   ID, write and fsync a =prepared= batch containing a server-generated batch ID,
+   previous durable leaf ID, ordered calls, and assistant content hash.  Only then
+   allow Pi to append the assistant leaf.
+2. Pi documents that =tool_call= waits until the current assistant message has been
+   persisted.  At the first sequential preflight, fsync the session file through its
+   public path, read the new durable assistant entry ID, compare its parent, calls,
+   and hash, then atomically bind the prepared batch and mark
+   =assistant_appended=.  After a crash in this gap, recovery may perform the same
+   unique parent/hash/call match; zero or multiple matches are corruption, never a
+   reason to execute.  A prepared batch without a leaf is safe to discard.  A
+   tool-bearing assistant leaf with no matching durable batch is corrupt and cannot
+   execute.
+3. Before handing any permitted item to a Python handler, compare-and-swap it from
+   =ready= to =executing= and fsync the item, decision version, effective-argument
+   digest, effect class, and any target-enforced idempotency key.  The handler's
+   terminal result or error is then written and fsynced before its custom-tool
+   =execute= returns to Pi.  A crash with =executing= and no terminal result is never
+   treated as not started.  It may retry only when the handler proves a target-side
+   idempotency contract for that exact key; otherwise recovery marks it =ambiguous=
+   and does not execute it again.
+4. Complete one ordered result batch before appending any tool result to Pi.  For an
+   ambiguous item, include a durable synthetic ambiguous result; every unstarted
+   sibling receives a durable not-executed result.  Append and fsync the complete
+   batch before accepting another user message, then mark =results_appended= and
+   transition the Run.  Pi therefore never remains indefinitely at an unmatched
+   tool-call leaf.  Orphan prepared/results records are reconciled by stable IDs,
+   never by text or model-controlled call ID alone.
+5. P2 force-kills immediately before and after every =ToolBatchStore= write, Pi
+   append/fsync, and =RunService= transition and proves the one
+   recovery action for every partial state.  If Pi's public blocking hooks cannot
+   enforce journal-first ordering, stop.
+
+Approval uses the current web contract:
+
+1. The runner receives one complete assistant message and, inside =message_end=,
+   asks Python to preflight the entire ordered tool-call batch before Pi persists or
+   executes any call.  It journals the classification before returning.
+2. If no call needs approval, Python executes permitted calls under the current
+   mutation-serialization rules, records every result, and appends exactly one
+   ordered result for every tool-call ID.
+3. If any call needs approval, Python has persisted the full ordered batch, exact
+   canonical arguments, and the fact that every sibling is unexecuted.  Pi 0.83 has
+   no public “pause after persisting this assistant message” return value.  On the
+   first =tool_call=, after binding and fsyncing the assistant leaf, the extension
+   writes the interruption frame/journal state and invokes synchronous =halt=
+   termination primitive before returning to Pi.  No sibling executes.  Only after
+   child death is confirmed may the queue be released and the Run become
+   =interrupted=.
+4. The existing approval card appears in the conversation.  Approval, edit, or
+   rejection applies once with compare-and-swap and creates an ordinary continuation
+   Run.  A repeated submission returns the existing decision.
+5. A fresh runner opens the session at the durable assistant leaf.  Python executes
+   the approved form at most once, records its result, executes each permitted
+   deferred sibling or records its policy rejection, and produces exactly one result
+   per original tool-call ID in original order.
+6. Only after the complete result batch is durable does the runner append it and
+   call Pi =continue()=.
+
+The current web UI supports one approval card per interrupted batch.  More than one
+approval-required sibling is therefore an invalid batch: execute none and append one
+ordered policy-error result for every call, telling the model to propose gated
+effects one at a time.  One gated call mixed with permitted siblings follows the
+defer-whole-batch flow above.  P0 tests two gated siblings and the mixed case.
+
+This transition is a P0 feasibility test, not assumed SDK behavior.  It must use
+public Pi session and event surfaces plus the contained child-termination boundary.
+P0 proves =message_end= precedes persistence, first =tool_call= observes the
+persisted leaf before execution, text-only =turn_end= can fsync before parent
+completion, and self-termination prevents every sibling effect.  If Pi begins
+sibling execution before the batch gate, cannot append a complete externally
+recorded result batch, or requires a custom agent loop, checkpoint scheduler, or Pi
+fork, the replacement experiment stops.
+
+Sandboxed file and shell operations are not assumed to be exactly once after a
+process crash.  If a result is missing, the UI reports the ambiguous operation and
+requires inspection or a fresh user instruction.  Reducing the probability of a
+duplicate is not a correctness guarantee.
+
+* Web UI contract
+
+The existing web UI is an acceptance surface, not a later integration detail.
+
+** Two explicit coexistence milestones
+
+- M1, P3 “usable dual-runtime web preview”: the same running web UI creates either
+  a Deep Agents thread or a Pi thread.  Ordinary work, the current research child,
+  files, renders, and one approval path work on Pi; the form names the capabilities
+  not yet qualified.  Deep Agents remains preselected.
+- M2, P5e “full-system dual-runtime release candidate”: both runtimes remain live
+  after full web, emacsos/phone, voice, unattended-client, recovery, and rollback
+  parity.  The collapsed per-thread choice still exists, Pi may now be preselected,
+  and there are no Pi capability exclusions.  Pierre can compare both complete
+  implementations before authorizing deletion.
+
+The selector remains available through M2 and disappears only in the reviewed
+Pi-only retirement change.  Engine choice applies to a /new/ thread; neither
+milestone converts an existing history.
+
+** Per-thread selection and common flow
+
+1. At M1, behind the operator flag, the existing new-thread form gains a collapsed
+   “Advanced” disclosure containing “Deep Agents (default)” and “Pi,
+   experimental.”  One sentence says the choice applies only to this thread,
+   cannot be changed, and temporarily lists the Pi capabilities not yet qualified.
+   After the approved web-default switch, the same control reads “Pi (default)” and
+   “Deep Agents (alternate)” through M2; the exclusion sentence shrinks as gates
+   pass and is absent when M2 has full parity.
+2. The chosen runtime is immutable and visible as a small badge in the thread
+   header from initialization onward.  Existing pre-schema threads implicitly
+   remain Deep Agents.
+3. Sending a message creates the same durable Run, pending message, queue status,
+   and busy banner.  The composer remains available.  In P3, an ordinary second
+   message queues as a follow-up after the active boundary; a natural “stop” asks
+   =RunService= to cancel and reap the current work.  It is not injected into the
+   model mid-turn.  P4 adds the current keep/update/cancel interjection semantics.
+   This program does not add a Stop button.
+4. The adapter maps Pi message, reasoning, tool, compaction, and error events into
+   the existing normalized message and status events.  Reasoning remains hidden.
+   The current web page does not token-stream or poll: completion appears on browser
+   refresh or pull-to-refresh, exactly as it does for Deep Agents.  Token streaming
+   is not a Pi web acceptance requirement.
+5. =render= blocks, citations, artifacts, and host tools use the current Python
+   implementation, so their page behavior does not fork.
+6. Approval cards appear in the same chronological conversation.  Submitting a
+   choice redirects to that conversation, terminally labels or removes the old
+   card, and shows the continuation as pending so a second tap is unnecessary.
+7. Async child tools remain the current private Agent Protocol and =RunService=
+   tools.  P3 qualifies the existing research child and its ordinary completion wake
+   without changing topology; other child roles remain absent until P4.
+8. Refresh, browser reconnect, service restart, and failed runner exit reconstruct
+   status from durable state.  A safe pre-effect failure preserves the pending
+   message and offers “Retry with Pi.”  An ambiguous effect names the operation
+   safely, says it may have completed, offers no automatic retry, keeps the composer
+   available, and asks the user to inspect before a fresh instruction.  A missing or
+   incompatible runner marks the Pi badge unavailable and disables submission until
+   restored.  Only during read-only session preflight, before the authoritative work
+   pin and before any session/input append, provider request, or tool effect, may the
+   server try the thread's recorded last-compatible release and visibly report the
+   fallback.  A pinned work or continuation is never repinned.
+   Deployment retains the last compatible read-only session parser so visible
+   history and export do not require the executable runner.
+
+Experimental Pi threads do not receive schedule, subscription, SMS, or other
+external-ingress tools and cannot be selected by voice or triage.  The server rejects
+external dispatch to them rather than running a second engine against their history.
+Only the research-child completion qualified in P3 is allowed before P4.
+
+Terminal or RPC success cannot pass the web program.  P3 live acceptance covers
+creating a Pi thread, ordinary single-agent chat and web research, a sandboxed file
+change, a rendered result, one approval, refresh during work, each failure state,
+blocked external ingress, and the next-work reload of one harmless prompt marker.
+P4 adds interjection, specialist
+and async-child completion, every approval shape, and compaction to that same live
+flow.
+
+Other clients do not receive a runtime selector during P3.  Their external ingress
+is excluded from Pi threads until the web adapter has passed the soak and the
+client-specific phase succeeds.  Emacsos chat has the explicit P5b plan and voice
+has its separate P5c gate.  This prevents an experimental engine choice
+from silently changing unattended or safety-sensitive work.
+
+* Threat model
+
+The new attack surface is a trusted Node dependency and child process, a
+cross-language message parser, dynamic tool selection, and persisted Pi JSONL.  The
+design contains each surface by construction:
+
+- exact-lock Pi and TypeScript dependencies; no runtime package install, update
+  check, telemetry, or network discovery;
+- fetch and compile in a disposable unprivileged build environment with no service
+  secrets; disable npm lifecycle scripts by default, audit any required exception,
+  and promote only the immutable compiled artifact and verified lock.  The service
+  host runs no npm install, compiler, or TypeScript loader;
+- use an empty dedicated Pi home and explicit resource loader; never scan global,
+  project, domain, or user extension directories;
+- do not import community packages into production without a separate source audit;
+- expose no Pi built-in filesystem or shell operations on the host;
+- run under the dedicated OS containment envelope described above; probe unreadable
+  canary files and environment values plus direct-model and general-egress denial in
+  P0;
+- make the separately contained gateway the only kernel-reachable model peer.  It
+  chooses one exact allowlisted scheme, address, port, and model ID, forbids
+  redirects, and enforces one-use bound leases for every client.  Clear =HOME=, XDG
+  variables, =NODE_OPTIONS=, =NODE_PATH=,
+  proxy variables, and every provider credential from the runner environment.  The
+  current local endpoint requires no Node-held credential; any later cloud-provider
+  credential stays in the gateway/broker, while the runner receives only the
+  request-bound one-use lease over its private control FD;
+- keep web model file/shell access in the existing per-turn Docker container and
+  each other client in its approved Python backend; all host effects remain behind
+  Python authorization and approval gates;
+- use dedicated child-process protocol pipes, not stdout or a listener; bound frame
+  size/count, logs, tool output, session growth, process time, PIDs, FDs, CPU, and
+  memory;
+- validate messages and tool arguments independently on both sides; never create a
+  shell command by concatenating model or bridge values;
+- test that secrets cannot appear in argv, environment metadata, prompt census, Pi
+  session files, stdout/stderr, errors, crash reports, or logs;
+- have the parent create a 0700 engine directory and 0600 regular session file under
+  one fixed root with dirfd/no-follow operations; reject links and nonregular files,
+  enforce record/line/file quotas before Pi parses, allow only audited record kinds,
+  and load no path-based attachment from session data.  Test crash-safe append and
+  directory/file =fsync=;
+- make active-tool state invocation-scoped and derived from the server-owned catalog
+  and trusted skill-load record.  Python enforces the allowed set on every call;
+  Pi's active set controls schema disclosure only.  Adversarial skill and tool-result
+  text must not grant a capability;
+- spawn directly without a shell in a dedicated process group/cgroup, close every
+  non-allowlisted FD, and on every exit TERM then KILL and reap the entire descendant
+  group before releasing =ThreadQueue= or =_STREAM_LOCK=.  Test that no descendant,
+  pipe, or provider socket survives cancellation, parser failure, timeout, client
+  disconnect, approval interruption, or runner crash;
+- treat Python tool handlers and their backend as part of the same execution lease.
+  On cancellation or runner failure, stop admitting calls, invoke the backend's
+  bounded termination, wait for every handler to finish or durably mark its effect
+  ambiguous, terminate runner and sandbox, join drainers, and only then release.  If
+  a handler cannot become terminal, keep the client/model unavailable rather than
+  overlap a new turn.  Exercise cancellation during Docker =execute= and emacsos
+  =apply_config=, not only during provider work;
+- retain the current single-worker FastAPI rule: blocking runner and Docker work
+  stays inside the synchronous background worker and never on the asyncio loop.
+
+A malicious skill body is still untrusted text.  Loading it may guide the model but
+cannot grant a tool, host path, extension, or approval.  A malicious Pi session file
+is likewise data, never an extension source.
+
+* Implementation phases and gates
+
+Each phase is a separate reviewed change.  Stop at the first failed gate.  No phase
+begins from this design without Pierre's approval.
+
+** P0: Pin, isolate, and prove execution control, no product path
+
+- Pin Pi, Node, the lockfile, and the local model compatibility profile.
+- Produce the compiled release in the disposable no-secret build environment with
+  lifecycle scripts disabled, then promote its immutable digest.
+- Build an offline SDK probe with in-memory settings, ambient resources and built-in
+  tools disabled, and explicit model/session services.
+- Prove the runner's OS identity, mount view, environment, FD table, cgroup bounds,
+  session file construction, inability to reach the model directly, single-use
+  gateway lease, exact non-redirecting upstream destination, and blocked egress with
+  canary probes.  Scan process metadata, session, census, logs, and crash output for
+  the test secret.
+- Capture final prompt, schemas, provider payload, events, and session record.
+- Load the exact static extension manifest and reject ambient discovery, duplicate
+  IDs/tools, dependency cycles, schema/version collisions, capability handlers that
+  register cross-cutting hooks, and lifecycle handlers that bypass =mustHandle=.
+- Inject every load-bearing extension failure listed in the lifecycle section and
+  prove swallowed exceptions cannot continue because =halt= terminates first.
+- In one invocation, call =load_skill= and use a newly disclosed tool on the next
+  model iteration.  Kill before/after the activation-record append/fsync,
+  =setActiveTools= application, load result, and next provider request; resume must
+  expose exactly the durably committed set without replaying the load or admitting
+  an uncommitted tool.
+- Prove the runner cannot see the host workspace through a model tool.
+- In the disposable runner, have a fixture lease request a yield while work is active.
+  The runner must finish and durably append the current complete provider/tool
+  boundary, stop before another provider request, emit =paused=, and exit.  The
+  fixture retains ownership until child exit is confirmed; a timed-out child is
+  killed and reaped before another holder can start.
+- Open the same session in a fresh process, continue without repeating the completed
+  boundary, and enforce the cumulative active-work cap across processes.
+- Force every race around pause, cancellation, kill, and fresh resume.  Prove the old
+  process group, descendant, pipe, or provider socket cannot survive or call the
+  provider after the fixture passes to a new holder.  Cancel during a streamed
+  generation and crash/restart the gateway; do not pass admission until a
+  provider-observed terminal/idle state or a completed bounded model restart proves
+  the old generation is absent.
+- Kill before and after input/custom-entry append and every session fsync boundary;
+  prove idempotent recovery from not-appended, appended-not-started, and completed
+  inputs, plus malformed, oversized, linked, and truncated session rejection.
+- With synthetic in-memory tools and a disposable journal, prove the public Pi hooks
+  can preflight an approval-bearing multi-tool batch, exit at the assistant leaf,
+  append one ordered result per sibling, and =continue()=.  Do not add
+  =ToolBatchStore=, change =ThreadQueue=, call production backends, or alter any web
+  path in P0.
+
+Gate: the exact Qwen endpoint passes every provider probe and the census shows that
+Assist owns every system-prompt character and active tool schema.  Cooperative
+yield, fresh-process resume, cumulative accounting, synthetic multi-tool approval,
+=message_end=/first-=tool_call= durability, fail-closed =halt=, and single-holder
+exclusion must all work through public Pi SDK/events plus contained process
+termination.  If any needs a custom agent loop, checkpoint scheduler, Pi fork,
+uncertain side-effect replay, or release-before-child-exit, stop before P1.  Also
+stop if containing the runner and the enforced model data plane require an
+operational stack whose cost defeats the claimed simplicity.
+
+** P1: Measure harness authoring
+
+- Build the disposable fixture and frozen natural/capability cohorts.
+- Generate the complete eval coverage manifest at the baseline commit.  Make
+  filesystem inventory/collection fail on every unclassified current or future
+  module, standalone program, or pytest node; support files require an explicit
+  reviewed reason.
+- Decide with compilation, unit tests, prompt/schema snapshots, reload smoke,
+  security gates, and actual event/result fixtures.  Do not use a semantic judge for
+  these load-bearing artifacts.
+- Run the 3/5/10 cadence and compare with the Deep Agents development baseline.
+
+Gate: the fixture, attempt accounting, and every deterministic artifact validator
+are trustworthy, all planned attempts complete, and the result is reported.  The
+8/10 threshold qualifies or rejects “Qwen can maintain the harness”; it does not
+gate Pi runtime migration.  P0 provider behavior and P3 product evals are the runtime
+gates.  A failed harness-authoring score therefore changes who may maintain the
+runner, not whether the reviewed runner may proceed to P2.
+
+** P1t: Select or omit the TODO extension
+
+Before freezing the P2 product manifest, preregister a paired natural-outcome
+experiment whose only difference is =assist-todo= plus its mechanics/guidance.
+Use multi-step ordinary work where a user would benefit from planning, adjacent
+short work where TODO overhead may hurt, restart/compaction cases, and the existing
+unprompted TODO behavior cohort.  The user prompts never ask for a TODO tool.  Keep
+provider, prompt kernel, other tools, fixtures, validators, and attempt schedule
+identical; measure full outcome, unnecessary planning, plan drift, token cost, and
+recovery.
+
+Gate: select =assist-todo= only if the preregistered comparison shows a useful
+outcome gain, meets the natural acceptance floor, and causes no material adjacent
+regression.  An ambiguous result chooses omission.  No experimental TODO-bearing
+session enters a product thread.  If a later product release removes a previously
+selected extension, its retained-session compatibility reader must understand and
+ignore the namespaced old entries while the new manifest exposes no TODO tools or
+guidance.
+
+** P2: Internal vertical slice
+
+- Define the minimal harness-neutral =RuntimeSession= protocol.
+- Add the strict-TypeScript short-lived runner, statically assembled first-party
+  extension suite with =assist-kernel= as sole lifecycle owner, generated closed
+  wire schema, and bounded pipe bridge behind tests only.
+- Test =assist-skills=, =assist-tools=, =assist-async-tasks=, and any selected
+  =assist-todo= independently against fake narrow host contracts, then test the exact
+  assembled suite for prompt contribution order, tool collision, active-set
+  ownership, same-turn skill activation/recovery, batch-gate order, and
+  optional-extension removal.
+- Define real Pi runtime manifests for the main agent and the current durable async
+  research leaf.  Select and implement that leaf's prompt-architecture P5 contract
+  here so a P3 parent and child share Pi by construction; do not defer its manifest
+  to the general P4 specialist work.
+- Add and failure-test the =RuntimePolicyAuthority= defined below before any product
+  runner can start: register every current dispatcher, require startup and
+  transactional admission reads, and prove a stale or restarted process cannot
+  cross a closed test epoch.  Include corrupt/unavailable storage, spoofed peer,
+  forged acknowledgement, cross-peer admission deletion, stopped or paused process,
+  unauthorized unit-fence target, process death, host reboot, and PID-reuse cases.
+  Restart the authority around a surviving peer, a dead peer, and a PID-reused peer.
+- Install the minimal lease-enforcing provider gateway and kernel-exclusive model
+  route, then move both Deep Agents and Pi calls from Assist and emacsos-server onto
+  it.  Prove FIFO admission and single occupancy across the two processes before P3,
+  including cancel-during-stream, lost upstream acknowledgement, gateway crash, and
+  model restart/quarantine.
+- Delegate read, edit, write, and bash to the existing sandbox and route the
+  P3 main-agent web/render tools through their existing Python owners.
+- Implement the prompt-rearchitecture target from the start: generated kernel,
+  trigger-only skill catalog, explicit =load_skill=, invocation-scoped active tools,
+  execution filtering, caller-research workflow over the existing durable async
+  research child, main-agent artifact delivery, and the selected repository/thread
+  memory policy.  Use real Assist policy and fixture data, not placeholder schemas.
+  Exercise exact prompt ownership, normalized events, cancellation, and next-work
+  reload.
+- Add =ToolBatchStore= and the journal-first state machine, then force-kill every
+  cross-store boundary and approval case specified above.
+- Add an engine-specific deferred-cleanup acquisition mode to =ThreadQueue= while
+  preserving Deep Agents behavior.  Cap expiry marks the lease terminal but the
+  existing timer cannot vacate it; a supervisor terminates every Python
+  handler/backend, runner descendant, pipe, drainer, and sandbox before one atomic
+  release/promotion.
+- Cancel while real Docker =execute= and fixture host-effect handlers are active.
+  Prove the operation lease becomes terminal or the model remains unavailable;
+  reaping Node alone never releases ownership.
+- Integrate the P0 pause/resume and input-entry identity with =RunService=, including
+  cumulative active time and every restart boundary.
+- Add retained-version fixtures and atomic release references; promotion must prove
+  new-session and continuation compatibility, parent-side digest validation, safe
+  per-thread fallback, and GC races before P3.  Kill at every current-hold,
+  read-only-preflight, fallback-hold, authoritative-pin, unused-hold-release, and
+  spawn boundary; recovery must select once before effects and never repin afterward.
+  Promote and crash at parent dispatch, child admission, retry, terminal handoff,
+  completion wake, and final reference release; prove the whole causal chain stays on
+  one fingerprint, a nonquiescent thread cannot advance, and GC cannot remove its
+  runner.  Also promote between an ordinary active web turn and its queued user
+  follow-up and prove both retain the same cohort across crash recovery.
+
+Gate: no ambient extension, host tool, or direct model route is reachable; every
+existing provider client passes through the shared gateway; no web behavior changes;
+and the diff still supports a plausible net deletion after migration.  Any product-path
+deviation from the P0 execution-control proof reopens its stop gate.  If the product
+lease, operation store, or cleanup adds a second framework, delete the slice and stop.
+
+** P3 / M1: Usable dual-runtime web preview, selected per thread
+
+- Behind an operator flag, add immutable runtime metadata and the explicit
+  new-thread selector.
+- Prove both choices in the same deployed service: create a Deep Agents thread and a
+  Pi thread, send ordinary work to each, observe the immutable header badges, and
+  confirm neither history, tool result, approval, child, or retry crosses engines.
+- Support ordinary messages, status, render blocks, errors, refresh, and
+  one current approval path.
+- Include the main-agent skill catalog, explicit memory inputs, dynamic tool
+  disclosure, execution filtering, and existing-topology caller-research path proven
+  in P2.  Qualify the Pi research-leaf manifest, prompt, return, tools, cancellation,
+  and completion wake in this phase.  These are part of
+  the usable slice, not deferred parity work.
+- Make this the first usable milestone.  Run the applicable engine-neutral eval
+  matrix, publish the full coverage manifest including not-yet-supported P4/P4x/P5a-e
+  rows, and put the reviewed/deployed Pi thread in Pierre's hands for real
+  ordinary work.  It uses the prompt-rearchitecture target, not the current Deep
+  Agents prompt copied wholesale.
+- Withhold every specialist/delegation path except the qualified research child
+  until P4.  Keep schedule, subscription, SMS,
+  triage, voice, and every other external-ingress capability withheld through P4;
+  only its P5b through P5d client gate may add it.
+- Deploy from the feature branch only after the full local review loop.
+
+Gate: every P3-applicable deterministic security, durability, prompt, tool, and web
+test passes.  The unchanged natural acceptance cases run at the three-repeat
+post-implementation cadence, meet the prompt program's current 70% full-pass floor,
+and show no material regression against the matched Deep Agents baseline.
+Explicitly unsupported P4/P4x/P5a-e rows stay visible but do not dilute either denominator.
+Only then does Pierre complete the live web flow.  Existing and default new threads
+remain unchanged.
+
+** P4: Product parity
+
+- Add the remaining specialists/delegation and async children, interjection, the
+  remaining approval shapes, long-thread compaction, and their recovery paths.
+  Main-agent skills, memory, dynamic disclosure, ordinary interactive tools, and the
+  research child already shipped in P3.
+- Define the Python runtime manifests for every remaining supported =assistant_id=
+  and replace each remaining Deep Agents specialist graph with a Pi role only after
+  its current return, trust, filesystem, and tool contract passes.  The main and
+  research-leaf manifests already exist from P2/P3.  Count all replacement builders
+  in the deletion census.
+- Extend the same prompt census and deterministic safety tests to both engines.
+
+Gate: every interactive web capability and failure path qualified in P3/P4 has one
+owner and passes on Pi; unattended and phone capabilities remain explicitly gated
+below.  There is no Pi-only substitute UI or child lifecycle.
+
+** Optional P4x: Provider-capacity experiments after M1
+
+This work may run alongside P4 only after the local-Qwen M1 web path is stable.  It
+does not gate P4, M2, cutover, or Deep Agents retirement.
+
+1. Benchmark the existing local model at gateway capacity two while llama.cpp uses
+   =--parallel 2=.  Keep production at one until the adversarial fairness, VRAM,
+   maximum-context, quality, latency, cancellation, crash, and voice-priority tests
+   above pass.  Higher capacity requires its own measured promotion.
+2. Separately probe OpenRouter with synthetic content and a dedicated capped
+   completion key through the cloud broker.  Verify the exact routing/privacy/cost
+   profile, prompt/tool compatibility, partial-stream behavior, usage accounting,
+   and no secret or content leakage into runner state/logs.
+3. If the probe passes and Pierre explicitly opts in, add an experimental provider
+   choice only when creating a new web Pi thread.  Provider metadata is immutable
+   for that thread and visibly distinguishes local from cloud.  Crash at parent,
+   child, retry, completion-wake, and resume admission boundaries and prove the exact
+   profile digest survives; reject a profile that the retained runner/broker no
+   longer supports rather than substituting another.  Existing threads and every
+   non-web client remain unchanged.
+
+Gate for retaining either option: its own deterministic and applicable behavioral
+evals pass without weakening the local path.  Failure deletes the experiment; it
+does not change the Pi-on-Qwen result.
+
+** P5a: Web stability comparison
+
+- Run paired natural evals at N=10, long-thread compaction, restart recovery, queue
+  fairness, cancellation, and a multi-day web soak.
+- Compare outcomes, latency, provider tokens, context growth, failure rates,
+  dependency surface, and net LOC.  Count the runner, bridge, operation records,
+  schemas, build/deploy path, compatibility hooks, and tests on the Pi side; credit
+  only old code and dependencies that the final deletion phase can actually remove.
+
+Gate: Pi is at least as reliable on natural outcomes, passes every web-default hard
+gate through P5a, gives materially clearer prompt ownership, and has a credible
+smaller end state.  This authorizes a web-default decision packet, not Deep Agents
+retirement; P5b through P5d remain required for that.
+
+** P5b: EmacsOS and the phone
+
+The phone is part of replacement maturity, not an indefinite follow-up.  It joins
+only after the web P5a gate because it has no eval harness and its live device is the
+contract.
+
+The current emacsos server directly constructs =assist.Thread= with a shared
+LangGraph =SqliteSaver= and drives =stream_message()= in
+=server/emacsos_server/app.py:247-329=.  Its async HTTP bridge pins construction,
+=next()=, and close to one executor thread at =app.py:362-568=, while
+=server/emacsos_server/stream.py= decodes LangGraph chunks into the stable phone
+NDJSON stream.  The legacy chat receives =EMACS_TOOLS=; file-backed =.assist= chat
+uses =EmacsBackend= to operate on the phone.
+
+The implementation plan is:
+
+1. Reuse the P2 lease-enforcing provider gateway already required by P3.  Emacsos
+   identifies work with its server-owned conversation generation and client request
+   ID rather than an Assist =run_id=/=work_id=.  Re-run simultaneous web/phone
+   occupancy, FIFO order, cumulative budget, cancellation, spoof, flood, replay,
+   peer-restart, and cross-lease-cancel tests while both engines coexist.  The runner
+   and phone backend still have no direct model route.  A P5b failure blocks phone
+   opt-in, but gateway selection is no longer deferred until after web cutover.
+2. Export the reviewed =RuntimeSession= factory and normalized event stream from
+   Assist.  EmacsOS continues to pass =AgentSpec= and =PhoneContext= in Python; the
+   factory creates either =Thread= or the Pi adapter.  Node receives the serialized
+   manifest, never Python callbacks, phone auth contents, or the Emacs backend.
+3. Before runtime opt-in, authenticate the complete phone control channel and narrow
+   the model's phone authority.  The current =/chat=, =/rollback=, =/clear=, and
+   =/forget= routes do not authenticate their caller; the posted Emacs auth contents
+   authorize only the server's later outbound call to the phone.  More importantly,
+   the current model can run arbitrary Elisp in the UI process and arbitrary shell
+   commands as the phone user.  A 0600 key, Emacs variable, same-user signing helper,
+   or WireGuard source address is therefore inside model authority and cannot prove
+   a physical UI request.
+
+   Split those authorities before Pi phone use.  A minimal phone UI transport helper
+   under a separate OS identity owns mutually authenticated confidential transport
+   credentials and is unreachable from the model worker.  Model file/command work
+   moves to a dedicated unprivileged worker with only the selected workdir, no Emacs
+   process access, no UI-helper socket, no control-plane route, no general network
+   egress, and no credential.  Resolve the selected workdir beneath an allowlisted
+   data root and make every Elisp/config/executable path loaded by the privileged UI
+   read-only and unaddressable to this worker even if it appears beneath that root.
+   Replace unrestricted model-callable =eval_elisp= with named primitives.  A truly
+   arbitrary Elisp/config effect requires a fresh physical key sequence observed by
+   the privileged helper itself and bound to the exact operation, content digest,
+   generation, and request ID; an Emacs callback cannot mint that proof.  If
+   preserving unrestricted same-process =eval_elisp= or shell is mandatory, secure
+   phone/UI origin is unachievable by construction and full phone cutover stops.
+
+   Bind each request and authenticated response stream to phone identity, method,
+   path, conversation generation, client request ID, payload digest, and monotonic
+   chunk sequence.  Keep a durable server-side replay/idempotency ledger across
+   restart for =/chat= and every control endpoint; a repeated ID resumes or returns
+   the recorded operation, never starts it again.  Reject cross-thread reuse,
+   altered/expired requests, response substitution, truncation without a terminal
+   frame, and replay.  WireGuard may carry the channel only if the test proves exact
+   peer binding and confidentiality; reachability alone is insufficient.
+4. Keep =app.py='s =/chat= single-flight lock, runaway bound,
+   and streaming NDJSON taxonomy.  Replace LangGraph-specific decoding in =stream.py= with
+   engine-neutral content, tool-start, tool-result, status, error, and completion
+   events.  Ordinary messages require no phone wire or layout change.  Clear/forget
+   generation transactions and proposal-scoped config approval are the two explicit
+   control/wire exceptions below.
+5. Change config mutation into an explicit nonmodal phone approval.  The model's
+   =apply_config= call persists an immutable proposal containing the exact diff,
+   affected paths, operation/content digest, expected base content digest and repo
+   HEAD, generation, and request ID, then pauses
+   the runtime before any config write.  The chat shows that diff with APPLY and
+   DECLINE actions.  The first tap selects; the second fresh hardware action is
+   observed and digest-bound by the privileged helper, not synthesized by Emacs.
+   Approval compare-and-swaps the current base digest/HEAD, executes exactly the
+   proposal, records its resulting digest and commit, and resumes the pending runtime
+   with the ordinary tool result; a stale base fails visibly and requires a new
+   proposal.  Rejection resumes it with a rejection result.  Only a successful apply
+   emits the top-level =applied= event and existing in-chat ROLLBACK affordance.
+   Rollback uses the same helper-bound two-tap decision and proceeds only when the
+   current state still matches that exact applied result; otherwise it fails visibly
+   instead of overwriting a later change.  Preserve =get_config=, =config_history=, skill sources, and per-request
+   phone identity through named primitives; replace unrestricted =eval_elisp= as
+   required above.
+6. For file-backed chat, every Pi filesystem/execute call crosses back to Python and
+   uses the narrowed phone worker, preserving =.assist=-file exclusions, selected
+   workdir, command timeout, and phone-origin binding.  Each command runs in a
+   Python-owned non-escapable per-request cgroup/container/process namespace on the
+   phone; =setsid=, double-fork, and daemonization cannot escape its lifetime.  The Node runner receives no
+   direct host or phone filesystem, shell, SSH, Emacs, UI-helper, or credential
+   primitive.  Deep Agents remains the phone engine until this replacement proves
+   the same useful file outcomes without the old shared full-trust identity.
+7. Store immutable engine, provider-profile digest, and engine-session ID under the
+   private emacsos state
+   directory for each conversation generation.  Each authenticated chat request is
+   its own logical work record and uses the global hold/preflight/authoritative-pin
+   transaction; it records that request's release fingerprint plus the generation's
+   last-compatible fallback.  A continuation or spawned async chain keeps its pinned
+   release.  The next independent turn may take a promoted release only when the
+   generation is quiescent; otherwise it inherits the held cohort.  Existing
+   checkpoint-backed conversations remain Deep Agents.  A file chat gets a new
+   engine only after explicit Forget creates its new client thread ID.  Legacy New
+   chat starts a new server generation under the fixed public ID, so it may take the
+   current default without reinterpreting the cleared history.
+   =/clear= and =/forget= become idempotent generation transactions with a
+   client-minted request ID.  The server atomically tombstones the old logical
+   generation and selects the new generation/engine before acknowledging; physical
+   session cleanup is retryable afterward.  =chat.el= and =emacos-assist.el= retain
+   the current transcript/header until a successful response, retry a lost response
+   with the same ID, and show a nonmodal error on failure.  They never look fresh
+   while the server can still recall the old generation.
+8. Preserve one execution context: runtime construction, every iterator advance,
+   cancellation, and close stay on the same dedicated executor thread until the
+   engine lease is released.  ABORT, disconnect, timeout, =/clear=, and =/forget=
+   perform bounded TERM/KILL/wait and descendant cleanup through that executor or an
+   async process supervisor, never =waitpid=, pipe reads, or process enumeration in
+   the event-loop generator.  The whole runner group is reaped before
+   =_STREAM_LOCK= releases or session state is deleted.  The Python backend also
+   kills the remote per-request command cgroup and proves it empty.  If it cannot,
+   quarantine the worker/conversation and retain both leases rather than overlap the
+   next turn.
+9. Drain stdout and stderr concurrently off-loop for the runner lifetime.  Retain a
+   fixed diagnostic tail, discard after the cap while continuing to drain, then join
+   the drainers and close every FD before either queue lock releases.
+10. Test both engines through =make test-server= and =make smoke=: legacy chat,
+   file-backed read/edit/execute, content/status/tool ordering, config apply and
+   rollback, clear/forget, reconnect, error mapping, cancellation, long-turn bound,
+   compaction, next-turn release reload, duplicate/lost clear/forget responses, and
+   failure before/after logical tombstone and physical cleanup.  Add mutual-channel,
+   request/response binding, durable replay, truncated/reordered stream, user-presence,
+   worker credential/control-route/general-egress denial, protected UI/config path
+   write rejection through symlinks and aliases, forged Emacs confirmation, exact
+   hardware-action digest binding, =setsid=/double-fork cleanup and quarantine, stale
+   config apply/rollback CAS, and attempted recursive-chat tests.
+11. Run concurrent web/phone tests against the selected shared admission owner: a long web
+   research turn, a phone request arriving during it, cancellation from each side,
+   provider failure, and process restart.  Require single-provider occupancy and no
+   starvation beyond the one already-active provider call.
+12. With Pierre directing the test, deploy the opt-in server setting and exercise the
+   real 320x240 phone: send and receive a streamed reply, ABORT, edit a =.assist=
+   file, inspect and two-tap approve the exact diff for a harmless config change,
+   reject a second proposal, roll back the first change, New chat, Forget, server
+   restart, and a runner failure.  The phone gets no engine picker and no extra
+   persistent engine button; proposal-scoped APPLY/DECLINE and ROLLBACK actions use
+   the nonmodal two-tap surface above.  Failures use the current in-chat error surface.
+
+Gate: the simulator and real phone preserve the intended user outcomes on Pi, no
+runner survives an abort, every phone tool stays inside its approved narrowed Python
+trust boundary, and
+the shared admission owner proves single-provider occupancy and cross-process
+fairness.  The narrowed model worker cannot reach the UI transport, control routes,
+or credentials, and every request/response is mutually authenticated and replay
+safe.  Pierre explicitly approves changing the emacsos-server default for new
+conversation generations.  Existing phone conversations remain on their recorded
+engine.
+
+** P5c: Voice
+
+Voice is a different phone path: the call bridge connects to Assist's =/call= and
+ordinary durable web threads rather than emacsos-server chat.  It cannot target an
+experimental Pi thread during P3.  After the web Pi default and the existing
+hardware power gate are both cleared, voice receives its own fake-bridge and live
+call parity run against Pi: PIN, routing, ordinary Run replies, async child wake,
+TTS, interruption, hangup/restart recovery, and no duplicate outward effect.  Pierre
+initiates every live call.  Voice stays on Deep Agents until that gate passes, but
+Deep Agents cannot be deleted while voice still depends on it.
+
+Thread reservation and Run admission therefore take a server-owned authenticated
+ingress identity, not a form-controlled engine.  Before the voice gate, =voice=
+always creates explicit Deep Agents metadata and its =ThreadCatalog= filters out Pi
+threads.  After the gate, one reviewed policy change permits Pi and deliberately
+widens the catalog.  The common web default can never silently select the voice
+engine.
+
+Gate: fake-bridge recovery and a Pierre-directed live call pass on Pi with no
+undervoltage, authentication regression, stale-thread routing, leaked runner, or
+duplicate outward effect.  Until then voice creates and catalogs only explicit Deep
+Agents threads, and Deep Agents cannot retire.
+
+** P5d: Schedules, subscriptions, SMS, and triage
+
+The web default may switch before these unattended clients, but Deep Agents cannot
+retire until all pass:
+
+1. Keep schedule/subscription tools absent from Pi manifests until this phase.
+   Existing jobs continue to target their immutable Deep Agents threads.
+2. Make every dispatcher resolve the target's =runtime.json= and construct that
+   engine with its exact provider profile.  A caller supplies authenticated ingress
+   and message identity, never an engine or provider override.
+3. Qualify Pi schedule creation, list/change/pause/resume, on-time firing, catch-up,
+   server restart, cancellation, one ordinary result Run, and duplicate-dispatch
+   idempotency.  Only then disclose schedule/subscription tools on Pi threads.
+4. Qualify inbound SMS deduplication, reduced triage manifest, same-engine target
+   continuation, reply approval/edit/reject, stacked ingress, restart, and the rule
+   that triage cannot acquire ordinary web tools.  Only then admit SMS to Pi threads.
+5. Produce a durable census of every unattended binding, including active and
+   paused schedules or subscriptions, pending SMS approvals and triage bindings,
+   queued ingress, and future catch-up records.  Give each Deep Agents binding one
+   explicit disposition approved by Pierre: recreate an eligible binding against a
+   visible Pi successor, permanently cancel and disable it, or retain Deep Agents
+   and block deletion.  An executable approval-bearing batch is never migrated: it
+   must resolve or be rejected on Deep Agents, be durably canceled with every late
+   decision terminally rejected, or keep the compatibility runtime.  Only ingress
+   proven unadmitted and pre-effect may transfer; a later Pi approval is a fresh
+   proposal from a fresh Pi turn.  Eligible recreation is an idempotent transaction
+   that tombstones the old binding and publishes the successor under one stable
+   migration identity.  Force crashes around every boundary and prove that old and
+   successor can never both dispatch and that the old binding or approval cannot
+   later resume.
+6. Re-run hidden child and task-completion wake tests from P4 through these ingress
+   paths so a child never inherits or guesses a different engine.
+
+Gate: every unattended entry point selects the recorded engine by construction,
+passes its deterministic recovery and authorization suite, has a live smoke where
+applicable, and the census has an explicit durable disposition for every dormant,
+pending, or catch-up record.  Until then the web form explains the missing
+capabilities and dispatch rejects Pi targets rather than falling back to Deep
+Agents.
+
+** P5e / M2: Full-system dual-runtime release candidate
+
+Keep both complete runtimes live for one final comparison after P5a through P5d
+pass.  The new-thread form retains its collapsed per-thread engine choice with Pi
+preselected.  Create matched new Deep Agents and Pi threads in the same deployed
+service and exercise ordinary chat, research, files, renders, all approvals,
+specialists, async children, compaction, interruption, and recovery.  The Pi option
+has no capability-warning exclusions.  Existing histories remain on their recorded
+engine.
+
+Repeat the relevant simulator/live emacsos, voice, schedule, subscription, SMS,
+triage, catch-up, child-wake, restart, and rollback smokes while both implementations
+are installed.  Those clients do not gain an engine picker: their server-owned
+generation/thread/binding policy selects and records the engine, and every child or
+wake inherits it.  Confirm the visible “Continue in a new other-engine thread” flow
+in both directions without state conversion.
+
+Gate: all client gates remain green together for the soak window, the full eval
+manifest has no unsupported Pi row, the M2 web comparison has no cross-engine state
+or effect, rollback still closes Pi admissions, and the reviewed deletion preview
+matches the Pi-only end state above.  This produces the full-system cutover packet
+for Pierre.  It does not delete Deep Agents or remove the selector.
+
+** P6: Choose and delete
+
+If Pi fails, first complete the multi-client rollback transaction below; disabling
+only the web selector is not rollback.  Existing Pi threads stay readable with their
+normalized transcript, show “Pi unavailable,” and have a disabled composer.
+Retain the last known-good immutable Pi reader until an engine-neutral transcript
+and export have been materialized and verified once for every experimental thread.
+Only then may the reader be removed.  Delete Pi sessions or visible histories only
+with Pierre's explicit approval; never silently convert them to Deep Agents.  The
+prompt-architecture work continues on Deep Agents.
+
+If Pi passes, execute the full-system retirement and deletion portion of the
+contract below; the P5a web-default switch has already occurred.  Do not preserve a
+translation layer forever.  The replacement is complete only when the default path
+is simpler and the obsolete path is gone.
+
+* Cutover and rollback contract
+
+The web-default switch is a reviewed product change after P5a, not an automatic
+consequence of an eval score.  Full-system cutover and retirement remain separate
+decisions after M2/P5e.
+
+One Assist-owned =RuntimePolicyAuthority= is the durable authority for cutover,
+rollback, and retirement admission.  It runs inside the existing trusted
+=assist-web= service rather than adding a daemon and is the only writer of a 0600
+host-local SQLite policy database.  No dispatcher opens that database.  External
+dispatchers use a bounded Unix socket whose owner authenticates =SO_PEERCRED=,
+distinct service UID and unit identity, host boot ID, and an authority-issued
+unguessable process incarnation held with a =pidfd=.  Model workers, sandboxes, and
+the phone UI helper cannot connect.  The closed API permits a peer only to read the
+epoch, register or terminalize its own admission, and acknowledge its own
+generation; it cannot publish an epoch, name another peer, alter another admission,
+or forge another acknowledgement.  Only an authenticated operator action may
+publish an epoch.  Corrupt or unavailable policy storage closes admission.
+
+Every web, emacsos, voice, child/wake, schedule, subscription, SMS, triage, and
+catch-up dispatcher must, on process startup and again in the same authority
+transaction that records an admission, prove that the selected engine/client pair
+is allowed.  A cached default is never authority.  The returned admission capability
+is required to spawn a Pi runner and to obtain any engine's model-gateway lease.
+Stopped dispatchers do no work; a new incarnation blocks before queue recovery or
+admission until it has read the durable epoch.  Epoch publication freezes the exact
+set of registered process incarnations that must acknowledge.  A missing or paused
+incarnation is never expired by heartbeat or PID.  For its own child, =assist-web=
+may signal through the held =pidfd= and reap it through the ordinary parent path.
+For an external systemd service, the authority uses a narrowly authorized fixed-unit
+fence that cannot name an arbitrary unit; the registration also binds the systemd
+invocation ID.  After an authority restart, a surviving peer must reauthenticate its
+persisted incarnation, boot ID, unit, and invocation ID over a fresh socket so the
+authority can acquire a new =pidfd= before accepting recovery or acknowledgement.
+If it cannot, systemd stops/kills the entire registered unit cgroup and remains
+responsible for reaping it; inactive unit state plus an empty cgroup is substitute
+proof when the old =pidfd= no longer exists.  A changed host boot ID proves every
+pre-reboot incarnation dead, after which persisted admissions are still
+terminalized or quarantined before recovery; a new process must register as a new
+incarnation.  When a =pidfd= is available, the authority additionally waits for its
+exit.  If the fixed-unit fence is unavailable, the epoch stays unacknowledged for
+operator action; a timeout never implies death.  Only then may it terminalize or quarantine
+every admission owned by that incarnation and remove it from the acknowledgement
+set.  A later incarnation starts from the current epoch and cannot revive the old
+one.  The authority owns selection policy only, never Run, session, or
+tool-operation lifecycle.
+
+** Web-default readiness packet
+
+Before Pierre chooses a cutover, one packet reports:
+
+- every deterministic security, recovery, queue, approval, and web gate through P5a,
+  all of which must pass;
+- paired N=10 natural outcomes and any statistically or practically meaningful
+  regression;
+- live Pi web Runs by outcome, failure, cancellation, restart, approval, child task,
+  and compaction, with every lost or duplicate host effect called out;
+- final provider prompt/schema ownership and the measured token/latency change;
+- the complete responsibility census with old code actually deletable, new runner
+  and bridge code, dependencies, build/deploy burden, and unresolved dual policy;
+- Qwen harness-authoring results reported separately from runtime reliability;
+- an explicit inventory of Deep Agents threads and non-web clients still awaiting
+  P5b through P5d, so web-default readiness is not confused with full retirement
+  readiness.
+
+Pierre explicitly approves or declines the default switch from that packet.  A
+failed hard gate cannot be waived by a good aggregate score.
+
+** Default switch
+
+1. Deploy the reviewed dual-runtime release with Deep Agents still the default and
+   Pi available only behind the operator flag.
+2. Pierre uses explicitly selected Pi threads during the P5a soak.  Review-driven
+   fixes repeat checks and redeploy before more testing.
+3. On approval, change one server-owned default so newly reserved ordinary web
+   threads use Pi.  Atomically publish =runtime.json= with the engine and exact
+   provider profile alongside the thread directory before admitting the first
+   durable Run and redirecting.
+4. Keep the collapsed per-thread selector through the full-system M2 comparison,
+   but preselect Pi.  Deep Agents remains the explicit alternate for a new thread
+   during coexistence; only the reviewed P6 retirement change removes the selector.
+5. Never change the marker on an existing thread.  Active and historical Deep
+   Agents threads continue on Deep Agents; existing Pi threads continue on Pi.
+6. Emacsos-server new conversation generations switch only after P5b and Pierre's
+   live-phone approval.  SMS, schedules, voice, triage, and hidden child roles keep
+   their approved engine until each client passes its own recovery and UX gate.  A
+   hidden child records the engine, exact provider-profile digest, and held release
+   fingerprint selected by its parent/client contract before admission.
+
+There is no shadow execution of live tools during cutover.  Paired comparisons use
+synthetic threads and cassette or idempotent fixtures only.
+
+** Rollback
+
+The safe operational rollback is one durable =RuntimePolicyAuthority= epoch across
+every client that has cut over, not a web-only setting:
+
+1. Publish an epoch that closes new Pi admission for ordinary web threads, emacsos
+   conversation generations, voice sessions, hidden children and wakes, schedules,
+   subscriptions, SMS, triage, and catch-up.  Revert each already-cut-over default
+   for /future/ work to Deep Agents; a dispatcher rejects a stale policy epoch.
+2. Never open an existing Pi session with Deep Agents or rewrite its engine marker.
+   Existing interactive Pi threads and emacsos generations remain readable and
+   either continue on an explicitly selected known-compatible Pi runner after the
+   defect is fixed or show a clear temporarily unavailable state.  A live Pi voice
+   session is ended through its ordinary authenticated teardown if it cannot safely
+   drain.
+3. Before acknowledging rollback, durably pause or quarantine every Pi-targeted
+   schedule, subscription, queued or catch-up ingress, SMS/triage item, pending
+   approval, child completion, and wake.  Cancel and reap active runner/provider/tool
+   work under its operation record; an ambiguous external effect stays quarantined.
+   Each item may later continue on an explicitly approved known-good Pi runner,
+   remain paused, or be canceled.  It is never silently redirected to Deep Agents.
+4. Acknowledge only after every frozen process incarnation has persisted the new
+   generation or has been fenced and its admissions terminalized/quarantined, the
+   policy/admission tables prove no new Pi work can be admitted, and
+   active Pi dispatch has drained or reached a durable terminal or quarantine state.
+   A stopped or newly starting dispatcher is safe by the mandatory startup read.
+   Crash and restart tests at every epoch/queue/operation boundary prove that no Pi
+   provider or tool dispatch begins after acknowledgement.
+
+The deploy retains the last known-good immutable Pi runner directory through the
+rollback period.  The =current= symlink may move back only after that runner proves
+it can open the persisted session version and tool-call shapes.  If compatibility is
+not proven, disable Pi continuation rather than guessing or replaying effects.
+
+For a user who must continue immediately, the Pi thread page offers “Continue in a
+new Deep Agents thread.”  It creates a new thread with a visible link to the source
+and an editable handoff message; it does not convert hidden state or silently copy a
+checkpoint.  The symmetric action is available when retiring an old Deep Agents
+thread in favor of Pi.
+
+** Deep Agents retirement
+
+After the rollback period, produce a second review packet from the live default.
+Before its final census, publish and acknowledge a =RuntimePolicyAuthority= retirement
+epoch that closes every new Deep Agents Run, continuation, child/wake, and
+unattended-binding create/change/resume admission.  Drain, cancel, or quarantine
+already admitted work under its existing lifecycle.  In the same policy transaction
+that admits a visible Pi successor, make its non-retained Deep Agents predecessor
+read-only; a predecessor selected to keep running blocks retirement completion and
+therefore deletion.  Only after every frozen dispatcher incarnation acknowledges or
+is fenced under the authority rule, every future process is covered by the startup
+rule, and no live Deep Agents admission
+remains does the final thread and unattended-binding census run.  Crash tests around
+closure, predecessor marking, successor publication, and census prove that a stale
+dispatcher cannot create a late binding or Run.
+
+Deletion requires:
+
+- no unresolved Pi reliability, security, prompt, queue, or web-parity regression;
+- no active non-web client still depending on the Deep Agents path;
+- no paused, pending, queued, catch-up, or otherwise dormant unattended binding can
+  still resume against Deep Agents; every P5d census row is durably canceled,
+  migrated without dual dispatch, or explicitly retains the compatibility runtime
+  and therefore blocks deletion;
+- Pierre's explicit decision for each still-active Deep Agents thread: keep the
+  compatibility runtime longer, create a visible successor Pi thread and make the
+  old predecessor read-only atomically, or make the old thread read-only;
+- no thread still carrying “keep the compatibility runtime” when deletion begins;
+  that disposition defers retirement and requires a later explicit decision;
+- old threads remaining readable in the web UI after their engine can no longer run;
+- a verified engine-neutral visible transcript and export for every thread whose old
+  engine reader will be removed;
+- the promised net deletion demonstrated by the actual final diff.
+
+Only then remove the Deep Agents builders and middleware, LangGraph checkpoint and
+resume integration, dependency, operator escape hatch, and compatibility runtime.
+The deletion change receives the full local review, deploy, web smoke, and external
+review cycle.  If old clients require both implementations indefinitely, report that
+Pi did not complete the simplicity goal and retain the cleaner single default rather
+than claiming the migration is finished.
+
+* Alternatives rejected
+
+** Replace Deep Agents immediately
+
+Rejected because Qwen provider behavior, harness maintenance, crash recovery, and
+the web adapter are unproven.  Existing histories also have LangGraph-specific
+checkpoints.  A big-bang conversion combines every risk and removes the rollback.
+
+** Put Pi inside the model sandbox
+
+Rejected for the first experiment.  The sandbox deliberately has no route to the
+host, while the local model endpoint and host tools live outside it.  Adding a host
+route from the model-controlled workspace to the provider gateway would expand the
+strongest security boundary.  The contained host runner reaches only a one-use
+gateway lease, exposes zero host model-tools, and keeps workspace operations in the
+existing sandbox.
+
+** Adopt a community “agent stack” package
+
+Rejected because subagent, memory, sandbox, research, and GUI stacks each introduce
+a competing product lifecycle or trust boundary.  Small source patterns may be
+adapted after audit; the packages do not become runtime policy.
+
+** Fork Pi first
+
+Rejected until a concrete upstream limitation is reproduced.  The SDK, resource
+loader, custom tools, and events cover the proposed experiment.  A fork would add a
+fast-moving maintenance burden before Pi has earned adoption.
+
+** Abstract every current Deep Agents type before the probe
+
+Rejected because it front-loads a large refactor around an unqualified candidate.
+P0 and P1 need no product abstraction.  P2 extracts only the boundary exercised by
+current clients.
+
+* Open decisions for implementation review
+
+1. Whether Pi's built-in compaction preserves the exact current final-request and
+   memory contracts, or Assist needs one small compaction hook.
+2. The bounded rollback period and retirement policy for old Deep Agents threads if
+   Pi becomes the default.
+These decisions do not block P0 or P1 and should not be guessed in the design-only
+change.  Emacsos runtime selection is not open: P5b fixes a server-owned default per
+new conversation generation and gives the phone no picker.
+
+* Sources inspected
+
+- [[https://github.com/earendil-works/pi/tree/845d6ff1f6643aba440341cce877ce1c43ebbc39][Pi 0.83.0 package source commit]] and
+  [[https://www.npmjs.com/package/@earendil-works/pi-coding-agent/v/0.83.0][published npm package]]
+- [[https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/docs/sdk.md][Pi coding-agent SDK]] and
+  [[https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/docs/rpc.md][language-neutral RPC contract]]
+- [[https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/docs/extensions.md][Pi extension lifecycle and reload semantics]]
+- [[https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/docs/models.md][Pi provider/model configuration, including OpenRouter routing preferences]]
+- [[https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/docs/usage.md][Pi resource and isolation options]]
+- [[https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/docs/packages.md][Pi package security model]]
+- [[https://github.com/earendil-works/pi/blob/845d6ff1f6643aba440341cce877ce1c43ebbc39/packages/coding-agent/examples/extensions/README.md][Official extension examples]]
+- [[https://mariozechner.at/posts/2025-11-30-pi-coding-agent/][Mario Zechner's minimal-agent design account]]
+- [[https://earendil.com/posts/announcing-pi-and-lefos/][Earendil's Pi acquisition announcement]],
+  [[https://earendil.com/values/][published company values]], and
+  [[https://rfc.earendil.com/0015/][Pi licensing commitment and adjacent-source caveat]]
+- [[https://docs.langchain.com/oss/javascript/deepagents/overview][Deep Agents TypeScript overview]] and
+  [[https://reference.langchain.com/javascript/deepagents/types][type reference]]
+- [[https://www.npmjs.com/package/pi-subagents][Community =pi-subagents= package]]
+- [[https://www.npmjs.com/package/@e9n/pi-subagent][Community isolated subagent package]]
+- The representative community TODO, workflow, sandbox, GUI, research, memory, and
+  Qwen packages linked with exact inspected versions in the capability table.
+- [[https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md][llama.cpp server parallel decoding and continuous batching documentation]]
+- OpenRouter's official [[https://openrouter.ai/docs/guides/routing/provider-selection][provider routing]],
+  [[https://openrouter.ai/docs/guides/privacy/data-collection][data collection]],
+  [[https://openrouter.ai/docs/guides/features/zdr][ZDR]], and
+  [[https://openrouter.ai/docs/guides/features/router-metadata][routing metadata]] documentation, plus its
+  [[https://openrouter.ai/docs/guides/features/message-transforms][message-transform contract]].
+- Assist =agent.py=, =thread.py=, =thread_manager.py=, =run_service.py=,
+  =sandbox.py=, =sandbox_manager.py=, =manage/web/threads.py=, current middleware,
+  and installed Deep Agents 0.6.1 source.
+- [[file:2026-07-26-agent-prompt-architecture.org][Agent prompt architecture and calibrated outcome evaluation]]
+- [[file:2026-06-11-embedder-contract.org][Assist embedder contract]]
+
+* Review record
+
+Twelve review rounds with parallel lenses covered architecture, simplicity, framework fit, user intention,
+the end-to-end web and phone experience, clean interfaces, correctness, concurrency
+and liveness, error recovery, adversarial security, design adherence, and
+doc/comment alignment.  The last pass re-read this document and the roadmap after
+all substantive revisions.
+
+| Severity | Disposition |
+|----------+-------------|
+| BLOCKER | Six, all fixed in the design: ordinary Pi extension exceptions could be swallowed; clients could bypass provider admission; a crash after dispatch but before recording tool execution could repeat an effect; the proposed phone authentication boundary still shared authority with model-driven Emacs execution; a directly shared writable policy database could not enforce authority between services; and Pi's once-only =before_agent_start= hook could not activate a newly loaded skill before the same invocation's next provider request. |
+| IMPORTANT | All fixed.  The revisions made tool batches journal-first and whole-batch on approval; made pause, resume, causal-chain release pinning, process cleanup, model cancellation, and phone request replay explicit; accounted for every eval source; put the current research child and selected prompt policies in the first usable slice; separated Qwen runtime qualification from harness-maintenance scoring; added phone config compare-and-swap plus physical confirmation; required an idempotent disposition for every dormant unattended binding; made one peer-authenticated durable policy authority govern multi-client rollback and retirement admission; and closed cutover, retained-session, and deletion conditions.  The user-comment revision then added explicit M1 and M2 coexistence gates, a consolidated Pi-only end state, one lifecycle kernel plus distinct capability extensions, a preregistered TODO-extension decision, capacity-one local admission with bounded multi-slot experiments and whole-model fault fan-out, exact inherited provider profiles, bounded cloud-cost reservation, a post-M1 OpenRouter experiment that cannot gate cutover, hostile sibling-extension probes, and a permanent narrowed admission owner after Deep Agents retirement. |
+| NIT | Real wording, source-version, phase-order, and roadmap-alignment findings were fixed. |
+| Rejected | None.  Every reported finding was concrete enough to incorporate. |
+
+Deterministic verification after the final substantive edit:
+
+- =git diff --check=: clean.
+- Emacs =org-lint= on this document and =roadmap.org=: clean.
+- Full mocked Assist suite:
+  =1548 passed, 2 skipped, 5 warnings, 2 subtests passed= in 43.89 seconds.
+
+No real-model eval, deployment, runtime change, package installation, or live-phone
+action was appropriate for this design-only change.  Those begin only in an
+independently approved implementation phase.
