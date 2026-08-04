@@ -24,9 +24,11 @@ evidence, not the gate.
 The production change is one file:
 =assist/templates/deepagents/general_instructions.md.j2=.  Small eval-only
 changes exercise the delegate shape, freeze explicit P2 prompt time, and let the
-existing eval runner select nodes and aggregate their status.  This record plus the overall design and
-roadmap receive result/status updates.  P2 changes no tool, schema, middleware,
-constructor, runtime state, model setting, memory, research behavior,
+existing eval runner select nodes and aggregate their status.  One deterministic
+prompt-shape expectation changes with the deleted block.  This record plus the
+overall design and roadmap receive result/status updates.  P2 changes no tool,
+schema, middleware, constructor, runtime state, model setting, memory, or research
+behavior,
 development guidance, SMS triage, Pi design, P2b tool disclosure, or P2c skill
 description suppression.  It adds no registry, feature flag, prompt composer,
 or production Python.  The deployed Jinja template already reloads for new
@@ -105,6 +107,23 @@ implementation judgment.
 +## User Tasks
  - User tasks must be stored in THEIR task files — ask the context-agent to find the correct location
  - If the user's message implies a task, add it to their task file with clear, actionable details
+#+end_src
+
+The candidate also updates the one deterministic test that currently requires
+the deleted long block.  It pins the retained one-line trigger and the absence of
+the duplicate prose instead.  No other deterministic expectation names a
+removed clause.
+
+#+begin_src diff
+@@
+-        assert "## Delegating whole tasks" in prompt
+-        assert "your first call must be `load_skill" in prompt
+-        assert "TODO bookkeeping is advisory" in prompt
+-        assert "explicit and self-contained" in prompt
++        assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
++        assert "## Delegating whole tasks" not in prompt
++        assert "your first call must be `load_skill" not in prompt
++        assert "TODO bookkeeping is advisory" not in prompt
 #+end_src
 
 The top-of-request one-line =complex-request= first-call trigger stays as the
@@ -340,3 +359,7 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   model counters and judge provenance only for focused runs, removed the
   unsupported first-launch latency claim, reran the pilot cleanly at 21/21, and
   preregistered its observed timing and call-count bounds before formal baseline.
+- 2026-08-04 revision 7: the pre-baseline mechanical sweep found one deterministic
+  test that required the long delegation block P2 deletes.  Froze the exact
+  test-only expectation change to require the retained short trigger and reject
+  the duplicate prose; no model input or timing-pilot dependency changed.
