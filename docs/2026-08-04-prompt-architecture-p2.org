@@ -22,7 +22,11 @@ Candidate 4 is frozen at =0b42166=.  Its fresh N=3 passed all 21 primary
 executions.  The restored sentence did not remove the small-sample context
 timing signal: that node's 42-second median remains above the 30.8-second final
 bound.  N=3 timing is diagnostic by preregistration, so post-N=3 review decides
-whether any concrete defect requires a change before the unchanged N=5.
+whether any concrete defect requires a change before the unchanged N=5.  That
+review found no directly attributable candidate defect or new failure class:
+the long context traces reproduce baseline long-tail behavior, every functional
+contract passed, and the exact baseline context-first sentence is restored.
+Candidate 4 therefore proceeds unchanged to N=5.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -616,6 +620,14 @@ This is recorded as the preregistered early diagnostic, not relabelled a pass or
 used to change the gate.  Candidate 4 pauses for the required cooldown and
 post-N=3 review before N=5.
 
+The post-N=3 scope review found no real candidate finding.  The three context
+traces are long, including one set of rejected guessed-URL reads, but the
+baseline already has a 39-second p90 and a 14-call tool p90; the guard rejected
+the guessed URLs, and P2 changes neither URL handling nor context procedure.
+No new failure class appeared, and all 21 primary executions passed.  The
+review therefore approved the unchanged preregistered N=5 rather than turning
+baseline variance into prompt or runtime work.
+
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
 wake result use, cancellation-request truth, mixed-sibling preservation, and
@@ -767,3 +779,7 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   Recorded the context node's 42-second diagnostic median and 50-second p90
   without changing the frozen final timing rule; paused for the registered
   post-N=3 review and GPU cooldown before N=5.
+- 2026-08-04 revision 21: post-N=3 review found no directly attributable
+  candidate defect or new failure class.  Classified the long context traces
+  as preregistered diagnostic variance, retained the frozen candidate and
+  gates unchanged, and approved proceeding to N=5 after cooldown.
