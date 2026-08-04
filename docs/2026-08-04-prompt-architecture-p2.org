@@ -18,6 +18,12 @@ missed.  Scope review classifies that real defect as deferred and rejects its
 attribution as a P2 blocker because its prompt clause, skill owner, and eval are
 byte-identical across arms.
 
+Candidate 4 is frozen at =0b42166=.  Its fresh N=3 passed all 21 primary
+executions.  The restored sentence did not remove the small-sample context
+timing signal: that node's 42-second median remains above the 30.8-second final
+bound.  N=3 timing is diagnostic by preregistration, so post-N=3 review decides
+whether any concrete defect requires a change before the unchanged N=5.
+
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
 is approved =edd/product-policy.org= review revision 3, SHA-256
@@ -585,6 +591,31 @@ in-scope regression.  Candidate 3 is rejected.  Candidate 4 restores only that
 sentence and restarts the unchanged cadence; no gate or cohort changes after
 observation.
 
+** Candidate 4 early result
+
+Candidate 4 is frozen at source
+=0b421665a67b4716671d74e36bc2fae73e74dc81=.  Its N=3 artifacts are
+=candidate4-n3-1-GECVaT=, =candidate4-n3-2-hi0CGq=, and
+=candidate4-n3-3-MleBUP=.  All 21 primary executions passed; block wall times
+were 303, 257, and 260 seconds.
+
+| Node (short name) | Pass | Seconds p50/p90 |
+|-
+| =starts_subagents_and_returns_without_polling= | 3/3 | 11 / 19 |
+| =natural_long_list_chooses_one_delegate_per_outcome= | 3/3 | 150 / 150 |
+| =explicit_delegate_fanout_capability= | 3/3 | 18 / 18 |
+| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 3/3 | 19 / 20 |
+| =implicit_skill_request= | 3/3 | 11 / 20 |
+| =delegate_implicit_skill_request= | 3/3 | 25 / 30 |
+| =first_turn_substantive_invokes_context= | 3/3 | 42 / 50 |
+
+Every functional contract passed.  Six nodes remain inside their final timing
+bounds.  Context selection passed 3/3, but its 42-second median is above the
+30.8-second final limit while its 50-second p90 is below the 69-second limit.
+This is recorded as the preregistered early diagnostic, not relabelled a pass or
+used to change the gate.  Candidate 4 pauses for the required cooldown and
+post-N=3 review before N=5.
+
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
 wake result use, cancellation-request truth, mixed-sibling preservation, and
@@ -732,3 +763,7 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   registered timing bound with added model/tool calls.  Rejected candidate 3,
   restored the exact baseline context-first sentence as candidate 4, and
   restarted N=3/N=5/N=10 without changing the cohort or gates.
+- 2026-08-04 revision 20: candidate 4 passed its fresh primary N=3 at 21/21.
+  Recorded the context node's 42-second diagnostic median and 50-second p90
+  without changing the frozen final timing rule; paused for the registered
+  post-N=3 review and GPU cooldown before N=5.
