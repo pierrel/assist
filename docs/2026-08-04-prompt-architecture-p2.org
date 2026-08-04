@@ -131,8 +131,8 @@ removed clause.
 +        assert "TODO bookkeeping is advisory" not in prompt
 #+end_src
 
-Candidate 1's N=3 failure below triggered a review-driven smallest-sentence
-fallback.  Final candidate 2 differs from that patch only here:
+Candidate 1's N=3 failure below triggered a post-observation provisional
+smallest-sentence fallback.  Final candidate 2 differs from that patch only here:
 
 #+begin_src diff
 @@
@@ -286,7 +286,7 @@ fresh N=10 reference at rejected candidate 1 =937168e= over only
 =test_natural_long_list_chooses_one_delegate_per_outcome=.  Candidate 2's normal
 stability N=10 executions of that same node are the matched candidate arm.  The
 sentence qualifies only if the reference reproduces at least one failure in the
-same deterministic class, a requested report field left empty, while candidate
+same class, a requested report field left empty, while candidate
 2 passes 10/10.  Other failure classes do not justify this sentence.  Both arms
 use the same frozen eval inputs, runner, fixed time, model settings, and
 provider-default sampling.  This comparison is registered after the early
@@ -463,7 +463,7 @@ At frozen baseline =b4cce1f=, the same timeout node passed 2/3 in
 =baseline-timeout-3-fnLlCe=.  The failure predates P2; three samples do not
 establish that the one-sample difference is causal.  P2 does not add a third
 duplicate lifecycle rule or redesign async execution.  The timeout node is
-promoted into N=5/N=10 execution and gated against its completed matched N=10
+promoted into N=5/N=10 execution and gated against its pending matched N=10
 baseline; its pre-existing reliability risk is reported separately.
 
 ** Gates
@@ -557,6 +557,6 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   exact candidate-2 delta, phase status, P1b completion, and current word count.
 - 2026-08-04 revision 12: round 2 corrected the context-node N=3 timing claim
   and the P1b attribution; kept the failed timeout diagnostic gating against a
-  completed matched N=10 baseline; and registered a bounded candidate-1 versus
+  pending matched N=10 baseline; and registered a bounded candidate-1 versus
   candidate-2 natural comparison before qualifying the restored sentence as a
   measured exception.
