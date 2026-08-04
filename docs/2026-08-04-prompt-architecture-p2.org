@@ -3,12 +3,11 @@
 
 * Status
 
-Candidate 2 is implemented at =d10cdfd= and qualification is in progress.  Its
-primary N=3 cohort passed 21/21, with one early context-node timing miss.
-Adjacent diagnostics passed 19/21; the unstable timeout-dependency case also
-failed on the pre-deletion prompt.  Its completed matched baseline is 7/10 and
-remains the candidate's gating threshold.  Local review round 2 added the
-bounded comparisons below before N=5 and N=10.
+Candidate 3 removes the unqualified candidate-2 fallback and is awaiting a fresh
+N=3/N=5/N=10 cadence.  The isolated rejected-candidate reference passed 10/10,
+so it did not reproduce the empty-field failure required to keep that sentence.
+The unstable timeout-dependency case has a completed 7/10 matched baseline,
+which remains candidate 3's adjacent no-regression threshold.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -64,8 +63,8 @@ P0 measured the canonical web-main Assist section at 13,068 characters inside a
 to 59,316 characters.  Raw comparison data remains under the home partition at
 =~/deploy/assist/prompt-census/p0-100aa885-final-v2/=.
 
-Rejected candidate 1 applied exactly this patch after baseline.  No wording was
-left to implementation judgment.
+Rejected candidate 1 and final candidate 3 apply exactly this patch after
+baseline.  No wording is left to implementation judgment.
 
 #+begin_src diff
 @@
@@ -129,10 +128,12 @@ removed clause.
 +        assert "## Delegating whole tasks" not in prompt
 +        assert "your first call must be `load_skill" not in prompt
 +        assert "TODO bookkeeping is advisory" not in prompt
++        assert "explicit and self-contained" not in prompt
 #+end_src
 
 Candidate 1's N=3 failure below triggered a post-observation provisional
-smallest-sentence fallback.  Final candidate 2 differs from that patch only here:
+smallest-sentence fallback.  Rejected candidate 2 differed from that patch only
+here:
 
 #+begin_src diff
 @@
@@ -140,8 +141,13 @@ smallest-sentence fallback.  Final candidate 2 differs from that patch only here
 +{% if agent_role == "main" and delegation_mode == "async" %}ROUTE COMPLEX REQUESTS FIRST: if the latest request has multiple deliverables or dependent stages, make `load_skill(name="complex-request")` your only first call. Do not inspect inputs first. Every subagent request must be explicit and self-contained because a subagent receives no parent conversation history.{% endif %}
 @@
          assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
+-        assert "explicit and self-contained" not in prompt
 +        assert prompt.count("explicit and self-contained") == 1
 #+end_src
+
+The review-registered reference below did not reproduce the failure, so
+candidate 3 removes this provisional delta and returns to the exact controlled
+patch above.
 
 The top-of-request one-line =complex-request= first-call trigger stays as the
 existing measured Qwen routing exception.  The development trigger stays
@@ -377,7 +383,7 @@ the current P2 comparison.
 
 | Owner/section | Exact characters | Approx. tokens |
 |-
-| Assist role instructions | 11,508 | 2,877 |
+| Assist role instructions | 11,389 | 2,848 |
 | Prompt composer | 2 | 1 |
 | Deep Agents base | 2,257 | 565 |
 | LangChain TODO middleware | 1,076 | 269 |
@@ -385,24 +391,21 @@ the current P2 comparison.
 | Assist skills middleware | 9,631 | 2,408 |
 | Assist memory middleware | 3,796 | 949 |
 | Context rider | 0 | 0 |
-| *System-message total* | *29,719* | *7,430* |
+| *System-message total* | *29,600* | *7,400* |
 | Provider-bound tool schemas | 28,037 | 7,010 |
-| *Bootstrap request + schemas* | *57,756* | *14,439* |
+| *Bootstrap request + schemas* | *57,637* | *14,410* |
 
-The final candidate removes 1,560 characters from the canonical system message and
+The final candidate removes 1,679 characters from the canonical system message and
 the complete bootstrap request.  Tool schemas are byte-identical.  The
 canonical current system-message SHA-256 is
-=4a8bbb67ecf527ec06c036b3634e480ff1a0dd69e8480d43bdeb1a86f891ac88=.
-The deterministic census artifact is 2,856,598 canonical bytes with SHA-256
-=4d24cbe22708acff699ddf73e7a96edd478e59eeb608bb66c4639a9f7cc1a809=.
-The final candidate's durable home-backed capture is
-=~/deploy/assist/prompt-census/p2-candidate2-932fd021/=; its =census.json=
-file is 2,856,598 bytes with file SHA-256
-=3caf8af8ee64c92deeca731b01cf83bfc1bfa54afa6d404c19d0400cda6a99de=.
-The rejected candidate 1 home-backed capture is
+=ddf6a102708f4b849c12394cf7dd719925a3984e666959b17c6a77498519e4ba=.
+The deterministic census artifact is 2,854,575 canonical bytes with SHA-256
+=f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
+The byte-identical candidate-1 capture is
 =~/deploy/assist/prompt-census/p2-candidate-a712057c/=; its =census.json=
 file is 2,854,575 bytes with file SHA-256
 =b5ecc5d24cc7fed5b67095425d12bddd731080da316f3d07dd83103fce31cb25=.
+A fresh candidate-3 capture is made after its source commit is frozen.
 
 ** Candidate 1 early result and revision
 
@@ -414,15 +417,14 @@ case: all requested files existed, but the alpha report's =next actions= field
 was empty.  The deterministic field gate stopped before the outcome judge.
 This is a fail, not a partial pass.
 
-The observed failure disqualifies candidate 1 because its natural node can no
-longer match the 10/10 baseline.  Routing, artifact creation, skill loading,
-dependency capability, and the other five behavioral contracts still passed;
-the narrow loss was a required field inside delegated work.  Candidate 2
-therefore restores only the prior general sentence requiring every subagent
-request to be explicit and self-contained because the child has no parent
-history.  The sentence moves to the retained front trigger for Qwen salience.
-The long delegation section, duplicate routing/load/TODO procedure, and every
-other frozen deletion remain removed.  Candidate N=3/N=5/N=10 restarts.
+The observed failure disqualified candidate 1's original cadence because its
+natural node could no longer match the 10/10 baseline.  Routing, artifact
+creation, skill loading, dependency capability, and the other five behavioral
+contracts still passed; the narrow loss was a required field inside delegated
+work.  Candidate 2 provisionally restored only the prior general sentence
+requiring self-contained subagent requests.  The long delegation section,
+duplicate routing/load/TODO procedure, and every other frozen deletion remained
+removed.
 
 ** Candidate 2 early and adjacent results
 
@@ -447,6 +449,25 @@ diagnostic, so the frozen N=10 timing decides the gate.  The natural case used
 more concurrent tool calls but no additional median model call.  P1b grades its four
 complete reports rather than the hidden route, and all requested fields and the
 outcome judge passed.
+
+** Candidate-1 matched reference and candidate-3 decision
+
+The fresh candidate-1 reference artifacts are
+=candidate1-reference-1-oJcxBW=, =candidate1-reference-2-8QH5fc=,
+=candidate1-reference-3-RZpAIG=, =candidate1-reference-4-NzY9Gy=,
+=candidate1-reference-5-xz0HBD=, =candidate1-reference-6-GFubaT=,
+=candidate1-reference-7-7xgqkD=, =candidate1-reference-8-gItPw9=,
+=candidate1-reference-9-nFthyF=, and =candidate1-reference-10-F9vxOl=.
+All ten exact natural-node executions passed.  Wall times were 145, 144, 203,
+208, 138, 141, 114, 164, 155, and 127 seconds.  No requested report field was
+empty.
+
+The first necessary condition for retaining candidate 2's duplicate sentence
+therefore failed.  A later candidate-2 stability arm cannot make the conjunction
+true, so no further sample is spent on that rejected prompt.  Candidate 3
+removes the provisional sentence, returns to the exact candidate-1 prompt, and
+restarts N=3/N=5/N=10.  The original candidate-1 failure remains reported; it is
+not attributed to the deletion after the isolated 10/10 non-reproduction.
 
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
@@ -567,3 +588,8 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
 - 2026-08-04 revision 13: completed the pre-deletion timeout reference at 7/10
   and froze that observed pass count as the candidate's adjacent no-regression
   threshold.
+- 2026-08-04 revision 14: the fresh candidate-1 natural reference passed 10/10
+  and did not reproduce the required empty-field failure.  Rejected candidate
+  2's provisional duplicate sentence, restored the exact deletion as candidate
+  3, and restarted the full candidate cadence without spending samples on an
+  already-impossible conjunction.
