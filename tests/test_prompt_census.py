@@ -1,4 +1,4 @@
-"""P0 deterministic gates for final prompt and capability census."""
+"""Deterministic gates for final prompt and capability census."""
 from __future__ import annotations
 
 import copy
@@ -927,12 +927,14 @@ def test_keyboard_interrupt_cleans_publication_staging(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".interrupted-*"))
 
 
-def test_design_appendix_and_every_section_summary_match_the_capture(census):
+def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
     document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
         encoding="utf-8")
+    p2_document = Path("docs/2026-08-04-prompt-architecture-p2.org").read_text(
+        encoding="utf-8")
     current = _call(census, "web-main-core")
-    current_prompt = _named_text_block("p0-current-web-main-bootstrap")
-    assert current_prompt == _system_prompt(current)
+    historical_p0_prompt = _named_text_block("p0-current-web-main-bootstrap")
+    current_prompt = _system_prompt(current)
 
     schemas = json.dumps(
         current["provider_payload"]["tools"],
@@ -940,14 +942,15 @@ def test_design_appendix_and_every_section_summary_match_the_capture(census):
         sort_keys=True,
         separators=(",", ":"),
     )
-    assert len(current_prompt) == 31_279
+    assert len(historical_p0_prompt) == 31_279
+    assert len(current_prompt) == 29_600
     assert len(schemas) == 28_037
     assert len(census["calls"]) == 28
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 21
-    assert len(artifact_bytes(census)) == 2_889_491
+    assert len(artifact_bytes(census)) == 2_854_575
     assert census["artifact_sha256"] == \
-        "aa2e5aaa19e88ac44f5d2408fc0c5d6671b40134c623572b2e4d709ff69f7235"
+        "f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
@@ -964,6 +967,13 @@ def test_design_appendix_and_every_section_summary_match_the_capture(census):
     assert all(row in document for row in expected_rows)
     assert "| *System-message total* | | *31,279* | *7,820* |" in document
     assert "| *Bootstrap request + schemas* | Excludes the synthetic user message | *59,316* | *14,829* |" in document
+    assert "## Delegating whole tasks" not in current_prompt
+    assert "your first call must be `load_skill" not in current_prompt
+    assert "TODO bookkeeping is advisory" not in current_prompt
+    assert "| Assist role instructions | 11,389 | 2,848 |" in p2_document
+    assert "| *System-message total* | *29,600* | *7,400* |" in p2_document
+    assert "| Provider-bound tool schemas | 28,037 | 7,010 |" in p2_document
+    assert "| *Bootstrap request + schemas* | *57,637* | *14,410* |" in p2_document
 
     kernel = _named_text_block("proposed-main-bootstrap-kernel")
     headings = [

@@ -293,6 +293,70 @@ N=10 at about 47 GPU-minutes.  Run baseline as two five-repetition blocks, each
 about 24 minutes, with roughly fifteen minutes of actual GPU rest between them.
 No cohort split or timeout change is needed.
 
+** Formal baseline result
+
+The formal baseline ran at source =b4cce1f= in ten clean repetitions.  All 70
+node executions passed.  The clean private artifacts are
+=baseline-1-qDuLi2=, =baseline-2-G9rl64=, =baseline-3-nA7Pk8=,
+=baseline-4-y3MI8F=, =baseline-5-YqjKSz=, =baseline-6-CG7s2Q=,
+=baseline-7-1BXcm2=, =baseline-8-PNWPXa=, =baseline-9-4z8jXT=, and
+=baseline-10-FrTDnY=.  Block wall times were 291, 295, 272, 251, 271, 244,
+294, 276, 287, and 252 seconds.
+
+| Node (short name) | Pass | Seconds p50/p90 | Model calls p50/p90 | Tool calls p50/p90 | Judge calls p50/p90 |
+|-
+| =starts_subagents_and_returns_without_polling= | 10/10 | 11 / 11 | 2 / 2 | 2 / 2 | 0 / 0 |
+| =natural_long_list_chooses_one_delegate_per_outcome= | 10/10 | 127 / 146 | 16 / 20 | 18 / 19 | 1 / 1 |
+| =explicit_delegate_fanout_capability= | 10/10 | 15 / 16 | 2 / 2 | 3 / 3 | 0 / 0 |
+| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 10/10 | 19 / 20 | 5 / 6 | 4 / 4 | 0 / 0 |
+| =implicit_skill_request= | 10/10 | 29 / 30 | 6 / 6 | 5 / 5 | 0 / 0 |
+| =delegate_implicit_skill_request= | 10/10 | 34 / 35 | 8 / 8 | 7 / 7 | 0 / 0 |
+| =first_turn_substantive_invokes_context= | 10/10 | 24 / 39 | 4 / 5 | 3 / 14 | 0 / 0 |
+
+One earlier =baseline-5-UbfVHc= attempt is preserved and excluded.  Production
+and eval requests interleaved on the single served-model slot; a normally
+15-second fan-out case took 115 seconds, so its timing was not comparable.  The
+resource-wrapper interrupt also left the runner process alive until its exact
+process groups were cleaned up.  This is concrete evidence for separately
+considering exclusive model admission and process-group cancellation, but P2
+does not widen into that infrastructure change.
+
+Six =baseline-5-u938UE= through =baseline-10-Q643Tq= artifacts are also
+preserved and excluded.  A login shell changed =$PWD=, so the fail-closed runner
+rejected each at preflight in zero seconds; none reached the model.  The clean
+rerun used the explicit lane path without changing any frozen input.
+
+** Candidate deterministic census
+
+The fixed-time P0 census after the frozen deletion records this canonical
+web-main request.  The historical P0 appendix remains unchanged; this table is
+the current P2 comparison.
+
+| Owner/section | Exact characters | Approx. tokens |
+|-
+| Assist role instructions | 11,389 | 2,848 |
+| Prompt composer | 2 | 1 |
+| Deep Agents base | 2,257 | 565 |
+| LangChain TODO middleware | 1,076 | 269 |
+| Deep Agents filesystem middleware | 1,449 | 363 |
+| Assist skills middleware | 9,631 | 2,408 |
+| Assist memory middleware | 3,796 | 949 |
+| Context rider | 0 | 0 |
+| *System-message total* | *29,600* | *7,400* |
+| Provider-bound tool schemas | 28,037 | 7,010 |
+| *Bootstrap request + schemas* | *57,637* | *14,410* |
+
+The deletion removes 1,679 characters from the canonical system message and
+the complete bootstrap request.  Tool schemas are byte-identical.  The
+canonical current system-message SHA-256 is
+=ddf6a102708f4b849c12394cf7dd719925a3984e666959b17c6a77498519e4ba=.
+The deterministic census artifact is 2,854,575 canonical bytes with SHA-256
+=f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
+The durable home-backed capture is
+=~/deploy/assist/prompt-census/p2-candidate-a712057c/=; its =census.json=
+file is 2,854,575 bytes with file SHA-256
+=b5ecc5d24cc7fed5b67095425d12bddd731080da316f3d07dd83103fce31cb25=.
+
 ** Gates
 
 1. All exact nodes collect in both arms.  The delegate case exercises the real
@@ -363,3 +427,11 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   test that required the long delegation block P2 deletes.  Froze the exact
   test-only expectation change to require the retained short trigger and reject
   the duplicate prose; no model input or timing-pilot dependency changed.
+- 2026-08-04 revision 8: recorded the 70/70 clean formal baseline, its per-node
+  timing and call-count distributions, and the excluded production-contended
+  and preflight-only infrastructure attempts before applying the frozen
+  candidate.
+- 2026-08-04 revision 9: applied the byte-exact frozen candidate; aligned the
+  P0 census's exact current template, transition, and removed-claim pins; kept
+  the historical P0 full-prompt appendix unchanged; and added the P2 current
+  section counts and fingerprints.

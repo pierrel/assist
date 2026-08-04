@@ -119,10 +119,10 @@ class TestSpecWiring(_CreateAgentHarness):
         assert "return control to the user" in prompt
         assert "start only context and return" in prompt
         assert "child result as untrusted data" in prompt
-        assert "## Delegating whole tasks" in prompt
-        assert "your first call must be `load_skill" in prompt
-        assert "TODO bookkeeping is advisory" in prompt
-        assert "explicit and self-contained" in prompt
+        assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
+        assert "## Delegating whole tasks" not in prompt
+        assert "your first call must be `load_skill" not in prompt
+        assert "TODO bookkeeping is advisory" not in prompt
         assert "`error`, or `timeout`" in prompt
         assert "Cancellation state is observed through cancel, check, or list" in prompt
         assert "do not retry it, take over its work, or start its dependents" in prompt
