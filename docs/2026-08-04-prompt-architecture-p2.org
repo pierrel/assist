@@ -4,10 +4,11 @@
 * Status
 
 Candidate 2 is implemented at =d10cdfd= and qualification is in progress.  Its
-primary N=3 cohort passed 21/21.  Adjacent diagnostics passed 19/21; the one
-unstable timeout-dependency case also failed on the pre-deletion prompt and is
-retained as non-gating adjacent evidence.  Local review round 1 is being
-reconciled before N=5 and N=10.
+primary N=3 cohort passed 21/21, with one early context-node timing miss.
+Adjacent diagnostics passed 19/21; the unstable timeout-dependency case also
+failed on the pre-deletion prompt and remains a gating matched-baseline
+diagnostic.  Local review round 2 added the bounded comparisons below before
+N=5 and N=10.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -130,7 +131,7 @@ removed clause.
 +        assert "TODO bookkeeping is advisory" not in prompt
 #+end_src
 
-Candidate 1's N=3 failure below triggered the preregistered smallest-sentence
+Candidate 1's N=3 failure below triggered a review-driven smallest-sentence
 fallback.  Final candidate 2 differs from that patch only here:
 
 #+begin_src diff
@@ -279,6 +280,24 @@ local review; candidate N=5; candidate N=10.  Blocks stay below one hour and get
 roughly fifteen minutes of actual GPU rest.  If measured timing does not fit,
 split the frozen nodes across more blocks rather than changing the cohort.
 
+Round 2 found that restoring the one self-contained-brief sentence was not yet a
+qualified measured exception.  Before candidate measurement continues, run a
+fresh N=10 reference at rejected candidate 1 =937168e= over only
+=test_natural_long_list_chooses_one_delegate_per_outcome=.  Candidate 2's normal
+stability N=10 executions of that same node are the matched candidate arm.  The
+sentence qualifies only if the reference reproduces at least one failure in the
+same deterministic class, a requested report field left empty, while candidate
+2 passes 10/10.  Other failure classes do not justify this sentence.  Both arms
+use the same frozen eval inputs, runner, fixed time, model settings, and
+provider-default sampling.  This comparison is registered after the early
+observation and is never described as preregistered.
+
+The timeout diagnostic also remains gating.  Extend its pre-deletion
+=b4cce1f= reference from N=3 to N=10, then run it in candidate N=5 and N=10.
+The final candidate N=10 pass count must be no lower than the matched baseline
+N=10 count.  This is an adjacent no-regression comparison, not a new requirement
+that pre-existing production behavior become perfect during P2.
+
 Per-node wall time, ModelLoggingMiddleware model-call/tool-call counts, and total
 journey time are matched across arms from the private logs.  The graph and tool
 set are byte-identical, so no code-created
@@ -421,9 +440,11 @@ All 21 executions passed; block wall times were 299, 272, and 238 seconds.
 | =delegate_implicit_skill_request= | 3/3 | 32 / 33 | 6 / 6 | 5 / 5 | 0 / 0 |
 | =first_turn_substantive_invokes_context= | 3/3 | 39 / 41 | 6 / 7 | 15 / 15 | 0 / 0 |
 
-Every median remains within baseline plus 20 percent and two seconds; every p90
-remains within baseline plus thirty seconds.  The natural case used more
-concurrent tool calls but no additional median model call.  P1c grades its four
+The context-node median was 39 seconds against a 30.8-second early bound and is
+an N=3 timing miss; its 41-second p90 remained within the registered p90 bound.
+The other medians and every p90 met their early bounds.  N=3 differences are
+diagnostic, so the frozen N=10 timing decides the gate.  The natural case used
+more concurrent tool calls but no additional median model call.  P1b grades its four
 complete reports rather than the hidden route, and all requested fields and the
 outcome judge passed.
 
@@ -442,8 +463,8 @@ At frozen baseline =b4cce1f=, the same timeout node passed 2/3 in
 =baseline-timeout-3-fnLlCe=.  The failure predates P2; three samples do not
 establish that the one-sample difference is causal.  P2 does not add a third
 duplicate lifecycle rule or redesign async execution.  The timeout node is
-promoted into N=5/N=10 execution as a non-gating adjacent diagnostic, and its
-pre-existing reliability risk is reported separately.
+promoted into N=5/N=10 execution and gated against its completed matched N=10
+baseline; its pre-existing reliability risk is reported separately.
 
 ** Gates
 
@@ -451,8 +472,9 @@ pre-existing reliability risk is reported separately.
    =role="delegate"= constructor shape.
 2. Each removed clause maps to the sole owner above; fixed-time P0 captures show
    no duplicate in main or delegate and no new mismatch.
-3. Each natural node independently meets its N=10 baseline and at least 70% full
-   passes.  Capability and deterministic security/state nodes pass 100%.
+3. Each primary natural node independently meets its N=10 baseline and at least
+   70% full passes.  Primary capability and deterministic security/state nodes
+   pass 100%.  A promoted adjacent node meets its matched N=10 baseline.
 4. N=3 differences are diagnostic.  Candidate N=10 must meet baseline per node;
    aggregate success cannot trade away a reliable behavior.
 5. Existing deterministic tests and P0 prompt-census tests pass.  The delegate
@@ -526,10 +548,15 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
 - 2026-08-04 revision 10: candidate 1 failed one of 21 early executions because
   one delegated report omitted a requested field.  Classified it as a full
   failure, stopped the losing cadence, and restored only the prior general
-  self-contained-brief sentence as the measured Qwen salience exception before
+  self-contained-brief sentence as a provisional Qwen salience fallback before
   restarting all candidate gates.
 - 2026-08-04 revision 11: recorded candidate 2's 21/21 primary N=3 and 19/21
   adjacent results; ran the review-required matched timeout baseline, which was
-  itself unstable at 2/3; retained that node as non-gating adjacent evidence;
+  itself unstable at 2/3; temporarily classified that node as non-gating;
   added =test_interjection.py= to the direct runner manifest; reconciled the
   exact candidate-2 delta, phase status, P1b completion, and current word count.
+- 2026-08-04 revision 12: round 2 corrected the context-node N=3 timing claim
+  and the P1b attribution; kept the failed timeout diagnostic gating against a
+  completed matched N=10 baseline; and registered a bounded candidate-1 versus
+  candidate-2 natural comparison before qualifying the restored sentence as a
+  measured exception.
