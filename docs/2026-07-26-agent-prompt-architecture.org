@@ -1700,8 +1700,12 @@ yet, and do not remove their procedures in this phase.  Conditional behaviors
 that still lack an owner remain temporarily rather than disappearing without a
 tested destination.
 
-The delegate branch is rendered as its own short role contract, not a main prompt
-with supervisor paragraphs conditionally hidden.
+The delegate retains its fixed short role contract and the shared legacy process
+needed by its synchronous specialists.  Supervisor-only async lifecycle
+paragraphs remain absent by construction.  P2 design review corrected the
+earlier assumption that the production delegate rendered with delegation
+disabled; collapsing its remaining legacy process requires a later measured
+instruction move rather than an untested P2 rewrite.
 
 ** Test and gate
 
@@ -1712,12 +1716,15 @@ with supervisor paragraphs conditionally hidden.
 - Context-first, skill loading, async lifecycle, trust handling, explicit
   capability, delegate natural outcome, interruption, and unrelated passing
   cohorts meet the experiment protocol with no regression.
-- Natural end-to-end delegate journeys cover independent mixed outcomes,
-  dependent outcomes, one success plus one failure, and interruption.  The
-  launch reply truthfully names pending outcomes without inventing results;
-  completions return to the originating thread; final synthesis accounts for
-  every outcome as completed, failed, or blocked; successful sibling work is
-  preserved; raw task/report IDs are omitted unless the user needs one to act.
+- The repeated natural journey covers independently useful mixed outcomes, and
+  paired capability coverage proves dependency ordering and untrusted-result
+  isolation.  P2 design review found that new-user steering, cancellation,
+  sibling preservation, and final lifecycle synthesis do not have one complete
+  owner outside the role prompt, so their current clauses remain byte-for-byte
+  in P2.  Existing failure, cancellation, and interruption cases run as adjacent
+  diagnostics.  Natural dependent, mixed success/failure, and interruption
+  journeys gate the first later phase that actually moves those lifecycle
+  clauses; they do not force P2 to test a procedure it no longer changes.
 - No delegate prompt mentions outer task lifecycle, parent history access, or a
   capability absent from the delegate graph.
 - The P0 mismatch report is clean for both profiles.

@@ -1,0 +1,307 @@
+#+title: Prompt architecture P2: remove duplicate main and delegate procedure
+#+date: 2026-08-04
+
+* Status
+
+Revised design and experiment preregistration.  No production prompt has changed.
+
+P2 starts from merged =main=
+=fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
+is approved =edd/product-policy.org= review revision 3, SHA-256
+=9c5fcf79030cb5307e4f7dc1440d300a597c5efc683f762206e4747ff4ef3067=.
+Natural cases grade useful visible outcomes, truthfulness, control,
+authorization, and non-regression.  They do not require a hidden tool, skill,
+delegate, prompt location, or return shape.  Separately labelled capability and
+deterministic security/state cases retain exact mechanism contracts.
+
+* Objective and scope
+
+Remove only shared-template procedure with a proven sole owner in an existing
+skill or framework middleware.  Preserve the policy outcomes and the small
+model's ability to choose the next instruction source.  Prompt reduction is
+evidence, not the gate.
+
+The production change is one file:
+=assist/templates/deepagents/general_instructions.md.j2=.  Small eval-only
+changes exercise the delegate shape, freeze explicit P2 prompt time, and let the
+existing eval runner select nodes and aggregate their status.  This record plus the overall design and
+roadmap receive result/status updates.  P2 changes no tool, schema, middleware,
+constructor, runtime state, model setting, memory, research behavior,
+development guidance, SMS triage, Pi design, P2b tool disclosure, or P2c skill
+description suppression.  It adds no registry, feature flag, prompt composer,
+or production Python.  The deployed Jinja template already reloads for new
+turns.
+
+* Review correction: what remains
+
+The first design review found that the proposed async deletion was too broad.
+The completion-wake producer owns “check this task before responding,” and tool
+descriptions own each operation's immediate contract, but no other source owns
+all of these cross-turn behaviors: inspect outstanding work after new user
+input; deliberately keep, steer, or stop it; preserve successful siblings;
+report cancellation-request versus cancellation truthfully; and synthesize
+terminal states.  Those exact lifecycle and child-result trust paragraphs stay
+unchanged in P2.  Their future home requires its own measured experiment.
+
+Research, memory, development, task-file, append/file-creation, context-first,
+urgent notification, workspace, text-only, authority, and unavailable-capability
+instructions also stay unchanged.  The current delegate is a legacy-mode shared
+Assist graph with synchronous specialists, not a delegation-disabled graph; it
+therefore receives the shared process.  P2 removes duplicates from both rendered
+roles but does not collapse the delegate to an untested minimal kernel.
+
+* Exact controlled change
+
+P0 measured the canonical web-main Assist section at 13,068 characters inside a
+31,279-character system message; tool schemas brought the synthetic bootstrap
+to 59,316 characters.  Raw comparison data remains under the home partition at
+=~/deploy/assist/prompt-census/p0-100aa885-final-v2/=.
+
+The candidate applies exactly this patch after baseline.  No wording is left to
+implementation judgment.
+
+#+begin_src diff
+@@
+-{% if agent_role == "main" and delegation_mode == "async" %}
+-## Delegating whole tasks
+-
+-When the latest request asks for two or more separately useful outputs, or for one
+-stage after another, your first call must be `load_skill(name="complex-request")`
+-before reading, writing, planning, or starting work. This overrides another matching
+-skill's normal first-call rule; do not load a domain skill merely to delegate, because
+-each delegate loads the skills its own outcome needs. Make the skill load the only call
+-in that response; act after its body returns. The skill defines how to combine
+-outcome-based TODOs with `delegate-agent`. The requested results and workspace
+-evidence are the goal; TODO bookkeeping is advisory. Every subagent request must be
+-explicit and self-contained because a subagent receives no parent conversation history.
+-{% endif %}
+-
+@@
+-**1. Skill check — your FIRST tool call this turn.** If the user's latest message mentions any keyword, file extension, filename, or topic from a description in the **Skills** section below, your FIRST tool call MUST be `load_skill(name="<matched skill>")` — before `write_todos`, `ls`, `read_file`, `edit_file`, `execute`, or research.
+-
+-{% if agent_role == "main" and delegation_mode == "async" %}Multiple deliverables or dependent stages always match `complex-request`; load it alone before inspecting their files.{% endif %}
+-
+ In particular: if the message mentions code, a software project, a repo, a codebase, a function, a class, a method, a module, a test, TDD, a refactor, a bug, debugging, fixing, implementing, a feature, or any project-file name (`pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Makefile`, `Dockerfile`) — call `load_skill(name="dev")`. The word *project* by itself counts. When in doubt, call `load_skill(name="dev")`.
+ 
+-**2. Local context — your SECOND tool call, on the FIRST turn of a thread.** After the skill check completes (a *separate* call), and *even if you just loaded a skill*, dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
++**Local context — after any matching skill, on the FIRST turn of a thread.** Dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
+@@
+-### Step 1: Plan
+-{% if delegation_mode == "async" %}If Step 0 started a task, start any other independent tasks the request needs, report their IDs, and return. Plan and act after a completion wake provides the needed context.{% else %}After Step 0, use the `write_todos` tool to outline your plan, then execute each step.{% endif %}
++### Step 1: Plan
++{% if delegation_mode == "async" %}If Step 0 started a task, start any other independent tasks the request needs, report their IDs, and return. Plan and act after a completion wake provides the needed context.{% endif %}
+@@
+-### Step 4: Clean Up
+-- Mark your internal todos as complete
+-- Respond to the user summarizing what you did
++### Step 4: Clean Up
++- Respond to the user summarizing what you did
+ 
+ ## Rules
+-- Step 0 is non-negotiable: if the user's message matches any skill description, you MUST call `load_skill` before any work tool. Skipping the skill check and trying to do the work directly produces silently wrong output.
+@@
+-## Internal Todos vs User Tasks
+-- The `write_todos` tool is for YOUR internal step tracking only
++## User Tasks
+ - User tasks must be stored in THEIR task files — ask the context-agent to find the correct location
+ - If the user's message implies a task, add it to their task file with clear, actionable details
+#+end_src
+
+The top-of-request one-line =complex-request= first-call trigger stays as the
+existing measured Qwen routing exception.  The development trigger stays
+unchanged.  The context line changes only to remove a reference to the deleted
+duplicate skill protocol; it preserves skill-before-context ordering.
+
+| Removed clause | Sole surviving owner |
+|-
+| Generic match/load/apply instructions at first call and in repeated rules | =SmallModelSkillsMiddleware= prompt and =load_skill= tool |
+| Long multi-outcome/dependency/TODO/delegate recipe and its second trigger | =assist/main_skills/complex-request/SKILL.md=; the short front trigger only chooses that source |
+| Mandatory generic TODO planning and cleanup | LangChain =TodoListMiddleware= system prompt and =write_todos= tool |
+
+The candidate does not remove or relocate the before-edit skill check, final
+completion account, concrete async lifecycle, trust, research, memory, dev,
+filesystem-result, or user-task procedure.
+
+* Hypothesis
+
+Qwen will preserve matching skill use, first-turn grounding, delegate skill use,
+natural multi-outcome artifacts, and explicit fan-out/dependency capability when
+the duplicated procedure above is removed, because the same final request still
+contains the sole owners.  We expect no new model/tool round trip because the
+change only deletes prompt text and keeps all graph composition and tools.
+
+* Preregistered experiment
+
+** Frozen variables and baseline
+
+- The behavioral baseline uses production bytes from =fae75c2= plus the
+  reviewed eval-only delegate case and this state document.  Candidate differs
+  from that baseline only in the exact template patch above.
+- Baseline and candidate use the same served model, model settings, skills,
+  tools, middleware, fixtures, validators, and judge prompt.
+- Because earlier P1b logs did not preserve a comparable final rendered prompt
+  identity, P2 does not reuse them as its formal baseline.  It runs a fresh N=10.
+- Any acceptance-affecting prompt or eval change restarts candidate N=3/N=5/N=10.
+- Logs live under mode-0700 =$HOME/deploy/assist/eval/p2/= with mode-0600 files.
+  Eval scratch lives under =$HOME/deploy/assist/tmp/eval=.  Nothing raw is stored
+  on the small root partition, in =/var=, or in the repository.
+- Each sample records source SHA, arm, repetition, exact nodes, provider-default
+  unset seed, hashes of the template, skills, tools, fixtures, validators, and
+  judge rubric, fixed-time rendered role-prompt fingerprints, served subject and
+  judge model provenance, per-node and block wall time, JUnit/model-log paths,
+  return code, and rerun identity.  Failed infrastructure attempts are preserved
+  and excluded until diagnosed.  A fixed-time P0 capture records the complete
+  final main/delegate request for each arm; the live clock is the only normalized
+  dynamic field.
+
+** Exact repeated cohort
+
+| Node | Layer | Contract |
+|-
+| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_starts_subagents_and_returns_without_polling= | deterministic-security/state | Truthful prompt return, visible task ID, no launch-turn poll or invented result |
+| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome= | natural | The four requested grounded reports exist; route is not graded |
+| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_delegate_fanout_capability= | capability | Explicit multi-outcome fan-out remains available |
+| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_dependent_delegate_starts_after_prerequisite_completion= | capability | Explicit dependency handoff remains available and rejects injected child instructions |
+| =edd/eval/test_skill_loading.py::TestSkillLoading::test_implicit_skill_request= | capability | Legacy main loads the matching format skill and preserves the requested file |
+| =edd/eval/test_skill_loading.py::TestSkillLoading::test_delegate_implicit_skill_request= | capability | Production-shaped delegate loads the same skill and preserves the requested file |
+| =edd/eval/test_context_agent.py::TestContextInvocation::test_first_turn_substantive_invokes_context= | capability | First-turn local grounding remains salient |
+
+The new delegate case is added before either arm, uses
+=AgentSpec(role="delegate")= with the existing production constructor, and reuses
+the same prompt, fixture, loaded-skill assertion, and final-file assertion as the
+legacy-main case.  It adds no production behavior or helper abstraction.
+
+The lifecycle paragraphs remain unchanged, so cancellation/failure/steering are
+adjacent rather than stability gates for this deletion.  After the prompt edit,
+these exact nodes run at N=3 with the early diagnostic:
+
+- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_completion_wake_checks_then_uses_result=;
+- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_user_stop_request_reports_cancellation_requested_for_running_tasks=;
+- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_timed_out_prerequisite_blocks_dependent_delegate=;
+- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_failed_sibling_preserves_success_and_blocks_join=;
+- =edd/eval/test_interjection.py::TestInterjection::test_redirect_mid_turn=;
+- =edd/eval/test_interjection.py::TestInterjection::test_incorporate_addition=; and
+- =edd/eval/test_interjection.py::TestInterjection::test_coalesce_two_rapid_interjections=.
+
+Any failure is a real finding and expands the repeated cohort before measurement
+continues; these diagnostics are not selectively rerun for a favorable result.
+The research-only prompt-injection file is excluded because it does not exercise
+this template.  Trust at the changed main/delegate seam remains covered by the
+injected child result in the dependency node and deterministic P0 census.
+
+** Execution and timing
+
+A reviewed machine-local runner at
+=$HOME/deploy/assist/eval/p2/run-block.sh=, mode 0700 and SHA-256
+=506c2ca6e71250074f31892449abd933af7b6caf65a15b8f5ae79a5dfabf3916=,
+is a fail-closed P2 provenance wrapper.  It creates a private home-backed run,
+fingerprints every directly relevant frozen input and the three rendered role
+prompts, then invokes the repository's existing =scripts/run-evals.sh=.  That
+script receives the minimal general improvement required by the program: when
+exact node IDs are supplied it runs only them, and it returns aggregate failure;
+with no arguments its nightly selection and historical zero exit remain
+unchanged.  The shared
+runner still owns scratch validation/locking, exact-mount orphan cleanup,
+per-node 1,200-second kill bounds, JUnit, and logs.  The invocation has a
+3,300-second outer cap.  The exact command is:
+
+#+begin_src shell
+WORKTREE="$PWD"
+AGENTIC_ROOT="$(realpath "$WORKTREE/../../..")"
+EXPECTED_SHA="$(git rev-parse HEAD)"
+NODES=(
+  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_starts_subagents_and_returns_without_polling
+  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome
+  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_delegate_fanout_capability
+  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_dependent_delegate_starts_after_prerequisite_completion
+  edd/eval/test_skill_loading.py::TestSkillLoading::test_implicit_skill_request
+  edd/eval/test_skill_loading.py::TestSkillLoading::test_delegate_implicit_skill_request
+  edd/eval/test_context_agent.py::TestContextInvocation::test_first_turn_substantive_invokes_context
+)
+"$AGENTIC_ROOT/tools/agentic" resource run llm -- \
+  timeout --kill-after=30s 3300 env \
+  ARM="$ARM" ITER="$ITER" EXPECTED_SHA="$EXPECTED_SHA" \
+  WORKTREE="$WORKTREE" \
+  "$HOME/deploy/assist/eval/p2/run-block.sh" "${NODES[@]}"
+#+end_src
+
+Only =ARM= and =ITER= vary within an arm; =EXPECTED_SHA= is frozen after each
+baseline or candidate commit.
+
+Before formal baseline, an uncounted N=3 timing pilot over the seven nodes
+records per-node p50/p90, expected subject turns/subagents and judge calls, and
+projected GPU minutes.  The formal sequence is baseline N=10; candidate N=3;
+local review; candidate N=5; candidate N=10.  Blocks stay below one hour and get
+roughly fifteen minutes of actual GPU rest.  If measured timing does not fit,
+split the frozen nodes across more blocks rather than changing the cohort.
+
+Per-node wall time, ModelLoggingMiddleware model-call/tool-call counts, first
+launch-response time, and total journey time are matched across arms from the
+private logs.  The graph and tool set are byte-identical, so no code-created
+round trip exists; the launch and capability traces fail if model behavior adds
+polling, misses skill/context selection, or loses required work.  Candidate
+median time must remain within baseline plus 20% and two seconds, with p90 no
+more than thirty seconds over baseline.  An unrelated ordinary journey may add
+no model/tool round trip.  Provider contention is an infrastructure failure.
+
+** Gates
+
+1. All exact nodes collect in both arms.  The delegate case exercises the real
+   =role="delegate"= constructor shape.
+2. Each removed clause maps to the sole owner above; fixed-time P0 captures show
+   no duplicate in main or delegate and no new mismatch.
+3. Each natural node independently meets its N=10 baseline and at least 70% full
+   passes.  Capability and deterministic security/state nodes pass 100%.
+4. N=3 differences are diagnostic.  Candidate N=10 must meet baseline per node;
+   aggregate success cannot trade away a reliable behavior.
+5. Existing deterministic tests and P0 prompt-census tests pass.  The delegate
+   retains no outer async lifecycle tools by construction, while its legacy
+   synchronous specialists and shared skills remain usable.
+6. Review-driven work stays directly tied to this deletion.  Useful unrelated
+   findings are reported with risk/value and not implemented.
+
+* Review and delivery
+
+Design review lenses are simplicity, framework fit, user intention, UX, clean
+interfaces, trust, and eval liveness.  The implementation local loop covers
+correctness, concurrency/liveness, error handling, adversarial security,
+simplicity, design adherence, and docstring/comment alignment, followed by the
+deterministic and model gates.
+
+After the local loop converges, deploy through the workspace transaction for
+Pierre's testing, publish a ready GitHub PR, and run the Copilot bridge loop.
+Every acceptance-affecting review edit restarts measurement and redeploys.
+
+The final completion report goes to Pierre's Kindle with the final design,
+rendered prompt counts, exact results, deep implementation guide, review report,
+deferred findings and their risk/value, learnings, and a candid account of what
+was hard.  It distinguishes necessary P2 work from anything outside the goal.
+
+* Changelog
+
+- 2026-08-04 revision 1: initial preregistration.
+- 2026-08-04 revision 2: accepted design review.  Corrected the delegate from
+  disabled to legacy mode; removed async lifecycle and research injection from
+  the deletion; retained new-user steering/cancellation/trust procedure; froze
+  the exact template patch; added direct delegate coverage; required a fresh
+  baseline; made per-node gates non-fungible; bounded the home-backed focused
+  execution; and named all adjacent diagnostics.  Rejected the suggestion to
+  add new natural failure/dependency journeys because those lifecycle clauses
+  are no longer changing; the existing cases remain diagnostics and their
+  coverage gap is reported rather than widening this deletion.
+- 2026-08-04 revision 3: retained the before-edit skill check and final response
+  account after follow-up proved they lacked another owner; retained the Step 1
+  heading; aligned the overall P2 lifecycle gate to the clauses actually moved;
+  froze eval time only for explicitly controlled runs; added the minimal direct
+  delegate case; and preregistered the reviewed home-backed runner, evidence
+  identity, exact command, N=3 adjacent diagnostics, and matched liveness fields.
+- 2026-08-04 revision 4: local review replaced the duplicate 118-line experiment
+  runner with a fail-closed provenance wrapper over the existing shared runner;
+  added its minimal explicit-node and aggregate-status interface; hashed all
+  direct graph/skill/fixture/validator inputs; changed the clock fixture to
+  pytest-owned restoration; corrected the skill-eval module documentation; and
+  prevented the delegate case from reaching real research.
+- 2026-08-04 revision 5: follow-up retained the nightly runner's historical
+  no-argument exit contract while focused blocks aggregate failure; moved all
+  P2 preflight checks behind durable trap setup; added the shared runner to the
+  manifest; and removed stale debt/docstring wording.
