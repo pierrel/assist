@@ -108,8 +108,13 @@ echo "  TMPDIR: $TMPDIR (wiped, $(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"
 # preamble.  With no arguments, preserve the nightly full-suite behavior.
 collect_err="$HISTORY_DIR/collect-$TS.err"
 focused=0
+pytest_args=()
 if [ "$#" -gt 0 ]; then
     focused=1
+    # Focused experiment runs retain the concise INFO counters emitted by
+    # ModelLoggingMiddleware and uncaptured judge-provenance prints.  Keep the
+    # historical nightly output unchanged when no node IDs are supplied.
+    pytest_args=(-s --log-cli-level=INFO)
     NODEIDS=("$@")
     "$PYTEST" --collect-only -q "${NODEIDS[@]}" >"$collect_err" 2>&1
     collect_rc=$?
@@ -151,7 +156,7 @@ for nodeid in "${NODEIDS[@]}"; do
     # blocked in a C socket read to llama's slot can't service SIGTERM, so
     # only SIGKILL frees the slot for the next test.
     timeout --kill-after="$KILL_GRACE" -s TERM "$PER_TEST_TIMEOUT" \
-        "$PYTEST" --junit-xml="$xml" "$nodeid" \
+        "$PYTEST" "${pytest_args[@]}" --junit-xml="$xml" "$nodeid" \
         > "$log" 2>&1
     rc=$?
     end=$(date +%s)

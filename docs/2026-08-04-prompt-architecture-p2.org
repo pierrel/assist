@@ -198,9 +198,10 @@ is a fail-closed P2 provenance wrapper.  It creates a private home-backed run,
 fingerprints every directly relevant frozen input and the three rendered role
 prompts, then invokes the repository's existing =scripts/run-evals.sh=.  That
 script receives the minimal general improvement required by the program: when
-exact node IDs are supplied it runs only them, and it returns aggregate failure;
-with no arguments its nightly selection and historical zero exit remain
-unchanged.  The shared
+exact node IDs are supplied it runs only them, retains INFO-level model counters
+and judge provenance in the private per-node logs, and returns aggregate
+failure; with no arguments its nightly selection and historical zero exit
+remain unchanged.  The shared
 runner still owns scratch validation/locking, exact-mount orphan cleanup,
 per-node 1,200-second kill bounds, JUnit, and logs.  The invocation has a
 3,300-second outer cap.  The exact command is:
@@ -235,9 +236,9 @@ local review; candidate N=5; candidate N=10.  Blocks stay below one hour and get
 roughly fifteen minutes of actual GPU rest.  If measured timing does not fit,
 split the frozen nodes across more blocks rather than changing the cohort.
 
-Per-node wall time, ModelLoggingMiddleware model-call/tool-call counts, first
-launch-response time, and total journey time are matched across arms from the
-private logs.  The graph and tool set are byte-identical, so no code-created
+Per-node wall time, ModelLoggingMiddleware model-call/tool-call counts, and total
+journey time are matched across arms from the private logs.  The graph and tool
+set are byte-identical, so no code-created
 round trip exists; the launch and capability traces fail if model behavior adds
 polling, misses skill/context selection, or loses required work.  Candidate
 median time must remain within baseline plus 20% and two seconds, with p90 no
