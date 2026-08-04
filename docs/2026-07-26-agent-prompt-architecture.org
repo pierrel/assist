@@ -3,8 +3,9 @@
 
 * State
 
-Status: architecture approved; P0 and P1 complete; P0b deferred; P1c complete;
-P1b is the next pending phase.
+Status: architecture approved; P0, P1, P1b, and P1c complete; P0b deferred; P2
+implementation and qualification are in progress.  See
+[[file:2026-08-04-prompt-architecture-p2.org][the P2 state record]].
 
 ** Change log
 
@@ -120,7 +121,8 @@ repository and thread-memory surfaces.  Every later implementation phase
 rebases on its then-current =main= and repeats the census.  The prompt
 architecture describes the resulting capability rather than an unmerged branch.
 
-The current custom main/delegate template is 2,548 source words before Deep
+The P0/P2 baseline custom main/delegate template was 2,548 source words; the
+current P2 candidate is 2,271 source words before Deep
 Agents appends its base prompt and middleware adds TODO, filesystem, skill,
 memory, and other guidance.  The custom skill block contributes another 258
 words before the dynamic skill list; the repository and thread-memory procedures
@@ -2563,7 +2565,7 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 Pierre satisfied the original design gate by approving and merging PR #216, and
 P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
 shared-model contention has not been a material problem.  P1 shipped in PR #223,
-and P1c is approved; P1b is now the next pending phase.  Adding P2c to the
+P1b shipped in PR #224, P1c is complete, and P2 is now in qualification.  Adding P2c to the
 program does not start its implementation or any other later phase automatically.
 
 * Decisions deliberately deferred to evidence

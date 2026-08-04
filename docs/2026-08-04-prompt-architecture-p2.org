@@ -3,7 +3,11 @@
 
 * Status
 
-Revised design and experiment preregistration.  No production prompt has changed.
+Candidate 2 is implemented at =d10cdfd= and qualification is in progress.  Its
+primary N=3 cohort passed 21/21.  Adjacent diagnostics passed 19/21; the one
+unstable timeout-dependency case also failed on the pre-deletion prompt and is
+retained as non-gating adjacent evidence.  Local review round 1 is being
+reconciled before N=5 and N=10.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -59,8 +63,8 @@ P0 measured the canonical web-main Assist section at 13,068 characters inside a
 to 59,316 characters.  Raw comparison data remains under the home partition at
 =~/deploy/assist/prompt-census/p0-100aa885-final-v2/=.
 
-The candidate applies exactly this patch after baseline.  No wording is left to
-implementation judgment.
+Rejected candidate 1 applied exactly this patch after baseline.  No wording was
+left to implementation judgment.
 
 #+begin_src diff
 @@
@@ -124,6 +128,18 @@ removed clause.
 +        assert "## Delegating whole tasks" not in prompt
 +        assert "your first call must be `load_skill" not in prompt
 +        assert "TODO bookkeeping is advisory" not in prompt
+#+end_src
+
+Candidate 1's N=3 failure below triggered the preregistered smallest-sentence
+fallback.  Final candidate 2 differs from that patch only here:
+
+#+begin_src diff
+@@
+-{% if agent_role == "main" and delegation_mode == "async" %}ROUTE COMPLEX REQUESTS FIRST: if the latest request has multiple deliverables or dependent stages, make `load_skill(name="complex-request")` your only first call. Do not inspect inputs first.{% endif %}
++{% if agent_role == "main" and delegation_mode == "async" %}ROUTE COMPLEX REQUESTS FIRST: if the latest request has multiple deliverables or dependent stages, make `load_skill(name="complex-request")` your only first call. Do not inspect inputs first. Every subagent request must be explicit and self-contained because a subagent receives no parent conversation history.{% endif %}
+@@
+         assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
++        assert prompt.count("explicit and self-contained") == 1
 #+end_src
 
 The top-of-request one-line =complex-request= first-call trigger stays as the
@@ -212,7 +228,7 @@ injected child result in the dependency node and deterministic P0 census.
 
 A reviewed machine-local runner at
 =$HOME/deploy/assist/eval/p2/run-block.sh=, mode 0700 and SHA-256
-=506c2ca6e71250074f31892449abd933af7b6caf65a15b8f5ae79a5dfabf3916=,
+=c6d59c5c4aa74cf7cda63ee7d5b616497111924d945493d237a14c6f6fa017cf=,
 is a fail-closed P2 provenance wrapper.  It creates a private home-backed run,
 fingerprints every directly relevant frozen input and the three rendered role
 prompts, then invokes the repository's existing =scripts/run-evals.sh=.  That
@@ -247,6 +263,14 @@ NODES=(
 
 Only =ARM= and =ITER= vary within an arm; =EXPECTED_SHA= is frozen after each
 baseline or candidate commit.
+
+Local review round 1 found that the first adjacent N=3 blocks used the prior
+runner SHA
+=506c2ca6e71250074f31892449abd933af7b6caf65a15b8f5ae79a5dfabf3916=,
+whose direct manifest omitted =edd/eval/test_interjection.py=.  Their clean
+source SHA still pins that file, so they remain diagnostic evidence rather than
+being discarded.  The current runner adds its direct hash; every later sample
+uses the current SHA.
 
 Before formal baseline, an uncounted N=3 timing pilot over the seven nodes
 records per-node p50/p90, expected subject turns/subagents and judge calls, and
@@ -381,6 +405,46 @@ history.  The sentence moves to the retained front trigger for Qwen salience.
 The long delegation section, duplicate routing/load/TODO procedure, and every
 other frozen deletion remain removed.  Candidate N=3/N=5/N=10 restarts.
 
+** Candidate 2 early and adjacent results
+
+Candidate 2 ran at source =d10cdfd=.  The primary N=3 artifacts are
+=candidate2-1-t6gowc=, =candidate2-2-EEjiv0=, and =candidate2-3-yC7qcw=.
+All 21 executions passed; block wall times were 299, 272, and 238 seconds.
+
+| Node (short name) | Pass | Seconds p50/p90 | Model calls p50/p90 | Tool calls p50/p90 | Judge calls p50/p90 |
+|-
+| =starts_subagents_and_returns_without_polling= | 3/3 | 12 / 19 | 2 / 2 | 2 / 2 | 0 / 0 |
+| =natural_long_list_chooses_one_delegate_per_outcome= | 3/3 | 144 / 157 | 16 / 19 | 24 / 24 | 1 / 1 |
+| =explicit_delegate_fanout_capability= | 3/3 | 17 / 17 | 2 / 2 | 3 / 3 | 0 / 0 |
+| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 3/3 | 21 / 22 | 6 / 6 | 4 / 4 | 0 / 0 |
+| =implicit_skill_request= | 3/3 | 10 / 10 | 3 / 3 | 3 / 3 | 0 / 0 |
+| =delegate_implicit_skill_request= | 3/3 | 32 / 33 | 6 / 6 | 5 / 5 | 0 / 0 |
+| =first_turn_substantive_invokes_context= | 3/3 | 39 / 41 | 6 / 7 | 15 / 15 | 0 / 0 |
+
+Every median remains within baseline plus 20 percent and two seconds; every p90
+remains within baseline plus thirty seconds.  The natural case used more
+concurrent tool calls but no additional median model call.  P1c grades its four
+complete reports rather than the hidden route, and all requested fields and the
+outcome judge passed.
+
+The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
+=candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
+wake result use, cancellation-request truth, mixed-sibling preservation, and
+all three interjection cases passed 3/3.  Timeout dependency blocking passed
+1/3.  In both failures the model checked the terminal timeout, then improperly
+took over the prerequisite and started its dependent.  The controlling
+lifecycle clause is byte-identical and the deleted prose contains no timeout or
+failure rule.
+
+Round 1 therefore required a matched pre-deletion diagnostic before attribution.
+At frozen baseline =b4cce1f=, the same timeout node passed 2/3 in
+=baseline-timeout-1-HdZYme=, =baseline-timeout-2-nsaGDZ=, and
+=baseline-timeout-3-fnLlCe=.  The failure predates P2; three samples do not
+establish that the one-sample difference is causal.  P2 does not add a third
+duplicate lifecycle rule or redesign async execution.  The timeout node is
+promoted into N=5/N=10 execution as a non-gating adjacent diagnostic, and its
+pre-existing reliability risk is reported separately.
+
 ** Gates
 
 1. All exact nodes collect in both arms.  The delegate case exercises the real
@@ -464,3 +528,8 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   failure, stopped the losing cadence, and restored only the prior general
   self-contained-brief sentence as the measured Qwen salience exception before
   restarting all candidate gates.
+- 2026-08-04 revision 11: recorded candidate 2's 21/21 primary N=3 and 19/21
+  adjacent results; ran the review-required matched timeout baseline, which was
+  itself unstable at 2/3; retained that node as non-gating adjacent evidence;
+  added =test_interjection.py= to the direct runner manifest; reconciled the
+  exact candidate-2 delta, phase status, P1b completion, and current word count.
