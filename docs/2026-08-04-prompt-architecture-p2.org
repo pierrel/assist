@@ -28,8 +28,8 @@ evidence, not the gate.
 The production change is one file:
 =assist/templates/deepagents/general_instructions.md.j2=.  Small eval-only
 changes exercise the delegate shape, freeze explicit P2 prompt time, and let the
-existing eval runner select nodes and aggregate their status.  One deterministic
-prompt-shape expectation changes with the deleted block.  This record plus the
+existing eval runner select nodes and aggregate their status.  Two deterministic
+prompt-shape expectations change with the deleted block.  This record plus the
 overall design and roadmap receive result/status updates.  P2 changes no tool,
 schema, middleware, constructor, runtime state, model setting, memory, or research
 behavior,
@@ -113,10 +113,11 @@ baseline.  No wording is left to implementation judgment.
  - If the user's message implies a task, add it to their task file with clear, actionable details
 #+end_src
 
-The candidate also updates the one deterministic test that currently requires
-the deleted long block.  It pins the retained one-line trigger and the absence of
-the duplicate prose instead.  No other deterministic expectation names a
-removed clause.
+The candidate updates =test_subagent_tools_select_asynchronous_prompt=, which
+previously required the long block, and
+=test_p0_appendix_and_p2_summary_match_the_current_capture=, which pins the
+current census.  Both require the retained trigger and absence of the duplicate
+prose.
 
 #+begin_src diff
 @@
@@ -251,7 +252,7 @@ per-node 1,200-second kill bounds, JUnit, and logs.  The invocation has a
 #+begin_src shell
 WORKTREE="$PWD"
 AGENTIC_ROOT="$(realpath "$WORKTREE/../../..")"
-EXPECTED_SHA="$(git rev-parse HEAD)"
+EXPECTED_SHA="d7b09efd2686c7e5f58ac2cf370227a8ff14d24e"
 NODES=(
   edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_starts_subagents_and_returns_without_polling
   edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome
@@ -267,6 +268,10 @@ NODES=(
   WORKTREE="$WORKTREE" \
   "$HOME/deploy/assist/eval/p2/run-block.sh" "${NODES[@]}"
 #+end_src
+
+The shown SHA is the independently frozen candidate-3 source.  A different arm
+replaces it with that arm's pre-frozen literal before checkout; the command must
+never derive the expected value from the checkout it verifies.
 
 Only =ARM= and =ITER= vary within an arm; =EXPECTED_SHA= is frozen after each
 baseline or candidate commit.
@@ -401,12 +406,13 @@ canonical current system-message SHA-256 is
 =ddf6a102708f4b849c12394cf7dd719925a3984e666959b17c6a77498519e4ba=.
 The deterministic census artifact is 2,854,575 canonical bytes with SHA-256
 =f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
-The fresh candidate-3 capture is
-=~/deploy/assist/prompt-census/p2-candidate3-a712057c/=; its =census.json=
-file is 2,854,575 bytes with file SHA-256
+The preserved capture is
+=~/deploy/assist/prompt-census/p2-candidate-a712057c/=; its =census.json= file
+is 2,854,575 bytes with file SHA-256
 =b5ecc5d24cc7fed5b67095425d12bddd731080da316f3d07dd83103fce31cb25=.
-The earlier byte-identical candidate-1 capture remains preserved separately at
-=~/deploy/assist/prompt-census/p2-candidate-a712057c/=.
+A fresh candidate-3 recapture produced byte-identical census and bootstrap
+files.  Because the capture contains no commit identity, the redundant copy was
+discarded rather than claiming duplicate evidence.
 
 ** Candidate 1 early result and revision
 
@@ -594,3 +600,6 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   2's provisional duplicate sentence, restored the exact deletion as candidate
   3, and restarted the full candidate cadence without spending samples on an
   already-impossible conjunction.
+- 2026-08-04 revision 15: local review froze the candidate runner's expected
+  source as an independent literal, named both deterministic prompt-shape tests,
+  and removed a byte-identical census copy that carried no source identity.
