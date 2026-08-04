@@ -848,7 +848,7 @@ phases while retaining strict, labelled capability probes. See [[file:docs/2026-
 Pierre approved review revision 3 on 2026-08-03 after the bounded
 post-approval read verified Etherpad revision 0 against canonical SHA-256
 =9c5fcf79030cb5307e4f7dc1440d300a597c5efc683f762206e4747ff4ef3067=.
-The policy has no open question.  Implementation and eval gaps remain explicit
+The policy has no open questions.  Implementation and eval gaps remain explicit
 without narrowing the aspiration.  Shipped =402b2b1= on 2026-08-03 in PR #225.
 See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1c-product-policy][the complete process, review record, and final alignment]].
 
