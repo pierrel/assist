@@ -28,6 +28,14 @@ the long context traces reproduce baseline long-tail behavior, every functional
 contract passed, and the exact baseline context-first sentence is restored.
 Candidate 4 therefore proceeds unchanged to N=5.
 
+Candidate 4 N=5 passed all 35 primary executions.  The natural journey's
+161-second median exceeds its 154.4-second limit, and the context journey's
+34-second median exceeds its 30.8-second limit; both p90 observations remain
+inside their limits.  The natural journey also used 24 tool calls in every
+repetition versus baseline p50/p90 of 18/19.  The timeout diagnostic passed
+4/5.  These are registered signals, not waived results.  Candidate 4 pauses
+for focused attribution review before any final N=10 execution.
+
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
 is approved =edd/product-policy.org= review revision 3, SHA-256
@@ -628,6 +636,38 @@ No new failure class appeared, and all 21 primary executions passed.  The
 review therefore approved the unchanged preregistered N=5 rather than turning
 baseline variance into prompt or runtime work.
 
+** Candidate 4 intermediate result
+
+The unchanged N=5 artifacts are =candidate4-n5-1-IoPRSo=,
+=candidate4-n5-2-txEH4j=, =candidate4-n5-3-6InU5N=,
+=candidate4-n5-4-D8TgSM=, and =candidate4-n5-5-oyg8Ax=.  All 35 primary
+executions passed.  The deferred timeout diagnostic passed 4/5; repetition 1
+failed with the already observed takeover-and-start-dependent behavior.  Block
+wall times were 339, 305, 313, 303, and 313 seconds.
+
+| Node (short name) | Pass | Seconds p50/p90 |
+|-
+| =starts_subagents_and_returns_without_polling= | 5/5 | 10 / 11 |
+| =natural_long_list_chooses_one_delegate_per_outcome= | 5/5 | 161 / 172 |
+| =explicit_delegate_fanout_capability= | 5/5 | 18 / 18 |
+| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 5/5 | 19 / 20 |
+| =implicit_skill_request= | 5/5 | 10 / 11 |
+| =delegate_implicit_skill_request= | 5/5 | 36 / 37 |
+| =first_turn_substantive_invokes_context= | 5/5 | 34 / 37 |
+
+Five nodes meet both final timing bounds.  Natural behavior passes its
+176-second p90 ceiling but misses its 154.4-second median ceiling by 6.6
+seconds.  Its model-call p50/p90 remains 16/19 versus baseline 16/20, while
+every repetition uses 24 tool calls versus baseline p50/p90 18/19.  Context
+passes its 69-second p90 ceiling but misses its 30.8-second median ceiling by
+3.2 seconds.  Each context trace uses five model calls and 13 tool calls;
+baseline p50/p90 is 4/5 model calls and 3/14 tool calls.
+
+N=5 is intermediate and the registered final decision is N=10, but the two
+median misses and natural journey's consistent added tool work require focused
+attribution review before spending the final cohort.  No gate, candidate, or
+eval input changes in response to this observation.
+
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
 wake result use, cancellation-request truth, mixed-sibling preservation, and
@@ -783,3 +823,7 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   candidate defect or new failure class.  Classified the long context traces
   as preregistered diagnostic variance, retained the frozen candidate and
   gates unchanged, and approved proceeding to N=5 after cooldown.
+- 2026-08-04 revision 22: candidate 4 passed all 35 primary N=5 executions and
+  the deferred timeout diagnostic passed 4/5.  Recorded the natural and context
+  median timing misses plus the natural journey's consistent added tool work;
+  paused for focused attribution review before any final N=10 execution.
