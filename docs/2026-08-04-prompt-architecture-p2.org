@@ -602,4 +602,4 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   already-impossible conjunction.
 - 2026-08-04 revision 15: local review froze the candidate runner's expected
   source as an independent literal, named both deterministic prompt-shape tests,
-  and removed a byte-identical census copy that carried no source identity.
+  and removed a byte-identical census copy that carried no commit identity.
