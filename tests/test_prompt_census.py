@@ -943,14 +943,14 @@ def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    assert len(current_prompt) == 29_600
+    assert len(current_prompt) == 29_692
     assert len(schemas) == 28_037
     assert len(census["calls"]) == 28
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 21
-    assert len(artifact_bytes(census)) == 2_854_575
+    assert len(artifact_bytes(census)) == 2_856_507
     assert census["artifact_sha256"] == \
-        "f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4"
+        "2a9095f5e948482d73add98dbaa5210beab15661b5ed662e86c41c6e7aad750f"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
@@ -971,10 +971,10 @@ def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
     assert "your first call must be `load_skill" not in current_prompt
     assert "TODO bookkeeping is advisory" not in current_prompt
     assert "explicit and self-contained" not in current_prompt
-    assert "| Assist role instructions | 11,389 | 2,848 |" in p2_document
-    assert "| *System-message total* | *29,600* | *7,400* |" in p2_document
+    assert "| Assist role instructions | 11,481 | 2,871 |" in p2_document
+    assert "| *System-message total* | *29,692* | *7,423* |" in p2_document
     assert "| Provider-bound tool schemas | 28,037 | 7,010 |" in p2_document
-    assert "| *Bootstrap request + schemas* | *57,637* | *14,410* |" in p2_document
+    assert "| *Bootstrap request + schemas* | *57,729* | *14,433* |" in p2_document
 
     kernel = _named_text_block("proposed-main-bootstrap-kernel")
     headings = [

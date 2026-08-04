@@ -3,15 +3,20 @@
 
 * Status
 
-Candidate 3 is implemented at =d7b09ef=.  Its fresh primary N=3 passed 21/21,
-N=5 passed 35/35, and the first half of N=10 passed 35/35; repetitions 6--10
-remain.  The isolated rejected-candidate reference passed 10/10, so it did not
-reproduce the empty-field failure required to keep that sentence.  The
-pre-existing timeout-dependency defect passed 2/5 at candidate N=5 and 1/5 in
-the first half of N=10, versus its 7/10 matched baseline.  The preregistered
-auxiliary comparison is therefore already missed.  Scope review classifies the
-real defect as deferred and rejects its attribution as a P2 blocker because its
-prompt clause, skill owner, and eval are byte-identical across arms.
+Candidate 3 passed all 70 primary N=10 executions, but it missed the registered
+context timing gate: the context invocation median was 33 seconds versus a
+30.8-second limit, and its median model-call count rose from 4 to 6.  This is
+directly related to candidate 3's only context-facing wording change, so that
+candidate is rejected rather than waived.  Candidate 4 restores the exact
+baseline context-first sentence while retaining the duplicate skill,
+delegation, and TODO deletion.  Because this is acceptance-affecting prompt
+text, candidate 4 restarts N=3/N=5/N=10 under the unchanged cohort and gates.
+
+Candidate 3's pre-existing timeout-dependency defect passed 3/10 versus its
+7/10 matched baseline.  The preregistered auxiliary comparison therefore also
+missed.  Scope review classifies that real defect as deferred and rejects its
+attribution as a P2 blocker because its prompt clause, skill owner, and eval are
+byte-identical across arms.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -67,8 +72,10 @@ P0 measured the canonical web-main Assist section at 13,068 characters inside a
 to 59,316 characters.  Raw comparison data remains under the home partition at
 =~/deploy/assist/prompt-census/p0-100aa885-final-v2/=.
 
-Rejected candidate 1 and final candidate 3 apply exactly this patch after
-baseline.  No wording is left to implementation judgment.
+Rejected candidates 1 and 3 applied the patch below after baseline.  Candidate
+4 applies the same deletion except that the baseline context-first sentence is
+retained unchanged, as shown after the patch.  No wording is left to
+implementation judgment.
 
 #+begin_src diff
 @@
@@ -92,8 +99,6 @@ baseline.  No wording is left to implementation judgment.
 -{% if agent_role == "main" and delegation_mode == "async" %}Multiple deliverables or dependent stages always match `complex-request`; load it alone before inspecting their files.{% endif %}
 -
  In particular: if the message mentions code, a software project, a repo, a codebase, a function, a class, a method, a module, a test, TDD, a refactor, a bug, debugging, fixing, implementing, a feature, or any project-file name (`pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Makefile`, `Dockerfile`) — call `load_skill(name="dev")`. The word *project* by itself counts. When in doubt, call `load_skill(name="dev")`.
--**2. Local context — your SECOND tool call, on the FIRST turn of a thread.** After the skill check completes (a *separate* call), and *even if you just loaded a skill*, dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
-+**Local context — after any matching skill, on the FIRST turn of a thread.** Dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
 @@
 -### Step 1: Plan
 -{% if delegation_mode == "async" %}If Step 0 started a task, start any other independent tasks the request needs, report their IDs, and return. Plan and act after a completion wake provides the needed context.{% else %}After Step 0, use the `write_todos` tool to outline your plan, then execute each step.{% endif %}
@@ -114,6 +119,12 @@ baseline.  No wording is left to implementation judgment.
 +## User Tasks
  - User tasks must be stored in THEIR task files — ask the context-agent to find the correct location
  - If the user's message implies a task, add it to their task file with clear, actionable details
+#+end_src
+
+Candidate 4 retains this baseline sentence byte-for-byte:
+
+#+begin_src markdown
+**2. Local context — your SECOND tool call, on the FIRST turn of a thread.** After the skill check completes (a *separate* call), and *even if you just loaded a skill*, dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
 #+end_src
 
 The candidate updates =test_subagent_tools_select_asynchronous_prompt=, which
@@ -150,13 +161,14 @@ here:
 #+end_src
 
 The review-registered reference below did not reproduce the failure, so
-candidate 3 removes this provisional delta and returns to the exact controlled
-patch above.
+candidate 3 removes this provisional delta and returns to the exact
+candidate-1 patch above.
 
 The top-of-request one-line =complex-request= first-call trigger stays as the
-existing measured Qwen routing exception.  The development trigger stays
-unchanged.  The context line changes only to remove a reference to the deleted
-duplicate skill protocol; it preserves skill-before-context ordering.
+existing measured Qwen routing exception.  The development trigger and exact
+context-first sentence stay unchanged in candidate 4.  The latter is a measured
+exception: candidate 3's weakened replacement passed selection but added enough
+long routes to miss the registered median timing gate.
 
 | Removed clause | Sole surviving owner |
 |-
@@ -397,7 +409,7 @@ the current P2 comparison.
 
 | Owner/section | Exact characters | Approx. tokens |
 |-
-| Assist role instructions | 11,389 | 2,848 |
+| Assist role instructions | 11,481 | 2,871 |
 | Prompt composer | 2 | 1 |
 | Deep Agents base | 2,257 | 565 |
 | LangChain TODO middleware | 1,076 | 269 |
@@ -405,23 +417,20 @@ the current P2 comparison.
 | Assist skills middleware | 9,631 | 2,408 |
 | Assist memory middleware | 3,796 | 949 |
 | Context rider | 0 | 0 |
-| *System-message total* | *29,600* | *7,400* |
+| *System-message total* | *29,692* | *7,423* |
 | Provider-bound tool schemas | 28,037 | 7,010 |
-| *Bootstrap request + schemas* | *57,637* | *14,410* |
+| *Bootstrap request + schemas* | *57,729* | *14,433* |
 
-The final candidate removes 1,679 characters from the canonical system message and
+The final candidate removes 1,587 characters from the canonical system message and
 the complete bootstrap request.  Tool schemas are byte-identical.  The
 canonical current system-message SHA-256 is
-=ddf6a102708f4b849c12394cf7dd719925a3984e666959b17c6a77498519e4ba=.
-The deterministic census artifact is 2,854,575 canonical bytes with SHA-256
-=f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
+=cbe4b044a680cf13d1c25861eed1b2e0a9b055784d34193933d110470011f705=.
+The deterministic census artifact is 2,856,507 canonical bytes with SHA-256
+=2a9095f5e948482d73add98dbaa5210beab15661b5ed662e86c41c6e7aad750f=.
 The preserved capture is
-=~/deploy/assist/prompt-census/p2-candidate-a712057c/=; its =census.json= file
-is 2,854,575 bytes with file SHA-256
-=b5ecc5d24cc7fed5b67095425d12bddd731080da316f3d07dd83103fce31cb25=.
-A fresh candidate-3 recapture produced byte-identical census and bootstrap
-files.  Because the capture contains no commit identity, the redundant copy was
-discarded rather than claiming duplicate evidence.
+=~/deploy/assist/prompt-census/p2-candidate4-1c2d0eec/=; its =census.json= file
+is 2,856,507 bytes with file SHA-256
+=5363dfa9da455a6507ee5fef8c46feda241d529527a6f39b327d98c9dd05012e=.
 
 ** Candidate 1 early result and revision
 
@@ -547,6 +556,34 @@ byte-identical.  The deleted text contains no timeout,
 failure, takeover, or dependent-start rule.  Fixing that pre-existing model
 reliability problem would be a separate async-lifecycle objective; P2 records
 its concrete risk and value without changing production for it.
+
+** Candidate 3 final result and rejection
+
+The second-half artifacts are =candidate3-n10-6-mrg9Xp=,
+=candidate3-n10-7-tksPOd=, =candidate3-n10-8-89cBCS=,
+=candidate3-n10-9-KJ7Lmw=, and =candidate3-n10-10-jFQFgt=.  Together with the
+five artifacts above, all 70 primary executions passed.  The timeout diagnostic
+passed 3/10 and remains the honestly failed, deferred auxiliary comparison.
+
+| Node (short name) | Pass | Seconds p50/p90 |
+|-
+| =starts_subagents_and_returns_without_polling= | 10/10 | 11 / 11 |
+| =natural_long_list_chooses_one_delegate_per_outcome= | 10/10 | 154 / 159 |
+| =explicit_delegate_fanout_capability= | 10/10 | 17 / 18 |
+| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 10/10 | 16 / 16 |
+| =implicit_skill_request= | 10/10 | 10.5 / 11 |
+| =delegate_implicit_skill_request= | 10/10 | 33 / 33 |
+| =first_turn_substantive_invokes_context= | 10/10 | 33 / 50 |
+
+Six primary nodes met both final wall-time bounds.  The context p90 passed at 50
+seconds against a 69-second limit, but its 33-second median exceeded the
+30.8-second limit.  Its baseline-to-candidate median model calls also rose from
+4 to 6 and tool calls from 3 to 10.  Long traces continued into unnecessary
+filesystem work after the stubbed context result.  Since candidate 3 changed
+the forceful context sentence and the miss is on that exact journey, this is an
+in-scope regression.  Candidate 3 is rejected.  Candidate 4 restores only that
+sentence and restarts the unchanged cadence; no gate or cohort changes after
+observation.
 
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
@@ -690,3 +727,8 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   scope review classified that real pre-existing defect as deferred and rejected
   its attribution as a blocker for this deletion; the full cohort remains
   unchanged.
+- 2026-08-04 revision 19: candidate 3 completed at 70/70 primary passes and
+  3/10 on the deferred timeout diagnostic, but its context median missed the
+  registered timing bound with added model/tool calls.  Rejected candidate 3,
+  restored the exact baseline context-first sentence as candidate 4, and
+  restarted N=3/N=5/N=10 without changing the cohort or gates.
