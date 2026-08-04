@@ -3,8 +3,8 @@
 
 * Status
 
-Candidate 3 removes the unqualified candidate-2 fallback and is awaiting a fresh
-N=3/N=5/N=10 cadence.  The isolated rejected-candidate reference passed 10/10,
+Candidate 3 is implemented at =d7b09ef= and is awaiting a fresh N=3/N=5/N=10
+cadence.  The isolated rejected-candidate reference passed 10/10,
 so it did not reproduce the empty-field failure required to keep that sentence.
 The unstable timeout-dependency case has a completed 7/10 matched baseline,
 which remains candidate 3's adjacent no-regression threshold.
@@ -401,11 +401,12 @@ canonical current system-message SHA-256 is
 =ddf6a102708f4b849c12394cf7dd719925a3984e666959b17c6a77498519e4ba=.
 The deterministic census artifact is 2,854,575 canonical bytes with SHA-256
 =f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
-The byte-identical candidate-1 capture is
-=~/deploy/assist/prompt-census/p2-candidate-a712057c/=; its =census.json=
+The fresh candidate-3 capture is
+=~/deploy/assist/prompt-census/p2-candidate3-a712057c/=; its =census.json=
 file is 2,854,575 bytes with file SHA-256
 =b5ecc5d24cc7fed5b67095425d12bddd731080da316f3d07dd83103fce31cb25=.
-A fresh candidate-3 capture is made after its source commit is frozen.
+The earlier byte-identical candidate-1 capture remains preserved separately at
+=~/deploy/assist/prompt-census/p2-candidate-a712057c/=.
 
 ** Candidate 1 early result and revision
 
