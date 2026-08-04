@@ -3,12 +3,15 @@
 
 * Status
 
-Candidate 3 is implemented at =d7b09ef=.  Its fresh primary N=3 passed 21/21
-and N=5 passed 35/35; N=10 remains.  The isolated rejected-candidate reference
-passed 10/10, so it did not reproduce the empty-field failure required to keep
-that sentence.  The unstable timeout-dependency case passed 2/5 at candidate
-N=5 and has a completed 7/10 matched baseline.  Its registered candidate N=10
-no-regression gate remains 7/10.
+Candidate 3 is implemented at =d7b09ef=.  Its fresh primary N=3 passed 21/21,
+N=5 passed 35/35, and the first half of N=10 passed 35/35; repetitions 6--10
+remain.  The isolated rejected-candidate reference passed 10/10, so it did not
+reproduce the empty-field failure required to keep that sentence.  The
+pre-existing timeout-dependency defect passed 2/5 at candidate N=5 and 1/5 in
+the first half of N=10, versus its 7/10 matched baseline.  The preregistered
+auxiliary comparison is therefore already missed.  Scope review classifies the
+real defect as deferred and rejects its attribution as a P2 blocker because its
+prompt clause, skill owner, and eval are byte-identical across arms.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -303,11 +306,17 @@ use the same frozen eval inputs, runner, fixed time, model settings, and
 provider-default sampling.  This comparison is registered after the early
 observation and is never described as preregistered.
 
-The timeout diagnostic also remains gating.  Extend its pre-deletion
+The timeout diagnostic was also preregistered as gating.  Extend its pre-deletion
 =b4cce1f= reference from N=3 to N=10, then run it in candidate N=5 and N=10.
 The final candidate N=10 pass count must be no lower than the matched baseline
 N=10 count.  This is an adjacent no-regression comparison, not a new requirement
 that pre-existing production behavior become perfect during P2.
+
+This paragraph preserves the preregistration.  Revision 18 later amends only
+its P2-blocking disposition under the user-directed scope policy after the
+comparison became mathematically impossible: the real, pre-existing defect is
+deferred because none of its prompt, skill, or eval inputs changed.  The result
+still runs to N=10 and remains reported as a failed auxiliary comparison.
 
 Per-node wall time, ModelLoggingMiddleware model-call/tool-call counts, and total
 journey time are matched across arms from the private logs.  The graph and tool
@@ -519,6 +528,26 @@ The promoted timeout diagnostic passed 2/5, with a 57-second median and
 prompt: its registered decision is the candidate N=10 comparison against the
 7/10 matched pre-deletion baseline.
 
+** Candidate 3 stability first half
+
+The first five stability artifacts are =candidate3-n10-1-kjGhSh=,
+=candidate3-n10-2-lSLXii=, =candidate3-n10-3-iQYdun=,
+=candidate3-n10-4-cHYGRI=, and =candidate3-n10-5-Y1QYvp=.  All 35 primary
+executions passed.  The timeout diagnostic passed 1/5.  Even five further
+passes could produce only 6/10, so the preregistered auxiliary 7/10 comparison
+is mathematically missed before the second half.
+
+The failed comparison remains reported as registered; it is not relabelled a
+pass.  A focused user-intention and design-adherence review performed before
+repetitions 6--10 classified the underlying defect as =DEFERRED= and said it
+must not block P2.  The lifecycle-plus-trust text has identical SHA-256
+=1e23629ed26edfb813175c36ed2e571915362f5ac98cc31fe2e447a9c682a145= at
+baseline and candidate; the complex-request skill and timeout eval are also
+byte-identical.  The deleted text contains no timeout,
+failure, takeover, or dependent-start rule.  Fixing that pre-existing model
+reliability problem would be a separate async-lifecycle objective; P2 records
+its concrete risk and value without changing production for it.
+
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
 wake result use, cancellation-request truth, mixed-sibling preservation, and
@@ -549,7 +578,7 @@ pass at least 7/10; its pre-existing reliability risk is reported separately.
    no duplicate in main or delegate and no new mismatch.
 3. Each primary natural node independently meets its N=10 baseline and at least
    70% full passes.  Primary capability and deterministic security/state nodes
-   pass 100%.  A promoted adjacent node meets its matched N=10 baseline.
+   pass 100%.
 4. N=3 differences are diagnostic.  Candidate N=10 must meet baseline per node;
    aggregate success cannot trade away a reliable behavior.
 5. Existing deterministic tests and P0 prompt-census tests pass.  The delegate
@@ -557,6 +586,10 @@ pass at least 7/10; its pre-existing reliability risk is reported separately.
    synchronous specialists and shared skills remain usable.
 6. Review-driven work stays directly tied to this deletion.  Useful unrelated
    findings are reported with risk/value and not implemented.
+7. The promoted timeout diagnostic runs to N=10 and its preregistered comparison
+   is reported honestly.  Revision 18's focused scope review controls its
+   disposition: because the unchanged defect is deferred, that auxiliary miss
+   is not a P2 completion gate and does not trigger an async-lifecycle rewrite.
 
 * Review and delivery
 
@@ -651,3 +684,9 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
 - 2026-08-04 revision 17: candidate 3 passed its primary N=5 at 35/35 with
   registered timing bounds intact.  Recorded the promoted timeout diagnostic's
   2/5 intermediate result without changing its frozen N=10 decision rule.
+- 2026-08-04 revision 18: the first half of candidate N=10 passed all 35 primary
+  executions while the timeout diagnostic passed 1/5, making its registered
+  7/10 auxiliary comparison impossible.  Before the second half, a focused
+  scope review classified that real pre-existing defect as deferred and rejected
+  its attribution as a blocker for this deletion; the full cohort remains
+  unchanged.
