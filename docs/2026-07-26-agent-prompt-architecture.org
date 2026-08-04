@@ -122,7 +122,7 @@ rebases on its then-current =main= and repeats the census.  The prompt
 architecture describes the resulting capability rather than an unmerged branch.
 
 The P0/P2 baseline custom main/delegate template was 2,548 source words; the
-current P2 candidate is 2,255 source words before Deep
+current P2 candidate is 2,272 source words before Deep
 Agents appends its base prompt and middleware adds TODO, filesystem, skill,
 memory, and other guidance.  The custom skill block contributes another 258
 words before the dynamic skill list; the repository and thread-memory procedures
