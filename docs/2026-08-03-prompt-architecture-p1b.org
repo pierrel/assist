@@ -3,6 +3,12 @@
 
 * Status
 
+P1b is complete at measured code SHA
+=95ee4fef332a6cdcdb01cb23006f4259bdcbaaa6=.  The frozen candidate passed
+natural 36/36 and capability 36/36 across official N=3, N=5, and N=10 runs.
+The completion-report commit changes documentation only; the measured eval code
+remains at that named SHA.
+
 The prior direct-validator candidate completed five local code-review rounds;
 the judge-adoption redesign and terminal-response follow-up have completed
 focused review and fixes.  The final deterministic suite is green: 1,571
@@ -300,6 +306,30 @@ SECONDS=0
   requested-field gates.  Only =pass= passes, and the private run log records
   model and prompt provenance.
 
+* Experiment results
+
+| Arm | Repetitions | Natural | Capability | Total |
+|-----+-------------+---------+------------+-------|
+| Baseline =10a66ce= | N=3 | 3/6 | 6/6 | 9/12 |
+| Candidate =95ee4fe= | N=3 | 6/6 | 6/6 | 12/12 |
+| Candidate =95ee4fe= | N=5 | 10/10 | 10/10 | 20/20 |
+| Candidate =95ee4fe= | N=10 | 20/20 | 20/20 | 40/40 |
+| Candidate aggregate | N=18 | 36/36 | 36/36 | 72/72 |
+
+All eighteen counted candidate repetitions used served model
+=Qwen_Qwen3.6-27B-Q4_K_M.gguf= and judge prompt SHA-256
+=f6d7f5ff9f1bebcda15ea095b25b2aefd35300c8e2f2852f727e4726eff3f884=.
+Each log contains the exact candidate SHA, two judge provenance records, and
+=run_rc=0=.  N=10 wall time was 3,510 seconds across two five-repetition blocks
+with a 15-minute GPU rest between them.  N=3 plus N=5 also stayed below one hour
+and was followed by a 15-minute rest.
+
+The baseline and candidate deliberately use different acceptance signals, so
+the table shows that the new signal is stable, not that runtime behavior
+improved.  Agent prompts and runtime code were identical in both arms.  Earlier
+candidate runs are diagnostic only because review changed the validator after
+each exposed false negative; none are included above.
+
 * Risks, decisions, and deferred findings
 
 - Model variance remains despite frozen prompts.  Repeated arms measure whether
@@ -379,11 +409,108 @@ SECONDS=0
   that fix; it corrected only the documentation boundary for task IDs that may
   appear naturally inside the verbatim visible response.
 
-* Completion report requirements
+* Implementation guide and what was hard
 
-The final report records the classification changes, exact run counts and
-results by layer, deterministic status, review rounds, declined out-of-scope
-findings with their risk/value, and what was hard.  Review
-findings do not expand implementation beyond this objective.  A directly
-related issue requiring significant unplanned rework triggers a blocked report
-with options before throwaway implementation.
+** Final data path
+
+1. The natural test snapshots each named source as bounded raw bytes before the
+   agent runs.
+2. The ordinary agent handles the unchanged user prompt.  The harness delivers
+   pending synthetic completions until the task graph is quiet, capped at 32.
+   A successful delegate completion materializes only exact report names found
+   in its brief, before the parent receives the wake.  Direct work requires no
+   fabricated delegate route.
+3. The validator proves the source is byte-for-byte unchanged, acquires every
+   requested artifact through the bounded no-follow reader, and requires each
+   requested visible field exactly once and nonempty after comment removal.
+4. One closed =OutcomeObservation= contains the prompt, authoritative initial
+   sources, sanitized final artifacts, and terminal visible response.  It
+   contains no separately supplied route trace.
+5. One existing =OutcomeJudge= call grades all outcomes in that natural case.
+   Only overall =pass= passes.  The two paired capability methods remain strict
+   checks of delegate fan-out and dependency propagation.
+
+** What was hard
+
+- The central difficulty was defining semantic acceptance without quietly
+  rebuilding the old route test.  Direct validators first failed valid Markdown
+  field content, then valid “tag-loss bug” and “tag import loses tags” wording.
+  Those were real outputs, not hypothetical synonyms.  The repeated failures
+  justified using the already-qualified semantic judge while retaining exact
+  file and field gates.
+- Synthetic async completion had to support direct, serial, parallel, and
+  whole-task routes without awarding points for any one of them.  Moving fixed
+  artifact side effects to successful completion before the wake made the
+  harness route-neutral and kept all changes in eval code.
+- Evidence custody was more work than the judge call.  Review found post-run
+  source reads, answer facts in evaluator requirements, unbounded reads,
+  symlink/FIFO exposure, newline-normalized equality, hidden markup, payload
+  expansion during JSON serialization, and omission of the final visible
+  response.  The final path makes each bad observation unreachable before the
+  judge is called.
+- Ambiguous canned recommendations made a weak judge pass look stronger than it
+  was.  The fixtures now state an actual launch or release decision.  This fixed
+  the evidence rather than tuning the judge to the fixture.
+- Judge-backed repetitions take roughly five to ten minutes rather than the
+  earlier two to three.  Private per-repetition logs, exact SHA checks, bounded
+  blocks, and GPU rests made the longer experiment auditable.
+
+** Maintainability and scope audit
+
+- The final diff has exactly two tracked paths: this P1b document and
+  =edd/eval/test_async_subagents.py=.  At the measured SHA the eval module is
+  264 insertions and 113 deletions against =10a66ce=, all in the synthetic
+  harness and two natural validators.
+- No code under =assist/=, =manage/=, or =scripts/= changed.  The judge
+  implementation, judge prompt, qualification corpus, agent prompts, tools,
+  middleware, and model settings are unchanged.
+- P1c owns the overall architecture document and roadmap in another lane.  P1b
+  neither edits nor waits on them.
+- Proposed registries, pytest plugins, markers, workspace collectors, evidence
+  history systems, and production guards were removed or declined.  They add
+  maintenance without a current P1b consumer.
+
+* Completion report
+
+** Review and verification
+
+- Design review completed.  Code review ran five full direct-validator rounds
+  plus four focused judge-adoption and response-follow-up rounds.
+- Final blockers: none.  Important findings were fixed in scope, including
+  route-biased completion, source/evidence custody, ambiguous fixture decisions,
+  and omission of the visible response.  The last follow-up found only one
+  documentation-alignment nit, which was fixed.
+- The full deterministic suite passed: 1,571 passed, 2 skipped, 5 existing
+  warnings, and 2 subtests passed.  The 23 deterministic outcome-judge tests
+  also passed, and all four experiment node IDs collected exactly.
+- Official real-model results are the table above.  Candidate acceptance was
+  72/72 at the frozen measured SHA.
+
+** Declined and deferred findings
+
+- A reviewer suggested replacing the bounded read loop with one =os.read= to
+  save lines.  This was rejected because a short read could silently omit valid
+  evidence; the loop pins the complete bounded-read contract.
+- A stale module description in the separate skill-loading suite remains
+  deferred.  Fixing it has documentation value, but no effect on P1b results;
+  leaving it risks reader confusion but avoids unrelated scope growth.
+- Repository-wide executable classification machinery remains deferred.  Its
+  value is preventing future taxonomy drift; its current cost is code and
+  maintenance with no runtime or test consumer.
+
+** Process learnings
+
+- One measurement setup command initially started without the shared LLM wrapper.
+  It was stopped immediately, its partial log was renamed as aborted, and it is
+  excluded from every result.
+- The first N=3 wrapper used a brace group whose =exit= ended the outer shell,
+  so it completed only repetition 1.  That repetition was valid and logged;
+  repetitions 2 and 3 ran afterward with a subshell group.  No result was rerun
+  or selected for favorability.
+- Review-driven validator changes always stopped the current cadence and
+  restarted N=3/N=5/N=10 together at a new SHA.  This cost time, but prevented
+  mixing incompatible acceptance definitions.
+
+External PR review and the final Kindle delivery are the remaining shipping
+steps.  Any valuable external finding outside P1b will be reported with its
+risk and value instead of widening this implementation.
