@@ -1,7 +1,8 @@
 # Assist
 
 Assist is an extensible, local-focused, LLM-based assistant. The principles guiding this project include:
-- **Privacy** - The user has full control and no information leaves their computer
+- **Privacy** - User data stays local by default; authorized external capabilities
+  receive only the minimum content required
 - **Extensibility** - All agentic behavior is easy to modify or add to
 - **Generic** - Assist can help with anything
 
@@ -27,17 +28,19 @@ where reliability is harder than with frontier APIs.
   capability bundles under `assist/skills/<name>/SKILL.md`; supervisor-only
   workflows live under `assist/main_skills/`. Both are tuned to small LLMs.
 
-- **Built-in sandboxing.** When Docker is available, tool calls that touch the
-  filesystem or run code happen inside a per-turn container with the
-  workspace bind-mounted at `/workspace` with reasonable guards.
+- **Web-path sandboxing.** When Docker is available, web turns run filesystem
+  and code tools inside a per-turn container with the workspace bind-mounted at
+  `/workspace`. The current CLI path is host-backed, and the web path falls back
+  to the host when Docker is unavailable; fail-closed cross-surface isolation is
+  planned rather than shipped.
 
 - **Specialized agents and skills out of the box.**
   - **Research agent** rigorous fact-checking and critiquing with
     internet search (`search_internet`) and URL fetch (`read_url`).
   - **Context agent** for read-only filesystem exploration — finds the
     right file, surfaces evidence, never modifies.
-  - **Dev agent + dev skill** for code work — TDD-style plan/test/implement
-    flow, designed to keep small models from skipping ahead.
+  - **Dev skill** for code work by the general agent — TDD-style
+    plan/test/implement flow, designed to keep small models from skipping ahead.
   - **Calculate skill** for arithmetic, statistics, simulations, and
     financial projections — forces the agent to verify its answer by
     running real Python rather than guessing a number.
@@ -806,7 +809,7 @@ When enabled, each thread creates a git branch and can merge changes back to mai
 
 ## Docker Sandbox
 
-The agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`. Visible main-agent turns also mount private thread state at `/agent`.
+On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`. Visible main-agent turns also mount private thread state at `/agent`. The current sandbox also inherits the configured `ASSIST_*` environment, so it is not yet a credential-free boundary. The CLI path remains host-backed.
 
 The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
 ```bash

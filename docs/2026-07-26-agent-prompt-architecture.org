@@ -3,7 +3,8 @@
 
 * State
 
-Status: architecture approved; P0 complete; P0b deferred; P1 active.
+Status: architecture approved; P0 and P1 complete; P0b deferred; P1c complete;
+P1b is the next pending phase.
 
 ** Change log
 
@@ -127,11 +128,12 @@ contribute 550 words before the memory contents.  Raw source size is not itself 
 but the current result mixes stable capability boundaries with conditional
 workflows and repeats several rules in more than one prompt source.
 
-Known drift already proves that source-by-source review is insufficient:
+Pre-P1c drift already proved that source-by-source review was insufficient:
 
 - the shared main prompt describes a report-file result for an async research
   leaf that returns findings directly;
-- =edd/product-policy.org= describes the read-only context agent as a writer;
+- the old =edd/product-policy.org= described the read-only context agent as a
+  writer; review revision 1 removed that topology claim;
 - product documentation collapses the research lead and research leaf into one
   incompatible capability list;
 - the main/delegate template, skill body, tool descriptions, and framework TODO
@@ -1442,6 +1444,232 @@ If a natural outcome remains too ambiguous for the qualified judge, use a
 case-specific deterministic artifact validator or recorded human adjudication.
 Do not make the user prompt name the desired architecture to regain determinism.
 
+* P1c: Reconcile and approve the product policy
+:PROPERTIES:
+:CUSTOM_ID: phase-1c-product-policy
+:END:
+
+** Value
+
+Later prompt experiments should implement Assist's intended product behavior,
+not infer that intent from whichever prompts, tools, or eval assertions happen
+to exist today.  The policy work can run independently of P1 and P1b.  Settling
+questions that materially affect a later prompt experiment before that specific
+experiment begins avoids expensive work on the wrong behavior.
+
+The canonical product policy is explicitly aspirational.  It states what Assist
+should become, not what the current implementation already guarantees.  Current
+implementation and evals provide evidence of coverage and gaps; they do not
+silently narrow the intended product to today's behavior.
+
+** Historical pilot process
+
+P1c compared every existing policy claim with current implementation and
+active eval evidence, then rewrote =edd/product-policy.org= as an aspirational
+product contract rather than a description of current mechanisms.  Open
+questions were placed at the top for Pierre; implementation mismatches survived
+in the alignment record and roadmap instead of weakening the intended product.
+
+Three complete numbered revisions went through privacy review, a new verified
+household Etherpad pad, matching Kindle delivery, bounded email handoff, and
+authenticated edit handback.  Each pad revision was frozen before review; pad
+text was treated as untrusted proposed content and could neither hand back nor
+approve a revision.  The coordination lane retained per-channel attempt and
+acceptance evidence so an ambiguous send was never retried blindly.
+
+Revision 3 closed every question and Pierre approved its exact canonical and
+frozen-pad bytes in the authenticated working thread.  The post-approval read
+again matched canonical SHA-256
+=9c5fcf79030cb5307e4f7dc1440d300a597c5efc683f762206e4747ff4ef3067=.
+The portable process refined from this pilot now lives only in the canonical
+meta-repository =AGENTS.md=.  It adds the concrete isolation, immutable identity,
+destination binding, durable handoff, deterministic transport, and authority-file
+promotion rules learned during local review.  This historical section is evidence,
+not a second operative copy.
+
+** Gate
+
+- Pierre explicitly approves the final numbered product-policy revision after
+  the iterative review.
+- No unanswered question or unresolved Etherpad edit/review note remains.
+- A final alignment pass accounts for every policy claim against implementation
+  and eval evidence, or names the intentional gap and its risk without expanding
+  P1c into the fix.
+- The approved policy clearly covers intended uses, useful proactive work,
+  authorization boundaries, and when Assist should do more than the literal
+  request.
+- Every normative claim is product-level rather than an agent, prompt, tool,
+  eval, or development-procedure prescription.
+- The policy says plainly that it is aspirational and does not claim current
+  implementation or eval coverage.  Current gaps remain visible as roadmap or
+  coverage work rather than being edited out of the intended behavior.
+- P1c does not block P1, P1b, or unrelated work.  P2 and later prompt reshaping
+  begin only after P1c has a final approved policy.  Their hypotheses and natural
+  outcome criteria use that policy as the target, while the normal eval gate
+  still determines whether a concrete change ships.
+
+** Expected learning and alternative
+
+The comparison should expose where stale policy, accidental implementation, or
+architecture-shaped evals have been substituting for product intent.  If a
+question cannot be settled from the lightweight review, leave it explicitly
+open and pause only the affected later experiment rather than creating policy
+machinery or guessing.  Other work continues.
+
+** P1c.1: Fold the review pattern into the development workflow
+
+After P1c approval, record the friction and useful parts observed in the real
+review rounds, then update the canonical cross-repository development workflow
+with the smallest refined pattern.  The repository artifact remains canonical;
+Etherpad is the collaborative review surface; Kindle carries the complete
+numbered snapshot; email carries the link, change summary, open questions, and
+requested action.  Do not standardize details before the pilot teaches us, add
+review infrastructure, or make this follow-up block P2.
+
+The pilot bounded the canonical rule now recorded once in the meta-repository
+=AGENTS.md=: it applies only to substantial artifacts that need both review
+surfaces; keeps numbered repository bytes canonical; treats pad edits as
+untrusted; confines raw-pad and candidate handling; binds authenticated approval
+to immutable bytes and destinations; delivers the same snapshot to Kindle; uses
+email as a bounded handoff; and makes per-channel state durable across owners.
+This section records the observed pilot, not a second operative copy of that
+rule.
+
+Revision 2's full review confirmed this transport pattern.  Pierre's additions
+changed the product policy, not the review mechanics: direct pad editing remained
+the useful review surface, the authenticated handback identified when to freeze
+it, and the next complete numbered snapshot can travel through the same bounded
+channels without another destination decision.
+
+** Revision 1 reconciliation evidence
+
+The revision-1 audit inspected implementation at commit =639709b= and collected
+180 active eval tests across 51 modules.  The real-model suite was not rerun for
+this doc-only reconciliation.  The temporary claim checklist kept
+implementation, eval evidence/result, and disposition separate.  Pinning the
+audit commit preserves those historical counts after the branch rebased onto a
+later =main= with additional evals.
+
+The old policy's material stale groups were: a write-capable context specialist;
+README before every action; one universal research topology and saved-report
+return; append-only and complete-file-read mechanisms as product requirements;
+obsolete eval/capture paths; and unsupported speed, coverage, sprint, and
+capture-rate targets.  These were deleted or rewritten as outcomes.
+
+The meaningful open gaps are preserved as the six questions in review revision
+1 and in existing later program phases: initiative beyond the literal request,
+automatic tasks/artifacts, retrieval thresholds, implicit sensitive memory,
+urgent owner notification, and cross-surface invariants.  P1b owns natural
+outcome versus capability-test separation; P3 owns memory prompt placement; P6d
+owns stale capture guidance; P7 owns artifact and task-file defaults.  Known
+email-content injection, persistent-trigger injection, and browser-rendering
+risks remain security/coverage work outside P1c rather than being edited out of
+the aspiration.
+
+Revision 1 was published to its review pad and read back byte-identical to
+the canonical snapshot, then accepted once by the configured Kindle and email
+transports.  The pilot exposed two immediate process corrections: Etherpad adds
+a terminal newline unless the write is normalized, and repeated delivery
+approval adds no value once Pierre has narrowly authorized the same recipient,
+channels, and policy-only scope.  Both corrections are now part of the bounded
+P1c loop.  The first post-delivery review also showed that Etherpad replacement
+cannot atomically reject a concurrent edit, so later revisions use new pads and
+leave prior review records untouched.  Later review friction still informs
+P1c.1.
+
+** Revision 2 question handback
+
+Pierre authenticated the revision-1 question handback on 2026-08-03 without
+claiming full-policy review.  The bounded fetch froze Etherpad revision 545 at
+SHA-256 =827753b8cc0fb7c6a22f7297d5656351c6570f61d84204c1071749dfb2a94b26=.
+He accepted the proposed initiative, artifact, retrieval, and urgent-owner
+notification defaults.  His memory answer requires context before choosing a
+storage home: a friend's address belongs with contact information, a
+thread-specific process belongs with the thread, and durable feedback belongs
+in user memory.  His surface answer sets common core functionality as the target
+while allowing capability-specific resource handling and an eventual phone
+superset.
+
+Review revision 2 incorporates those decisions, removes the questions section,
+and fixes the authorization wording so a narrow prior automation may explicitly
+cover bounded generated content and a fixed delivery envelope.  It is the first
+full-policy review candidate, not an approved policy; P2 remains gated on final
+authenticated approval.  The candidate passed focused product and adversarial
+security review, then its SHA-256
+=3efd8240f2995ad00376300da5b84682f45ce5fb39c4aa7f3197bf04f5f44106= snapshot
+was accepted once by its new Etherpad pad, the configured Kindle, and the fixed
+Gmail review envelope.  The pad read-back was byte-identical to the canonical
+file.  Full-policy review remains open.
+
+** Revision 2 full-policy handback
+
+Pierre authenticated the completed full-policy review on 2026-08-03 and clarified
+that the text already present in revision 2 was accepted as written; only his
+additions at the top required disposition.  The bounded fetch froze Etherpad
+revision 667 at SHA-256
+=c94df2967e8be42f8182f73bfb37f1f0b0ba2cde593fdf435f3707629a880c83=.
+The original changed hunk contained three additions: prompt acknowledgement and
+result incorporation for asynchronous work, progressively valuable intermediate
+artifacts while longer work runs, and an aspirational path for the user to add
+Assist capabilities through Assist itself with narrow-scope trials and quality
+and security gates before broader promotion.  All three are accepted at product
+level in review revision 3.  Pierre then added a fourth requirement in the
+authenticated thread: web, command-line, and phone execution and testing remain
+isolated from the user's main system for now.  Revision 3 makes this a
+cross-surface invariant, permits only narrow authorized interfaces to cross the
+boundary, and requires an explicit later policy change before the default can be
+relaxed.  These additions open no product question.  Revision 3 remains a
+candidate until Pierre's authenticated final numbered approval.  Focused product
+and adversarial-security review converged after binding promotion to the exact
+tested candidate and removing production credentials and real effects from
+trials by construction.  Its SHA-256
+=9c5fcf79030cb5307e4f7dc1440d300a597c5efc683f762206e4747ff4ef3067=
+snapshot was accepted once by a new revision-3 Etherpad pad, the configured
+Kindle, and the fixed Gmail review envelope.  Etherpad revision 0 read back
+byte-identical to the canonical file.
+
+Pierre explicitly approved review revision 3 in the authenticated working
+thread on 2026-08-03 and authorized merge and re-pin.  The mandatory
+post-approval read found the pad still at revision 0 and byte-identical to the
+canonical SHA-256 above, so the approval is valid and P1c is complete.
+
+P1c.1 then applied the observed pattern once to the canonical meta-repository
+=AGENTS.md= shared feature-development rules.  The rule is limited to substantial
+long-form artifacts that need both collaborative and away-from-repository
+review.  It keeps ordinary candidates canonical and authority-bearing candidates
+inert until approval, uses a new privacy-swept and exactly verified pad for each
+revision, resolves pad edits in a capability-constrained context, sends the
+matching full snapshot to Kindle, limits email to navigation and review
+instructions, binds approval to immutable revisions and hashes, and preserves
+single-owner attempt/acceptance recording and the fixed-envelope standing-
+authorization boundary.  Ordinary diffs and PR descriptions stay on the
+existing review path.
+
+** Revision 3 final alignment
+
+The revision-1 audit remains the claim-by-claim baseline for the policy it
+replaced.  After revision 3 approval, the final pass rechecked every new or
+materially changed claim plus adjacent storage and privacy promises.  Evidence
+below describes the rebased =10a66ce= tree.  Active real-model evals were
+inspected and collected as 198 tests across 52 modules but not run for this
+policy-only phase, so their current result is =not rerun= rather than an inferred
+pass.
+
+| Approved claim | Implementation evidence | Active eval evidence | Disposition and risk |
+|----------------+-------------------------+----------------------+----------------------|
+| Prompt acknowledgement and later result incorporation for long work | The async main prompt requires =start_async_task= to return immediately, name each started task and intended contribution, and use checked completion wakes; the web UI preserves the first progressive reply when a continuation arrives | =test_async_subagents.py= covers launch-without-polling, visible task IDs, independent starts, checked completion, result use, failure, cancellation, and synthesis; not rerun here | Implemented for web async subagents.  Other long operations and surfaces still need the natural P1b inventory; risk is a silent wait or an unincorporated result outside that path |
+| Progressively improve a useful user artifact while longer work runs | Current guidance can add user tasks and the async lifecycle can deliver multiple turns, but no general contract creates the smallest useful artifact before research and enriches that same artifact afterward | Async evals cover staged dependencies and final artifacts, not the natural early-artifact-then-enrichment journey; not rerun | Partial.  P1b must add natural acceptance coverage and P7b must retain or replace the user-task workflow.  Risk is delayed value or parallel work that never updates the user's artifact |
+| User-directed self-extension, narrow trial, and exact broader promotion | The dev skill can edit and test repository code in a sandbox, and in-repo skills are discoverable.  There is no narrower-to-broader promotion mechanism, immutable promotion record, or product-scope lift | Dev, author, and domain-skill evals cover editing/testing and skill discovery, not exact candidate promotion across scopes; not rerun | Intentional gap requiring its own design.  A required check is a pass gate; the tested identity includes security-relevant configuration and permissions.  Risk is either unavailable self-extension or promotion of unproved behavior |
+| Isolated execution and testing on web, CLI, and phone | Web normally creates a per-turn Docker sandbox but explicitly falls back to no sandbox on Docker failure; CLI constructs a host-backed thread directly; phone has no complete cross-surface isolation proof in this repo.  The web sandbox also inherits all configured =ASSIST_*= variables, including credential and effect configuration | Sandbox tests pin the current Docker-error =None= fallback and sandbox behavior when supplied; dev evals skip when Docker is absent; no cross-surface fail-closed or credential-minimization acceptance case; not rerun | Not implemented as approved.  Later work must fail closed, minimize sandbox credentials/effect configuration, and validate each surface before claiming parity.  Risk is agent-controlled execution on the user's main system or possession of production-capable secrets inside the trial boundary |
+| Distinct user, repository, and thread memory scopes | Thread memory exists separately, but =AGENTS.md= still combines user and repository memory across conversations | Thread-memory evals cover repository-versus-thread placement and non-leakage, not user-versus-collaborator-safe repository separation; not rerun | Partial and not owned by P3, which preserves current storage.  A separate memory-scope design is required.  Risk is private user context entering collaborator-visible repository memory |
+| At-most-once, bounded-rate imminent owner notification | The shipped =notify= path sends once per trusted tool invocation and its earlier design explicitly rejected event deduplication and rate limiting | Urgency evals distinguish imminent from routine requests but do not cover duplicate event delivery or a bounded send rate; not rerun | Conflicts with the approved policy.  Reconcile notification identity, deduplication, and rate bounds before claiming this automation compliant.  Risk is duplicate or unbounded owner messaging |
+| Local-by-default privacy with minimum authorized disclosure | Runtime has authorized research and delivery egress; the top-level Markdown and Org READMEs now use the approved local-by-default wording | Existing injection, egress-approval, email, and research evals cover narrower paths; not rerun | Documentation aligned.  Existing email-content, persistent-trigger, and rendering risks remain their previously recorded security work |
+| Capture uses the policy as an outcome boundary, not a test template | =edd/capture.py= and the capture prompt still treat the replaced policy as a test-pattern manual | No current capture natural-contract gate | Known deferred gap owned by P6d.  Risk is capture generating architecture-shaped tests or main-prompt additions from guidance the approved policy no longer contains |
+
+P1c closes because the intended product is approved and every observed mismatch
+is explicit; it does not claim those mismatches are fixed.  The roadmap keeps
+the five product-capability gaps open, while P6d retains capture reconciliation.
+
 * P2: Remove main/delegate procedures already owned elsewhere
 :PROPERTIES:
 :CUSTOM_ID: phase-2
@@ -2111,21 +2339,23 @@ useful thread labels with a compact output-only contract.  Change only its promp
 adversarial-content cohorts meet N=10 baseline; P0 captures the direct invocation
 without inventing an agent constructor.  Restore only a causal example or clause.
 
-** P6d: Capture and product-policy reconciliation
+** P6d: Capture contract
 :PROPERTIES:
 :CUSTOM_ID: phase-6d
 :END:
 
 /Value and hypothesis:/ Capture can classify a behavioral miss into the narrowest
-instruction home without defaulting to main-prompt growth, and product/eval docs
-can describe the same real surfaces.  Change the capture contract first; reconcile
-documentation only after its behavior gate passes.
+instruction home without defaulting to main-prompt growth.  Product-policy
+reconciliation already happens in P1c; change only the capture contract here.
 
 /Gate:/ Capture's filesystem/output-shape capability remains 100%; natural miss
-cases identify kernel, capability protocol, role, skill, tool, guard, or no-prompt
-change at N=10 baseline or better; recommendations never prescribe
-=general_instructions.md.j2= by default; README, =edd/product-policy.org=, eval
-docstrings, and design docs then pass dedicated alignment review.
+cases identify one of the six canonical instruction homes: bootstrap role kernel,
+capability protocol, tool description/result, skill, role system contract, or
+context data.  A guard/code change or no-prompt outcome is recorded separately,
+not as an instruction home.  Classification holds at N=10 baseline or better;
+recommendations never prescribe
+=general_instructions.md.j2= by default; capture docs and eval descriptions pass
+dedicated alignment review against the approved P1c policy.
 
 /Learning and alternative:/ This shows whether capture can resist the accretion
 bias.  If it cannot, retire the unused capture profile rather than keep a process
@@ -2179,9 +2409,13 @@ leftover as a measured exception.
 
 * Cross-phase security and integrity
 
-This program adds no production listener, privilege, or host tool.  Its new risk
-is evaluator authority: untrusted agent output could instruct the judge to ignore
+This program adds no production listener, privilege, or host tool.  P0/P1 add
+evaluator authority: untrusted agent output could instruct the judge to ignore
 the rubric, and a lenient judge could turn a real failure into a reported pass.
+P1c adds a mutable household review pad plus Kindle and email delivery.  Review
+revision 3 also makes self-extension an aspirational product behavior, creating
+future untrusted-code, trial-effect, and promotion-integrity surfaces even
+though P1c implements none of them.
 Containment is therefore structural:
 
 - deterministic gates run first and cannot be waived by the judge;
@@ -2193,6 +2427,28 @@ Containment is therefore structural:
 - qualification includes prompt-injection artifacts and fluent false-success
   claims;
 - failed qualification leaves the judge diagnostic only.
+- the completed P1c pilot kept canonical bytes inert until authenticated
+  approval, confined untrusted pad content, used immutable per-revision pads,
+  and recorded per-channel outcomes without ambiguous retries.  The refined
+  operative transport and promotion controls now live only in the canonical
+  meta-repository =AGENTS.md=;
+- any later self-extension design must run trials without production credentials
+  or real effect interfaces, require separate exact approval for an intentional
+  live effect, and bind promotion evidence and approval to the exact candidate
+  and target scope; content, dependency, resolved security configuration,
+  permission, destination, or scope drift invalidates them.  Mandatory-check
+  selection, immutable check definitions, runner/toolchain, result evidence, and
+  promotion remain in a trusted control plane outside the candidate's
+  permissions and are included in that approval record.
+
+For the approved self-extension clause, “hold the change to relevant checks” is
+a pass gate: a failed required check blocks promotion.  The exact tested
+candidate includes the security-relevant resolved configuration and permissions,
+not source bytes alone.  A future implementation must use a production-equivalent
+no-effect adapter for mediated boundaries and, only where that cannot validate
+the real boundary, a separately approved bounded live trial.  These are
+architecture consequences of the approved policy, not post-approval edits to
+its canonical bytes.
 
 Prompt movement must not weaken capability-based security.  Trust boundaries,
 tool omission, filesystem permissions, URL provenance, HITL, and resource bounds
@@ -2235,8 +2491,10 @@ is complete only when a final P0 census proves all of the following:
    reproduced regression that justified it;
 7. all deterministic security gates pass and every natural cohort meets its
    unchanged-main N=10 baseline and 70% floor;
-8. README, product policy, eval descriptions, docstrings, comments, roadmap, and
-   this document describe the same final architecture.
+8. README and architecture documentation describe the final architecture, while
+   product policy, eval descriptions, docstrings, comments, and roadmap remain
+   consistent with its approved outcomes and authorization boundaries without
+   encoding one internal topology as product intent.
 
 This gate can close with a measured exception.  It cannot close by weakening a
 phase threshold, accepting an unexplained duplicate, or rounding a partial judge
@@ -2297,9 +2555,9 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 
 Pierre satisfied the original design gate by approving and merging PR #216, and
 P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
-shared-model contention has not been a material problem; P1 is now the active
-implementation phase.  Adding P2c to the program does not start its
-implementation or any other later phase automatically.
+shared-model contention has not been a material problem.  P1 shipped in PR #223,
+and P1c is approved; P1b is now the next pending phase.  Adding P2c to the
+program does not start its implementation or any other later phase automatically.
 
 * Decisions deliberately deferred to evidence
 

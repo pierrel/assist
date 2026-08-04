@@ -1,4 +1,4 @@
-"""Eval: can the dev agent reach a value buried in a large EXECUTE log (by grepping
+"""Eval: can the general agent with the dev skill find a value in a large EXECUTE log (by grepping
 the offloaded file)?  This is the per-tool gate for adding `execute` to
 ToolResultToFileMiddleware — grep-adoption is PROVEN for read_url, UNPROVEN for
 execute (a command log is a different interaction than a web page).

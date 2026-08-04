@@ -86,10 +86,12 @@ trade-offs:
   SMS wording.  This is accepted because Pierre explicitly requested no HITL.  The tool
   remains absent from untrusted SMS-triage turns, and that content still cannot choose
   recipient, endpoint, shared secret, or link base.
-- Do not add a per-thread dedupe or rate limit.  It would silently discard a later
-  =notify= call even though Pierre requested all urgent notifications be texted.  The
-  behavioral eval and concise tool guidance instead keep =notify= limited to genuinely
-  time-sensitive events; each explicit trusted-tool call produces one notification.
+- The shipped change deliberately omitted per-event deduplication and rate
+  limiting so each trusted =notify= call produced one message.  This decision is
+  superseded by the product policy approved on 2026-08-03, which requires at most
+  one notification per event and a bounded rate.  Reconciliation remains open;
+  the current implementation must not be described as compliant with that newer
+  contract.
 
 The threat-model reviewer additionally required redirect refusal on the shared request;
 that is included in step 1 and will be unit-pinned.

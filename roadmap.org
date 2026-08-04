@@ -844,9 +844,36 @@ authoritative and only semantic =pass= may satisfy a natural eval.  See
 Remove orchestration-shaped assertions from every natural cohort used by later
 phases while retaining strict, labelled capability probes. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1b][P1b hypothesis and gate]].
 
+*** TODO P1c: Reconcile and approve the product policy
+Pierre approved review revision 3 on 2026-08-03 after the bounded
+post-approval read verified Etherpad revision 0 against canonical SHA-256
+=9c5fcf79030cb5307e4f7dc1440d300a597c5efc683f762206e4747ff4ef3067=.
+The policy has no open question.  Implementation and eval gaps remain explicit
+without narrowing the aspiration.  Add the landing commit and flip this item to
+=DONE= before the PR.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1c-product-policy][the complete process, review record, and final alignment]].
+
+**** TODO P1c.1: Fold the observed review pattern into the main development workflow
+The canonical meta-repository =AGENTS.md= now owns the coordinated Etherpad,
+Kindle, and email rule derived from the pilot.  Add the meta-repository landing
+commit and flip this item to =DONE= before the PR.
+
+*** TODO Close approved product-policy coverage gaps
+Revision 3 is intentionally aspirational.  The final alignment found five
+unmet or partial contracts to carry into later designs and natural acceptance
+coverage: progressively update useful user artifacts while long work runs;
+stage and promote self-extension from a narrower proof scope to broader use;
+fail closed on unavailable isolation across web, CLI, and phone, while removing
+production credentials and effect configuration from trial sandboxes; separate
+durable user memory from collaborator-safe repository memory; and enforce
+per-event deduplication plus a bounded rate for imminent owner notifications.
+P1b and later phase gates use these outcomes, while P6d retains the known stale
+capture contract.  See [[file:docs/2026-07-26-agent-prompt-architecture.org][the evidence and risks]].
+
 *** TODO P2: Remove main/delegate procedures already owned elsewhere
 Deduplicate only rules already owned by skills, middleware, or tool contracts;
-prompt reduction is evidence, not the gate. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2][P2 hypothesis and gate]].
+prompt reduction is evidence, not the gate.  Begin only after P1c has a final
+approved policy and use it as this experiment's intended-behavior target. See
+[[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2][P2 hypothesis and gate]].
 
 *** TODO P2b: Progressively disclose non-kernel tools through loaded skills
 Keep the actual Deep Agents built-ins plus =load_skill= as a generated kernel.
@@ -904,7 +931,7 @@ See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6a][P6a hypothe
 See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6b][P6b hypothesis and gate]].
 **** TODO P6c: Thread-description contract
 See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6c][P6c hypothesis and gate]].
-**** TODO P6d: Capture and product-policy reconciliation
+**** TODO P6d: Capture contract
 See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-6d][P6d hypothesis and gate]].
 
 *** TODO P7: Resolve residual main/delegate procedures

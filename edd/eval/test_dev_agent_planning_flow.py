@@ -1,4 +1,4 @@
-"""Eval for the dev agent planning-first TDD workflow.
+"""Eval for the general agent's dev-skill planning-first TDD workflow.
 
 Tests the full multi-turn flow:
   1. Agent explores codebase and runs at least one test (shows output)
@@ -100,9 +100,8 @@ class TestDevAgentPlanningFlow(TestCase):
         cleanup_workspace(self.workspace)
 
     def _create_agent(self) -> AgentHarness:
-        # General agent + dev skill (post-Phase-D).  The rsync'd workspace
-        # has pyproject.toml at the top level, which trips create_agent's
-        # project_indicator detection and pre-loads the dev skill body.
+        # The eval prompt asks for project code work, so the general agent loads
+        # the dev skill on demand before acting.
         return AgentHarness(create_agent(
             self.model,
             self.workspace,

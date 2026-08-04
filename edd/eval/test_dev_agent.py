@@ -1,6 +1,6 @@
-"""Evals for the software development agent.
+"""Evals for the general agent using the development skill.
 
-Tests a dev agent running inside a Docker sandbox against this codebase.
+Tests the general agent with the dev skill inside a Docker sandbox against this codebase.
 The project is rsync'd to a temp directory and mounted into the container.
 
 Expected behaviors:
@@ -63,7 +63,7 @@ def _rsync_project(dest: str) -> None:
 
 
 class TestDevAgent(TestCase):
-    """Evals for the software development agent in a Docker sandbox.
+    """Evals for the general agent with the dev skill in a Docker sandbox.
 
     Each test gets its own workspace and sandbox container to ensure isolation.
     Agent actions in one test (e.g. creating a venv) cannot affect subsequent tests.
@@ -154,7 +154,7 @@ class TestDevAgent(TestCase):
     # ------------------------------------------------------------------
 
     def test_explains_codebase(self):
-        """The dev agent should provide thorough codebase explanations."""
+        """The general agent with the dev skill explains the codebase."""
         agent = self._create_agent()
         response = self._invoke(agent,
             "Explain the architecture of this codebase. What are the main "
@@ -176,7 +176,7 @@ class TestDevAgent(TestCase):
         )
 
     def test_updates_documentation(self):
-        """The dev agent should update documentation correctly."""
+        """The general agent with the dev skill updates documentation."""
         agent = self._create_agent()
         self._invoke(agent,
             "Update the README.md to add a section explaining the "
@@ -206,7 +206,7 @@ class TestDevAgent(TestCase):
         )
 
     def test_discovers_and_installs_dependencies(self):
-        """The dev agent should figure out how to install project deps."""
+        """The general agent with the dev skill discovers dependency setup."""
         agent = self._create_agent()
         self._invoke(agent,
             "Look at this Python project's dependency files and install "
@@ -224,7 +224,7 @@ class TestDevAgent(TestCase):
         )
 
     def test_writes_and_runs_tests(self):
-        """The dev agent should write a function plus a test, then run the test.
+        """The general agent with the dev skill writes and runs code plus tests.
 
         Combines the prior test_writes_tests_for_feature_request +
         test_runs_tests assertions into a single eval.  The agent must
@@ -265,7 +265,7 @@ class TestDevAgent(TestCase):
         )
 
     def test_uses_context_agent_before_changes(self):
-        """The dev agent should call context-agent BEFORE making any writes or edits."""
+        """The general agent should gather context before writing or editing."""
         agent = self._create_agent()
         self._invoke(agent,
             "Add a logging statement to the top of every public method in "
@@ -299,7 +299,7 @@ class TestDevAgent(TestCase):
             )
 
     def test_uses_research_agent(self):
-        """The dev agent should use research-agent for unfamiliar topics."""
+        """The general agent should use research for unfamiliar topics."""
         agent = self._create_agent()
         self._invoke(agent,
             "Add rate limiting to the sandbox execute function using the "
@@ -320,7 +320,7 @@ class TestDevAgent(TestCase):
         )
 
     def test_leverages_existing_utilities(self):
-        """The dev agent should reuse existing code instead of rewriting."""
+        """The general agent with the dev skill should reuse existing code."""
         from langchain_core.messages import ToolMessage
 
         agent = self._create_agent()
@@ -350,4 +350,3 @@ class TestDevAgent(TestCase):
             f"Agent should discover and reference existing promptable.py utility. "
             f"Response preview: {response[:500]}",
         )
-
