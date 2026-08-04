@@ -245,6 +245,35 @@ median time must remain within baseline plus 20% and two seconds, with p90 no
 more than thirty seconds over baseline.  An unrelated ordinary journey may add
 no model/tool round trip.  Provider contention is an infrastructure failure.
 
+** Timing pilot result
+
+The corrected uncounted pilot ran at source =d9f3b42= from 07:59 through 08:13
+PDT.  All 21 node executions passed.  Complete private artifacts are
+=timing-1-yGUlzx=, =timing-2-yOspg4=, and =timing-3-drOghF= under the P2 eval
+directory.  The earlier =timing-1-PPWqNB= attempt is preserved but excluded:
+pytest capture hid the middleware counters and judge provenance that the
+preregistered evidence requires.  Focused runs now retain those existing
+outputs; no production or acceptance behavior changed.
+
+With three samples, p90 below is the nearest-rank observation, therefore the
+maximum.  Calls count INFO-level subject-model starts across the named agents;
+tool calls sum the middleware's completed concurrent-call counts.
+
+| Node (short name) | Seconds p50/p90 | Model calls p50/p90 | Tool calls p50/p90 | Judge calls | Expected/observed child work |
+|-
+| =starts_subagents_and_returns_without_polling= | 11 / 11 | 2 / 2 | 2 / 2 | 0 | At least one async subagent starts; no launch-turn poll |
+| =natural_long_list_chooses_one_delegate_per_outcome= | 135 / 168 | 17 / 19 | 18 / 27 | 1 | Four synthetic delegate outcomes complete; route is not graded |
+| =explicit_delegate_fanout_capability= | 16 / 16 | 2 / 2 | 3 / 3 | 0 | Three delegate starts |
+| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 21 / 21 | 6 / 6 | 4 / 4 | 0 | Two sequential delegate starts with an intervening check |
+| =implicit_skill_request= | 29 / 30 | 6 / 6 | 5 / 5 | 0 | Main plus context agent; skill load and final file verified |
+| =delegate_implicit_skill_request= | 34 / 35 | 8 / 8 | 7 / 7 | 0 | Delegate plus context agent; skill load and final file verified |
+| =first_turn_substantive_invokes_context= | 14 / 40 | 2 / 6 | 1 / 13 | 0 | One required context dispatch; one longer valid subject route |
+
+Full repetitions took 260, 280, and 296 seconds.  The median projects baseline
+N=10 at about 47 GPU-minutes.  Run baseline as two five-repetition blocks, each
+about 24 minutes, with roughly fifteen minutes of actual GPU rest between them.
+No cohort split or timeout change is needed.
+
 ** Gates
 
 1. All exact nodes collect in both arms.  The delegate case exercises the real
@@ -306,3 +335,8 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   no-argument exit contract while focused blocks aggregate failure; moved all
   P2 preflight checks behind durable trap setup; added the shared runner to the
   manifest; and removed stale debt/docstring wording.
+- 2026-08-04 revision 6: the first uncounted pilot exposed hidden pytest INFO
+  and stdout capture.  Preserved that failed-harness artifact, retained existing
+  model counters and judge provenance only for focused runs, removed the
+  unsupported first-launch latency claim, reran the pilot cleanly at 21/21, and
+  preregistered its observed timing and call-count bounds before formal baseline.
