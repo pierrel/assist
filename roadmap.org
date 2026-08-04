@@ -844,18 +844,18 @@ authoritative and only semantic =pass= may satisfy a natural eval.  See
 Remove orchestration-shaped assertions from every natural cohort used by later
 phases while retaining strict, labelled capability probes. See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1b][P1b hypothesis and gate]].
 
-*** TODO P1c: Reconcile and approve the product policy
+*** DONE P1c: Reconcile and approve the product policy
 Pierre approved review revision 3 on 2026-08-03 after the bounded
 post-approval read verified Etherpad revision 0 against canonical SHA-256
 =9c5fcf79030cb5307e4f7dc1440d300a597c5efc683f762206e4747ff4ef3067=.
 The policy has no open question.  Implementation and eval gaps remain explicit
-without narrowing the aspiration.  Add the landing commit and flip this item to
-=DONE= before the PR.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1c-product-policy][the complete process, review record, and final alignment]].
+without narrowing the aspiration.  Shipped =402b2b1= on 2026-08-03; add the PR
+number once assigned.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-1c-product-policy][the complete process, review record, and final alignment]].
 
-**** TODO P1c.1: Fold the observed review pattern into the main development workflow
+**** DONE P1c.1: Fold the observed review pattern into the main development workflow
 The canonical meta-repository =AGENTS.md= now owns the coordinated Etherpad,
-Kindle, and email rule derived from the pilot.  Add the meta-repository landing
-commit and flip this item to =DONE= before the PR.
+Kindle, and email rule derived from the pilot.  Shipped in meta-repository commit
+=37f01cb= on 2026-08-03.
 
 *** TODO Close approved product-policy coverage gaps
 Revision 3 is intentionally aspirational.  The final alignment found five
