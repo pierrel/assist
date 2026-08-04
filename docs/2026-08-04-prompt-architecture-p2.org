@@ -34,7 +34,10 @@ Candidate 4 N=5 passed all 35 primary executions.  The natural journey's
 inside their limits.  The natural journey also used 24 tool calls in every
 repetition versus baseline p50/p90 of 18/19.  The timeout diagnostic passed
 4/5.  These are registered signals, not waived results.  Candidate 4 pauses
-for focused attribution review before any final N=10 execution.
+for focused attribution review before any final N=10 execution.  That review
+found no final objective-affecting defect at the intermediate gate and selected
+decision A: proceed unchanged to the preregistered N=10 decision after the GPU
+cooldown.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -668,6 +671,15 @@ median misses and natural journey's consistent added tool work require focused
 attribution review before spending the final cohort.  No gate, candidate, or
 eval input changes in response to this observation.
 
+The focused review selected decision A, proceed unchanged to N=10.  The natural
+call-shape change is candidate-correlated, but it added no model-round median,
+lost outcome, or capability failure, and the natural gate deliberately does not
+grade a hidden route.  Context converged on a baseline-observed longer route;
+its five model calls and 13 tool calls remain within baseline p90, the exact
+context-first sentence is byte-identical, and dispatch passed 5/5.  Neither
+intermediate signal substitutes for the registered N=10 timing decision.  The
+review found no blocker and no justification for a candidate or gate change.
+
 The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
 =candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
 wake result use, cancellation-request truth, mixed-sibling preservation, and
@@ -827,3 +839,7 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   the deferred timeout diagnostic passed 4/5.  Recorded the natural and context
   median timing misses plus the natural journey's consistent added tool work;
   paused for focused attribution review before any final N=10 execution.
+- 2026-08-04 revision 23: focused attribution review selected decision A.  The
+  candidate-correlated call-shape changes remain performance signals, but no
+  final objective-affecting defect is established at the intermediate gate;
+  approved the unchanged preregistered N=10 after cooldown.
