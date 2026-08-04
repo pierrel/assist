@@ -6,9 +6,9 @@
 Candidate 2 is implemented at =d10cdfd= and qualification is in progress.  Its
 primary N=3 cohort passed 21/21, with one early context-node timing miss.
 Adjacent diagnostics passed 19/21; the unstable timeout-dependency case also
-failed on the pre-deletion prompt and remains a gating matched-baseline
-diagnostic.  Local review round 2 added the bounded comparisons below before
-N=5 and N=10.
+failed on the pre-deletion prompt.  Its completed matched baseline is 7/10 and
+remains the candidate's gating threshold.  Local review round 2 added the
+bounded comparisons below before N=5 and N=10.
 
 P2 starts from merged =main=
 =fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
@@ -460,11 +460,15 @@ failure rule.
 Round 1 therefore required a matched pre-deletion diagnostic before attribution.
 At frozen baseline =b4cce1f=, the same timeout node passed 2/3 in
 =baseline-timeout-1-HdZYme=, =baseline-timeout-2-nsaGDZ=, and
-=baseline-timeout-3-fnLlCe=.  The failure predates P2; three samples do not
-establish that the one-sample difference is causal.  P2 does not add a third
-duplicate lifecycle rule or redesign async execution.  The timeout node is
-promoted into N=5/N=10 execution and gated against its pending matched N=10
-baseline; its pre-existing reliability risk is reported separately.
+=baseline-timeout-3-fnLlCe=.  The completed reference adds
+=baseline-timeout-4-KKhrIa=, =baseline-timeout-5-96a14j=,
+=baseline-timeout-6-0K5pvY=, =baseline-timeout-7-ZouZ2u=,
+=baseline-timeout-8-Qti4Hm=, =baseline-timeout-9-nlXPfY=, and
+=baseline-timeout-10-vfYL9i=.  It passed 7/10; repetitions 1, 6, and 10 failed
+with the same forbidden takeover behavior.  The failure predates P2.  P2 does
+not add a third duplicate lifecycle rule or redesign async execution.  The
+timeout node is promoted into N=5/N=10 execution and the candidate N=10 must
+pass at least 7/10; its pre-existing reliability risk is reported separately.
 
 ** Gates
 
@@ -560,3 +564,6 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   pending matched N=10 baseline; and registered a bounded candidate-1 versus
   candidate-2 natural comparison before qualifying the restored sentence as a
   measured exception.
+- 2026-08-04 revision 13: completed the pre-deletion timeout reference at 7/10
+  and froze that observed pass count as the candidate's adjacent no-regression
+  threshold.
