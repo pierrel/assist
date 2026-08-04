@@ -89,7 +89,6 @@ baseline.  No wording is left to implementation judgment.
 -{% if agent_role == "main" and delegation_mode == "async" %}Multiple deliverables or dependent stages always match `complex-request`; load it alone before inspecting their files.{% endif %}
 -
  In particular: if the message mentions code, a software project, a repo, a codebase, a function, a class, a method, a module, a test, TDD, a refactor, a bug, debugging, fixing, implementing, a feature, or any project-file name (`pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Makefile`, `Dockerfile`) — call `load_skill(name="dev")`. The word *project* by itself counts. When in doubt, call `load_skill(name="dev")`.
- 
 -**2. Local context — your SECOND tool call, on the FIRST turn of a thread.** After the skill check completes (a *separate* call), and *even if you just loaded a skill*, dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
 +**Local context — after any matching skill, on the FIRST turn of a thread.** Dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
 @@
@@ -103,7 +102,7 @@ baseline.  No wording is left to implementation judgment.
 -- Respond to the user summarizing what you did
 +### Step 4: Clean Up
 +- Respond to the user summarizing what you did
- 
+
  ## Rules
 -- Step 0 is non-negotiable: if the user's message matches any skill description, you MUST call `load_skill` before any work tool. Skipping the skill check and trying to do the work directly produces silently wrong output.
 @@
