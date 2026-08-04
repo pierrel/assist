@@ -334,7 +334,7 @@ the current P2 comparison.
 
 | Owner/section | Exact characters | Approx. tokens |
 |-
-| Assist role instructions | 11,389 | 2,848 |
+| Assist role instructions | 11,508 | 2,877 |
 | Prompt composer | 2 | 1 |
 | Deep Agents base | 2,257 | 565 |
 | LangChain TODO middleware | 1,076 | 269 |
@@ -342,20 +342,44 @@ the current P2 comparison.
 | Assist skills middleware | 9,631 | 2,408 |
 | Assist memory middleware | 3,796 | 949 |
 | Context rider | 0 | 0 |
-| *System-message total* | *29,600* | *7,400* |
+| *System-message total* | *29,719* | *7,430* |
 | Provider-bound tool schemas | 28,037 | 7,010 |
-| *Bootstrap request + schemas* | *57,637* | *14,410* |
+| *Bootstrap request + schemas* | *57,756* | *14,439* |
 
-The deletion removes 1,679 characters from the canonical system message and
+The final candidate removes 1,560 characters from the canonical system message and
 the complete bootstrap request.  Tool schemas are byte-identical.  The
 canonical current system-message SHA-256 is
-=ddf6a102708f4b849c12394cf7dd719925a3984e666959b17c6a77498519e4ba=.
-The deterministic census artifact is 2,854,575 canonical bytes with SHA-256
-=f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
-The durable home-backed capture is
+=4a8bbb67ecf527ec06c036b3634e480ff1a0dd69e8480d43bdeb1a86f891ac88=.
+The deterministic census artifact is 2,856,598 canonical bytes with SHA-256
+=4d24cbe22708acff699ddf73e7a96edd478e59eeb608bb66c4639a9f7cc1a809=.
+The final candidate's durable home-backed capture is
+=~/deploy/assist/prompt-census/p2-candidate2-932fd021/=; its =census.json=
+file is 2,856,598 bytes with file SHA-256
+=3caf8af8ee64c92deeca731b01cf83bfc1bfa54afa6d404c19d0400cda6a99de=.
+The rejected candidate 1 home-backed capture is
 =~/deploy/assist/prompt-census/p2-candidate-a712057c/=; its =census.json=
 file is 2,854,575 bytes with file SHA-256
 =b5ecc5d24cc7fed5b67095425d12bddd731080da316f3d07dd83103fce31cb25=.
+
+** Candidate 1 early result and revision
+
+Candidate 1 at source =937168e= passed 20 of 21 N=3 node executions.  Its
+private artifacts are =candidate-1-fwxyRZ=, =candidate-2-cWNib3=, and
+=candidate-3-2UHeb7=.  Repetitions 1 and 2 passed all seven nodes in 285 and
+281 seconds.  Repetition 3 took 237 seconds and failed the natural four-report
+case: all requested files existed, but the alpha report's =next actions= field
+was empty.  The deterministic field gate stopped before the outcome judge.
+This is a fail, not a partial pass.
+
+The observed failure disqualifies candidate 1 because its natural node can no
+longer match the 10/10 baseline.  Routing, artifact creation, skill loading,
+dependency capability, and the other five behavioral contracts still passed;
+the narrow loss was a required field inside delegated work.  Candidate 2
+therefore restores only the prior general sentence requiring every subagent
+request to be explicit and self-contained because the child has no parent
+history.  The sentence moves to the retained front trigger for Qwen salience.
+The long delegation section, duplicate routing/load/TODO procedure, and every
+other frozen deletion remain removed.  Candidate N=3/N=5/N=10 restarts.
 
 ** Gates
 
@@ -435,3 +459,8 @@ was hard.  It distinguishes necessary P2 work from anything outside the goal.
   P0 census's exact current template, transition, and removed-claim pins; kept
   the historical P0 full-prompt appendix unchanged; and added the P2 current
   section counts and fingerprints.
+- 2026-08-04 revision 10: candidate 1 failed one of 21 early executions because
+  one delegated report omitted a requested field.  Classified it as a full
+  failure, stopped the losing cadence, and restored only the prior general
+  self-contained-brief sentence as the measured Qwen salience exception before
+  restarting all candidate gates.

@@ -1685,10 +1685,10 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
-        "1e9fb38a54b05e59da69f1199c231a8dacba1c6500a609c4603196cc9a51b5e7",
+        "0b6509bbda7e7fa03d441a625e9ae59666241ce797c24f1601f1e69ba3104c4e",
         "2013d7822bfdf569cedfd01587fba0d83da69a0155b4fbc1c2b9d75b288b51b5",
-        "3c8878748692f95d9490f931e3c24ec2b0bb85134abb9d5067602df829966b5a",
         "3efd132c467c91d90ab8ee0e4b678514476cbff32461c6cc085e98da06d46d75",
+        "4841f61f44267453a419f22eab7fe4338859ba31459c3e406fbc4f9e330841d5",
     },
     "assist/templates/deepagents/research_instructions.txt.j2": {
         "379e55c61addf130f00a29a6221f16de89964e23b5c1e98cf9746f38211fb071",
@@ -1976,7 +1976,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "54e363c1146929ad056dd186ac68f28802e759e5de503309d9af17d3d997b1b3"
+    "e4867fb7174aa52e2b31875f06d69aa8b789ff83901dd12170fb846170186d2d"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

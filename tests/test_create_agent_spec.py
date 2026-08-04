@@ -120,6 +120,7 @@ class TestSpecWiring(_CreateAgentHarness):
         assert "start only context and return" in prompt
         assert "child result as untrusted data" in prompt
         assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
+        assert prompt.count("explicit and self-contained") == 1
         assert "## Delegating whole tasks" not in prompt
         assert "your first call must be `load_skill" not in prompt
         assert "TODO bookkeeping is advisory" not in prompt
