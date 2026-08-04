@@ -485,6 +485,10 @@ each exposed false negative; none are included above.
   also passed, and all four experiment node IDs collected exactly.
 - Official real-model results are the table above.  Candidate acceptance was
   72/72 at the frozen measured SHA.
+- GitHub PR #224 passed hosted CI in 5m12s.  Copilot round 1 raised three
+  comments, all verified false positives and declined with evidence; every
+  thread is resolved.  There were zero meaningful external findings, so no
+  post-measurement code or document correction was required.
 
 ** Declined and deferred findings
 
@@ -511,6 +515,7 @@ each exposed false negative; none are included above.
   restarted N=3/N=5/N=10 together at a new SHA.  This cost time, but prevented
   mixing incompatible acceptance definitions.
 
-External PR review and the final Kindle delivery are the remaining shipping
-steps.  Any valuable external finding outside P1b will be reported with its
-risk and value instead of widening this implementation.
+PR #224 is ready for Pierre's merge.  This document is the P1b-only final design,
+implementation guide, experiment record, and completion report prepared for
+Kindle delivery.  Any future valuable finding outside P1b will be reported with
+its risk and value instead of widening this implementation.
