@@ -81,6 +81,23 @@ research, and critique tasks are direct leaf graphs. A whole-task delegate may
 use fixed synchronous specialists but has no async lifecycle or self-delegation
 tools. Design and verification contract:
 [[file:docs/2026-07-25-async-subagents-asgi.org][docs/2026-07-25-async-subagents-asgi.org]].
+** TODO Make checked task timeouts block dependent execution
+The P2 prompt-deletion experiment exposed an existing async-lifecycle defect:
+=test_explicit_timed_out_prerequisite_blocks_dependent_delegate= passed 7/10 on
+the matched baseline and 3/10 on the accepted candidate.  After checking a
+terminally timed-out prerequisite, the model sometimes takes over that failed
+work and starts its dependent anyway.
+
+Treat this as a separate eval-driven lifecycle objective, not prompt-architecture
+cleanup.  Once a checked prerequisite is terminally timed out, Assist must
+preserve successful siblings, report the blocked dependency, and neither redo
+the prerequisite nor start its dependent unless the user explicitly asks for a
+recovery attempt.  Reproduce the natural user impact, retain the explicit
+capability diagnostic, and run the standard N=3/5/10 cadence with adjacent async
+success, failure, cancellation, and independent-sibling coverage.  Value: no
+invalid result derived from a missing prerequisite.  Risk until fixed: wasted
+work and occasional dependent output built without its required input.  See
+[[file:docs/2026-08-04-prompt-architecture-p2.org::*Deferred finding][the P2 evidence and scope decision]].
 ** DONE Refactor assist into a framework (deepagents / assist / client boundary)
 Shipped 2026-06-12: the =AgentSpec= embedder contract
 ([[file:docs/2026-06-11-embedder-contract.org][docs/2026-06-11-embedder-contract.org]], assist PR #134 + the
