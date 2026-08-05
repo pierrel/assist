@@ -24,6 +24,7 @@ prose. The model interacts with skills through ``load_skill(name=...)``,
 so paths and file structure are irrelevant from its perspective.
 """
 from langchain_core.tools import tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware._utils import append_to_system_message
@@ -74,7 +75,13 @@ without it produces incorrect output for that domain.
 
 
 def _tool_name(tool) -> str:
-    """Return the model-visible name for a tool object or callable."""
+    """Return the model-visible name for a supported tool declaration."""
+    if isinstance(tool, dict):
+        converted = convert_to_openai_tool(tool)
+        function = converted.get("function")
+        if isinstance(function, dict):
+            return function.get("name", "")
+        return converted.get("name") or converted.get("type", "")
     return getattr(tool, "name", None) or getattr(tool, "__name__", "")
 
 

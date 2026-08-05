@@ -910,7 +910,8 @@ Add declarations with no visibility change and deterministically prove every
 declared tool exists.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-declare][P2b.1]].
 Completed on 2026-08-05: generated the final-request kernel, declared seven
 bundled owners, preserved SMS-triage bytes and provider schemas, passed the
-post-review cohort 24/25, and passed 1,590 deterministic tests with 2 skipped.
+post-review cohort 24/25, and passed 1,592 deterministic tests with 2 skipped.
+PR review added LangChain dict-form tool coverage without changing that surface.
 See [[https://github.com/pierrel/assist/pull/227][PR #227]] and
 [[file:docs/2026-08-05-prompt-architecture-p2b1.org][the completed P2b.1 record]].
 **** TODO P2b.2: Gate Assist-owned tools after skill load

@@ -21,6 +21,10 @@
 ** 2026-08-05: Baseline and implementation evidence
 
 - Published the reviewed child as [[https://github.com/pierrel/assist/pull/227][Assist PR #227]].
+- Fixed PR review's one directly related defect: =AgentSpec.tools= accepts
+  LangChain dict declarations, so name extraction now uses LangChain's own
+  converter for every supported dict shape instead of misclassifying them as
+  kernel.  The broader external name-collision rejection remains P2b.3.
 - Pre-registered and completed the merged-P2 N=3 baseline at 13/15 full passes.
 - Completed the revised candidate N=3 at the same 13/15, with every node equal
   to baseline and all three ordinary traces making zero tool calls.  The earlier
@@ -38,8 +42,8 @@
 - Recorded, without changing it here, that =map_data= is registered on delegate
   and legacy profiles while its owning web-only =render= skill is not mounted
   there.  P2b.2 must resolve profile visibility; P2b.1 preserves the baseline.
-- Final deterministic evidence is 1,590 passed and 2 skipped; the focused
-  ownership/kernel/source-provenance set is 103 passed.
+- Final deterministic evidence is 1,592 passed and 2 skipped; the focused
+  modified-file ownership/kernel/source-provenance set is 98 passed.
 
 * Objective
 
@@ -92,7 +96,7 @@ The candidate system message is 29,873 characters, up 273 from merged P2; the
 30 provider-bound schemas remain byte-identical at 28,037 characters.  The
 bounded synthetic artifact is 2,884,412 bytes with 21 retained audit findings
 and SHA-256
-=c8a918171d2f8e34b2c5c1b24aba13a79f428d2a052254fd8bf0e5cd956660ec=.
+=41c2ba18904e2541d82c7e92d0513ad0f33a86582d4de3db4b68665002b372d3=.
 
 * Design
 
@@ -376,3 +380,9 @@ That added two small production seams in =backends.py= and =thread_manager.py=;
 it did not add a registry, checkpoint state, tool filter, or SMS-specific tool
 behavior.  Repeated review also removed duplicate validation, duplicate tool-name
 extraction, and accidental prompt whitespace rather than broadening the goal.
+Copilot then exposed an observed supported-input gap in that shared extraction:
+dict-form embedder tools.  Reusing LangChain's converter kept the fix smaller
+and more maintainable than copying its accepted dict forms.  A local
+security probe also reproduced a future embedder tool whose name collides with
+a framework tool.  P2b.1's census already records that risk; construction-time
+rejection across external representations remains deliberately scoped to P2b.3.

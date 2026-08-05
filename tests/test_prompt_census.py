@@ -1091,7 +1091,7 @@ def test_p0_p2_history_and_p2b1_summary_match_the_current_capture(census):
     assert len(census["findings"]) == 21
     assert len(artifact_bytes(census)) == 2_884_412
     assert census["artifact_sha256"] == \
-        "c8a918171d2f8e34b2c5c1b24aba13a79f428d2a052254fd8bf0e5cd956660ec"
+        "41c2ba18904e2541d82c7e92d0513ad0f33a86582d4de3db4b68665002b372d3"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [

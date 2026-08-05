@@ -82,6 +82,33 @@ class TestSpecWiring(_CreateAgentHarness):
         assert skills.non_kernel_tool_names == (
             "_tool_a", "_tool_b", "travel", "directions", "map_data", "read_url")
 
+    def test_dict_spec_tool_names_remain_non_kernel(self):
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        plain = {"name": "plain_dict", "description": "Plain dict tool",
+                 "parameters": {"type": "object", "properties": {}}}
+        openai = {"type": "function", "function": {
+            "name": "openai_dict", "description": "OpenAI dict tool",
+            "parameters": {"type": "object", "properties": {}}}}
+        json_schema = {"title": "json_schema_dict", "description": "JSON schema tool",
+                       "type": "object", "properties": {}}
+        bedrock = {"toolSpec": {
+            "name": "bedrock_dict", "description": "Bedrock dict tool",
+            "inputSchema": {"json": {"type": "object", "properties": {}}}}}
+        responses = {"type": "function", "name": "responses_dict",
+                     "description": "Responses dict tool",
+                     "parameters": {"type": "object", "properties": {}}}
+        provider = {"type": "web_search_preview"}
+
+        kwargs = self._build(spec=AgentSpec(
+            tools=(plain, openai, json_schema, bedrock, responses, provider)))
+        skills = next(m for m in kwargs["middleware"]
+                      if isinstance(m, SmallModelSkillsMiddleware))
+
+        assert skills.non_kernel_tool_names[:6] == (
+            "plain_dict", "openai_dict", "json_schema_dict", "bedrock_dict",
+            "responses_dict", "web_search_preview")
+
     def test_async_subagent_tools_replace_blocking_subagents(self):
         from assist.agent import create_agent
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware

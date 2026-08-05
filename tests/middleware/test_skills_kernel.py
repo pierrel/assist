@@ -60,6 +60,37 @@ def test_kernel_line_omits_a_tool_removed_before_the_final_request():
     assert "travel" not in text
 
 
+def test_kernel_line_reads_supported_dict_tool_names():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=[],
+        non_kernel_tool_names=(
+            "plain_dict", "openai_dict", "json_schema_dict", "bedrock_dict",
+            "responses_dict", "web_search_preview"))
+    request = ModelRequest(
+        model=Mock(), messages=[], system_message=None,
+        tools=[
+            {"name": "plain_dict"},
+            {"type": "function", "function": {"name": "openai_dict"}},
+            {"title": "json_schema_dict", "type": "object", "properties": {}},
+            {"toolSpec": {"name": "bedrock_dict", "inputSchema": {
+                "json": {"type": "object", "properties": {}}}}},
+            {"type": "function", "name": "responses_dict"},
+            {"type": "web_search_preview"},
+            _tool("load_skill"),
+        ],
+        state={"skills_metadata": []}, runtime=None)
+
+    text = _system_text(middleware.modify_request(request).system_message)
+
+    assert "Kernel tools: load_skill." in text
+    assert "plain_dict" not in text
+    assert "openai_dict" not in text
+    assert "json_schema_dict" not in text
+    assert "bedrock_dict" not in text
+    assert "responses_dict" not in text
+    assert "web_search_preview" not in text
+
+
 def test_explicit_no_delegation_profile_keeps_the_prior_skills_prompt():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=[], non_kernel_tool_names=("send_reply",),
