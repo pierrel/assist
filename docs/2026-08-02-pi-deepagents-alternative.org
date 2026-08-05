@@ -1,10 +1,16 @@
 #+title: Migrating from Deep Agents to Pi through a side-by-side path
 #+date: <2026-08-02>
-#+updated: <2026-08-03>
+#+updated: <2026-08-05>
 
 * State
 
-Status: proposed, revised 2026-08-03.  This document authorizes no implementation.
+Status: proposed, revised 2026-08-05.  Both stronger-boundary P0 attempts stopped at
+mandatory local review.  Pierre then clarified that the migration target is security
+parity with the trusted Python/Deep Agents authority, with stronger containment only
+around the new disposable Pi runner.  The resulting parity-target successor has a
+reviewed seven-scenario report with status =GO= and scope =P1_ONLY= after thirteen local
+review rounds; see =docs/2026-08-04-pi-runtime-p0.org=.  P1 is the only authorized
+next experiment.  Every product phase remains unauthorized.
 
 Recommendation: make Pi the intended replacement for Deep Agents, through a
 side-by-side migration with hard stop gates.  M1/P3 makes the same deployed web UI
@@ -100,7 +106,7 @@ material and middleware glue without rebuilding an entire agent runtime.
 
 * Non-goals
 
-- Do not implement any part of this design in this change.
+- Do not integrate the disposable P0 experiment into a product path.
 - Do not migrate or reinterpret existing thread histories.
 - Do not replace the Assist web UI with Pi's terminal UI or a community web UI.
 - Do not replace =RunService= with Pi sessions or replace durable async children with
@@ -174,10 +180,12 @@ appends the current working directory even for a custom prompt.  The loader and
 command-line =--system-prompt= therefore cannot establish complete ownership by
 themselves.  Assist must construct the loader explicitly, disable ambient discovery,
 and make =assist-kernel= the sole audited owner of =before_agent_start=; it returns
-the exact Python-rendered prompt after Pi's builder.  Pi keeps that per-turn override
-when =setActiveTools= rebuilds its base prompt.  P0 verifies the behavior and censuses
-the final =session.agent.state.systemPrompt= plus provider request; if the public
-hook ever fails to dominate the builder, stop rather than accept the extra text.
+the exact Python-rendered prompt after Pi's builder.  The rejected narrow P0 observed
+the intended canary once but did not verify the complete provider-bound census.  A
+newly reviewed successor must do so before P2, which must separately
+prove that =setActiveTools= cannot displace the per-turn override or reintroduce
+framework text; if the public hook ever fails to dominate the builder, stop rather
+than accept the extra text.
 
 The extension API supports custom tools, tool-call interception, and
 =setActiveTools=.  That is a direct fit for [[file:2026-07-26-agent-prompt-architecture.org::*P2b: Progressively disclose non-kernel tools through loaded skills][prompt-architecture P2b]]: =load_skill=
@@ -332,7 +340,8 @@ container on an internal network whose only egress is the allowlist proxy.
 ** Responsibility and deletion census
 
 The compatibility work is not allowed to hide the current middleware in a generic
-“bridge.”  P0 snapshots every responsibility below and its parity test.  P5a counts
+“bridge.”  This design snapshots every responsibility below; P1 accounts its eval
+coverage and P2 onward exercises its parity test.  P5a counts
 the TypeScript runner, bridge, operation records, generated schemas, build path, and
 tests against the Python/framework code and dependencies that can actually be
 deleted.
@@ -345,7 +354,7 @@ deleted.
 | JSON, tool-name, and malformed tool-call repair | Pure =assist-kernel= policy modules; do not generalize beyond observed repairs | existing JSON/tool correction tests plus provider probes | the three corresponding LangChain middleware layers |
 | Output sanitization and large-result offload | Retain in the Python result bridge and current backend | sanitization, untrusted-result, truncation, and offload tests | only LangChain wrappers; policy stays |
 | Loop and repeated-read detection | Pure =assist-kernel= call-history module for generic loops; retain URL-specific Python guard | existing loop and re-read breaker tests | generic LangChain loop middleware only |
-| Fair queue pause, cumulative cap, restart resume, and cross-process model admission | Engine-specific Pi execution-control adapter; =ThreadQueue= keeps web policy; one measured client-neutral admission owner coordinates web/phone | P0 boundary proof, P2 product-path crash tests, P5a stability, and P5b concurrent web/phone starvation tests | LangGraph-specific queue middleware and checkpoint calls only after every client gate and P6 retirement approval; the selected shared-admission cost remains and is counted |
+| Fair queue pause, cumulative cap, restart resume, and cross-process model admission | Engine-specific Pi execution-control adapter; =ThreadQueue= keeps web policy; one measured client-neutral admission owner coordinates web/phone | Newly reviewed P0 successor; P2 durability, fairness, and product-path crash tests; P5a stability; P5b concurrent web/phone starvation tests | LangGraph-specific queue middleware and checkpoint calls only after every client gate and P6 retirement approval; the selected shared-admission cost remains and is counted |
 | Empty-response recovery | Pure =assist-kernel= policy module | existing empty-response cases on Qwen | current middleware after parity |
 | Interjection | Pi core steering/follow-up events mapped by the adapter | current keep/update/cancel and queue-priority tests | LangGraph interjection middleware |
 | Skills and active-tool disclosure | =assist-skills= contributes capabilities; =assist-kernel= alone applies the final active set | skill precedence, role scope, prompt-architecture P2b schema/execution, and natural evals | Deep Agents skills middleware; Assist skill policy stays |
@@ -469,33 +478,37 @@ extension owner, input/output type, order, failure rule, and parity test:
 | =session_start= | =assist-kernel= | Validate release, manifest, engine session, and durable input identity before work |
 | =before_agent_start= | =assist-kernel= | Compose approved capability contributions, replace the complete system prompt, and set invocation-scoped active tools |
 | =context= | =assist-kernel= | Apply only the approved skills/memory/compaction projection without mutating durable history |
-| =before_provider_request= | =assist-kernel= | Validate and census the final provider payload; never silently repair policy drift |
+| =before_provider_request= | =assist-kernel= | Enforce the exact owned first system message, fail on any other envelope drift, and census the final provider payload.  This public final-boundary transformation is required because Pi 0.83's public =agent.continue()= bypasses =before_agent_start= |
 | assistant =message_end= | =assist-kernel= | Journal the complete ordered tool batch before Pi may persist the assistant leaf |
 | =tool_call= | =assist-kernel= | Run sequential whole-batch preflight, capability, authorization, and approval decisions before execution |
 | =load_skill= execute/result boundary | =assist-skills= through =assist-kernel.commitActivation= | Durably bind the skill digest/capabilities to this work, apply the recomputed active set before returning, and reconstruct it on resume |
 | custom-tool =execute= then =tool_result= | Named capability extension, then =assist-kernel= | Capability extension calls its narrow Python adapter; Python durably records the operation result before =execute= returns; kernel validates the normalized, sanitized, bounded value before session append |
 | =turn_end= and =agent_end= | =assist-kernel= | Fsync the completed session boundary, then project normalized events and terminal outcome to the parent |
-| =session_shutdown= | =assist-kernel= plus bootstrap | Flush extension state and report shutdown; the Python parent still cancels and reaps the process group |
+| =session_shutdown= on reload | =assist-kernel= | Flush extension state before a public Pi reload.  Pi 0.83 =dispose()= does not emit this event, so normal exit is an explicit bootstrap terminal frame followed by Python-owned cgroup teardown, never an assumed extension callback |
 
 Pi 0.83 preflights sibling =tool_call= events sequentially before its default parallel
-execution, which is promising for the batch gate, but P0 still proves the exact
-journal and pause ordering through public hooks.  Extension ordering is explicit;
-ambient or community extensions cannot enter the closed release manifest.
+execution, which is promising for the batch gate, but P2 must prove the exact journal
+and pause ordering through public hooks before a Pi web thread.  Extension ordering
+is explicit; ambient or community extensions cannot enter the closed release
+manifest.
 
 Ordinary extension exceptions do /not/ fail closed in Pi 0.83: the extension runner
 reports =extension_error= and continues.  The runner bootstrap therefore has one
 audited synchronous =halt(frame)= primitive.  Every extension handler is registered
 only through a typed =mustHandle= wrapper whose =fatal(reason)= path invokes it
 on invariant, journal, fsync, protocol, or policy failure.  =halt= writes a bounded
-terminal frame to the dedicated control FD when possible and sends its own process
-=SIGKILL=; it never throws and returns.  The
-durable journal, session, and child exit remain the parent's sources of truth.  P0
-injects a failure into =before_agent_start=, =before_provider_request=,
-=message_end=, first =tool_call=, custom-tool return, =tool_result=, and =turn_end=,
-and proves that no later provider request, tool effect, result append, or queue
-release occurs before the parent terminalizes handlers/backends and reaps the whole
-process group.  The parent then performs the one ordinary release.  If synchronous
-termination cannot enforce that contract without a Pi fork, stop.
+terminal frame to the dedicated control connection when possible and sends its own
+process =SIGKILL=; it never throws or returns.  The
+durable journal, session, and child exit remain the parent's sources of truth.
+The rejected narrow contract required one =before_provider_request= failure in the
+real contained path, but its candidate did not prove closed or backpressured halt.
+A newly reviewed successor must prove the bootstrap before P2 extends it across
+=before_agent_start=, =message_end=, first =tool_call=, custom-tool return,
+=tool_result=, and =turn_end=, and proves that no later provider request, tool effect,
+result append, or queue release occurs before the parent terminalizes
+handlers/backends, empties the named cgroup, and reaps the direct child.  The parent
+then performs the one ordinary release.  If synchronous termination cannot enforce
+that contract without a Pi fork, stop.
 
 Policies that remain authoritative in Python, including backend containment, host
 authorization, approval decisions, URL provenance, and git controls, are not
@@ -577,12 +590,20 @@ never guesses.  No adapter converts
 LangGraph checkpoints into Pi JSONL or vice versa.
 
 The Pi runner is a contained child process of the existing synchronous per-turn
-worker.  Dedicated inherited pipe FDs carry bounded newline-delimited control and
-tool frames; stdout and stderr are separate bounded logs and can never be parsed as
-protocol.  There is no TCP listener, shell-built command string, secret in argv, or
-inherited Pi user config.  Every request carries a parent-generated unguessable
-nonce, engine-session ID, monotonically increasing sequence, operation name, JSON
-value, and exactly one closed authenticated client identity:
+worker.  The selected Bubblewrap version closes arbitrary inherited FDs, so the
+parent creates two one-run Unix listeners, mounts only their inodes into the private
+runner namespace, accepts one exact-cgroup connection on each, then closes
+and unlinks the listeners.  One connection carries bounded control and tool frames;
+the other carries the stock Pi provider's bounded HTTP/SSE exchange through a
+loopback-only transport bridge.  Python admits the first peer only through the private
+listener from the expected namespace slot in the exact transient cgroup.  Each
+accepted one-run stream is a capability of that cgroup, not process identity;
+the protocol nonce binds the run and sequence rather than authenticating a process.
+Stdout and stderr are separate bounded logs and can never be parsed as protocol.
+There is no routable TCP listener, shell-built command string, secret in argv, or
+inherited Pi user config.  Every request carries a parent-generated unguessable nonce,
+engine-session ID, monotonically increasing sequence, operation name, JSON value, and
+exactly one closed authenticated client identity:
 
 - ={kind: "assist", run_id, work_id, thread_id}=; or
 - ={kind: "emacsos", conversation_generation, request_id, client_thread_id}=.
@@ -599,29 +620,38 @@ closes every FD before any queue or client lock releases.
 The runner constructs every Pi service explicitly.  It uses
 =SettingsManager.inMemory()= with one audited complete configuration, an explicitly
 constructed model and credential source, and =SessionManager.open()= on the one
-server-selected thread path.  It starts with all built-in tools disabled and then
+server-selected thread path.  It starts with all built-in tools disabled; P2 later
 adds only Assist custom tools.  Every =no*= resource switch is set even though the
-custom loader also supplies explicit empty resources.  Effective settings, model
-compatibility, session path identity, disabled resource families, and active tools
-are part of the P0 census.  Neither =~/.pi= nor project settings can alter retry,
-compaction, shell, model, or discovery behavior.
+custom loader also supplies explicit empty resources.  P0 pins this construction and
+checks its external provider/session behavior without treating untrusted
+runner-reported settings as a security attestation.  P2 adds the effective-settings,
+model-compatibility, session, resource-family, and active-tool census for every
+disclosed tool set as conformance evidence.  Neither
+=~/.pi= nor project settings can alter retry, compaction, shell, model, or discovery
+behavior.
 
 Running Pi inside the model's workspace sandbox would mix trusted harness state with
 model-controlled files.  Instead the runner gets its own OS containment envelope:
-dedicated unprivileged identity, empty allowlisted environment, read-only immutable
-release, private temporary directory, read-write access to only the one bound engine
-session directory, cgroup/resource limits, and no direct network route to the model
+dedicated unprivileged identity, fixed allowlisted environment, read-only immutable
+release, private temporary directory, read-write access to only the one parent-created
+engine-session inode, cgroup/resource limits, and no direct network route to the model
 or general network.  Its only provider path is the lease-enforcing gateway below.
 It cannot read the service home, worktree, deployment environment, other threads,
 Docker socket, or phone credentials.
+
+Pi 0.83 resolves its agent directory at module import through =os.homedir()=.  The
+closed environment therefore contains only =PATH=/runtime=, =PWD=/tmp=, and
+=HOME=/tmp/home=; that home is an empty directory inside the private tmpfs.  It is
+not the service home and cannot contain Pi configuration.
 
 The web client's model-facing filesystem and commands continue through the existing
 Docker container.  Other embedders continue through their Python-owned backend;
 emacsos keeps =EmacsBackend= on Deep Agents until P5b replaces its shared full-trust
 identity with the narrowed worker.  Host-effect tools call the
 same Python functions and authorization checks used by Deep Agents.  If this runner
-containment or the enforced model data plane requires a second elaborate runtime, P0
-fires the simplicity stop gate.
+containment requires a second elaborate runtime, P0 fires the simplicity stop gate.
+P2 separately fires its stop gate if the enforced real-model data plane requires a
+second elaborate runtime.
 
 The runner source, installed Pi package, lockfile, and system prompt are outside the
 model workspace and read-only to the sandbox.  Qwen can edit a copy only in an
@@ -682,8 +712,12 @@ partial assistant/tool leaf, or reuses its old lease after an OOM, zombie
 cancellation, gateway crash, or server restart; each receives a visible recoverable
 or ambiguous outcome from its own durable state before any new lease is issued.
 
-P0 proves the mechanism with a disposable gateway; P2 routes every live Assist and
-emacsos provider client through the reviewed gateway before the first Pi web thread.
+The rejected narrow P0 nominally ran one stock-SDK request, cancellation, and cleanup
+through a disposable in-process gateway and instrumented upstream, but review did not
+accept the cancellation or cleanup proof; it neither contacted nor locked the shared
+model.  A newly reviewed successor is required before P2 routes every live Assist and emacsos provider client
+through the reviewed gateway, passes the complete real-Qwen provider matrix, and
+proves real-model cancellation/restart fencing before the first Pi web thread.
 If a small gateway plus kernel-enforced exclusive model reachability cannot be built
 and operated simply, stop rather than ship an advisory lock or direct runner access.
 
@@ -836,10 +870,11 @@ adds only the role's audited Assist resources.  Pi's default prompt, current wor
 directory prose, global =AGENTS.md=, =SYSTEM.md=, =APPEND_SYSTEM.md=, and =~/.pi=
 resources must not reach the provider.
 
-P0 changes the active tool set before and after =load_skill= and proves that Pi's
+P2 changes the active tool set before and after =load_skill= and proves that Pi's
 base-prompt rebuild cannot displace the per-turn override or reintroduce the working
-directory.  The provider request, not =DefaultResourceLoader= configuration, remains
-the contract.
+directory.  A newly reviewed P0 successor must prove the tool-free synthetic provider
+boundary; the rejected candidate did not complete its effective census.  The provider
+request, not =DefaultResourceLoader= configuration, remains the contract.
 
 The provider-bound census is the gate, not the source configuration.  It records:
 
@@ -851,9 +886,10 @@ The provider-bound census is the gate, not the source configuration.  It records
 
 Prompt-architecture P2 through P5 should remain harness-neutral.  Once Pi
 qualification starts, each later prompt-architecture phase compares the two
-harnesses on the same proposed instruction change.  Do not finish a large Deep
-Agents-specific prompt-architecture P2b implementation before the Pi P0/P1
-qualification answers whether Pi supplies the simpler tool-disclosure boundary.
+harnesses on the same proposed instruction change.  Narrow Pi P0 uses only a
+synthetic ownership canary and neither depends on nor edits the active prompt work.
+Before Pi P2/P3 selects tool disclosure, reconcile the completed Deep Agents prompt
+experiment with Pi P1 rather than reproducing a second large implementation.
 
 The first usable Pi web release must include every prompt-architecture improvement
 approved by then, plus the already-approved target shape for phases whose Deep
@@ -994,7 +1030,7 @@ never Run or operation truth; web status remains a projection.
 Before the provider can run, the server appends a public Pi custom session entry
 carrying the authenticated =run_id=, =work_id=, engine-session ID, and canonical
 input hash.  Recovery distinguishes input not appended, appended but not started,
-and completed without comparing message text.  P0 kills the runner before and after
+and completed without comparing message text.  P2 kills the runner before and after
 each append boundary.  If public Pi session APIs cannot provide this identity
 without ambiguous replay, the experiment stops.
 
@@ -1077,11 +1113,11 @@ The current web UI supports one approval card per interrupted batch.  More than 
 approval-required sibling is therefore an invalid batch: execute none and append one
 ordered policy-error result for every call, telling the model to propose gated
 effects one at a time.  One gated call mixed with permitted siblings follows the
-defer-whole-batch flow above.  P0 tests two gated siblings and the mixed case.
+defer-whole-batch flow above.  P2 tests two gated siblings and the mixed case.
 
-This transition is a P0 feasibility test, not assumed SDK behavior.  It must use
+This transition is a P2 feasibility test, not assumed SDK behavior.  It must use
 public Pi session and event surfaces plus the contained child-termination boundary.
-P0 proves =message_end= precedes persistence, first =tool_call= observes the
+P2 proves =message_end= precedes persistence, first =tool_call= observes the
 persisted leaf before execution, text-only =turn_end= can fsync before parent
 completion, and self-termination prevents every sibling effect.  If Pi begins
 sibling execution before the batch gate, cannot append a complete externally
@@ -1202,29 +1238,36 @@ design contains each surface by construction:
   proxy variables, and every provider credential from the runner environment.  The
   current local endpoint requires no Node-held credential; any later cloud-provider
   credential stays in the gateway/broker, while the runner receives only the
-  request-bound one-use lease over its private control FD;
+  request-bound one-use lease over its private control connection;
 - keep web model file/shell access in the existing per-turn Docker container and
   each other client in its approved Python backend; all host effects remain behind
   Python authorization and approval gates;
-- use dedicated child-process protocol pipes, not stdout or a listener; bound frame
-  size/count, logs, tool output, session growth, process time, PIDs, FDs, CPU, and
-  memory;
+- use the two inode-mounted one-run Unix listeners described above, never stdout or
+  a reusable service listener; admit only the expected namespace slot from the exact
+  transient cgroup, treat the stream as that cgroup's capability, and bind its nonce
+  to the run/sequence.  Bound frame size/count, logs,
+  tool output, session growth, process time, PIDs, FDs, CPU, and memory;
 - validate messages and tool arguments independently on both sides; never create a
   shell command by concatenating model or bridge values;
 - test that secrets cannot appear in argv, environment metadata, prompt census, Pi
   session files, stdout/stderr, errors, crash reports, or logs;
 - have the parent create a 0700 engine directory and 0600 regular session file under
-  one fixed root with dirfd/no-follow operations; reject links and nonregular files,
-  enforce record/line/file quotas before Pi parses, allow only audited record kinds,
-  and load no path-based attachment from session data.  Test crash-safe append and
-  directory/file =fsync=;
+  one fixed root with dirfd/no-follow operations, retain that file descriptor, and
+  bind only the writable file inode into the runner.  Pi alone writes its JSONL; the
+  parent fsyncs and verifies the retained inode and records each committed offset and
+  prefix digest.  Reject links and nonregular files, enforce record/line/file quotas
+  before Pi parses, allow only audited record kinds, load no path-based attachment
+  from session data, and recover only a verified uncommitted suffix.  Test crash-safe
+  append and directory/file =fsync=;
 - make active-tool state invocation-scoped and derived from the server-owned catalog
   and trusted skill-load record.  Python enforces the allowed set on every call;
   Pi's active set controls schema disclosure only.  Adversarial skill and tool-result
   text must not grant a capability;
-- spawn directly without a shell in a dedicated process group/cgroup, close every
-  non-allowlisted FD, and on every exit TERM then KILL and reap the entire descendant
-  group before releasing =ThreadQueue= or =_STREAM_LOCK=.  Test that no descendant,
+- spawn directly without a shell in a named transient cgroup, close every
+  non-allowlisted FD, and on every exit TERM then KILL the entire cgroup, prove it
+  empty, and reap the direct child before releasing =ThreadQueue= or =_STREAM_LOCK=.
+  A process group is not an authority because a descendant can create a new session.
+  Test that no descendant,
   pipe, or provider socket survives cancellation, parser failure, timeout, client
   disconnect, approval interruption, or runner crash;
 - treat Python tool handlers and their backend as part of the same execution lease.
@@ -1246,61 +1289,158 @@ is likewise data, never an extension source.
 Each phase is a separate reviewed change.  Stop at the first failed gate.  No phase
 begins from this design without Pierre's approval.
 
-** P0: Pin, isolate, and prove execution control, no product path
+** P0: parity-target execution boundary
 
-- Pin Pi, Node, the lockfile, and the local model compatibility profile.
-- Produce the compiled release in the disposable no-secret build environment with
-  lifecycle scripts disabled, then promote its immutable digest.
-- Build an offline SDK probe with in-memory settings, ambient resources and built-in
-  tools disabled, and explicit model/session services.
-- Prove the runner's OS identity, mount view, environment, FD table, cgroup bounds,
-  session file construction, inability to reach the model directly, single-use
-  gateway lease, exact non-redirecting upstream destination, and blocked egress with
-  canary probes.  Scan process metadata, session, census, logs, and crash output for
-  the test secret.
-- Capture final prompt, schemas, provider payload, events, and session record.
-- Load the exact static extension manifest and reject ambient discovery, duplicate
-  IDs/tools, dependency cycles, schema/version collisions, capability handlers that
-  register cross-cutting hooks, and lifecycle handlers that bypass =mustHandle=.
-- Inject every load-bearing extension failure listed in the lifecycle section and
-  prove swallowed exceptions cannot continue because =halt= terminates first.
-- In one invocation, call =load_skill= and use a newly disclosed tool on the next
-  model iteration.  Kill before/after the activation-record append/fsync,
-  =setActiveTools= application, load result, and next provider request; resume must
-  expose exactly the durably committed set without replaying the load or admitting
-  an uncommitted tool.
-- Prove the runner cannot see the host workspace through a model tool.
-- In the disposable runner, have a fixture lease request a yield while work is active.
-  The runner must finish and durably append the current complete provider/tool
-  boundary, stop before another provider request, emit =paused=, and exit.  The
-  fixture retains ownership until child exit is confirmed; a timed-out child is
-  killed and reaped before another holder can start.
-- Open the same session in a fresh process, continue without repeating the completed
-  boundary, and enforce the cumulative active-work cap across processes.
-- Force every race around pause, cancellation, kill, and fresh resume.  Prove the old
-  process group, descendant, pipe, or provider socket cannot survive or call the
-  provider after the fixture passes to a new holder.  Cancel during a streamed
-  generation and crash/restart the gateway; do not pass admission until a
-  provider-observed terminal/idle state or a completed bounded model restart proves
-  the old generation is absent.
-- Kill before and after input/custom-entry append and every session fsync boundary;
-  prove idempotent recovery from not-appended, appended-not-started, and completed
-  inputs, plus malformed, oversized, linked, and truncated session rejection.
-- With synthetic in-memory tools and a disposable journal, prove the public Pi hooks
-  can preflight an approval-bearing multi-tool batch, exit at the assistant leaf,
-  append one ordered result per sibling, and =continue()=.  Do not add
-  =ToolBatchStore=, change =ThreadQueue=, call production backends, or alter any web
-  path in P0.
+P0 trusts the Python authority, as the current Deep Agents path does, and treats the
+new Node/Pi process plus its descendants as disposable.  It does not attempt to
+protect the build from another trusted same-user process, create an independently
+enforced cryptographic lease, or turn the experiment into a retained release
+service.  Those requirements exceeded the intended migration threat model.
 
-Gate: the exact Qwen endpoint passes every provider probe and the census shows that
-Assist owns every system-prompt character and active tool schema.  Cooperative
-yield, fresh-process resume, cumulative accounting, synthetic multi-tool approval,
-=message_end=/first-=tool_call= durability, fail-closed =halt=, and single-holder
-exclusion must all work through public Pi SDK/events plus contained process
-termination.  If any needs a custom agent loop, checkpoint scheduler, Pi fork,
-uncertain side-effect replay, or release-before-child-exit, stop before P1.  Also
-stop if containing the runner and the enforced model data plane require an
-operational stack whose cost defeats the claimed simplicity.
+The stock pinned Pi runner must have no service secret or authenticating external
+provider credential, no active tools, no ambient
+skills/prompts/themes/context, no host workspace, and no direct model or public
+network route.  It sees a read-only runtime and one writable size-limited session
+inode.  A private one-run Unix connection carries Pi's exact HTTP request to trusted
+Python, which validates the complete closed provider envelope and may forward at
+most one canonical request to a fixed in-process instrumented upstream.
+
+Python admits the first peer only from namespace PID 2 in the exact disposable runner
+cgroup.  This verifies launch topology, not immutable executable identity: the
+untrusted process can transfer the stream or replace itself with =execve=.  The stream
+is the cgroup's capability.  Delegation within the same no-secret, no-network,
+recursively killed cgroup grants no additional authority.  The peer pidfd remains
+construction and cleanup evidence.
+
+The host, rather than the runner, gates containment from =/proc=: distinct network
+and mount namespace identities, no IPv4 route, a real host canary absent beneath the
+runner root, zero soft and hard core-file limits, namespace-slot/exact-cgroup identity, and
+effective transient-unit limits.  Runner-reported connection counts remain a
+pinned-SDK conformance observation, not a security attestation.
+
+One invocation must exercise seven fresh transient services: deterministic success,
+hook fail-stop with the control channel closed, hook fail-stop after Node reaches
+backpressure, hostile descendant teardown, cancellation, fresh success after that
+cancellation, and Python-authority death while the upstream and hostile descendant
+are active.  Each normal result is issued only after its runner child cgroup is
+empty and reaped.  The outer orchestrator then requires the whole service inactive
+and its retained =cgroup.events= certificate empty before starting the next case.
+
+The reviewed run found one Pi-specific cancellation behavior: Pi 0.83 opens one
+additional provider connection after abort despite retry settings being disabled.
+The one-shot bridge rejects it locally; Python receives and forwards exactly one
+provider request and waits for the first upstream to become terminal.  This observed
+retry/reconnect behavior is part of the P2 real-provider contract, not a reason to
+weaken one-shot admission.
+
+Gate: the full report is =GO= only if every scenario passes in one invocation, every
+effective systemd/cgroup and cleanup certificate is present, the closed provider
+request and host-derived containment evidence match, the post-cancel run uses fresh state, the
+authority-death setup has a trusted pre-death readiness frame, its final result is
+assembled only from the outer process's kernel observations, and all
+hand-authored experiment files remain at or below 1,500 lines.  =GO= authorizes P1
+only.  It does not qualify Qwen, authorize P2, or expose a Pi thread.
+
+** Rejected stronger P0 contract: historical evidence
+
+Both P0 candidates stopped in local review.  Their state and the full rejected
+narrowed contract are in =docs/2026-08-04-pi-runtime-p0.org=.  The bullets below
+record what that contract required; they are not achieved topology or authorization.
+The parity-versus-stronger-security decision has now selected parity.  The rejected
+requirements below are retained to explain the earlier STOP result; they are not
+requirements of current P0:
+
+- Build one fresh private candidate manifest from hashed Pi, Node, npm, TypeScript,
+  compiler/ELF closure, and independently reviewed lock inputs.  For each scenario,
+  descriptor-copy it into a private tmpfs before the runner exists, verify the copy,
+  remount it read-only, and drop mount capability.  Use a closed no-secret build,
+  disable lifecycle scripts, and add no release registry or reusable promoted
+  directory.
+- Launch the stock Pi SDK/provider in a private-network Bubblewrap child.  One
+  serialized Python state machine per scenario gets Bubblewrap's namespace-init PID
+  from its private =--json-status-fd= and the first peer's outer PID from
+  =SO_PEERCRED=, then opens and checks both pidfds before admission.  Bubblewrap
+  remains namespace PID 1 so the initial Node process, as PID 2, can unconditionally
+  self-SIGKILL.  A pinned minimal
+  launcher uses =clone3(CLONE_INTO_CGROUP)=, reports the child PID, and remains only
+  to =waitpid= Bubblewrap; Python owns and waits for that launcher.  This places
+  Bubblewrap and every descendant atomically in one
+  authority-owned runner child cgroup.  A post-accept nonterminal check of the
+  accepted peer pidfd makes numeric PID reuse fail closed.  The path omits
+  =--die-with-parent=.  A fresh transient systemd service per scenario supplies
+  OS-level recursive group death if Python itself is killed.
+- Route one tool-free request at a time through the in-namespace loopback bridge,
+  one-run Unix connection, and in-process Python gateway to one exact instrumented
+  HTTP/SSE upstream.  The runner has no direct model or public-egress route.  P0 uses
+  no live Qwen endpoint or shared =llm= resource.
+- Register the exact runner first, then lazily receive stock Pi's bounded raw HTTP
+  bytes.  Python independently validates the complete closed envelope and atomically
+  issues and consumes one lease for the canonical bytes it will forward before
+  opening the fixed numeric destination.  Reject duplicate JSON keys and parser
+  ambiguity, retaining the received-byte digest separately as evidence.  No runner
+  digest or destination authorizes itself.
+- Prove one deterministic success through an instrumented fake upstream, including
+  the complete closed provider envelope, exact owned system canary, no extra
+  privileged message, =noTools: "all"=, no schemas, every ambient-resource disable
+  switch, streamed response parsing, and one persisted assistant result.
+- Prove a =before_provider_request= failure invokes a nonblocking,
+  unconditional-self-SIGKILL bootstrap =halt=, creates no raw request or lease, and
+  enters ordinary cleanup even when its terminal-frame connection is closed or full.
+- Prove cleanup against a =setsid= descendant that ignores =TERM= and retains an
+  audited pipe's sole remaining write half while Node also ignores =TERM=: close
+  every local writer, require Node alive plus cgroup populated plus no EOF, close
+  admission, then atomically =cgroup.kill= the runner-only child cgroup and require
+  Node dead plus =populated 0= plus EOF.  Then observe both pidfds, wait for the
+  direct launcher to reap Bubblewrap, and close/join every owned resource.  After
+  Python exits, the outer orchestrator
+  requires the unit inactive and an exact-invocation cgroup-empty certificate before
+  another scenario: either observed =populated 0= or bound =ENODEV= after kernel
+  removal, with no runner-visible cgroup or migration interface.
+- Prove deterministic cancellation against an endless instrumented stream, then use
+  only a fresh runner, connection, lease, session, and cleanup certificate for the
+  post-cancel request.  No cancelled state is reusable.
+- SIGKILL the Python authority while the upstream and hostile descendant are active;
+  systemd must kill the whole service without a custom cleanup supervisor.  The
+  bounded outer orchestrator records pidfd, cgroup, unit-property, and EOF evidence;
+  it sequences whole services and assembles the report but cannot issue leases,
+  signal a runner individually, or decide an application transition.
+- Give every operation one monotonic deadline, product work one absolute deadline,
+  cleanup an independent absolute fence deadline, the outer unit stop its own bound,
+  and every protocol total frame/byte/token/time budgets.  Concurrent terminal,
+  cancel, disconnect, runner-death, and deadline events have one legal transition and
+  exactly one cleanup outcome; elapsed time never releases ownership.
+- Let the outer orchestrator atomically produce one report only after every scenario
+  unit is inactive and empty.  It accepts no external live report and binds the
+  build-time and final source manifests, every verified private candidate copy,
+  toolchain and effective containment identities, lock/profile, each raw
+  request/response/cancel/upstream observation, one inner application-cleanup
+  fragment plus outer unit-empty certificate per normal scenario, and only its own
+  direct OS evidence for authority death.
+
+The rejected narrow P0 contract deliberately excluded skills, tools, hot reload, approval batches,
+compaction, continuation, retained-session/crash recovery, cumulative accounting,
+cross-process fairness, global Deep Agents/emacsos enforcement, release promotion,
+the broad Qwen matrix, copied evals, web, phone, voice, and prompt-P2 changes.  These
+remain later phase gates, including P5b/P5c; they are not inferred from P0.  P2 must
+run the complete provider matrix and exact real-model cancellation/restart fence
+through globally exclusive admission before P3.
+
+That rejected implementation contract had three process roles: bounded outer test orchestrator/report
+assembler, one transient Python request authority with in-process gateway/upstream
+per scenario, and one contained Node/Pi runner.  It
+may not add a daemon, database, persistent queue, generic RPC framework, live-model
+client, restart manager, release registry, custom agent loop, checkpoint scheduler,
+or second application lifecycle authority.  Delete the rejected proof doubles and
+broad matrix.  Every hand-authored file under =experiments/pi-runtime-p0= counts
+toward the hard 1,500-line budget except =package-lock.json=; the state doc defines
+the exact =line_count()= calculation.
+
+Historical gate: all six scenarios pass through the same path, every cleanup certificate is
+complete, evidence is invocation-bound, and the simplicity budget holds.  =GO=
+authorizes P1 only and does not qualify Qwen, P2, or a Pi thread.  If public Pi
+behavior, exact deterministic cancellation, authority/cgroup teardown, private
+candidate identity, or the line/role budget cannot satisfy this slice, stop the migration
+rather than weaken the boundary.
 
 ** P1: Measure harness authoring
 
@@ -1317,8 +1457,10 @@ operational stack whose cost defeats the claimed simplicity.
 Gate: the fixture, attempt accounting, and every deterministic artifact validator
 are trustworthy, all planned attempts complete, and the result is reported.  The
 8/10 threshold qualifies or rejects “Qwen can maintain the harness”; it does not
-gate Pi runtime migration.  P0 provider behavior and P3 product evals are the runtime
-gates.  A failed harness-authoring score therefore changes who may maintain the
+gate Pi runtime migration.  P0 deterministic provider behavior and P3 product evals
+are the first and last runtime gates; P2's complete real-Qwen provider matrix and
+global admission are the mandatory middle gate.  A failed harness-authoring score
+therefore changes who may maintain the
 runner, not whether the reviewed runner may proceed to P2.
 
 ** P1t: Select or omit the TODO extension
@@ -1367,6 +1509,10 @@ guidance.
   it.  Prove FIFO admission and single occupancy across the two processes before P3,
   including cancel-during-stream, lost upstream acknowledgement, gateway crash, and
   model restart/quarantine.
+- Run and pass the complete real-Qwen provider matrix through that product gateway:
+  thinking/text, single and dependent tools, parallel reads, serialized mutations,
+  malformed/unknown/error calls, compaction, user/tool-result continuation, the
+  prompt/schema census, and exact real-model cancellation/restart fencing.
 - Delegate read, edit, write, and bash to the existing sandbox and route the
   P3 main-agent web/render tools through their existing Python owners.
 - Implement the prompt-rearchitecture target from the start: generated kernel,
@@ -1386,7 +1532,10 @@ guidance.
 - Cancel while real Docker =execute= and fixture host-effect handlers are active.
   Prove the operation lease becomes terminal or the model remains unavailable;
   reaping Node alone never releases ownership.
-- Integrate the P0 pause/resume and input-entry identity with =RunService=, including
+- Implement the deferred pause/resume and input-entry identity with =RunService=,
+  using a newly reviewed successor to the narrow P0 lifecycle authority rather than
+  either rejected candidate or a disconnected proof object,
+  including
   cumulative active time and every restart boundary.
 - Add retained-version fixtures and atomic release references; promotion must prove
   new-session and continuation compatibility, parent-side digest validation, safe
@@ -1400,10 +1549,13 @@ guidance.
   follow-up and prove both retain the same cohort across crash recovery.
 
 Gate: no ambient extension, host tool, or direct model route is reachable; every
-existing provider client passes through the shared gateway; no web behavior changes;
-and the diff still supports a plausible net deletion after migration.  Any product-path
-deviation from the P0 execution-control proof reopens its stop gate.  If the product
-lease, operation store, or cleanup adds a second framework, delete the slice and stop.
+existing provider client passes through the shared gateway; the complete real-Qwen
+provider matrix passes; no web behavior changes; and the diff still supports a
+plausible net deletion after migration.  Any
+product-path deviation from the newly reviewed successor's gateway, cancellation, or
+cleanup authority reopens its stop gate; every deferred durability and fairness property must pass its
+own P2 evidence.  If the product lease, operation store, or cleanup adds a second
+framework, delete the slice and stop.
 
 ** P3 / M1: Usable dual-runtime web preview, selected per thread
 
@@ -2001,7 +2153,7 @@ new conversation generation and gives the phone no picker.
 - [[file:2026-07-26-agent-prompt-architecture.org][Agent prompt architecture and calibrated outcome evaluation]]
 - [[file:2026-06-11-embedder-contract.org][Assist embedder contract]]
 
-* Review record
+* Historical design-only review record
 
 Twelve review rounds with parallel lenses covered architecture, simplicity, framework fit, user intention,
 the end-to-end web and phone experience, clean interfaces, correctness, concurrency

@@ -1,0 +1,13 @@
+{
+  "name": "assist-pi-runtime-p0",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": "22.23.1"},
+  "scripts": {"build": "tsc -p tsconfig.json"},
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0"
+  },
+  "devDependencies": {"@types/node": "22.19.0", "typescript": "5.9.3"}
+}
