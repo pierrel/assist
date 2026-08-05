@@ -1,26 +1,23 @@
-"""Skill-loading evals across three levels of prompt implicitness.
+"""Skill-loading evals across main and delegate prompt shapes.
 
 The `org-format` skill is a clean target for measuring whether the
 SkillsMiddleware progressive-disclosure mechanism actually fires:
 
-- It is NOT pre-injected into the system prompt (unlike the `dev` skill,
-  which the general agent inlines when project indicators are present),
+- It is NOT pre-injected into the system prompt (the `dev` skill instead has a
+  separate trigger when project indicators are present),
   so the only way the agent can apply its rules is to load `SKILL.md`
-  via the `read_file` tool.
+  via the `load_skill` tool.
 - The skill governs a concrete, breakable mechanic (the heading-body
   rule for org-mode), so a side-channel correctness check is possible
   in addition to the tool-call check.
 
-These three tests vary how loud the hint is — from "use this skill
-explicitly" to "no mention at all" — to surface failure modes where
-the agent would correctly apply the skill only when named, or only
-when domain language is present.
+The main cases vary how loud the hint is, while a third case exercises the
+production delegate role with the hardest implicit request.
 
 Each test asserts the same thing twice over:
 
-1. The agent loaded the skill — i.e. it called `read_file` (or
-   the deepagents alias `ls`) on the `/skills/org-format/SKILL.md`
-   path that the SkillsMiddleware advertises.
+1. The agent loaded the skill through `load_skill` (or the compatible upstream
+   path-based mechanism).
 2. The agent applied the skill correctly — i.e. inserting a heading
    did not orphan the previous heading's body. This is the same
    correctness rule covered in test_org_format_skill.py.
@@ -33,8 +30,10 @@ from unittest import TestCase
 
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
+from assist.spec import AgentSpec
 
-from .utils import create_filesystem, read_file, skill_was_loaded
+from .utils import (create_filesystem, read_file, skill_was_loaded,
+                    stub_research_subagent)
 
 
 _PROJECTS_FIXTURE = dedent("""\
@@ -58,13 +57,14 @@ class TestSkillLoading(TestCase):
     def setUp(self):
         self.model = select_assistant_model(0.1)
 
-    def _make_agent(self):
+    def _make_agent(self, *, role="main"):
         root = tempfile.mkdtemp()
         create_filesystem(root, {
             "README.org": "My projects are tracked in projects.org",
             "projects.org": _PROJECTS_FIXTURE,
         })
-        return AgentHarness(create_agent(self.model, root)), root
+        spec = AgentSpec(role=role) if role == "delegate" else None
+        return AgentHarness(create_agent(self.model, root, spec=spec)), root
 
     def _assert_alpha_body_preserved(self, root: str):
         content = read_file(os.path.join(root, "projects.org"))
@@ -121,9 +121,9 @@ class TestSkillLoading(TestCase):
 
         The user says nothing about skills, formatting, or org-mode
         rules. The only signal is the `.org` file extension, which the
-        skill description (``Load before reading, editing, or
-        surfacing any .org file``) is supposed to key off of. This is
-        the hardest case and the one progressive disclosure is meant
+        skill description (``MUST load before any tool call that reads,
+        edits, writes, or mentions a .org file``) is supposed to key off
+        of. This is the hardest case and the one progressive disclosure is meant
         to handle: the agent must choose to load the skill from the
         description alone.
         """
@@ -142,5 +142,21 @@ class TestSkillLoading(TestCase):
             "description tells the agent to load before editing any "
             ".org file, so the agent should have loaded SKILL.md "
             "from the description alone."
+        )
+        self._assert_alpha_body_preserved(root)
+
+    def test_delegate_implicit_skill_request(self):
+        """A delegate uses the shared skill protocol without main-only prose."""
+        with stub_research_subagent():
+            agent, root = self._make_agent(role="delegate")
+            agent.message(
+                "Add a new top-level project 'Project Gamma' between Alpha "
+                "and Beta in projects.org. Its description should be "
+                "'Gamma is a new experimental project.'"
+            )
+
+        self.assertTrue(
+            skill_was_loaded(agent, "org-format"),
+            "Delegate did not load org-format for an implicit .org edit."
         )
         self._assert_alpha_body_preserved(root)

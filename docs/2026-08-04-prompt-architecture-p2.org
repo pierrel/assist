@@ -1,0 +1,273 @@
+#+title: P2 duplicate role-prompt deletion experiment
+#+date: <2026-08-04>
+
+* Final status
+
+P2 passed.  Candidate 3 preserved all 70 primary functional executions and met
+every preregistered per-node timing gate.  It removes 1,679 characters of
+duplicate procedure from the canonical web-main rendering without adding
+production code.
+
+A final local correctness review caught a calculation defect before PR: the
+intermediate analysis had used nearest-rank p50 even though the preregistration
+specified the conventional median and identified nearest-rank only for p90.
+Using the registered statistic, candidate 3's context median is 33 seconds
+against a 34.4-second limit, not against the erroneous 30.8-second limit.  The
+later candidate 4 work is retained in private logs as an invalid post-result
+extension, but it does not determine P2's outcome.
+
+* Objective and boundaries
+
+The hypothesis was that Qwen could preserve skill selection, first-turn
+grounding, delegation, and TODO behavior after duplicate procedure was removed
+from =assist/templates/deepagents/general_instructions.md.j2=, because skills,
+tool descriptions, and framework middleware already owned that procedure.
+Prompt reduction was evidence, not the acceptance criterion.
+
+P2 changes no tool, schema, middleware, constructor, runtime state, memory,
+research, development guidance, SMS triage, Pi design, P2b tool disclosure, or
+P2c skill-description lifecycle.  It adds no production Python, registry,
+feature flag, or prompt composer.
+
+Design review kept the async lifecycle and child-result trust paragraphs.  No
+other source completely owns cross-turn reconciliation, steering, cancellation
+truth, sibling preservation, and terminal synthesis.  Moving that procedure
+requires a separate measured objective.
+
+* Controlled change
+
+The candidate deletes three duplicate groups from the shared role template:
+
+| Deleted group | Existing owner |
+|-
+| Long complex-request routing, delegation, and TODO recipe | =assist/main_skills/complex-request/SKILL.md= plus the retained short front trigger |
+| Generic first-call skill-match/load/apply instructions repeated around the process | =SmallModelSkillsMiddleware= and the =load_skill= tool |
+| Generic TODO planning, cleanup, and internal-versus-user TODO explanation | LangChain =TodoListMiddleware= and the =write_todos= tool |
+
+It retains the development trigger, before-edit skill check, final completion
+account, user-task procedure, and complete async lifecycle/trust rules.  The
+context-first instruction becomes shorter but keeps its ordering: after any
+matching skill, dispatch the context agent on the first substantive turn.
+
+The accepted candidate changes the canonical web-main request as follows:
+
+| Request component | Baseline characters | Candidate characters |
+|-
+| Assist role instructions | 13,068 | 11,389 |
+| Complete system message | 31,279 | 29,600 |
+| Provider-bound tool schemas | 28,037 | 28,037 |
+| Bootstrap request plus schemas | 59,316 | 57,637 |
+
+The historical complete baseline remains in the P0 appendix of
+[[file:2026-07-26-agent-prompt-architecture.org][the overall architecture document]].  The accepted candidate's deterministic
+census artifact is 2,854,575 canonical bytes with SHA-256
+=f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
+
+* Experiment
+
+** Frozen inputs
+
+- Formal baseline source: =b4cce1f=.
+- Accepted candidate source: =d7b09efd2686c7e5f58ac2cf370227a8ff14d24e=.
+- Accepted template SHA-256:
+  =a712057c0f1405cd48193b7badb9ffa4eb66f17ca12e519b8209b0aa9a4351dc=.
+- Baseline and candidate used the same served model, settings, tools, skills,
+  middleware, fixtures, validators, judge rubric, and fixed rendered time.
+- Any acceptance-affecting prompt or eval change restarted N=3/N=5/N=10.
+- Raw logs and scratch stayed under mode-restricted home-backed
+  =~/deploy/assist/eval/p2/= and =~/deploy/assist/tmp/eval=.  Nothing large was
+  written to the small root partition or repository.
+- The home-backed runner wrapped =scripts/run-evals.sh= and recorded source,
+  prompt, input hashes, model provenance, node IDs, wall times, model/tool
+  counts, return codes, JUnit, and logs.  Infrastructure failures were preserved
+  but excluded rather than silently becoming samples.
+
+** Repeated primary cohort
+
+The seven primary nodes were:
+
+1. natural launch of async work without polling;
+2. natural four-outcome artifact creation;
+3. explicit independent delegate fan-out capability;
+4. explicit dependent delegate ordering capability;
+5. implicit main-role skill loading and correct Org edit;
+6. implicit delegate-role skill loading and correct Org edit; and
+7. first-turn context dispatch.
+
+The natural journey graded requested files and their content, not hidden tool
+routing.  Explicit capability cases retained strict orchestration checks.
+Security/state diagnostics covered untrusted results, cancellation,
+interjections, mixed sibling outcomes, and timeout dependency blocking.
+
+** Registered gates
+
+- Every primary natural node had to match its N=10 baseline and pass at least
+  70%; primary capability and deterministic security/state checks had to pass
+  100%.  Adjacent diagnostics were reported separately and did not determine
+  P2 acceptance.
+- Each primary node independently had to keep conventional median wall time at
+  or below =baseline median * 1.2 + 2 seconds=.  Nearest-rank p90 had to remain
+  at or below =baseline p90 + 30 seconds=.
+- N=3 was diagnostic, followed by review; N=5 was intermediate; N=10 made the
+  final decision.  Aggregate success could not trade away one failed node.
+- Existing unit, census, syntax, and collection gates still had to pass.
+
+** Formal baseline and candidate
+
+All 70 baseline and all 70 candidate primary executions passed.  The table uses
+the preregistered conventional median and nearest-rank p90.
+
+| Node | Baseline median/p90 | Candidate median/p90 | Median limit | p90 limit | Result |
+|-
+| Launch | 11 / 11 | 11 / 11 | 15.2 | 41 | pass |
+| Natural outcomes | 128 / 146 | 154 / 159 | 155.6 | 176 | pass |
+| Fan-out | 15 / 16 | 17 / 18 | 20 | 46 | pass |
+| Dependency | 19 / 20 | 16 / 16 | 24.8 | 50 | pass |
+| Main skill | 29.5 / 30 | 10.5 / 11 | 37.4 | 60 | pass |
+| Delegate skill | 34.5 / 35 | 33 / 33 | 43.4 | 65 | pass |
+| Context | 27 / 39 | 33 / 50 | 34.4 | 69 | pass |
+
+The clean baseline artifacts are =baseline-1-qDuLi2= through
+=baseline-10-FrTDnY=.  The candidate artifacts are
+=candidate3-n10-1-kjGhSh= through =candidate3-n10-10-jFQFgt=.  A
+production-contended baseline attempt and wrong-working-directory preflight
+failures remain preserved and excluded.
+
+** Post-review correction
+
+Pierre's PR review found that the accepted conditional left an empty =Step 1:
+Plan= heading in the synchronous main and delegate renderings.  The final
+implementation makes the pointer and heading conditional with their async-only
+body.  This is a 42-character deletion in each legacy rendering.  The qualified
+async-main rendering is byte-identical.  The formal 70-execution result above
+qualifies the underlying duplicate-procedure deletion, but some of those cases
+also exercised delegates and therefore do not directly qualify this final
+legacy-render cleanup.
+
+The most relevant changed behavioral surface, implicit delegate skill use,
+passed the bounded N=3 follow-up Pierre requested at commit
+=3ab3b94dc32dbc41b9d2e261a4f871f5733e6ba6=:
+
+| Artifact | Wall time | Result |
+|-
+| =step1-review-n3-1-YVBFOj= | 20 seconds | pass |
+| =step1-review-n3-2-bjS433= | 11 seconds | pass |
+| =step1-review-n3-3-rCOUL1= | 11 seconds | pass |
+
+The final template SHA-256 is
+=1b259166503f4f4c625fde17a0c938e3f94fa35c2e61ef6e24768f1820fcaa28=.
+The refreshed deterministic census is 2,854,395 canonical bytes with SHA-256
+=7a73c557b7a10abfd2f53111406cb157cb94d984350444e33e7846599495578a=.
+The earlier template and census identities remain above because they identify
+the exact formally qualified candidate.  By explicit direction, the cleanup
+was not expanded into another full qualification cadence.
+
+* Candidate history
+
+| Candidate | Primary result | Decision |
+|-
+| 1, exact deletion | N=3 20/21; one natural report omitted a required field | Stopped.  A matched ten-run reference later passed 10/10, so the miss was not attributed to deletion. |
+| 2, provisional self-contained-brief sentence | N=3 21/21 primary; 19/21 adjacent | Rejected because the sentence's required failure did not reproduce in the candidate-1 reference. |
+| 3, exact deletion | N=3 21/21; N=5 35/35; N=10 70/70 | Accepted under every registered functional and timing gate. |
+| 4, deletion with baseline context sentence | N=3 21/21; N=5 35/35; 42/42 final executions attempted | Invalid extension caused by the p50 calculation error; not used for acceptance. |
+
+Candidate 4's private evidence remains available for audit rather than being
+discarded.  Its apparent “mathematical stop” was valid only for the unregistered
+nearest-rank p50 calculation and is not a P2 result.
+
+* Deferred finding
+
+The timeout-dependency diagnostic passed 7/10 at baseline and 3/10 for the
+accepted candidate.  The failure mode is real: the model sometimes checks a
+timed-out prerequisite, takes over its work, and starts the dependent anyway.
+
+It is not a P2 blocker.  Every frozen input except the controlled role-template
+deletion was identical across arms.  The governing timeout lifecycle clause,
+skill owner, eval, and tools were unchanged; however, the deleted prose did
+mention dependent stages, so a causal contribution cannot be ruled out.  The
+case was registered as an adjacent diagnostic rather than a primary acceptance
+gate, and fixing it requires a separate async-lifecycle objective.  Value: make
+dependent execution reliably stop after prerequisite failure.  Risk of
+deferral: occasional wasted work or an invalid dependent result after timeout.
+P2 neither hides the miss nor widens into that redesign.
+
+The local review also found a pre-existing nightly collection weakness: the
+no-argument runner can proceed with a nonempty subset if pytest reports an
+import error elsewhere.  Value of a later fix: trustworthy full-nightly
+coverage.  Risk of deferral: a partial nightly suite can appear complete.  P2's
+focused mode checks collection directly, so this is outside the objective.
+
+* Implementation guide
+
+The production change is only the template deletion above.  Retained test-side
+support is:
+
+- =edd/eval/conftest.py= freezes rendered prompt time only when an explicit
+  =ASSIST_EVAL_FIXED_DATETIME= is supplied;
+- =scripts/run-evals.sh= accepts explicit node IDs, retains the existing
+  nightly no-argument behavior, and returns aggregate failure for focused
+  blocks;
+- =edd/eval/test_skill_loading.py= adds one direct delegate-role implicit skill
+  case so both rendered role shapes are measured; and
+- deterministic spec/census tests pin the removed clauses, final prompt counts,
+  render hashes, and canonical artifact hash.
+
+The Jinja template auto-reloads for new turns.  Deployment therefore needs no
+service restart, but the feature branch must be deployed through the workspace
+transaction before the PR so new turns exercise the accepted prompt.
+
+* What was hard
+
+The production edit was small.  The hard part was making a fair small-model
+comparison and preserving the experiment's meaning:
+
+- earlier logs lacked enough final-prompt identity, requiring a fresh matched
+  baseline and fixed-time fingerprints;
+- the single served model exposed production overlap as extreme latency,
+  requiring preserved exclusions and bounded home-backed runs;
+- candidate 1's one content miss required an isolated matched reference before
+  attribution;
+- the pre-existing timeout defect had to be reported without expanding P2 into
+  an async-lifecycle redesign; and
+- the final local review caught that the analysis had silently switched from
+  the registered median to nearest-rank p50.  Correcting the statistic reversed
+  the disposition and prevented a valid experiment from being discarded.
+
+All non-document code beyond the template deletion is eval-only and small.  The
+machine-local provenance runner is not committed.  No nontrivial work was done
+outside the objective; adjacent findings are explicitly deferred above.
+
+* Learnings
+
+- “Owned elsewhere” can be removable for this model, but only with direct
+  natural and capability evidence for both rendered roles.
+- Functional pass rate and latency are separate user-facing outcomes; both need
+  preregistered per-node gates.
+- Statistical definitions must be explicit.  “Median” and a percentile method
+  are not interchangeable for even sample counts.
+- A local reviewer that recomputes evidence can catch a conclusion-changing
+  defect that prose-only review misses.
+- Scope discipline preserved the experiment: real timeout and nightly-runner
+  defects are reported with risk/value instead of becoming unrelated P2 code.
+
+* Changelog
+
+- Revisions 1-5: preregistered scope, corrected delegate topology, narrowed the
+  deletion, added direct delegate coverage, and made focused runs fail closed.
+- Revisions 6-9: repaired evidence capture, ran the 70/70 baseline, applied the
+  exact deletion, and recorded its deterministic census.
+- Revisions 10-14: stopped candidate 1 on a full failure, tested and rejected a
+  provisional sentence, and used a matched 10/10 reference to avoid false
+  attribution.
+- Revisions 15-19: qualified candidate 3 through 70/70 primary passes and
+  reported the timeout diagnostic separately.
+- Revisions 20-24: explored candidate 4 after an erroneous nearest-rank p50
+  interpretation and stopped its final cohort after six repetitions.
+- Revision 25: local correctness review recovered the preregistered conventional
+  median, recomputed every node, accepted candidate 3, restored its exact prompt
+  and census pins, and classified candidate 4 as an invalid extension rather
+  than evidence against P2.
+- Revision 26: Pierre's PR review found an empty synchronous =Step 1= heading.
+  Made that async-only with its body, proved the qualified async rendering was
+  byte-identical, passed the affected delegate-skill behavior 3/3, and refreshed
+  the deterministic census identities.

@@ -1,8 +1,9 @@
 """Deterministic census of Assist's final model requests and capabilities.
 
-P0 is deliberately test-side.  The recorder keeps ChatOpenAI's real provider
-profile and tool binding, but replaces network inference with scripted synthetic
-responses.  No production constructor accepts an observer or census flag.
+The census is deliberately test-side.  The recorder keeps ChatOpenAI's real
+provider profile and tool binding, but replaces network inference with scripted
+synthetic responses.  No production constructor accepts an observer or census
+flag.
 """
 from __future__ import annotations
 
@@ -1684,10 +1685,10 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "c8853dc566ad691ea9406fc2c42dcb01298ba24193fd0f81a3b8677205d0afef",
     },
     "assist/templates/deepagents/general_instructions.md.j2": {
-        "0d6dc9a523fa1c91fda3c8bf6727795aba1ac037130e3646a04951fdbf9589ea",
-        "56fe738ea8acb05cc69b67228878da825bfe1e2cbbc0b989b5740d9226fb27c0",
-        "5907ddd30780b9ddc4f2d7a43ef7cec427d5715217ffab369975852bb6d6017a",
-        "b6e9337cc8eba732cd574fe2c1544451397b9df6709f1d5bd13071747a26838c",
+        "102082e634233200a9b0fc4c0240ac93b6afc7e922fba97ffec254ea7f82eafd",
+        "1b8e35f63bf4be8dd8676e477a084171d0ee50e01e812656c4ab594024ba3629",
+        "1e9fb38a54b05e59da69f1199c231a8dacba1c6500a609c4603196cc9a51b5e7",
+        "3c8878748692f95d9490f931e3c24ec2b0bb85134abb9d5067602df829966b5a",
     },
     "assist/templates/deepagents/research_instructions.txt.j2": {
         "379e55c61addf130f00a29a6221f16de89964e23b5c1e98cf9746f38211fb071",
@@ -1730,7 +1731,6 @@ _CLAIM_SPECS = (
     (None, "positive", "list_async_tasks", "call `list_async_tasks` or `check_async_task`"),
     (None, "positive", "update_async_task", "steer it with `update_async_task`"),
     (None, "positive", "cancel_async_task", "stop it with `cancel_async_task`"),
-    (None, "positive", "write_todos", "use the `write_todos` tool to outline your plan"),
     (None, "positive", "task", "call BOTH in parallel via the `task` tool"),
     (None, "positive", "edit_file", "ADD new content using `edit_file`"),
     (None, "positive", "write_todos", "You have access to the `write_todos` tool"),
@@ -1976,7 +1976,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "0bd66ea6ebf2e1f2c9def50c3ed5f54c6dce1bc27c98af61337fdac7033b865e"
+    "7a18b7265e11b5a8447a49e6a1ad26e11d638a10963761dded4eae4fa7793d76"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

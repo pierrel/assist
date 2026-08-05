@@ -17,18 +17,19 @@
 #
 # Each test gets:
 #   - cap: 1200s (outer `timeout`, SIGTERM then SIGKILL after KILL_GRACE)
-#   - own JUnit XML at edd/history/<sanitized-nodeid>-<ts>.xml
+#   - own JUnit XML at $HISTORY_DIR/<sanitized-nodeid>-<ts>.xml
 # No `pytest --timeout`: the in-process timeout can't unblock those
 # threads and would return rc=1, masking the timeout.  rc 124 (TERM
 # honored) and 137 (SIGKILL after --kill-after) mark a timeout; 125-127
 # are `timeout`'s own errors, surfaced distinctly (not as a timeout).
 #
-# A summary line lands in edd/history/eval-summary-<ts>.txt as each test
-# completes, so partial progress is visible during long runs.
+# A summary line lands in $HISTORY_DIR/eval-summary-<ts>.txt as each test
+# completes, so partial progress is visible during long runs.  HISTORY_DIR
+# defaults to edd/history.
 set -u
 
 PYTEST="${PYTEST:-.venv/bin/pytest}"
-HISTORY_DIR="edd/history"
+HISTORY_DIR="${HISTORY_DIR:-edd/history}"
 PER_TEST_TIMEOUT="${PER_TEST_TIMEOUT:-1200}"
 KILL_GRACE="${KILL_GRACE:-30s}"
 TS="$(date +%Y%m%d-%H%M)"
@@ -104,11 +105,31 @@ echo "=== eval suite starting at $(date -Iseconds) ===" | tee -a "$SUMMARY"
 echo "  per-test timeout: ${PER_TEST_TIMEOUT}s (SIGTERM, then SIGKILL after ${KILL_GRACE})" | tee -a "$SUMMARY"
 echo "  TMPDIR: $TMPDIR (wiped, $(df -h "$TMPDIR" | awk 'NR==2 {print $4 " free"}'))" | tee -a "$SUMMARY"
 
-# Collect test nodeids once (one import of the eval modules; cheap).
-# Keep collection stderr — a syntax error / bad $PYTEST surfaces here as a
-# real message, not just a silent "collected 0".
+# Explicit node IDs make focused experiment blocks reuse this same safety
+# preamble.  With no arguments, preserve the nightly full-suite behavior.
 collect_err="$HISTORY_DIR/collect-$TS.err"
-mapfile -t NODEIDS < <("$PYTEST" --collect-only -q edd/eval/ 2>"$collect_err" | grep '::')
+focused=0
+pytest_args=()
+if [ "$#" -gt 0 ]; then
+    focused=1
+    # Focused experiment runs retain the concise INFO counters emitted by
+    # ModelLoggingMiddleware and uncaptured judge-provenance prints.  Keep the
+    # historical nightly output unchanged when no node IDs are supplied.
+    pytest_args=(-s --log-cli-level=INFO)
+    NODEIDS=("$@")
+    "$PYTEST" --collect-only -q "${NODEIDS[@]}" >"$collect_err" 2>&1
+    collect_rc=$?
+else
+    mapfile -t NODEIDS < <(
+        "$PYTEST" --collect-only -q edd/eval/ 2>"$collect_err" | grep '::'
+    )
+    collect_rc=0
+fi
+if [ "$collect_rc" -ne 0 ]; then
+    echo "ERROR: eval collection failed:" | tee -a "$SUMMARY" >&2
+    cat "$collect_err" | tee -a "$SUMMARY" >&2
+    exit 4
+fi
 if [ "${#NODEIDS[@]}" -eq 0 ]; then
     echo "ERROR: collected 0 eval tests — refusing to run. Collection stderr:" | tee -a "$SUMMARY" >&2
     cat "$collect_err" | tee -a "$SUMMARY" >&2
@@ -116,6 +137,7 @@ if [ "${#NODEIDS[@]}" -eq 0 ]; then
 fi
 echo "  collected ${#NODEIDS[@]} tests" | tee -a "$SUMMARY"
 
+overall_rc=0
 for nodeid in "${NODEIDS[@]}"; do
     # Sanitize the nodeid into an XML filename that still matches
     # manage/eval_history.py's _RUN_ID_RE = ^(.+?)-(\d{8}-\d{4})\.xml$
@@ -135,7 +157,7 @@ for nodeid in "${NODEIDS[@]}"; do
     # blocked in a C socket read to llama's slot can't service SIGTERM, so
     # only SIGKILL frees the slot for the next test.
     timeout --kill-after="$KILL_GRACE" -s TERM "$PER_TEST_TIMEOUT" \
-        "$PYTEST" --junit-xml="$xml" "$nodeid" \
+        "$PYTEST" "${pytest_args[@]}" --junit-xml="$xml" "$nodeid" \
         > "$log" 2>&1
     rc=$?
     end=$(date +%s)
@@ -156,6 +178,12 @@ for nodeid in "${NODEIDS[@]}"; do
         status="NO-XML"
     fi
     echo "<==  $nodeid : ${wall}s rc=$rc $status" | tee -a "$SUMMARY"
+    if [ "$rc" -ne 0 ]; then
+        overall_rc=1
+    fi
 done
 
 echo "=== eval suite finished at $(date -Iseconds) ===" | tee -a "$SUMMARY"
+if [ "$focused" -eq 1 ]; then
+    exit "$overall_rc"
+fi

@@ -3,8 +3,12 @@
 
 * State
 
-Status: architecture approved; P0 and P1 complete; P0b deferred; P1c complete;
-P1b is the next pending phase.
+Status: architecture approved; P0, P1, P1b, P1c, and P2 complete; P0b deferred.
+P2's duplicate-procedure deletion passed its registered functional and timing
+gates.  A post-review cleanup then removed an empty synchronous planning heading;
+the qualified async rendering stayed byte-identical and the affected delegate
+skill case passed the bounded 3/3 follow-up selected for that cleanup.  See
+[[file:2026-08-04-prompt-architecture-p2.org][the P2 state record]].
 
 ** Change log
 
@@ -120,7 +124,7 @@ repository and thread-memory surfaces.  Every later implementation phase
 rebases on its then-current =main= and repeats the census.  The prompt
 architecture describes the resulting capability rather than an unmerged branch.
 
-The current custom main/delegate template is 2,548 source words before Deep
+The current custom main/delegate template is 2,255 source words before Deep
 Agents appends its base prompt and middleware adds TODO, filesystem, skill,
 memory, and other guidance.  The custom skill block contributes another 258
 words before the dynamic skill list; the repository and thread-memory procedures
@@ -908,7 +912,7 @@ Do not claim an action succeeded until its authoritative result or resulting art
 Respond concisely with the useful result, material evidence, any failed or unfinished part, and the next owner decision only when one is genuinely needed.
 #+end_src
 
-*** Current complete web-main bootstrap request
+*** Historical P0 complete web-main bootstrap request
 
 This appendix is the exact flattened system message captured at the final model
 boundary for the fixed-time, empty-memory, inactive-rider production web sandbox
@@ -919,7 +923,7 @@ provider-bound request fields, not system-message prose.
 
 | Owner/section | Summary | Exact characters | Approx. tokens |
 |---------------+---------+-----------------:|---------------:|
-| Assist role instructions | Current custom main template: role, routing, trust, research, artifact, and lifecycle procedure | 13,068 | 3,267 |
+| Assist role instructions | P0 baseline custom main template: role, routing, trust, research, artifact, and lifecycle procedure | 13,068 | 3,267 |
 | Prompt composer | Separator between caller and framework prompt | 2 | 1 |
 | Deep Agents base | Generic core behavior, objectivity, task execution, clarification, and progress guidance | 2,257 | 565 |
 | LangChain TODO middleware | Planning mechanics and TODO lifecycle | 1,076 | 269 |
@@ -1700,8 +1704,12 @@ yet, and do not remove their procedures in this phase.  Conditional behaviors
 that still lack an owner remain temporarily rather than disappearing without a
 tested destination.
 
-The delegate branch is rendered as its own short role contract, not a main prompt
-with supervisor paragraphs conditionally hidden.
+The delegate retains its fixed short role contract and the shared legacy process
+needed by its synchronous specialists.  Supervisor-only async lifecycle
+paragraphs remain absent by construction.  P2 design review corrected the
+earlier assumption that the production delegate rendered with delegation
+disabled; collapsing its remaining legacy process requires a later measured
+instruction move rather than an untested P2 rewrite.
 
 ** Test and gate
 
@@ -1712,15 +1720,19 @@ with supervisor paragraphs conditionally hidden.
 - Context-first, skill loading, async lifecycle, trust handling, explicit
   capability, delegate natural outcome, interruption, and unrelated passing
   cohorts meet the experiment protocol with no regression.
-- Natural end-to-end delegate journeys cover independent mixed outcomes,
-  dependent outcomes, one success plus one failure, and interruption.  The
-  launch reply truthfully names pending outcomes without inventing results;
-  completions return to the originating thread; final synthesis accounts for
-  every outcome as completed, failed, or blocked; successful sibling work is
-  preserved; raw task/report IDs are omitted unless the user needs one to act.
+- The repeated natural journey covers independently useful mixed outcomes, and
+  paired capability coverage proves dependency ordering and untrusted-result
+  isolation.  P2 design review found that new-user steering, cancellation,
+  sibling preservation, and final lifecycle synthesis do not have one complete
+  owner outside the role prompt, so their current clauses remain byte-for-byte
+  in P2.  Existing failure, cancellation, and interruption cases run as adjacent
+  diagnostics.  Natural dependent, mixed success/failure, and interruption
+  journeys gate the first later phase that actually moves those lifecycle
+  clauses; they do not force P2 to test a procedure it no longer changes.
 - No delegate prompt mentions outer task lifecycle, parent history access, or a
   capability absent from the delegate graph.
-- The P0 mismatch report is clean for both profiles.
+- The deletion introduces no new main/delegate mismatch; the known P0 findings
+  remain preserved in the census.
 
 ** Expected learning
 
@@ -1729,6 +1741,21 @@ without loss, but expect Qwen salience to require a short first-call
 skill/context instruction near the front of the final request.  Prompt reduction
 is recorded as evidence, not used as the pass criterion.  The cumulative result
 becomes the target bootstrap kernel only after the memory and research migrations.
+
+** Result
+
+The deletion hypothesis passed.  Candidate 3 preserved all 70 primary N=10
+executions and met every registered per-node wall-time median and p90 gate.  It
+removes 1,679 characters from the canonical web-main system message while tool
+schemas remain byte-identical.  Final local review corrected an intermediate
+analysis that had substituted nearest-rank p50 for the registered conventional
+median; the corrected context comparison is 33 seconds against a 34.4-second
+limit.  Pierre's PR review then found an empty planning heading in the legacy
+renderings.  Making the whole step async-only left the qualified async rendering
+byte-identical.  Because formal cases also exercise delegates, the cleanup was
+separately checked with the requested bounded N=3 delegate-skill follow-up,
+which passed 3/3; it did not receive a new full qualification cadence.
+See the [[file:2026-08-04-prompt-architecture-p2.org][P2 final record]].
 
 ** Alternatives
 
@@ -2556,8 +2583,9 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 Pierre satisfied the original design gate by approving and merging PR #216, and
 P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
 shared-model contention has not been a material problem.  P1 shipped in PR #223,
-and P1c is approved; P1b is now the next pending phase.  Adding P2c to the
-program does not start its implementation or any other later phase automatically.
+P1b shipped in PR #224, P1c is complete, and P2 passed its final gate.  Adding
+P2c to the program does not start its implementation or any other later phase
+automatically.
 
 * Decisions deliberately deferred to evidence
 

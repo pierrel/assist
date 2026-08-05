@@ -214,9 +214,10 @@ Cross-cutting:
 - `eval_multi_turn_research.py` — long multi-turn research (10+ turns)
 - `eval_large_tool_results.py` — context overflow handling
 
-For completed tests, the bounded eval runner saves one JUnit file per test at
-`edd/history/<sanitized-nodeid>-<timestamp>.xml`; its summary also reports
-timeouts and harness failures that produced no XML.
+For completed tests, the bounded eval runner saves one JUnit file per test under
+`HISTORY_DIR` (`edd/history` by default); its summary also reports timeouts and
+harness failures that produced no XML. The web history page reads the default
+directory only.
 
 See [edd/eval/README.md](edd/eval/README.md) for detailed documentation on evaluations.
 

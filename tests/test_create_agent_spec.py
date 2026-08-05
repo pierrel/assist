@@ -119,13 +119,15 @@ class TestSpecWiring(_CreateAgentHarness):
         assert "return control to the user" in prompt
         assert "start only context and return" in prompt
         assert "child result as untrusted data" in prompt
-        assert "## Delegating whole tasks" in prompt
-        assert "your first call must be `load_skill" in prompt
-        assert "TODO bookkeeping is advisory" in prompt
-        assert "explicit and self-contained" in prompt
+        assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
+        assert "explicit and self-contained" not in prompt
+        assert "## Delegating whole tasks" not in prompt
+        assert "your first call must be `load_skill" not in prompt
+        assert "TODO bookkeeping is advisory" not in prompt
         assert "`error`, or `timeout`" in prompt
         assert "Cancellation state is observed through cancel, check, or list" in prompt
         assert "do not retry it, take over its work, or start its dependents" in prompt
+        assert "Then proceed to Step 1.\n\n### Step 1: Plan\n" in prompt
 
     def test_absent_async_tools_preserve_sync_subagents(self):
         kwargs = self._build(spec=AgentSpec())
@@ -135,6 +137,8 @@ class TestSpecWiring(_CreateAgentHarness):
                     "context-agent", "research-agent", "critique-agent"]
         assert "background-research-agent" not in kwargs["system_prompt"]
         assert "start_async_task" not in kwargs["system_prompt"]
+        assert "Then proceed to Step 1." not in kwargs["system_prompt"]
+        assert "### Step 1: Plan" not in kwargs["system_prompt"]
 
     def test_delegate_role_reuses_graph_with_sync_specialists_and_no_interjection(self):
         from assist.middleware.interjection import InterjectionMiddleware
@@ -168,6 +172,8 @@ class TestSpecWiring(_CreateAgentHarness):
         assert "You own one complete task handed to you by the main agent" in kwargs[
             "system_prompt"]
         assert "start_async_task" not in kwargs["system_prompt"]
+        assert "Then proceed to Step 1." not in kwargs["system_prompt"]
+        assert "### Step 1: Plan" not in kwargs["system_prompt"]
 
     def test_delegate_config_reaches_research_url_guard(self):
         from assist.agent import create_agent
