@@ -17,14 +17,15 @@
 #
 # Each test gets:
 #   - cap: 1200s (outer `timeout`, SIGTERM then SIGKILL after KILL_GRACE)
-#   - own JUnit XML at edd/history/<sanitized-nodeid>-<ts>.xml
+#   - own JUnit XML at $HISTORY_DIR/<sanitized-nodeid>-<ts>.xml
 # No `pytest --timeout`: the in-process timeout can't unblock those
 # threads and would return rc=1, masking the timeout.  rc 124 (TERM
 # honored) and 137 (SIGKILL after --kill-after) mark a timeout; 125-127
 # are `timeout`'s own errors, surfaced distinctly (not as a timeout).
 #
-# A summary line lands in edd/history/eval-summary-<ts>.txt as each test
-# completes, so partial progress is visible during long runs.
+# A summary line lands in $HISTORY_DIR/eval-summary-<ts>.txt as each test
+# completes, so partial progress is visible during long runs.  HISTORY_DIR
+# defaults to edd/history.
 set -u
 
 PYTEST="${PYTEST:-.venv/bin/pytest}"

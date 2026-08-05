@@ -3,8 +3,9 @@
 
 * State
 
-Status: architecture approved; P0, P1, P1b, and P1c complete; P0b deferred; P2
-implementation and qualification are in progress.  See
+Status: architecture approved; P0, P1, P1b, P1c, and P2 complete; P0b deferred.
+P2's duplicate-procedure deletion passed its registered functional and timing
+gates.  See
 [[file:2026-08-04-prompt-architecture-p2.org][the P2 state record]].
 
 ** Change log
@@ -121,8 +122,7 @@ repository and thread-memory surfaces.  Every later implementation phase
 rebases on its then-current =main= and repeats the census.  The prompt
 architecture describes the resulting capability rather than an unmerged branch.
 
-The P0/P2 baseline custom main/delegate template was 2,548 source words; the
-current P2 candidate is 2,272 source words before Deep
+The current custom main/delegate template is 2,255 source words before Deep
 Agents appends its base prompt and middleware adds TODO, filesystem, skill,
 memory, and other guidance.  The custom skill block contributes another 258
 words before the dynamic skill list; the repository and thread-memory procedures
@@ -1739,6 +1739,16 @@ skill/context instruction near the front of the final request.  Prompt reduction
 is recorded as evidence, not used as the pass criterion.  The cumulative result
 becomes the target bootstrap kernel only after the memory and research migrations.
 
+** Result
+
+The deletion hypothesis passed.  Candidate 3 preserved all 70 primary N=10
+executions and met every registered per-node wall-time median and p90 gate.  It
+removes 1,679 characters from the canonical web-main system message while tool
+schemas remain byte-identical.  Final local review corrected an intermediate
+analysis that had substituted nearest-rank p50 for the registered conventional
+median; the corrected context comparison is 33 seconds against a 34.4-second
+limit.  See the [[file:2026-08-04-prompt-architecture-p2.org][P2 final record]].
+
 ** Alternatives
 
 If a removed rule causes a targeted regression and no skill yet owns it, restore
@@ -2565,8 +2575,9 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 Pierre satisfied the original design gate by approving and merging PR #216, and
 P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
 shared-model contention has not been a material problem.  P1 shipped in PR #223,
-P1b shipped in PR #224, P1c is complete, and P2 is now in qualification.  Adding P2c to the
-program does not start its implementation or any other later phase automatically.
+P1b shipped in PR #224, P1c is complete, and P2 passed its final gate.  Adding
+P2c to the program does not start its implementation or any other later phase
+automatically.
 
 * Decisions deliberately deferred to evidence
 

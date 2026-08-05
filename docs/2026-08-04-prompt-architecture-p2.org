@@ -1,845 +1,236 @@
-#+title: Prompt architecture P2: remove duplicate main and delegate procedure
-#+date: 2026-08-04
+#+title: P2 duplicate role-prompt deletion experiment
+#+date: <2026-08-04>
 
-* Status
+* Final status
 
-Candidate 3 passed all 70 primary N=10 executions, but it missed the registered
-context timing gate: the context invocation median was 33 seconds versus a
-30.8-second limit, and its median model-call count rose from 4 to 6.  This is
-directly related to candidate 3's only context-facing wording change, so that
-candidate is rejected rather than waived.  Candidate 4 restores the exact
-baseline context-first sentence while retaining the duplicate skill,
-delegation, and TODO deletion.  Because this is acceptance-affecting prompt
-text, candidate 4 restarts N=3/N=5/N=10 under the unchanged cohort and gates.
+P2 passed.  Candidate 3 preserved all 70 primary functional executions and met
+every preregistered per-node timing gate.  It removes 1,679 characters of
+duplicate procedure from the shared main/delegate template without adding
+production code.
 
-Candidate 3's pre-existing timeout-dependency defect passed 3/10 versus its
-7/10 matched baseline.  The preregistered auxiliary comparison therefore also
-missed.  Scope review classifies that real defect as deferred and rejects its
-attribution as a P2 blocker because its prompt clause, skill owner, and eval are
-byte-identical across arms.
+A final local correctness review caught a calculation defect before PR: the
+intermediate analysis had used nearest-rank p50 even though the preregistration
+specified the conventional median and identified nearest-rank only for p90.
+Using the registered statistic, candidate 3's context median is 33 seconds
+against a 34.4-second limit, not against the erroneous 30.8-second limit.  The
+later candidate 4 work is retained in private logs as an invalid post-result
+extension, but it does not determine P2's outcome.
 
-Candidate 4 is frozen at =0b42166=.  Its fresh N=3 passed all 21 primary
-executions.  The restored sentence did not remove the small-sample context
-timing signal: that node's 42-second median remains above the 30.8-second final
-bound.  N=3 timing is diagnostic by preregistration, so post-N=3 review decides
-whether any concrete defect requires a change before the unchanged N=5.  That
-review found no directly attributable candidate defect or new failure class:
-the long context traces reproduce baseline long-tail behavior, every functional
-contract passed, and the exact baseline context-first sentence is restored.
-Candidate 4 therefore proceeds unchanged to N=5.
+* Objective and boundaries
 
-Candidate 4 N=5 passed all 35 primary executions.  The natural journey's
-161-second median exceeds its 154.4-second limit, and the context journey's
-34-second median exceeds its 30.8-second limit; both p90 observations remain
-inside their limits.  The natural journey also used 24 tool calls in every
-repetition versus baseline p50/p90 of 18/19.  The timeout diagnostic passed
-4/5.  These are registered signals, not waived results.  Candidate 4 pauses
-for focused attribution review before any final N=10 execution.  That review
-found no final objective-affecting defect at the intermediate gate and selected
-decision A: proceed unchanged to the preregistered N=10 decision after the GPU
-cooldown.
+The hypothesis was that Qwen could preserve skill selection, first-turn
+grounding, delegation, and TODO behavior after duplicate procedure was removed
+from =assist/templates/deepagents/general_instructions.md.j2=, because skills,
+tool descriptions, and framework middleware already owned that procedure.
+Prompt reduction was evidence, not the acceptance criterion.
 
-P2 starts from merged =main=
-=fae75c2332cfea40f251de378be453d1b99d52ec=.  Its intended-behavior boundary
-is approved =edd/product-policy.org= review revision 3, SHA-256
-=9c5fcf79030cb5307e4f7dc1440d300a597c5efc683f762206e4747ff4ef3067=.
-Natural cases grade useful visible outcomes, truthfulness, control,
-authorization, and non-regression.  They do not require a hidden tool, skill,
-delegate, prompt location, or return shape.  Separately labelled capability and
-deterministic security/state cases retain exact mechanism contracts.
+P2 changes no tool, schema, middleware, constructor, runtime state, memory,
+research, development guidance, SMS triage, Pi design, P2b tool disclosure, or
+P2c skill-description lifecycle.  It adds no production Python, registry,
+feature flag, or prompt composer.
 
-* Objective and scope
+Design review kept the async lifecycle and child-result trust paragraphs.  No
+other source completely owns cross-turn reconciliation, steering, cancellation
+truth, sibling preservation, and terminal synthesis.  Moving that procedure
+requires a separate measured objective.
 
-Remove only shared-template procedure with a proven sole owner in an existing
-skill or framework middleware.  Preserve the policy outcomes and the small
-model's ability to choose the next instruction source.  Prompt reduction is
-evidence, not the gate.
+* Controlled change
 
-The production change is one file:
-=assist/templates/deepagents/general_instructions.md.j2=.  Small eval-only
-changes exercise the delegate shape, freeze explicit P2 prompt time, and let the
-existing eval runner select nodes and aggregate their status.  Two deterministic
-prompt-shape expectations change with the deleted block.  This record plus the
-overall design and roadmap receive result/status updates.  P2 changes no tool,
-schema, middleware, constructor, runtime state, model setting, memory, or research
-behavior,
-development guidance, SMS triage, Pi design, P2b tool disclosure, or P2c skill
-description suppression.  It adds no registry, feature flag, prompt composer,
-or production Python.  The deployed Jinja template already reloads for new
-turns.
+The candidate deletes three duplicate groups from the shared role template:
 
-* Review correction: what remains
-
-The first design review found that the proposed async deletion was too broad.
-The completion-wake producer owns “check this task before responding,” and tool
-descriptions own each operation's immediate contract, but no other source owns
-all of these cross-turn behaviors: inspect outstanding work after new user
-input; deliberately keep, steer, or stop it; preserve successful siblings;
-report cancellation-request versus cancellation truthfully; and synthesize
-terminal states.  Those exact lifecycle and child-result trust paragraphs stay
-unchanged in P2.  Their future home requires its own measured experiment.
-
-Research, memory, development, task-file, append/file-creation, context-first,
-urgent notification, workspace, text-only, authority, and unavailable-capability
-instructions also stay unchanged.  The current delegate is a legacy-mode shared
-Assist graph with synchronous specialists, not a delegation-disabled graph; it
-therefore receives the shared process.  P2 removes duplicates from both rendered
-roles but does not collapse the delegate to an untested minimal kernel.
-
-* Exact controlled change
-
-P0 measured the canonical web-main Assist section at 13,068 characters inside a
-31,279-character system message; tool schemas brought the synthetic bootstrap
-to 59,316 characters.  Raw comparison data remains under the home partition at
-=~/deploy/assist/prompt-census/p0-100aa885-final-v2/=.
-
-Rejected candidates 1 and 3 applied the patch below after baseline.  Candidate
-4 applies the same deletion except that the baseline context-first sentence is
-retained unchanged, as shown after the patch.  No wording is left to
-implementation judgment.
-
-#+begin_src diff
-@@
--{% if agent_role == "main" and delegation_mode == "async" %}
--## Delegating whole tasks
--
--When the latest request asks for two or more separately useful outputs, or for one
--stage after another, your first call must be `load_skill(name="complex-request")`
--before reading, writing, planning, or starting work. This overrides another matching
--skill's normal first-call rule; do not load a domain skill merely to delegate, because
--each delegate loads the skills its own outcome needs. Make the skill load the only call
--in that response; act after its body returns. The skill defines how to combine
--outcome-based TODOs with `delegate-agent`. The requested results and workspace
--evidence are the goal; TODO bookkeeping is advisory. Every subagent request must be
--explicit and self-contained because a subagent receives no parent conversation history.
--{% endif %}
--
-@@
--**1. Skill check — your FIRST tool call this turn.** If the user's latest message mentions any keyword, file extension, filename, or topic from a description in the **Skills** section below, your FIRST tool call MUST be `load_skill(name="<matched skill>")` — before `write_todos`, `ls`, `read_file`, `edit_file`, `execute`, or research.
--
--{% if agent_role == "main" and delegation_mode == "async" %}Multiple deliverables or dependent stages always match `complex-request`; load it alone before inspecting their files.{% endif %}
--
- In particular: if the message mentions code, a software project, a repo, a codebase, a function, a class, a method, a module, a test, TDD, a refactor, a bug, debugging, fixing, implementing, a feature, or any project-file name (`pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Makefile`, `Dockerfile`) — call `load_skill(name="dev")`. The word *project* by itself counts. When in doubt, call `load_skill(name="dev")`.
-@@
--### Step 1: Plan
--{% if delegation_mode == "async" %}If Step 0 started a task, start any other independent tasks the request needs, report their IDs, and return. Plan and act after a completion wake provides the needed context.{% else %}After Step 0, use the `write_todos` tool to outline your plan, then execute each step.{% endif %}
-+### Step 1: Plan
-+{% if delegation_mode == "async" %}If Step 0 started a task, start any other independent tasks the request needs, report their IDs, and return. Plan and act after a completion wake provides the needed context.{% endif %}
-@@
--### Step 4: Clean Up
--- Mark your internal todos as complete
--- Respond to the user summarizing what you did
-+### Step 4: Clean Up
-+- Respond to the user summarizing what you did
-
- ## Rules
--- Step 0 is non-negotiable: if the user's message matches any skill description, you MUST call `load_skill` before any work tool. Skipping the skill check and trying to do the work directly produces silently wrong output.
-@@
--## Internal Todos vs User Tasks
--- The `write_todos` tool is for YOUR internal step tracking only
-+## User Tasks
- - User tasks must be stored in THEIR task files — ask the context-agent to find the correct location
- - If the user's message implies a task, add it to their task file with clear, actionable details
-#+end_src
-
-Candidate 4 retains this baseline sentence byte-for-byte:
-
-#+begin_src markdown
-**2. Local context — your SECOND tool call, on the FIRST turn of a thread.** After the skill check completes (a *separate* call), and *even if you just loaded a skill*, dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
-#+end_src
-
-The candidate updates =test_subagent_tools_select_asynchronous_prompt=, which
-previously required the long block, and
-=test_p0_appendix_and_p2_summary_match_the_current_capture=, which pins the
-current census.  Both require the retained trigger and absence of the duplicate
-prose.
-
-#+begin_src diff
-@@
--        assert "## Delegating whole tasks" in prompt
--        assert "your first call must be `load_skill" in prompt
--        assert "TODO bookkeeping is advisory" in prompt
--        assert "explicit and self-contained" in prompt
-+        assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
-+        assert "## Delegating whole tasks" not in prompt
-+        assert "your first call must be `load_skill" not in prompt
-+        assert "TODO bookkeeping is advisory" not in prompt
-+        assert "explicit and self-contained" not in prompt
-#+end_src
-
-Candidate 1's N=3 failure below triggered a post-observation provisional
-smallest-sentence fallback.  Rejected candidate 2 differed from that patch only
-here:
-
-#+begin_src diff
-@@
--{% if agent_role == "main" and delegation_mode == "async" %}ROUTE COMPLEX REQUESTS FIRST: if the latest request has multiple deliverables or dependent stages, make `load_skill(name="complex-request")` your only first call. Do not inspect inputs first.{% endif %}
-+{% if agent_role == "main" and delegation_mode == "async" %}ROUTE COMPLEX REQUESTS FIRST: if the latest request has multiple deliverables or dependent stages, make `load_skill(name="complex-request")` your only first call. Do not inspect inputs first. Every subagent request must be explicit and self-contained because a subagent receives no parent conversation history.{% endif %}
-@@
-         assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
--        assert "explicit and self-contained" not in prompt
-+        assert prompt.count("explicit and self-contained") == 1
-#+end_src
-
-The review-registered reference below did not reproduce the failure, so
-candidate 3 removes this provisional delta and returns to the exact
-candidate-1 patch above.
-
-The top-of-request one-line =complex-request= first-call trigger stays as the
-existing measured Qwen routing exception.  The development trigger and exact
-context-first sentence stay unchanged in candidate 4.  The latter is a measured
-exception: candidate 3's weakened replacement passed selection but added enough
-long routes to miss the registered median timing gate.
-
-| Removed clause | Sole surviving owner |
+| Deleted group | Existing owner |
 |-
-| Generic match/load/apply instructions at first call and in repeated rules | =SmallModelSkillsMiddleware= prompt and =load_skill= tool |
-| Long multi-outcome/dependency/TODO/delegate recipe and its second trigger | =assist/main_skills/complex-request/SKILL.md=; the short front trigger only chooses that source |
-| Mandatory generic TODO planning and cleanup | LangChain =TodoListMiddleware= system prompt and =write_todos= tool |
+| Long complex-request routing, delegation, and TODO recipe | =assist/main_skills/complex-request/SKILL.md= plus the retained short front trigger |
+| Generic first-call skill-match/load/apply instructions repeated around the process | =SmallModelSkillsMiddleware= and the =load_skill= tool |
+| Generic TODO planning, cleanup, and internal-versus-user TODO explanation | LangChain =TodoListMiddleware= and the =write_todos= tool |
 
-The candidate does not remove or relocate the before-edit skill check, final
-completion account, concrete async lifecycle, trust, research, memory, dev,
-filesystem-result, or user-task procedure.
+It retains the development trigger, before-edit skill check, final completion
+account, user-task procedure, and complete async lifecycle/trust rules.  The
+context-first instruction becomes shorter but keeps its ordering: after any
+matching skill, dispatch the context agent on the first substantive turn.
 
-* Hypothesis
+The accepted candidate changes the canonical web-main request as follows:
 
-Qwen will preserve matching skill use, first-turn grounding, delegate skill use,
-natural multi-outcome artifacts, and explicit fan-out/dependency capability when
-the duplicated procedure above is removed, because the same final request still
-contains the sole owners.  We expect no new model/tool round trip because the
-change only deletes prompt text and keeps all graph composition and tools.
-
-* Preregistered experiment
-
-** Frozen variables and baseline
-
-- The behavioral baseline uses production bytes from =fae75c2= plus the
-  reviewed eval-only delegate case and this state document.  Candidate differs
-  from that baseline only in the exact template patch above.
-- Baseline and candidate use the same served model, model settings, skills,
-  tools, middleware, fixtures, validators, and judge prompt.
-- Because earlier P1b logs did not preserve a comparable final rendered prompt
-  identity, P2 does not reuse them as its formal baseline.  It runs a fresh N=10.
-- Any acceptance-affecting prompt or eval change restarts candidate N=3/N=5/N=10.
-- Logs live under mode-0700 =$HOME/deploy/assist/eval/p2/= with mode-0600 files.
-  Eval scratch lives under =$HOME/deploy/assist/tmp/eval=.  Nothing raw is stored
-  on the small root partition, in =/var=, or in the repository.
-- Each sample records source SHA, arm, repetition, exact nodes, provider-default
-  unset seed, hashes of the template, skills, tools, fixtures, validators, and
-  judge rubric, fixed-time rendered role-prompt fingerprints, served subject and
-  judge model provenance, per-node and block wall time, JUnit/model-log paths,
-  return code, and rerun identity.  Failed infrastructure attempts are preserved
-  and excluded until diagnosed.  A fixed-time P0 capture records the complete
-  final main/delegate request for each arm; the live clock is the only normalized
-  dynamic field.
-
-** Exact repeated cohort
-
-| Node | Layer | Contract |
+| Request component | Baseline characters | Candidate characters |
 |-
-| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_starts_subagents_and_returns_without_polling= | deterministic-security/state | Truthful prompt return, visible task ID, no launch-turn poll or invented result |
-| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome= | natural | The four requested grounded reports exist; route is not graded |
-| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_delegate_fanout_capability= | capability | Explicit multi-outcome fan-out remains available |
-| =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_dependent_delegate_starts_after_prerequisite_completion= | capability | Explicit dependency handoff remains available and rejects injected child instructions |
-| =edd/eval/test_skill_loading.py::TestSkillLoading::test_implicit_skill_request= | capability | Legacy main loads the matching format skill and preserves the requested file |
-| =edd/eval/test_skill_loading.py::TestSkillLoading::test_delegate_implicit_skill_request= | capability | Production-shaped delegate loads the same skill and preserves the requested file |
-| =edd/eval/test_context_agent.py::TestContextInvocation::test_first_turn_substantive_invokes_context= | capability | First-turn local grounding remains salient |
+| Assist role instructions | 13,068 | 11,389 |
+| Complete system message | 31,279 | 29,600 |
+| Provider-bound tool schemas | 28,037 | 28,037 |
+| Bootstrap request plus schemas | 59,316 | 57,637 |
 
-The new delegate case is added before either arm, uses
-=AgentSpec(role="delegate")= with the existing production constructor, and reuses
-the same prompt, fixture, loaded-skill assertion, and final-file assertion as the
-legacy-main case.  It adds no production behavior or helper abstraction.
+The historical complete baseline remains in the P0 appendix of
+[[file:2026-07-26-agent-prompt-architecture.org][the overall architecture document]].  The accepted candidate's deterministic
+census artifact is 2,854,575 canonical bytes with SHA-256
+=f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4=.
 
-The lifecycle paragraphs remain unchanged, so cancellation/failure/steering are
-adjacent rather than stability gates for this deletion.  After the prompt edit,
-these exact nodes run at N=3 with the early diagnostic:
+* Experiment
 
-- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_completion_wake_checks_then_uses_result=;
-- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_user_stop_request_reports_cancellation_requested_for_running_tasks=;
-- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_timed_out_prerequisite_blocks_dependent_delegate=;
-- =edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_failed_sibling_preserves_success_and_blocks_join=;
-- =edd/eval/test_interjection.py::TestInterjection::test_redirect_mid_turn=;
-- =edd/eval/test_interjection.py::TestInterjection::test_incorporate_addition=; and
-- =edd/eval/test_interjection.py::TestInterjection::test_coalesce_two_rapid_interjections=.
+** Frozen inputs
 
-Any failure is a real finding and expands the repeated cohort before measurement
-continues; these diagnostics are not selectively rerun for a favorable result.
-The research-only prompt-injection file is excluded because it does not exercise
-this template.  Trust at the changed main/delegate seam remains covered by the
-injected child result in the dependency node and deterministic P0 census.
+- Formal baseline source: =b4cce1f=.
+- Accepted candidate source: =d7b09efd2686c7e5f58ac2cf370227a8ff14d24e=.
+- Accepted template SHA-256:
+  =a712057c0f1405cd48193b7badb9ffa4eb66f17ca12e519b8209b0aa9a4351dc=.
+- Baseline and candidate used the same served model, settings, tools, skills,
+  middleware, fixtures, validators, judge rubric, and fixed rendered time.
+- Any acceptance-affecting prompt or eval change restarted N=3/N=5/N=10.
+- Raw logs and scratch stayed under mode-restricted home-backed
+  =~/deploy/assist/eval/p2/= and =~/deploy/assist/tmp/eval=.  Nothing large was
+  written to the small root partition or repository.
+- The home-backed runner wrapped =scripts/run-evals.sh= and recorded source,
+  prompt, input hashes, model provenance, node IDs, wall times, model/tool
+  counts, return codes, JUnit, and logs.  Infrastructure failures were preserved
+  but excluded rather than silently becoming samples.
 
-** Execution and timing
+** Repeated primary cohort
 
-A reviewed machine-local runner at
-=$HOME/deploy/assist/eval/p2/run-block.sh=, mode 0700 and SHA-256
-=c6d59c5c4aa74cf7cda63ee7d5b616497111924d945493d237a14c6f6fa017cf=,
-is a fail-closed P2 provenance wrapper.  It creates a private home-backed run,
-fingerprints every directly relevant frozen input and the three rendered role
-prompts, then invokes the repository's existing =scripts/run-evals.sh=.  That
-script receives the minimal general improvement required by the program: when
-exact node IDs are supplied it runs only them, retains INFO-level model counters
-and judge provenance in the private per-node logs, and returns aggregate
-failure; with no arguments its nightly selection and historical zero exit
-remain unchanged.  The shared
-runner still owns scratch validation/locking, exact-mount orphan cleanup,
-per-node 1,200-second kill bounds, JUnit, and logs.  The invocation has a
-3,300-second outer cap.  The exact command is:
+The seven primary nodes were:
 
-#+begin_src shell
-WORKTREE="$PWD"
-AGENTIC_ROOT="$(realpath "$WORKTREE/../../..")"
-EXPECTED_SHA="d7b09efd2686c7e5f58ac2cf370227a8ff14d24e"
-NODES=(
-  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_starts_subagents_and_returns_without_polling
-  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_long_list_chooses_one_delegate_per_outcome
-  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_delegate_fanout_capability
-  edd/eval/test_async_subagents.py::TestAsyncSubagentSupervisor::test_explicit_dependent_delegate_starts_after_prerequisite_completion
-  edd/eval/test_skill_loading.py::TestSkillLoading::test_implicit_skill_request
-  edd/eval/test_skill_loading.py::TestSkillLoading::test_delegate_implicit_skill_request
-  edd/eval/test_context_agent.py::TestContextInvocation::test_first_turn_substantive_invokes_context
-)
-"$AGENTIC_ROOT/tools/agentic" resource run llm -- \
-  timeout --kill-after=30s 3300 env \
-  ARM="$ARM" ITER="$ITER" EXPECTED_SHA="$EXPECTED_SHA" \
-  WORKTREE="$WORKTREE" \
-  "$HOME/deploy/assist/eval/p2/run-block.sh" "${NODES[@]}"
-#+end_src
+1. natural launch of async work without polling;
+2. natural four-outcome artifact creation;
+3. explicit independent delegate fan-out capability;
+4. explicit dependent delegate ordering capability;
+5. implicit main-role skill loading and correct Org edit;
+6. implicit delegate-role skill loading and correct Org edit; and
+7. first-turn context dispatch.
 
-The shown SHA is the independently frozen candidate-3 source.  A different arm
-replaces it with that arm's pre-frozen literal before checkout; the command must
-never derive the expected value from the checkout it verifies.
+The natural journey graded requested files and their content, not hidden tool
+routing.  Explicit capability cases retained strict orchestration checks.
+Security/state diagnostics covered untrusted results, cancellation,
+interjections, mixed sibling outcomes, and timeout dependency blocking.
 
-Only =ARM= and =ITER= vary within an arm; =EXPECTED_SHA= is frozen after each
-baseline or candidate commit.
+** Registered gates
 
-Local review round 1 found that the first adjacent N=3 blocks used the prior
-runner SHA
-=506c2ca6e71250074f31892449abd933af7b6caf65a15b8f5ae79a5dfabf3916=,
-whose direct manifest omitted =edd/eval/test_interjection.py=.  Their clean
-source SHA still pins that file, so they remain diagnostic evidence rather than
-being discarded.  The current runner adds its direct hash; every later sample
-uses the current SHA.
+- Every primary natural node had to match its N=10 baseline and pass at least
+  70%; capability and deterministic security/state nodes had to pass 100%.
+- Each primary node independently had to keep conventional median wall time at
+  or below =baseline median * 1.2 + 2 seconds=.  Nearest-rank p90 had to remain
+  at or below =baseline p90 + 30 seconds=.
+- N=3 was diagnostic, followed by review; N=5 was intermediate; N=10 made the
+  final decision.  Aggregate success could not trade away one failed node.
+- Existing unit, census, syntax, and collection gates still had to pass.
 
-Before formal baseline, an uncounted N=3 timing pilot over the seven nodes
-records per-node p50/p90, expected subject turns/subagents and judge calls, and
-projected GPU minutes.  The formal sequence is baseline N=10; candidate N=3;
-local review; candidate N=5; candidate N=10.  Blocks stay below one hour and get
-roughly fifteen minutes of actual GPU rest.  If measured timing does not fit,
-split the frozen nodes across more blocks rather than changing the cohort.
+** Formal baseline and candidate
 
-Round 2 found that restoring the one self-contained-brief sentence was not yet a
-qualified measured exception.  Before candidate measurement continues, run a
-fresh N=10 reference at rejected candidate 1 =937168e= over only
-=test_natural_long_list_chooses_one_delegate_per_outcome=.  Candidate 2's normal
-stability N=10 executions of that same node are the matched candidate arm.  The
-sentence qualifies only if the reference reproduces at least one failure in the
-same class, a requested report field left empty, while candidate
-2 passes 10/10.  Other failure classes do not justify this sentence.  Both arms
-use the same frozen eval inputs, runner, fixed time, model settings, and
-provider-default sampling.  This comparison is registered after the early
-observation and is never described as preregistered.
+All 70 baseline and all 70 candidate primary executions passed.  The table uses
+the preregistered conventional median and nearest-rank p90.
 
-The timeout diagnostic was also preregistered as gating.  Extend its pre-deletion
-=b4cce1f= reference from N=3 to N=10, then run it in candidate N=5 and N=10.
-The final candidate N=10 pass count must be no lower than the matched baseline
-N=10 count.  This is an adjacent no-regression comparison, not a new requirement
-that pre-existing production behavior become perfect during P2.
-
-This paragraph preserves the preregistration.  Revision 18 later amends only
-its P2-blocking disposition under the user-directed scope policy after the
-comparison became mathematically impossible: the real, pre-existing defect is
-deferred because none of its prompt, skill, or eval inputs changed.  The result
-still runs to N=10 and remains reported as a failed auxiliary comparison.
-
-Per-node wall time, ModelLoggingMiddleware model-call/tool-call counts, and total
-journey time are matched across arms from the private logs.  The graph and tool
-set are byte-identical, so no code-created
-round trip exists; the launch and capability traces fail if model behavior adds
-polling, misses skill/context selection, or loses required work.  Candidate
-median time must remain within baseline plus 20% and two seconds, with p90 no
-more than thirty seconds over baseline.  An unrelated ordinary journey may add
-no model/tool round trip.  Provider contention is an infrastructure failure.
-
-** Timing pilot result
-
-The corrected uncounted pilot ran at source =d9f3b42= from 07:59 through 08:13
-PDT.  All 21 node executions passed.  Complete private artifacts are
-=timing-1-yGUlzx=, =timing-2-yOspg4=, and =timing-3-drOghF= under the P2 eval
-directory.  The earlier =timing-1-PPWqNB= attempt is preserved but excluded:
-pytest capture hid the middleware counters and judge provenance that the
-preregistered evidence requires.  Focused runs now retain those existing
-outputs; no production or acceptance behavior changed.
-
-With three samples, p90 below is the nearest-rank observation, therefore the
-maximum.  Calls count INFO-level subject-model starts across the named agents;
-tool calls sum the middleware's completed concurrent-call counts.
-
-| Node (short name) | Seconds p50/p90 | Model calls p50/p90 | Tool calls p50/p90 | Judge calls | Expected/observed child work |
+| Node | Baseline median/p90 | Candidate median/p90 | Median limit | p90 limit | Result |
 |-
-| =starts_subagents_and_returns_without_polling= | 11 / 11 | 2 / 2 | 2 / 2 | 0 | At least one async subagent starts; no launch-turn poll |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 135 / 168 | 17 / 19 | 18 / 27 | 1 | Four synthetic delegate outcomes complete; route is not graded |
-| =explicit_delegate_fanout_capability= | 16 / 16 | 2 / 2 | 3 / 3 | 0 | Three delegate starts |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 21 / 21 | 6 / 6 | 4 / 4 | 0 | Two sequential delegate starts with an intervening check |
-| =implicit_skill_request= | 29 / 30 | 6 / 6 | 5 / 5 | 0 | Main plus context agent; skill load and final file verified |
-| =delegate_implicit_skill_request= | 34 / 35 | 8 / 8 | 7 / 7 | 0 | Delegate plus context agent; skill load and final file verified |
-| =first_turn_substantive_invokes_context= | 14 / 40 | 2 / 6 | 1 / 13 | 0 | One required context dispatch; one longer valid subject route |
+| Launch | 11 / 11 | 11 / 11 | 15.2 | 41 | pass |
+| Natural outcomes | 128 / 146 | 154 / 159 | 155.6 | 176 | pass |
+| Fan-out | 15 / 16 | 17 / 18 | 20 | 46 | pass |
+| Dependency | 19 / 20 | 16 / 17 | 24.8 | 50 | pass |
+| Main skill | 29.5 / 30 | 10.5 / 11 | 37.4 | 60 | pass |
+| Delegate skill | 34.5 / 35 | 33 / 33 | 43.4 | 65 | pass |
+| Context | 27 / 39 | 33 / 50 | 34.4 | 69 | pass |
 
-Full repetitions took 260, 280, and 296 seconds.  The median projects baseline
-N=10 at about 47 GPU-minutes.  Run baseline as two five-repetition blocks, each
-about 24 minutes, with roughly fifteen minutes of actual GPU rest between them.
-No cohort split or timeout change is needed.
+The clean baseline artifacts are =baseline-1-qDuLi2= through
+=baseline-10-FrTDnY=.  The candidate artifacts are
+=candidate3-n10-1-kjGhSh= through =candidate3-n10-10-jFQFgt=.  A
+production-contended baseline attempt and wrong-working-directory preflight
+failures remain preserved and excluded.
 
-** Formal baseline result
+* Candidate history
 
-The formal baseline ran at source =b4cce1f= in ten clean repetitions.  All 70
-node executions passed.  The clean private artifacts are
-=baseline-1-qDuLi2=, =baseline-2-G9rl64=, =baseline-3-nA7Pk8=,
-=baseline-4-y3MI8F=, =baseline-5-YqjKSz=, =baseline-6-CG7s2Q=,
-=baseline-7-1BXcm2=, =baseline-8-PNWPXa=, =baseline-9-4z8jXT=, and
-=baseline-10-FrTDnY=.  Block wall times were 291, 295, 272, 251, 271, 244,
-294, 276, 287, and 252 seconds.
-
-| Node (short name) | Pass | Seconds p50/p90 | Model calls p50/p90 | Tool calls p50/p90 | Judge calls p50/p90 |
+| Candidate | Primary result | Decision |
 |-
-| =starts_subagents_and_returns_without_polling= | 10/10 | 11 / 11 | 2 / 2 | 2 / 2 | 0 / 0 |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 10/10 | 127 / 146 | 16 / 20 | 18 / 19 | 1 / 1 |
-| =explicit_delegate_fanout_capability= | 10/10 | 15 / 16 | 2 / 2 | 3 / 3 | 0 / 0 |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 10/10 | 19 / 20 | 5 / 6 | 4 / 4 | 0 / 0 |
-| =implicit_skill_request= | 10/10 | 29 / 30 | 6 / 6 | 5 / 5 | 0 / 0 |
-| =delegate_implicit_skill_request= | 10/10 | 34 / 35 | 8 / 8 | 7 / 7 | 0 / 0 |
-| =first_turn_substantive_invokes_context= | 10/10 | 24 / 39 | 4 / 5 | 3 / 14 | 0 / 0 |
+| 1, exact deletion | N=3 20/21; one natural report omitted a required field | Stopped.  A matched ten-run reference later passed 10/10, so the miss was not attributed to deletion. |
+| 2, provisional self-contained-brief sentence | N=3 21/21 primary; 19/21 adjacent | Rejected because the sentence's required failure did not reproduce in the candidate-1 reference. |
+| 3, exact deletion | N=3 21/21; N=5 35/35; N=10 70/70 | Accepted under every registered functional and timing gate. |
+| 4, deletion with baseline context sentence | N=3 21/21; N=5 35/35; 42/42 final executions attempted | Invalid extension caused by the p50 calculation error; not used for acceptance. |
 
-One earlier =baseline-5-UbfVHc= attempt is preserved and excluded.  Production
-and eval requests interleaved on the single served-model slot; a normally
-15-second fan-out case took 115 seconds, so its timing was not comparable.  The
-resource-wrapper interrupt also left the runner process alive until its exact
-process groups were cleaned up.  This is concrete evidence for separately
-considering exclusive model admission and process-group cancellation, but P2
-does not widen into that infrastructure change.
+Candidate 4's private evidence remains available for audit rather than being
+discarded.  Its apparent “mathematical stop” was valid only for the unregistered
+nearest-rank p50 calculation and is not a P2 result.
 
-Six =baseline-5-u938UE= through =baseline-10-Q643Tq= artifacts are also
-preserved and excluded.  A login shell changed =$PWD=, so the fail-closed runner
-rejected each at preflight in zero seconds; none reached the model.  The clean
-rerun used the explicit lane path without changing any frozen input.
+* Deferred finding
 
-** Candidate deterministic census
+The timeout-dependency diagnostic passed 7/10 at baseline and 3/10 for the
+accepted candidate.  The failure mode is real: the model sometimes checks a
+timed-out prerequisite, takes over its work, and starts the dependent anyway.
 
-The fixed-time P0 census after the frozen deletion records this canonical
-web-main request.  The historical P0 appendix remains unchanged; this table is
-the current P2 comparison.
+It is not a P2 blocker.  The governing lifecycle clause, skill owner, eval,
+tools, and model inputs were byte-identical across arms, and the deleted prose
+contained no timeout, failure, takeover, or dependency rule.  Fixing it would
+require a separate async-lifecycle objective.  Value: make dependent execution
+reliably stop after prerequisite failure.  Risk of deferral: occasional wasted
+work or an invalid dependent result after timeout.  P2 neither hides the miss
+nor widens into that redesign.
 
-| Owner/section | Exact characters | Approx. tokens |
-|-
-| Assist role instructions | 11,481 | 2,871 |
-| Prompt composer | 2 | 1 |
-| Deep Agents base | 2,257 | 565 |
-| LangChain TODO middleware | 1,076 | 269 |
-| Deep Agents filesystem middleware | 1,449 | 363 |
-| Assist skills middleware | 9,631 | 2,408 |
-| Assist memory middleware | 3,796 | 949 |
-| Context rider | 0 | 0 |
-| *System-message total* | *29,692* | *7,423* |
-| Provider-bound tool schemas | 28,037 | 7,010 |
-| *Bootstrap request + schemas* | *57,729* | *14,433* |
+The local review also found a pre-existing nightly collection weakness: the
+no-argument runner can proceed with a nonempty subset if pytest reports an
+import error elsewhere.  Value of a later fix: trustworthy full-nightly
+coverage.  Risk of deferral: a partial nightly suite can appear complete.  P2's
+focused mode checks collection directly, so this is outside the objective.
 
-The final candidate removes 1,587 characters from the canonical system message and
-the complete bootstrap request.  Tool schemas are byte-identical.  The
-canonical current system-message SHA-256 is
-=cbe4b044a680cf13d1c25861eed1b2e0a9b055784d34193933d110470011f705=.
-The deterministic census artifact is 2,856,507 canonical bytes with SHA-256
-=2a9095f5e948482d73add98dbaa5210beab15661b5ed662e86c41c6e7aad750f=.
-The preserved capture is
-=~/deploy/assist/prompt-census/p2-candidate4-1c2d0eec/=; its =census.json= file
-is 2,856,507 bytes with file SHA-256
-=5363dfa9da455a6507ee5fef8c46feda241d529527a6f39b327d98c9dd05012e=.
+* Implementation guide
 
-** Candidate 1 early result and revision
+The production change is only the template deletion above.  Retained test-side
+support is:
 
-Candidate 1 at source =937168e= passed 20 of 21 N=3 node executions.  Its
-private artifacts are =candidate-1-fwxyRZ=, =candidate-2-cWNib3=, and
-=candidate-3-2UHeb7=.  Repetitions 1 and 2 passed all seven nodes in 285 and
-281 seconds.  Repetition 3 took 237 seconds and failed the natural four-report
-case: all requested files existed, but the alpha report's =next actions= field
-was empty.  The deterministic field gate stopped before the outcome judge.
-This is a fail, not a partial pass.
+- =edd/eval/conftest.py= freezes rendered prompt time only when an explicit
+  =ASSIST_EVAL_FIXED_DATETIME= is supplied;
+- =scripts/run-evals.sh= accepts explicit node IDs, retains the existing
+  nightly no-argument behavior, and returns aggregate failure for focused
+  blocks;
+- =edd/eval/test_skill_loading.py= adds one direct delegate-role implicit skill
+  case so both rendered role shapes are measured; and
+- deterministic spec/census tests pin the removed clauses, final prompt counts,
+  render hashes, and canonical artifact hash.
 
-The observed failure disqualified candidate 1's original cadence because its
-natural node could no longer match the 10/10 baseline.  Routing, artifact
-creation, skill loading, dependency capability, and the other five behavioral
-contracts still passed; the narrow loss was a required field inside delegated
-work.  Candidate 2 provisionally restored only the prior general sentence
-requiring self-contained subagent requests.  The long delegation section,
-duplicate routing/load/TODO procedure, and every other frozen deletion remained
-removed.
+The Jinja template auto-reloads for new turns.  Deployment therefore needs no
+service restart, but the feature branch must be deployed through the workspace
+transaction before the PR so new turns exercise the accepted prompt.
 
-** Candidate 2 early and adjacent results
+* What was hard
 
-Candidate 2 ran at source =d10cdfd=.  The primary N=3 artifacts are
-=candidate2-1-t6gowc=, =candidate2-2-EEjiv0=, and =candidate2-3-yC7qcw=.
-All 21 executions passed; block wall times were 299, 272, and 238 seconds.
+The production edit was small.  The hard part was making a fair small-model
+comparison and preserving the experiment's meaning:
 
-| Node (short name) | Pass | Seconds p50/p90 | Model calls p50/p90 | Tool calls p50/p90 | Judge calls p50/p90 |
-|-
-| =starts_subagents_and_returns_without_polling= | 3/3 | 12 / 19 | 2 / 2 | 2 / 2 | 0 / 0 |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 3/3 | 144 / 157 | 16 / 19 | 24 / 24 | 1 / 1 |
-| =explicit_delegate_fanout_capability= | 3/3 | 17 / 17 | 2 / 2 | 3 / 3 | 0 / 0 |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 3/3 | 21 / 22 | 6 / 6 | 4 / 4 | 0 / 0 |
-| =implicit_skill_request= | 3/3 | 10 / 10 | 3 / 3 | 3 / 3 | 0 / 0 |
-| =delegate_implicit_skill_request= | 3/3 | 32 / 33 | 6 / 6 | 5 / 5 | 0 / 0 |
-| =first_turn_substantive_invokes_context= | 3/3 | 39 / 41 | 6 / 7 | 15 / 15 | 0 / 0 |
+- earlier logs lacked enough final-prompt identity, requiring a fresh matched
+  baseline and fixed-time fingerprints;
+- the single served model exposed production overlap as extreme latency,
+  requiring preserved exclusions and bounded home-backed runs;
+- candidate 1's one content miss required an isolated matched reference before
+  attribution;
+- the pre-existing timeout defect had to be reported without expanding P2 into
+  an async-lifecycle redesign; and
+- the final local review caught that the analysis had silently switched from
+  the registered median to nearest-rank p50.  Correcting the statistic reversed
+  the disposition and prevented a valid experiment from being discarded.
 
-The context-node median was 39 seconds against a 30.8-second early bound and is
-an N=3 timing miss; its 41-second p90 remained within the registered p90 bound.
-The other medians and every p90 met their early bounds.  N=3 differences are
-diagnostic, so the frozen N=10 timing decides the gate.  The natural case used
-more concurrent tool calls but no additional median model call.  P1b grades its four
-complete reports rather than the hidden route, and all requested fields and the
-outcome judge passed.
+All non-document code beyond the template deletion is eval-only and small.  The
+machine-local provenance runner is not committed.  No nontrivial work was done
+outside the objective; adjacent findings are explicitly deferred above.
 
-** Candidate-1 matched reference and candidate-3 decision
+* Learnings
 
-The fresh candidate-1 reference artifacts are
-=candidate1-reference-1-oJcxBW=, =candidate1-reference-2-8QH5fc=,
-=candidate1-reference-3-RZpAIG=, =candidate1-reference-4-NzY9Gy=,
-=candidate1-reference-5-xz0HBD=, =candidate1-reference-6-GFubaT=,
-=candidate1-reference-7-7xgqkD=, =candidate1-reference-8-gItPw9=,
-=candidate1-reference-9-nFthyF=, and =candidate1-reference-10-F9vxOl=.
-All ten exact natural-node executions passed.  Wall times were 145, 144, 203,
-208, 138, 141, 114, 164, 155, and 127 seconds.  No requested report field was
-empty.
-
-The first necessary condition for retaining candidate 2's duplicate sentence
-therefore failed.  A later candidate-2 stability arm cannot make the conjunction
-true, so no further sample is spent on that rejected prompt.  Candidate 3
-removes the provisional sentence, returns to the exact candidate-1 prompt, and
-restarts N=3/N=5/N=10.  The original candidate-1 failure remains reported; it is
-not attributed to the deletion after the isolated 10/10 non-reproduction.
-
-** Candidate 3 early result
-
-The fresh candidate-3 artifacts are =candidate3-1-hYrOya=,
-=candidate3-2-d3fhzI=, and =candidate3-3-mmOBAB=.  All 21 primary executions
-passed; block wall times were 273, 234, and 242 seconds.
-
-| Node (short name) | Pass | Seconds p50/p90 |
-|-
-| =starts_subagents_and_returns_without_polling= | 3/3 | 11 / 12 |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 3/3 | 145 / 148 |
-| =explicit_delegate_fanout_capability= | 3/3 | 16 / 18 |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 3/3 | 15 / 16 |
-| =implicit_skill_request= | 3/3 | 10 / 10 |
-| =delegate_implicit_skill_request= | 3/3 | 33 / 35 |
-| =first_turn_substantive_invokes_context= | 3/3 | 16 / 36 |
-
-Every median and p90 meets its registered early bound.  Candidate 3 continues
-to N=5 after the required GPU cooldown; the promoted timeout diagnostic joins
-N=5 and N=10.
-
-** Candidate 3 qualification result
-
-The candidate N=5 artifacts are =candidate3-n5-1-EQA2OZ=,
-=candidate3-n5-2-gClLbL=, =candidate3-n5-3-r9BUzx=,
-=candidate3-n5-4-NRy5F7=, and =candidate3-n5-5-Hctstb=.  All 35 primary
-executions passed.
-
-| Node (short name) | Pass | Seconds p50/p90 |
-|-
-| =starts_subagents_and_returns_without_polling= | 5/5 | 11 / 11 |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 5/5 | 141 / 161 |
-| =explicit_delegate_fanout_capability= | 5/5 | 18 / 18 |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 5/5 | 16 / 19 |
-| =implicit_skill_request= | 5/5 | 10 / 11 |
-| =delegate_implicit_skill_request= | 5/5 | 33 / 33 |
-| =first_turn_substantive_invokes_context= | 5/5 | 11 / 33 |
-
-Every primary median and p90 remains inside the registered final timing bounds.
-The promoted timeout diagnostic passed 2/5, with a 57-second median and
-64-second p90.  This intermediate diagnostic result does not alter the frozen
-prompt: its registered decision is the candidate N=10 comparison against the
-7/10 matched pre-deletion baseline.
-
-** Candidate 3 stability first half
-
-The first five stability artifacts are =candidate3-n10-1-kjGhSh=,
-=candidate3-n10-2-lSLXii=, =candidate3-n10-3-iQYdun=,
-=candidate3-n10-4-cHYGRI=, and =candidate3-n10-5-Y1QYvp=.  All 35 primary
-executions passed.  The timeout diagnostic passed 1/5.  Even five further
-passes could produce only 6/10, so the preregistered auxiliary 7/10 comparison
-is mathematically missed before the second half.
-
-The failed comparison remains reported as registered; it is not relabelled a
-pass.  A focused user-intention and design-adherence review performed before
-repetitions 6--10 classified the underlying defect as =DEFERRED= and said it
-must not block P2.  The lifecycle-plus-trust text has identical SHA-256
-=1e23629ed26edfb813175c36ed2e571915362f5ac98cc31fe2e447a9c682a145= at
-baseline and candidate; the complex-request skill and timeout eval are also
-byte-identical.  The deleted text contains no timeout,
-failure, takeover, or dependent-start rule.  Fixing that pre-existing model
-reliability problem would be a separate async-lifecycle objective; P2 records
-its concrete risk and value without changing production for it.
-
-** Candidate 3 final result and rejection
-
-The second-half artifacts are =candidate3-n10-6-mrg9Xp=,
-=candidate3-n10-7-tksPOd=, =candidate3-n10-8-89cBCS=,
-=candidate3-n10-9-KJ7Lmw=, and =candidate3-n10-10-jFQFgt=.  Together with the
-five artifacts above, all 70 primary executions passed.  The timeout diagnostic
-passed 3/10 and remains the honestly failed, deferred auxiliary comparison.
-
-| Node (short name) | Pass | Seconds p50/p90 |
-|-
-| =starts_subagents_and_returns_without_polling= | 10/10 | 11 / 11 |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 10/10 | 154 / 159 |
-| =explicit_delegate_fanout_capability= | 10/10 | 17 / 18 |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 10/10 | 16 / 16 |
-| =implicit_skill_request= | 10/10 | 10.5 / 11 |
-| =delegate_implicit_skill_request= | 10/10 | 33 / 33 |
-| =first_turn_substantive_invokes_context= | 10/10 | 33 / 50 |
-
-Six primary nodes met both final wall-time bounds.  The context p90 passed at 50
-seconds against a 69-second limit, but its 33-second median exceeded the
-30.8-second limit.  Its baseline-to-candidate median model calls also rose from
-4 to 6 and tool calls from 3 to 10.  Long traces continued into unnecessary
-filesystem work after the stubbed context result.  Since candidate 3 changed
-the forceful context sentence and the miss is on that exact journey, this is an
-in-scope regression.  Candidate 3 is rejected.  Candidate 4 restores only that
-sentence and restarts the unchanged cadence; no gate or cohort changes after
-observation.
-
-** Candidate 4 early result
-
-Candidate 4 is frozen at source
-=0b421665a67b4716671d74e36bc2fae73e74dc81=.  Its N=3 artifacts are
-=candidate4-n3-1-GECVaT=, =candidate4-n3-2-hi0CGq=, and
-=candidate4-n3-3-MleBUP=.  All 21 primary executions passed; block wall times
-were 303, 257, and 260 seconds.
-
-| Node (short name) | Pass | Seconds p50/p90 |
-|-
-| =starts_subagents_and_returns_without_polling= | 3/3 | 11 / 19 |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 3/3 | 150 / 150 |
-| =explicit_delegate_fanout_capability= | 3/3 | 18 / 18 |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 3/3 | 19 / 20 |
-| =implicit_skill_request= | 3/3 | 11 / 20 |
-| =delegate_implicit_skill_request= | 3/3 | 25 / 30 |
-| =first_turn_substantive_invokes_context= | 3/3 | 42 / 50 |
-
-Every functional contract passed.  Six nodes remain inside their final timing
-bounds.  Context selection passed 3/3, but its 42-second median is above the
-30.8-second final limit while its 50-second p90 is below the 69-second limit.
-This is recorded as the preregistered early diagnostic, not relabelled a pass or
-used to change the gate.  Candidate 4 pauses for the required cooldown and
-post-N=3 review before N=5.
-
-The post-N=3 scope review found no real candidate finding.  The three context
-traces are long, including one set of rejected guessed-URL reads, but the
-baseline already has a 39-second p90 and a 14-call tool p90; the guard rejected
-the guessed URLs, and P2 changes neither URL handling nor context procedure.
-No new failure class appeared, and all 21 primary executions passed.  The
-review therefore approved the unchanged preregistered N=5 rather than turning
-baseline variance into prompt or runtime work.
-
-** Candidate 4 intermediate result
-
-The unchanged N=5 artifacts are =candidate4-n5-1-IoPRSo=,
-=candidate4-n5-2-txEH4j=, =candidate4-n5-3-6InU5N=,
-=candidate4-n5-4-D8TgSM=, and =candidate4-n5-5-oyg8Ax=.  All 35 primary
-executions passed.  The deferred timeout diagnostic passed 4/5; repetition 1
-failed with the already observed takeover-and-start-dependent behavior.  Block
-wall times were 339, 305, 313, 303, and 313 seconds.
-
-| Node (short name) | Pass | Seconds p50/p90 |
-|-
-| =starts_subagents_and_returns_without_polling= | 5/5 | 10 / 11 |
-| =natural_long_list_chooses_one_delegate_per_outcome= | 5/5 | 161 / 172 |
-| =explicit_delegate_fanout_capability= | 5/5 | 18 / 18 |
-| =explicit_dependent_delegate_starts_after_prerequisite_completion= | 5/5 | 19 / 20 |
-| =implicit_skill_request= | 5/5 | 10 / 11 |
-| =delegate_implicit_skill_request= | 5/5 | 36 / 37 |
-| =first_turn_substantive_invokes_context= | 5/5 | 34 / 37 |
-
-Five nodes meet both final timing bounds.  Natural behavior passes its
-176-second p90 ceiling but misses its 154.4-second median ceiling by 6.6
-seconds.  Its model-call p50/p90 remains 16/19 versus baseline 16/20, while
-every repetition uses 24 tool calls versus baseline p50/p90 18/19.  Context
-passes its 69-second p90 ceiling but misses its 30.8-second median ceiling by
-3.2 seconds.  Each context trace uses five model calls and 13 tool calls;
-baseline p50/p90 is 4/5 model calls and 3/14 tool calls.
-
-N=5 is intermediate and the registered final decision is N=10, but the two
-median misses and natural journey's consistent added tool work require focused
-attribution review before spending the final cohort.  No gate, candidate, or
-eval input changes in response to this observation.
-
-The focused review selected decision A, proceed unchanged to N=10.  The natural
-call-shape change is candidate-correlated, but it added no model-round median,
-lost outcome, or capability failure, and the natural gate deliberately does not
-grade a hidden route.  Context converged on a baseline-observed longer route;
-its five model calls and 13 tool calls remain within baseline p90, the exact
-context-first sentence is byte-identical, and dispatch passed 5/5.  Neither
-intermediate signal substitutes for the registered N=10 timing decision.  The
-review found no blocker and no justification for a candidate or gate change.
-
-The preregistered adjacent artifacts are =candidate2-adjacent-1-jUCd8D=,
-=candidate2-adjacent-2-JT2tSE=, and =candidate2-adjacent-3-Vx9Gyj=.  Completion
-wake result use, cancellation-request truth, mixed-sibling preservation, and
-all three interjection cases passed 3/3.  Timeout dependency blocking passed
-1/3.  In both failures the model checked the terminal timeout, then improperly
-took over the prerequisite and started its dependent.  The controlling
-lifecycle clause is byte-identical and the deleted prose contains no timeout or
-failure rule.
-
-Round 1 therefore required a matched pre-deletion diagnostic before attribution.
-At frozen baseline =b4cce1f=, the same timeout node passed 2/3 in
-=baseline-timeout-1-HdZYme=, =baseline-timeout-2-nsaGDZ=, and
-=baseline-timeout-3-fnLlCe=.  The completed reference adds
-=baseline-timeout-4-KKhrIa=, =baseline-timeout-5-96a14j=,
-=baseline-timeout-6-0K5pvY=, =baseline-timeout-7-ZouZ2u=,
-=baseline-timeout-8-Qti4Hm=, =baseline-timeout-9-nlXPfY=, and
-=baseline-timeout-10-vfYL9i=.  It passed 7/10; repetitions 1, 6, and 10 failed
-with the same forbidden takeover behavior.  The failure predates P2.  P2 does
-not add a third duplicate lifecycle rule or redesign async execution.  The
-timeout node is promoted into N=5/N=10 execution and the candidate N=10 must
-pass at least 7/10; its pre-existing reliability risk is reported separately.
-
-** Gates
-
-1. All exact nodes collect in both arms.  The delegate case exercises the real
-   =role="delegate"= constructor shape.
-2. Each removed clause maps to the sole owner above; fixed-time P0 captures show
-   no duplicate in main or delegate and no new mismatch.
-3. Each primary natural node independently meets its N=10 baseline and at least
-   70% full passes.  Primary capability and deterministic security/state nodes
-   pass 100%.
-4. N=3 differences are diagnostic.  Candidate N=10 must meet baseline per node;
-   aggregate success cannot trade away a reliable behavior.
-5. Existing deterministic tests and P0 prompt-census tests pass.  The delegate
-   retains no outer async lifecycle tools by construction, while its legacy
-   synchronous specialists and shared skills remain usable.
-6. Review-driven work stays directly tied to this deletion.  Useful unrelated
-   findings are reported with risk/value and not implemented.
-7. The promoted timeout diagnostic runs to N=10 and its preregistered comparison
-   is reported honestly.  Revision 18's focused scope review controls its
-   disposition: because the unchanged defect is deferred, that auxiliary miss
-   is not a P2 completion gate and does not trigger an async-lifecycle rewrite.
-
-* Review and delivery
-
-Design review lenses are simplicity, framework fit, user intention, UX, clean
-interfaces, trust, and eval liveness.  The implementation local loop covers
-correctness, concurrency/liveness, error handling, adversarial security,
-simplicity, design adherence, and docstring/comment alignment, followed by the
-deterministic and model gates.
-
-After the local loop converges, deploy through the workspace transaction for
-Pierre's testing, publish a ready GitHub PR, and run the Copilot bridge loop.
-Every acceptance-affecting review edit restarts measurement and redeploys.
-
-The final completion report goes to Pierre's Kindle with the final design,
-rendered prompt counts, exact results, deep implementation guide, review report,
-deferred findings and their risk/value, learnings, and a candid account of what
-was hard.  It distinguishes necessary P2 work from anything outside the goal.
+- “Owned elsewhere” can be removable for this model, but only with direct
+  natural and capability evidence for both rendered roles.
+- Functional pass rate and latency are separate user-facing outcomes; both need
+  preregistered per-node gates.
+- Statistical definitions must be explicit.  “Median” and a percentile method
+  are not interchangeable for even sample counts.
+- A local reviewer that recomputes evidence can catch a conclusion-changing
+  defect that prose-only review misses.
+- Scope discipline preserved the experiment: real timeout and nightly-runner
+  defects are reported with risk/value instead of becoming unrelated P2 code.
 
 * Changelog
 
-- 2026-08-04 revision 1: initial preregistration.
-- 2026-08-04 revision 2: accepted design review.  Corrected the delegate from
-  disabled to legacy mode; removed async lifecycle and research injection from
-  the deletion; retained new-user steering/cancellation/trust procedure; froze
-  the exact template patch; added direct delegate coverage; required a fresh
-  baseline; made per-node gates non-fungible; bounded the home-backed focused
-  execution; and named all adjacent diagnostics.  Rejected the suggestion to
-  add new natural failure/dependency journeys because those lifecycle clauses
-  are no longer changing; the existing cases remain diagnostics and their
-  coverage gap is reported rather than widening this deletion.
-- 2026-08-04 revision 3: retained the before-edit skill check and final response
-  account after follow-up proved they lacked another owner; retained the Step 1
-  heading; aligned the overall P2 lifecycle gate to the clauses actually moved;
-  froze eval time only for explicitly controlled runs; added the minimal direct
-  delegate case; and preregistered the reviewed home-backed runner, evidence
-  identity, exact command, N=3 adjacent diagnostics, and matched liveness fields.
-- 2026-08-04 revision 4: local review replaced the duplicate 118-line experiment
-  runner with a fail-closed provenance wrapper over the existing shared runner;
-  added its minimal explicit-node and aggregate-status interface; hashed all
-  direct graph/skill/fixture/validator inputs; changed the clock fixture to
-  pytest-owned restoration; corrected the skill-eval module documentation; and
-  prevented the delegate case from reaching real research.
-- 2026-08-04 revision 5: follow-up retained the nightly runner's historical
-  no-argument exit contract while focused blocks aggregate failure; moved all
-  P2 preflight checks behind durable trap setup; added the shared runner to the
-  manifest; and removed stale debt/docstring wording.
-- 2026-08-04 revision 6: the first uncounted pilot exposed hidden pytest INFO
-  and stdout capture.  Preserved that failed-harness artifact, retained existing
-  model counters and judge provenance only for focused runs, removed the
-  unsupported first-launch latency claim, reran the pilot cleanly at 21/21, and
-  preregistered its observed timing and call-count bounds before formal baseline.
-- 2026-08-04 revision 7: the pre-baseline mechanical sweep found one deterministic
-  test that required the long delegation block P2 deletes.  Froze the exact
-  test-only expectation change to require the retained short trigger and reject
-  the duplicate prose; no model input or timing-pilot dependency changed.
-- 2026-08-04 revision 8: recorded the 70/70 clean formal baseline, its per-node
-  timing and call-count distributions, and the excluded production-contended
-  and preflight-only infrastructure attempts before applying the frozen
-  candidate.
-- 2026-08-04 revision 9: applied the byte-exact frozen candidate; aligned the
-  P0 census's exact current template, transition, and removed-claim pins; kept
-  the historical P0 full-prompt appendix unchanged; and added the P2 current
-  section counts and fingerprints.
-- 2026-08-04 revision 10: candidate 1 failed one of 21 early executions because
-  one delegated report omitted a requested field.  Classified it as a full
-  failure, stopped the losing cadence, and restored only the prior general
-  self-contained-brief sentence as a provisional Qwen salience fallback before
-  restarting all candidate gates.
-- 2026-08-04 revision 11: recorded candidate 2's 21/21 primary N=3 and 19/21
-  adjacent results; ran the review-required matched timeout baseline, which was
-  itself unstable at 2/3; temporarily classified that node as non-gating;
-  added =test_interjection.py= to the direct runner manifest; reconciled the
-  exact candidate-2 delta, phase status, P1b completion, and current word count.
-- 2026-08-04 revision 12: round 2 corrected the context-node N=3 timing claim
-  and the P1b attribution; kept the failed timeout diagnostic gating against a
-  pending matched N=10 baseline; and registered a bounded candidate-1 versus
-  candidate-2 natural comparison before qualifying the restored sentence as a
-  measured exception.
-- 2026-08-04 revision 13: completed the pre-deletion timeout reference at 7/10
-  and froze that observed pass count as the candidate's adjacent no-regression
-  threshold.
-- 2026-08-04 revision 14: the fresh candidate-1 natural reference passed 10/10
-  and did not reproduce the required empty-field failure.  Rejected candidate
-  2's provisional duplicate sentence, restored the exact deletion as candidate
-  3, and restarted the full candidate cadence without spending samples on an
-  already-impossible conjunction.
-- 2026-08-04 revision 15: local review froze the candidate runner's expected
-  source as an independent literal, named both deterministic prompt-shape tests,
-  and removed a byte-identical census copy that carried no commit identity.
-- 2026-08-04 revision 16: candidate 3 passed its fresh primary N=3 at 21/21,
-  with every median and p90 inside the registered early timing bounds.
-- 2026-08-04 revision 17: candidate 3 passed its primary N=5 at 35/35 with
-  registered timing bounds intact.  Recorded the promoted timeout diagnostic's
-  2/5 intermediate result without changing its frozen N=10 decision rule.
-- 2026-08-04 revision 18: the first half of candidate N=10 passed all 35 primary
-  executions while the timeout diagnostic passed 1/5, making its registered
-  7/10 auxiliary comparison impossible.  Before the second half, a focused
-  scope review classified that real pre-existing defect as deferred and rejected
-  its attribution as a blocker for this deletion; the full cohort remains
-  unchanged.
-- 2026-08-04 revision 19: candidate 3 completed at 70/70 primary passes and
-  3/10 on the deferred timeout diagnostic, but its context median missed the
-  registered timing bound with added model/tool calls.  Rejected candidate 3,
-  restored the exact baseline context-first sentence as candidate 4, and
-  restarted N=3/N=5/N=10 without changing the cohort or gates.
-- 2026-08-04 revision 20: candidate 4 passed its fresh primary N=3 at 21/21.
-  Recorded the context node's 42-second diagnostic median and 50-second p90
-  without changing the frozen final timing rule; paused for the registered
-  post-N=3 review and GPU cooldown before N=5.
-- 2026-08-04 revision 21: post-N=3 review found no directly attributable
-  candidate defect or new failure class.  Classified the long context traces
-  as preregistered diagnostic variance, retained the frozen candidate and
-  gates unchanged, and approved proceeding to N=5 after cooldown.
-- 2026-08-04 revision 22: candidate 4 passed all 35 primary N=5 executions and
-  the deferred timeout diagnostic passed 4/5.  Recorded the natural and context
-  median timing misses plus the natural journey's consistent added tool work;
-  paused for focused attribution review before any final N=10 execution.
-- 2026-08-04 revision 23: focused attribution review selected decision A.  The
-  candidate-correlated call-shape changes remain performance signals, but no
-  final objective-affecting defect is established at the intermediate gate;
-  approved the unchanged preregistered N=10 after cooldown.
+- Revisions 1-5: preregistered scope, corrected delegate topology, narrowed the
+  deletion, added direct delegate coverage, and made focused runs fail closed.
+- Revisions 6-9: repaired evidence capture, ran the 70/70 baseline, applied the
+  exact deletion, and recorded its deterministic census.
+- Revisions 10-14: stopped candidate 1 on a full failure, tested and rejected a
+  provisional sentence, and used a matched 10/10 reference to avoid false
+  attribution.
+- Revisions 15-19: qualified candidate 3 through 70/70 primary passes and
+  reported the timeout diagnostic separately.
+- Revisions 20-24: explored candidate 4 after an erroneous nearest-rank p50
+  interpretation and stopped its final cohort after six repetitions.
+- Revision 25: local correctness review recovered the preregistered conventional
+  median, recomputed every node, accepted candidate 3, restored its exact prompt
+  and census pins, and classified candidate 4 as an invalid extension rather
+  than evidence against P2.

@@ -888,12 +888,15 @@ per-event deduplication plus a bounded rate for imminent owner notifications.
 P1b and later phase gates use these outcomes, while P6d retains the known stale
 capture contract.  See [[file:docs/2026-07-26-agent-prompt-architecture.org][the evidence and risks]].
 
-*** TODO P2: Remove main/delegate procedures already owned elsewhere
+*** DONE P2: Test removal of main/delegate procedures owned elsewhere
 Deduplicate only rules already owned by skills, middleware, or tool contracts;
 prompt reduction is evidence, not the gate.  Begin only after P1c has a final
 approved policy and use it as this experiment's intended-behavior target. See
 [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2][P2 hypothesis and gate]] and
-[[file:docs/2026-08-04-prompt-architecture-p2.org][the in-progress P2 record]].
+[[file:docs/2026-08-04-prompt-architecture-p2.org][the completed P2 record]].
+Completed on 2026-08-04: candidate 3 preserved all 70 final primary executions,
+met every preregistered timing gate, and removes 1,679 characters of duplicate
+role procedure without adding production code.
 
 *** TODO P2b: Progressively disclose non-kernel tools through loaded skills
 Keep the actual Deep Agents built-ins plus =load_skill= as a generated kernel.
