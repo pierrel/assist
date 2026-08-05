@@ -911,7 +911,8 @@ declared tool exists.  See [[file:docs/2026-07-26-agent-prompt-architecture.org:
 Completed on 2026-08-05: generated the final-request kernel, declared seven
 bundled owners, preserved SMS-triage bytes and provider schemas, passed the
 post-review cohort 24/25, and passed 1,590 deterministic tests with 2 skipped.
-See [[file:docs/2026-08-05-prompt-architecture-p2b1.org][the completed P2b.1 record]].
+See [[https://github.com/pierrel/assist/pull/227][PR #227]] and
+[[file:docs/2026-08-05-prompt-architecture-p2b1.org][the completed P2b.1 record]].
 **** TODO P2b.2: Gate Assist-owned tools after skill load
 Filter model schemas and execution from trusted invocation-scoped load state,
 then run the natural/capability cohorts.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-assist][P2b.2]].
