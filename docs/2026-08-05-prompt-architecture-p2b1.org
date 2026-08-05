@@ -55,6 +55,11 @@
   nodes passed 9/9 at candidate N=3, 30/30 at unchanged-current-main baseline
   N=10, 15/15 at post-review candidate N=5, and 30/30 at candidate stability
   N=10.  Every run produced valid XML with no timeout or harness error.
+- Copilot's final review of the simplified 14-file candidate produced no formal
+  comments.  One suppressed determinism nit correctly identified a new
+  locale-default read in the census's packaged-skill validation.  The gate now
+  names UTF-8 explicitly; the change is test-side only and leaves the runtime,
+  prompt, schemas, and evaluated skill bytes unchanged.
 
 * Objective
 

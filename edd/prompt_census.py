@@ -2458,7 +2458,7 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
         local_path = _packaged_skill_path(source)
         if local_path is not None:
             from deepagents.middleware.skills import _parse_skill_metadata
-            content = local_path.read_text()
+            content = local_path.read_text(encoding="utf-8")
             metadata = _parse_skill_metadata(
                 content, source["path"], local_path.parent.name)
             if metadata is None \
