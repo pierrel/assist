@@ -133,6 +133,35 @@ The clean baseline artifacts are =baseline-1-qDuLi2= through
 production-contended baseline attempt and wrong-working-directory preflight
 failures remain preserved and excluded.
 
+** Post-review correction
+
+Pierre's PR review found that the accepted conditional left an empty =Step 1:
+Plan= heading in the synchronous main and delegate renderings.  The final
+implementation makes the pointer and heading conditional with their async-only
+body.  This is a 42-character deletion in each legacy rendering.  The qualified
+async-main rendering is byte-identical.  The formal 70-execution result above
+qualifies the underlying duplicate-procedure deletion, but some of those cases
+also exercised delegates and therefore do not directly qualify this final
+legacy-render cleanup.
+
+The most relevant changed behavioral surface, implicit delegate skill use,
+passed the bounded N=3 follow-up Pierre requested at commit
+=3ab3b94dc32dbc41b9d2e261a4f871f5733e6ba6=:
+
+| Artifact | Wall time | Result |
+|-
+| =step1-review-n3-1-YVBFOj= | 20 seconds | pass |
+| =step1-review-n3-2-bjS433= | 11 seconds | pass |
+| =step1-review-n3-3-rCOUL1= | 11 seconds | pass |
+
+The final template SHA-256 is
+=1b259166503f4f4c625fde17a0c938e3f94fa35c2e61ef6e24768f1820fcaa28=.
+The refreshed deterministic census is 2,854,395 canonical bytes with SHA-256
+=7a73c557b7a10abfd2f53111406cb157cb94d984350444e33e7846599495578a=.
+The earlier template and census identities remain above because they identify
+the exact formally qualified candidate.  By explicit direction, the cleanup
+was not expanded into another full qualification cadence.
+
 * Candidate history
 
 | Candidate | Primary result | Decision |
@@ -238,3 +267,7 @@ outside the objective; adjacent findings are explicitly deferred above.
   median, recomputed every node, accepted candidate 3, restored its exact prompt
   and census pins, and classified candidate 4 as an invalid extension rather
   than evidence against P2.
+- Revision 26: Pierre's PR review found an empty synchronous =Step 1= heading.
+  Made that async-only with its body, proved the qualified async rendering was
+  byte-identical, passed the affected delegate-skill behavior 3/3, and refreshed
+  the deterministic census identities.

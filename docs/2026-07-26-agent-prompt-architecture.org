@@ -5,7 +5,9 @@
 
 Status: architecture approved; P0, P1, P1b, P1c, and P2 complete; P0b deferred.
 P2's duplicate-procedure deletion passed its registered functional and timing
-gates.  See
+gates.  A post-review cleanup then removed an empty synchronous planning heading;
+the qualified async rendering stayed byte-identical and the affected delegate
+skill case passed the bounded 3/3 follow-up selected for that cleanup.  See
 [[file:2026-08-04-prompt-architecture-p2.org][the P2 state record]].
 
 ** Change log
@@ -1748,7 +1750,12 @@ removes 1,679 characters from the canonical web-main system message while tool
 schemas remain byte-identical.  Final local review corrected an intermediate
 analysis that had substituted nearest-rank p50 for the registered conventional
 median; the corrected context comparison is 33 seconds against a 34.4-second
-limit.  See the [[file:2026-08-04-prompt-architecture-p2.org][P2 final record]].
+limit.  Pierre's PR review then found an empty planning heading in the legacy
+renderings.  Making the whole step async-only left the qualified async rendering
+byte-identical.  Because formal cases also exercise delegates, the cleanup was
+separately checked with the requested bounded N=3 delegate-skill follow-up,
+which passed 3/3; it did not receive a new full qualification cadence.
+See the [[file:2026-08-04-prompt-architecture-p2.org][P2 final record]].
 
 ** Alternatives
 
