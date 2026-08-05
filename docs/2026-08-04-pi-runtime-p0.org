@@ -3,7 +3,74 @@
 
 * Status
 
-P0 stopped at the mandatory local-review gate.  The pre-review candidate reported
+The parity-target P0 successor has a reviewed result of status =GO= with scope
+=P1_ONLY=.  It trusts the Python authority, treats the Pi
+runner and its descendants as disposable, and requires security parity with the
+current Deep Agents product boundary rather than protection from another trusted
+same-user process.  The local review loop converged in five rounds.  P1 is now the
+only authorized next experiment; no product integration phase is authorized.
+
+The current report is
+=experiments/pi-runtime-p0/.artifacts/runs/20260805T161831Z-bb8fdf39/report.json=.
+Its SHA-256 is
+=ead9216e48e9d956cb54863745d02f02386b2e141cf9403d9cce69b9e97328a7=.
+It is ignored and machine-local.  One invocation built stock Pi 0.83 and passed all
+seven exercised cases: deterministic success, fail-stop with a closed control
+channel, fail-stop after Node reached backpressure, hostile descendant teardown,
+cancellation, a fresh post-cancel request, and Python-authority death while the
+upstream and hostile descendant were active.  The harness is 1,497
+hand-authored lines.  Its report binds all eight counted source identities before
+the build and proves they are unchanged after the scenarios.
+
+The first parity-target review round found a real containment escape: although Node
+received a cleared environment, Bubblewrap PID 1 retained the authority environment
+and exposed it at =/proc/1/environ=.  It also found unbounded runner stderr, no CPU
+quota, literal rather than observed fail-stop counters, incomplete model and source
+provenance, weak completed-message validation, and unsafe outer cleanup paths.  The
+reviewed implementation closes each finding.  In particular the launcher supplies
+an empty environment, and the authority verifies Bubblewrap PID 1 has no environment before
+admission, Node receives only =HOME=, =PATH=, and =PWD=, runner output is discarded,
+and the transient service's effective 100% CPU, 2 GiB memory, and 64-task bounds are
+report-checked.
+
+The second review invalidated the next candidate result too.  It found that
+Bubblewrap's child status was discarded, the network and host-file canaries were
+self-reported and non-probative, source capture was separated from build copying,
+core dumps could escape the runner cgroup, session evidence preceded final writer
+death, and Node duplicated Python's bridge-count policy.  The reviewed implementation
+propagates and checks =SIGKILL= status, derives namespace/route/mount/core/canary
+evidence from trusted =/proc= state, compares the copied build tree with the captured
+source identity before compilation, reads the session only after runner cleanup, and
+makes Node report observed connection counts without deciding whether they pass.
+Node still implements the mechanical one-shot listener that rejects every connection
+after the first; Python alone applies the expected-count policy to that observation.
+
+** Final local review result
+
+The fifth, focused round returned no real findings from correctness, concurrency and
+liveness, error handling and edge cases, adversarial security, simplicity, design
+adherence, or the dedicated documentation-alignment pass.  Earlier rounds found
+blockers and important defects in environment isolation, source and release binding,
+runner identity, network and mount evidence, output and resource bounds, cancellation,
+recursive cleanup, systemd waiter handling, report provenance, and failure hashing.
+All verified findings were fixed and the affected checks were rerun.
+
+Three proposed changes were rejected after verification.  Closing Bubblewrap's JSON
+status pipe before process exit changes an observed backpressure case from the required
+=SIGKILL= status to =SIGPIPE=, so the bounded pipe remains open until Bubblewrap exits.
+Running the dependency build inside another sandbox is outside this parity trust model;
+the installed build toolchain and same-user Python authority are trusted on both paths.
+No program can guarantee a final report after the trusted host filesystem itself fails
+or the outer process is unconditionally killed during the final write; that condition
+remains a process error and is not mislabeled =GO=.
+
+Verification on the reviewed source: the seven-scenario P0 run is =GO/P1_ONLY=;
+the focused Python suite has 4 passes; the full Assist suite has 1,571 passes, 2 skips,
+5 dependency warnings, and 2 passing subtests; strict TypeScript checking, C compilation
+with warnings as errors, Org lint, and =git diff --check= pass.  Nothing was deployed,
+published, merged, or connected to a product path.
+
+The earlier broad P0 stopped at the mandatory local-review gate.  That candidate reported
 =GO=, but adversarial review reproduced failures in the execution-control,
 durability, release-integrity, and evidence-provenance claims.  Its deterministic
 and exact-Qwen observations remain useful SDK evidence; they do not authorize P1 or
@@ -23,11 +90,181 @@ ignored and machine-local.  Neither artifact is accepted as release evidence bec
 the live report was not bound to that release and selected release contents were not
 reverified before execution.
 
-This is a stop for the attempted P0 proof, not a conclusion that Pi itself is
-unsuitable.  Closing the findings requires one integrated provider gateway and one
-real runner-ownership authority in the exercised path.  The proposed narrower P0
-below defines that decision as one disposable vertical slice.  It still requires
-explicit implementation authorization.
+That was a stop for the broad attempted P0 proof, not a conclusion that Pi itself is
+unsuitable.  The now-rejected narrower contract below records the second attempted
+decision slice.  It is historical input to the parity-target successor above, not
+its current contract.
+
+The rejected narrow report is
+=experiments/pi-runtime-p0/.artifacts/runs/20260805T134052Z-fe8fb7d5/report.json=.
+It is ignored and machine-local.  It records the candidate's six nominally passing
+scenarios and 1,121 hand-authored lines against the 1,500-line gate; neither fact
+overrides the review findings.
+
+** Rejected narrow implementation review result
+
+The first full local-review round found that the candidate does not prove the
+reviewed question:
+
+- authority death was injected with a hostile descendant active but no provider
+  request or instrumented upstream active;
+- fail-stop observed one healthy draining control connection, not the required
+  closed and backpressured variants;
+- provider validation accepted changed nested options, wrong types, and extra
+  message fields before counting a lease;
+- a living authority emitted =PASS= before its sockets, pidfds, launcher pipes,
+  private copy, and session resources were closed, while partial-start and failure
+  paths had no single cleanup owner;
+- operation timeouts were renewed per read/wait rather than derived from one work
+  deadline and one cleanup deadline, and some host subprocess and Node waits were
+  unbounded;
+- =SO_PEERCRED= plus runner-cgroup membership accepted an arbitrary live process in
+  that cgroup rather than proving the exact Node incarnation;
+- the copied candidate was chmod-read-only but not kernel-sealed against a surviving
+  same-invocation writer, contrary to the reviewed private read-only mount claim;
+- the lock and tool hashes were reported from the inputs being exercised rather than
+  checked against independently reviewed identities, while TypeScript and C
+  compilation inherited the ambient process environment rather than the claimed
+  closed build environment; and
+- the reported lease was not a separately enforced one-use capability at the
+  upstream-open boundary.
+
+Design-adherence review found further missing proof: there was no serialized lifecycle
+transition function or exercised cancellation/terminal race; control frames had no
+closed schema, incarnation, request sequence, or nonce; the Pi census omitted effective
+settings, compatibility, session identity, resource-family state, and the containment
+canaries; startup did not exclude a surviving stale P0 unit; per-scenario private-copy
+identities and unique raw-evidence digests were absent from the report; and the report
+did not bind effective =MemoryMax=, =TasksMax=, or memory-peak evidence.
+
+The review also found narrower defects: cancellation swallowed every prompt error
+after abort began, child output pipes could block, authority-death used a numeric PID
+despite retaining a pidfd, the session had no file-size limit, report writes did not
+handle short writes, and the retained =build-release.sh= called a removed command.
+
+These are not evidence-format nits.  Fixing the authority-death and fail-stop cases
+requires new exercised topology; fixing candidate immutability requires a different
+kernel-enforced construction; and adding complete cleanup/deadline ownership changes
+the authority throughout.  Under the significant-rework rule, do not patch this
+candidate into another self-reported =GO= without a new reviewed decision.
+
+Pierre's clarification resolves that decision in favor of security parity.  Python
+is trusted just as it is on the Deep Agents path.  The release must be read-only to
+the untrusted Pi runner, but it need not resist another trusted same-user process.
+The host gateway must admit at most one exact request, but P0 does not invent an
+independent cryptographic lease for its single deterministic request.  Exact peer
+and release evidence now detect construction drift; they are not a new hostile-host
+security boundary.
+
+* Parity-target successor contract and reviewed result
+
+The successor asks one smaller question:
+
+#+begin_quote
+Can trusted Python run stock Pi as a service-secret-free, network-contained, disposable
+child, forward at most one exact request, and make cancellation or any process death
+end in bounded recursive cleanup before fresh work starts?
+#+end_quote
+
+The exercised boundary is intentionally asymmetric.  Python builds the pinned
+lockfile release, creates the one-run socket and session inode, validates Pi's closed
+provider envelope, owns the fixed instrumented upstream, and assembles evidence.
+Bubblewrap gives Node private user, PID, mount, and network namespaces; a read-only
+runtime; empty workspace and agent directories; a three-variable environment; no
+active tools or ambient resources; no authority-environment canary; and no direct
+host/model route.  The Pi model profile uses the fixed non-secret loopback token
+=local= because the stock provider requires an API-key-shaped value.  It is not an
+external provider credential and grants no authority outside this one runner.
+Node and every descendant start atomically in a delegated child cgroup.  Python and
+systemd retain the only cgroup kill authorities.
+
+The trusted authority also verifies that Node's network and mount namespace inodes
+differ from its own, the private network namespace has no IPv4 route, a real
+invocation-local host canary is absent beneath Node's root, and both soft and hard
+core-file limits are zero.  The outer transient service independently has
+=LimitCORE=0=.  These kernel observations, not a runner-provided Boolean, establish
+the containment portion of the gate.
+
+The one-run bridge accepts one provider connection.  During cancellation, stock Pi
+0.83 made one additional connection after the first stream was aborted even though
+both agent and provider retry settings were disabled.  The bridge rejected that
+connection locally with a fixed 409.  It did not forward a second control frame or
+open a second upstream request.  The report binds =connections=2=,
+=rejected=1=, =requests=1=, and =upstream_requests=1= for cancellation; success and
+fresh admission each bind one connection and zero rejection.  P2 must retain this
+one-shot gate and recheck the behavior against the real provider.
+
+The seven scenarios prove only this boundary:
+
+1. one stock-SDK request has the owned system canary, one user message, exact nested
+   provider options, no tools or extra privileged fields, one streamed result, and
+   one persisted completed assistant message;
+2. a hook invariant failure self-SIGKILLs even after its control channel is closed;
+3. the same failure self-SIGKILLs after Node's send path reports backpressure;
+4. =cgroup.kill= terminates Node plus a =setsid= descendant that ignores =TERM= and
+   retains the sole FIFO writer;
+5. cancellation closes the first Pi client, makes the in-process upstream terminal,
+   rejects the extra Pi connection, and completes recursive cleanup;
+6. a fresh release-bound runner, socket, session, and upstream request succeeds only
+   after scenario 5's service is empty; and
+7. killing Python while the first upstream and a hostile descendant are active lets
+   stock systemd =KillMode=control-group= empty the service without accepting a dead
+   authority's report.  The trusted authority supplies only a bounded pre-death
+   readiness frame; the outer process alone assembles the terminal result from its
+   pidfd, FIFO, service exit, and cgroup observations.
+
+Every Python and Node protocol operation has an absolute bound inside a 30-second
+systemd backstop.  Normal scenario success is emitted only after the runner cgroup is
+empty, Node and Bubblewrap pidfds are terminal, Bubblewrap is reaped, the control
+connection and session/FIFO descriptors are closed, and the runner child cgroup is
+removed.  The outer process then waits for the Python pidfd and requires the bound
+service =cgroup.events= certificate before beginning another scenario.  The session
+has a 2 MiB =RLIMIT_FSIZE= and exact evidence-size check.  The final report uses a
+complete-write/fsync/rename sequence and emits =STOP= with partial results on any
+caught build, containment, or scenario failure.  Failure of the report filesystem
+itself cannot truthfully promise a report and remains a process error.
+
+The current developer command is =experiments/pi-runtime-p0/run-p0=.  It performs
+one deterministic local-provider invocation, fetching only lock-pinned packages into
+a fresh npm cache when needed.  It prints the final report path after completion and exits zero
+only for status =GO=.  A caught build, scenario, source-drift, or cleanup failure
+prints a =STOP= report path and exits nonzero.  P0 has no live-Qwen continuation.
+
+P0 still makes no claim about Qwen, tools, skills, hot reload, retained sessions,
+fair global model admission, production Docker tool execution, the web UI, emacsos,
+or the phone.  Those remain later gates.  A reviewed =GO= authorizes only P1's
+harness-authoring and eval-copy experiment.
+
+** Security scope: parity plus a stronger new boundary
+
+P0 targets parity with the overall Deep Agents trust model, not blanket superiority.
+The host account, Python authority, installed Node/compiler toolchain, package
+installation step, systemd user manager, kernel, and Bubblewrap are trusted.  This
+matches the current product's trust in its Python interpreter, installed dependency
+set, host service manager, and container runtime.  The package lock and exact Node
+version are pinned, package lifecycle scripts are disabled, the build environment is
+closed and canaried, and the copied runtime is manifest-hashed and mounted read-only.
+A second build sandbox would protect against a compromised trusted toolchain and is deliberately
+outside this parity P0.
+
+The newly introduced Pi runner and every process it creates are untrusted.  That
+boundary is intentionally stronger and more controllable than an in-process library:
+it receives no service secret, external provider credential, host network, host
+workspace, ambient Pi resources, or cgroup authority; its request is admitted only
+after exact kernel identity and provider-envelope checks; and the authority can kill
+its entire descendant cgroup.  P2 must preserve these properties when it replaces
+the fixture gateway with the real globally fair provider gateway.  Product-level
+authorization, tool sandboxing, session recovery, and web/phone exposure remain P2
+and later threat surfaces, not claims of this disposable P0.
+
+The runner reports readiness and its later connection counts, but no
+security-gating settings census.  Pi construction is pinned in the source/build
+identity; the exact provider request and final session are its external conformance
+observations.  Security decisions come from the authority's kernel observations, exact
+provider-bound request, one accepted control request, one instrumented upstream
+request, final session inode, and empty cgroups.  A compromised runner can lie about
+its readiness or counts, but cannot use them to acquire another provider admission
+or host capability.
 
 * Rejected candidate scope
 
@@ -105,20 +342,22 @@ Bubblewrap 0.11.2 closes arbitrary inherited descriptors, including a socket nam
 with =--sync-fd=.  The rejected candidate therefore could not implement the original
 inherited-FD wording.  Its two-listener product protocol, accepted-peer binding, and
 same-UID-pathname lessons remain inputs to P2, not instructions for narrower P0.
-Narrower P0 instead uses the single multiplexed one-run connection and exact PID,
-cgroup, incarnation, and sequence construction defined below.
+The rejected narrow contract instead proposed the single multiplexed one-run
+connection and exact PID, cgroup, incarnation, and sequence construction defined
+below.  Its candidate did not establish exact Node identity, incarnation, or sequence.
 
 The rejected candidate's single session file was likewise a writable bind-mounted inode.  The runner can
 write it but cannot replace its host directory entry.  The parent retains the
 original descriptor, verifies bounded audited JSONL, fsyncs that inode, and records
 the committed byte offset plus prefix digest.  That committed-prefix recovery
-observation belongs to P2; narrower P0 proves only one successful persisted result
-and claims no restoration or recovery.
+observation belongs to P2.  The narrow candidate nominally persisted one successful
+result but did not establish the complete proof and claims no restoration or recovery.
 
 The useful containment lesson is that a named cgroup, not =killpg=, must own
-descendants and =prlimit= must supply =RLIMIT_NOFILE=.  Narrower P0's one service per
-scenario, runner child cgroup, one connection, atomic =cgroup.kill=, and outer empty
-certificate below replace the rejected scope and two-socket teardown.
+descendants and =prlimit= must supply =RLIMIT_NOFILE=.  The narrow contract's one
+service per scenario, runner child cgroup, one connection, atomic =cgroup.kill=, and
+outer empty certificate below remain proposed replacements for the rejected scope
+and two-socket teardown; the candidate did not establish the whole contract.
 
 * Rejected SDK observations retained for P2
 
@@ -226,7 +465,7 @@ Their substantive corrections are incorporated above.  The first implementation
 slice remains intentionally fail-fast because the containment and model data plane
 are the decisive simplicity gate.
 
-* Local-review stop
+* Rejected broad candidate: local-review stop
 
 The first review round found concrete failures that invalidate =GO=:
 
@@ -266,9 +505,9 @@ The first round therefore ended with blockers.  Error/edge, simplicity,
 design-adherence, and doc-alignment passes were not used to claim convergence; the
 stop condition came first.
 
-* Proposed narrower P0: one real request authority
+* Rejected narrower P0 contract: one real request authority
 
-The revised P0 answers one question only:
+The rejected contract asked one question only:
 
 #+begin_quote
 Can the stock pinned Pi SDK make one request at a time from a contained child through
@@ -332,30 +571,33 @@ runner incarnation and request sequence.  Stale events are rejected, and termina
 cancel, deadline versus terminal, disconnect during cancellation, and runner death
 each have one deterministic winner.  Exactly one cleanup certificate may be issued.
 
-The authority launches pinned Bubblewrap as its direct child with =--as-pid-1= and a
-private inherited =--json-status-fd=, and retains Bubblewrap's process handle/pidfd.
+The authority launches pinned Bubblewrap with a private inherited
+=--json-status-fd=.  Bubblewrap remains namespace PID 1 and Node is namespace PID 2;
+making Node PID 1 prevents its required self-directed =SIGKILL= from behaving like an
+ordinary process signal.  The authority retains Bubblewrap's init pidfd.
 It does not use =--die-with-parent=; otherwise authority death would not prove the
 systemd backstop.  Before accepting a connection, it reads one bounded closed JSON
-status object from that FD, obtains the sandbox command's outer =child-pid=, verifies
-that the pinned Bubblewrap invocation made that PID Node as namespace PID 1, and
-opens its pidfd.  The first connection is accepted only when =SO_PEERCRED.pid=
-equals that =child-pid=, it is in the expected runner cgroup, and a nonblocking
-pidfd check performed after =accept= proves the original Node process is still
-alive.  A terminal original pidfd fixes =STOP=, so numeric PID reuse cannot authorize
-a descendant.  The private
-inherited status FD, not runner protocol data, anchors provenance.  UID, pathname
+status object from that FD, obtains Bubblewrap's outer namespace-init PID, and opens
+its pidfd.  The first connection supplies Node's exact outer PID through
+=SO_PEERCRED=; the authority requires a different live PID in the expected runner
+cgroup, opens its pidfd after =accept=, and nonblockingly proves both the original
+Bubblewrap init and Node incarnations remain alive.  A terminal pidfd fixes =STOP=,
+so numeric PID reuse cannot authorize a descendant.  The private inherited status
+FD plus kernel peer credentials, not runner protocol data, anchor provenance.  UID, pathname
 secrecy, descendant status, and cgroup membership alone are not peer authority.  An
 unauthorized first connection fixes the outcome to =STOP=, can never acquire a
 lease, and still enters ordinary =CLEANING=.  After the accepted peer connects, the
 listener is closed and unlinked immediately.
 
 Before the child can execute, a minimal pinned launcher calls =clone3= with
-=CLONE_PARENT|CLONE_INTO_CGROUP= and the authority's pre-opened runner-cgroup FD.
-The clone child =exec=s Bubblewrap; the launcher reports that PID over its private
-bounded FD, exits, and is reaped before admission.  =CLONE_PARENT= makes Bubblewrap
-another direct Python child, not a launcher-owned process or supervisor.  This places
-Bubblewrap, Node, and every descendant atomically in one runner-only cgroup nested
-below the scenario service.  The sandbox receives no
+=CLONE_INTO_CGROUP= and the authority's pre-opened runner-cgroup FD.  The clone child
+=exec=s Bubblewrap; the launcher reports that PID over its private bounded FD and
+then does nothing except =waitpid= it.  The original
+=CLONE_PARENT|CLONE_INTO_CGROUP= proposal was invalid because =clone3= rejects
+=CLONE_PARENT= with a nonzero exit signal.  Keeping the 43-line launcher as Python's
+direct child makes reaping explicit without adding cleanup policy or moving the
+Bubblewrap child after creation.  This places Bubblewrap, Node, and every descendant
+atomically in one runner-only cgroup nested below the scenario service.  The sandbox receives no
 cgroup filesystem mount, cgroup namespace escape, or migration FD.  Node's PID-1
 signal semantics are never trusted for cleanup: after a bounded =TERM= sent through
 Node's pidfd and a bounded grace, the authority writes =1= once to the runner
@@ -369,16 +611,20 @@ of these are true:
 2. gateway admission is closed and the one-run connection is closed;
 3. =TERM= has been sent to the exact Node pidfd, followed when needed by atomic
    =cgroup.kill=, and the runner-cgroup =cgroup.events= reports =populated 0=;
-4. the Node pidfd is readable and the authority's direct Bubblewrap child has been
-   reaped;
+4. the Node and Bubblewrap-init pidfds are readable and the direct launcher has
+   reaped Bubblewrap;
 5. every accepted socket, pipe, listener, pidfd, and bounded drainer is closed or
    joined.
 
 Because the upstream is owned in-process, authority death cannot leave an external
 model generation.  Each scenario runs in a fresh transient systemd user service
 with =Type=exec=, =ExitType=main=, =KillMode=control-group=, =SendSIGKILL=yes=,
-=Restart=no=, bounded =TimeoutStopSec= and =RuntimeMaxSec=, =OOMPolicy=stop=, and
-=Delegate=yes= for the authority-owned runner child cgroup.
+=Restart=no=, bounded =TimeoutStopSec= and =RuntimeMaxSec=, =OOMPolicy=stop=, a
+2 GiB =MemoryMax=, and =Delegate=yes= for the authority-owned runner child cgroup.
+The proposed 1 GiB limit killed the hostile two-Node fixture at the boundary.  The
+candidate requested 2 GiB, but its report failed to record the effective limit or a
+bound peak measurement; this is part of the rejected evidence rather than a retained
+capacity claim.
 Only Python receives the delegated hierarchy; the sandbox sees no cgroup control or
 migration interface.  The report records the effective properties and unit
 =InvocationID= rather than trusting requested values.  When the Python main process
@@ -449,8 +695,8 @@ One invocation builds one fresh candidate and runs these scenarios sequentially:
    atomic =cgroup.kill= without enumerating descendants and proves the Node pidfd
    terminal, the cgroup =populated 0=, and the read half at EOF.  Thus namespace-PID-1
    exit cannot make the cgroup proof vacuous.  The Node pidfd proves Node death;
-   Python reaps its actual direct Bubblewrap child, while systemd owns any descendant
-   that survives Python.
+   Python waits for its direct minimal launcher to reap Bubblewrap, while systemd
+   owns any descendant that survives Python.
 4. *Deterministic cancellation.*  The instrumented upstream acknowledges that the
    exact request is active, then emits an endless valid stream within per-frame
    deadlines.  The driver asks public Pi to abort; bridge disconnect and upstream
@@ -545,7 +791,7 @@ Narrow P0 does not claim or test:
 
 Those are not silently dropped.  Public-SDK experiments from the rejected candidate
 remain non-gating observations.  P1 still measures eval inventory and Qwen harness
-authoring only after narrow P0 is =GO=.  P2 owns the complete provider matrix through
+authoring only after a newly reviewed P0 successor is =GO=.  P2 owns the complete provider matrix through
 the globally exclusive product gateway: thinking/text, single and dependent tools,
 parallel reads, serialized mutations, malformed/unknown/error calls, compaction,
 user/tool-result continuation, prompt/schema census, and exact real-model
@@ -573,14 +819,8 @@ The 1,500-line gate covers every hand-authored file under
 =experiments/pi-runtime-p0= after the rejected implementation is deleted, including
 source, tests, shell, package/configuration JSON, schemas, and =.gitignore=.  Only
 =package-lock.json= and ignored generated/artifact directories are excluded.  The
-review report records the sorted manifest and the final =wc -l= total from:
-
-#+begin_src sh
-git ls-files --cached --others --exclude-standard experiments/pi-runtime-p0 \
-  | LC_ALL=C sort \
-  | grep -Ev '(^|/)(package-lock\.json|node_modules|dist|\.artifacts|\.build)(/|$)' \
-  | xargs wc -l
-#+end_src
+report records the sorted existing-file manifest and the total computed by
+=line_count()= from =read_bytes().splitlines()=.  Deleted tracked paths are ignored.
 
 The result must be materially smaller than the rejected 4,494-line harness and at
 most 1,500 lines.  Crossing the limit is =STOP= unless Pierre explicitly changes the
@@ -637,7 +877,7 @@ experiment, but they are not a passing P0 result.
   authority were absent from the exercised path, the simplicity judgment does not
   survive review.
 
-Recommendation: do not publish this candidate, begin P1, start P2 integration,
-select a Pi web thread, or touch the active prompt-P2 work.  The narrower P0 above is
-the recommended next experiment, but this definition does not authorize its
-implementation.  Reusing the disconnected proof objects is not an option.
+The two rejected candidates remain unpublished historical evidence.  The reviewed
+parity-target successor above replaces their stronger contract and remains local.
+P1 may now begin as a separate experiment.  Do not start P2 integration, select a Pi
+web thread, deploy, or publish from this result.

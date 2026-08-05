@@ -1,1751 +1,1109 @@
 #!/usr/bin/env python3
-"""Disposable P0 build and containment driver.
-
-This module is deliberately confined to the experiment.  It is evidence machinery,
-not the future RuntimeSession, product gateway, or deployment path.
-"""
-
 from __future__ import annotations
-
-import argparse
+import atexit
 import base64
-import contextlib
+import errno
 import fcntl
 import hashlib
+import http.client
 import json
 import os
-import re
-import secrets
+import select
 import shutil
+import signal
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
-from dataclasses import dataclass
+from contextlib import suppress
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-
-
-EXPERIMENT = Path(__file__).resolve().parents[1]
-BUILD_ROOT = EXPERIMENT / ".build"
-ARTIFACT_ROOT = EXPERIMENT / ".artifacts"
-RUNTIME_ROOT = Path("/tmp/assist-pi-runtime-p0")
-_NODE_COMMAND = os.environ.get("ASSIST_PI_P0_NODE") or shutil.which("node")
-NODE = Path(_NODE_COMMAND) if _NODE_COMMAND else None
-EXPECTED_NODE = "v22.23.1"
-MAX_FRAME = 8 * 1024 * 1024
-MAX_LOG_TAIL = 64 * 1024
-PROFILE = {
-    "api": "openai-completions",
-    "context_window": 131072,
-    "model": "Qwen_Qwen3.6-27B-Q4_K_M.gguf",
-    "provider": "assist-local-qwen",
-}
-OWNED_PROMPT = "ASSIST_P0_PROMPT_OWNERSHIP_CANARY_v1"
-ALLOWED_SESSION_TYPES = {
-    "custom",
-    "message",
-    "model_change",
-    "session",
-    "thinking_level_change",
-}
-MAX_SESSION_BYTES = 1024 * 1024
-MAX_SESSION_LINE_BYTES = 64 * 1024
-
+ROOT = Path(__file__).resolve().parents[1]
+PROMPT = "ASSIST_P0_PROMPT_OWNERSHIP_CANARY_v1"
+USER = "Return the fixed deterministic response."
+FIFO = "/run/assist-p0/liveness.fifo"
+ENV_CANARY = "P0_AUTHORITY_ENV_MUST_NOT_ENTER_RUNNER"
+NODE_VERSION = "v22.23.1"
+LOCK_SHA256 = "ed4d145d52056516ddbc8dd602f74f6f6d363ac62acef73f26679acd9336baa7"
+MAX_FRAME = 512 * 1024
+MAX_SESSION = 2 * 1024 * 1024
+WORK_SECONDS = 15.0
+CLEANUP_SECONDS = 6.0
+SCENARIOS = ("success", "fail-closed", "fail-backpressure", "hostile", "cancel", "fresh", "authority-death")
 
 class P0Error(RuntimeError):
-    """A concrete P0 gate failure."""
+    pass
 
-
-@dataclass(frozen=True)
-class ProviderBinding:
-    run_id: str
-    release: str
-    model: str
-    profile_digest: str
-    request_digest: str
-
-
-class ProviderAdmission:
-    """Disposable capacity-one lease and generation fence used by P0 tests."""
-
-    def __init__(self) -> None:
-        self.gateway_generation = 1
-        self.server_generation = 1
-        self._issued: dict[str, tuple[ProviderBinding, int, int]] = {}
-        self._used: set[str] = set()
-        self._active: str | None = None
-        self._closed = False
-        self._quarantined = False
-
-    def issue(self, binding: ProviderBinding) -> str:
-        if self._closed or self._quarantined or self._active is not None:
-            raise P0Error("provider admission is unavailable")
-        lease = secrets.token_hex(32)
-        self._issued[lease] = (
-            binding,
-            self.gateway_generation,
-            self.server_generation,
-        )
-        return lease
-
-    def admit(self, lease: str, binding: ProviderBinding) -> None:
-        expected = self._issued.pop(lease, None)
-        if lease in self._used or expected is None:
-            raise P0Error("provider lease is unknown or already consumed")
-        if self._closed or self._quarantined or self._active is not None:
-            raise P0Error("provider admission is unavailable")
-        if expected != (
-            binding,
-            self.gateway_generation,
-            self.server_generation,
-        ):
-            raise P0Error("provider lease binding or generation changed")
-        self._used.add(lease)
-        self._active = lease
-
-    def cancel(self, lease: str) -> None:
-        if self._active != lease:
-            raise P0Error("cannot cancel an inactive provider generation")
-        self._closed = True
-
-    def observe_terminal(self, lease: str) -> None:
-        if self._active != lease:
-            raise P0Error("terminal frame belongs to another generation")
-        self._active = None
-        self._closed = False
-        self._quarantined = False
-
-    def observe_single_slot_idle(self, is_processing: object) -> None:
-        if is_processing is not False or self._active is None:
-            raise P0Error("provider idle proof is not the exact inactive sole slot")
-        self._active = None
-        self._closed = False
-        self._quarantined = False
-
-    def gateway_restart(self) -> None:
-        self.gateway_generation += 1
-        self._issued.clear()
-        self._quarantined = self._active is not None
-        self._closed = self._active is not None
-
-    def server_restart_complete(self) -> None:
-        if self._active is None and not self._quarantined:
-            raise P0Error("model restart was not required")
-        self.server_generation += 1
-        self._active = None
-        self._closed = False
-        self._quarantined = False
-
-
-class ActiveWorkLedger:
-    """Disposable persistent cumulative-time and single-holder proof."""
-
-    def __init__(self, path: Path, cap_ns: int) -> None:
-        self.path = path
-        self.lock_path = path.with_suffix(".lock")
-        self.cap_ns = cap_ns
-        with self._exclusive():
-            if not path.exists():
-                descriptor = os.open(
-                    path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                    0o600,
-                )
-                try:
-                    os.write(
-                        descriptor,
-                        _canonical({"cumulative_ns": 0, "holder": None}) + b"\n",
-                    )
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-
-    @contextlib.contextmanager
-    def _exclusive(self) -> Iterable[None]:
-        descriptor = os.open(
-            self.lock_path,
-            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-            0o600,
-        )
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
-
-    def _read(self) -> dict[str, object]:
-        value = json.loads(self.path.read_text())
-        if set(value) != {"cumulative_ns", "holder"}:
-            raise P0Error("active-work ledger schema changed")
+class Deadline:
+    def __init__(self, seconds: float):
+        self.end = time.monotonic() + seconds
+    def remaining(self, label: str = "operation") -> float:
+        value = self.end - time.monotonic()
+        if value <= 0:
+            raise P0Error(f"{label} exceeded its absolute deadline")
         return value
 
-    def _write(self, value: dict[str, object]) -> None:
-        descriptor, raw_temporary = tempfile.mkstemp(
-            prefix=f".{self.path.name}.", dir=self.path.parent
-        )
-        temporary = Path(raw_temporary)
-        try:
-            os.fchmod(descriptor, 0o600)
-            os.write(descriptor, _canonical(value) + b"\n")
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, self.path)
-        directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+def canonical(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
 
-    def acquire(self, holder: str) -> None:
-        with self._exclusive():
-            value = self._read()
-            if value["holder"] is not None:
-                raise P0Error("active-work holder is already occupied")
-            if int(value["cumulative_ns"]) >= self.cap_ns:
-                raise P0Error("cumulative active-work cap is exhausted")
-            self._write({"cumulative_ns": value["cumulative_ns"], "holder": holder})
-
-    def release_after_exit(self, holder: str, elapsed_ns: int, child_pid: int) -> None:
-        if Path(f"/proc/{child_pid}").exists():
-            raise P0Error("cannot release holder before child exit")
-        with self._exclusive():
-            value = self._read()
-            if value["holder"] != holder or elapsed_ns < 0:
-                raise P0Error("active-work release identity changed")
-            self._write(
-                {
-                    "cumulative_ns": int(value["cumulative_ns"]) + elapsed_ns,
-                    "holder": None,
-                }
-            )
-
-
-def _canonical(value: object) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
-
-
-def _sha256(data: bytes) -> str:
+def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-
-def _run(
-    argv: list[str],
-    *,
-    cwd: Path | None = None,
-    env: dict[str, str] | None = None,
-    timeout: float = 120,
-) -> subprocess.CompletedProcess[bytes]:
-    result = subprocess.run(
-        argv,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-        check=False,
-    )
-    if result.returncode != 0:
-        tail = result.stdout[-MAX_LOG_TAIL:].decode("utf-8", "replace")
-        raise P0Error(f"command failed ({result.returncode}): {argv!r}\n{tail}")
+def command(argv: list[str], *, timeout: float, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+            start_new_session=True, **kwargs,
+        )
+        try:
+            returncode = process.wait(timeout=timeout)
+        except BaseException as caught:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired as reap:
+                raise P0Error(f"command could not be reaped after timeout: {argv!r}") from reap
+            output.seek(max(0, output.seek(0, os.SEEK_END) - 65536))
+            raise P0Error(f"command interrupted {argv!r}: {output.read().decode(errors='replace')}") from caught
+        output.seek(max(0, output.seek(0, os.SEEK_END) - 65536))
+        result = subprocess.CompletedProcess(argv, returncode, output.read())
+    if result.returncode:
+        detail = result.stdout[-65536:].decode(errors="replace")
+        raise P0Error(f"command failed {argv!r}:\n{detail}")
     return result
 
+def tool(name: str) -> Path:
+    value = shutil.which(name)
+    if value is None:
+        raise P0Error(f"missing tool: {name}")
+    return Path(value).resolve()
 
-def _safe_build_env(cache: Path, home: Path) -> dict[str, str]:
-    return {
-        "HOME": str(home),
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "NPM_CONFIG_AUDIT": "false",
-        "NPM_CONFIG_CACHE": str(cache),
-        "NPM_CONFIG_FUND": "false",
-        "NPM_CONFIG_IGNORE_SCRIPTS": "true",
-        "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/",
-        "NPM_CONFIG_UPDATE_NOTIFIER": "false",
-        "PATH": os.environ["PATH"],
-    }
-
-
-def _verify_lock() -> dict[str, Any]:
-    lock_path = EXPERIMENT / "package-lock.json"
-    lock = json.loads(lock_path.read_text())
-    if lock.get("lockfileVersion") != 3:
-        raise P0Error("package lock must use lockfile version 3")
-    packages = lock.get("packages")
-    if not isinstance(packages, dict):
-        raise P0Error("package lock packages must be an object")
-    for path, metadata in packages.items():
-        if not isinstance(metadata, dict):
-            raise P0Error(f"invalid lock metadata for {path}")
-        resolved = metadata.get("resolved")
-        if resolved is not None and not str(resolved).startswith(
-            "https://registry.npmjs.org/"
-        ):
-            raise P0Error(f"non-registry dependency in lock: {path}: {resolved}")
-    expected = {
-        "node_modules/@earendil-works/pi-agent-core": "0.83.0",
-        "node_modules/@earendil-works/pi-ai": "0.83.0",
-        "node_modules/@earendil-works/pi-coding-agent": "0.83.0",
-        "node_modules/@earendil-works/pi-tui": "0.83.0",
-    }
-    for path, version in expected.items():
-        actual = packages.get(path, {}).get("version")
-        if actual != version:
-            raise P0Error(f"{path} resolved to {actual}, expected {version}")
-    return lock
-
-
-def _copy_build_sources(destination: Path) -> None:
-    for name in ("package.json", "package-lock.json", "tsconfig.json"):
-        shutil.copy2(EXPERIMENT / name, destination / name)
-    shutil.copytree(EXPERIMENT / "src", destination / "src")
-    shutil.copytree(EXPERIMENT / "test", destination / "test")
-
-
-_NEEDED = re.compile(r"Shared library: \[(?P<name>[^]]+)\]")
-_INTERPRETER = re.compile(r"Requesting program interpreter: (?P<path>[^]]+)")
-
-
-def _elf_files(root: Path) -> Iterable[Path]:
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            with path.open("rb") as handle:
-                if handle.read(4) == b"\x7fELF":
-                    yield path
-        except OSError:
-            continue
-
-
-def _readelf(path: Path, *args: str) -> str:
-    result = _run(["/usr/bin/readelf", *args, str(path)], timeout=30)
-    return result.stdout.decode("utf-8", "replace")
-
-
-def _runtime_libraries(elfs: Iterable[Path]) -> dict[str, Path]:
-    pending = list(elfs)
-    seen_files: set[Path] = set()
-    libraries: dict[str, Path] = {}
-    while pending:
-        path = pending.pop()
-        resolved = path.resolve()
-        if resolved in seen_files:
-            continue
-        seen_files.add(resolved)
-        dynamic = _readelf(resolved, "-d")
-        for match in _NEEDED.finditer(dynamic):
-            name = match.group("name")
-            candidate = Path("/usr/lib") / name
-            if not candidate.exists():
-                raise P0Error(f"cannot resolve ELF dependency {name} for {path}")
-            libraries[name] = candidate.resolve()
-            pending.append(candidate)
-        program = _readelf(resolved, "-l")
-        interpreter = _INTERPRETER.search(program)
-        if interpreter:
-            loader = Path(interpreter.group("path"))
-            if not loader.exists():
-                raise P0Error(f"missing ELF interpreter {loader}")
-            libraries[loader.name] = loader.resolve()
-            pending.append(loader)
-    return libraries
-
-
-def _minimal_node_bwrap(
-    node: Path,
-    libraries: dict[str, Path],
-    build_dir: Path,
-    command: list[str],
-) -> list[str]:
-    args = [
-        "bwrap",
-        "--unshare-all",
-        "--unshare-user",
-        "--die-with-parent",
-        "--cap-drop",
-        "ALL",
-        "--ro-bind",
-        str(node),
-        "/node",
-        "--dir",
-        "/usr",
-        "--dir",
-        "/usr/lib",
+def verify_lock() -> dict[str, object]:
+    raw = (ROOT / "package-lock.json").read_bytes()
+    if digest(raw) != LOCK_SHA256:
+        raise P0Error("package lock differs from the reviewed P0 identity")
+    lock = json.loads(raw)
+    bad = [
+        name for name, meta in lock["packages"].items()
+        if name and not meta.get("link") and (
+            not str(meta.get("resolved", "")).startswith("https://registry.npmjs.org/")
+            or not str(meta.get("integrity", "")).startswith("sha512-")
+        )
     ]
-    for name, source in sorted(libraries.items()):
-        args.extend(["--ro-bind", str(source), f"/usr/lib/{name}"])
-    args.extend(
-        [
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib",
-            "/lib64",
-            "--bind",
-            str(build_dir),
-            "/build",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--dir",
-            "/tmp/home",
-            "--clearenv",
-            "--setenv",
-            "HOME",
-            "/tmp/home",
-            "--setenv",
-            "PATH",
-            "/node-bin",
-            "--chdir",
-            "/build",
-            "/node",
-            *command,
-        ]
-    )
-    return args
+    if bad: raise P0Error(f"package lock has an unreviewed registry entry: {bad}")
+    return {"sha256": digest(raw), "packages": len(lock["packages"])}
 
-
-def _copy_runtime_tree(build: Path, candidate: Path) -> None:
-    if NODE is None:
-        raise P0Error("Node is not available on PATH and ASSIST_PI_P0_NODE is unset")
-    (candidate / "app").mkdir(parents=True)
-    shutil.copytree(build / "dist" / "src", candidate / "app", dirs_exist_ok=True)
-    for name in ("package.json", "package-lock.json"):
-        shutil.copy2(build / name, candidate / name)
-    shutil.copy2(NODE, candidate / "node")
-
-    runtime_install = candidate / ".runtime-install"
-    runtime_install.mkdir()
-    for name in ("package.json", "package-lock.json"):
-        shutil.copy2(build / name, runtime_install / name)
-    cache = candidate.parent / "runtime-npm-cache"
-    home = candidate.parent / "runtime-home"
-    cache.mkdir()
-    home.mkdir()
-    _run(
-        [
-            "npm",
-            "ci",
-            "--ignore-scripts",
-            "--omit=dev",
-            "--omit=optional",
-            "--no-audit",
-            "--no-fund",
-            "--update-notifier=false",
-        ],
-        cwd=runtime_install,
-        env=_safe_build_env(cache, home),
-        timeout=300,
-    )
-    shutil.move(str(runtime_install / "node_modules"), candidate / "node_modules")
-    shutil.rmtree(runtime_install)
-
-    libraries = _runtime_libraries([candidate / "node", *_elf_files(candidate / "node_modules")])
-    library_root = candidate / "lib"
-    library_root.mkdir()
-    for name, source in sorted(libraries.items()):
-        shutil.copy2(source, library_root / name)
-
-
-def _tree_entries(root: Path) -> list[dict[str, object]]:
+def tree_manifest(root: Path) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+    for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
-        metadata = path.lstat()
-        mode = stat.S_IMODE(metadata.st_mode)
+        item: dict[str, object] = {"path": relative, "mode": stat.S_IMODE(path.lstat().st_mode)}
         if path.is_symlink():
-            entries.append(
-                {"mode": mode, "path": relative, "target": os.readlink(path), "type": "symlink"}
-            )
-        elif path.is_file():
-            entries.append(
-                {
-                    "mode": mode,
-                    "path": relative,
-                    "sha256": _sha256(path.read_bytes()),
-                    "type": "file",
-                }
-            )
+            item.update(type="symlink", target=os.readlink(path))
         elif path.is_dir():
-            entries.append({"mode": mode, "path": relative, "type": "directory"})
+            item["type"] = "directory"
         else:
-            raise P0Error(f"unsupported release entry: {path}")
+            item.update(type="file", sha256=digest(path.read_bytes()))
+        entries.append(item)
     return entries
 
+def node_libraries(node: Path) -> list[tuple[str, Path]]:
+    output = command(["ldd", str(node)], timeout=10).stdout.decode()
+    paths: dict[str, Path] = {}
+    for line in output.splitlines():
+        tokens = line.replace("=>", " ").split()
+        sources = [Path(token).resolve() for token in tokens if token.startswith("/") and Path(token).is_file()]
+        if sources:
+            name = Path(line.split()[0]).name if "=>" in line else sources[0].name
+            paths[name] = sources[0]
+    if not paths:
+        raise P0Error("Node ELF closure is empty")
+    return sorted(paths.items())
 
-def _make_read_only(root: Path) -> None:
+def set_read_only(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
-        if path.is_symlink():
-            continue
-        mode = stat.S_IMODE(path.stat().st_mode)
-        path.chmod(mode & ~0o222)
+        if not path.is_symlink():
+            path.chmod(0o555 if path.is_dir() or os.access(path, os.X_OK) else 0o444)
     root.chmod(0o555)
 
-
-def _remove_tree(root: Path) -> None:
-    for directory, names, files in os.walk(root):
-        Path(directory).chmod(0o700)
-        for name in names:
-            path = Path(directory) / name
-            if not path.is_symlink():
-                path.chmod(0o700)
-        for name in files:
-            path = Path(directory) / name
-            if not path.is_symlink():
-                path.chmod(0o600)
+def remove_tree(root: Path) -> None:
+    if not root.exists():
+        return
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            with suppress(FileNotFoundError):
+                path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IWUSR)
+    root.chmod(stat.S_IMODE(root.stat().st_mode) | stat.S_IWUSR)
     shutil.rmtree(root)
 
-
-def build_release() -> Path:
-    _verify_lock()
-    if NODE is None:
-        raise P0Error("Node is not available on PATH and ASSIST_PI_P0_NODE is unset")
-    if not NODE.is_file():
-        raise P0Error(f"pinned Node binary is missing: {NODE}")
-    version = _run([str(NODE), "--version"]).stdout.decode().strip()
-    if version != EXPECTED_NODE:
-        raise P0Error(f"Node is {version}, expected {EXPECTED_NODE}")
-    BUILD_ROOT.mkdir(parents=True, exist_ok=True)
-    ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="build-", dir=BUILD_ROOT))
-    try:
-        source = work / "source"
-        source.mkdir()
-        _copy_build_sources(source)
-        cache = work / "npm-cache"
-        home = work / "home"
-        cache.mkdir()
-        home.mkdir()
-        fetch_log = _run(
-            [
-                "npm",
-                "ci",
-                "--ignore-scripts",
-                "--omit=optional",
-                "--no-audit",
-                "--no-fund",
-                "--update-notifier=false",
-            ],
-            cwd=source,
-            env=_safe_build_env(cache, home),
-            timeout=300,
-        ).stdout
-        canary = f"P0-BUILD-CANARY-{secrets.token_hex(16)}".encode()
-        (home / "secret-canary").write_bytes(canary)
-        node_libraries = _runtime_libraries([NODE])
-        compile_command = ["/build/node_modules/typescript/bin/tsc", "-p", "/build/tsconfig.json"]
-        compile_log = _run(
-            _minimal_node_bwrap(NODE, node_libraries, source, compile_command),
-            timeout=120,
-        ).stdout
-        compiled_tests = [
-            f"/build/{path.relative_to(source).as_posix()}"
-            for path in sorted((source / "dist" / "test").glob("*.test.js"))
-        ]
-        if not compiled_tests:
-            raise P0Error("TypeScript build produced no tests")
-        test_log = _run(
-            _minimal_node_bwrap(
-                NODE,
-                node_libraries,
-                source,
-                ["--test", *compiled_tests],
-            ),
-            timeout=120,
-        ).stdout
-        candidate = work / "candidate"
-        candidate.mkdir()
-        _copy_runtime_tree(source, candidate)
-        manifest_log = _run(
-            _minimal_node_bwrap(
-                NODE,
-                node_libraries,
-                source,
-                ["/build/dist/src/emit-manifest.js"],
-            ),
-            timeout=30,
-        ).stdout
-        manifest = json.loads(manifest_log)
-        if not isinstance(manifest, list):
-            raise P0Error("emitted extension manifest is not an array")
-        (candidate / "extension-manifest.json").write_bytes(
-            _canonical(manifest) + b"\n"
-        )
-        runtime_libraries = _runtime_libraries(
-            [candidate / "node", *_elf_files(candidate / "node_modules")]
-        )
-        runtime_smoke_log = _run(
-            _minimal_node_bwrap(
-                candidate / "node",
-                runtime_libraries,
-                candidate,
-                [
-                    "--input-type=module",
-                    "--eval",
-                    "await import('/build/app/sdk-fixture.js')",
-                ],
-            ),
-            timeout=30,
-        ).stdout
-        if canary in fetch_log or canary in compile_log or canary in test_log:
-            raise P0Error("build canary appeared in build logs")
-        if canary in manifest_log or canary in runtime_smoke_log:
-            raise P0Error("build canary appeared in release-generation logs")
-        for path in candidate.rglob("*"):
-            if path.is_file() and canary in path.read_bytes():
-                raise P0Error(f"build canary appeared in release: {path}")
-        entries = _tree_entries(candidate)
-        identity = {
-            "contents": entries,
-            "node": EXPECTED_NODE,
-            "profile": PROFILE,
-        }
-        digest = _sha256(_canonical(identity))
-        (candidate / "contents.json").write_bytes(_canonical(identity) + b"\n")
-        (candidate / "release.json").write_bytes(
-            _canonical({"digest": digest, "node": EXPECTED_NODE, "profile": PROFILE})
-            + b"\n"
-        )
-        destination_root = ARTIFACT_ROOT / "releases"
-        destination_root.mkdir(parents=True, exist_ok=True)
-        destination = destination_root / digest
-        _make_read_only(candidate)
-        if destination.exists():
-            _remove_tree(candidate)
-        else:
-            candidate.chmod(0o755)
-            os.replace(candidate, destination)
-            destination.chmod(0o555)
-        return destination
-    finally:
-        if work.exists():
-            _remove_tree(work)
-
-
-class JsonLines:
-    def __init__(self, connection: socket.socket, maximum: int = MAX_FRAME):
-        self._connection = connection
-        self._maximum = maximum
-        self._buffer = bytearray()
-
-    def read(self) -> dict[str, Any]:
-        while True:
-            newline = self._buffer.find(b"\n")
-            if newline >= 0:
-                raw = bytes(self._buffer[:newline])
-                del self._buffer[: newline + 1]
-                if not raw:
-                    raise P0Error("empty protocol frame")
-                value = json.loads(raw)
-                if not isinstance(value, dict):
-                    raise P0Error("protocol frame must be an object")
-                return value
-            if len(self._buffer) >= self._maximum:
-                raise P0Error("protocol frame exceeds bound")
-            chunk = self._connection.recv(min(65536, self._maximum - len(self._buffer)))
-            if not chunk:
-                raise P0Error("protocol connection closed")
-            self._buffer.extend(chunk)
-
-    def write(self, value: dict[str, object]) -> None:
-        payload = _canonical(value) + b"\n"
-        if len(payload) > self._maximum:
-            raise P0Error("outbound protocol frame exceeds bound")
-        self._connection.sendall(payload)
-
-
-def _exact(frame: dict[str, Any], fields: set[str]) -> None:
-    actual = set(frame)
-    if actual != fields:
-        raise P0Error(f"frame fields {sorted(actual)} != {sorted(fields)}")
-
-
-def _peer_pid(connection: socket.socket) -> int:
-    raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-    return int.from_bytes(raw[:4], sys.byteorder, signed=True)
-
-
-def _process_cgroup(pid: int) -> str:
-    for line in Path(f"/proc/{pid}/cgroup").read_text().splitlines():
-        if line.startswith("0::"):
-            return line[3:]
-    raise P0Error(f"process {pid} has no unified cgroup")
-
-
-def _is_descendant(pid: int, ancestor: int) -> bool:
-    current = pid
-    for _ in range(32):
-        if current == ancestor:
-            return True
-        status = Path(f"/proc/{current}/status")
-        if not status.exists():
-            return False
-        parent = next(
-            (
-                int(line.split()[1])
-                for line in status.read_text().splitlines()
-                if line.startswith("PPid:")
-            ),
-            0,
-        )
-        if parent <= 1 or parent == current:
-            return False
-        current = parent
-    return False
-
-
-def _namespace_pid(pid: int) -> int:
-    line = next(
-        line
-        for line in Path(f"/proc/{pid}/status").read_text().splitlines()
-        if line.startswith("NSpid:")
+def build_release(run_root: Path, expected_source: dict[str, dict[str, object]]) -> tuple[Path, dict[str, object]]:
+    lock = verify_lock()
+    node, npm, cc = tool("node"), tool("npm"), tool("cc")
+    if command([str(node), "--version"], timeout=10).stdout.decode().strip() != NODE_VERSION:
+        raise P0Error("Node version changed")
+    npm_cli = npm.resolve()
+    source = run_root / "build-source"
+    source.mkdir()
+    for name in ("package.json", "package-lock.json", "tsconfig.json"):
+        shutil.copy2(ROOT / name, source / name)
+    shutil.copytree(ROOT / "src", source / "src")
+    copied = {
+        f"experiments/pi-runtime-p0/{path.relative_to(source)}":
+        {"mode": stat.S_IMODE(path.stat().st_mode), "sha256": digest(path.read_bytes())}
+        for path in source.rglob("*") if path.is_file() and path.name != "package-lock.json"
+    }
+    expected = {name: value for name, value in expected_source.items() if "/src/" in name or name.endswith(("package.json", "tsconfig.json"))}
+    if copied != expected or digest((source / "package-lock.json").read_bytes()) != LOCK_SHA256:
+        raise P0Error("copied build source differs from the captured source")
+    home, cache = run_root / "build-home", run_root / "npm-cache"
+    home.mkdir()
+    cache.mkdir()
+    canary = f"P0-BUILD-CANARY-{os.urandom(16).hex()}".encode()
+    (home / "canary").write_bytes(canary)
+    env = {
+        "HOME": str(home), "PATH": f"{node.parent}:{cc.parent}", "LANG": "C", "LC_ALL": "C",
+        "npm_config_cache": str(cache),
+    }
+    install = command(
+        [str(node), str(npm_cli), "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+        cwd=source, env=env, timeout=300,
+    ).stdout
+    tsc = source / "node_modules/typescript/bin/tsc"
+    compile_log = command(
+        [str(node), str(tsc), "-p", str(source / "tsconfig.json")], cwd=source, env=env, timeout=120,
+    ).stdout
+    launcher = source / "launch-in-cgroup"
+    compile_c = command(
+        [str(cc), "-O2", "-Wall", "-Wextra", "-Werror", "-o", str(launcher),
+         str(source / "src/launch-in-cgroup.c")], env=env, timeout=60,
+    ).stdout
+    command(
+        [str(node), str(npm_cli), "prune", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+        cwd=source, env=env, timeout=300,
     )
-    return int(line.split()[-1])
+    release = run_root / "release"
+    (release / "runtime/app").mkdir(parents=True)
+    (release / "runtime/lib").mkdir()
+    shutil.copy2(node, release / "runtime/node")
+    shutil.copy2(source / "dist/runner.js", release / "runtime/app/runner.js")
+    shutil.copy2(launcher, release / "runtime/launch-in-cgroup")
+    shutil.copytree(source / "node_modules", release / "runtime/node_modules", symlinks=True)
+    libraries = node_libraries(node)
+    for name, library in libraries:
+        shutil.copy2(library, release / "runtime/lib" / name)
+    if any(canary in value for value in (install, compile_log, compile_c)):
+        raise P0Error("build canary escaped in logs")
+    if any(path.is_file() and canary in path.read_bytes() for path in release.rglob("*")):
+        raise P0Error("build canary escaped into release")
+    set_read_only(release / "runtime")
+    manifest = tree_manifest(release)
+    release_digest = digest(canonical(manifest))
+    release.chmod(0o555)
+    evidence = {"digest": release_digest, "lock": lock, "node": NODE_VERSION}
+    return release, evidence
 
+def strict_json(raw: bytes) -> object:
+    def pairs(values: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in values:
+            if key in result:
+                raise P0Error(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+    try:
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=pairs,
+            parse_constant=lambda item: (_ for _ in ()).throw(P0Error(f"invalid number: {item}")),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise P0Error("invalid JSON") from error
+    return value
 
-def _accept_peer(
-    listener: socket.socket,
-    expected_pid: int,
-    expected_cgroup: str,
-    *,
-    descendant_allowed: bool = False,
-) -> tuple[socket.socket, int]:
-    listener.settimeout(10)
-    connection, _ = listener.accept()
-    peer = _peer_pid(connection)
-    if peer != expected_pid and not (
-        descendant_allowed and _is_descendant(peer, expected_pid)
-    ):
-        connection.close()
-        raise P0Error(f"socket peer pid {peer} != registered runner {expected_pid}")
-    if _process_cgroup(peer) != expected_cgroup:
-        connection.close()
-        raise P0Error("socket peer is outside the registered cgroup")
-    os.pidfd_open(peer)
-    return connection, peer
-
-
-@dataclass
-class LogTail:
-    stream: Any
-    tail: bytearray
-    thread: threading.Thread
-
-
-def _drain(stream: Any) -> LogTail:
-    tail = bytearray()
-
-    def consume() -> None:
-        while True:
-            chunk = stream.read(65536)
-            if not chunk:
-                return
-            tail.extend(chunk)
-            if len(tail) > MAX_LOG_TAIL:
-                del tail[: len(tail) - MAX_LOG_TAIL]
-
-    thread = threading.Thread(target=consume, daemon=True)
-    thread.start()
-    return LogTail(stream, tail, thread)
-
-
-def _socket_listener(run_root: Path, name: str) -> tuple[socket.socket, Path, int]:
-    path = run_root / name
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(path))
-    path.chmod(0o600)
-    listener.listen(1)
-    descriptor = os.open(path, os.O_PATH | os.O_NOFOLLOW)
-    return listener, path, descriptor
-
-
-def _runtime_bwrap(
-    release: Path,
-    control_fd: int,
-    provider_fd: int,
-    session_fd: int,
-    status_fd: int,
-) -> list[str]:
-    args = [
-        "bwrap",
-        "--unshare-all",
-        "--unshare-user",
-        "--die-with-parent",
-        "--disable-userns",
-        "--cap-drop",
-        "ALL",
-        "--uid",
-        "65534",
-        "--gid",
-        "65534",
-        "--ro-bind",
-        str(release),
-        "/runtime",
-        "--dir",
-        "/usr",
-        "--ro-bind",
-        str(release / "lib"),
-        "/usr/lib",
-        "--symlink",
-        "usr/lib",
-        "/lib",
-        "--symlink",
-        "usr/lib",
-        "/lib64",
-        "--dir",
-        "/run",
-        "--dir",
-        "/run/assist-p0",
-        "--ro-bind-fd",
-        str(control_fd),
-        "/run/assist-p0/control.sock",
-        "--ro-bind-fd",
-        str(provider_fd),
-        "/run/assist-p0/provider.sock",
-        "--dir",
-        "/session",
-        "--bind-fd",
-        str(session_fd),
-        "/session/session.jsonl",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--dir",
-        "/tmp/home",
-        "--clearenv",
-        "--setenv",
-        "HOME",
-        "/tmp/home",
-        "--setenv",
-        "PATH",
-        "/runtime",
-        "--chdir",
-        "/tmp",
-        "--json-status-fd",
-        str(status_fd),
-        "/runtime/node",
-        "/runtime/app/topology-probe.js",
-    ]
-    return args
-
-
-def _read_status_line(descriptor: int) -> tuple[dict[str, Any], LogTail]:
-    stream = os.fdopen(descriptor, "rb", closefd=True)
-    raw = stream.readline(MAX_FRAME + 1)
-    if not raw or len(raw) > MAX_FRAME:
-        stream.close()
-        raise P0Error("missing or oversized bwrap status")
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        stream.close()
-        raise P0Error("bwrap status is not an object")
-    return value, _drain(stream)
-
-
-def _validate_session(descriptor: int, run_id: str) -> dict[str, object]:
-    metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise P0Error("session inode is not a single-link regular file")
-    if stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise P0Error("session inode mode changed")
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    data = os.read(descriptor, MAX_SESSION_BYTES + 1)
-    if len(data) > MAX_SESSION_BYTES or not data.endswith(b"\n"):
-        raise P0Error("session output is oversized or truncated")
-    records = []
-    for line in data.splitlines():
-        if len(line) > MAX_SESSION_LINE_BYTES:
-            raise P0Error("session line exceeds bound")
-        value = json.loads(line)
-        if not isinstance(value, dict) or value.get("type") not in ALLOWED_SESSION_TYPES:
-            observed = value.get("type") if isinstance(value, dict) else type(value).__name__
-            raise P0Error(f"session contains an unaudited record: {observed!r}")
-        records.append(value)
-    if not records or records[0].get("type") != "session":
-        raise P0Error("Pi session header is missing")
-    roles = [
-        value.get("message", {}).get("role")
-        for value in records
-        if value.get("type") == "message" and isinstance(value.get("message"), dict)
-    ]
-    if roles != ["user", "assistant", "toolResult", "assistant"]:
-        raise P0Error(f"unexpected contained SDK session roles: {roles!r}")
-    ids = [value.get("id") for value in records[1:]]
-    if any(not isinstance(entry_id, str) or not entry_id for entry_id in ids):
-        raise P0Error("Pi session contains an invalid entry ID")
-    if len(ids) != len(set(ids)):
-        raise P0Error("Pi session contains duplicate entry IDs")
-    os.fsync(descriptor)
+def expected_payload() -> dict[str, object]:
     return {
-        "bytes": len(data),
-        "record_types": [value["type"] for value in records],
-        "roles": roles,
-        "sha256": _sha256(data),
+        "model": "fixture-model",
+        "messages": [
+            {"role": "system", "content": PROMPT},
+            {"role": "user", "content": [{"type": "text", "text": USER}]},
+        ],
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "max_tokens": 256,
+        "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True},
     }
 
-
-def open_session_candidate(path: Path) -> int:
-    """Open and validate a retained P0 session without following or replacing it."""
-    descriptor = os.open(
-        path,
-        os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW,
-    )
+def parse_provider_request(raw: bytes) -> tuple[bytes, dict[str, object]]:
+    if len(raw) > MAX_FRAME or b"\r\n\r\n" not in raw:
+        raise P0Error("provider request is malformed")
+    head, body = raw.split(b"\r\n\r\n", 1)
     try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise P0Error("session candidate is not a regular file")
-        if metadata.st_nlink != 1:
-            raise P0Error("session candidate has multiple links")
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            raise P0Error("session candidate mode is not 0600")
-        if metadata.st_size > MAX_SESSION_BYTES:
-            raise P0Error("session candidate exceeds the size bound")
-        data = os.pread(descriptor, MAX_SESSION_BYTES + 1, 0)
-        if data and not data.endswith(b"\n"):
-            raise P0Error("session candidate has a truncated suffix")
-        ids: set[str] = set()
-        for line in data.splitlines():
-            if len(line) > MAX_SESSION_LINE_BYTES:
-                raise P0Error("session candidate line exceeds the size bound")
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError as error:
-                raise P0Error("session candidate contains malformed JSON") from error
-            if not isinstance(value, dict) or not isinstance(value.get("type"), str):
-                raise P0Error("session candidate record is not typed")
-            entry_id = value.get("id")
-            if entry_id is not None:
-                if not isinstance(entry_id, str) or not entry_id:
-                    raise P0Error("session candidate entry id is invalid")
-                if entry_id in ids:
-                    raise P0Error("session candidate contains a duplicate entry id")
-                ids.add(entry_id)
-        return descriptor
-    except BaseException:
+        lines = head.decode("ascii").split("\r\n")
+    except UnicodeDecodeError as error:
+        raise P0Error("provider headers are not ASCII") from error
+    if lines.pop(0) != "POST /v1/chat/completions HTTP/1.1":
+        raise P0Error("provider method or path changed")
+    allowed = {
+        "host", "connection", "accept", "user-agent", "x-stainless-retry-count",
+        "x-stainless-timeout", "x-stainless-lang", "x-stainless-package-version",
+        "x-stainless-os", "x-stainless-arch", "x-stainless-runtime",
+        "x-stainless-runtime-version", "authorization", "content-type",
+        "accept-language", "sec-fetch-mode", "accept-encoding", "content-length",
+    }
+    headers: dict[str, str] = {}
+    for line in lines:
+        if ":" not in line:
+            raise P0Error("malformed provider header")
+        name, value = line.split(":", 1)
+        name = name.lower()
+        if name in headers or name not in allowed:
+            raise P0Error(f"provider header rejected: {name}")
+        headers[name] = value.strip()
+    expected_headers = {
+        "connection": "keep-alive", "accept": "application/json", "user-agent": "OpenAI/JS 6.26.0",
+        "x-stainless-retry-count": "0", "x-stainless-timeout": "300", "x-stainless-lang": "js",
+        "x-stainless-package-version": "6.26.0", "x-stainless-os": "Linux", "x-stainless-arch": "x64",
+        "x-stainless-runtime": "node", "x-stainless-runtime-version": NODE_VERSION,
+        "authorization": "Bearer local", "content-type": "application/json", "accept-language": "*",
+        "sec-fetch-mode": "cors", "accept-encoding": "gzip, deflate",
+    }
+    try:
+        content_length = int(headers.get("content-length", "-1"))
+    except ValueError as error:
+        raise P0Error("provider content length is invalid") from error
+    host = headers.get("host", "")
+    port_text = host.removeprefix("127.0.0.1:") if host.startswith("127.0.0.1:") else ""
+    if (
+        set(headers) != allowed
+        or any(headers.get(name) != value for name, value in expected_headers.items())
+        or not port_text.isdecimal() or not 1 <= int(port_text) <= 65535
+        or content_length != len(body)
+    ):
+        raise P0Error("provider content headers changed")
+    payload = strict_json(body)
+    if canonical(payload) != canonical(expected_payload()):
+        raise P0Error("provider payload changed")
+    encoded = canonical(payload)
+    return encoded, {
+        "raw_sha256": digest(raw), "received_sha256": digest(body),
+        "canonical_sha256": digest(encoded), "headers": sorted(headers), "host": host,
+    }
+
+class Channel:
+    def __init__(self, connection: socket.socket):
+        self.connection = connection
+        self.buffer = bytearray()
+    def read(self, deadline: Deadline) -> dict[str, Any]:
+        while b"\n" not in self.buffer:
+            self.connection.settimeout(deadline.remaining("control read"))
+            chunk = self.connection.recv(min(65536, MAX_FRAME - len(self.buffer)))
+            if not chunk:
+                raise EOFError("channel closed")
+            self.buffer.extend(chunk)
+            if len(self.buffer) >= MAX_FRAME:
+                raise P0Error("protocol frame too large")
+        raw, _, rest = self.buffer.partition(b"\n")
+        self.buffer = bytearray(rest)
+        value = strict_json(bytes(raw).rstrip(b" "))
+        if not isinstance(value, dict):
+            raise P0Error("protocol frame is not an object")
+        return value
+    def write(self, value: dict[str, object], deadline: Deadline) -> None:
+        raw = canonical(value) + b"\n"
+        if len(raw) > MAX_FRAME:
+            raise P0Error("outbound frame too large")
+        self.connection.settimeout(deadline.remaining("control write"))
+        self.connection.sendall(raw)
+
+def expect(frame: dict[str, Any], expected: dict[str, object], label: str) -> None:
+    if canonical(frame) != canonical(expected):
+        raise P0Error(f"{label} changed: {frame}")
+
+class FixtureHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def do_POST(self) -> None:
+        owner: FixtureServer = self.server.owner  # type: ignore[attr-defined]
+        try:
+            length = int(self.headers.get("Content-Length", "-1"))
+        except ValueError:
+            self.send_error(400)
+            return
+        if length < 0 or length > MAX_FRAME:
+            self.send_error(413)
+            return
+        body = self.rfile.read(length)
+        with owner.lock:
+            owner.requests += 1
+            admitted = owner.requests == 1
+        if not admitted or self.path != "/v1/chat/completions" or body != owner.expected:
+            self.send_error(409 if not admitted else 400)
+            return
+        owner.request = body
+        owner.active.set()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            chunks = owner.chunks if not owner.endless else owner.chunks[:1]
+            while True:
+                for chunk in chunks:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                if not owner.endless or owner.stop.wait(0.02):
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            self.close_connection = True
+            owner.terminal.set()
+    def log_message(self, _format: str, *_args: object) -> None:
+        pass
+
+class FixtureServer:
+    def __init__(self, expected: bytes, *, endless: bool):
+        self.expected, self.endless = expected, endless
+        self.identity = os.urandom(16).hex()
+        self.active, self.stop, self.terminal = threading.Event(), threading.Event(), threading.Event()
+        self.lock = threading.Lock()
+        self.requests = 0
+        self.request: bytes | None = None
+        base = {"id": "p0", "object": "chat.completion.chunk", "created": 1, "model": "fixture-model"}
+        self.chunks = [
+            f"data: {json.dumps({**base, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': 'P0_OK'}, 'finish_reason': None}]})}\n\n".encode(),
+            f"data: {json.dumps({**base, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}], 'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2}})}\n\ndata: [DONE]\n\n".encode(),
+        ]
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
+        self.server.owner = self  # type: ignore[attr-defined]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+    def start(self) -> None:
+        self.thread.start()
+    def close(self, deadline: Deadline) -> None:
+        self.stop.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(deadline.remaining("fixture thread"))
+        if self.thread.is_alive():
+            raise P0Error("fixture server did not stop")
+
+def gateway(
+    channel: Channel, raw: bytes, mode: str, deadline: Deadline, observer: Channel | None = None,
+) -> dict[str, object]:
+    canonical_body, evidence = parse_provider_request(raw)
+    fixture = FixtureServer(canonical_body, endless=mode in {"cancel", "authority-death"})
+    fixture.start()
+    connection = http.client.HTTPConnection("127.0.0.1", fixture.server.server_port, timeout=deadline.remaining())
+    response: http.client.HTTPResponse | None = None
+    try:
+        connection.request(
+            "POST", "/v1/chat/completions", body=canonical_body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(canonical_body))},
+        )
+        response = connection.getresponse()
+        if response.status != 200 or not fixture.active.wait(deadline.remaining("upstream activation")):
+            raise P0Error("upstream did not activate")
+        if connection.sock is not None:
+            connection.sock.settimeout(deadline.remaining("upstream response"))
+        first = response.fp.readline(MAX_FRAME) + response.fp.readline(MAX_FRAME)  # type: ignore[union-attr]
+        channel.write({"request": 1, "type": "response_start"}, deadline)
+        channel.write({"data": base64.b64encode(first).decode(), "request": 1, "type": "response_chunk"}, deadline)
+        if mode == "authority-death":
+            if observer is None:
+                raise P0Error("authority-death observer is absent")
+            observer.write({"type": "authority_death_ready", "upstream_active": True}, deadline)
+            signal.pause()
+            raise P0Error("authority death signal returned")
+        if mode == "cancel":
+            channel.write({"request": 1, "type": "cancel"}, deadline)
+            expect(channel.read(deadline), {"request": 1, "type": "client_closed"}, "client close")
+            fixture.stop.set()
+            response.close()
+            connection.close()
+            if not fixture.terminal.wait(deadline.remaining("cancelled upstream terminal")):
+                raise P0Error("cancelled upstream remained active")
+            channel.write({"request": 1, "type": "cancel_ack"}, deadline)
+        else:
+            rest = response.read(MAX_FRAME + 1)
+            if len(rest) > MAX_FRAME:
+                raise P0Error("upstream response exceeded its byte budget")
+            channel.write({"data": base64.b64encode(rest).decode(), "request": 1, "type": "response_chunk"}, deadline)
+            channel.write({"request": 1, "type": "response_end"}, deadline)
+            connection.close()
+        if not fixture.terminal.wait(deadline.remaining("upstream terminal")):
+            raise P0Error("upstream request did not become terminal")
+        if fixture.requests != 1:
+            raise P0Error("upstream one-shot admission changed")
+        return {
+            **evidence, "upstream_sha256": digest(fixture.request or b""),
+            "upstream_instance": fixture.identity, "upstream_requests": fixture.requests,
+            "cancelled": mode == "cancel",
+        }
+    finally:
+        if mode != "authority-death":
+            if response is not None:
+                response.close()
+            connection.close()
+            fixture.close(Deadline(CLEANUP_SECONDS))
+
+def cgroup_path(pid: int | None = None) -> Path:
+    text = Path(f"/proc/{pid or 'self'}/cgroup").read_text().strip()
+    if not text.startswith("0::/"):
+        raise P0Error("P0 requires unified cgroup v2")
+    return Path("/sys/fs/cgroup") / text[3:].lstrip("/")
+
+def process_identity(pid: int) -> dict[str, int]:
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    return {"pid": pid, "starttime": int(fields[19])}
+
+def inode_identity(metadata: os.stat_result, root: Path) -> dict[str, object]:
+    return {"root": root.name, "device": metadata.st_dev, "inode": metadata.st_ino}
+
+def populated(path: Path) -> bool:
+    values = dict(line.split() for line in (path / "cgroup.events").read_text().splitlines())
+    return values.get("populated") == "1"
+
+def pidfd_alive(descriptor: int) -> bool:
+    return not select.select([descriptor], [], [], 0)[0]
+
+def wait_pidfd(descriptor: int, deadline: Deadline, label: str) -> None:
+    if not select.select([descriptor], [], [], deadline.remaining(label))[0]:
+        raise P0Error(f"{label} did not become terminal")
+
+def read_fd_line(descriptor: int, deadline: Deadline, label: str) -> bytes:
+    if not select.select([descriptor], [], [], deadline.remaining(label))[0]:
+        raise P0Error(f"{label} timed out")
+    raw = os.read(descriptor, MAX_FRAME)
+    if not raw.endswith(b"\n") or raw.count(b"\n") != 1:
+        raise P0Error(f"{label} is malformed")
+    return raw
+
+def drain_dead_peer(channel: Channel, deadline: Deadline) -> dict[str, object]:
+    raw = bytearray(channel.buffer)
+    channel.buffer.clear()
+    while True:
+        if not select.select([channel.connection], [], [], deadline.remaining("fail-stop drain"))[0]:
+            raise P0Error("fail-stop control connection did not close")
+        chunk = channel.connection.recv(min(65536, MAX_FRAME + 1 - len(raw)))
+        if not chunk:
+            break
+        raw.extend(chunk)
+        if len(raw) > MAX_FRAME:
+            raise P0Error("fail-stop evidence exceeded its byte budget")
+    if b'"type":"provider_request"' in raw:
+        raise P0Error("fail-stop emitted a provider admission frame")
+    return {"bytes": len(raw), "provider_frames": 0, "sha256": digest(raw)}
+
+def launch_runner(
+    scenario: str, release: Path, control_path_fd: int, session_fd: int, fifo_fd: int,
+    runner_cgroup: Path, deadline: Deadline,
+) -> tuple[int, int, subprocess.Popen[bytes], int]:
+    status_r, status_w = os.pipe()
+    cgroup_fd = os.open(runner_cgroup, os.O_PATH | os.O_DIRECTORY)
+    session_path_fd = os.open(f"/proc/self/fd/{session_fd}", os.O_PATH)
+    args = [
+        str(release / "runtime/launch-in-cgroup"), str(cgroup_fd), "--",
+        str(tool("prlimit")), f"--fsize={MAX_SESSION}:{MAX_SESSION}", "--nofile=64:64", "--core=0:0", "--",
+        str(tool("bwrap")), "--unshare-all", "--unshare-user", "--new-session", "--disable-userns",
+        "--cap-drop", "ALL", "--uid", "65534", "--gid", "65534",
+        "--ro-bind", str(release / "runtime"), "/runtime", "--dir", "/run", "--dir", "/run/assist-p0",
+        "--ro-bind-fd", str(control_path_fd), "/run/assist-p0/control.sock",
+        "--dir", "/session", "--bind-fd", str(session_path_fd), "/session/session.jsonl",
+        "--dir", "/workspace", "--dir", "/agent", "--proc", "/proc", "--dev", "/dev",
+        "--tmpfs", "/tmp", "--dir", "/tmp/home", "--clearenv", "--setenv", "HOME", "/tmp/home",
+        "--setenv", "PATH", "/runtime", "--chdir", "/tmp", "--json-status-fd", str(status_w),
+        "--bind-fd", str(fifo_fd), FIFO,
+    ]
+    loader = next((release / "runtime/lib").glob("ld-linux-*.so.*"))
+    args += [
+        f"/runtime/lib/{loader.name}", "--library-path", "/runtime/lib", "/runtime/node",
+        "/runtime/app/runner.js", scenario,
+    ]
+    inherited = (cgroup_fd, status_w, control_path_fd, session_path_fd, fifo_fd)
+    launcher = subprocess.Popen(
+        args, pass_fds=inherited, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, env={},
+    )
+    for descriptor in inherited:
         os.close(descriptor)
+    try:
+        value = strict_json(read_fd_line(status_r, deadline, "Bubblewrap status"))
+        status_fields = {"child-pid", "cgroup-namespace", "ipc-namespace", "mnt-namespace", "net-namespace", "pid-namespace", "uts-namespace"}
+        if not isinstance(value, dict) or set(value) != status_fields or not all(isinstance(item, int) for item in value.values()):
+            raise P0Error(f"invalid Bubblewrap status: {value}")
+        init_pid = value["child-pid"]
+        if Path(f"/proc/{init_pid}/environ").read_bytes():
+            raise P0Error("Bubblewrap PID 1 inherited the authority environment")
+        return init_pid, os.pidfd_open(init_pid), launcher, status_r
+    except BaseException:
+        close_fd(status_r)
+        if populated(runner_cgroup):
+            (runner_cgroup / "cgroup.kill").write_text("1")
+        launcher.wait(timeout=CLEANUP_SECONDS)
         raise
 
-
-def recover_verified_suffix(
-    descriptor: int,
-    committed_offset: int,
-    committed_prefix_sha256: str,
-) -> None:
-    """Remove only bytes after an exact previously committed prefix."""
-    metadata = os.fstat(descriptor)
-    if committed_offset < 0 or committed_offset > metadata.st_size:
-        raise P0Error("committed session offset is outside the current inode")
-    prefix = os.pread(descriptor, committed_offset, 0)
-    if len(prefix) != committed_offset or _sha256(prefix) != committed_prefix_sha256:
-        raise P0Error("committed session prefix no longer matches")
-    os.ftruncate(descriptor, committed_offset)
-    os.fsync(descriptor)
-
-
-def _verify_cgroup(path: str) -> dict[str, str]:
-    root = Path("/sys/fs/cgroup") / path.lstrip("/")
-    expected_files = ("memory.max", "pids.max", "cpu.max", "memory.oom.group")
-    values = {name: (root / name).read_text().strip() for name in expected_files}
-    if values["memory.max"] != str(512 * 1024 * 1024):
-        raise P0Error(f"unexpected memory.max: {values['memory.max']}")
-    if values["pids.max"] != "32":
-        raise P0Error(f"unexpected pids.max: {values['pids.max']}")
-    if values["cpu.max"].split()[0] == "max":
-        raise P0Error("CPU quota is not active")
-    if values["memory.oom.group"] != "1":
-        raise P0Error("OOM group kill is not active")
-    return values
-
-
-def _validate_runner_census(census: dict[str, Any]) -> dict[str, object]:
-    mounts = census.get("mounts")
-    if not isinstance(mounts, str):
-        raise P0Error("runner mount census is missing")
-    mount_points = []
-    for line in mounts.splitlines():
-        fields = line.split()
-        if len(fields) < 6:
-            raise P0Error("runner mount census is malformed")
-        mount_points.append(fields[4])
-    required = {
-        "/",
-        "/dev",
-        "/dev/full",
-        "/dev/null",
-        "/dev/pts",
-        "/dev/random",
-        "/dev/tty",
-        "/dev/urandom",
-        "/dev/zero",
-        "/proc",
-        "/run/assist-p0/control.sock",
-        "/run/assist-p0/provider.sock",
-        "/runtime",
-        "/session/session.jsonl",
-        "/tmp",
-        "/usr/lib",
-    }
-    if set(mount_points) != required:
-        raise P0Error(f"runner mount set changed: {sorted(mount_points)}")
-    if any(point.startswith(("/home", "/workspace")) for point in mount_points):
-        raise P0Error("runner acquired a host workspace or home mount")
-    descriptors = census.get("fds")
-    if not isinstance(descriptors, dict):
-        raise P0Error("runner FD census is missing")
-    allowed_prefixes = (
-        "/dev/null",
-        "<closed>",
-        "anon_inode:",
-        "pipe:",
-        "socket:",
-    )
-    for target in descriptors.values():
-        if not isinstance(target, str) or not target.startswith(allowed_prefixes):
-            raise P0Error(f"runner inherited an unaudited descriptor: {target!r}")
-    limits = census.get("limits")
-    if not isinstance(limits, str) or not re.search(
-        r"^Max open files\s+64\s+64\s+files\s*$", limits, re.MULTILINE
-    ):
-        raise P0Error("runner RLIMIT_NOFILE is not exactly 64")
-    return {
-        "descriptor_count": len(descriptors),
-        "mount_count": len(mount_points),
-        "mount_points": sorted(mount_points),
-    }
-
-
-def _validate_sdk_census(census: object) -> dict[str, object]:
-    if not isinstance(census, dict) or set(census) != {
-        "active_tools",
-        "events",
-        "payloads",
-    }:
-        raise P0Error("contained SDK census schema changed")
-    expected_tools = ["load_skill", "fixture_workspace_probe"]
-    if census["active_tools"] != expected_tools:
-        raise P0Error("contained SDK active-tool set changed")
-    payloads = census["payloads"]
-    if not isinstance(payloads, list) or len(payloads) != 2:
-        raise P0Error("contained SDK did not capture both provider boundaries")
-    for payload in payloads:
-        if not isinstance(payload, dict):
-            raise P0Error("contained SDK provider payload is not an object")
-        messages = payload.get("messages")
-        if (
-            not isinstance(messages, list)
-            or not messages
-            or messages[0] != {"role": "system", "content": OWNED_PROMPT}
-        ):
-            raise P0Error("Assist does not own the exact provider-bound prompt")
-        tools = payload.get("tools")
-        if not isinstance(tools, list):
-            raise P0Error("contained SDK provider schemas are absent")
-        names = [
-            tool.get("function", {}).get("name")
-            for tool in tools
-            if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
-        ]
-        if names != expected_tools:
-            raise P0Error("contained SDK provider schemas changed")
-        serialized = _canonical(payload)
-        if b"Current working directory" in serialized or b"expert coding assistant operating inside pi" in serialized:
-            raise P0Error("Pi default prompt bytes reached the provider")
-    events = census["events"]
-    if not isinstance(events, list):
-        raise P0Error("contained SDK event census is absent")
-    phases = [event.get("phase") for event in events if isinstance(event, dict)]
-    required_phases = {
-        "before_agent_start",
-        "before_provider_request",
-        "message_end",
-        "session_start",
-        "tool_call",
-        "tool_result",
-        "turn_end",
-    }
-    if not required_phases.issubset(phases):
-        raise P0Error("contained SDK lifecycle census is incomplete")
-    return {
-        "event_count": len(events),
-        "payload_count": len(payloads),
-        "prompt_sha256": _sha256(OWNED_PROMPT.encode()),
-        "tools": expected_tools,
-    }
-
-
-def _fake_provider(channel: JsonLines, identity: dict[str, object]) -> dict[str, object]:
-    hello = channel.read()
-    identity_fields = {
-        "gateway_generation",
-        "lease",
-        "model",
-        "nonce",
-        "profile_digest",
-        "release",
-        "request_budget_bytes",
-        "response_budget_bytes",
-        "run_id",
-        "server_generation",
-    }
-    _exact(hello, {"type", "seq", *identity_fields})
-    if hello != {
-        "type": "provider_hello",
-        "seq": 0,
-        **identity,
-    }:
-        raise P0Error("invalid provider hello")
-    channel.write({"type": "provider_ready", "seq": 0})
-    request = channel.read()
-    _exact(
-        request,
-        {
-            "type",
-            "seq",
-            *identity_fields,
-            "method",
-            "path",
-            "content_type",
-            "body_sha256",
-            "body_base64",
-        },
-    )
-    if request["type"] != "provider_request" or request["seq"] != 1:
-        raise P0Error("invalid provider request sequence")
-    for field in identity_fields:
-        if request[field] != identity[field]:
-            raise P0Error(f"provider identity mismatch: {field}")
-    if request["method"] != "POST" or request["path"] != "/v1/chat/completions":
-        raise P0Error("provider destination changed")
-    body = base64.b64decode(request["body_base64"], validate=True)
-    if _sha256(body) != request["body_sha256"]:
-        raise P0Error("provider body digest mismatch")
-    payload = json.loads(body)
-    if payload != {"model": "topology-fixture", "stream": True, "messages": []}:
-        raise P0Error("provider body changed")
-    response_body = b'data: {"fixture":"topology-ok"}\n\ndata: [DONE]\n\n'
-    channel.write(
-        {
-            "type": "provider_response_start",
-            "seq": 1,
-            "status": 200,
-            "content_type": "text/event-stream",
-        }
-    )
-    channel.write(
-        {
-            "type": "provider_response_chunk",
-            "seq": 1,
-            "chunk_base64": base64.b64encode(response_body).decode(),
-        }
-    )
-    channel.write({"type": "provider_response_end", "seq": 1})
-    return {"body_sha256": _sha256(body), "response_sha256": _sha256(response_body)}
-
-
-def run_topology(release: Path, *, teardown_race: bool = False) -> dict[str, object]:
-    release_metadata = json.loads((release / "release.json").read_text())
-    release_digest = release_metadata["digest"]
-    run_id = secrets.token_hex(16)
-    nonce = secrets.token_hex(32)
-    lease = secrets.token_hex(32)
-    profile_digest = _sha256(_canonical(PROFILE))
-    provider_identity = {
-        "gateway_generation": 7,
-        "lease": lease,
-        "model": PROFILE["model"],
-        "nonce": nonce,
-        "profile_digest": profile_digest,
-        "release": release_digest,
-        "request_budget_bytes": 4 * 1024 * 1024,
-        "response_budget_bytes": 8 * 1024 * 1024,
-        "run_id": run_id,
-        "server_generation": 11,
-    }
-    RUNTIME_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if stat.S_IMODE(RUNTIME_ROOT.stat().st_mode) != 0o700:
-        raise P0Error(f"runtime root has unsafe mode: {RUNTIME_ROOT}")
-    run_root = Path(tempfile.mkdtemp(prefix="run-", dir=RUNTIME_ROOT))
-    run_root.chmod(0o700)
-    secret_canary = f"P0-RUNTIME-CANARY-{secrets.token_hex(16)}".encode()
-    (run_root / "unmounted-secret-canary").write_bytes(secret_canary)
-    control_listener = provider_listener = None
-    control_fd = provider_fd = session_path_fd = session_fd = status_read = status_write = -1
-    process: subprocess.Popen[bytes] | None = None
-    stdout_tail: LogTail | None = None
-    stderr_tail: LogTail | None = None
-    status_tail: LogTail | None = None
-    unit = f"assist-pi-p0-{run_id[:16]}.scope"
+def accept_runner(
+    listener: socket.socket, init_pid: int, init_pidfd: int, runner_cgroup: Path,
+    release: Path, host_canary: Path, deadline: Deadline,
+) -> tuple[Channel, int, int, dict[str, object]]:
+    ready, _, _ = select.select([listener, init_pidfd], [], [], deadline.remaining("runner accept"))
+    if init_pidfd in ready:
+        raise P0Error("runner died before connecting")
+    if listener not in ready:
+        raise P0Error("runner did not connect")
+    connection, _ = listener.accept()
+    pid, _uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    node_pidfd = os.pidfd_open(pid)
+    loader = next((release / "runtime/lib").glob("ld-linux-*.so.*"))
     try:
-        control_listener, control_path, control_fd = _socket_listener(run_root, "control.sock")
-        provider_listener, provider_path, provider_fd = _socket_listener(run_root, "provider.sock")
-        session_path = run_root / "session.jsonl"
-        session_fd = os.open(
-            session_path,
-            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
+        namespace_pids = next(
+            line.split()[1:] for line in Path(f"/proc/{pid}/status").read_text().splitlines()
+            if line.startswith("NSpid:")
         )
-        session_path_fd = os.open(session_path, os.O_PATH | os.O_NOFOLLOW)
-        status_read, status_write = os.pipe()
-        bwrap = _runtime_bwrap(
-            release, control_fd, provider_fd, session_path_fd, status_write
-        )
-        command = [
-            "systemd-run",
-            "--user",
-            "--scope",
-            "--quiet",
-            f"--unit={unit}",
-            "-p",
-            "MemoryMax=512M",
-            "-p",
-            "CPUQuota=50%",
-            "-p",
-            "TasksMax=32",
-            "-p",
-            "OOMPolicy=kill",
-            "-p",
-            "RuntimeMaxSec=60s",
-            "prlimit",
-            "--nofile=64:64",
-            "--",
-            *bwrap,
-        ]
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            pass_fds=(control_fd, provider_fd, session_path_fd, status_write),
-            start_new_session=True,
-        )
-        os.close(status_write)
-        status_write = -1
-        if process.stdout is None or process.stderr is None:
-            raise P0Error("runner logs were not captured")
-        stdout_tail = _drain(process.stdout)
-        stderr_tail = _drain(process.stderr)
-        try:
-            status, status_tail = _read_status_line(status_read)
-        except P0Error as error:
-            process.wait(timeout=5)
-            stdout_tail.thread.join(timeout=1)
-            stderr_tail.thread.join(timeout=1)
-            logs = bytes(stdout_tail.tail + stderr_tail.tail).decode("utf-8", "replace")
-            raise P0Error(f"{error}; runner exit={process.returncode}; logs={logs}") from error
-        status_read = -1
-        child_pid = status.get("child-pid")
-        if not isinstance(child_pid, int) or child_pid <= 0:
-            raise P0Error(f"bwrap did not report child pid: {status!r}")
-        cgroup = _process_cgroup(child_pid)
-        if not cgroup.endswith(f"/{unit}"):
-            raise P0Error(f"runner entered unexpected cgroup: {cgroup}")
-        cgroup_limits = _verify_cgroup(cgroup)
-        try:
-            control_connection, runner_pid = _accept_peer(
-                control_listener,
-                child_pid,
-                cgroup,
-                descendant_allowed=True,
-            )
-        except (OSError, P0Error) as error:
-            logs = bytes(stdout_tail.tail + stderr_tail.tail).decode("utf-8", "replace")
-            raise P0Error(f"control connection failed: {error}; logs={logs}") from error
-        control_listener.close()
-        control_listener = None
-        control_path.unlink()
-        control = JsonLines(control_connection, 1024 * 1024)
-        hello = control.read()
-        _exact(hello, {"type", "seq", "pid", "release"})
-        if hello != {
-            "type": "hello",
-            "seq": 0,
-            "pid": _namespace_pid(runner_pid),
-            "release": release_digest,
-        }:
-            raise P0Error(f"invalid runner hello: {hello!r}")
-        control.write({"type": "challenge", "seq": 0, "mode": (
-            "teardown-race" if teardown_race else "topology"
-        ), **{
-            key: value for key, value in provider_identity.items() if key != "release"
-        }})
-
-        try:
-            provider_connection, provider_pid = _accept_peer(
-                provider_listener, runner_pid, cgroup
-            )
-        except (OSError, P0Error) as error:
-            logs = bytes(stdout_tail.tail + stderr_tail.tail).decode("utf-8", "replace")
-            raise P0Error(f"provider connection failed: {error}; logs={logs}") from error
-        provider_listener.close()
-        provider_listener = None
-        provider_path.unlink()
-        if provider_pid != runner_pid:
-            raise P0Error("provider connection did not come from the registered runner")
-        if teardown_race:
-            provider = JsonLines(provider_connection)
-            provider_hello = provider.read()
-            identity_fields = set(provider_identity)
-            _exact(provider_hello, {"type", "seq", *identity_fields})
-            if provider_hello != {"type": "provider_hello", "seq": 0, **provider_identity}:
-                raise P0Error("teardown provider identity changed")
-            ready = control.read()
-            _exact(ready, {"type", "seq", "nonce", "run_id", "descendant_pid"})
-            if (
-                ready.get("type") != "race_ready"
-                or ready.get("seq") != 1
-                or ready.get("nonce") != nonce
-                or ready.get("run_id") != run_id
-            ):
-                raise P0Error("teardown runner readiness changed")
-            cgroup_root = Path("/sys/fs/cgroup") / cgroup.lstrip("/")
-            host_members = {
-                int(value)
-                for value in (cgroup_root / "cgroup.procs").read_text().splitlines()
-            }
-            if runner_pid not in host_members or len(host_members) < 2:
-                raise P0Error("teardown race did not create a cgroup-owned descendant")
-            subprocess.run(
-                [
-                    "systemctl",
-                    "--user",
-                    "kill",
-                    "--kill-whom=all",
-                    "--signal=TERM",
-                    unit,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                subprocess.run(
-                    [
-                        "systemctl",
-                        "--user",
-                        "kill",
-                        "--kill-whom=all",
-                        "--signal=KILL",
-                        unit,
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                process.wait(timeout=5)
-            for connection in (control_connection, provider_connection):
-                connection.settimeout(2)
-                if connection.recv(1) != b"":
-                    raise P0Error("a runner socket survived cgroup termination")
-                connection.close()
-            stdout_tail.thread.join(timeout=2)
-            stderr_tail.thread.join(timeout=2)
-            status_tail.thread.join(timeout=2)
-            if any(
-                tail.thread.is_alive()
-                for tail in (stdout_tail, stderr_tail, status_tail)
-            ):
-                raise P0Error("a teardown pipe remained open after cgroup termination")
-            if cgroup_root.exists():
-                events = dict(
-                    line.split(maxsplit=1)
-                    for line in (cgroup_root / "cgroup.events").read_text().splitlines()
-                )
-                if events.get("populated") != "0":
-                    raise P0Error("teardown cgroup remained populated")
-            if os.fstat(session_fd).st_size != 0:
-                raise P0Error("teardown race unexpectedly wrote the session")
-            return {
-                "cgroup": cgroup,
-                "descendant_count": len(host_members) - 1,
-                "pipes_closed": True,
-                "provider_socket_closed": True,
-                "session_unchanged": True,
-                "status": "PASS",
-            }
-        provider_evidence = _fake_provider(
-            JsonLines(provider_connection),
-            provider_identity,
-        )
-        result = control.read()
-        _exact(
-            result,
-            {
-                "type",
-                "seq",
-                "nonce",
-                "run_id",
-                "release",
-                "gateway_status",
-                "gateway_body_sha256",
-                "replay_denied",
-                "workspace_model_tool_denied",
-                "sdk_census",
-                "direct_model_denied",
-                "public_egress_denied",
-                "forbidden_paths",
-                "session_sha256",
-                "census",
-            },
-        )
-        if result["type"] != "topology_result" or result["seq"] != 1:
-            raise P0Error("invalid topology result sequence")
-        if result["nonce"] != nonce or result["run_id"] != run_id:
-            raise P0Error("topology result identity mismatch")
-        if result["release"] != release_digest or result["gateway_status"] != 200:
-            raise P0Error("topology result release or gateway mismatch")
-        if result["replay_denied"] is not True:
-            raise P0Error("one-use provider lease was replayed")
-        if result["workspace_model_tool_denied"] is not True:
-            raise P0Error("a model tool observed the host workspace")
-        sdk_evidence = _validate_sdk_census(result["sdk_census"])
-        if result["direct_model_denied"] is not True or result["public_egress_denied"] is not True:
-            raise P0Error("runner retained IP egress")
-        forbidden = result["forbidden_paths"]
-        if not isinstance(forbidden, dict) or not forbidden or set(forbidden.values()) != {True}:
-            raise P0Error("runner saw a forbidden path")
-        census = result["census"]
-        if not isinstance(census, dict) or census.get("env") != {
-            "HOME": "/tmp/home",
-            "PATH": "/runtime",
-            "PWD": "/tmp",
-        }:
-            raise P0Error("runner environment census changed")
-        if census.get("uid") != 65534 or census.get("gid") != 65534:
-            raise P0Error("runner namespace identity changed")
-        census_evidence = _validate_runner_census(census)
-        session_evidence = _validate_session(session_fd, run_id)
-        control.write({"type": "accepted", "seq": 1})
-        control_connection.shutdown(socket.SHUT_RDWR)
-        control_connection.close()
-        provider_connection.shutdown(socket.SHUT_RDWR)
-        provider_connection.close()
-        return_code = process.wait(timeout=10)
-        if return_code != 0:
-            raise P0Error(f"runner exited {return_code}")
-        stdout_tail.thread.join(timeout=2)
-        stderr_tail.thread.join(timeout=2)
-        status_tail.thread.join(timeout=2)
+        command_line = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        executable = Path(f"/proc/{pid}/exe").stat()
+        expected_executable = loader.stat()
+        host_net, runner_net = Path("/proc/self/ns/net").stat(), Path(f"/proc/{pid}/ns/net").stat()
+        host_mount, runner_mount = Path("/proc/self/ns/mnt").stat(), Path(f"/proc/{pid}/ns/mnt").stat()
+        routes = Path(f"/proc/{pid}/net/route").read_text().splitlines()
+        core_limit = next(
+            line for line in Path(f"/proc/{pid}/limits").read_text().splitlines()
+            if line.startswith("Max core file size")
+        ).split()[-3:-1]
+        environment = sorted(filter(None, Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")))
         if (
-            stdout_tail.thread.is_alive()
-            or stderr_tail.thread.is_alive()
-            or status_tail.thread.is_alive()
+            pid == init_pid or cgroup_path(pid) != runner_cgroup or not pidfd_alive(init_pidfd)
+            or not pidfd_alive(node_pidfd) or namespace_pids[-1] != "2"
+            or (executable.st_dev, executable.st_ino) != (expected_executable.st_dev, expected_executable.st_ino)
+            or b"/runtime/node" not in command_line or b"/runtime/app/runner.js" not in command_line
+            or host_net.st_ino == runner_net.st_ino or host_mount.st_ino == runner_mount.st_ino
+            or len(routes) != 1 or not host_canary.is_file() or Path(f"/proc/{pid}/root{host_canary}").exists()
+            or core_limit != ["0", "0"]
+            or environment != [b"HOME=/tmp/home", b"PATH=/runtime", b"PWD=/tmp"]
         ):
-            raise P0Error("runner log drainer did not reach EOF")
-        if stdout_tail.tail or stderr_tail.tail:
-            raise P0Error(
-                "runner wrote unexpected logs: "
-                + bytes(stdout_tail.tail + stderr_tail.tail).decode("utf-8", "replace")
-            )
-        secret_scan_targets = (
-            _canonical(result),
-            os.pread(session_fd, MAX_SESSION_BYTES + 1, 0),
-            bytes(stdout_tail.tail),
-            bytes(stderr_tail.tail),
-            Path(f"/proc/{process.pid}/cmdline").read_bytes()
-            if Path(f"/proc/{process.pid}/cmdline").exists()
-            else b"",
-        )
-        if any(secret_canary in target for target in secret_scan_targets):
-            raise P0Error("runtime secret canary escaped its unmounted source")
-        cgroup_root = Path("/sys/fs/cgroup") / cgroup.lstrip("/")
-        if cgroup_root.exists():
-            events = dict(
-                line.split(maxsplit=1)
-                for line in (cgroup_root / "cgroup.events").read_text().splitlines()
-            )
-            if events.get("populated") != "0":
-                raise P0Error("runner cgroup remained populated after child exit")
-        return {
-            "cgroup": cgroup,
-            "cgroup_limits": cgroup_limits,
-            "gateway": provider_evidence,
-            "release": release_digest,
-            "run_id": run_id,
-            "runner_census": census,
-            "runner_census_evidence": census_evidence,
-            "sdk_census_evidence": sdk_evidence,
-            "secret_scan": "PASS",
-            "session": session_evidence,
-            "status": "PASS",
-        }
-    finally:
-        if process is not None and process.poll() is None:
-            subprocess.run(
-                [
-                    "systemctl",
-                    "--user",
-                    "kill",
-                    "--kill-whom=all",
-                    "--signal=TERM",
-                    unit,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                subprocess.run(
-                    [
-                        "systemctl",
-                        "--user",
-                        "kill",
-                        "--kill-whom=all",
-                        "--signal=KILL",
-                        unit,
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                process.wait(timeout=5)
-        for listener in (control_listener, provider_listener):
-            if listener is not None:
-                listener.close()
-        for descriptor in (
-            control_fd,
-            provider_fd,
-            session_path_fd,
-            session_fd,
-            status_read,
-            status_write,
-        ):
-            if descriptor >= 0:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-        shutil.rmtree(run_root, ignore_errors=True)
+            raise P0Error("runner peer identity changed")
+    except BaseException:
+        connection.close()
+        os.close(node_pidfd)
+        raise
+    listener_path = Path(listener.getsockname())
+    listener.close()
+    listener_path.unlink(missing_ok=True)
+    containment = {"net_namespace": runner_net.st_ino, "mount_namespace": runner_mount.st_ino,
+                   "ipv4_routes": len(routes) - 1, "host_canary_absent": True,
+                   "core_limit": core_limit, "environment": [value.decode() for value in environment]}
+    return Channel(connection), pid, node_pidfd, containment
 
-
-def _measure_simplicity(release: Path) -> dict[str, object]:
-    sources = [
-        path
-        for path in EXPERIMENT.rglob("*")
-        if path.is_file()
-        and path.suffix in {".py", ".sh", ".ts"}
-        and not any(part in {".artifacts", ".build", "dist", "node_modules"} for part in path.parts)
+def session_evidence(descriptor: int, *, completed: bool) -> dict[str, object]:
+    os.fsync(descriptor)
+    size = os.fstat(descriptor).st_size
+    if size > MAX_SESSION:
+        raise P0Error("Pi session exceeded its file-size limit")
+    raw = os.pread(descriptor, size + 1, 0)
+    if len(raw) != size or (raw and not raw.endswith(b"\n")):
+        raise P0Error("Pi session evidence is incomplete")
+    records = [strict_json(line) for line in raw.splitlines()]
+    assistants = [
+        entry for entry in records
+        if isinstance(entry, dict) and entry.get("type") == "message"
+        and isinstance(entry.get("message"), dict) and entry["message"].get("role") == "assistant"
     ]
-    source_lines = {
-        path.relative_to(EXPERIMENT).as_posix(): len(path.read_text().splitlines())
-        for path in sorted(sources)
-    }
-    runtime_bytes = sum(path.stat().st_size for path in release.rglob("*") if path.is_file())
-    package_root = release / "node_modules"
-    top_level_packages = len([path for path in package_root.iterdir() if path.is_dir()])
-    return {
-        "judgment": "PASS_FOR_P1_ONLY",
-        "reason": (
-            "The proof needs one existing Python owner, one unprivileged transient "
-            "systemd/bwrap/Node runner, and one capacity-one provider gateway. It adds "
-            "no custom agent loop, checkpoint scheduler, privileged helper, or product "
-            "daemon in P0. P2 must extract only these measured boundaries and reopens "
-            "the stop gate if it creates another lifecycle authority."
-        ),
-        "runtime_bytes": runtime_bytes,
-        "runtime_top_level_package_directories": top_level_packages,
-        "source_lines": source_lines,
-        "source_lines_total": sum(source_lines.values()),
-        "runtime_process_roles": [
-            "existing Python orchestration/gateway owner",
-            "transient systemd scope",
-            "bubblewrap namespace launcher",
-            "pinned Node/Pi runner",
-        ],
-        "privilege": "unprivileged user scope; private namespaces; all capabilities dropped",
-    }
+    terminal: dict[str, object] | None = None
+    if completed:
+        if len(assistants) != 1:
+            raise P0Error("completed session does not have exactly one assistant record")
+        message = assistants[0]["message"]
+        terminal = {"content": message.get("content"), "stopReason": message.get("stopReason")}
+        if terminal != {"content": [{"type": "text", "text": "P0_OK"}], "stopReason": "stop"}:
+            raise P0Error(f"completed assistant record changed: {terminal}")
+    return {"sha256": digest(raw), "bytes": len(raw), "assistant_records": len(assistants), "terminal": terminal}
 
+def cleanup_runner(
+    runner_cgroup: Path | None, node_pidfd: int | None, init_pidfd: int | None,
+    launcher: subprocess.Popen[bytes] | None,
+    deadline: Deadline,
+) -> dict[str, object]:
+    if runner_cgroup is not None and runner_cgroup.exists() and populated(runner_cgroup):
+        (runner_cgroup / "cgroup.kill").write_text("1")
+    if node_pidfd is not None:
+        wait_pidfd(node_pidfd, deadline, "Node cleanup")
+    if init_pidfd is not None:
+        wait_pidfd(init_pidfd, deadline, "Bubblewrap cleanup")
+    code = launcher.wait(timeout=deadline.remaining("launcher reap")) if launcher is not None else None
+    if code != 137:
+        raise P0Error(f"cgroup launcher exit changed: {code}")
+    if runner_cgroup is not None and runner_cgroup.exists() and populated(runner_cgroup):
+        raise P0Error("runner cgroup remained populated")
+    if runner_cgroup is not None and runner_cgroup.exists():
+        runner_cgroup.rmdir()
+    return {"node_terminal": node_pidfd is not None, "runner_cgroup_empty": runner_cgroup is not None,
+            "bwrap_reaped": launcher is not None, "launcher_exit": code}
 
-def _validate_live_report(path: Path) -> dict[str, object]:
-    report = json.loads(path.read_text())
-    expected_cases = {
-        "cancellation",
-        "compaction",
-        "dependent-sequential",
-        "malformed-arguments",
-        "one-tool-result",
-        "parallel-readonly",
-        "persisted-tool-result-continuation",
-        "persisted-user-continuation",
-        "prompt-schema-census",
-        "serialized-mutations",
-        "text-thinking",
-        "tool-error",
-        "unknown-tool",
-    }
-    if report.get("status") != "PASS" or report.get("model") != PROFILE["model"]:
-        raise P0Error("live Qwen report did not pass the exact pinned model")
-    cases = report.get("cases")
-    if not isinstance(cases, list):
-        raise P0Error("live Qwen report cases are missing")
-    names = {
-        case.get("name")
-        for case in cases
-        if isinstance(case, dict) and case.get("status") == "PASS"
-    }
-    if names != expected_cases:
-        raise P0Error("live Qwen report does not contain the exact passing matrix")
-    census = next(
-        case for case in cases
-        if isinstance(case, dict) and case.get("name") == "prompt-schema-census"
+def close_fd(descriptor: int | None) -> None:
+    if descriptor is not None:
+        with suppress(OSError):
+            os.close(descriptor)
+
+def scenario_authority(name: str, root: Path, observer_path: Path, release: Path) -> int:
+    work = Deadline(WORK_SECONDS)
+    observer_socket = socket.socket(socket.AF_UNIX)
+    observer_socket.connect(str(observer_path))
+    observer = Channel(observer_socket)
+    listener: socket.socket | None = None
+    channel: Channel | None = None
+    launcher: subprocess.Popen[bytes] | None = None
+    runner_cgroup: Path | None = None
+    session_fd: int | None = None
+    fifo_read: int | None = None
+    init_pidfd: int | None = None
+    node_pidfd: int | None = None
+    status_fd: int | None = None
+    result: dict[str, object] | None = None
+    cleanup_error: BaseException | None = None
+    try:
+        if os.environ.get("P0_SECRET_CANARY") != ENV_CANARY:
+            raise P0Error("authority environment canary is absent")
+        observer.write({"pid": os.getpid(), "type": "authority_online"}, work)
+        expect(observer.read(work), {"type": "authority_start"}, "authority start")
+        runner_cgroup = cgroup_path() / "runner"
+        runner_cgroup.mkdir()
+        listener = socket.socket(socket.AF_UNIX)
+        control_path = root / "control.sock"
+        listener.bind(str(control_path))
+        listener.listen(1)
+        control_identity = inode_identity(os.fstat(listener.fileno()), root)
+        control_path_fd = os.open(control_path, os.O_PATH | os.O_NOFOLLOW)
+        session_path = root / "session.jsonl"
+        session_fd = os.open(session_path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        session_identity = inode_identity(os.fstat(session_fd), root)
+        fifo_path = root / "liveness.fifo"
+        fifo_fd = os.open(fifo_path, os.O_PATH | os.O_NOFOLLOW)
+        fifo_read = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+        host_canary = root / "host-secret-canary"
+        host_canary.write_text(ENV_CANARY)
+        init_pid, init_pidfd, launcher, status_fd = launch_runner(
+            name, release, control_path_fd, session_fd, fifo_fd, runner_cgroup, work,
+        )
+        channel, node_pid, node_pidfd, containment = accept_runner(
+            listener, init_pid, init_pidfd, runner_cgroup, release, host_canary, work,
+        )
+        identities = {"control": control_identity, "runner": process_identity(node_pid),
+                      "session": session_identity, "containment": containment}
+        listener = None
+        expect(channel.read(work), {"scenario": name, "type": "hello"}, "runner hello")
+        channel.write({"type": "accepted"}, work)
+        first = channel.read(work)
+        if name == "hostile":
+            expect(first, {"type": "hostile_ready"}, "hostile readiness")
+            try:
+                before = os.read(fifo_read, 1)
+            except BlockingIOError:
+                before = None
+            if not pidfd_alive(node_pidfd) or not populated(runner_cgroup) or before is not None:
+                raise P0Error("hostile pre-kill evidence was not active")
+            channel.connection.close()
+            channel = None
+            cleanup = cleanup_runner(runner_cgroup, node_pidfd, init_pidfd, launcher, Deadline(CLEANUP_SECONDS))
+            if os.read(fifo_read, 1) != b"":
+                raise P0Error("hostile descendant retained its FIFO after cgroup kill")
+            runner_cgroup = None
+            result = {"scenario": name, "status": "PASS", "causal_cgroup_kill": True, "cleanup": cleanup}
+        else:
+            expect(first, {"type": "runner_ready"}, "runner readiness")
+            channel.write({"type": "begin"}, work)
+            if name in {"fail-closed", "fail-backpressure"}:
+                wait_pidfd(node_pidfd, work, "fail-stop Node")
+                if launcher.wait(timeout=work.remaining("fail-stop signal")) != 137:
+                    raise P0Error("fail-stop was not SIGKILL")
+                if name == "fail-backpressure" and os.read(fifo_read, 1) != b"B":
+                    raise P0Error("backpressure was not reached before fail-stop")
+                fail_stop = drain_dead_peer(channel, work)
+                channel.connection.close()
+                channel = None
+                cleanup = cleanup_runner(runner_cgroup, node_pidfd, init_pidfd, launcher, Deadline(CLEANUP_SECONDS))
+                runner_cgroup = None
+                result = {
+                    "scenario": name, "status": "PASS", "requests": 0, "one_shot_admissions": 0,
+                    "fail_stop": fail_stop, "cleanup": cleanup,
+                }
+            else:
+                frame = channel.read(work)
+                if (
+                    set(frame) != {"raw", "request", "type"}
+                    or frame.get("request") != 1 or frame.get("type") != "provider_request"
+                    or not isinstance(frame.get("raw"), str)
+                ):
+                    raise P0Error("runner provider request frame changed")
+                raw = base64.b64decode(frame["raw"], validate=True)
+                mode = "cancel" if name == "cancel" else name
+                provider = gateway(channel, raw, mode, work, observer if name == "authority-death" else None)
+                done = channel.read(work)
+                expected_counts = (2, 1) if name == "cancel" else (1, 0)
+                if (
+                    set(done) != {"connections", "rejected", "request", "type"}
+                    or done.get("request") != 1 or done.get("type") != "scenario_done"
+                    or (done.get("connections"), done.get("rejected")) != expected_counts
+                ):
+                    raise P0Error(f"scenario completion changed: {done}")
+                channel.connection.close()
+                channel = None
+                cleanup = cleanup_runner(runner_cgroup, node_pidfd, init_pidfd, launcher, Deadline(CLEANUP_SECONDS))
+                runner_cgroup = None
+                evidence = session_evidence(session_fd, completed=name in {"success", "fresh"})
+                result = {
+                    "scenario": name, "status": "PASS", "requests": 1, "one_shot_admissions": 1,
+                    "provider": provider, "bridge": done, "session": evidence, "cleanup": cleanup,
+                }
+        close_fd(node_pidfd)
+        node_pidfd = None
+        close_fd(init_pidfd)
+        init_pidfd = None
+        close_fd(session_fd)
+        session_fd = None
+        close_fd(fifo_read)
+        fifo_read = None
+        close_fd(status_fd)
+        status_fd = None
+        result["identities"] = identities
+        result["evidence_sha256"] = digest(canonical(result))
+        observer.write({"result": result, "type": "scenario_result"}, work)
+        return 0
+    except BaseException as error:
+        try:
+            if channel is not None:
+                channel.connection.close()
+            cleanup_runner(runner_cgroup, node_pidfd, init_pidfd, launcher, Deadline(CLEANUP_SECONDS))
+        except BaseException as secondary:
+            cleanup_error = secondary
+        detail = f"{type(error).__name__}: {error}"
+        if cleanup_error is not None:
+            detail += f"; cleanup: {type(cleanup_error).__name__}: {cleanup_error}"
+        with suppress(BaseException):
+            observer.write({"error": detail, "evidence": str(root), "type": "scenario_error"}, Deadline(CLEANUP_SECONDS))
+        return 1
+    finally:
+        if listener is not None:
+            with suppress(OSError):
+                listener.close()
+        close_fd(node_pidfd)
+        close_fd(init_pidfd)
+        close_fd(session_fd)
+        close_fd(fifo_read)
+        close_fd(status_fd)
+        observer_socket.close()
+
+def unit_properties(unit: str, deadline: Deadline) -> dict[str, str]:
+    names = (
+        "InvocationID", "MainPID", "ControlGroup", "Type", "ExitType", "KillMode", "SendSIGKILL",
+        "Restart", "TimeoutStopUSec", "RuntimeMaxUSec", "OOMPolicy", "Delegate", "MemoryMax", "TasksMax",
+        "CPUQuotaPerSecUSec", "LimitCORE",
     )
-    detail = census.get("detail")
-    if not isinstance(detail, dict) or detail.get("prompt") != OWNED_PROMPT:
-        raise P0Error("live Qwen census lost prompt ownership")
-    return {
-        "case_count": len(expected_cases),
-        "model": report["model"],
-        "profile": report.get("profile"),
-        "report_path": str(path.resolve()),
-        "status": "PASS",
+    raw = command(
+        ["systemctl", "--user", "show", unit, *sum((["-p", name] for name in names), [])],
+        timeout=deadline.remaining("unit property query"),
+    ).stdout.decode()
+    properties = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+    expected = {
+        "Type": "exec", "ExitType": "main", "KillMode": "control-group", "SendSIGKILL": "yes",
+        "Restart": "no", "TimeoutStopUSec": "1s", "RuntimeMaxUSec": "30s", "OOMPolicy": "stop",
+        "Delegate": "yes", "MemoryMax": str(2 * 1024**3), "TasksMax": "64",
+        "CPUQuotaPerSecUSec": "1s", "LimitCORE": "0",
     }
+    if any(properties.get(name) != value for name, value in expected.items()):
+        raise P0Error(f"effective transient-unit properties changed: {properties}")
+    if not properties.get("InvocationID") or not properties.get("ControlGroup"):
+        raise P0Error("transient unit identity is incomplete")
+    return properties
 
+def empty_certificate(events_fd: int, cgroup: Path, properties: dict[str, str]) -> str:
+    if properties.get("Delegate") != "yes":
+        raise P0Error("unit delegation changed")
+    try:
+        os.lseek(events_fd, 0, os.SEEK_SET)
+        data = os.read(events_fd, 4096).decode()
+        if "populated 0" not in data:
+            raise P0Error("service cgroup remained populated")
+        return "populated-0"
+    except OSError as error:
+        if error.errno != errno.ENODEV or cgroup.exists():
+            raise
+        return "removed-enodev"
 
-def _write_evidence(
-    release: Path,
-    topology: dict[str, object],
-    teardown_race: dict[str, object],
-    *,
-    live_qwen: dict[str, object] | None = None,
-    reproducible_release: bool = False,
-) -> Path:
-    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    commit = _run(["git", "rev-parse", "HEAD"], cwd=EXPERIMENT).stdout.decode().strip()
-    profile_digest = _sha256(_canonical(PROFILE))
-    run_dir = ARTIFACT_ROOT / "runs" / f"{timestamp}-{commit[:12]}-{profile_digest[:12]}"
-    run_dir.mkdir(parents=True)
+def run_scenario(name: str, release: Path, invocation: str) -> dict[str, object]:
+    work = Deadline(25)
+    unit = f"assist-pi-p0-{invocation[-8:]}-{name}.service"
+    root: Path | None = None
+    listener: socket.socket | None = None
+    waiter: subprocess.Popen[bytes] | None = None
+    connection: socket.socket | None = None
+    fifo_read: int | None = None
+    main_pidfd: int | None = None
+    events_fd: int | None = None
+    service_cgroup: Path | None = None
+    result: dict[str, object] | None = None
+    try:
+        root = Path(tempfile.mkdtemp(prefix=f"{name}-", dir="/tmp"))
+        root.chmod(0o700)
+        fifo = root / "liveness.fifo"
+        os.mkfifo(fifo, 0o600)
+        fifo_read = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        observer_path = root / "observer.sock"
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(observer_path))
+        listener.listen(1)
+        argv = [
+            "systemd-run", "--user", "--wait", "--collect", "--quiet", f"--unit={unit}", "--service-type=exec",
+            f"--setenv=P0_SECRET_CANARY={ENV_CANARY}",
+            "-p", "ExitType=main", "-p", "KillMode=control-group", "-p", "SendSIGKILL=yes", "-p", "Restart=no",
+            "-p", "TimeoutStopSec=1s", "-p", "RuntimeMaxSec=30s", "-p", "OOMPolicy=stop", "-p", "Delegate=yes",
+            "-p", "MemoryMax=2G", "-p", "TasksMax=64", "-p", "CPUQuota=100%",
+            "-p", "LimitCORE=0",
+            "-p", "StandardOutput=null", "-p", "StandardError=journal",
+            sys.executable, str(Path(__file__).resolve()), "scenario", name, str(root), str(observer_path), str(release),
+        ]
+        waiter = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        listener.settimeout(work.remaining("authority accept"))
+        connection, _ = listener.accept()
+        listener.close()
+        listener = None
+        observer = Channel(connection)
+        online = observer.read(work)
+        if set(online) != {"pid", "type"} or online["type"] != "authority_online" or not isinstance(online["pid"], int):
+            raise P0Error("scenario authority did not start")
+        main_pidfd = os.pidfd_open(online["pid"])
+        properties = unit_properties(unit, work)
+        main_pid = int(properties["MainPID"])
+        if main_pid != online["pid"]:
+            raise P0Error("systemd MainPID does not match the authority")
+        service_cgroup = Path("/sys/fs/cgroup") / properties["ControlGroup"].lstrip("/")
+        events_fd = os.open(service_cgroup / "cgroup.events", os.O_RDONLY)
+        observer.write({"type": "authority_start"}, work)
+        frame = observer.read(work)
+        authority_death = name == "authority-death"
+        if authority_death:
+            expect(frame, {"type": "authority_death_ready", "upstream_active": True}, "authority-death readiness")
+            try:
+                before = os.read(fifo_read, 1)
+            except BlockingIOError:
+                before = None
+            if before is not None:
+                raise P0Error("authority-death descendant FIFO was not active")
+            signal.pidfd_send_signal(main_pidfd, signal.SIGKILL)
+            try:
+                observer.read(Deadline(CLEANUP_SECONDS))
+            except (EOFError, OSError):
+                pass
+            else:
+                raise P0Error("dead authority emitted a result")
+        else:
+            if set(frame) != {"result", "type"} or frame["type"] != "scenario_result" or not isinstance(frame["result"], dict):
+                raise P0Error(f"scenario failed: {frame}")
+            result = frame["result"]
+            if result.get("scenario") != name or result.get("status") != "PASS":
+                raise P0Error(f"scenario result changed: {result}")
+        expected_codes = {0} if not authority_death else {255}
+        code = waiter.wait(timeout=work.remaining("scenario service"))
+        if code not in expected_codes:
+            raise P0Error(f"systemd-run failed with {code}")
+        terminal = Deadline(CLEANUP_SECONDS)
+        wait_pidfd(main_pidfd, terminal, "authority cleanup")
+        certificate = empty_certificate(events_fd, service_cgroup, properties)
+        if authority_death:
+            if os.read(fifo_read, 1) != b"":
+                raise P0Error("authority-death descendant survived service cleanup")
+            result = {
+                "scenario": name, "status": "PASS", "dead_authority_report_accepted": False,
+                "main_pid_terminal": True, "fifo_eof": True, "predeath_readiness": frame,
+            }
+        result["unit"] = {**properties, "empty_certificate": certificate}
+        result["outer_evidence_sha256"] = digest(canonical(result))
+    except BaseException as caught:
+        raise P0Error(f"{type(caught).__name__}: {caught}; evidence: {root}") from caught
+    finally:
+        primary = sys.exc_info()[1]
+        cleanup_error: BaseException | None = None
+        cleanup = Deadline(CLEANUP_SECONDS)
+        try:
+            if waiter is not None and (primary is not None or waiter.poll() is None):
+                command(["systemctl", "--user", "stop", unit], timeout=cleanup.remaining("unit stop"))
+                waiter.wait(timeout=cleanup.remaining("systemd-run cleanup"))
+        except BaseException as caught:
+            cleanup_error = caught
+            fallback = Deadline(35)
+            if main_pidfd is not None and pidfd_alive(main_pidfd):
+                with suppress(ProcessLookupError):
+                    signal.pidfd_send_signal(main_pidfd, signal.SIGKILL)
+                with suppress(P0Error):
+                    wait_pidfd(main_pidfd, fallback, "failed unit authority cleanup")
+            if waiter is not None and waiter.poll() is None:
+                with suppress(subprocess.TimeoutExpired, P0Error):
+                    waiter.wait(timeout=fallback.remaining("failed unit cleanup"))
+            if waiter is not None and waiter.poll() is None:
+                waiter.kill()
+                try:
+                    waiter.wait(timeout=1)
+                except subprocess.TimeoutExpired as secondary:
+                    cleanup_error = P0Error(f"{cleanup_error}; systemd-run could not be reaped: {secondary}")
+        try:
+            stale_unit_preflight()
+        except BaseException as caught:
+            cleanup_error = cleanup_error or caught
+        if events_fd is not None and service_cgroup is not None:
+            try:
+                empty_certificate(events_fd, service_cgroup, {"Delegate": "yes"})
+            except BaseException as caught:
+                cleanup_error = cleanup_error or caught
+        if listener is not None:
+            with suppress(OSError):
+                listener.close()
+        if connection is not None:
+            connection.close()
+        close_fd(main_pidfd)
+        close_fd(events_fd)
+        close_fd(fifo_read)
+        if cleanup_error is None and primary is None and root is not None:
+            try:
+                shutil.rmtree(root)
+            except BaseException as caught:
+                cleanup_error = caught
+        if cleanup_error is not None:
+            detail = f"cleanup: {type(cleanup_error).__name__}: {cleanup_error}"
+            if primary is not None:
+                detail = f"{type(primary).__name__}: {primary}; {detail}"
+                raise P0Error(detail) from cleanup_error
+            elif result is not None:
+                result.update(status="FAIL", cleanup_error=detail, evidence_root=str(root))
+                result.pop("outer_evidence_sha256", None); result["outer_evidence_sha256"] = digest(canonical(result))
+            else:
+                raise P0Error(detail) from cleanup_error
+    if result is None: raise P0Error("scenario produced no result")
+    return result
+
+def stale_unit_preflight() -> None:
+    output = command(
+        ["systemctl", "--user", "list-units", "assist-pi-p0-*", "--state=active,activating,deactivating",
+         "--no-legend", "--no-pager"],
+        timeout=10,
+    ).stdout.decode().strip()
+    if output: raise P0Error(f"a stale P0 unit is active: {output}")
+
+def line_count() -> tuple[int, list[str], dict[str, dict[str, object]]]:
+    raw = command(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "experiments/pi-runtime-p0"],
+        cwd=ROOT.parents[1], timeout=10,
+    ).stdout.decode().splitlines()
+    files = [
+        value for value in sorted(raw)
+        if (ROOT.parents[1] / value).is_file() and Path(value).name != "package-lock.json"
+        and not any(part in {"node_modules", "dist", ".artifacts", ".build"} for part in Path(value).parts)
+    ]
+    contents = {value: (ROOT.parents[1] / value).read_bytes() for value in files}
+    total = sum(len(data.splitlines()) for data in contents.values())
+    identity = {
+        value: {"mode": stat.S_IMODE((ROOT.parents[1] / value).stat().st_mode), "sha256": digest(data)}
+        for value, data in contents.items()
+    }
+    return total, files, identity
+
+def write_report(report: dict[str, object], destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    data = canonical(report) + b"\n"
+    offset = 0
+    try:
+        while offset < len(data):
+            written = os.write(descriptor, data[offset:])
+            if written <= 0:
+                raise P0Error("report write made no progress")
+            offset += written
+        os.fsync(descriptor)
+    except BaseException:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+    else:
+        os.close(descriptor)
+    os.replace(temporary, destination)
+
+def run_all() -> tuple[Path, bool]:
+    invocation = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + os.urandom(4).hex()
+    run_root = ROOT / ".build" / invocation
+    run_root.mkdir(parents=True)
+    atexit.register(remove_tree, run_root)
+    lock_fd: int | None = None
+    results: list[dict[str, object]] = []
+    build: dict[str, object] | None = None
+    error: str | None = None
+    lines: int | None = None
+    files: list[str] = []
+    source: dict[str, dict[str, object]] = {}
+    systemd: str | None = None
+    try:
+        lines, files, source = line_count()
+        lock_fd = os.open("/tmp/assist-pi-runtime-p0.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as caught:
+            raise P0Error("another P0 invocation is active") from caught
+        stale_unit_preflight()
+        systemd = command(["systemctl", "--version"], timeout=5).stdout.decode().splitlines()[0]
+        release, build = build_release(run_root, source)
+        for name in SCENARIOS:
+            outcome = run_scenario(name, release, invocation)
+            results.append(outcome)
+            if outcome.get("status") != "PASS":
+                raise P0Error(f"scenario cleanup failed: {outcome}")
+        current_lines, current_files, current_source = line_count()
+        if ((current_lines, current_files, current_source) != (lines, files, source)
+                or digest((ROOT / "package-lock.json").read_bytes()) != LOCK_SHA256):
+            raise P0Error("counted P0 source changed during the run")
+        indexed = {result["scenario"]: result for result in results}
+        cancel, fresh = indexed["cancel"], indexed["fresh"]
+        if any(cancel["identities"][key] == fresh["identities"][key] for key in ("control", "runner", "session")):
+            raise P0Error("fresh scenario reused a prior runtime identity")
+        if cancel["provider"]["upstream_instance"] == fresh["provider"]["upstream_instance"]:
+            raise P0Error("fresh scenario reused a prior upstream fixture")
+        if lines > 1500:
+            raise P0Error(f"simplicity gate exceeded: {lines} lines")
+        status, scope = "GO", "P1_ONLY"
+    except BaseException as caught:
+        status, scope = "STOP", "NONE"
+        error = f"{type(caught).__name__}: {caught}"
+    try:
+        remove_tree(run_root)
+    except BaseException as caught:
+        status, scope = "STOP", "NONE"
+        error = "; ".join(filter(None, (error, f"build cleanup: {type(caught).__name__}: {caught}")))
+    finally:
+        close_fd(lock_fd)
     report = {
-        "commit": commit,
-        "containment": "PASS",
-        "deterministic_sdk_tests": "PASS",
-        "live_qwen": live_qwen or "NOT RUN",
-        "next_authorized_action": (
-            "publish the reviewed P0 result; P1 requires separate authorization"
-            if live_qwen is not None and reproducible_release
-            else "finish remaining offline P0 gates"
-        ),
-        "offline": "PASS" if reproducible_release else "INCOMPLETE",
-        "p0_status": (
-            "GO" if live_qwen is not None and reproducible_release else "INCOMPLETE"
-        ),
-        "profile": PROFILE,
-        "release": release.name,
-        "session_preflight_tests": "PASS",
-        "reproducible_release": "PASS" if reproducible_release else "NOT RUN",
-        "simplicity_judgment": (
-            _measure_simplicity(release) if reproducible_release else "NOT RUN"
-        ),
-        "topology": topology,
-        "teardown_race": teardown_race,
+        "status": status, "scope": scope, "invocation": invocation, "error": error,
+        "build": build, "containment": {
+            "kernel": os.uname().release, "cgroup": "v2",
+            "systemd": systemd,
+        },
+        "scenarios": results, "simplicity": {"lines": lines, "files": files}, "source": source,
     }
-    path = run_dir / "report.json"
-    path.write_bytes(_canonical(report) + b"\n")
-    return path
-
+    destination = ROOT / ".artifacts" / "runs" / invocation / "report.json"
+    write_report(report, destination)
+    return destination, status == "GO"
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("build", "topology", "offline", "final"))
-    parser.add_argument("--release", type=Path)
-    parser.add_argument("--live-report", type=Path)
-    arguments = parser.parse_args()
-    started = time.monotonic()
-    try:
-        if arguments.command == "final":
-            raise P0Error(
-                "local review invalidated this candidate's execution-control and "
-                "evidence gates; see docs/2026-08-04-pi-runtime-p0.org"
-            )
-        if arguments.command == "build":
-            print("[build] start", flush=True)
-            release = build_release()
-            print(f"[build] PASS {time.monotonic() - started:.1f}s {release}", flush=True)
-            return 0
-        if arguments.command in {"offline", "final"}:
-            print("[session-preflight] start", flush=True)
-            _run(
-                [sys.executable, "-m", "unittest", "-v", "test_pi_runtime_p0.py"],
-                cwd=EXPERIMENT / "python",
-                timeout=30,
-            )
-            print(
-                f"[session-preflight] PASS {time.monotonic() - started:.1f}s",
-                flush=True,
-            )
-        if arguments.command == "final":
-            if arguments.live_report is None:
-                raise P0Error("final requires --live-report")
-            print("[reproducible-release] build 1/2", flush=True)
-            first_release = build_release()
-            print("[reproducible-release] build 2/2", flush=True)
-            second_release = build_release()
-            if first_release.name != second_release.name:
-                raise P0Error("two clean builds produced different release digests")
-            release = first_release
-            print(f"[reproducible-release] PASS digest={release.name}", flush=True)
-        else:
-            release = arguments.release or build_release()
-        print(f"[topology] start release={release.name}", flush=True)
-        topology = run_topology(release)
-        print(f"[teardown-race] start release={release.name}", flush=True)
-        teardown_race = run_topology(release, teardown_race=True)
-        live_qwen = (
-            _validate_live_report(arguments.live_report)
-            if arguments.command == "final" and arguments.live_report is not None
-            else None
-        )
-        report = _write_evidence(
-            release,
-            topology,
-            teardown_race,
-            live_qwen=live_qwen,
-            reproducible_release=arguments.command == "final",
-        )
-        print(f"[topology] PASS {time.monotonic() - started:.1f}s", flush=True)
-        complete = arguments.command == "final"
-        print(f"P0 STATUS: {'GO' if complete else 'INCOMPLETE'}", flush=True)
-        print(f"offline deterministic result: {'PASS' if complete else 'INCOMPLETE'}", flush=True)
-        print(f"live exact-Qwen result: {'PASS' if complete else 'NOT RUN'}", flush=True)
-        print("containment and secret scan: PASS (topology slice)", flush=True)
-        print(
-            f"simplicity judgment: {'PASS_FOR_P1_ONLY' if complete else 'NOT RUN'}",
-            flush=True,
-        )
-        print(
-            "next authorized action: "
-            + (
-                "publish the reviewed P0 result; P1 requires separate authorization"
-                if complete
-                else "finish remaining offline P0 gates"
-            ),
-            flush=True,
-        )
-        print(f"report: {report}", flush=True)
-        return 0
-    except (OSError, P0Error, subprocess.SubprocessError, ValueError) as error:
-        print(f"P0 STATUS: STOP\n{error}", file=sys.stderr, flush=True)
-        return 1
-
-
+    if len(sys.argv) == 6 and sys.argv[1] == "scenario":
+        return scenario_authority(sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5]))
+    if sys.argv[1:] == ["offline"]:
+        destination, passed = run_all()
+        print(destination)
+        return 0 if passed else 1
+    print("usage: pi_runtime_p0.py offline", file=sys.stderr)
+    return 2
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -4,9 +4,13 @@
 
 * State
 
-Status: proposed, revised 2026-08-05.  P0 was separately authorized and attempted,
-then stopped at its mandatory local-review gate; see
-=docs/2026-08-04-pi-runtime-p0.org=.  This document authorizes no further phase.
+Status: proposed, revised 2026-08-05.  Both stronger-boundary P0 attempts stopped at
+mandatory local review.  Pierre then clarified that the migration target is security
+parity with the trusted Python/Deep Agents authority, with stronger containment only
+around the new disposable Pi runner.  The resulting parity-target successor has a
+reviewed seven-scenario report with status =GO= and scope =P1_ONLY= after five local
+review rounds; see =docs/2026-08-04-pi-runtime-p0.org=.  P1 is the only authorized
+next experiment.  Every product phase remains unauthorized.
 
 Recommendation: make Pi the intended replacement for Deep Agents, through a
 side-by-side migration with hard stop gates.  M1/P3 makes the same deployed web UI
@@ -102,7 +106,7 @@ material and middleware glue without rebuilding an entire agent runtime.
 
 * Non-goals
 
-- Do not implement any part of this design in this change.
+- Do not integrate the disposable P0 experiment into a product path.
 - Do not migrate or reinterpret existing thread histories.
 - Do not replace the Assist web UI with Pi's terminal UI or a community web UI.
 - Do not replace =RunService= with Pi sessions or replace durable async children with
@@ -176,8 +180,9 @@ appends the current working directory even for a custom prompt.  The loader and
 command-line =--system-prompt= therefore cannot establish complete ownership by
 themselves.  Assist must construct the loader explicitly, disable ambient discovery,
 and make =assist-kernel= the sole audited owner of =before_agent_start=; it returns
-the exact Python-rendered prompt after Pi's builder.  Narrow P0 verifies complete
-provider-bound ownership for one synthetic tool-free request.  P2 must separately
+the exact Python-rendered prompt after Pi's builder.  The rejected narrow P0 observed
+the intended canary once but did not verify the complete provider-bound census.  A
+newly reviewed successor must do so before P2, which must separately
 prove that =setActiveTools= cannot displace the per-turn override or reintroduce
 framework text; if the public hook ever fails to dominate the builder, stop rather
 than accept the extra text.
@@ -349,7 +354,7 @@ deleted.
 | JSON, tool-name, and malformed tool-call repair | Pure =assist-kernel= policy modules; do not generalize beyond observed repairs | existing JSON/tool correction tests plus provider probes | the three corresponding LangChain middleware layers |
 | Output sanitization and large-result offload | Retain in the Python result bridge and current backend | sanitization, untrusted-result, truncation, and offload tests | only LangChain wrappers; policy stays |
 | Loop and repeated-read detection | Pure =assist-kernel= call-history module for generic loops; retain URL-specific Python guard | existing loop and re-read breaker tests | generic LangChain loop middleware only |
-| Fair queue pause, cumulative cap, restart resume, and cross-process model admission | Engine-specific Pi execution-control adapter; =ThreadQueue= keeps web policy; one measured client-neutral admission owner coordinates web/phone | Narrow P0 request/cancellation/cleanup primitive; P2 durability, fairness, and product-path crash tests; P5a stability; P5b concurrent web/phone starvation tests | LangGraph-specific queue middleware and checkpoint calls only after every client gate and P6 retirement approval; the selected shared-admission cost remains and is counted |
+| Fair queue pause, cumulative cap, restart resume, and cross-process model admission | Engine-specific Pi execution-control adapter; =ThreadQueue= keeps web policy; one measured client-neutral admission owner coordinates web/phone | Newly reviewed P0 successor; P2 durability, fairness, and product-path crash tests; P5a stability; P5b concurrent web/phone starvation tests | LangGraph-specific queue middleware and checkpoint calls only after every client gate and P6 retirement approval; the selected shared-admission cost remains and is counted |
 | Empty-response recovery | Pure =assist-kernel= policy module | existing empty-response cases on Qwen | current middleware after parity |
 | Interjection | Pi core steering/follow-up events mapped by the adapter | current keep/update/cancel and queue-priority tests | LangGraph interjection middleware |
 | Skills and active-tool disclosure | =assist-skills= contributes capabilities; =assist-kernel= alone applies the final active set | skill precedence, role scope, prompt-architecture P2b schema/execution, and natural evals | Deep Agents skills middleware; Assist skill policy stays |
@@ -495,8 +500,9 @@ on invariant, journal, fsync, protocol, or policy failure.  =halt= writes a boun
 terminal frame to the dedicated control connection when possible and sends its own
 process =SIGKILL=; it never throws or returns.  The
 durable journal, session, and child exit remain the parent's sources of truth.
-Narrow P0 injects one =before_provider_request= failure into the real contained path
-to prove the bootstrap halt itself.  P2 extends the same construction across
+The rejected narrow contract required one =before_provider_request= failure in the
+real contained path, but its candidate did not prove closed or backpressured halt.
+A newly reviewed successor must prove the bootstrap before P2 extends it across
 =before_agent_start=, =message_end=, first =tool_call=, custom-tool return,
 =tool_result=, and =turn_end=, and proves that no later provider request, tool effect,
 result append, or queue release occurs before the parent terminalizes
@@ -614,9 +620,11 @@ The runner constructs every Pi service explicitly.  It uses
 constructed model and credential source, and =SessionManager.open()= on the one
 server-selected thread path.  It starts with all built-in tools disabled; P2 later
 adds only Assist custom tools.  Every =no*= resource switch is set even though the
-custom loader also supplies explicit empty resources.  Narrow P0 censuses effective
-settings, model compatibility, session identity, disabled resource families, and an
-empty active-tool set.  P2 repeats the census for every disclosed tool set.  Neither
+custom loader also supplies explicit empty resources.  P0 pins this construction and
+checks its external provider/session behavior without treating untrusted
+runner-reported settings as a security attestation.  P2 adds the effective-settings,
+model-compatibility, session, resource-family, and active-tool census for every
+disclosed tool set as conformance evidence.  Neither
 =~/.pi= nor project settings can alter retry, compaction, shell, model, or discovery
 behavior.
 
@@ -702,9 +710,10 @@ partial assistant/tool leaf, or reuses its old lease after an OOM, zombie
 cancellation, gateway crash, or server restart; each receives a visible recoverable
 or ambiguous outcome from its own durable state before any new lease is issued.
 
-Narrow P0 proves one stock-SDK request, cancellation, and cleanup through a
-disposable in-process gateway and instrumented upstream; it neither contacts nor
-locks the shared model.  P2 routes every live Assist and emacsos provider client
+The rejected narrow P0 nominally ran one stock-SDK request, cancellation, and cleanup
+through a disposable in-process gateway and instrumented upstream, but review did not
+accept the cancellation or cleanup proof; it neither contacted nor locked the shared
+model.  A newly reviewed successor is required before P2 routes every live Assist and emacsos provider client
 through the reviewed gateway, passes the complete real-Qwen provider matrix, and
 proves real-model cancellation/restart fencing before the first Pi web thread.
 If a small gateway plus kernel-enforced exclusive model reachability cannot be built
@@ -861,8 +870,9 @@ resources must not reach the provider.
 
 P2 changes the active tool set before and after =load_skill= and proves that Pi's
 base-prompt rebuild cannot displace the per-turn override or reintroduce the working
-directory.  Narrow P0 proves only the tool-free synthetic provider boundary.  The
-provider request, not =DefaultResourceLoader= configuration, remains the contract.
+directory.  A newly reviewed P0 successor must prove the tool-free synthetic provider
+boundary; the rejected candidate did not complete its effective census.  The provider
+request, not =DefaultResourceLoader= configuration, remains the contract.
 
 The provider-bound census is the gate, not the source configuration.  It records:
 
@@ -1276,12 +1286,59 @@ is likewise data, never an extension source.
 Each phase is a separate reviewed change.  Stop at the first failed gate.  No phase
 begins from this design without Pierre's approval.
 
-** P0: Prove one real request authority, no product path
+** P0: parity-target execution boundary
 
-The first broader P0 candidate stopped in local review because several passing
-objects were not connected to the exercised Pi/Qwen path.  Its state and the full
-narrowed contract are in =docs/2026-08-04-pi-runtime-p0.org=.  Revised P0 answers
-only whether the smallest safe Pi execution slice is feasible:
+P0 trusts the Python authority, as the current Deep Agents path does, and treats the
+new Node/Pi process plus its descendants as disposable.  It does not attempt to
+protect the build from another trusted same-user process, create an independently
+enforced cryptographic lease, or turn the experiment into a retained release
+service.  Those requirements exceeded the intended migration threat model.
+
+The stock pinned Pi runner must have no service secret or authenticating external
+provider credential, no active tools, no ambient
+skills/prompts/themes/context, no host workspace, and no direct model or public
+network route.  It sees a read-only runtime and one writable size-limited session
+inode.  A private one-run Unix connection carries Pi's exact HTTP request to trusted
+Python, which validates the complete closed provider envelope and may forward at
+most one canonical request to a fixed in-process instrumented upstream.
+
+The host, rather than the runner, gates containment from =/proc=: distinct network
+and mount namespace identities, no IPv4 route, a real host canary absent beneath the
+runner root, zero soft and hard core-file limits, exact process/cgroup identity, and
+effective transient-unit limits.  Runner-reported connection counts remain a
+pinned-SDK conformance observation, not a security attestation.
+
+One invocation must exercise seven fresh transient services: deterministic success,
+hook fail-stop with the control channel closed, hook fail-stop after Node reaches
+backpressure, hostile descendant teardown, cancellation, fresh success after that
+cancellation, and Python-authority death while the upstream and hostile descendant
+are active.  Each normal result is issued only after its runner child cgroup is
+empty and reaped.  The outer orchestrator then requires the whole service inactive
+and its retained =cgroup.events= certificate empty before starting the next case.
+
+The reviewed run found one Pi-specific cancellation behavior: Pi 0.83 opens one
+additional provider connection after abort despite retry settings being disabled.
+The one-shot bridge rejects it locally; Python receives and forwards exactly one
+provider request and waits for the first upstream to become terminal.  This observed
+retry/reconnect behavior is part of the P2 real-provider contract, not a reason to
+weaken one-shot admission.
+
+Gate: the full report is =GO= only if every scenario passes in one invocation, every
+effective systemd/cgroup and cleanup certificate is present, the closed provider
+request and host-derived containment evidence match, the post-cancel run uses fresh state, the
+authority-death setup has a trusted pre-death readiness frame, its final result is
+assembled only from the outer process's kernel observations, and all
+hand-authored experiment files remain at or below 1,500 lines.  =GO= authorizes P1
+only.  It does not qualify Qwen, authorize P2, or expose a Pi thread.
+
+** Rejected stronger P0 contract: historical evidence
+
+Both P0 candidates stopped in local review.  Their state and the full rejected
+narrowed contract are in =docs/2026-08-04-pi-runtime-p0.org=.  The bullets below
+record what that contract required; they are not achieved topology or authorization.
+The parity-versus-stronger-security decision has now selected parity.  The rejected
+requirements below are retained to explain the earlier STOP result; they are not
+requirements of current P0:
 
 - Build one fresh private candidate manifest from hashed Pi, Node, npm, TypeScript,
   compiler/ELF closure, and independently reviewed lock inputs.  For each scenario,
@@ -1290,12 +1347,13 @@ only whether the smallest safe Pi execution slice is feasible:
   disable lifecycle scripts, and add no release registry or reusable promoted
   directory.
 - Launch the stock Pi SDK/provider in a private-network Bubblewrap child.  One
-  serialized Python state machine per scenario gets Node's outer PID from pinned
-  Bubblewrap's private =--json-status-fd= under verified =--as-pid-1=, opens its
-  pidfd, and binds it to =SO_PEERCRED.pid= before admission.  A pinned minimal
-  launcher uses =clone3(CLONE_PARENT|CLONE_INTO_CGROUP)=, reports the child PID,
-  exits, and is reaped before admission, leaving Bubblewrap as another direct Python
-  child.  This places Bubblewrap and every descendant atomically in one
+  serialized Python state machine per scenario gets Bubblewrap's namespace-init PID
+  from its private =--json-status-fd= and Node's exact outer PID from =SO_PEERCRED=,
+  then opens and checks both pidfds before admission.  Bubblewrap remains namespace
+  PID 1 so Node, as PID 2, can unconditionally self-SIGKILL.  A pinned minimal
+  launcher uses =clone3(CLONE_INTO_CGROUP)=, reports the child PID, and remains only
+  to =waitpid= Bubblewrap; Python owns and waits for that launcher.  This places
+  Bubblewrap and every descendant atomically in one
   authority-owned runner child cgroup.  A post-accept nonterminal check of the
   original Node pidfd makes numeric PID reuse fail closed.  The path omits
   =--die-with-parent=.  A fresh transient systemd service per scenario supplies
@@ -1321,8 +1379,8 @@ only whether the smallest safe Pi execution slice is feasible:
   audited pipe's sole remaining write half while Node also ignores =TERM=: close
   every local writer, require Node alive plus cgroup populated plus no EOF, close
   admission, then atomically =cgroup.kill= the runner-only child cgroup and require
-  Node dead plus =populated 0= plus EOF.  Then observe the runner pidfd, reap
-  Python's direct Bubblewrap child, and close/join every owned resource.  After
+  Node dead plus =populated 0= plus EOF.  Then observe both pidfds, wait for the
+  direct launcher to reap Bubblewrap, and close/join every owned resource.  After
   Python exits, the outer orchestrator
   requires the unit inactive and an exact-invocation cgroup-empty certificate before
   another scenario: either observed =populated 0= or bound =ENODEV= after kernel
@@ -1348,7 +1406,7 @@ only whether the smallest safe Pi execution slice is feasible:
   fragment plus outer unit-empty certificate per normal scenario, and only its own
   direct OS evidence for authority death.
 
-Revised P0 deliberately excludes skills, tools, hot reload, approval batches,
+The rejected narrow P0 contract deliberately excluded skills, tools, hot reload, approval batches,
 compaction, continuation, retained-session/crash recovery, cumulative accounting,
 cross-process fairness, global Deep Agents/emacsos enforcement, release promotion,
 the broad Qwen matrix, copied evals, web, phone, voice, and prompt-P2 changes.  These
@@ -1356,7 +1414,7 @@ remain later phase gates, including P5b/P5c; they are not inferred from P0.  P2 
 run the complete provider matrix and exact real-model cancellation/restart fence
 through globally exclusive admission before P3.
 
-The implementation has three process roles: bounded outer test orchestrator/report
+That rejected implementation contract had three process roles: bounded outer test orchestrator/report
 assembler, one transient Python request authority with in-process gateway/upstream
 per scenario, and one contained Node/Pi runner.  It
 may not add a daemon, database, persistent queue, generic RPC framework, live-model
@@ -1364,9 +1422,9 @@ client, restart manager, release registry, custom agent loop, checkpoint schedul
 or second application lifecycle authority.  Delete the rejected proof doubles and
 broad matrix.  Every hand-authored file under =experiments/pi-runtime-p0= counts
 toward the hard 1,500-line budget except =package-lock.json=; the state doc defines
-the exact manifest/count command.
+the exact =line_count()= calculation.
 
-Gate: all six scenarios pass through the same path, every cleanup certificate is
+Historical gate: all six scenarios pass through the same path, every cleanup certificate is
 complete, evidence is invocation-bound, and the simplicity budget holds.  =GO=
 authorizes P1 only and does not qualify Qwen, P2, or a Pi thread.  If public Pi
 behavior, exact deterministic cancellation, authority/cgroup teardown, private
@@ -1464,7 +1522,8 @@ guidance.
   Prove the operation lease becomes terminal or the model remains unavailable;
   reaping Node alone never releases ownership.
 - Implement the deferred pause/resume and input-entry identity with =RunService=,
-  using the narrow P0 lifecycle authority rather than a disconnected proof object,
+  using a newly reviewed successor to the narrow P0 lifecycle authority rather than
+  either rejected candidate or a disconnected proof object,
   including
   cumulative active time and every restart boundary.
 - Add retained-version fixtures and atomic release references; promotion must prove
@@ -1482,8 +1541,8 @@ Gate: no ambient extension, host tool, or direct model route is reachable; every
 existing provider client passes through the shared gateway; the complete real-Qwen
 provider matrix passes; no web behavior changes; and the diff still supports a
 plausible net deletion after migration.  Any
-product-path deviation from narrow P0's gateway, cancellation, or cleanup authority
-reopens its stop gate; every deferred durability and fairness property must pass its
+product-path deviation from the newly reviewed successor's gateway, cancellation, or
+cleanup authority reopens its stop gate; every deferred durability and fairness property must pass its
 own P2 evidence.  If the product lease, operation store, or cleanup adds a second
 framework, delete the slice and stop.
 
@@ -2083,7 +2142,7 @@ new conversation generation and gives the phone no picker.
 - [[file:2026-07-26-agent-prompt-architecture.org][Agent prompt architecture and calibrated outcome evaluation]]
 - [[file:2026-06-11-embedder-contract.org][Assist embedder contract]]
 
-* Review record
+* Historical design-only review record
 
 Twelve review rounds with parallel lenses covered architecture, simplicity, framework fit, user intention,
 the end-to-end web and phone experience, clean interfaces, correctness, concurrency
