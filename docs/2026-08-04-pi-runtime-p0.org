@@ -7,18 +7,18 @@ The parity-target P0 successor has a reviewed result of status =GO= with scope
 =P1_ONLY=.  It trusts the Python authority, treats the Pi
 runner and its descendants as disposable, and requires security parity with the
 current Deep Agents product boundary rather than protection from another trusted
-same-user process.  The local review loop converged in five rounds.  P1 is now the
+same-user process.  The local review loop converged in thirteen rounds.  P1 is now the
 only authorized next experiment; no product integration phase is authorized.
 
 The current report is
-=experiments/pi-runtime-p0/.artifacts/runs/20260805T181647Z-898ddd8a/report.json=.
+=experiments/pi-runtime-p0/.artifacts/runs/20260805T192524Z-f59c04f9/report.json=.
 Its SHA-256 is
-=a57352c9bcadad7ff13a108890447f7b18a4a65e88816119f17f891c467abedd=.
+=54518cdf92dcdbd1eb98265e854518666811877f029f263c0b022e6dbeafb587=.
 It is ignored and machine-local.  One invocation built stock Pi 0.83 and passed all
 seven exercised cases: deterministic success, fail-stop with a closed control
 channel, fail-stop after Node reached backpressure, hostile descendant teardown,
 cancellation, a fresh post-cancel request, and Python-authority death while the
-upstream and hostile descendant were active.  The harness is 1,497
+upstream and hostile descendant were active.  The harness is 1,499
 hand-authored lines.  Its report binds all eight counted source identities before
 the build and proves they are unchanged after the scenarios.
 
@@ -47,13 +47,31 @@ after the first; Python alone applies the expected-count policy to that observat
 
 ** Final local review result
 
-The fifth, focused round returned no real findings from correctness, concurrency and
-liveness, error handling and edge cases, adversarial security, simplicity, design
+The fifth pre-landing round returned no real findings from correctness, concurrency
+and liveness, error handling and edge cases, adversarial security, simplicity, design
 adherence, or the dedicated documentation-alignment pass.  Earlier rounds found
 blockers and important defects in environment isolation, source and release binding,
 runner identity, network and mount evidence, output and resource bounds, cancellation,
 recursive cleanup, systemd waiter handling, report provenance, and failure hashing.
 All verified findings were fixed and the affected checks were rerun.
+
+The landing review first found that the written boundary incorrectly treated
+=SO_PEERCRED= as permanent per-message Node identity.  A Unix stream is transferable,
+and pidfd polling cannot remove the check/use race.  The parity-aligned boundary is
+the exact disposable runner cgroup: Python admits the first peer only through the
+private one-run listener from namespace PID 2 in that cgroup, then treats the stream
+as a capability of that same cgroup.  Transfer or =execve= inside the recursively
+killed cgroup grants no new provider, host, or cleanup authority.  The peer pidfd is
+construction and cleanup evidence, not executable or per-frame authentication.
+
+The ninth focused round exposed the remaining executable-identity overclaim.  The
+next proof then stopped on an observed cleanup race: tracked pidfds became terminal
+before the kernel finished draining every cgroup descendant.  Cleanup now waits on
+the bound =cgroup.events= transition within its existing deadline.  The eleventh
+focused round found and closed a descriptor leak on the initial event read.  The
+twelfth found one remaining Node-identity wording overclaim and a duplicated cgroup
+guard.  The thirteenth returned no real findings after both corrections and
+documentation reconciliation.
 
 Three proposed changes were rejected after verification.  Closing Bubblewrap's JSON
 status pipe before process exit changes an observed backpressure case from the required
@@ -152,9 +170,9 @@ Pierre's clarification resolves that decision in favor of security parity.  Pyth
 is trusted just as it is on the Deep Agents path.  The release must be read-only to
 the untrusted Pi runner, but it need not resist another trusted same-user process.
 The host gateway must admit at most one exact request, but P0 does not invent an
-independent cryptographic lease for its single deterministic request.  Exact peer
-and release evidence now detect construction drift; they are not a new hostile-host
-security boundary.
+independent cryptographic lease for its single deterministic request.  The private
+stream, exact cgroup, and release evidence constrain the disposable principal; they
+are not a new hostile-host security boundary.
 
 * Parity-target successor contract and reviewed result
 
@@ -162,8 +180,8 @@ The successor asks one smaller question:
 
 #+begin_quote
 Can trusted Python run stock Pi as a service-secret-free, network-contained, disposable
-child, forward at most one exact request, and make cancellation or any process death
-end in bounded recursive cleanup before fresh work starts?
+runner cgroup, forward at most one exact request, and make cancellation or authority
+death end in bounded recursive cleanup before fresh work starts?
 #+end_quote
 
 The exercised boundary is intentionally asymmetric.  Python builds the pinned
@@ -178,9 +196,16 @@ external provider credential and grants no authority outside this one runner.
 Node and every descendant start atomically in a delegated child cgroup.  Python and
 systemd retain the only cgroup kill authorities.
 
-The trusted authority also verifies that Node's network and mount namespace inodes
+The first stream peer must be namespace PID 2 in that exact runner cgroup.  This
+checks the launch topology, not immutable executable identity: the untrusted process
+can transfer the stream or replace itself with =execve=.  The stream is therefore the
+cgroup's capability.  Every possible recipient is already inside the same no-secret,
+no-network, recursively killed boundary.  Python's closed request validation and
+one-shot upstream gate constrain what the whole runner cgroup can do.
+
+The trusted authority also verifies that the admitted peer's network and mount namespace inodes
 differ from its own, the private network namespace has no IPv4 route, a real
-invocation-local host canary is absent beneath Node's root, and both soft and hard
+invocation-local host canary is absent beneath the peer's root, and both soft and hard
 core-file limits are zero.  The outer transient service independently has
 =LimitCORE=0=.  These kernel observations, not a runner-provided Boolean, establish
 the containment portion of the gate.
@@ -215,7 +240,7 @@ The seven scenarios prove only this boundary:
 
 Every Python and Node protocol operation has an absolute bound inside a 30-second
 systemd backstop.  Normal scenario success is emitted only after the runner cgroup is
-empty, Node and Bubblewrap pidfds are terminal, Bubblewrap is reaped, the control
+empty, the admitted-peer and Bubblewrap pidfds are terminal, Bubblewrap is reaped, the control
 connection and session/FIFO descriptors are closed, and the runner child cgroup is
 removed.  The outer process then waits for the Python pidfd and requires the bound
 service =cgroup.events= certificate before beginning another scenario.  The session
@@ -251,8 +276,8 @@ The newly introduced Pi runner and every process it creates are untrusted.  That
 boundary is intentionally stronger and more controllable than an in-process library:
 it receives no service secret, external provider credential, host network, host
 workspace, ambient Pi resources, or cgroup authority; its request is admitted only
-after exact kernel identity and provider-envelope checks; and the authority can kill
-its entire descendant cgroup.  P2 must preserve these properties when it replaces
+through the private exact-cgroup stream after provider-envelope checks; the authority can
+kill its entire descendant cgroup.  P2 must preserve these properties when it replaces
 the fixture gateway with the real globally fair provider gateway.  Product-level
 authorization, tool sandboxing, session recovery, and web/phone exposure remain P2
 and later threat surfaces, not claims of this disposable P0.

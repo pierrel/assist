@@ -466,7 +466,14 @@ def inode_identity(metadata: os.stat_result, root: Path) -> dict[str, object]:
 def populated(path: Path) -> bool:
     values = dict(line.split() for line in (path / "cgroup.events").read_text().splitlines())
     return values.get("populated") == "1"
-
+def wait_cgroup_empty(path: Path, deadline: Deadline) -> None:
+    descriptor = os.open(path / "cgroup.events", os.O_RDONLY)
+    try:
+        os.read(descriptor, 4096)
+        while populated(path):
+            if not select.select([], [], [descriptor], deadline.remaining("runner cgroup empty"))[2]: raise P0Error("runner cgroup remained populated")
+            os.lseek(descriptor, 0, os.SEEK_SET); os.read(descriptor, 4096)
+    finally: os.close(descriptor)
 def pidfd_alive(descriptor: int) -> bool:
     return not select.select([descriptor], [], [], 0)[0]
 
@@ -548,7 +555,7 @@ def launch_runner(
 
 def accept_runner(
     listener: socket.socket, init_pid: int, init_pidfd: int, runner_cgroup: Path,
-    release: Path, host_canary: Path, deadline: Deadline,
+    host_canary: Path, deadline: Deadline,
 ) -> tuple[Channel, int, int, dict[str, object]]:
     ready, _, _ = select.select([listener, init_pidfd], [], [], deadline.remaining("runner accept"))
     if init_pidfd in ready:
@@ -558,15 +565,11 @@ def accept_runner(
     connection, _ = listener.accept()
     pid, _uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
     node_pidfd = os.pidfd_open(pid)
-    loader = next((release / "runtime/lib").glob("ld-linux-*.so.*"))
     try:
         namespace_pids = next(
             line.split()[1:] for line in Path(f"/proc/{pid}/status").read_text().splitlines()
             if line.startswith("NSpid:")
         )
-        command_line = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-        executable = Path(f"/proc/{pid}/exe").stat()
-        expected_executable = loader.stat()
         host_net, runner_net = Path("/proc/self/ns/net").stat(), Path(f"/proc/{pid}/ns/net").stat()
         host_mount, runner_mount = Path("/proc/self/ns/mnt").stat(), Path(f"/proc/{pid}/ns/mnt").stat()
         routes = Path(f"/proc/{pid}/net/route").read_text().splitlines()
@@ -578,8 +581,6 @@ def accept_runner(
         if (
             pid == init_pid or cgroup_path(pid) != runner_cgroup or not pidfd_alive(init_pidfd)
             or not pidfd_alive(node_pidfd) or namespace_pids[-1] != "2"
-            or (executable.st_dev, executable.st_ino) != (expected_executable.st_dev, expected_executable.st_ino)
-            or b"/runtime/node" not in command_line or b"/runtime/app/runner.js" not in command_line
             or host_net.st_ino == runner_net.st_ino or host_mount.st_ino == runner_mount.st_ino
             or len(routes) != 1 or not host_canary.is_file() or Path(f"/proc/{pid}/root{host_canary}").exists()
             or core_limit != ["0", "0"]
@@ -636,9 +637,8 @@ def cleanup_runner(
     code = launcher.wait(timeout=deadline.remaining("launcher reap")) if launcher is not None else None
     if code != 137:
         raise P0Error(f"cgroup launcher exit changed: {code}")
-    if runner_cgroup is not None and runner_cgroup.exists() and populated(runner_cgroup):
-        raise P0Error("runner cgroup remained populated")
     if runner_cgroup is not None and runner_cgroup.exists():
+        wait_cgroup_empty(runner_cgroup, deadline)
         runner_cgroup.rmdir()
     return {"node_terminal": node_pidfd is not None, "runner_cgroup_empty": runner_cgroup is not None,
             "bwrap_reaped": launcher is not None, "launcher_exit": code}
@@ -689,7 +689,7 @@ def scenario_authority(name: str, root: Path, observer_path: Path, release: Path
             name, release, control_path_fd, session_fd, fifo_fd, runner_cgroup, work,
         )
         channel, node_pid, node_pidfd, containment = accept_runner(
-            listener, init_pid, init_pidfd, runner_cgroup, release, host_canary, work,
+            listener, init_pid, init_pidfd, runner_cgroup, host_canary, work,
         )
         identities = {"control": control_identity, "runner": process_identity(node_pid),
                       "session": session_identity, "containment": containment}

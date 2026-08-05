@@ -8,7 +8,7 @@ Status: proposed, revised 2026-08-05.  Both stronger-boundary P0 attempts stoppe
 mandatory local review.  Pierre then clarified that the migration target is security
 parity with the trusted Python/Deep Agents authority, with stronger containment only
 around the new disposable Pi runner.  The resulting parity-target successor has a
-reviewed seven-scenario report with status =GO= and scope =P1_ONLY= after five local
+reviewed seven-scenario report with status =GO= and scope =P1_ONLY= after thirteen local
 review rounds; see =docs/2026-08-04-pi-runtime-p0.org=.  P1 is the only authorized
 next experiment.  Every product phase remains unauthorized.
 
@@ -592,16 +592,18 @@ LangGraph checkpoints into Pi JSONL or vice versa.
 The Pi runner is a contained child process of the existing synchronous per-turn
 worker.  The selected Bubblewrap version closes arbitrary inherited FDs, so the
 parent creates two one-run Unix listeners, mounts only their inodes into the private
-runner namespace, accepts one authenticated child connection on each, then closes
+runner namespace, accepts one exact-cgroup connection on each, then closes
 and unlinks the listeners.  One connection carries bounded control and tool frames;
 the other carries the stock Pi provider's bounded HTTP/SSE exchange through a
-loopback-only transport bridge.  Peer authority is the registered runner pidfd plus
-exact transient-cgroup membership and protocol nonce, not the same-UID pathname or
-socket mode.  Stdout and stderr are separate bounded logs and can never be parsed as
-protocol.  There is no routable TCP listener, shell-built command string, secret in
-argv, or inherited Pi user config.  Every request carries a parent-generated unguessable
-nonce, engine-session ID, monotonically increasing sequence, operation name, JSON
-value, and exactly one closed authenticated client identity:
+loopback-only transport bridge.  Python admits the first peer only through the private
+listener from the expected namespace slot in the exact transient cgroup.  Each
+accepted one-run stream is a capability of that cgroup, not process identity;
+the protocol nonce binds the run and sequence rather than authenticating a process.
+Stdout and stderr are separate bounded logs and can never be parsed as protocol.
+There is no routable TCP listener, shell-built command string, secret in argv, or
+inherited Pi user config.  Every request carries a parent-generated unguessable nonce,
+engine-session ID, monotonically increasing sequence, operation name, JSON value, and
+exactly one closed authenticated client identity:
 
 - ={kind: "assist", run_id, work_id, thread_id}=; or
 - ={kind: "emacsos", conversation_generation, request_id, client_thread_id}=.
@@ -1241,9 +1243,10 @@ design contains each surface by construction:
   each other client in its approved Python backend; all host effects remain behind
   Python authorization and approval gates;
 - use the two inode-mounted one-run Unix listeners described above, never stdout or
-  a reusable service listener; bind accepted peers to the registered pidfd and
-  transient cgroup, then bound frame size/count, logs, tool output, session growth,
-  process time, PIDs, FDs, CPU, and memory;
+  a reusable service listener; admit only the expected namespace slot from the exact
+  transient cgroup, treat the stream as that cgroup's capability, and bind its nonce
+  to the run/sequence.  Bound frame size/count, logs,
+  tool output, session growth, process time, PIDs, FDs, CPU, and memory;
 - validate messages and tool arguments independently on both sides; never create a
   shell command by concatenating model or bridge values;
 - test that secrets cannot appear in argv, environment metadata, prompt census, Pi
@@ -1302,9 +1305,16 @@ inode.  A private one-run Unix connection carries Pi's exact HTTP request to tru
 Python, which validates the complete closed provider envelope and may forward at
 most one canonical request to a fixed in-process instrumented upstream.
 
+Python admits the first peer only from namespace PID 2 in the exact disposable runner
+cgroup.  This verifies launch topology, not immutable executable identity: the
+untrusted process can transfer the stream or replace itself with =execve=.  The stream
+is the cgroup's capability.  Delegation within the same no-secret, no-network,
+recursively killed cgroup grants no additional authority.  The peer pidfd remains
+construction and cleanup evidence.
+
 The host, rather than the runner, gates containment from =/proc=: distinct network
 and mount namespace identities, no IPv4 route, a real host canary absent beneath the
-runner root, zero soft and hard core-file limits, exact process/cgroup identity, and
+runner root, zero soft and hard core-file limits, namespace-slot/exact-cgroup identity, and
 effective transient-unit limits.  Runner-reported connection counts remain a
 pinned-SDK conformance observation, not a security attestation.
 
@@ -1348,14 +1358,15 @@ requirements of current P0:
   directory.
 - Launch the stock Pi SDK/provider in a private-network Bubblewrap child.  One
   serialized Python state machine per scenario gets Bubblewrap's namespace-init PID
-  from its private =--json-status-fd= and Node's exact outer PID from =SO_PEERCRED=,
-  then opens and checks both pidfds before admission.  Bubblewrap remains namespace
-  PID 1 so Node, as PID 2, can unconditionally self-SIGKILL.  A pinned minimal
+  from its private =--json-status-fd= and the first peer's outer PID from
+  =SO_PEERCRED=, then opens and checks both pidfds before admission.  Bubblewrap
+  remains namespace PID 1 so the initial Node process, as PID 2, can unconditionally
+  self-SIGKILL.  A pinned minimal
   launcher uses =clone3(CLONE_INTO_CGROUP)=, reports the child PID, and remains only
   to =waitpid= Bubblewrap; Python owns and waits for that launcher.  This places
   Bubblewrap and every descendant atomically in one
   authority-owned runner child cgroup.  A post-accept nonterminal check of the
-  original Node pidfd makes numeric PID reuse fail closed.  The path omits
+  accepted peer pidfd makes numeric PID reuse fail closed.  The path omits
   =--die-with-parent=.  A fresh transient systemd service per scenario supplies
   OS-level recursive group death if Python itself is killed.
 - Route one tool-free request at a time through the in-namespace loopback bridge,
