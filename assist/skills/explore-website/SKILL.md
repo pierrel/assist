@@ -1,6 +1,7 @@
 ---
 name: explore-website
 description: "Explore ONE specific website to find and download a file — a manual, PDF, spec sheet, dataset, image, export. Navigate with read_url, download with curl. EXAMPLES — 'download the user manual PDF from the fellow website'; 'get the CSV linked on this vendor dashboard page'; 'save the spec sheet from acme.com/products/x'. This is NOT general web research (that's the research agent, which searches). MUST load before fetching pages or files from a specific website with read_url or curl."
+allowed-tools: read_url
 ---
 
 # Explore a website — read to navigate, curl to download

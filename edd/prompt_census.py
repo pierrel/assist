@@ -491,7 +491,16 @@ _OWNER_SOURCE_IDS = {
     "deepagents.SummarizationMiddleware": "python:deepagents.middleware.summarization",
     "langchain.TodoListMiddleware": "python:langchain.agents.middleware.todo",
     "assist.ContextRiderMiddleware": "python:assist.middleware.context_rider_middleware",
+    "assist.SmallModelSkillsMiddleware": "python:assist.middleware.skills_middleware",
 }
+
+_PACKAGED_SKILL_ROOTS = {
+    "/skills/": Path("assist/skills"),
+    "/main-skills/": Path("assist/main_skills"),
+    "/render-skill/": Path("assist/web_skills"),
+}
+
+_BUNDLED_OWNER_EXCEPTION = "notify"
 
 
 def _append_owned(segments: list[dict[str, Any]], value: str,
@@ -1006,6 +1015,7 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
     import langchain.agents.middleware.todo as todo_mod
     import assist.agent as assist_agent_mod
     import assist.middleware.context_rider_middleware as rider_mod
+    import assist.middleware.skills_middleware as assist_skills_mod
     import edd.agent as capture_agent_mod
     from deepagents import create_deep_agent as real_create_deep_agent
 
@@ -1132,15 +1142,15 @@ def _scenario(name: str) -> Iterator[None]:
         _CURRENT_SCENARIO.reset(token)
 
 
-def _write_skill(root: Path, name: str, description: str, marker: str) -> None:
+def _write_skill(root: Path, name: str, description: str, marker: str,
+                 *, allowed_tools: str | None = None) -> None:
     directory = root / name
     directory.mkdir(parents=True, exist_ok=True)
+    allowed_line = (f"allowed-tools: {allowed_tools}\n"
+                    if allowed_tools else "")
     (directory / "SKILL.md").write_text(
-        "---\n"
-        f"name: {name}\n"
-        f"description: {description}\n"
-        "---\n\n"
-        f"{marker}\n",
+        f"---\nname: {name}\ndescription: {description}\n"
+        f"{allowed_line}---\n\n{marker}\n",
         encoding="utf-8",
     )
 
@@ -1245,7 +1255,8 @@ def _invoke_web(trace: CensusTrace, root: Path, *, full: bool,
         _write_skill(
             sandbox_root / ".claude" / "skills",
             "synthetic-domain", "SYNTHETIC DOMAIN DESCRIPTION",
-            "SYNTHETIC_DOMAIN_BODY")
+            "SYNTHETIC_DOMAIN_BODY",
+            allowed_tools="synthetic_external_tool")
         configurable = {CONTEXT_RIDER_KEY: ContextRider(
             sent_at=datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc),
             tz="UTC", place_label="SYNTHETIC PLACE")}
@@ -1595,35 +1606,6 @@ def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
             })
     return sorted(entries, key=lambda entry: entry["id"])
 
-
-_OWNER_HINTS = {
-    "travel": ["travel"],
-    "directions": ["travel"],
-    "map_data": ["render"],
-    "read_url": ["explore-website"],
-    "create_schedule": ["schedule"],
-    "list_schedules": ["schedule"],
-    "modify_schedule": ["schedule"],
-    "pause_schedule": ["schedule"],
-    "resume_schedule": ["schedule"],
-    "delete_schedule": ["schedule"],
-    "create_subscription": ["subscribe-events"],
-    "list_subscriptions": ["subscribe-events"],
-    "modify_subscription": ["subscribe-events"],
-    "delete_subscription": ["subscribe-events"],
-    "request_egress": ["egress"],
-    "list_allowed_hosts": ["egress"],
-    "remove_allowed_host": ["egress"],
-    "send_email": ["send-email"],
-    "list_regions": ["travel"],
-    "find_regions": ["travel"],
-    "propose_region_download": ["travel"],
-    "start_async_task": ["complex-request"],
-    "check_async_task": ["complex-request"],
-    "update_async_task": ["complex-request"],
-    "cancel_async_task": ["complex-request"],
-    "list_async_tasks": ["complex-request"],
-}
 
 _TOOL_ORIGINS = {
     "cancel_async_task": "assist.async_subagents",
@@ -2453,48 +2435,36 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
                 and observation["email_delivery_attempted"] is not False:
             raise AssertionError(f"{scenario} reached the email body")
 
-    packaged_skill_roots = {
-        "/skills/": Path("assist/skills"),
-        "/main-skills/": Path("assist/main_skills"),
-        "/render-skill/": Path("assist/web_skills"),
-    }
     expected_external_skills = {
         ("web-main-full", "synthetic-domain", "/.claude/skills/"): {
             "path": "/.claude/skills/synthetic-domain/SKILL.md",
             "description": "SYNTHETIC DOMAIN DESCRIPTION",
             "content": "---\nname: synthetic-domain\ndescription: SYNTHETIC DOMAIN "
-                       "DESCRIPTION\n---\n\nSYNTHETIC_DOMAIN_BODY\n",
+                       "DESCRIPTION\nallowed-tools: synthetic_external_tool\n"
+                       "---\n\nSYNTHETIC_DOMAIN_BODY\n",
+            "allowed_tools": ["synthetic_external_tool"],
         },
         ("skill-precedence-embedder", "dev", "/synthetic-embedder-skills/"): {
             "path": "/synthetic-embedder-skills/dev/SKILL.md",
             "description": "SYNTHETIC EMBEDDER DEV DESCRIPTION",
             "content": "---\nname: dev\ndescription: SYNTHETIC EMBEDDER DEV "
                        "DESCRIPTION\n---\n\nSYNTHETIC_EMBEDDER_DEV_BODY\n",
+            "allowed_tools": [],
         },
     }
     for source in artifact["source_manifest"]:
         if source.get("kind") != "skill":
             continue
-        if source.get("source") in packaged_skill_roots:
+        local_path = _packaged_skill_path(source)
+        if local_path is not None:
             from deepagents.middleware.skills import _parse_skill_metadata
-            route = source["source"]
-            if not source["path"].startswith(route):
-                raise AssertionError("packaged skill path escaped its route")
-            relative = source["path"][len(route):]
-            local_root = (Path(__file__).resolve().parents[1]
-                          / packaged_skill_roots[route]).resolve()
-            local_path = (local_root / relative).resolve()
-            if not local_path.is_relative_to(local_root) or not local_path.is_file():
-                raise AssertionError("packaged skill path is not declared")
-            content = local_path.read_text()
+            content = local_path.read_text(encoding="utf-8")
             metadata = _parse_skill_metadata(
                 content, source["path"], local_path.parent.name)
             if metadata is None \
                     or source["name"] != metadata["name"] \
                     or source["description"] != metadata["description"] \
-                    or source["allowed_tools"] != metadata["allowed_tools"] \
-                    or source["content_sha256"] != hashlib.sha256(
-                        content.encode()).hexdigest():
+                    or source["allowed_tools"] != metadata["allowed_tools"]:
                 raise AssertionError("packaged skill metadata drifted")
         else:
             expected = expected_external_skills.get((
@@ -2502,9 +2472,9 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
             if expected is None \
                     or source["path"] != expected["path"] \
                     or source["description"] != expected["description"] \
+                    or source["allowed_tools"] != expected["allowed_tools"] \
                     or source["content_sha256"] != hashlib.sha256(
-                        expected["content"].encode()).hexdigest() \
-                    or source["allowed_tools"]:
+                        expected["content"].encode()).hexdigest():
                 raise AssertionError("non-packaged skill is not a declared fixture")
 
 
@@ -2536,8 +2506,10 @@ def _assert_source_links(artifact: dict[str, Any]) -> None:
          call["provenance"]["final_sha256"])
         for call in artifact["calls"]
     ]
-    if _sha(block_chain) != _DECLARED_PROMPT_BLOCK_CHAIN_SHA256:
-        raise AssertionError("prompt block transition chain drifted")
+    block_chain_sha = _sha(block_chain)
+    if block_chain_sha != _DECLARED_PROMPT_BLOCK_CHAIN_SHA256:
+        raise AssertionError(
+            f"prompt block transition chain drifted: {block_chain_sha}")
     for source in sources.values():
         if source["kind"] == "template":
             expected_id = (
@@ -2793,36 +2765,88 @@ def _observed_actions(call: dict[str, Any],
     return states
 
 
-def _capabilities(trace: CensusTrace,
-                  observations: dict[str, Any]) -> dict[str, Any]:
+def _packaged_skill_path(source: dict[str, Any]) -> Path | None:
+    """Return the matching bundled file only when the recorded bytes prove it."""
+    route = source.get("source")
+    if source.get("kind") != "skill" or route not in _PACKAGED_SKILL_ROOTS \
+            or not source.get("path", "").startswith(route):
+        return None
+    relative = source["path"][len(route):]
+    local_root = (Path(__file__).resolve().parents[1]
+                  / _PACKAGED_SKILL_ROOTS[route]).resolve()
+    local_path = (local_root / relative).resolve()
+    if not local_path.is_relative_to(local_root) or not local_path.is_file():
+        return None
+    if hashlib.sha256(local_path.read_bytes()).hexdigest() \
+            != source.get("content_sha256"):
+        return None
+    return local_path
+
+
+def _skill_tool_owners(source_manifest: list[dict[str, Any]], *,
+                       scenario: str | None = None) \
+        -> dict[str, list[str]]:
+    """Return bundled owners whose declarations win the selected compositions."""
+    owners: dict[str, list[str]] = {}
+    for source in source_manifest:
+        if scenario is not None and source.get("scenario") != scenario:
+            continue
+        if _packaged_skill_path(source) is None:
+            continue
+        for tool_name in source["allowed_tools"]:
+            owners.setdefault(tool_name, []).append(source["name"])
+    return {name: sorted(set(skill_names))
+            for name, skill_names in owners.items()}
+
+
+def _tool_classification(path: str, name: str, origin: str) -> str:
     fixed = {"context", "research-lead", "research-leaf",
              "nested-research-worker", "nested-fact-check",
              "nested-report-critique", "receptionist", "thread-description",
              "capture"}
+    if path in fixed:
+        return "fixed-role tool"
+    if origin.startswith("deepagents") or name == "load_skill" \
+            or origin.startswith("langchain.agents.middleware") \
+            or origin == "assist.async_subagents":
+        return "framework-kernel candidate"
+    return "skill-scoped candidate"
+
+
+def _assert_unique_tool_candidates(
+        surface: str, candidates: list[dict[str, str]]) -> None:
+    candidates_by_name: dict[str, list[dict[str, str]]] = {}
+    for item in candidates:
+        candidates_by_name.setdefault(item["name"], []).append(item)
+    for name, duplicates in candidates_by_name.items():
+        if len(duplicates) > 1:
+            origins = ", ".join(item["origin"] for item in duplicates)
+            raise AssertionError(
+                f"{surface}: duplicate tool candidate `{name}` from {origins}")
+
+
+def _capabilities(trace: CensusTrace, observations: dict[str, Any],
+                  source_manifest: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for call in trace.calls:
+        owners = _skill_tool_owners(
+            source_manifest, scenario=call["scenario"])
         key = f"{call['scenario']}:{call['call_index']}"
         matches = [trace.tool_nodes[index] for index in call["matching_tool_nodes"]]
         if call["visible_tools"] and len(matches) != 1:
             raise AssertionError(
                 f"{key} has {len(matches)} construction-time ToolNode matches")
         registered = matches[0]["candidates"] if matches else []
+        _assert_unique_tool_candidates(key, registered)
         tools = []
         for item in registered:
             name = item["name"]
             origin = item["origin"]
-            if call["path"] in fixed:
-                classification = "fixed-role tool"
-            elif origin.startswith("deepagents") or name == "load_skill" \
-                    or origin.startswith("langchain.agents.middleware") \
-                    or origin == "assist.async_subagents":
-                classification = "framework-kernel candidate"
-            else:
-                classification = "skill-scoped candidate"
+            classification = _tool_classification(call["path"], name, origin)
             tools.append({
                 **item,
                 "classification": classification,
-                "possible_owners": _OWNER_HINTS.get(name, []),
+                "possible_owners": owners.get(name, []),
             })
         result[key] = {
             "path": call["path"],
@@ -2833,6 +2857,53 @@ def _capabilities(trace: CensusTrace,
             "effective_actions": _observed_actions(call, observations),
         }
     return result
+
+
+def _validate_skill_tool_declarations(
+        capabilities: dict[str, Any], source_manifest: list[dict[str, Any]]) -> None:
+    """Validate winning bundled declarations against recorded compositions."""
+    global_owners = _skill_tool_owners(source_manifest)
+    skill_sources = [
+        source for source in source_manifest
+        if _packaged_skill_path(source) is not None
+    ]
+    for source in skill_sources:
+        winning_scenarios = {
+            candidate["scenario"] for candidate in skill_sources
+            if candidate["name"] == source["name"]
+            and candidate["path"] == source["path"]
+        }
+        surfaces = [surface for key, surface in capabilities.items()
+                    if key.split(":", 1)[0] in winning_scenarios]
+        for name in source["allowed_tools"]:
+            matches = [tool for surface in surfaces
+                       for tool in surface["registered_tools"]
+                       if tool["name"] == name]
+            if not matches:
+                raise AssertionError(
+                    f"{source['path']}: unknown declared tool `{name}`")
+            if all(tool["classification"] != "skill-scoped candidate"
+                   or not tool["origin"].startswith("assist.")
+                   for tool in matches):
+                raise AssertionError(
+                    f"{source['path']}: non-bundled or kernel tool `{name}` "
+                    "must not be declared")
+
+    for key, surface in capabilities.items():
+        for tool in surface["registered_tools"]:
+            if tool["classification"] != "skill-scoped candidate":
+                continue
+            if not tool["origin"].startswith("assist.") \
+                    or tool["name"] == _BUNDLED_OWNER_EXCEPTION:
+                continue
+            owners = global_owners.get(tool["name"], [])
+            if not owners:
+                raise AssertionError(
+                    f"{key}: non-kernel tool `{tool['name']}` has no winning owner")
+            if len(owners) > 1:
+                raise AssertionError(
+                    f"{key}: non-kernel tool `{tool['name']}` has multiple owners: "
+                    f"{', '.join(owners)}")
 
 
 def _findings(trace: CensusTrace, capabilities: dict[str, Any],
@@ -2948,6 +3019,11 @@ def _findings(trace: CensusTrace, capabilities: dict[str, Any],
 
 def _assert_semantic_views(artifact: dict[str, Any]) -> None:
     nodes = artifact["tool_nodes"]
+    for node in nodes:
+        _assert_unique_tool_candidates(
+            f"{node['scenario']}:tool-node:{node['index']}",
+            node["candidates"],
+        )
     if _sha(nodes) != _DECLARED_TOOL_NODE_HISTORY_SHA256:
         raise AssertionError("construction-time ToolNode history drifted")
     if [node["index"] for node in nodes] != list(range(len(nodes))):
@@ -2968,9 +3044,12 @@ def _assert_semantic_views(artifact: dict[str, Any]) -> None:
         if call["matching_tool_nodes"] != [node["index"] for node in matching]:
             raise AssertionError("provider call ToolNode matches drifted")
     trace = CensusTrace(calls=artifact["calls"], tool_nodes=nodes)
-    expected_capabilities = _capabilities(trace, artifact["observations"])
+    expected_capabilities = _capabilities(
+        trace, artifact["observations"], artifact["source_manifest"])
     if artifact["capabilities"] != expected_capabilities:
         raise AssertionError("capability surfaces drifted from recorded evidence")
+    _validate_skill_tool_declarations(
+        expected_capabilities, artifact["source_manifest"])
     if artifact["findings"] != _findings(
             trace, expected_capabilities, artifact["observations"]):
         raise AssertionError("findings drifted from recorded evidence")
@@ -3068,11 +3147,12 @@ def _capture_census() -> dict[str, Any]:
 
         if trace.faults:
             raise trace.faults[0]
-        capabilities = _capabilities(trace, observations)
+        source_manifest = _source_manifest(trace)
+        capabilities = _capabilities(trace, observations, source_manifest)
         artifact = {
             "schema_version": SCHEMA_VERSION,
             "fixed_clock": FIXED_NOW,
-            "source_manifest": _source_manifest(trace),
+            "source_manifest": source_manifest,
             "calls": trace.calls,
             "tool_nodes": trace.tool_nodes,
             "capabilities": capabilities,

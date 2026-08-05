@@ -1,6 +1,7 @@
 ---
 name: subscribe-events
 description: Subscribe this conversation to inbound messages (texts) so the agent triages each one against your instructions — e.g. "watch my texts and if it's from the plumber tell me", "when Ana messages about pickup, draft a reply", "stop watching texts from that number", "change how you handle messages from work". Load whenever the user wants incoming messages handled automatically by rules in this thread.
+allowed-tools: create_subscription list_subscriptions modify_subscription delete_subscription
 ---
 
 # Subscribing to inbound message events

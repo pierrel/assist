@@ -1,0 +1,390 @@
+#+title: Prompt architecture P2b.1: kernel and bundled tool declarations
+
+* Change log
+
+** 2026-08-05: Initial design
+
+- Scoped this child to declaration and deterministic validation.  It does not
+  hide, reject, or dynamically activate any tool.
+- Chose census-owned classification of real construction candidates and final
+  requests instead of production grouping, LangGraph introspection, or a name
+  registry.
+- Included web-only bundled skills because the production web composition owns
+  =render= and =send-email=.  An attempted =notify= owner hit the explicit stop
+  gate: profile-specific skill roots conflict with checkpointed skill metadata
+  and would change SMS triage or require unplanned cache invalidation.
+- Kept SMS triage unchanged.  =notify= remains prompt-owned and baseline-visible
+  pending a later experiment that can isolate it without profile cache changes.
+- Added no SMS-triage-specific code.  Its prompt, tool set, routing, permissions,
+  and backend access policy remain unchanged; shared bundled skill files carry
+  their standard declaration in every composition.
+
+** 2026-08-05: Baseline and implementation evidence
+
+- Published the reviewed child as [[https://github.com/pierrel/assist/pull/227][Assist PR #227]].
+- The first reviewed candidate appended a generated kernel line.  Its N=10
+  cohort passed 43/50, but urgent notification fell to 3/10 against unchanged
+  P2 at 7/10.  Shortening and qualifying the line did not restore urgent-first
+  behavior under a focused diagnostic.  The stop gate fired.
+- Removed the model-visible line and all production tool-name extraction rather
+  than special-casing =notify=.  P2b.1 now records kernel classification only
+  in the deterministic census; P2b.2 will add kernel prose together with actual
+  schema and execution gating, when the classification becomes actionable.
+- PR review's dict-form =AgentSpec.tools= finding was real for the removed
+  runtime name-extraction seam.  Deleting that seam removed the defect and its
+  six-shape compatibility code instead of expanding P2b.1.
+- Review removed an attempted triage-only metadata rewrite after proving that
+  direct filesystem reads could bypass it.  Preserving exact historical skill
+  bytes would require an unplanned profile-specific backend; P2b.1 instead adds
+  no triage production path at all.
+- The final bootstrap system message is byte-identical to merged P2 at 29,600
+  characters, and every provider-bound tool schema remains byte-identical.
+- Confirmed the census produces the expected kernel classification in all six
+  recorded skills-enabled compositions without a production registry.
+- Replaced the P0 census's hand-written possible-owner hints with winning
+  =allowed-tools= declarations and made missing, multiple, stale, pattern-shaped,
+  kernel-redundant, and bad-winning-shadow declarations deterministic failures.
+- Recorded, without changing it here, that =map_data= is registered on four
+  profiles where its owning web-only =render= skill is not mounted.  These are
+  explicit per-composition =unowned-tool= findings for P2b.2; P2b.1 preserves
+  the baseline-visible schemas.
+- Corrected declaration-only deterministic evidence is 1,584 passed and 2
+  skipped; the focused ownership/classification/source-provenance set is 90
+  passed.
+- After rebasing onto current main =e68dbe8=, the three declaration-sensitive
+  nodes passed 9/9 at candidate N=3, 30/30 at unchanged-current-main baseline
+  N=10, 15/15 at post-review candidate N=5, and 30/30 at candidate stability
+  N=10.  Every run produced valid XML with no timeout or harness error.
+- Copilot's final review of the simplified 14-file candidate produced no formal
+  comments.  One suppressed determinism nit correctly identified a new
+  locale-default read in the census's packaged-skill validation.  The gate now
+  names UTF-8 explicitly; the change is test-side only and leaves the runtime,
+  prompt, schemas, and evaluated skill bytes unchanged.
+
+* Objective
+
+P2b.1 makes the future disclosure boundary inspectable before P2b.2 changes any
+schema visibility.  It derives the kernel from the real composed request, adds
+portable Agent Skills =allowed-tools= declarations to bundled Assist skills,
+and fails deterministically when a declaration is stale, misspelled, redundant,
+or shadowed inconsistently.
+
+This is the first independently reviewed child of the approved P2b milestone in
+[[file:2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-declare][the program design]].
+
+* Current evidence
+
+- Deep Agents 0.6.1 constructs TODO, filesystem, and optional synchronous
+  delegation tools inside =create_deep_agent=.  Upstream already parses the
+  Agent Skills =allowed-tools= field as a space-delimited string.
+- Assist supplies application tools through =AgentSpec.tools= and its four
+  built-in navigation tools.  The async lifecycle tools are supplied separately
+  and must remain kernel because completion wakes need them without selecting a
+  domain workflow.
+- =SmallModelSkillsMiddleware= supplies =load_skill= and owns the skill catalog
+  prompt.  Its catalog intentionally remains name plus description; declarations
+  are not revealed at startup.
+- The unchanged P0 census records 30 visible tools for core web main, 36 for
+  full web main, 14 for the executable delegate, and 13 for the non-executable
+  legacy main.  Its 27 deterministic tests pass on merged P2.
+- Existing non-kernel ownership is:
+
+  | Skill | Non-kernel tools |
+  |-------+------------------|
+  | travel | =travel directions list_regions find_regions propose_region_download= |
+  | render | =map_data= |
+  | explore-website | =read_url= |
+  | schedule | =create_schedule list_schedules modify_schedule pause_schedule resume_schedule delete_schedule= |
+  | subscribe-events | =create_subscription list_subscriptions modify_subscription delete_subscription= |
+  | egress | =request_egress list_allowed_hosts remove_allowed_host= |
+  | send-email | =send_email= |
+
+The P0 census also reports =notify= as unowned.  It is available only to normal
+web turns, is deliberately absent from untrusted SMS-triage turns, and has an
+always-on urgent-first role rule.  The attempted web-only owner was removed
+after local review proved that Deep Agents caches skill metadata per thread, not
+per normal/triage composition.  Fixing that would add checkpoint invalidation
+outside this child's objective.  The two =notify= findings therefore remain as
+the one explicit prompt-owned migration exception; the urgent rule and all
+SMS-triage-specific configuration and behavior remain unchanged.
+
+The corrected candidate system message is byte-identical to merged P2 at 29,600
+characters; the 30 provider-bound schemas remain byte-identical at 28,037
+characters.  The bounded synthetic artifact is 2,856,251 bytes with 25 retained
+audit findings
+and SHA-256
+=cec33a06566de462cc9cc9ee0d7f81b5429293ff27982b75e0c3332e7ce0f586=.
+
+* Design
+
+** Census-owned classification, no runtime registry
+
+P2b.1 leaves =create_agent='s tool expression and middleware request path
+unchanged.  The existing P0 census observes the actual pre-deduplication
+=ToolNode= candidates, final model request, and winning skill sources for each
+real composition.  It classifies framework-origin TODO, filesystem,
+delegation, =load_skill=, and Assist async lifecycle tools as kernel candidates;
+the remaining Assist tools are skill-scoped candidates.  Exact expected kernel
+sets are pinned for executable and non-executable main, delegate, legacy, and
+source-precedence compositions.
+
+This classification exists only in EDD evidence.  Production does not extract
+tool names, copy framework names, inspect private graph nodes, or carry a second
+registry before P2b.2 needs the boundary for filtering.
+
+P2b.1 adds no SMS-triage-specific production path.  Its prompt, tool set,
+routing, permissions, backend types, and access policies remain the merged-P2
+ones.  Because the same bundled files are mounted across profiles, their new
+standard frontmatter is present if a skill is deliberately loaded or read;
+P2b.1 does not interpret it at runtime or grant any authority from it.
+
+** No model-visible kernel until P2b.2
+
+P2b.1 does not change the startup prompt, provider schemas, executable tool set,
+or tool ordering.  Startup skill rows remain name plus description only and do
+not reveal =allowed-tools=.  A successfully loaded bundled skill returns its
+new declaration as ordinary frontmatter in every profile that mounts it.
+
+P2b.2 will generate the model-visible kernel at the same final-request seam that
+filters schemas and execution.  Landing the explanation with the behavior keeps
+the prompt truthful and avoids a declaration-only line that the small model
+mistook for a routing instruction.
+
+** Portable declarations and precedence
+
+Add =allowed-tools= only to bundled skills that own non-kernel tools.  Use the
+same upstream metadata parser used at runtime.  Include all mounted bundled
+roots:
+
+- =assist/skills/*/SKILL.md=;
+- =assist/main_skills/*/SKILL.md=; and
+- =assist/web_skills/*/SKILL.md=.
+
+Validation resolves sources with the existing last-source-wins rule.  A
+shadowed declaration contributes nothing; the winning metadata and the body
+returned by =load_skill= must come from the same path.  Kernel tools such as
+=execute=, filesystem tools, TODO, synchronous =task=, async lifecycle tools,
+and =load_skill= are deliberately omitted even when a skill body uses them.
+
+Losing shadowed declarations are ignored, exactly like their bodies and
+descriptions.  The shadowing negative fixture changes the /winning/ source's
+declaration and proves that the diagnostic names that winning path and bad tool;
+it does not reject irrelevant metadata in a losing source.
+
+External domain and embedder skill declarations are recorded by the census but
+are not enforced or gated in this child.  That is P2b.3.
+
+* Implementation plan
+
+1. Add focused red tests for census-owned kernel classification,
+   parser-backed bundled declarations, negative fixtures, and source
+   precedence.
+2. Add =allowed-tools= to the seven existing owning skills.  Keep =notify= as
+   the one measured prompt-owned exception after its stop gate fires.
+3. Extend the P0 census semantic view and deterministic gates using its recorded
+   real compositions.  Do not move production logic into =edd= or make
+   production import evaluator code.
+4. Prove the startup prompt, provider schemas, tool order, and winners remain
+   byte-identical; defer kernel prose to P2b.2 and add no triage-specific path.
+5. Update README skill authoring guidance and this experiment record.  After all
+   child gates close and before opening the PR, mark only P2b.1 done in
+   =roadmap.org=; P2b.2 and P2b.3 remain open.
+
+Production changes are confined to bundled skill frontmatter.  =create_agent=,
+=AgentSpec=, the skills middleware, ThreadManager, backend routing, tool
+construction, and the model-request path are unchanged.  Census, tests, docs,
+and roadmap hold the remaining work.
+
+* Test and experiment gate
+
+** Deterministic
+
+- The existing P0 census remains 27/27 before implementation.
+- Every bundled declaration parses through upstream =_parse_skill_metadata=.
+- Each token is one exact current model-visible tool name, exists in a recorded
+  real composition mounting that winning skill, and is non-kernel there.
+- Every registered bundled non-kernel tool has exactly one global owner;
+  multiple winning owners fail.  Each
+  capability surface separately reports only owners mounted in that composition,
+  so a profile that registers a tool without mounting its owner becomes an
+  =unowned-tool= finding for P2b.2 rather than changing P2b.1 visibility.
+- Misspelled, command-pattern, stale, kernel-redundant, and bad winning-source
+  shadow fixtures fail with both the skill path and offending name.
+- Census-classified kernel names equal these exact recorded real-composition
+  sets:
+
+  | Composition | Expected kernel |
+  |-------------+-----------------|
+  | =web-main-core= and =web-main-full= | =write_todos ls read_file write_file edit_file glob grep execute load_skill start_async_task check_async_task update_async_task cancel_async_task list_async_tasks= |
+  | =web-delegate= | =write_todos ls read_file write_file edit_file glob grep execute task load_skill= |
+  | =legacy-main= | =write_todos ls read_file write_file edit_file glob grep task load_skill= |
+  | =skill-precedence-built-in= and =skill-precedence-embedder= | =write_todos ls read_file write_file edit_file glob grep load_skill start_async_task check_async_task update_async_task cancel_async_task list_async_tasks= |
+
+  The first row is executable async main, the second executable synchronous
+  delegate, the third non-executable synchronous legacy, and the fourth
+  non-executable async main.  Other fixed-role profiles do not mount skills and
+  remain outside P2b.
+- Tool name order and canonical provider schema JSON are byte-identical to the
+  merged P2 baseline for every recorded composition.
+- The census final-boundary assertion proves that classification is intersected
+  with the actual final model-visible request after middleware exclusions.
+- The construction trace fails whenever any pre-deduplication candidates share
+  a name, regardless of classification.  Runtime enforcement across external/
+  embedder representations remains P2b.3.
+- The canonical startup system message, final tool order, winner set, and
+  provider schema JSON are byte-identical to merged P2.
+- Existing HITL, URL provenance, read-only, role-omission, and SMS-triage tests
+  remain green.
+- No SMS-triage-specific code, prompt, tool, route, or access-policy change is
+  present.  Shared skill bodies expose the same standard declaration in every
+  composition that mounts them.
+
+** Behavioral
+
+The corrected candidate leaves bootstrap behavior unchanged.  Its remaining
+model-facing risk is that =allowed-tools= now appears in a bundled skill body
+after a successful load.  Run these natural/capability nodes on unchanged
+merged P2 and the corrected candidate:
+
+1. implicit main skill loading, which loads a newly declared bundled body and
+   then edits the requested Org file;
+2. delegate implicit skill loading, which exercises the same body through the
+   synchronous delegate composition; and
+3. the explicit render-skill case, which loads a newly declared web-only body
+   and then uses its application tool.
+
+The candidate must meet the baseline full-pass count for every node and the
+program's 70% natural floor.  This child adds no model step.  A missed load,
+failure after reading the declaration, or changed tool choice is a regression.
+The urgent-notification and ordinary no-tool controls belonged to the removed
+startup-prompt experiment; they are not affected by the declaration-only final
+candidate and are not pulled into its final gate.
+
+*** Pre-registered comparison
+
+The behavioral baseline is current main =e68dbe8bd960b5b6d09a39870b1373099ee3073a=.
+It contains the merged P2 baseline =aa011f6ce5e9f3264817a51567c172dbcf05ea48=
+plus only the isolated Pi P0 experiment and its docs; it changes no Assist
+runtime, prompt, or retained eval node.  The candidate was rebased onto that
+tip before the post-review and stability cohorts.  The evaluated model-facing
+candidate consists exactly of the seven bundled =SKILL.md= frontmatter deltas;
+the canonical =git diff --binary e68dbe8 -- <seven skill files>= byte stream has
+SHA-256
+=3b23d15a1f20f298e0facbffe0ca139a592757f2070011f861b80547bde2ff05=.
+Production Python and prompt sources are byte-identical to current main, so docs,
+census, and deterministic-test edits cannot alter the behavioral subject.  Each
+run uses
+=scripts/run-evals.sh= through the shared =real-llm= resource and the deployed
+Assist virtual environment.  The exact node IDs, run three times apiece, are:
+
+1. =edd/eval/test_skill_loading.py::TestSkillLoading::test_implicit_skill_request=
+   for implicit main selection;
+2. =edd/eval/test_skill_loading.py::TestSkillLoading::test_delegate_implicit_skill_request=
+   for implicit delegate selection; and
+3. =edd/eval/test_render_agent.py::TestRenderAgent::test_named_render_skill_request_uses_load_skill=
+   for an explicit skill request that exercises a declared application tool.
+
+The corrected declaration-only candidate uses a new capture directory so none
+of the generated-line trials can be mistaken for final evidence.  A fresh
+current-main N=10 cohort provides the matched comparison.
+
+*** Superseded generated-line experiment
+
+The first N=10 stability run completed its five-node cohort at 43/50 (86%):
+implicit main 10/10,
+implicit delegate 10/10, imminent urgent notification 3/10, explicit render
+10/10, and ordinary no-tool 10/10.  Every ordinary trace contained exactly one
+model call and no tool call.  All ten summaries are complete, XML-backed, and
+free of timeout or harness-error markers.  A matched unchanged-P2 N=10 urgent
+baseline passed 7/10, proving that the generated line caused a real regression.
+Shorter and qualified variants still loaded skills before notifying in focused
+diagnostics.  Review also found that the existing urgent eval counts an eventual
+=notify= even when another tool precedes it.  Tightening that separate validator
+would be valuable, but it is not part of the declaration-only final candidate;
+the experimental test edit was reverted and the risk is reported rather than
+expanding P2b.1.  The measured regression removed the entire model-visible
+kernel seam from this child.
+
+*** Corrected declaration-only comparison
+
+| Cohort | Implicit main | Implicit delegate | Named render | Total |
+|--------+---------------+-------------------+--------------+-------|
+| corrected candidate N=3 | 3/3 | 3/3 | 3/3 | 9/9 |
+| current-main baseline N=10 | 10/10 | 10/10 | 10/10 | 30/30 |
+| post-review candidate N=5 | 5/5 | 5/5 | 5/5 | 15/15 |
+| candidate stability N=10 | 10/10 | 10/10 | 10/10 | 30/30 |
+
+The candidate met the full-pass baseline for every node and exceeded the 70%
+natural-acceptance floor.  All 84 executions produced one valid passing XML
+suite with zero failures, errors, or skips.  No summary contains a timeout,
+harness error, or missing-XML marker.
+
+All raw captures and comparison logs go below =$P2B1_OUTPUT_ROOT=, whose local
+default is =~/deploy/assist/prompt-architecture/p2b1/= on the large home
+partition.  Final declaration-only cohorts are under
+=declaration-only/{candidate-n3,baseline-n10,candidate-n5,candidate-n10}=.  The
+repo stores only bounded summaries and hashes.
+
+* Stop gates
+
+- Stop if construction grouping changes tool order, a winner, or any provider
+  schema.
+- Stop if kernel classification needs private LangGraph graph/node inspection,
+  a copied list of Deep Agents tool names, or any production dependency on EDD.
+- Stop if the declarations or classification alter the startup prompt, final
+  provider schemas, tool order, or winners.
+- Stop if any pre-deduplication candidates share a name, whether their
+  classifications match or differ.  Do not resolve the problem with a copied
+  built-in-name list.
+- Stop if winning skill metadata and =load_skill= body precedence differ.
+- Stop and report rather than broadening scope if =notify= cannot gain a web-only
+  owner without changing urgent or SMS-triage behavior.
+- Stop if any model-visible kernel prose is needed before P2b.2 can pair it with
+  filtering.
+
+* Non-goals
+
+- No schema filtering, hidden-tool rejection, load state, =ToolMessage.artifact=,
+  checkpoint state, or concurrent disclosure behavior.
+- No domain/embedder declaration enforcement or tool gating.
+- No SMS-triage, memory, research, development-guidance, or skill-catalog lifetime
+  change.  P2b.1 emits no kernel prose in any profile.
+- No Deep Agents fork, replacement parser, private graph introspection, or second
+  tool registry.
+- No unrelated cleanup found during review.
+
+* Implementation notes
+
+The hard part is not parsing =allowed-tools=.  Upstream already does that.  The
+first hard part was classifying the kernel from real compositions without
+copying Deep Agents' built-in names or binding production to private LangGraph
+internals.  Keeping that work in the P0 census makes the boundary inspectable
+without adding runtime machinery before P2b.2 needs it.  The other nontrivial
+edge is =notify=: its current always-on urgent-first behavior predates skill
+ownership, while skill metadata is checkpoint-cached across normal and
+SMS-triage constructions.  The stop gate prevented a cache redesign or an SMS
+change; the exception is explicit instead.
+
+The longest part was review convergence around the instruction not to turn this
+into SMS-triage work.  Adding standard frontmatter changes the shared skill file
+bytes.  An attempted =load_skill=-only rewrite did not preserve direct
+filesystem reads and required new profile/source plumbing.  Review removed that
+entire approach.  The final child adds no triage-specific production code and
+does not change its prompt, tools, routes, permissions, or access policy; the
+shared skill metadata is simply the same official file content in every mounted
+profile.  Repeated review also removed duplicate validation and accidental
+prompt whitespace rather than broadening the goal.  Copilot exposed that the
+proposed runtime name extraction mishandled dict-form embedder tools.  The
+generated kernel line then caused a measured urgent-notification regression.
+The final correction deleted the entire runtime extraction and prompt seam
+instead of adding compatibility forms or a =notify= special case.  A local
+security probe also reproduced a future embedder tool whose name collides with
+a framework tool.  P2b.1's census records that risk; runtime rejection across
+external representations remains deliberately scoped to P2b.3.
+
+Review additionally found that the urgent-notification eval accepts a late or
+repeated =notify= even though the prompt says first and once.  That is valuable
+future eval debt with a risk of overstating urgent-first reliability, but the
+corrected P2b.1 candidate has no startup-prompt change and no longer affects the
+urgent path.  The experimental validator edit was reverted rather than turning
+this child into an urgent-notification cleanup.

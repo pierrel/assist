@@ -1,6 +1,7 @@
 ---
 name: send-email
 description: Drafting or sending a plain-text email for the user. EXAMPLES — "email the contractor to reschedule"; "write this person a note about the meeting"; "send a thank-you email to this address". MUST load before drafting or sending an email.
+allowed-tools: send_email
 ---
 
 # Email drafting and approval

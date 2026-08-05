@@ -3,7 +3,8 @@
 
 * State
 
-Status: architecture approved; P0, P1, P1b, P1c, and P2 complete; P0b deferred.
+Status: architecture approved; P0, P1, P1b, P1c, and P2 complete; P2b.1 gates
+complete in PR #227 pending merge; P0b deferred.
 P2's duplicate-procedure deletion passed its registered functional and timing
 gates.  A post-review cleanup then removed an empty synchronous planning heading;
 the qualified async rendering stayed byte-identical and the affected delegate
@@ -11,6 +12,21 @@ skill case passed the bounded 3/3 follow-up selected for that cleanup.  See
 [[file:2026-08-04-prompt-architecture-p2.org][the P2 state record]].
 
 ** Change log
+
+*** 2026-08-05: P2b.1 declaration and census boundary
+
+- Refined P2b.1 after inspecting the real Deep Agents 0.6.1 composition.  The
+  P0 census observes actual construction candidates and final model requests,
+  then classifies the kernel without adding production tool-name extraction.
+- A first candidate emitted model-visible kernel prose before it changed any
+  behavior.  Its N=10 urgent-notification regression fired the stop gate, so
+  P2b.1 now leaves the startup prompt, tool construction, and provider schemas
+  unchanged.  P2b.2 will land kernel prose with the filtering it explains.
+- The corrected declaration-only candidate matched current main on all three
+  declaration-sensitive nodes: 9/9 at N=3, 15/15 post-review at N=5, and 30/30
+  at N=10 stability against a 30/30 current-main N=10 baseline.
+- Added the independently reviewed implementation record at
+  [[file:2026-08-05-prompt-architecture-p2b1.org][Prompt architecture P2b.1]].
 
 *** 2026-07-31: P0b deferred until an observed problem
 
@@ -181,9 +197,10 @@ The architecture therefore needs three separations:
    the conditional procedure for deciding and performing memory writes.
 5. Put optional workflows such as complex task breakdown and external research
    behind skills whose descriptions provide the routing trigger.
-6. Keep only the Deep Agents built-ins needed to inspect, plan, and modify work,
-   plus =load_skill=, in the always-visible tool kernel.  Reveal other tools only
-   after a matching skill is successfully loaded.
+6. Keep only the framework filesystem, execution, TODO, and delegation tools
+   supplied for the profile, plus =load_skill= and required Assist async
+   lifecycle tools, in the always-visible kernel.  Reveal other tools only after
+   a matching skill is successfully loaded.
 7. Use the portable Agent Skills =allowed-tools= field for declarations across
    Assist, domain-repository, and embedder skill sources.
 8. Give every specialist a concise role contract aligned with its actual tools,
@@ -293,19 +310,20 @@ wakes, parent TODOs, or the supervisor's scheduling lifecycle.
 ** Tool-disclosure boundary
 
 The model does not need every registered tool schema before it has selected a
-workflow.  Each main/delegate profile therefore starts an agent invocation with
-one kernel: the Deep Agents built-ins actually present for that profile, plus
-=load_skill=.  Framework-owned filesystem, execution, TODO, and delegation tools
-remain kernel capabilities when the profile supplies them.  Fixed-role
+workflow.  The P2b target therefore starts each main/delegate invocation with a
+kernel derived from its final request: the framework filesystem, execution,
+TODO, and delegation tools actually present, =load_skill=, and Assist's async
+lifecycle additions when that profile supplies them.  Recorded migration
+exceptions remain visible until their owning P2b child resolves them.  Fixed-role
 specialists that do not mount skills keep their existing small tool sets and are
 outside this mechanism.
 
-The kernel is declared once where the Deep Agents middleware/tool composition is
-built.  The skills middleware uses that same exact set both to filter the final
-model request and to generate a compact system-prompt block listing the kernel
-tool names and the disclosure rule.  Jinja prose does not carry a second
-hand-maintained list.  Tool schemas remain authoritative for arguments and
-immediate results.
+P2b.1 classifies the exact kernel only in the deterministic census and leaves
+the production request unchanged.  P2b.2 will extend the existing skills
+middleware so its final-request filtering and compact model-visible kernel line
+use the same actual retained tools.  It must not add a hand-maintained framework
+list or a second Jinja registry.  Tool schemas remain authoritative for
+arguments and immediate results.
 
 Every non-kernel tool stays registered with LangChain's execution graph but is
 absent from the model request and rejected if called until a successful
@@ -341,8 +359,8 @@ keeps tool visibility failures distinguishable from catalog-lifecycle failures.
 
 All skill sources obey the same resolution contract:
 
-- bundled shared and main-only Assist skills declare their non-kernel tools in
-  their own =SKILL.md=;
+- bundled shared, main-only, and web-only Assist skills declare their non-kernel
+  tools in their own =SKILL.md=;
 - an in-repo =.claude/skills/= skill can disclose only a tool already registered
   in the current composed agent;
 - an embedder skill from =AgentSpec.skill_sources= can disclose a custom tool
@@ -1773,7 +1791,7 @@ P2b is a milestone with three independently reviewed stop points.  Each child
 gets its own baseline, branch, report, and stop/go decision.  No child needs the
 next one to deliver value.
 
-** P2b.1: Declare the kernel and validate skill tool names
+** P2b.1: Classify the kernel and validate bundled skill tool names
 :PROPERTIES:
 :CUSTOM_ID: phase-2b-tools-declare
 :END:
@@ -1786,24 +1804,39 @@ deterministic test instead of becoming a behavioral mystery.
 
 *** Hypothesis
 
-The P0 census can classify the actual Deep Agents built-ins as the profile's
-kernel and assign every other currently used tool to at least one skill without
+The P0 census can classify the actual framework built-ins, =load_skill=, and
+Assist async lifecycle additions as the profile's kernel and assign every other
+Assist-owned tool, except a recorded migration exception, to one skill without
 adding a runtime registry or changing behavior.
 
 *** Controlled change
 
-Define one construction-time kernel set from the actual Deep Agents built-in
-tool instances present for the profile plus =load_skill=.  Pass that set to the
-skills middleware; generate the system-prompt kernel list from it.  Do not copy
-the names into the main Jinja template.
+Leave production tool construction and the model request unchanged.  Extend the
+P0 census to classify the actual pre-deduplication construction candidates and
+final visible request as framework-kernel versus skill-scoped.  Pin exact kernel
+sets for the real main, delegate, backend, legacy, and precedence compositions.
+The classification remains EDD evidence in this child: do not add runtime name
+extraction, inspect private graph nodes, copy framework names into a template,
+or emit model-visible kernel prose before P2b.2 pairs it with filtering.  Any
+duplicate candidate name remains a pre-deduplication census failure;
+external/embedder runtime
+enforcement belongs to P2b.3.
 
-Add =allowed-tools= to each bundled shared/main-only Assist skill that calls for
-a non-kernel tool.  Kernel tools are omitted from the field.  Parse frontmatter
-through the same upstream Agent Skills parser used at runtime.  Keep the current
-model-visible tool set unchanged in this child.
+Do not add an SMS-triage-specific builder, backend, metadata rewrite, prompt, or
+tool rule.  Its tool set, guidance, access policy, and separately gated
+=send_reply= surface remain unchanged throughout this program.  The shared
+bundled skill files gain the same standard =allowed-tools= frontmatter in every
+profile; P2b.1 neither interprets that field at runtime nor changes triage based
+on it.
+
+Add =allowed-tools= to each bundled shared, main-only, or web-only Assist skill
+that calls for a non-kernel tool.  Kernel tools are omitted from the field.
+Parse frontmatter through the same upstream Agent Skills parser used at runtime.
+Keep the current model-visible tool set unchanged in this child.
 
 Add a deterministic repository test that walks every
-=assist/skills/*/SKILL.md= and =assist/main_skills/*/SKILL.md=.  For every
+=assist/skills/*/SKILL.md=, =assist/main_skills/*/SKILL.md=, and
+=assist/web_skills/*/SKILL.md=.  For every
 =allowed-tools= token it proves:
 
 1. the value is one exact model-visible tool name, not a command pattern;
@@ -1812,6 +1845,11 @@ Add a deterministic repository test that walks every
 3. the declaration is non-kernel in that composition; and
 4. source precedence leaves the same winning declaration that =load_skill=
    returns.
+
+Positively identify bundled declarations by both their routed path and recorded
+content digest; a route overridden by an embedder remains external.  Enforce
+completeness only for Assist-owned application tools.  Domain/embedder skills
+and tools remain recorded migration exceptions for P2b.3.
 
 The test validates declarations, not prose by regex.  Completeness comes from
 the P0 tool-owner census and the behavior cohorts; parsing Markdown examples for
@@ -1822,14 +1860,16 @@ tool-like words would create a brittle second skill language.
 - The full bundled-skill declaration scan is deterministic and 100% green.
 - A misspelled, patterned, stale, or kernel-redundant fixture fails with the
   skill path and tool name.
-- P0 reports no registered non-kernel tool used by a current workflow without a
-  skill owner.  A deliberately shared tool may name multiple owners; the report
-  records the reason rather than treating this as accidental duplication.
-- The generated kernel block exactly matches the kernel schemas in the final
-  request for main, delegate, executable/non-executable backend, and legacy
+- P0 reports every Assist-owned registered non-kernel tool except the explicit
+  =notify= stop-gate exception with one bundled owner.  =notify= remains
+  baseline-visible because adding a profile-specific owner would change SMS
+  triage or require unrelated checkpoint-cache invalidation.  Domain/embedder
+  tools remain recorded but unenforced until P2b.3.
+- The census-classified kernel exactly matches the final visible request for
+  main, delegate, executable/non-executable backend, legacy, and precedence
   compositions.
-- Final model-visible tools and all natural outcomes remain byte/behavior
-  equivalent to baseline except for the new generated kernel prose.
+- The startup prompt, final model-visible tools, provider schemas, tool order,
+  and natural outcomes remain byte/behavior equivalent to baseline.
 
 *** Expected learning and alternative
 
@@ -1864,6 +1904,10 @@ For the final model request the middleware keeps only kernel tools plus the
 =allowed-tools= union of successfully loaded skills.  The same middleware's
 tool-call wrapper rejects a hidden non-kernel call, so a hallucinated remembered
 name cannot bypass schema filtering.
+
+At that same final-request seam, generate the compact model-visible kernel line
+from the tools the request actually retains.  The explanation and enforcement
+land together; no copied framework list or main-template registry is allowed.
 
 A successful =load_skill= updates trusted invocation-scoped graph state with
 the exact resolved winning skill and returns its body plus the newly available
@@ -2575,7 +2619,7 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 | Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; capability protocol has one owner; provider-wide prompt changes remain isolated; Deep Agents already parses =allowed-tools=; request-time schema filtering is paired with tool-node rejection | Clean |
 | User intention | SMS triage moves to a separate roadmap item; memory retains its existing access model; the framework kernel remains immediately usable; non-kernel tools arrive with the workflow that explains them; domain and embedder skills follow the same contract | Clean |
 | User experience | latency/round-trip guard; complete delegate, memory, research, domain, and embedder journeys; skill selection adds no round trip beyond the existing load; load results name newly available tools | Clean |
-| Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, trusted-composition-root machinery, tool registry, or source-specific disclosure field; composition supplies one kernel set to the existing middleware | Clean |
+| Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, trusted-composition-root machinery, or tool registry; P2b.1 keeps classification in the census, while P2b.2 must derive filtering and its kernel line from the same final request in the existing skills middleware | Clean |
 | Threat model | synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; hidden and same-response sibling calls fail at execution; external declarations can select only already registered tools and do not bypass existing authority | Clean |
 | Event-loop/eval liveness | P0b is deferred pending observed contention; current per-node TERM/KILL bounds, cooperative development lock, infrastructure-failure classification, one-hour blocks, and actual GPU-rest interval govern P1; bare serialized judge remains bounded; disclosure state is graph-run-local, parallel loads merge deterministically, and filtering adds no I/O | Clean |
 | Documentation alignment | changelog records Pierre's boundary revisions; triage and development guidance are excluded; P2b covers bundled, domain, and embedder sources; P2c changes only catalog-row lifetime; phase names, anchors, and current-versus-target wording verified | Clean |
@@ -2583,9 +2627,10 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 Pierre satisfied the original design gate by approving and merging PR #216, and
 P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
 shared-model contention has not been a material problem.  P1 shipped in PR #223,
-P1b shipped in PR #224, P1c is complete, and P2 passed its final gate.  Adding
-P2c to the program does not start its implementation or any other later phase
-automatically.
+P1b shipped in PR #224, P1c is complete, P2 passed its final gate, and P2b.1's
+declaration-only candidate passed its deterministic and behavioral gates in PR
+#227 pending merge.  Adding P2c to the program does not start its implementation
+or any other later phase automatically.
 
 * Decisions deliberately deferred to evidence
 
@@ -2594,7 +2639,8 @@ automatically.
   compact always-on trigger.
 - Whether natural research selection needs one compact always-on trigger.
 - The exact final kernel membership.  P0 records the actual framework-built
-  profiles; P2b.1 derives the set from composition instead of naming it here.
+  profiles; P2b.1's census derives the sets from observed compositions instead
+  of naming them here.
 - Whether a measured tool family must remain in one profile's kernel after a
   reproduced N=10 disclosure regression.
 - Whether context gathering can ever move behind a skill.  The default remains

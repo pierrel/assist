@@ -1,6 +1,7 @@
 ---
 name: schedule
 description: Set up, change, pause, or cancel recurring scheduled prompts for this conversation — e.g. "every morning at 7 review my inbox", "weekly weather", "when does it next run", "stop the scheduled task", "cancel the cron", "change it to fire at 5am". Load whenever the user wants something to run automatically on a timer/recurring basis in this thread.
+allowed-tools: create_schedule list_schedules modify_schedule pause_schedule resume_schedule delete_schedule
 ---
 
 # Scheduling recurring prompts

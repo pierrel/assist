@@ -899,14 +899,25 @@ met every preregistered timing gate, and removes 1,679 characters of duplicate
 procedure from the canonical web-main rendering without adding production code.
 
 *** TODO P2b: Progressively disclose non-kernel tools through loaded skills
-Keep the actual Deep Agents built-ins plus =load_skill= as a generated kernel.
-Declare every other tool with the Agent Skills =allowed-tools= frontmatter field
-and reveal/execute it only after the matching skill loads.  This is an
+Keep the actual framework built-ins, =load_skill=, and required async lifecycle
+tools as a generated kernel.  Declare other Assist-owned tools with the Agent
+Skills =allowed-tools= frontmatter field, retain measured migration exceptions,
+and reveal/execute gated tools only after the matching skill loads.  This is an
 eval-gated milestone covering Assist, domain-repository, and embedder skills.
 See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools][the P2b milestone]].
-**** TODO P2b.1: Declare the kernel and validate bundled skill tool names
+**** DONE P2b.1: Classify the kernel and validate bundled skill tool names
 Add declarations with no visibility change and deterministically prove every
 declared tool exists.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-declare][P2b.1]].
+Candidate 1's generated kernel line regressed urgent notification at N=10, so
+the stop gate removed the entire model-visible/runtime-name-extraction seam.
+The corrected child declares seven bundled owners and classifies the exact
+kernel in the deterministic census while keeping the startup prompt, provider
+schemas, tool construction, and SMS-triage-specific behavior unchanged.  Final
+corrected-candidate deterministic tests pass; the declaration-sensitive nodes
+match current main at 30/30 in the N=10 stability cohort (2026-08-05).
+Kernel prose moves to P2b.2 with actual gating.
+See [[https://github.com/pierrel/assist/pull/227][PR #227]] and
+[[file:docs/2026-08-05-prompt-architecture-p2b1.org][the P2b.1 state record]].
 **** TODO P2b.2: Gate Assist-owned tools after skill load
 Filter model schemas and execution from trusted invocation-scoped load state,
 then run the natural/capability cohorts.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-assist][P2b.2]].
