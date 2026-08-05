@@ -21,11 +21,14 @@ class TestSubscriptionAgent(TestCase):
     def test_natural_request_loads_skill_and_creates_subscription(self):
         store = SubscriptionStore(tempfile.mkdtemp(prefix="subscription_eval_store_"))
         with stub_research_subagent():
-            agent = AgentHarness(create_agent(
-                self.model,
-                tempfile.mkdtemp(prefix="subscription_eval_workspace_"),
-                spec=AgentSpec(tools=tuple(subscription_tools(store))),
-            ))
+            agent = AgentHarness(
+                create_agent(
+                    self.model,
+                    tempfile.mkdtemp(prefix="subscription_eval_workspace_"),
+                    spec=AgentSpec(tools=tuple(subscription_tools(store))),
+                ),
+                thread_id="subscription-eval",
+            )
             agent.message(
                 "Whenever a text comes in from a 415 number, check whether it is "
                 "asking to schedule something and draft a short reply for me to review."
