@@ -527,9 +527,8 @@ to re-justify loading.
    tool, add the official space-separated `allowed-tools:` field with its exact
    model-visible names. Omit framework kernel tools such as filesystem, TODO,
    delegation/lifecycle, and `load_skill`; their availability does not depend on
-   a domain skill. Packaged skill backends identify these declarations by source;
-   the SMS-triage profile omits them from loaded bodies without changing domain
-   or embedder skill bytes.
+   a domain skill. The P2b.1 census validates bundled declarations against real
+   compositions; runtime disclosure and enforcement belong to later P2b phases.
 2. That's it for a skill shared by every Assist role. `SkillsMiddleware`
    discovers it via the `/skills/` source path on next agent construction;
    the system prompt automatically lists it and

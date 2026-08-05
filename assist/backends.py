@@ -85,8 +85,8 @@ MAIN_SKILLS_ROUTE = "/main-skills/"
 MAIN_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "main_skills")
 
 
-class PackagedSkillsBackend(FilesystemBackend):
-    """Read-only packaged Assist skills, with source identity for prompt policy."""
+class ReadOnlyFilesystemBackend(FilesystemBackend):
+    """Package files exposed to agents for reading, never mutation."""
 
     def write(self, file_path: str, content: str) -> WriteResult:
         return WriteResult(error="This filesystem is read-only.", path=file_path)
@@ -102,7 +102,7 @@ class PackagedSkillsBackend(FilesystemBackend):
 
 def create_skills_backend(root_dir: str) -> BackendProtocol:
     """Return the shared read-only backend used for packaged agent skills."""
-    return PackagedSkillsBackend(root_dir=root_dir, virtual_mode=True)
+    return ReadOnlyFilesystemBackend(root_dir=root_dir, virtual_mode=True)
 
 # Domain skills live in the cloned repo at <working_dir>/.claude/skills/ — the
 # agentskills.io open-standard path that Claude Code and the Agent SDK also read

@@ -193,20 +193,6 @@ class TestCreateAgentExtraSkillSources:
         assert mw.sources.count(SKILLS_ROUTE) == 1, (
             f"SKILLS_ROUTE duplicated in middleware sources: {mw.sources}"
         )
-        assert mw.assist_owned_sources == ()
-
-    def test_packaged_backend_cannot_make_reserved_overrides_builtin(self):
-        from assist.backends import create_skills_backend, MAIN_SKILLS_ROUTE
-        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
-
-        for route in (SKILLS_ROUTE, MAIN_SKILLS_ROUTE):
-            replacement = create_skills_backend("assist/skills")
-            kwargs = self._build(spec=AgentSpec(
-                skill_sources={route: replacement}))
-            mw = next(m for m in kwargs["middleware"]
-                      if isinstance(m, SmallModelSkillsMiddleware))
-
-            assert route not in mw.assist_owned_sources
 
 
 class TestCreateAgentDomainSkills:

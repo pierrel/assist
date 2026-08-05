@@ -20,7 +20,6 @@ from assist.backends import (
     DOMAIN_SKILLS_PATH,
     MAIN_SKILLS_DIR,
     MAIN_SKILLS_ROUTE,
-    PackagedSkillsBackend,
     SKILLS_ROUTE,
     STATEFUL_PATHS,
     create_composite_backend,
@@ -46,10 +45,7 @@ from assist.middleware.read_only_enforcer import ReadOnlyEnforcerMiddleware
 from assist.middleware.git_push_blocker import GitPushBlockerMiddleware
 from assist.middleware.url_provenance import UrlProvenanceMiddleware
 from assist.middleware.read_url_reread_breaker import ReadUrlRereadBreaker
-from assist.middleware.skills_middleware import (
-    SmallModelSkillsMiddleware,
-    _tool_name,
-)
+from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
 from assist.middleware.write_collision import WriteCollisionMiddleware
 from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
@@ -365,30 +361,7 @@ def create_agent(model: BaseChatModel,
     # _has_domain_skills is skipped when an embedder already supplied the path.
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
         skill_sources.insert(1 if async_main else 0, DOMAIN_SKILLS_PATH)
-    reserved_overrides = set(spec.skill_sources) & {
-        SKILLS_ROUTE, MAIN_SKILLS_ROUTE,
-    }
-    assist_owned_skill_sources = {
-        route for route, source_backend in extra_routes.items()
-        if isinstance(source_backend, PackagedSkillsBackend)
-        and route not in reserved_overrides
-    }
-    if SKILLS_ROUTE not in extra_routes:
-        assist_owned_skill_sources.add(SKILLS_ROUTE)
-    kernel_additions = list(spec.async_subagent_tools or ())
-    non_kernel_tools = list(spec.tools) + [
-        tool for tool in (travel, directions, map_data, read_url)
-        if tool not in spec.tools
-    ]
-    skills_mw = SmallModelSkillsMiddleware(
-        backend=backend,
-        sources=skill_sources,
-        assist_owned_sources=tuple(
-            source for source in skill_sources
-            if source in assist_owned_skill_sources),
-        non_kernel_tool_names=tuple(_tool_name(tool) for tool in non_kernel_tools),
-        include_kernel_prompt=spec.async_subagent_tools != (),
-    )
+    skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
     memory_mw = SmallModelMemoryMiddleware(
         backend=backend, memories_path=memories_path,
         thread_memories_path=thread_memories_path)
@@ -529,7 +502,10 @@ def create_agent(model: BaseChatModel,
         # built-ins: direct deterministic real-world lookups the Assist graph answers
         # inline (gated by the travel / render skills), like a calculation — not web
         # research, so not on the research sub-agent.  Skip any a spec supplies (no dup).
-        tools=kernel_additions + non_kernel_tools,
+        tools=list(spec.async_subagent_tools or ())
+              + list(spec.tools)
+              + [t for t in (travel, directions, map_data, read_url)
+                 if t not in spec.tools],
         # HITL gating for web outward-effect tools; None off.
         **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     )

@@ -74,44 +74,11 @@ class TestSpecWiring(_CreateAgentHarness):
 
     def test_spec_tools_reach_create_deep_agent(self):
         from assist.tools import directions, map_data, read_url, travel
-        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
         kwargs = self._build(spec=AgentSpec(tools=(_tool_a, _tool_b)))
         assert kwargs["tools"] == [_tool_a, _tool_b, travel, directions, map_data, read_url]
-        skills = next(m for m in kwargs["middleware"]
-                      if isinstance(m, SmallModelSkillsMiddleware))
-        assert skills.non_kernel_tool_names == (
-            "_tool_a", "_tool_b", "travel", "directions", "map_data", "read_url")
-
-    def test_dict_spec_tool_names_remain_non_kernel(self):
-        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
-
-        plain = {"name": "plain_dict", "description": "Plain dict tool",
-                 "parameters": {"type": "object", "properties": {}}}
-        openai = {"type": "function", "function": {
-            "name": "openai_dict", "description": "OpenAI dict tool",
-            "parameters": {"type": "object", "properties": {}}}}
-        json_schema = {"title": "json_schema_dict", "description": "JSON schema tool",
-                       "type": "object", "properties": {}}
-        bedrock = {"toolSpec": {
-            "name": "bedrock_dict", "description": "Bedrock dict tool",
-            "inputSchema": {"json": {"type": "object", "properties": {}}}}}
-        responses = {"type": "function", "name": "responses_dict",
-                     "description": "Responses dict tool",
-                     "parameters": {"type": "object", "properties": {}}}
-        provider = {"type": "web_search_preview"}
-
-        kwargs = self._build(spec=AgentSpec(
-            tools=(plain, openai, json_schema, bedrock, responses, provider)))
-        skills = next(m for m in kwargs["middleware"]
-                      if isinstance(m, SmallModelSkillsMiddleware))
-
-        assert skills.non_kernel_tool_names[:6] == (
-            "plain_dict", "openai_dict", "json_schema_dict", "bedrock_dict",
-            "responses_dict", "web_search_preview")
 
     def test_async_subagent_tools_replace_blocking_subagents(self):
         from assist.agent import create_agent
-        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
         from assist.tools import directions, map_data, read_url, travel
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -128,16 +95,10 @@ class TestSpecWiring(_CreateAgentHarness):
         assert kwargs["subagents"] == []
         assert kwargs["tools"] == [
             *_async_task_tools, travel, directions, map_data, read_url]
-        skills = next(m for m in kwargs["middleware"]
-                      if isinstance(m, SmallModelSkillsMiddleware))
-        assert skills.non_kernel_tool_names == (
-            "travel", "directions", "map_data", "read_url")
         fake_ctx.assert_not_called()
         fake_res.assert_not_called()
 
     def test_explicit_empty_async_tools_disable_all_delegation(self):
-        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
-
         kwargs = self._build(spec=AgentSpec(async_subagent_tools=()))
 
         assert kwargs["subagents"] == []
@@ -145,23 +106,6 @@ class TestSpecWiring(_CreateAgentHarness):
         assert "Do not call `task` or any subagent management tool" in kwargs[
             "system_prompt"]
         assert "dispatch the `context-agent`" not in kwargs["system_prompt"]
-        skills = next(m for m in kwargs["middleware"]
-                      if isinstance(m, SmallModelSkillsMiddleware))
-        assert skills.include_kernel_prompt is False
-        assert skills.assist_owned_sources == ("/skills/",)
-
-    def test_no_delegation_tracks_actual_web_skill_source(self):
-        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
-        from assist.thread_manager import _web_skill_sources
-
-        kwargs = self._build(spec=AgentSpec(
-            async_subagent_tools=(),
-            skill_sources=_web_skill_sources(),
-        ))
-
-        skills = next(m for m in kwargs["middleware"]
-                      if isinstance(m, SmallModelSkillsMiddleware))
-        assert skills.assist_owned_sources == ("/skills/", "/render-skill/")
 
     def test_subagent_tools_select_asynchronous_prompt(self):
         kwargs = self._build(spec=AgentSpec(

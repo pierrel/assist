@@ -1115,10 +1115,6 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
             rider_mod.ContextRiderMiddleware, "wrap_model_call",
             _wrap_model_prompt("assist.ContextRiderMiddleware",
                                rider_mod.ContextRiderMiddleware.wrap_model_call)))
-        stack.enter_context(patch.object(
-            assist_skills_mod, "append_to_system_message",
-            _wrap_append("assist.SmallModelSkillsMiddleware",
-                         assist_skills_mod.append_to_system_message)))
         stack.enter_context(patch.object(factory_mod, "ToolNode", tracing_tool_node))
         stack.enter_context(patch.object(
             skills_mod.SkillsMiddleware, "before_agent", traced_skills_before))
@@ -1962,7 +1958,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "e6fd1d63a1f4f4d4ba5ee7ae3fd1cb19410275f0792c9fc7772aa055e3f0a26e"
+    "7a18b7265e11b5a8447a49e6a1ad26e11d638a10963761dded4eae4fa7793d76"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2787,11 +2783,14 @@ def _packaged_skill_path(source: dict[str, Any]) -> Path | None:
     return local_path
 
 
-def _skill_tool_owners(source_manifest: list[dict[str, Any]]) \
+def _skill_tool_owners(source_manifest: list[dict[str, Any]], *,
+                       scenario: str | None = None) \
         -> dict[str, list[str]]:
-    """Return possible owners from declarations that win a real composition."""
+    """Return bundled owners whose declarations win the selected compositions."""
     owners: dict[str, list[str]] = {}
     for source in source_manifest:
+        if scenario is not None and source.get("scenario") != scenario:
+            continue
         if _packaged_skill_path(source) is None:
             continue
         for tool_name in source["allowed_tools"]:
@@ -2814,26 +2813,31 @@ def _tool_classification(path: str, name: str, origin: str) -> str:
     return "skill-scoped candidate"
 
 
+def _assert_unique_tool_candidates(
+        surface: str, candidates: list[dict[str, str]]) -> None:
+    candidates_by_name: dict[str, list[dict[str, str]]] = {}
+    for item in candidates:
+        candidates_by_name.setdefault(item["name"], []).append(item)
+    for name, duplicates in candidates_by_name.items():
+        if len(duplicates) > 1:
+            origins = ", ".join(item["origin"] for item in duplicates)
+            raise AssertionError(
+                f"{surface}: duplicate tool candidate `{name}` from {origins}")
+
+
 def _capabilities(trace: CensusTrace, observations: dict[str, Any],
                   source_manifest: list[dict[str, Any]]) -> dict[str, Any]:
-    owners = _skill_tool_owners(source_manifest)
     result: dict[str, Any] = {}
     for call in trace.calls:
+        owners = _skill_tool_owners(
+            source_manifest, scenario=call["scenario"])
         key = f"{call['scenario']}:{call['call_index']}"
         matches = [trace.tool_nodes[index] for index in call["matching_tool_nodes"]]
         if call["visible_tools"] and len(matches) != 1:
             raise AssertionError(
                 f"{key} has {len(matches)} construction-time ToolNode matches")
         registered = matches[0]["candidates"] if matches else []
-        classifications_by_name: dict[str, set[str]] = {}
-        for item in registered:
-            classifications_by_name.setdefault(item["name"], set()).add(
-                _tool_classification(call["path"], item["name"], item["origin"]))
-        for name, classifications in classifications_by_name.items():
-            if {"framework-kernel candidate", "skill-scoped candidate"} \
-                    <= classifications:
-                raise AssertionError(
-                    f"{key}: application tool `{name}` collides with the kernel")
+        _assert_unique_tool_candidates(key, registered)
         tools = []
         for item in registered:
             name = item["name"]
@@ -2858,6 +2862,7 @@ def _capabilities(trace: CensusTrace, observations: dict[str, Any],
 def _validate_skill_tool_declarations(
         capabilities: dict[str, Any], source_manifest: list[dict[str, Any]]) -> None:
     """Validate winning bundled declarations against recorded compositions."""
+    global_owners = _skill_tool_owners(source_manifest)
     skill_sources = [
         source for source in source_manifest
         if _packaged_skill_path(source) is not None
@@ -2891,23 +2896,14 @@ def _validate_skill_tool_declarations(
             if not tool["origin"].startswith("assist.") \
                     or tool["name"] == _BUNDLED_OWNER_EXCEPTION:
                 continue
-            if not tool["possible_owners"]:
+            owners = global_owners.get(tool["name"], [])
+            if not owners:
                 raise AssertionError(
                     f"{key}: non-kernel tool `{tool['name']}` has no winning owner")
-            if len(tool["possible_owners"]) > 1:
+            if len(owners) > 1:
                 raise AssertionError(
                     f"{key}: non-kernel tool `{tool['name']}` has multiple owners: "
-                    f"{', '.join(tool['possible_owners'])}")
-
-
-def _prompt_kernel_tools(call: dict[str, Any]) -> list[str]:
-    match = re.search(
-        r"Kernel tools: ([^.]+)\. Declared application tools belong to skills; "
-        r"migration exceptions remain visible\.",
-        _system_prompt(call))
-    if match is None:
-        raise AssertionError(f"{call['scenario']} has no generated kernel line")
-    return match.group(1).split(", ")
+                    f"{', '.join(owners)}")
 
 
 def _findings(trace: CensusTrace, capabilities: dict[str, Any],
@@ -3023,6 +3019,11 @@ def _findings(trace: CensusTrace, capabilities: dict[str, Any],
 
 def _assert_semantic_views(artifact: dict[str, Any]) -> None:
     nodes = artifact["tool_nodes"]
+    for node in nodes:
+        _assert_unique_tool_candidates(
+            f"{node['scenario']}:tool-node:{node['index']}",
+            node["candidates"],
+        )
     if _sha(nodes) != _DECLARED_TOOL_NODE_HISTORY_SHA256:
         raise AssertionError("construction-time ToolNode history drifted")
     if [node["index"] for node in nodes] != list(range(len(nodes))):
@@ -3049,19 +3050,6 @@ def _assert_semantic_views(artifact: dict[str, Any]) -> None:
         raise AssertionError("capability surfaces drifted from recorded evidence")
     _validate_skill_tool_declarations(
         expected_capabilities, artifact["source_manifest"])
-    for call in artifact["calls"]:
-        surface = expected_capabilities[
-            f"{call['scenario']}:{call['call_index']}"]
-        expected_kernel = [
-            tool["name"] for tool in surface["registered_tools"]
-            if tool["classification"] == "framework-kernel candidate"
-            and tool["name"] in call["visible_tools"]
-        ]
-        if call["path"] not in {"main", "delegate", "legacy-main"}:
-            continue
-        if _prompt_kernel_tools(call) != expected_kernel:
-            raise AssertionError(
-                f"{call['scenario']} generated kernel drifted from final request")
     if artifact["findings"] != _findings(
             trace, expected_capabilities, artifact["observations"]):
         raise AssertionError("findings drifted from recorded evidence")

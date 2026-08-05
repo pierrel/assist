@@ -110,38 +110,42 @@ def test_registered_visible_and_classification_stay_separate(census):
     assert next(tool for tool in surface["registered_tools"]
                 if tool["name"] == "map_data")["possible_owners"] == ["render"]
 
+    delegate = census["capabilities"]["web-delegate:0"]
+    assert next(tool for tool in delegate["registered_tools"]
+                if tool["name"] == "map_data")["possible_owners"] == []
+    assert {
+        (finding["kind"], finding["surface"], finding["detail"])
+        for finding in census["findings"]
+    } >= {("unowned-tool", "web-delegate:0", "map_data")}
 
-def test_generated_kernel_matches_each_final_skills_enabled_request(census):
+
+def test_classified_kernel_matches_each_final_skills_enabled_request(census):
+    filesystem = [
+        "write_todos", "ls", "read_file", "write_file", "edit_file",
+        "glob", "grep"]
+    executable = [*filesystem, "execute"]
+    async_lifecycle = [
+        "start_async_task", "check_async_task", "update_async_task",
+        "cancel_async_task", "list_async_tasks"]
     expected = {
-        "web-main-core": [
-            "write_todos", "ls", "read_file", "write_file", "edit_file",
-            "glob", "grep", "execute", "load_skill", "start_async_task",
-            "check_async_task", "update_async_task", "cancel_async_task",
-            "list_async_tasks"],
-        "web-main-full": [
-            "write_todos", "ls", "read_file", "write_file", "edit_file",
-            "glob", "grep", "execute", "load_skill", "start_async_task",
-            "check_async_task", "update_async_task", "cancel_async_task",
-            "list_async_tasks"],
-        "web-delegate": [
-            "write_todos", "ls", "read_file", "write_file", "edit_file",
-            "glob", "grep", "execute", "task", "load_skill"],
-        "legacy-main": [
-            "write_todos", "ls", "read_file", "write_file", "edit_file",
-            "glob", "grep", "task", "load_skill"],
+        "web-main-core": [*executable, "load_skill", *async_lifecycle],
+        "web-main-full": [*executable, "load_skill", *async_lifecycle],
+        "web-delegate": [*executable, "task", "load_skill"],
+        "legacy-main": [*filesystem, "task", "load_skill"],
         "skill-precedence-built-in": [
-            "write_todos", "ls", "read_file", "write_file", "edit_file",
-            "glob", "grep", "load_skill", "start_async_task",
-            "check_async_task", "update_async_task", "cancel_async_task",
-            "list_async_tasks"],
+            *filesystem, "load_skill", *async_lifecycle],
         "skill-precedence-embedder": [
-            "write_todos", "ls", "read_file", "write_file", "edit_file",
-            "glob", "grep", "load_skill", "start_async_task",
-            "check_async_task", "update_async_task", "cancel_async_task",
-            "list_async_tasks"],
+            *filesystem, "load_skill", *async_lifecycle],
     }
     for scenario, names in expected.items():
-        assert prompt_census._prompt_kernel_tools(_call(census, scenario)) == names
+        call = _call(census, scenario)
+        surface = census["capabilities"][f"{scenario}:{call['call_index']}"]
+        actual = [
+            tool["name"] for tool in surface["registered_tools"]
+            if tool["classification"] == "framework-kernel candidate"
+            and tool["name"] in call["visible_tools"]
+        ]
+        assert actual == names
 
 
 def _recomputed_capabilities(census, source_manifest=None, tool_nodes=None):
@@ -244,8 +248,36 @@ def test_application_kernel_name_collision_fails(census):
     node["candidates"].append({"name": "write_todos", "origin": "assist.tools"})
 
     with pytest.raises(
-            AssertionError, match="application tool `write_todos` collides"):
+            AssertionError, match=(
+                r"web-main-core:0: duplicate tool candidate `write_todos`.*"
+                r"langchain\.agents\.middleware\.todo, assist\.tools")):
         _recomputed_capabilities(census, tool_nodes=nodes)
+
+
+def test_same_class_tool_name_collision_fails(census):
+    nodes = copy.deepcopy(census["tool_nodes"])
+    node = next(node for node in nodes if node["scenario"] == "web-main-core")
+    node["candidates"].append({
+        "name": "travel", "origin": "assist.embedder_tools"})
+
+    with pytest.raises(
+            AssertionError, match=(
+                r"web-main-core:0: duplicate tool candidate `travel`.*"
+                r"assist\.tools, assist\.embedder_tools")):
+        _recomputed_capabilities(census, tool_nodes=nodes)
+
+
+def test_unmatched_tool_node_name_collision_fails(census):
+    bad = copy.deepcopy(census)
+    node = next(node for node in bad["tool_nodes"]
+                if node["scenario"] == "capture")
+    node["candidates"].append(copy.deepcopy(node["candidates"][0]))
+
+    with pytest.raises(
+            AssertionError, match=(
+                rf"capture:tool-node:{node['index']}: duplicate tool candidate "
+                rf"`{re.escape(node['candidates'][0]['name'])}`")):
+        prompt_census._assert_semantic_views(bad)
 
 
 def test_every_prompt_transition_is_observed_and_attributed(census):
@@ -431,6 +463,10 @@ def test_expected_audit_findings_are_reported_not_hidden(census):
             for finding in census["findings"]] == [
         ("unowned-tool", "web-main-core:0"),
         ("unowned-tool", "web-main-full:0"),
+        ("unowned-tool", "web-delegate:0"),
+        ("unowned-tool", "legacy-main:0"),
+        ("unowned-tool", "skill-precedence-built-in:0"),
+        ("unowned-tool", "skill-precedence-embedder:0"),
         ("unavailable-capability-claim", "skill-precedence-built-in:1"),
         ("contradictory-capability-claims", "context-read-only:0"),
         ("contradictory-capability-claims", "context-read-only:0"),
@@ -1084,14 +1120,14 @@ def test_p0_p2_history_and_p2b1_summary_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    assert len(current_prompt) == 29_873
+    assert len(current_prompt) == 29_600
     assert len(schemas) == 28_037
     assert len(census["calls"]) == 28
     assert len(census["tool_nodes"]) == 38
-    assert len(census["findings"]) == 21
-    assert len(artifact_bytes(census)) == 2_884_412
+    assert len(census["findings"]) == 25
+    assert len(artifact_bytes(census)) == 2_856_251
     assert census["artifact_sha256"] == \
-        "41c2ba18904e2541d82c7e92d0513ad0f33a86582d4de3db4b68665002b372d3"
+        "cec33a06566de462cc9cc9ee0d7f81b5429293ff27982b75e0c3332e7ce0f586"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
@@ -1116,10 +1152,10 @@ def test_p0_p2_history_and_p2b1_summary_match_the_current_capture(census):
     assert "| Complete system message | 31,279 | 29,600 |" in p2_document
     assert "| Provider-bound tool schemas | 28,037 | 28,037 |" in p2_document
     assert "| Bootstrap request plus schemas | 59,316 | 57,637 |" in p2_document
-    assert "29,873 characters, up 273 from merged P2" in p2b1_document
+    assert "byte-identical to merged P2 at 29,600" in p2b1_document
     assert "30 provider-bound schemas remain byte-identical at 28,037" \
         in p2b1_document
-    assert "2,884,412 bytes with 21 retained audit findings" in p2b1_document
+    assert "2,856,251 bytes with 25 retained" in p2b1_document
 
     kernel = _named_text_block("proposed-main-bootstrap-kernel")
     headings = [
