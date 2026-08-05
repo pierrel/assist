@@ -11,9 +11,9 @@ same-user process.  The local review loop converged in five rounds.  P1 is now t
 only authorized next experiment; no product integration phase is authorized.
 
 The current report is
-=experiments/pi-runtime-p0/.artifacts/runs/20260805T161831Z-bb8fdf39/report.json=.
+=experiments/pi-runtime-p0/.artifacts/runs/20260805T181647Z-898ddd8a/report.json=.
 Its SHA-256 is
-=ead9216e48e9d956cb54863745d02f02386b2e141cf9403d9cce69b9e97328a7=.
+=a57352c9bcadad7ff13a108890447f7b18a4a65e88816119f17f891c467abedd=.
 It is ignored and machine-local.  One invocation built stock Pi 0.83 and passed all
 seven exercised cases: deterministic success, fail-stop with a closed control
 channel, fail-stop after Node reached backpressure, hostile descendant teardown,
