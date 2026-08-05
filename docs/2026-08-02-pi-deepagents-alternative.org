@@ -1,10 +1,12 @@
 #+title: Migrating from Deep Agents to Pi through a side-by-side path
 #+date: <2026-08-02>
-#+updated: <2026-08-03>
+#+updated: <2026-08-05>
 
 * State
 
-Status: proposed, revised 2026-08-03.  This document authorizes no implementation.
+Status: proposed, revised 2026-08-05.  P0 was separately authorized and attempted,
+then stopped at its mandatory local-review gate; see
+=docs/2026-08-04-pi-runtime-p0.org=.  This document authorizes no further phase.
 
 Recommendation: make Pi the intended replacement for Deep Agents, through a
 side-by-side migration with hard stop gates.  M1/P3 makes the same deployed web UI
@@ -469,13 +471,13 @@ extension owner, input/output type, order, failure rule, and parity test:
 | =session_start= | =assist-kernel= | Validate release, manifest, engine session, and durable input identity before work |
 | =before_agent_start= | =assist-kernel= | Compose approved capability contributions, replace the complete system prompt, and set invocation-scoped active tools |
 | =context= | =assist-kernel= | Apply only the approved skills/memory/compaction projection without mutating durable history |
-| =before_provider_request= | =assist-kernel= | Validate and census the final provider payload; never silently repair policy drift |
+| =before_provider_request= | =assist-kernel= | Enforce the exact owned first system message, fail on any other envelope drift, and census the final provider payload.  This public final-boundary transformation is required because Pi 0.83's public =agent.continue()= bypasses =before_agent_start= |
 | assistant =message_end= | =assist-kernel= | Journal the complete ordered tool batch before Pi may persist the assistant leaf |
 | =tool_call= | =assist-kernel= | Run sequential whole-batch preflight, capability, authorization, and approval decisions before execution |
 | =load_skill= execute/result boundary | =assist-skills= through =assist-kernel.commitActivation= | Durably bind the skill digest/capabilities to this work, apply the recomputed active set before returning, and reconstruct it on resume |
 | custom-tool =execute= then =tool_result= | Named capability extension, then =assist-kernel= | Capability extension calls its narrow Python adapter; Python durably records the operation result before =execute= returns; kernel validates the normalized, sanitized, bounded value before session append |
 | =turn_end= and =agent_end= | =assist-kernel= | Fsync the completed session boundary, then project normalized events and terminal outcome to the parent |
-| =session_shutdown= | =assist-kernel= plus bootstrap | Flush extension state and report shutdown; the Python parent still cancels and reaps the process group |
+| =session_shutdown= on reload | =assist-kernel= | Flush extension state before a public Pi reload.  Pi 0.83 =dispose()= does not emit this event, so normal exit is an explicit bootstrap terminal frame followed by Python-owned cgroup teardown, never an assumed extension callback |
 
 Pi 0.83 preflights sibling =tool_call= events sequentially before its default parallel
 execution, which is promising for the batch gate, but P0 still proves the exact
@@ -487,14 +489,14 @@ reports =extension_error= and continues.  The runner bootstrap therefore has one
 audited synchronous =halt(frame)= primitive.  Every extension handler is registered
 only through a typed =mustHandle= wrapper whose =fatal(reason)= path invokes it
 on invariant, journal, fsync, protocol, or policy failure.  =halt= writes a bounded
-terminal frame to the dedicated control FD when possible and sends its own process
-=SIGKILL=; it never throws and returns.  The
+terminal frame to the dedicated control connection when possible and sends its own
+process =SIGKILL=; it never throws or returns.  The
 durable journal, session, and child exit remain the parent's sources of truth.  P0
 injects a failure into =before_agent_start=, =before_provider_request=,
 =message_end=, first =tool_call=, custom-tool return, =tool_result=, and =turn_end=,
 and proves that no later provider request, tool effect, result append, or queue
-release occurs before the parent terminalizes handlers/backends and reaps the whole
-process group.  The parent then performs the one ordinary release.  If synchronous
+release occurs before the parent terminalizes handlers/backends, empties the named
+cgroup, and reaps the direct child.  The parent then performs the one ordinary release.  If synchronous
 termination cannot enforce that contract without a Pi fork, stop.
 
 Policies that remain authoritative in Python, including backend containment, host
@@ -577,10 +579,16 @@ never guesses.  No adapter converts
 LangGraph checkpoints into Pi JSONL or vice versa.
 
 The Pi runner is a contained child process of the existing synchronous per-turn
-worker.  Dedicated inherited pipe FDs carry bounded newline-delimited control and
-tool frames; stdout and stderr are separate bounded logs and can never be parsed as
-protocol.  There is no TCP listener, shell-built command string, secret in argv, or
-inherited Pi user config.  Every request carries a parent-generated unguessable
+worker.  The selected Bubblewrap version closes arbitrary inherited FDs, so the
+parent creates two one-run Unix listeners, mounts only their inodes into the private
+runner namespace, accepts one authenticated child connection on each, then closes
+and unlinks the listeners.  One connection carries bounded control and tool frames;
+the other carries the stock Pi provider's bounded HTTP/SSE exchange through a
+loopback-only transport bridge.  Peer authority is the registered runner pidfd plus
+exact transient-cgroup membership and protocol nonce, not the same-UID pathname or
+socket mode.  Stdout and stderr are separate bounded logs and can never be parsed as
+protocol.  There is no routable TCP listener, shell-built command string, secret in
+argv, or inherited Pi user config.  Every request carries a parent-generated unguessable
 nonce, engine-session ID, monotonically increasing sequence, operation name, JSON
 value, and exactly one closed authenticated client identity:
 
@@ -608,12 +616,17 @@ compaction, shell, model, or discovery behavior.
 
 Running Pi inside the model's workspace sandbox would mix trusted harness state with
 model-controlled files.  Instead the runner gets its own OS containment envelope:
-dedicated unprivileged identity, empty allowlisted environment, read-only immutable
-release, private temporary directory, read-write access to only the one bound engine
-session directory, cgroup/resource limits, and no direct network route to the model
+dedicated unprivileged identity, fixed allowlisted environment, read-only immutable
+release, private temporary directory, read-write access to only the one parent-created
+engine-session inode, cgroup/resource limits, and no direct network route to the model
 or general network.  Its only provider path is the lease-enforcing gateway below.
 It cannot read the service home, worktree, deployment environment, other threads,
 Docker socket, or phone credentials.
+
+Pi 0.83 resolves its agent directory at module import through =os.homedir()=.  The
+closed environment therefore contains only =PATH=/runtime=, =PWD=/tmp=, and
+=HOME=/tmp/home=; that home is an empty directory inside the private tmpfs.  It is
+not the service home and cannot contain Pi configuration.
 
 The web client's model-facing filesystem and commands continue through the existing
 Docker container.  Other embedders continue through their Python-owned backend;
@@ -1202,29 +1215,35 @@ design contains each surface by construction:
   proxy variables, and every provider credential from the runner environment.  The
   current local endpoint requires no Node-held credential; any later cloud-provider
   credential stays in the gateway/broker, while the runner receives only the
-  request-bound one-use lease over its private control FD;
+  request-bound one-use lease over its private control connection;
 - keep web model file/shell access in the existing per-turn Docker container and
   each other client in its approved Python backend; all host effects remain behind
   Python authorization and approval gates;
-- use dedicated child-process protocol pipes, not stdout or a listener; bound frame
-  size/count, logs, tool output, session growth, process time, PIDs, FDs, CPU, and
-  memory;
+- use the two inode-mounted one-run Unix listeners described above, never stdout or
+  a reusable service listener; bind accepted peers to the registered pidfd and
+  transient cgroup, then bound frame size/count, logs, tool output, session growth,
+  process time, PIDs, FDs, CPU, and memory;
 - validate messages and tool arguments independently on both sides; never create a
   shell command by concatenating model or bridge values;
 - test that secrets cannot appear in argv, environment metadata, prompt census, Pi
   session files, stdout/stderr, errors, crash reports, or logs;
 - have the parent create a 0700 engine directory and 0600 regular session file under
-  one fixed root with dirfd/no-follow operations; reject links and nonregular files,
-  enforce record/line/file quotas before Pi parses, allow only audited record kinds,
-  and load no path-based attachment from session data.  Test crash-safe append and
-  directory/file =fsync=;
+  one fixed root with dirfd/no-follow operations, retain that file descriptor, and
+  bind only the writable file inode into the runner.  Pi alone writes its JSONL; the
+  parent fsyncs and verifies the retained inode and records each committed offset and
+  prefix digest.  Reject links and nonregular files, enforce record/line/file quotas
+  before Pi parses, allow only audited record kinds, load no path-based attachment
+  from session data, and recover only a verified uncommitted suffix.  Test crash-safe
+  append and directory/file =fsync=;
 - make active-tool state invocation-scoped and derived from the server-owned catalog
   and trusted skill-load record.  Python enforces the allowed set on every call;
   Pi's active set controls schema disclosure only.  Adversarial skill and tool-result
   text must not grant a capability;
-- spawn directly without a shell in a dedicated process group/cgroup, close every
-  non-allowlisted FD, and on every exit TERM then KILL and reap the entire descendant
-  group before releasing =ThreadQueue= or =_STREAM_LOCK=.  Test that no descendant,
+- spawn directly without a shell in a named transient cgroup, close every
+  non-allowlisted FD, and on every exit TERM then KILL the entire cgroup, prove it
+  empty, and reap the direct child before releasing =ThreadQueue= or =_STREAM_LOCK=.
+  A process group is not an authority because a descendant can create a new session.
+  Test that no descendant,
   pipe, or provider socket survives cancellation, parser failure, timeout, client
   disconnect, approval interruption, or runner crash;
 - treat Python tool handlers and their backend as part of the same execution lease.

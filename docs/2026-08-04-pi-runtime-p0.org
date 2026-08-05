@@ -1,0 +1,317 @@
+#+title: Pi runtime P0: pin, isolate, and prove execution control
+#+date: 2026-08-04
+
+* Status
+
+P0 stopped at the mandatory local-review gate.  The pre-review candidate reported
+=GO=, but adversarial review reproduced failures in the execution-control,
+durability, release-integrity, and evidence-provenance claims.  Its deterministic
+and exact-Qwen observations remain useful SDK evidence; they do not authorize P1 or
+establish the P0 gate.
+
+This is a disposable conformance experiment.  It does not create a usable Pi chat.
+P3/M1 remains the first selectable Pi thread in the existing web UI.  EmacsOS chat
+remains P5b, after the web adapter has passed P5a; voice remains separately gated.
+
+Rejected pre-review release:
+=2f55e618a8215e2ffda2a826c7f7dd2638eaab09d20bc86ccd3d6b9fcafb8692=.
+Two clean builds produced that same digest.  The rejected pre-review report is under
+=experiments/pi-runtime-p0/.artifacts/runs/20260805T005023Z-aa53f4301071-86016fd93d44/=;
+the direct live-Qwen attempt is under
+=experiments/pi-runtime-p0/.artifacts/live/20260805-p0-qwen-r3/=.  Evidence is
+ignored and machine-local.  Neither artifact is accepted as release evidence because
+the live report was not bound to that release and selected release contents were not
+reverified before execution.
+
+This is a stop for the attempted P0 proof, not a conclusion that Pi itself is
+unsuitable.  Closing the findings requires one integrated provider gateway and one
+real runner-ownership authority in the exercised path.  Building those now would
+expand P0 toward the P2 product data plane instead of preserving a small disposable
+proof, so that fork requires an explicit design decision.
+
+* Scope
+
+P0 answers whether pinned Pi 0.83 can satisfy the public-SDK, prompt-ownership,
+durability, process-control, and exact-Qwen provider contracts in
+=docs/2026-08-02-pi-deepagents-alternative.org=.  All experiment code and evidence
+machinery lives under =experiments/pi-runtime-p0=.  It imports no Assist product
+path, changes no web or phone path, calls no production backend, and deploys
+nothing.
+
+The prompt is a synthetic ownership canary.  It proves that Pi contributes zero
+provider-bound bytes and only the expected schemas.  It is not a prompt-P2
+candidate and selects no unresolved product policy.  The live Qwen work is explicit
+provider/capability coverage, not behavioral eval parity.  P1 owns the complete eval
+inventory and the question of whether Qwen can consistently modify this harness.
+
+* Reviewed implementation order
+
+1. Build the smallest containment/data-plane spike: a compiled echo runner, two
+   one-run Unix sockets, a capacity-one fake gateway, immutable runtime closure,
+   private namespaces, a named transient cgroup, and bounded teardown.  Stop before
+   SDK work if this topology cannot prove its security and simplicity claims.
+2. Add the real pinned public Pi SDK and stock =openai-completions= provider.  A
+   loopback-only HTTP bridge transports the exact bounded HTTP/SSE bytes over the
+   provider socket; it neither serializes model messages nor repairs responses.
+3. Add the two-extension static suite, prompt/schema census, lifecycle failure
+   injection, skill activation, persistence, yield/resume, cumulative accounting,
+   race, and synthetic approval proofs.
+4. Run the exact-Qwen capability probe only after every offline gate passes.
+5. Produce immutable evidence, perform the local review loop, and decide GO or STOP.
+
+The implementation stops at the first failed gate.  It never grows a custom Pi
+agent loop, checkpoint scheduler, generic extension loader, durable product gateway,
+or production approval store to make a test pass.
+
+* Ownership
+
+- Pi =SessionManager= is the only writer of Pi JSONL.  Python creates and retains
+  the single session inode; the kernel requests fsync and records ordering evidence.
+- Python alone owns disposable input identity, approval/result truth, cumulative
+  active time, one-use leases, process/cgroup teardown, and gate decisions.
+- One typed static tuple of descriptor plus inline factory is the extension source.
+  The build emits its JSON manifest and digest.  There is no second hand-maintained
+  factory map.
+- Bootstrap alone receives Pi's raw =ExtensionAPI=.  Capability contributions receive
+  a restricted Assist-owned registration interface and cannot register lifecycle
+  hooks.
+- The kernel owns lifecycle handlers through =mustHandle=.  =halt= belongs to the
+  bootstrap and synchronously terminates the runner after a bounded terminal frame.
+- The loopback bridge is transport only.  The Python gateway alone consumes leases,
+  validates the exact request, selects the fixed upstream, and proves terminal/idle
+  state.  It owns no session, tool, prompt, or approval state.
+- Reports collate already-decided evidence.  They are not another validator.
+
+* Pinned inputs
+
+- =@earendil-works/pi-coding-agent= 0.83.0
+- package git head =845d6ff1f6643aba440341cce877ce1c43ebbc39=
+- package integrity
+  =sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw===
+- Node 22.23.1, npm 10.9.8, TypeScript 5.9.3
+- exact local model =Qwen_Qwen3.6-27B-Q4_K_M.gguf=
+- runtime context 131072, local capacity one
+
+The release digest covers the copied Node executable, loader/library closure,
+runtime dependencies, compiled runner, file modes and symlink targets, lockfile,
+emitted extension manifest, and provider profile.  No compiler, npm cache, source
+map, service secret, or broad host =/usr= mount enters the release.
+
+* Containment correction discovered in design review
+
+Bubblewrap 0.11.2 closes arbitrary inherited descriptors, including a socket named
+with =--sync-fd=.  P0 therefore cannot implement the original inherited-FD wording.
+The canonical design now uses two one-run Unix listener inodes mounted directly into
+the sandbox.  Each accepts the registered child once and is then closed and unlinked.
+The accepted peer must match the bwrap child pidfd, exact transient cgroup, release,
+run nonce, and protocol sequence.  Same-UID pathname secrecy is never authority.
+
+The single session file is likewise a writable bind-mounted inode.  The runner can
+write it but cannot replace its host directory entry.  The parent retains the
+original descriptor, verifies bounded audited JSONL, fsyncs that inode, and records
+the committed byte offset plus prefix digest.  Recovery may remove only a suffix
+whose committed prefix still matches.
+
+The named transient user scope, not =killpg=, owns descendants.  =prlimit= supplies
+=RLIMIT_NOFILE=; the scope supplies memory, CPU, task, OOM, and runtime bounds.  Every
+exit closes admission, sends TERM then KILL to the whole scope, proves the cgroup
+empty, closes both sockets, joins bounded log drainers, and reaps the direct child
+before ownership can move.
+
+* SDK qualifications to prove
+
+- Use =SettingsManager.inMemory= and =DefaultResourceLoader= with every =no*= switch,
+  empty overrides, and only the typed inline factories.
+- Use =noTools: "builtin"=, not ="all"=: Pi 0.83 otherwise installs an empty permanent
+  allowlist that prevents later disclosure.  Bind extensions exactly once before
+  the first registry census.
+- Register the fixed provider/model on an explicit =ModelRuntime= before session
+  construction, with =modelsPath: null=, network refresh disabled, in-memory
+  credentials, and only a dummy loopback key.
+- The stock Pi provider must own request serialization, Qwen compatibility flags,
+  response parsing, cancellation, and provider lifecycle hooks.
+- =SessionManager.open= must initialize the parent-created empty file through its
+  public behavior.  Any use of =_persist= is a stop.
+- Pi 0.83 has no =AgentSession.continue=.  P0 may try exactly one documented public
+  =session.agent.continue()= after restoration.  It must not mutate transcript state
+  or loop.  Continuation bypasses =before_agent_start=, so the provider-bound payload
+  is the final contract.  If exact prompt/tools, persistence, lifecycle, abort, and
+  compaction cannot be proven through public hooks without private state or a custom
+  loop, stop.
+
+Two SDK details were resolved by evidence:
+
+- Pi imports require =os.homedir()=.  The runner provides only a fixed empty
+  =HOME=/tmp/home= inside its private tmpfs, alongside =PATH=/runtime= and
+  =PWD=/tmp=; no ambient Pi home or settings become visible.
+- =session_shutdown= is emitted by public =reload()= but not =dispose()= in Pi 0.83.
+  The hook remains fail-closed for reload.  Normal exit is instead the bootstrap's
+  terminal frame plus parent-owned cgroup termination and reap.  No code assumes a
+  shutdown event that Pi does not emit.
+
+The public =agent.continue()= path also bypasses =before_agent_start=.  The kernel's
+public =before_provider_request= handler therefore replaces only the expected first
+system message with the exact owned prompt and fails on any other envelope shape,
+then records the authoritative provider-bound census.  This is the specified final
+boundary, not a repair of arbitrary payload drift.
+
+* Operator flow and evidence
+
+The developer interface is one command:
+
+#+begin_src sh
+experiments/pi-runtime-p0/run-p0
+#+end_src
+
+It prints and flushes each bounded phase, elapsed time, and the immutable report path
+before long work.  An offline success ends =INCOMPLETE= until the mandatory live
+Qwen probe is run by the agent through the shared =llm= resource.  Pierre is not
+expected to operate coordination tooling.  His surface is the final state-doc
+summary, artifact paths and hashes, and explicit recommendation.
+
+Every invocation creates a new evidence directory keyed by commit, release, provider
+profile, and timestamp.  Evidence is never appended in place.  Each requirement is
+=PASS=, =FAIL=, =NOT RUN=, or =BLOCKED=; the overall result is =GO=, =STOP=, or
+=INCOMPLETE=.  Interrupts durably record =INCOMPLETE= and the last completed phase.
+Raw output is capped and retained, and appears at the terminal only on failure.
+
+The terminal summary order is:
+
+1. P0 status
+2. offline deterministic result
+3. live exact-Qwen result and profile fingerprint
+4. containment and secret-scan result
+5. measured operational facts and human simplicity judgment
+6. failed, blocked, and unrun requirements
+7. next authorized action
+
+* Required gate matrix
+
+The final implementation report must account for every P0 bullet, including:
+
+- locked supply chain and reproducible immutable release;
+- actual identity, mounts, environment, FDs, cgroup, session construction, canaries,
+  direct-model/general-egress denial, one-use gateway, exact destination, and secret
+  census;
+- exact static manifest rejection and restricted capability APIs;
+- final prompt, schemas, provider payload, events, session, compatibility profile,
+  release, and provenance census;
+- fail-closed termination at every load-bearing lifecycle phase;
+- same-invocation skill activation with every append/fsync/active-set/load-result/
+  next-request crash boundary and exact recovery;
+- no host-workspace visibility through any model tool;
+- cooperative yield, fresh-process continuation, cumulative cap, single-holder
+  exclusion, and all pause/cancel/kill/resume races;
+- generation-fenced cancellation and gateway restart with provider terminal/idle or
+  bounded model-restart proof;
+- input/custom-entry/session-fsync crash recovery plus malformed, oversized, linked,
+  nonregular, wrong-mode, duplicate, and truncated session rejection;
+- actual Pi multi-tool approval feasibility, ordered result append, two-gated-sibling
+  rejection, mixed-batch deferral, and one continuation;
+- the exact-Qwen text/thinking, tool, dependency, parallel/serial, malformed/error,
+  cancellation, compaction, continuation, and census cases.
+
+P0 stops before P1 for any custom agent loop, checkpoint scheduler, Pi fork,
+uncertain side-effect replay, release before cgroup/provider termination, advisory
+model exclusion, unprovable session identity, non-fail-closed hook, incomplete prompt
+ownership, or containment/gateway stack whose permanent cost defeats the simplicity
+claim.
+
+* Design review record
+
+The required design lenses ran before implementation: simplicity, Pi/framework fit,
+user intention, operator/user experience, clean interfaces, and adversarial security.
+Their substantive corrections are incorporated above.  The first implementation
+slice remains intentionally fail-fast because the containment and model data plane
+are the decisive simplicity gate.
+
+* Local-review stop
+
+The first review round found concrete failures that invalidate =GO=:
+
+- The real contained SDK run used an internal scripted HTTP provider, while the live
+  Qwen probe connected directly to llama.cpp.  The capacity-one admission object,
+  cancellation generations, and gateway restart fence existed only in unit tests.
+  A client disconnect therefore had no integrated cancellation or sole-slot-idle
+  proof, and the live report could continue after that proof failed.
+- The persistent holder accepted a caller-supplied unrelated PID at release and was
+  never connected to the contained runner.  Review reproduced a second holder
+  acquiring while the first holder's real child remained alive.
+- Teardown sent =KILL= only when the direct launcher failed to exit after =TERM=.  A
+  TERM-resistant descendant could remain in the cgroup after the launcher exited,
+  and error paths neither forced the cgroup empty nor closed and joined every owned
+  socket, pipe, and drainer.
+- Accepted peer pidfds were discarded and leaked, so subsequent checks used reusable
+  numeric PIDs despite the design's incarnation-authority claim.
+- Skill and input crash tests reopened page-cache bytes after =SIGKILL= and treated
+  pre-fsync appends as committed.  They did not recover from the parent's recorded
+  committed offset and prefix digest.  Cooperative yield likewise persisted
+  =paused= without first fsyncing the completed Pi session boundary.
+- An existing content-addressed release was trusted by directory name and its own
+  =release.json= instead of having its complete tree identity recomputed immediately
+  before reuse and mount.
+- The final validator accepted a hand-written live report containing only the model,
+  case names, =PASS= statuses, and prompt canary.  It did not bind the Qwen attempt to
+  the immutable release, source/test digest, model build, provider profile, or full
+  schema fingerprint.
+- Session preflight accepted unaudited record types and open nested shapes; skill
+  activation records lacked work, release, skill-digest, and batch identity; the
+  schema census compared tool names rather than complete provider-bound schemas.
+- Several launch, protocol, file-lock, and backpressure waits had no independent
+  deadline, and the actual topology used the fixture's throwing default =halt=,
+  allowing Pi's extension dispatcher to swallow a supposedly fatal hook failure.
+
+The first round therefore ended with blockers.  Error/edge, simplicity,
+design-adherence, and doc-alignment passes were not used to claim convergence; the
+stop condition came first.
+
+* Rejected pre-review observations
+
+The pre-review candidate ran without a Pi fork, private Pi API, custom agent loop,
+checkpoint scheduler, production backend call, web change, phone change, or
+prompt-P2 file change.  The observations below are retained to inform a revised
+experiment, but they are not a passing P0 result.
+
+- Supply chain and release: exact packages, Node, lockfile, emitted manifest,
+  runtime library closure, modes, symlinks, and provider profile are hashed.  Install
+  scripts are disabled.  Two clean builds produced the same digest.  The published
+  Pi declaration tree requires =skipLibCheck= under NodeNext because its transitive
+  declarations contain unresolved optional and JSON-import types; the experiment's
+  own sources remain fully strict and no emitted JavaScript bypass is allowed.
+- Containment: the real compiled Pi SDK ran as UID/GID 65534 with 16 exact mounts,
+  25 audited descriptors, =RLIMIT_NOFILE= 64, 512 MiB memory, 50% CPU, 32 tasks,
+  group OOM kill, private network, no direct model/general egress, and no host
+  workspace visible through a model-selected tool.  A forced teardown killed a live
+  descendant, closed pipes and both sockets, left the session unchanged, and emptied
+  the cgroup before release.
+- SDK and recovery: 35 Node tests pass around prompt/schema ownership, public
+  continuation, dynamic skill disclosure, crash injection, malformed/unknown tool
+  results, lifecycle callbacks, input identity, cooperative yield, streamed
+  cancellation, and approval batch shapes.  Eight Python tests pass around session
+  preflight, leases, generations, holder exclusion, and cumulative accounting.  The
+  review proved that several of these are disconnected models or page-cache tests,
+  not the claimed end-to-end durability and execution-control evidence.
+- Exact Qwen: all 13 direct-provider cases returned =PASS= on
+  =Qwen_Qwen3.6-27B-Q4_K_M.gguf=: separated thinking/text, one tool and result,
+  data-dependent sequential calls, parallel reads, serialized mutations, malformed
+  and unknown-call dispositions, tool error, cancellation, compaction, persisted
+  user/tool-result continuation, and prompt/schema observation.  They bypassed the
+  contained gateway, were not bound to the rejected release, and could abort before
+  observing an active generation, so they are capability observations only.
+  On deliberately invalid requests Qwen sometimes refuses an unknown tool or repairs
+  malformed arguments into a valid call; deterministic raw-response injection proves
+  Pi turns genuinely malformed and unknown calls into error results.
+- Simplicity: the rejected candidate self-reported =PASS_FOR_P1_ONLY= using an
+  existing Python authority, one unprivileged transient systemd/bwrap/Node runner,
+  and a modeled capacity-one provider gateway.  The runtime is 340,971,930 bytes
+  with 57 top-level package
+  directories; the rejected evidence harness is 4,494 source/test lines.  Those
+  numbers are not a product-code target.  Because the real gateway and ownership
+  authority were absent from the exercised path, the simplicity judgment does not
+  survive review.
+
+Recommendation: do not publish this candidate, begin P1, start P2 integration,
+select a Pi web thread, or touch the active prompt-P2 work.  Decide explicitly
+whether to (1) authorize a revised P0 that exercises a small but real gateway and
+runner authority end to end, or (2) revise the migration design to defer or narrow
+those guarantees.  Reusing the disconnected proof objects is not an option.
