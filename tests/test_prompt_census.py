@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -108,6 +109,143 @@ def test_registered_visible_and_classification_stay_separate(census):
                 if tool["name"] == "travel")["possible_owners"] == ["travel"]
     assert next(tool for tool in surface["registered_tools"]
                 if tool["name"] == "map_data")["possible_owners"] == ["render"]
+
+
+def test_generated_kernel_matches_each_final_skills_enabled_request(census):
+    expected = {
+        "web-main-core": [
+            "write_todos", "ls", "read_file", "write_file", "edit_file",
+            "glob", "grep", "execute", "load_skill", "start_async_task",
+            "check_async_task", "update_async_task", "cancel_async_task",
+            "list_async_tasks"],
+        "web-main-full": [
+            "write_todos", "ls", "read_file", "write_file", "edit_file",
+            "glob", "grep", "execute", "load_skill", "start_async_task",
+            "check_async_task", "update_async_task", "cancel_async_task",
+            "list_async_tasks"],
+        "web-delegate": [
+            "write_todos", "ls", "read_file", "write_file", "edit_file",
+            "glob", "grep", "execute", "task", "load_skill"],
+        "legacy-main": [
+            "write_todos", "ls", "read_file", "write_file", "edit_file",
+            "glob", "grep", "task", "load_skill"],
+        "skill-precedence-built-in": [
+            "write_todos", "ls", "read_file", "write_file", "edit_file",
+            "glob", "grep", "load_skill", "start_async_task",
+            "check_async_task", "update_async_task", "cancel_async_task",
+            "list_async_tasks"],
+        "skill-precedence-embedder": [
+            "write_todos", "ls", "read_file", "write_file", "edit_file",
+            "glob", "grep", "load_skill", "start_async_task",
+            "check_async_task", "update_async_task", "cancel_async_task",
+            "list_async_tasks"],
+    }
+    for scenario, names in expected.items():
+        assert prompt_census._prompt_kernel_tools(_call(census, scenario)) == names
+
+
+def _recomputed_capabilities(census, source_manifest=None, tool_nodes=None):
+    trace = prompt_census.CensusTrace(
+        calls=census["calls"], tool_nodes=tool_nodes or census["tool_nodes"])
+    sources = source_manifest or census["source_manifest"]
+    return prompt_census._capabilities(
+        trace, census["observations"], sources)
+
+
+@pytest.mark.parametrize(("declared_name", "diagnostic"), [
+    ("travle", "unknown declared tool `travle`"),
+    ("execute(git:*)", "unknown declared tool `execute\\(git:\\*\\)`"),
+    ("execute", "non-bundled or kernel tool `execute` must not be declared"),
+])
+def test_invalid_bundled_declarations_fail_with_path(
+        census, declared_name, diagnostic):
+    sources = copy.deepcopy(census["source_manifest"])
+    travel = next(source for source in sources
+                  if source.get("kind") == "skill"
+                  and source.get("scenario") == "web-main-full"
+                  and source.get("name") == "travel")
+    travel["allowed_tools"].append(declared_name)
+    capabilities = _recomputed_capabilities(census, sources)
+
+    with pytest.raises(
+            AssertionError,
+            match=rf"{re.escape(travel['path'])}.*{diagnostic}"):
+        prompt_census._validate_skill_tool_declarations(capabilities, sources)
+
+
+def test_bad_winning_shadow_declaration_names_winning_path(census):
+    sources = copy.deepcopy(census["source_manifest"])
+    winner = next(source for source in sources
+                  if source.get("kind") == "skill"
+                  and source.get("scenario") == "skill-precedence-built-in"
+                  and source.get("name") == "dev")
+    winner["allowed_tools"].append("missing_embedder_tool")
+    capabilities = _recomputed_capabilities(census, sources)
+
+    with pytest.raises(AssertionError, match=(
+            rf"{re.escape(winner['path'])}.*missing_embedder_tool")):
+        prompt_census._validate_skill_tool_declarations(capabilities, sources)
+
+
+def test_multiple_winning_owners_fail(census):
+    sources = copy.deepcopy(census["source_manifest"])
+    travel = next(source for source in sources
+                  if source.get("kind") == "skill"
+                  and source.get("scenario") == "web-main-full"
+                  and source.get("name") == "travel")
+    travel["allowed_tools"].append("map_data")
+    capabilities = _recomputed_capabilities(census, sources)
+
+    with pytest.raises(AssertionError, match=(
+            r"non-kernel tool `map_data` has multiple owners: render, travel")):
+        prompt_census._validate_skill_tool_declarations(capabilities, sources)
+
+
+def test_external_declarations_are_recorded_but_not_enforced(census):
+    external = next(source for source in census["source_manifest"]
+                    if source.get("kind") == "skill"
+                    and source.get("source") == "/.claude/skills/")
+    assert external["allowed_tools"] == ["synthetic_external_tool"]
+    capabilities = _recomputed_capabilities(census)
+
+    prompt_census._validate_skill_tool_declarations(
+        capabilities, census["source_manifest"])
+    map_data = next(
+        tool for tool in capabilities["web-main-full:0"]["registered_tools"]
+        if tool["name"] == "map_data")
+    assert map_data["possible_owners"] == ["render"]
+
+
+def test_overridden_bundled_route_is_not_packaged_by_name_alone(census):
+    source = copy.deepcopy(next(
+        source for source in census["source_manifest"]
+        if source.get("kind") == "skill"
+        and source.get("source") == "/skills/"))
+    source["content_sha256"] = "0" * 64
+
+    assert prompt_census._packaged_skill_path(source) is None
+    assert prompt_census._skill_tool_owners([source]) == {}
+
+
+def test_external_registered_tools_do_not_require_bundled_owners(census):
+    nodes = copy.deepcopy(census["tool_nodes"])
+    node = next(node for node in nodes if node["scenario"] == "web-main-core")
+    node["candidates"].append({
+        "name": "embedder_tool", "origin": "external_embedder.tools"})
+    capabilities = _recomputed_capabilities(census, tool_nodes=nodes)
+
+    prompt_census._validate_skill_tool_declarations(
+        capabilities, census["source_manifest"])
+
+
+def test_application_kernel_name_collision_fails(census):
+    nodes = copy.deepcopy(census["tool_nodes"])
+    node = next(node for node in nodes if node["scenario"] == "web-main-core")
+    node["candidates"].append({"name": "write_todos", "origin": "assist.tools"})
+
+    with pytest.raises(
+            AssertionError, match="application tool `write_todos` collides"):
+        _recomputed_capabilities(census, tool_nodes=nodes)
 
 
 def test_every_prompt_transition_is_observed_and_attributed(census):
@@ -927,10 +1065,13 @@ def test_keyboard_interrupt_cleans_publication_staging(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".interrupted-*"))
 
 
-def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
+def test_p0_p2_history_and_p2b1_summary_match_the_current_capture(census):
     document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
         encoding="utf-8")
     p2_document = Path("docs/2026-08-04-prompt-architecture-p2.org").read_text(
+        encoding="utf-8")
+    p2b1_document = Path(
+        "docs/2026-08-05-prompt-architecture-p2b1.org").read_text(
         encoding="utf-8")
     current = _call(census, "web-main-core")
     historical_p0_prompt = _named_text_block("p0-current-web-main-bootstrap")
@@ -943,14 +1084,14 @@ def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    assert len(current_prompt) == 29_600
+    assert len(current_prompt) == 29_873
     assert len(schemas) == 28_037
     assert len(census["calls"]) == 28
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 21
-    assert len(artifact_bytes(census)) == 2_854_395
+    assert len(artifact_bytes(census)) == 2_884_412
     assert census["artifact_sha256"] == \
-        "7a73c557b7a10abfd2f53111406cb157cb94d984350444e33e7846599495578a"
+        "c8a918171d2f8e34b2c5c1b24aba13a79f428d2a052254fd8bf0e5cd956660ec"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
@@ -975,6 +1116,10 @@ def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
     assert "| Complete system message | 31,279 | 29,600 |" in p2_document
     assert "| Provider-bound tool schemas | 28,037 | 28,037 |" in p2_document
     assert "| Bootstrap request plus schemas | 59,316 | 57,637 |" in p2_document
+    assert "29,873 characters, up 273 from merged P2" in p2b1_document
+    assert "30 provider-bound schemas remain byte-identical at 28,037" \
+        in p2b1_document
+    assert "2,884,412 bytes with 21 retained audit findings" in p2b1_document
 
     kernel = _named_text_block("proposed-main-bootstrap-kernel")
     headings = [

@@ -1,6 +1,7 @@
 ---
 name: render
 description: Rendering things in the user's web view (web UI only) beyond plain text — files, generated PNG graphs/charts, existing PNG artifacts, and maps. MUST load when the user wants to see a file in the conversation, asks for a graph or chart to be created and displayed, refers back to a PNG artifact they want displayed, names the render skill, or discusses places/routes that would be clearer on a map.
+allowed-tools: map_data
 ---
 
 # Render — show a file in the user's web view

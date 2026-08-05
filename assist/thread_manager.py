@@ -52,15 +52,12 @@ _render_skill_sources = None
 
 
 def _web_skill_sources() -> dict:
-    """Route -> backend for the web AgentSpec's render skill.  Built lazily so the
-    FilesystemBackend import defers deepagents' transitive imports off module load
-    (same pattern as emacsos-server's _skill_sources)."""
+    """Return the cached route/backend for the web AgentSpec's render skill."""
     global _render_skill_sources
     if _render_skill_sources is None:
-        from deepagents.backends import FilesystemBackend
+        from assist.backends import create_skills_backend
         _render_skill_sources = {
-            _RENDER_SKILL_ROUTE: FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
-                                                   virtual_mode=True)
+            _RENDER_SKILL_ROUTE: create_skills_backend(_RENDER_SKILLS_DIR)
         }
     return _render_skill_sources
 

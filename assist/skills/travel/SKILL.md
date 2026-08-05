@@ -1,6 +1,7 @@
 ---
 name: travel
 description: Real-world travel between places — time and distance by car/bike/walk/transit, AND step-by-step directions (turns, which bus or train), across a metro area and nearby cities, PLUS which geographic areas are covered and adding new ones on request. EXAMPLES — "how long from home to the Ferry Building"; "is it faster to bike or take the train"; "drive time to the airport"; "how far is the office"; "directions to City Hall"; "which bus do I take"; "what areas do you cover"; "can you do directions in Seattle"; "download the Los Angeles area". MUST load before answering any question about travel time, distance, the fastest mode, how to get from one place to another, OR which regions are covered / adding a region.
+allowed-tools: travel directions list_regions find_regions propose_region_download
 ---
 
 # Travel & directions — real map data, two tools

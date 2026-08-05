@@ -523,7 +523,13 @@ to re-justify loading.
 
 1. Create `assist/skills/<skill-name>/SKILL.md` with frontmatter
    (`name:` matching the directory, `description:` following the rules
-   above) and a body of rules.
+   above) and a body of rules. If a bundled skill owns an Assist application
+   tool, add the official space-separated `allowed-tools:` field with its exact
+   model-visible names. Omit framework kernel tools such as filesystem, TODO,
+   delegation/lifecycle, and `load_skill`; their availability does not depend on
+   a domain skill. Packaged skill backends identify these declarations by source;
+   the SMS-triage profile omits them from loaded bodies without changing domain
+   or embedder skill bytes.
 2. That's it for a skill shared by every Assist role. `SkillsMiddleware`
    discovers it via the `/skills/` source path on next agent construction;
    the system prompt automatically lists it and

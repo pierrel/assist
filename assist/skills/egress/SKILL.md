@@ -1,6 +1,7 @@
 ---
 name: egress
 description: "Sandbox network access is restricted to an approved host allowlist — commands that reach a blocked host fail with a proxy 403. EXAMPLES — a curl/pip/git command failed with '403' and 'proxy' or 'tunnel' in the output; you need to fetch a page or API the sandbox can't reach; auditing or reducing which hosts this thread can access. MUST load when a network command is denied or before requesting new network access."
+allowed-tools: request_egress list_allowed_hosts remove_allowed_host
 ---
 
 # Egress — restricted network access and the approval workflow
