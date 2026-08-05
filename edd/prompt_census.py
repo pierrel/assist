@@ -58,7 +58,7 @@ REQUIRED_PATHS = {
 }
 EXPECTED_PATHS_BY_SCENARIO = {
     "web-main-core": ("main", "main", "main"),
-    "web-main-full": ("main",),
+    "web-main-full": ("main", "main"),
     "web-delegate": ("delegate",),
     "legacy-main": ("legacy-main",),
     "skill-precedence-built-in": ("main", "main"),
@@ -186,6 +186,8 @@ def _message(message: BaseMessage) -> dict[str, Any]:
     if isinstance(message, ToolMessage):
         result["tool_call_id"] = message.tool_call_id
         result["status"] = message.status
+        if message.artifact is not None:
+            result["artifact"] = message.artifact
     return result
 
 
@@ -446,7 +448,10 @@ def _scripted_response(scenario: str, index: int) -> AIMessage:
             return _call("execute", {"command": "printf synthetic-ok"}, "safe-exec")
         if index == 1:
             return _call("execute", {"command": "git push origin main"}, "git-push")
-    if scenario == "web-main-full" and index == 0:
+    if scenario == "web-main-full":
+        if index == 0:
+            return _call(
+                "load_skill", {"name": "send-email"}, "hitl-skill-load")
         return _call("send_email", {
             "to": "synthetic-recipient@example.invalid",
             "subject": "Synthetic approval probe",
@@ -697,10 +702,22 @@ def _content_segments(owner: str, text: str, scenario: str,
             listing_parts.append("(No skills available.)")
             _append_owned(listing_segments, listing_parts[0], [formatter_id])
         listing = "".join(listing_parts)
+        tools_match = re.search(
+            r"Tools available for this response: ([^\n]+)\.\n?$", text)
+        if tools_match is None:
+            raise AssertionError(
+                f"retained tool guidance is absent from {scenario}")
         rendered, segments = _render_owned_template(
             SMALL_MODEL_SKILLS_PROMPT,
             "python:assist.middleware.skills_middleware.SMALL_MODEL_SKILLS_PROMPT",
-            {"skills_list": {"value": listing, "segments": listing_segments}},
+            {
+                "skills_list": {"value": listing, "segments": listing_segments},
+                "tools_available": {
+                    "value": tools_match.group(1),
+                    "source_ids": [
+                        "python:assist.middleware.skills_middleware"],
+                },
+            },
         )
     elif owner == "deepagents.MemoryMiddleware":
         from assist.middleware.memory_middleware import (
@@ -1325,9 +1342,11 @@ def _invoke_skill_precedence(trace: CensusTrace, root: Path,
             spec=AgentSpec(skill_sources=sources,
                            async_subagent_tools=async_task_tools))
         result = _invoke_agent(agent, name)
-    bodies = [str(message["content"])
-              for message in _tool_messages(result, name="load_skill")]
-    return {"loaded_skill_bodies": bodies}
+    messages = _tool_messages(result, name="load_skill")
+    return {
+        "loaded_skill_bodies": [str(message["content"]) for message in messages],
+        "load_artifacts": [message["artifact"] for message in messages],
+    }
 
 
 def _invoke_context(trace: CensusTrace, root: Path) -> dict[str, Any]:
@@ -1820,6 +1839,8 @@ _DECLARED_TOOL_CALLS = {
             "subject": "Synthetic approval probe",
             "body": "Synthetic body.",
         }),
+    "synthetic-call-hitl-skill-load": (
+        "load_skill", {"name": "send-email"}),
     "synthetic-call-read-only": (
         "write_file", {
             "file_path": "/synthetic-forbidden.txt",
@@ -1907,11 +1928,17 @@ def _expected_tool_results() -> dict[str, str]:
             "Error: direct git push is not allowed.  The user controls pushes from "
             "the web UI.  To publish your work to origin, ask the user to click "
             "'Push to origin' in their browser.",
+        "synthetic-call-hitl-skill-load":
+            (repo / "assist/web_skills/send-email/SKILL.md").read_text(
+                encoding="utf-8")
+            + "\n\nNewly available tools: send_email.",
         "synthetic-call-skill-precedence-built-in-load":
-            (repo / "assist/skills/dev/SKILL.md").read_text(),
+            (repo / "assist/skills/dev/SKILL.md").read_text(encoding="utf-8")
+            + "\n\nNo additional tools became available.",
         "synthetic-call-skill-precedence-embedder-load":
             "---\nname: dev\ndescription: SYNTHETIC EMBEDDER DEV DESCRIPTION\n"
-            "---\n\nSYNTHETIC_EMBEDDER_DEV_BODY\n",
+            "---\n\nSYNTHETIC_EMBEDDER_DEV_BODY\n"
+            "\n\nNo additional tools became available.",
         "synthetic-call-read-only":
             "Error: this agent is read-only and cannot call 'write_file'. If the "
             "user asked you to write or modify something, do not attempt the write "
@@ -1940,9 +1967,38 @@ def _expected_tool_results() -> dict[str, str]:
     }
 
 
+def _expected_load_artifact(tool_call_id: str) -> dict[str, str]:
+    from deepagents.middleware.skills import _parse_skill_metadata
+
+    requested_name = _DECLARED_TOOL_CALLS[tool_call_id][1]["name"]
+    content = _expected_tool_results()[tool_call_id]
+    body, separator, _disclosure = content.rpartition("\n\n")
+    if not separator:
+        raise AssertionError("declared load result lacks disclosure suffix")
+    metadata = _parse_skill_metadata(
+        body, f"/{requested_name}/SKILL.md", requested_name)
+    if metadata is None:
+        raise AssertionError("declared load result metadata did not parse")
+    fingerprint_payload = {
+        "allowed_tools": list(metadata["allowed_tools"]),
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "description": metadata["description"],
+        "name": metadata["name"],
+    }
+    return {
+        "schema": "assist.skill-load.v1",
+        "requested_name": requested_name,
+        "winner_fingerprint": hashlib.sha256(json.dumps(
+            fingerprint_payload, ensure_ascii=False, separators=(",", ":"),
+            sort_keys=True).encode("utf-8")).hexdigest(),
+        "result_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+
+
 _TOOL_RESULT_METADATA = {
     "synthetic-call-safe-exec": ("execute", "success"),
     "synthetic-call-git-push": ("execute", "error"),
+    "synthetic-call-hitl-skill-load": ("load_skill", "success"),
     "synthetic-call-skill-precedence-built-in-load": ("load_skill", "success"),
     "synthetic-call-skill-precedence-embedder-load": ("load_skill", "success"),
     "synthetic-call-read-only": ("write_file", "error"),
@@ -1958,7 +2014,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "7a18b7265e11b5a8447a49e6a1ad26e11d638a10963761dded4eae4fa7793d76"
+    "9602ca8b9d3883ee20f6391c5eade241d1b03d4179d38e0165bc7275e0913d4c"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2002,6 +2058,8 @@ def _expected_message_history(scenario: str, index: int) -> list[dict[str, Any]]
     ids: list[str] = []
     if scenario == "web-main-core":
         ids = ["synthetic-call-safe-exec", "synthetic-call-git-push"][:index]
+    elif scenario == "web-main-full" and index == 1:
+        ids = ["synthetic-call-hitl-skill-load"]
     elif scenario.startswith("skill-precedence-") and index == 1:
         ids = [f"synthetic-call-{scenario}-load"]
     elif scenario == "context-read-only":
@@ -2035,6 +2093,8 @@ def _assert_tool_result(message: dict[str, Any]) -> None:
             "tool_call_id": tool_call_id,
             "status": status,
         }
+        if name == "load_skill":
+            expected_message["artifact"] = _expected_load_artifact(tool_call_id)
         if message != expected_message:
             raise AssertionError(f"undeclared observed tool-result shape: {tool_call_id}")
 
@@ -2356,8 +2416,10 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
             "web-delegate": {"sandbox_commands", "tool_messages", "interrupted",
                              "email_delivery_attempted"},
             "legacy-main": set(),
-            "skill-precedence-built-in": {"loaded_skill_bodies"},
-            "skill-precedence-embedder": {"loaded_skill_bodies"},
+            "skill-precedence-built-in": {
+                "loaded_skill_bodies", "load_artifacts"},
+            "skill-precedence-embedder": {
+                "loaded_skill_bodies", "load_artifacts"},
             "context-read-only": {"tool_messages"},
             "research-lead": {"tool_messages"},
             "research-leaf-provenance": {"tool_messages"},
@@ -2383,6 +2445,9 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
             if observation["loaded_skill_bodies"] != [
                     _expected_tool_results()[call_id]]:
                 raise AssertionError(f"{scenario} has undeclared loaded skills")
+            if observation["load_artifacts"] != [
+                    _expected_load_artifact(call_id)]:
+                raise AssertionError(f"{scenario} has undeclared load evidence")
         if "description" in observation \
                 and observation["description"] != \
                 "SYNTHETIC TERMINAL thread-description 0":
@@ -2414,7 +2479,7 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
         expected_tool_ids = {
             "web-main-core": ["synthetic-call-safe-exec",
                               "synthetic-call-git-push"],
-            "web-main-full": [],
+            "web-main-full": ["synthetic-call-hitl-skill-load"],
             "web-delegate": [],
             "context-read-only": ["synthetic-call-read-only",
                                   "synthetic-call-read-only-edit"],
@@ -3197,7 +3262,7 @@ def _assert_observer_payload(payload: dict[str, Any]) -> None:
     tools = payload["tools"]
     expected_tools = [
         "write_todos", "ls", "read_file", "write_file", "edit_file", "glob",
-        "grep", "load_skill", "travel", "directions", "map_data", "read_url",
+        "grep", "load_skill", "map_data",
     ]
     if not isinstance(tools, list) or [
             tool.get("function", {}).get("name") for tool in tools

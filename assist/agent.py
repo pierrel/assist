@@ -11,6 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 from langchain.agents.middleware import ModelRetryMiddleware
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
@@ -26,6 +27,7 @@ from assist.backends import (
     create_references_backend,
     create_sandbox_composite_backend,
     create_skills_backend,
+    ReadOnlyFilesystemBackend,
 )
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
@@ -361,7 +363,19 @@ def create_agent(model: BaseChatModel,
     # _has_domain_skills is skipped when an embedder already supplied the path.
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
         skill_sources.insert(1 if async_main else 0, DOMAIN_SKILLS_PATH)
-    skills_mw = SmallModelSkillsMiddleware(backend=backend, sources=skill_sources)
+    bundled_skill_sources = {
+        source for source, route_backend in extra_routes.items()
+        if isinstance(route_backend, ReadOnlyFilesystemBackend)
+    }
+    if SKILLS_ROUTE not in spec.skill_sources:
+        bundled_skill_sources.add(SKILLS_ROUTE)
+    if async_main and MAIN_SKILLS_ROUTE not in spec.skill_sources:
+        bundled_skill_sources.add(MAIN_SKILLS_ROUTE)
+    skills_mw = SmallModelSkillsMiddleware(
+        backend=backend,
+        sources=skill_sources,
+        bundled_sources=bundled_skill_sources,
+    )
     memory_mw = SmallModelMemoryMiddleware(
         backend=backend, memories_path=memories_path,
         thread_memories_path=thread_memories_path)
@@ -490,6 +504,12 @@ def create_agent(model: BaseChatModel,
             ),
             # Mid-turn interjection delivery is installed on the user-facing main
             # agent only. A delegate is an atomic task worker and omits it.
+            # Keep HITL immediately before skills. after-model hooks run in
+            # reverse order, so skills rejects a hidden outward-effect call
+            # before HITL can interrupt on it. Execution remains HITL-gated
+            # after a successful matching skill load.
+            *([HumanInTheLoopMiddleware(interrupt_on=spec.interrupt_on)]
+              if spec.interrupt_on else []),
             skills_mw, memory_mw, ContextRiderMiddleware(),
             *([] if delegate else [InterjectionMiddleware()]), logging_mw],
         backend=backend,
@@ -506,8 +526,6 @@ def create_agent(model: BaseChatModel,
               + list(spec.tools)
               + [t for t in (travel, directions, map_data, read_url)
                  if t not in spec.tools],
-        # HITL gating for web outward-effect tools; None off.
-        **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     )
 
     return agent

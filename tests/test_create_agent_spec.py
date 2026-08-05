@@ -7,6 +7,7 @@ agent-directory and memory-source wiring, and `Thread`-level `spec=` /
 
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -15,6 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import StructuredTool
 from langchain.tools.tool_node import ToolCallRequest
+from langgraph.types import Command
 
 from assist.spec import AgentSpec
 
@@ -60,6 +62,21 @@ class _CreateAgentHarness:
                 create_agent(MagicMock(), wd, **kwargs)
                 return fake.call_args.kwargs
 
+    @staticmethod
+    def _load_skill(middleware, name):
+        update = middleware.before_agent({}, SimpleNamespace(), {})
+        state = {
+            "skills_metadata": update["skills_metadata"],
+            "loaded_skill_tools": frozenset(),
+        }
+        result = middleware.tools[0].func(
+            name,
+            SimpleNamespace(state=state, config={}, tool_call_id="test-load"),
+        )
+        if isinstance(result, Command):
+            return result.update["messages"][0].content
+        return result
+
 
 class TestSpecWiring(_CreateAgentHarness):
     """The spec's fields reach create_deep_agent."""
@@ -76,6 +93,23 @@ class TestSpecWiring(_CreateAgentHarness):
         from assist.tools import directions, map_data, read_url, travel
         kwargs = self._build(spec=AgentSpec(tools=(_tool_a, _tool_b)))
         assert kwargs["tools"] == [_tool_a, _tool_b, travel, directions, map_data, read_url]
+
+    def test_hitl_precedes_skills_and_is_not_appended_by_deepagents(self):
+        from langchain.agents.middleware import HumanInTheLoopMiddleware
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        kwargs = self._build(spec=AgentSpec(
+            interrupt_on={"send_email": True}))
+        middleware = kwargs["middleware"]
+        hitl_index = next(
+            index for index, item in enumerate(middleware)
+            if isinstance(item, HumanInTheLoopMiddleware))
+        skills_index = next(
+            index for index, item in enumerate(middleware)
+            if isinstance(item, SmallModelSkillsMiddleware))
+
+        assert hitl_index < skills_index
+        assert "interrupt_on" not in kwargs
 
     def test_async_subagent_tools_replace_blocking_subagents(self):
         from assist.agent import create_agent
@@ -157,7 +191,7 @@ class TestSpecWiring(_CreateAgentHarness):
         skills = next(m for m in kwargs["middleware"]
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
-        assert "not found" in skills.tools[0].invoke({"name": "complex-request"})
+        assert "could not be loaded" in self._load_skill(skills, "complex-request")
         assert provenance._trust_human_messages is False
         assert provenance._trust_task_results is False
         from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
@@ -251,7 +285,7 @@ class TestSpecWiring(_CreateAgentHarness):
         skills = next(m for m in kwargs["middleware"]
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
-        assert "not found" in skills.tools[0].invoke({"name": "complex-request"})
+        assert "could not be loaded" in self._load_skill(skills, "complex-request")
         assert provenance._trust_human_messages is True
 
     def test_async_main_can_load_supervisor_skill(self):
@@ -265,7 +299,7 @@ class TestSpecWiring(_CreateAgentHarness):
 
         assert "/main-skills/" in skills.sources
         assert skills.sources[0] == "/main-skills/"
-        loaded = skills.tools[0].invoke({"name": "complex-request"})
+        loaded = self._load_skill(skills, "complex-request")
         assert "start one `delegate-agent` per outcome" in loaded
         task_offload = next(
             middleware for middleware in kwargs["middleware"]

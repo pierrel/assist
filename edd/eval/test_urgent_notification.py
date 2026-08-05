@@ -43,6 +43,12 @@ class TestUrgentNotification(TestCase):
                 for call in (message.tool_calls or [])
                 if call.get("name") == "notify"]
 
+    @staticmethod
+    def _all_calls(agent: AgentHarness) -> list[dict]:
+        return [call for message in agent.all_messages()
+                if isinstance(message, AIMessage)
+                for call in (message.tool_calls or [])]
+
     def test_imminent_deadline_is_flagged_with_a_message(self):
         agent = self._agent()
         with stub_research_subagent():
@@ -51,7 +57,11 @@ class TestUrgentNotification(TestCase):
                 "must answer about the lease before 4pm today or the apartment goes to "
                 "someone else. Please make sure I don't miss it.")
         calls = self._notify_calls(agent)
-        self.assertTrue(calls, f"expected notify for an imminent deadline; calls: {calls}")
+        self.assertEqual(len(calls), 1,
+                         f"expected exactly one notify; calls: {calls}")
+        all_calls = self._all_calls(agent)
+        self.assertTrue(all_calls and all_calls[0].get("name") == "notify",
+                        f"notify was not the first effect: {all_calls}")
         message = (calls[0].get("args") or {}).get("message", "")
         self.assertTrue(message.strip(), f"notify omitted its message: {calls}")
         self.assertIn("4", message, f"notification lacks the deadline: {calls}")

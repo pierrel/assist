@@ -88,7 +88,7 @@ class AgentSpec:
     async_subagent_tools: tuple[BaseTool, ...] | None = None
 
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
-    # InterruptOnConfig}`` passed straight to ``create_deep_agent(interrupt_on=…)``.  Web
+    # InterruptOnConfig}`` installed as LangChain's HumanInTheLoopMiddleware. Web
     # profiles gate outward-effect tools (normal: ``send_email``; inbound triage:
     # ``send_reply``) so they can propose an action but never perform it without approval.
     # ``None`` = no HITL.

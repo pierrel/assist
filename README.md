@@ -527,8 +527,10 @@ to re-justify loading.
    tool, add the official space-separated `allowed-tools:` field with its exact
    model-visible names. Omit framework kernel tools such as filesystem, TODO,
    delegation/lifecycle, and `load_skill`; their availability does not depend on
-   a domain skill. The P2b.1 census validates bundled declarations against real
-   compositions; runtime disclosure and enforcement belong to later P2b phases.
+   a domain skill. Assist validates bundled declarations against real
+   compositions. Those application tools are absent from provider schemas until
+   `load_skill` successfully loads the winning bundled skill in the current
+   invocation; both schema visibility and execution reset on the next turn.
 2. That's it for a skill shared by every Assist role. `SkillsMiddleware`
    discovers it via the `/skills/` source path on next agent construction;
    the system prompt automatically lists it and
@@ -573,6 +575,11 @@ backend in both local and sandbox modes; on the first turn of a chat the
 middleware lists every skill it finds there alongside the built-ins, and
 `load_skill(name="<skill-name>")` loads the body. (Skills are listed
 once per chat — add one and start a new chat to pick it up.)
+
+During the P2b migration, domain-repository declarations are validated and
+recorded but do not yet hide tools at runtime. Bundled Assist skills use
+progressive disclosure now; domain and embedder-owned skills join that contract
+in P2b.3.
 
 **Authoring one on request.** Ask the agent to "make a skill for X" and
 the `author-skill` built-in walks it through writing a correct

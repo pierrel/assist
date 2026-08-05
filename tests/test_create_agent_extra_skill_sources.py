@@ -18,6 +18,7 @@ routes that hold skill files outside the assist repo.  The contract:
 import os
 import shutil
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 from assist.backends import (
@@ -30,6 +31,22 @@ from assist.backends import (
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.spec import AgentSpec
 from deepagents.backends import FilesystemBackend
+from langgraph.types import Command
+
+
+def _load_skill(middleware, name):
+    update = middleware.before_agent({}, SimpleNamespace(), {})
+    state = {
+        "skills_metadata": update["skills_metadata"],
+        "loaded_skill_tools": frozenset(),
+    }
+    result = middleware.tools[0].func(
+        name,
+        SimpleNamespace(state=state, config={}, tool_call_id="test-load"),
+    )
+    if isinstance(result, Command):
+        return result.update["messages"][0].content
+    return result
 
 
 def _route_backend():
@@ -337,7 +354,7 @@ class TestCreateAgentDomainSkills:
         backend = _create_standard_backend(wd)
         mw = SmallModelSkillsMiddleware(
             backend=backend, sources=[DOMAIN_SKILLS_PATH, SKILLS_ROUTE])
-        result = mw.tools[0].invoke({"name": "dev"})
+        result = _load_skill(mw, "dev")
         assert marker not in result, (
             "load_skill returned the domain dev body; built-in must win"
         )

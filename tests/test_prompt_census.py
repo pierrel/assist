@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import subprocess
@@ -85,18 +86,42 @@ def test_final_provider_tools_are_the_visible_tools(census):
     assert "extra_body" not in capture["provider_payload"]
 
 
+def test_bundled_schema_disclosure_and_load_evidence_are_observed(census):
+    initial = _call(census, "web-main-full", 0)
+    disclosed = _call(census, "web-main-full", 1)
+
+    assert "send_email" not in initial["visible_tools"]
+    assert "send_email" in disclosed["visible_tools"]
+    assert "travel" not in initial["visible_tools"]
+    assert "notify" in initial["visible_tools"]
+    assert "Tools available for this response: " \
+        + ", ".join(initial["visible_tools"]) + "." in _system_prompt(initial)
+
+    load = census["observations"]["web-main-full"]["tool_messages"][0]
+    assert load["name"] == "load_skill"
+    assert set(load["artifact"]) == {
+        "schema", "requested_name", "winner_fingerprint", "result_sha256"}
+    assert load["artifact"]["requested_name"] == "send-email"
+    assert load["artifact"]["result_sha256"] == hashlib.sha256(
+        load["content"].encode("utf-8")).hexdigest()
+    assert "/render-skill/" not in json.dumps(load["artifact"])
+
+
 def test_registered_visible_and_classification_stay_separate(census):
     for surface in census["capabilities"].values():
         registered = [tool["name"] for tool in surface["registered_tools"]]
         visible = surface["model_visible_tools"]
         assert not surface["ambiguous_tool_node_matches"]
         assert all(name in registered for name in visible)
-        assert registered == visible or [
-            name for name in registered if name != "execute"] == visible
+        assert visible == [name for name in registered if name in visible]
+        hidden = [tool for tool in surface["registered_tools"]
+                  if tool["name"] not in visible]
+        assert all(tool["name"] == "execute" or tool["possible_owners"]
+                   for tool in hidden)
 
     surface = census["capabilities"]["web-main-core:0"]
     registered = [tool["name"] for tool in surface["registered_tools"]]
-    assert registered == surface["model_visible_tools"]
+    assert set(surface["model_visible_tools"]) < set(registered)
     assert {tool["classification"] for tool in surface["registered_tools"]} == {
         "framework-kernel candidate", "skill-scoped candidate"}
     assert next(tool for tool in surface["registered_tools"]
@@ -109,6 +134,8 @@ def test_registered_visible_and_classification_stay_separate(census):
                 if tool["name"] == "travel")["possible_owners"] == ["travel"]
     assert next(tool for tool in surface["registered_tools"]
                 if tool["name"] == "map_data")["possible_owners"] == ["render"]
+    assert "travel" not in surface["model_visible_tools"]
+    assert "map_data" not in surface["model_visible_tools"]
 
     delegate = census["capabilities"]["web-delegate:0"]
     assert next(tool for tool in delegate["registered_tools"]
@@ -511,10 +538,10 @@ def test_expected_audit_findings_are_reported_not_hidden(census):
     assert context["effective_actions"]["edit_file"] == "observed-denied"
     assert census["capabilities"]["research-leaf-provenance:0"][
         "effective_actions"]["read_url"] == "observed-denied-by-provenance"
-    assert census["capabilities"]["web-main-core:0"][
-        "effective_actions"]["read_url"] == "unexercised"
-    assert census["capabilities"]["web-delegate:0"][
-        "effective_actions"]["read_url"] == "unexercised"
+    assert "read_url" not in census["capabilities"]["web-main-core:0"][
+        "effective_actions"]
+    assert "read_url" not in census["capabilities"]["web-delegate:0"][
+        "effective_actions"]
     checked = json.loads(
         census["observations"]["async-task-return-contract"]["checked"])
     assert checked["agent_name"] == "research-agent"
@@ -641,7 +668,7 @@ def test_artifact_is_bounded_and_hygiene_checked(census, tmp_path):
 
     bad = _unsigned_copy(census)
     bad["capabilities"]["web-main-core:0"]["effective_actions"][
-        "read_url"] = "observed-permitted"
+        "load_skill"] = "observed-permitted"
     with pytest.raises(AssertionError, match="capability surfaces drifted"):
         _assert_hygiene(bad, tmp_path)
 
@@ -649,7 +676,7 @@ def test_artifact_is_bounded_and_hygiene_checked(census, tmp_path):
     call = _call(bad, "web-main-core")
     call["provider_payload"]["tools"] = [
         schema for schema in call["provider_payload"]["tools"]
-        if schema["function"]["name"] != "read_url"]
+        if schema["function"]["name"] != "load_skill"]
     with pytest.raises(AssertionError, match="schema surface drifted"):
         _assert_hygiene(bad, tmp_path)
 
@@ -1101,13 +1128,16 @@ def test_keyboard_interrupt_cleans_publication_staging(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".interrupted-*"))
 
 
-def test_p0_p2_history_and_p2b1_summary_match_the_current_capture(census):
+def test_p0_through_p2b2_history_matches_the_current_capture(census):
     document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
         encoding="utf-8")
     p2_document = Path("docs/2026-08-04-prompt-architecture-p2.org").read_text(
         encoding="utf-8")
     p2b1_document = Path(
         "docs/2026-08-05-prompt-architecture-p2b1.org").read_text(
+        encoding="utf-8")
+    p2b2_document = Path(
+        "docs/2026-08-05-prompt-architecture-p2b2.org").read_text(
         encoding="utf-8")
     current = _call(census, "web-main-core")
     historical_p0_prompt = _named_text_block("p0-current-web-main-bootstrap")
@@ -1120,14 +1150,14 @@ def test_p0_p2_history_and_p2b1_summary_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    assert len(current_prompt) == 29_600
-    assert len(schemas) == 28_037
-    assert len(census["calls"]) == 28
+    assert len(current_prompt) == 29_527
+    assert len(schemas) == 17_984
+    assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 25
-    assert len(artifact_bytes(census)) == 2_856_251
+    assert len(artifact_bytes(census)) == 2_992_991
     assert census["artifact_sha256"] == \
-        "cec33a06566de462cc9cc9ee0d7f81b5429293ff27982b75e0c3332e7ce0f586"
+        "a16e88ba2b5f0187a67423591138a856c81ed7c60aa1a547e4a5768d76df2490"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
@@ -1156,6 +1186,9 @@ def test_p0_p2_history_and_p2b1_summary_match_the_current_capture(census):
     assert "30 provider-bound schemas remain byte-identical at 28,037" \
         in p2b1_document
     assert "2,856,251 bytes with 25 retained" in p2b1_document
+    assert "29,527 characters" in p2b2_document
+    assert "17,984 characters" in p2b2_document
+    assert "2,992,991 bytes" in p2b2_document
 
     kernel = _named_text_block("proposed-main-bootstrap-kernel")
     headings = [
