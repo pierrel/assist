@@ -948,9 +948,9 @@ def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
     assert len(census["calls"]) == 28
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 21
-    assert len(artifact_bytes(census)) == 2_854_575
+    assert len(artifact_bytes(census)) == 2_854_395
     assert census["artifact_sha256"] == \
-        "f2d2dc4e1ff361eeac9bdb12367e9d4ef8d133b4067a4b2e53e1166dcb75d3f4"
+        "7a73c557b7a10abfd2f53111406cb157cb94d984350444e33e7846599495578a"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [

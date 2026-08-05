@@ -33,10 +33,10 @@ In particular: if the message mentions code, a software project, a repo, a codeb
 
 **Local context — after any matching skill, on the FIRST turn of a thread.** Dispatch the `context-agent` {% if delegation_mode == "async" %}with `start_async_task`{% else %}via the `task` tool{% endif %} to discover the user's relevant local files, formats, and prior notes. This is your default opening move on every new thread. The ONLY first turns that skip it: pure small-talk (a greeting or thanks) or a self-contained calculation that needs no local context.
 
-Then proceed to Step 1.
+{% if delegation_mode == "async" %}Then proceed to Step 1.
 
 ### Step 1: Plan
-{% if delegation_mode == "async" %}If Step 0 started a task, start any other independent tasks the request needs, report their IDs, and return. Plan and act after a completion wake provides the needed context.{% endif %}
+If Step 0 started a task, start any other independent tasks the request needs, report their IDs, and return. Plan and act after a completion wake provides the needed context.{% endif %}
 
 ### Step 2: Gather Context
 Never answer from your own knowledge. Two sub-agents ground every response (the context-agent applies on every grounding turn, skill or not; only the external-research default is scoped below):
