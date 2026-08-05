@@ -121,9 +121,9 @@ class TestSkillLoading(TestCase):
 
         The user says nothing about skills, formatting, or org-mode
         rules. The only signal is the `.org` file extension, which the
-        skill description (``Load before reading, editing, or
-        surfacing any .org file``) is supposed to key off of. This is
-        the hardest case and the one progressive disclosure is meant
+        skill description (``MUST load before any tool call that reads,
+        edits, writes, or mentions a .org file``) is supposed to key off
+        of. This is the hardest case and the one progressive disclosure is meant
         to handle: the agent must choose to load the skill from the
         description alone.
         """

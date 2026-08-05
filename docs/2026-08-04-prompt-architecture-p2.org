@@ -5,7 +5,7 @@
 
 P2 passed.  Candidate 3 preserved all 70 primary functional executions and met
 every preregistered per-node timing gate.  It removes 1,679 characters of
-duplicate procedure from the shared main/delegate template without adding
+duplicate procedure from the canonical web-main rendering without adding
 production code.
 
 A final local correctness review caught a calculation defect before PR: the
@@ -102,7 +102,9 @@ interjections, mixed sibling outcomes, and timeout dependency blocking.
 ** Registered gates
 
 - Every primary natural node had to match its N=10 baseline and pass at least
-  70%; capability and deterministic security/state nodes had to pass 100%.
+  70%; primary capability and deterministic security/state checks had to pass
+  100%.  Adjacent diagnostics were reported separately and did not determine
+  P2 acceptance.
 - Each primary node independently had to keep conventional median wall time at
   or below =baseline median * 1.2 + 2 seconds=.  Nearest-rank p90 had to remain
   at or below =baseline p90 + 30 seconds=.
@@ -120,7 +122,7 @@ the preregistered conventional median and nearest-rank p90.
 | Launch | 11 / 11 | 11 / 11 | 15.2 | 41 | pass |
 | Natural outcomes | 128 / 146 | 154 / 159 | 155.6 | 176 | pass |
 | Fan-out | 15 / 16 | 17 / 18 | 20 | 46 | pass |
-| Dependency | 19 / 20 | 16 / 17 | 24.8 | 50 | pass |
+| Dependency | 19 / 20 | 16 / 16 | 24.8 | 50 | pass |
 | Main skill | 29.5 / 30 | 10.5 / 11 | 37.4 | 60 | pass |
 | Delegate skill | 34.5 / 35 | 33 / 33 | 43.4 | 65 | pass |
 | Context | 27 / 39 | 33 / 50 | 34.4 | 69 | pass |
@@ -150,13 +152,15 @@ The timeout-dependency diagnostic passed 7/10 at baseline and 3/10 for the
 accepted candidate.  The failure mode is real: the model sometimes checks a
 timed-out prerequisite, takes over its work, and starts the dependent anyway.
 
-It is not a P2 blocker.  The governing lifecycle clause, skill owner, eval,
-tools, and model inputs were byte-identical across arms, and the deleted prose
-contained no timeout, failure, takeover, or dependency rule.  Fixing it would
-require a separate async-lifecycle objective.  Value: make dependent execution
-reliably stop after prerequisite failure.  Risk of deferral: occasional wasted
-work or an invalid dependent result after timeout.  P2 neither hides the miss
-nor widens into that redesign.
+It is not a P2 blocker.  Every frozen input except the controlled role-template
+deletion was identical across arms.  The governing timeout lifecycle clause,
+skill owner, eval, and tools were unchanged; however, the deleted prose did
+mention dependent stages, so a causal contribution cannot be ruled out.  The
+case was registered as an adjacent diagnostic rather than a primary acceptance
+gate, and fixing it requires a separate async-lifecycle objective.  Value: make
+dependent execution reliably stop after prerequisite failure.  Risk of
+deferral: occasional wasted work or an invalid dependent result after timeout.
+P2 neither hides the miss nor widens into that redesign.
 
 The local review also found a pre-existing nightly collection weakness: the
 no-argument runner can proceed with a nonempty subset if pytest reports an

@@ -954,7 +954,7 @@ def test_p0_appendix_and_p2_summary_match_the_current_capture(census):
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
-        "| Assist role instructions | Current custom main template: role, routing, trust, research, artifact, and lifecycle procedure | 13,068 | 3,267 |",
+            "| Assist role instructions | P0 baseline custom main template: role, routing, trust, research, artifact, and lifecycle procedure | 13,068 | 3,267 |",
         "| Prompt composer | Separator between caller and framework prompt | 2 | 1 |",
         "| Deep Agents base | Generic core behavior, objectivity, task execution, clarification, and progress guidance | 2,257 | 565 |",
         "| LangChain TODO middleware | Planning mechanics and TODO lifecycle | 1,076 | 269 |",

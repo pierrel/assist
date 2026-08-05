@@ -910,7 +910,7 @@ Do not claim an action succeeded until its authoritative result or resulting art
 Respond concisely with the useful result, material evidence, any failed or unfinished part, and the next owner decision only when one is genuinely needed.
 #+end_src
 
-*** Current complete web-main bootstrap request
+*** Historical P0 complete web-main bootstrap request
 
 This appendix is the exact flattened system message captured at the final model
 boundary for the fixed-time, empty-memory, inactive-rider production web sandbox
@@ -921,7 +921,7 @@ provider-bound request fields, not system-message prose.
 
 | Owner/section | Summary | Exact characters | Approx. tokens |
 |---------------+---------+-----------------:|---------------:|
-| Assist role instructions | Current custom main template: role, routing, trust, research, artifact, and lifecycle procedure | 13,068 | 3,267 |
+| Assist role instructions | P0 baseline custom main template: role, routing, trust, research, artifact, and lifecycle procedure | 13,068 | 3,267 |
 | Prompt composer | Separator between caller and framework prompt | 2 | 1 |
 | Deep Agents base | Generic core behavior, objectivity, task execution, clarification, and progress guidance | 2,257 | 565 |
 | LangChain TODO middleware | Planning mechanics and TODO lifecycle | 1,076 | 269 |
@@ -1729,7 +1729,8 @@ instruction move rather than an untested P2 rewrite.
   clauses; they do not force P2 to test a procedure it no longer changes.
 - No delegate prompt mentions outer task lifecycle, parent history access, or a
   capability absent from the delegate graph.
-- The P0 mismatch report is clean for both profiles.
+- The deletion introduces no new main/delegate mismatch; the known P0 findings
+  remain preserved in the census.
 
 ** Expected learning
 
