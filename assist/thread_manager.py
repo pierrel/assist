@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 # the web host's approval transport.  Scoped here BY DESIGN: ThreadManager is the
 # web app's agent builder (emacsos builds its own Thread/spec; the eval harness uses
 # create_agent directly), so these web-only skills never reach surfaces with no web
-# view (nor the eval agents).  The route keeps its historical render-skill name.
+# view.  The eval harness may mount the route explicitly for render coverage.  The
+# route keeps its historical render-skill name.
 _RENDER_SKILL_ROUTE = "/render-skill/"
 _RENDER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "web_skills")
 _render_skill_sources = None

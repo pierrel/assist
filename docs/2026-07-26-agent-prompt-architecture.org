@@ -3,8 +3,8 @@
 
 * State
 
-Status: architecture approved; P0, P1, P1b, P1c, P2, and P2b.1 complete;
-P2b.2 implementation and evaluation in progress; P0b deferred.
+Status: architecture approved; P0, P1, P1b, P1c, P2, P2b.1, and P2b.2 complete;
+P0b deferred.
 P2's duplicate-procedure deletion passed its registered functional and timing
 gates.  A post-review cleanup then removed an empty synchronous planning heading;
 the qualified async rendering stayed byte-identical and the affected delegate
