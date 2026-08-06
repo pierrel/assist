@@ -383,6 +383,24 @@ counts were travel 4, directions 5, website download 5, day-of-month scheduling
 email 5, time control 5, and urgent notification 0.  The byte-identical
 candidate N=5 comparison follows after the required GPU cooldown.
 
+** Post-review candidate N=5
+
+The candidate N=5 block also completed all 55 samples with valid XML and no
+timeout or harness error.  It passed 43/55 overall (78.2 percent): 25/35
+natural outcomes (71.4 percent), 13/15 capability diagnostics, and 5/5
+control.  Per-node counts were travel 5, directions 5, website download 5,
+day-of-month scheduling 3, subscription 5, referential follow-up 0, async
+delegation 5, render 5, email 5, time control 5, and urgent notification 0.
+
+Candidate therefore improves +8 overall and +5 natural outcomes, clears the
+70 percent natural floor, and meets or exceeds baseline on every node.  The
+remaining failures repeat previously observed classes: referential follow-up
+does not reliably reactivate and modify the schedule, day scheduling sometimes
+loads but does not invoke its tool, and urgent notification calls =notify=
+exactly once only after exploratory skill loads.  There is still no hidden-tool,
+unavailable-schema, timeout, or harness failure.  No prompt or implementation
+tuning is warranted before the pre-registered N=10 stability cadence.
+
 * Design-review resolution
 
 - Simplicity and clean-interface review rejected a global owner manifest and
