@@ -941,6 +941,7 @@ then run the natural/capability cohorts.  See [[file:docs/2026-07-26-agent-promp
 Completed on 2026-08-06 in =1dab6fe=: the stability candidate passed 87/110
 overall and 50/70 natural, met or exceeded all eleven P2b.1 baseline nodes, and
 reduced initial provider schemas from 30 to 15.  See
+[[https://github.com/pierrel/assist/pull/230][PR #230]] and
 [[file:docs/2026-08-05-prompt-architecture-p2b2.org][the P2b.2 state record]].
 **** TODO P2b.3: Apply the contract to domain and embedder skills
 Use the same winning-skill declaration and current composed tool registry for
