@@ -54,8 +54,8 @@ _triage_skill_sources_cache = None
 
 def _web_skill_sources() -> dict:
     """Route -> backend for the web AgentSpec's render skill.  Built lazily so the
-    FilesystemBackend import defers deepagents' transitive imports off module load
-    (same pattern as emacsos-server's _skill_sources)."""
+    bundled-backend construction and deepagents' transitive imports stay off module
+    load (same pattern as emacsos-server's _skill_sources)."""
     global _render_skill_sources
     if _render_skill_sources is None:
         from assist.backends import create_bundled_skills_backend
