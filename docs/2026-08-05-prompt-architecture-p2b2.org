@@ -373,6 +373,16 @@ seen in two of three baseline samples.  The referential follow-up remains 0/3
 on both sides.  No hidden-tool rejection or unavailable-schema failure appeared,
 so the experiment proceeds unchanged to the pre-registered N=5 cadence.
 
+** Post-review baseline N=5
+
+The fresh P2b.1 N=5 block completed all 55 samples with valid XML and no
+timeout or harness error.  It passed 35/55 overall: 20/35 natural outcomes
+(57.1 percent), 10/15 capability diagnostics, and 5/5 control.  Per-node pass
+counts were travel 4, directions 5, website download 5, day-of-month scheduling
+1, subscription 0, referential follow-up 0, async delegation 5, render 5,
+email 5, time control 5, and urgent notification 0.  The byte-identical
+candidate N=5 comparison follows after the required GPU cooldown.
+
 * Design-review resolution
 
 - Simplicity and clean-interface review rejected a global owner manifest and
