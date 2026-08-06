@@ -100,9 +100,18 @@ class ReadOnlyFilesystemBackend(FilesystemBackend):
                 for path, _content in files]
 
 
+class BundledSkillsBackend(ReadOnlyFilesystemBackend):
+    """Read-only backend marking an Assist-owned packaged skill route."""
+
+
 def create_skills_backend(root_dir: str) -> BackendProtocol:
-    """Return the shared read-only backend used for packaged agent skills."""
+    """Return a read-only backend for a skill tree."""
     return ReadOnlyFilesystemBackend(root_dir=root_dir, virtual_mode=True)
+
+
+def create_bundled_skills_backend(root_dir: str) -> BackendProtocol:
+    """Return a read-only backend marked as an Assist-owned skill tree."""
+    return BundledSkillsBackend(root_dir=root_dir, virtual_mode=True)
 
 # Domain skills live in the cloned repo at <working_dir>/.claude/skills/ — the
 # agentskills.io open-standard path that Claude Code and the Agent SDK also read
@@ -117,7 +126,7 @@ DOMAIN_SKILLS_PATH = "/.claude/skills/"
 
 def routes(stateful_paths: list[str]) -> dict:
     routes = {path: StateBackend() for path in stateful_paths}
-    routes[SKILLS_ROUTE] = create_skills_backend(SKILLS_DIR)
+    routes[SKILLS_ROUTE] = create_bundled_skills_backend(SKILLS_DIR)
     return routes
 
 

@@ -11,7 +11,7 @@ from unittest import TestCase
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem
+from .utils import create_filesystem, skill_was_loaded
 
 
 class TestTravelAgent(TestCase):
@@ -34,6 +34,8 @@ class TestTravelAgent(TestCase):
         agent = self._agent()
         agent.message("How long does it take to get from the Ferry Building to "
                       "Oakland City Hall?")
+        self.assertTrue(skill_was_loaded(agent, "travel"),
+                        "expected the agent to load the travel skill")
         self.assertTrue(self._called_travel(agent),
                         "expected the agent to call the travel tool")
 
@@ -41,5 +43,7 @@ class TestTravelAgent(TestCase):
         agent = self._agent()
         agent.message("Is it faster to bike or drive from Civic Center to the "
                       "Mission in San Francisco?")
+        self.assertTrue(skill_was_loaded(agent, "travel"),
+                        "expected the agent to load the travel skill")
         self.assertTrue(self._called_travel(agent),
                         "expected the agent to call the travel tool")

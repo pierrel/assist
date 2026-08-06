@@ -1,0 +1,509 @@
+#+title: Prompt architecture P2b.2: bundled skill tool disclosure
+
+* State
+
+Status: implementation, bounded local review, and comparative evaluation are
+complete.  The candidate passes every deterministic and behavioral gate.
+
+* Change log
+
+** 2026-08-05: Bounded implementation-review corrections
+
+- Preserved provider history when rejecting a response that mixes hidden and
+  visible calls.  The response now receives one paired error result for every
+  call and jumps back to the model; no sibling call executes or reaches HITL.
+- Replaced backend-class inference with an explicit packaged-skill backend
+  marker.  Generic read-only embedder routes remain external, and longest-source
+  matching prevents a nested external route from being claimed by a bundled
+  parent prefix.
+- Intersected each declaration with the tools registered in that exact agent
+  profile.  A shared declaration can keep its full portable owner list without
+  disclosing tools absent from this graph.
+- Restored the nested provider-schema dict form accepted by =AgentSpec.tools=;
+  registered-name extraction now covers the same BaseTool, callable, and dict
+  shapes as graph construction.
+- Kept inbound SMS triage on its pre-P2b skill prompt, loader, shared-skill
+  backend, and render backend.  This uses its existing composition boundary and
+  adds no triage permission or authorization mechanism.
+- Restored HITL propagation to the declarative critique subagent, which can
+  inherit main-agent tools under Deep Agents even though fixed compiled
+  context/research agents do not.
+- Added deterministic coverage for invalid bytes, parallel union, async reset,
+  prose-only claims, nested sources, registered-tool intersection, critique
+  HITL, and triage composition.  Consolidated changed evals on one tool-call
+  traversal helper.
+
+** 2026-08-05: Reviewed design
+
+- Scoped this child to winning bundled Assist, main-only, and web-only skills.
+  Domain-repository skills and embedder-owned skill/tool representations remain
+  baseline-visible until P2b.3.
+- Reused Deep Agents' winning =skills_metadata= and the existing packaged
+  read-only skill backends.  There is no second skill manifest, copied kernel
+  list, router, or tool-owner registry in production.
+- Derived both provider visibility and execution permission from one allowed-set
+  calculation over the actual request, successful invocation-local loads, and
+  the winning bundled declarations.
+- Added a pre-HITL rejection seam after review found that the framework's
+  default after-model order could otherwise interrupt on a hallucinated hidden
+  outward-effect call before the execution wrapper rejected it.
+- Kept =notify= baseline-visible and retained its urgent-first instruction.  The
+  strict urgent notification control requires it to be the first effect and to
+  occur exactly once.  SMS triage remains unchanged.
+- Added pronoun-only scheduling follow-up coverage after the user-experience
+  review identified invocation reset as a risk to an active task such as
+  “make it 8 instead.”
+
+** 2026-08-05: Current deterministic implementation evidence
+
+- The canonical initial web-main system message is 29,527 characters, about
+  7,382 tokens at the program's four-characters-per-token estimate.  Its 15
+  provider-bound schemas are 17,956 characters, about 4,489 tokens.  The
+  combined bootstrap is 47,483 characters, about 11,871 tokens.
+- Against the frozen P0/P2b.1 census, initial schema count is down 50 percent,
+  schema characters 36.0 percent, system-prompt characters 5.6 percent, and
+  combined bootstrap characters 19.9 percent.
+- After loading =send-email=, the same request has 16 schemas totaling 18,414
+  characters; =send_email= is then handled by the unchanged approval pause.
+- The bounded synthetic census records 29 provider calls, 38 construction
+  nodes, 25 retained audit findings, successful-load artifacts, and is
+  2,992,683 bytes with SHA-256
+  =d3a0ce22fcf4be92c97423742fc66ebc85ea4b2dc575246b4316625dda82b45d=.
+- These measurements include the post-review tool-name deduplication fix and are pinned
+  by the deterministic census test.  They will be regenerated after any later
+  implementation edit.
+- The final pre-eval deterministic suite passes 1,606 tests with 2 skipped and
+  2 subtests passed.  Python compilation and =git diff --check= also pass.
+
+* Objective
+
+P2b.2 makes bundled skill tools visible only after the model successfully loads
+their winning skill during the current graph invocation.  It reduces irrelevant
+provider schemas without changing the registered executable graph, outward-
+effect approval, fixed-role agents, memory authority, development guidance, or
+SMS triage.
+
+This is the second independently reviewed child of the approved P2b milestone
+in [[file:2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-declare][the program design]].
+
+* Boundary
+
+** In scope
+
+- winning skills under the packaged =/skills/=, =/main-skills/=, and web-only
+  packaged skill routes;
+- exact =allowed-tools= names already validated by P2b.1;
+- invocation-local successful-load state;
+- filtering the final model request and rejecting calls outside the same
+  allowed set;
+- deterministic load evidence and prompt/schema measurements;
+- natural and explicit-capability evals for bundled workflows.
+
+** Deferred to P2b.3
+
+- =/.claude/skills/= domain-repository ownership and activation;
+- arbitrary =AgentSpec.skill_sources= and embedder tool representations;
+- external/bundled name-collision policy beyond the supported-composition
+  duplicate-name gate established in P2b.1;
+- any new =AgentSpec= provenance field.
+
+** Explicitly unchanged
+
+- =notify= and the urgent notification prompt;
+- inbound SMS triage's tool set, routing, permissions, prompts, and backends;
+- memory read/write authority;
+- development guidance;
+- fixed-role agents that do not mount skills;
+- Pi runtime/provider work.
+
+* Design
+
+** One source of disclosure truth
+
+=SmallModelSkillsMiddleware= already receives the composed backend and ordered
+skill sources.  Deep Agents loads those sources before the graph loop and stores
+the last-source-wins metadata in =skills_metadata=.  P2b.2 uses that exact
+winner set.
+
+A winning skill is bundled only when its metadata path belongs to a route backed
+by Assist's explicit packaged-skill backend marker.  A generic read-only backend
+does not imply Assist ownership.  The built-in and
+main-only routes are bundled unless an embedder overrides them.  The web
+composition mounts its existing packaged web skill directory through the same
+marked backend.  When source prefixes nest, the longest matching configured
+source owns the path.  A losing, shadowed, domain, mutable, or arbitrary embedder
+source contributes no gated names in this child.
+
+For each model request:
+
+1. collect exact declared names from winning bundled skills;
+2. retain every actual request tool whose name is not in that collection;
+3. additionally retain declared names activated by a successful load in this
+   invocation; and
+4. preserve the retained request's original tool order and schemas.
+
+This makes framework tools, async lifecycle tools, =load_skill=, =notify=, and
+all P2b.3 migration exceptions visible by construction.  A composition that
+does not mount =render= does not gate =map_data= merely because another profile
+has that owner.
+
+The prompt line is generated from the retained request itself:
+
+: Tools available for this response: <ordered exact names>.
+
+It is intentionally not called a kernel list because the retained request may
+contain baseline-visible migration exceptions.  It gives no preference or
+first-call ordering among those tools.
+
+** Invocation-local activation
+
+The middleware adds one private graph-state field containing a set of disclosed
+tool names.  Its reducer is set union, so concurrent successful loads combine
+deterministically.  =before_agent= resets the field with LangGraph's overwrite
+value on each new graph invocation.  A paused approval continuation resumes the
+same invocation and retains the set; a later turn begins empty even when the
+thread checkpoint still contains skill metadata.
+
+=load_skill(name)= resolves an exact winning metadata entry and downloads only
+that recorded path.  It enforces the upstream 10 MiB skill-file limit before
+UTF-8 decoding.  On success it returns a =Command= containing the matching
+=ToolMessage= and the union-state update.  The model-visible result is the
+sanitized complete winning skill file plus the exact newly available names.  Missing, failed,
+oversized, non-UTF-8, or fabricated names return an error message and no state
+or evidence update.  Prose that mentions a skill cannot update private state.
+
+The skill prompt requires a matching =load_skill= to be the only call in that
+model response.  The model waits for its result and uses newly available tools
+in the next response.  Matching includes an active prior task when the latest
+message is a referential follow-up, not only literal keywords in the newest
+message.
+
+** Schema and execution agree
+
+The model-request wrapper removes hidden schemas using the derived allowed set.
+The tool-call wrapper uses the same calculation and returns a corrective error
+without invoking a hidden tool.  Parallel calls receive the same pre-node state,
+so =load_skill= and a sibling hidden tool in one model response cannot disclose
+the sibling retroactively.
+
+Outward-effect tools require one more ordering guarantee.  Deep Agents normally
+appends =HumanInTheLoopMiddleware= after caller middleware, and after-model hooks
+run in reverse order.  A hallucinated hidden =send_email= call could therefore
+pause for approval before reaching tool execution.  Assist installs the same
+HITL middleware explicitly immediately before the skills middleware.  The
+skills after-model hook first completes every call ID in an invalid mixed
+response with an error and jumps back to the model.  HITL therefore sees none of
+that response, and the model retries with a valid call set.  The execution
+wrapper remains the second defense.  Approval configuration and decisions are
+otherwise unchanged.  Declarative subagents receive the same HITL map because
+Deep Agents can give them inherited tools.
+
+** Load evidence
+
+Each successful load attaches a non-model-visible artifact with exactly:
+
+- =schema=;
+- =requested_name=;
+- =winner_fingerprint=; and
+- =result_sha256=.
+
+The winner fingerprint hashes canonical JSON containing the winning name,
+description, digest of the decoded complete skill file before display
+sanitization, and ordered declared names.  It contains
+no host path.  =result_sha256= covers the exact sanitized model-visible content.
+Failures have no artifact.
+
+The artifact is audit/provenance evidence, not authority.  Tool activation comes
+only from the middleware's private state update produced by the real loader.
+P2c must not accept a user- or model-fabricated artifact as authorization when it
+later experiments with catalog-description suppression.
+
+* Implementation plan
+
+1. Add focused red tests for reset, successful/failed loads, parallel union,
+   source precedence, exact evidence, request order, sync/async parity,
+   after-model pre-HITL rejection, and execution rejection.
+2. Extend =SmallModelSkillsMiddleware= with the private reducer state, exact
+   winner loader, one allowed-set helper, model filtering, and call rejection.
+3. Mark packaged web skill routing with the existing read-only skill backend and
+   pass the exact bundled route set from =create_agent=.  Install existing HITL
+   middleware before the skills middleware rather than through Deep Agents'
+   tail argument.
+4. Extend the P0 census/deterministic evidence only where needed to record
+   initial and post-load request schemas and the load artifact.  Do not move the
+   runtime implementation into EDD.
+5. Add natural and explicit-capability evals, run the pre-registered cadence,
+   reconcile this doc against the implementation, and close only P2b.2 in the
+   roadmap if every gate passes.
+
+* Test and experiment gate
+
+** Deterministic
+
+- Startup provider schemas omit exactly the declared tools of mounted winning
+  bundled skills and retain original order for everything else.
+- A successful exact load exposes only that winner's declared names on the next
+  request in the same invocation; a new invocation resets them.
+- Two successful parallel loads union; a same-response hidden sibling call is
+  rejected.
+- Failed, fabricated, oversized, non-UTF-8, shadowed, and prose-only cases do not
+  disclose a name or emit success evidence.
+- Sync and async graph paths produce the same visibility and rejection results.
+- A hidden HITL tool is rejected before approval; a disclosed one still pauses
+  under the existing review contract.
+- The evidence schema has exactly four keys; its fingerprint has no host path;
+  and its result digest matches the exact model-visible content after
+  sanitization.
+- Kernel-only and unrelated requests add no skill round trip.  A scoped request
+  adds at most the existing one load round trip.
+- Fixed-role, role-omission, URL provenance, read-only, HITL, SMS-triage, and
+  urgent-notification deterministic tests remain green.
+
+** Behavioral
+
+Compare candidate and merged-P2b.1 baseline on natural and capability coverage
+for:
+
+1. travel and directions;
+2. reading a user-specified site;
+3. scheduling and subscriptions, including a pronoun-only follow-up;
+4. complex-request delegation;
+5. render and approved email outward effects;
+6. an unrelated kernel-only request; and
+7. urgent notification as a causal control.
+
+Natural acceptance stays at or above 70 percent and may not regress below its
+pre-registered baseline.  Capability diagnostics separately identify whether a
+failure was load selection, disclosure, tool selection, execution, or final
+outcome.  The urgent control passes only when =notify= is the first effect and
+is called exactly once.  Every cadence reports prompt characters/tokens, schema
+characters/tokens, wrong-skill loads, unavailable-tool calls, unnecessary
+loads, and round trips.
+
+Run N=3 after implementation, N=5 after local review, and N=10 for stability.
+Stop rather than tune around a regression in an adjacent cohort.
+
+** Pre-registered cohort and execution budget
+
+The comparative cohort is frozen before its first P2b.2 model call at these
+eleven nodes:
+
+1. =TestTravelAgent::test_calls_travel_for_distance_question=;
+2. =TestDirectionsAgent::test_step_by_step_calls_directions=;
+3. =TestWebsiteDownload::test_download_converges_without_crawling=;
+4. =TestScheduleAgent::test_agent_maps_day_of_month=;
+5. =TestSubscriptionAgent::test_natural_request_loads_skill_and_creates_subscription=;
+6. =TestScheduleAgent::test_referential_followup_reloads_skill_and_modifies_schedule=;
+7. =TestAsyncSubagentSupervisor::test_natural_two_independent_outcomes_delegate=;
+8. =TestRenderAgent::test_creates_and_renders_requested_graph=;
+9. =TestSendEmailSkill::test_natural_request_loads_skill_and_proposes_one_email=;
+10. =TestTimeAgent::test_does_not_load_on_non_date_prompt=; and
+11. =TestUrgentNotification::test_imminent_deadline_is_flagged_with_a_message=.
+
+Nodes 3, 5, 6, 7, 8, 9, and 11 are natural outcome journeys.  Nodes 1, 2,
+and 4 are explicit capability diagnostics retained to localize routing or
+argument failures.  Node 10 is the causal no-load control.  Capability and
+control results are reported separately from the natural acceptance rate.
+
+The unchanged baseline is merged P2b.1 commit =d981395=.  Baseline execution
+uses that production tree with only the frozen candidate eval files overlaid,
+so prompts, fixtures, and validators are byte-identical while runtime code is
+not.  The new subscription and referential-follow-up cases are part of the
+same comparison, not candidate-only evidence.
+
+Each sample has one user subject turn except the scheduling follow-up, which
+has two.  The async case starts the two requested synthetic delegates, processes
+their completion wakes, and makes one qualified-judge call; all other cases
+make no judge call and either use no subagent or the existing deterministic
+research stub.  Thus N=3 is 33 samples, 36 user turns, six synthetic delegate
+starts, and three judge calls per side.  N=5 is 55 samples and N=10 is 110.
+
+Recent P2b.1 focused runs on the unchanged model measured a roughly 20-second
+one-case median and 75-second p90.  Use a 300-second per-case deadline.  At the
+p90 bound, partition each N=10 side into blocks of at most 40 samples (50 GPU
+minutes), with the required GPU cooldown between blocks.  N=3 projects to about
+14 GPU minutes per side at p90; the async and website cases may make actual wall
+time higher but remain individually bounded.  Store every run under
+=~/deploy/assist/prompt-architecture/p2b2/= and never on the root partition.
+
+The comparison gate is per node: the N=10 candidate full-pass count must meet
+the byte-identical N=10 baseline and the 70 percent natural floor.  The N=3
+result is diagnostic.  Deterministic load/disclose/execute tests localize a
+failure before any prompt tuning; no cohort prompt changes are allowed after
+launch.
+
+** Preliminary baseline N=3
+
+The first baseline launch had no =.dev.env= in its detached worktree and is
+preserved as invalid infrastructure evidence.  The bounded replacement ran the
+merged P2b.1 runtime with the frozen candidate eval files.  The new subscription
+fixture first supplied a UUID where the store contract requires a string.  Its
+first correction then exposed a second production-shaped fixture omission: the
+real web app creates the thread directory before the per-thread store writes,
+but the isolated eval had created only the store root.  Both invalid attempts
+are preserved and excluded.  The final fixture creates its string-named thread
+directory and will be rerun unchanged on both sides.
+
+The final subscription fixture then ran without infrastructure errors and
+failed its intended =subscribe-events= load assertion in all three samples.
+The complete P2b.1 diagnostic baseline is therefore 24/33 overall: 13/21
+natural outcomes, 8/9 capability diagnostics, and 3/3 control.  Travel,
+directions, website download, async delegation, render, email, and the time
+control each passed 3/3; day-of-month scheduling passed 2/3; subscription and
+the referential follow-up passed 0/3; and urgent notification passed 1/3.
+These are diagnostic N=3 results, not a final gate; the candidate result follows.
+
+** Candidate N=3
+
+The frozen, rebased candidate completed all 33 samples with no timeout,
+collection error, or other harness failure.  It passed 25/33 overall: 15/21
+natural outcomes (71.4 percent), 7/9 capability diagnostics, and 3/3 control.
+Travel, directions, website download, subscription, async delegation, render,
+email, and the time control passed 3/3; day-of-month scheduling passed 1/3; the
+referential follow-up and urgent notification passed 0/3.
+
+This is +1 overall and +2 natural outcomes versus baseline.  The principal
+P2b.2 journey, natural subscription creation, improved from 0/3 to 3/3 and
+completed the intended load, disclosure, and tool execution.  The two failed
+day-of-month samples successfully loaded =schedule= but ended before invoking
+=create_schedule=.  Each urgent sample invoked =notify= exactly once but first
+loaded schedule/time-related skills, the same strict first-effect failure class
+seen in two of three baseline samples.  The referential follow-up remains 0/3
+on both sides.  No hidden-tool rejection or unavailable-schema failure appeared,
+so the experiment proceeds unchanged to the pre-registered N=5 cadence.
+
+** Post-review baseline N=5
+
+The fresh P2b.1 N=5 block completed all 55 samples with valid XML and no
+timeout or harness error.  It passed 35/55 overall: 20/35 natural outcomes
+(57.1 percent), 10/15 capability diagnostics, and 5/5 control.  Per-node pass
+counts were travel 4, directions 5, website download 5, day-of-month scheduling
+1, subscription 0, referential follow-up 0, async delegation 5, render 5,
+email 5, time control 5, and urgent notification 0.  The byte-identical
+candidate N=5 comparison follows after the required GPU cooldown.
+
+** Post-review candidate N=5
+
+The candidate N=5 block also completed all 55 samples with valid XML and no
+timeout or harness error.  It passed 43/55 overall (78.2 percent): 25/35
+natural outcomes (71.4 percent), 13/15 capability diagnostics, and 5/5
+control.  Per-node counts were travel 5, directions 5, website download 5,
+day-of-month scheduling 3, subscription 5, referential follow-up 0, async
+delegation 5, render 5, email 5, time control 5, and urgent notification 0.
+
+Candidate therefore improves +8 overall and +5 natural outcomes, clears the
+70 percent natural floor, and meets or exceeds baseline on every node.  The
+remaining failures repeat previously observed classes: referential follow-up
+does not reliably reactivate and modify the schedule, day scheduling sometimes
+loads but does not invoke its tool, and urgent notification calls =notify=
+exactly once only after exploratory skill loads.  There is still no hidden-tool,
+unavailable-schema, timeout, or harness failure.  No prompt or implementation
+tuning is warranted before the pre-registered N=10 stability cadence.
+
+** Stability baseline N=10
+
+The P2b.1 stability side completed 110/110 valid samples in four bounded GPU
+blocks, with the required cooldowns and no timeout or harness error.  It passed
+72/110 overall (65.5 percent): 41/70 natural outcomes (58.6 percent), 21/30
+capability diagnostics, and 10/10 control.  Per-node counts are travel 9,
+directions 10, website download 10, day-of-month scheduling 2, subscription 1,
+referential follow-up 0, async delegation 10, render 10, email 10, time control
+10, and urgent notification 0.  These counts are the final per-node stability
+bar for the candidate; the candidate N=10 side follows unchanged.
+
+** Stability candidate N=10
+
+The candidate side also completed 110/110 valid samples in four bounded GPU
+blocks, with no timeout or harness error.  It passed 87/110 overall (79.1
+percent): 50/70 natural outcomes (71.4 percent), 27/30 capability diagnostics,
+and 10/10 control.  Per-node counts are travel 10, directions 10, website
+download 10, day-of-month scheduling 7, subscription 10, referential follow-up
+0, async delegation 10, render 10, email 10, time control 10, and urgent
+notification 0.
+
+Candidate therefore improves +15 overall, +9 natural outcomes, and +6
+capability diagnostics.  It clears the 70 percent natural floor and meets or
+exceeds baseline on every node: travel 10>=9, directions 10=10, website 10=10,
+schedule 7>=2, subscription 10>=1, referential 0=0, async/render/email/time
+10=10, and urgent 0=0.  The narrow 71.4 percent natural margin is an honest
+limitation: referential schedule modification and notify-first urgency remain
+weak on both sides.  They are not P2b.2 regressions and this experiment does
+not tune unrelated behavior around them.
+
+* Design-review resolution
+
+- Simplicity and clean-interface review rejected a global owner manifest and
+  moving web route constants.  Winning metadata plus packaged-backend identity
+  is sufficient.
+- User-guidance review required an exclusive load response and neutral retained-
+  tool wording.
+- User-experience review added active-task referent guidance and the pronoun-only
+  follow-up case.
+- Framework review found the =ToolRuntime=/=Command= terminator requirement,
+  sync/async parity, reverse after-model order, and later output sanitization.
+- Security review confirmed exact winning-path loading, the byte bound,
+  duplicate-name gates for supported compositions, and that evidence must never
+  become authorization.
+
+* Implementation notes
+
+** What was hard
+
+The hard part in design was not the filtering algorithm.  It was locating the
+actual framework seams that preserve one invariant across schemas, execution,
+approval, parallel tool calls, checkpoints, and sanitization.  In particular,
+Deep Agents appends HITL after caller middleware while LangChain runs after-model
+hooks in reverse, and a state-updating tool must return a =Command= with a
+matching =tool_call_id= terminator.  Those contracts were verified from the
+installed Deep Agents, LangChain, and LangGraph sources.
+
+The first implementation review found two additional framework-shaped details.
+Removing hidden calls from an =AIMessage= would leave orphaned tool results in
+provider history, so an invalid mixed response must be completed as a whole and
+retried.  Also, declarative Deep Agents subagents may inherit parent tools, so
+moving HITL from =create_deep_agent(interrupt_on=...)= into explicit middleware
+requires forwarding the same gate to that declarative subagent.  Both fixes are
+small, local, and deterministically tested.
+
+Preserving the explicit “do not change SMS triage” boundary also required care.
+The normal web render route must be marked bundled for this experiment, while
+triage must retain the exact pre-P2b shared and render backends so neither its
+prompt nor schemas change.  The implementation uses the existing triage
+composition seam with two legacy backend entries; it does not add a new triage
+agent, authorization rule, or tool registry.
+
+The initial architect and lens-review invocations also read far beyond the
+bounded question and overran their expected context.  The first code-review
+round repeated that cost, producing very large logs and several broad or
+theoretical suggestions.  Only findings directly affecting P2b.2 were accepted:
+history pairing, HITL ordering/propagation, source ownership, per-profile tool
+intersection, production-shaped render coverage, triage parity, and explicit
+design gates.  ID-less-call recovery and broad graph-matrix expansion were
+declined without an observed contract.  No unrelated production cleanup is part
+of this child.
+
+The local code-review loop converged at its five-round cap.  All verified
+P2b.2 findings were fixed: provider-history pairing, HITL ordering and
+declarative-subagent propagation, explicit/longest source ownership,
+per-profile tool intersection, nested dict-form tools, exact triage parity,
+raw-file fingerprints versus sanitized results, bounded backend errors, and
+shared eval traversal.  The rejected items were theoretical ID-less call
+recovery and broad graph-matrix expansion without an observed contract.
+
+The final diff is 25 files, +1,801/-252 lines: production +412/-64,
+tests/evals +807/-152, and docs/roadmap +582/-36.  Most production logic is confined to
+=SmallModelSkillsMiddleware=; the other production edits mark packaged skill
+backends, preserve triage's existing composition seam, and install the existing
+HITL middleware in the required order.  No new registry, router, authorization
+model, =AgentSpec= provenance field, SMS behavior, memory policy, development
+guidance, or Pi/runtime integration was added.
+
+The final deterministic suite passes 1,606 tests with 2 skipped and 2 subtests
+passed; compilation and =git diff --check= pass.  Local review ran five rounds,
+fixed every verified in-scope finding, and rejected only theoretical recovery
+or broad matrix work without an observed contract.  The N=3, N=5, and N=10
+candidate cohorts all beat aggregate baseline, and the decisive N=10 result
+meets every per-node bar plus the natural floor.  The remaining hard points are
+the framework ordering/state contracts described above and the pre-existing
+referential/urgent behavioral weaknesses, which are reported rather than
+expanded into this objective.

@@ -40,29 +40,48 @@ from assist.agent import create_context_agent, create_research_agent
 
 logger = logging.getLogger(__name__)
 
-# The web app's main agent gets a web-only "render" skill: it tells the model to
-# embed a workspace file in the web view by emitting a ```render block (parsed by
-# manage/web/threads.py).  Scoped here BY DESIGN: ThreadManager is the web app's
-# agent builder (emacsos builds its own Thread/spec; the eval harness uses
-# create_agent directly), so the web-only render skill rides the web-only builder
-# and never reaches surfaces with no web view (nor the eval agents).
+# The web app's main agent gets web-only skills: ``render`` emits a workspace-file
+# block for the web view (parsed by manage/web/threads.py), and ``send-email`` uses
+# the web host's approval transport.  Scoped here BY DESIGN: ThreadManager is the
+# web app's agent builder (emacsos builds its own Thread/spec; the eval harness uses
+# create_agent directly), so these web-only skills never reach surfaces with no web
+# view.  The eval harness may mount the route explicitly for render coverage.  The
+# route keeps its historical render-skill name.
 _RENDER_SKILL_ROUTE = "/render-skill/"
 _RENDER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "web_skills")
 _render_skill_sources = None
+_triage_skill_sources_cache = None
 
 
 def _web_skill_sources() -> dict:
-    """Route -> backend for the web AgentSpec's render skill.  Built lazily so the
-    FilesystemBackend import defers deepagents' transitive imports off module load
-    (same pattern as emacsos-server's _skill_sources)."""
+    """Route -> backend for the web AgentSpec's web-only skills.
+
+    The route keeps its historical ``render-skill`` name although it serves both
+    the render and send-email skills.  Build it lazily so bundled-backend
+    construction and deepagents' transitive imports stay off module load (same
+    pattern as emacsos-server's ``_skill_sources``).
+    """
     global _render_skill_sources
     if _render_skill_sources is None:
-        from deepagents.backends import FilesystemBackend
+        from assist.backends import create_bundled_skills_backend
         _render_skill_sources = {
-            _RENDER_SKILL_ROUTE: FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
-                                                   virtual_mode=True)
+            _RENDER_SKILL_ROUTE: create_bundled_skills_backend(_RENDER_SKILLS_DIR)
         }
     return _render_skill_sources
+
+
+def _triage_skill_sources() -> dict:
+    """The unchanged pre-P2b skill backends used by inbound SMS triage."""
+    global _triage_skill_sources_cache
+    if _triage_skill_sources_cache is None:
+        from deepagents.backends import FilesystemBackend
+        from assist.backends import SKILLS_DIR, SKILLS_ROUTE, create_skills_backend
+        _triage_skill_sources_cache = {
+            SKILLS_ROUTE: create_skills_backend(SKILLS_DIR),
+            _RENDER_SKILL_ROUTE: FilesystemBackend(
+                root_dir=_RENDER_SKILLS_DIR, virtual_mode=True)
+        }
+    return _triage_skill_sources_cache
 
 
 # The web app's main agent also gets the schedule tools, injected by the web composition
@@ -334,7 +353,9 @@ class ThreadManager:
         return Thread(
             working_dir, **thread_kwargs,
             spec=AgentSpec(
-                skill_sources=_web_skill_sources(), tools=tools,
+                skill_sources=(_triage_skill_sources() if triage
+                               else _web_skill_sources()),
+                tools=tools,
                 async_subagent_tools=async_tools,
                 interrupt_on=interrupt_on))
 

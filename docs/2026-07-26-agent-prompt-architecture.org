@@ -3,8 +3,8 @@
 
 * State
 
-Status: architecture approved; P0, P1, P1b, P1c, and P2 complete; P2b.1 gates
-complete in PR #227 pending merge; P0b deferred.
+Status: architecture approved; P0, P1, P1b, P1c, P2, P2b.1, and P2b.2 complete;
+P0b deferred.
 P2's duplicate-procedure deletion passed its registered functional and timing
 gates.  A post-review cleanup then removed an empty synchronous planning heading;
 the qualified async rendering stayed byte-identical and the affected delegate
@@ -12,6 +12,23 @@ skill case passed the bounded 3/3 follow-up selected for that cleanup.  See
 [[file:2026-08-04-prompt-architecture-p2.org][the P2 state record]].
 
 ** Change log
+
+*** 2026-08-05: P2b.2 bundled disclosure implementation
+
+- Began P2b.2 from merged P2b.1 commit =d981395=.  The current candidate gates
+  only winning Assist-owned packaged routes and leaves domain/embedder sources
+  visible until P2b.3.
+- Source ownership now uses an explicit packaged backend marker plus
+  longest-prefix matching; declarations are intersected with each graph's
+  registered tools.
+- Invalid mixed responses retain every call ID, receive paired errors, and
+  return to the model before HITL.  Declarative subagents retain the parent HITL
+  map for any inherited effect tools.
+- Inbound SMS triage remains on its pre-P2b skills prompt, loader, and backends
+  through its existing composition seam.  No SMS permission or behavior is
+  part of this experiment.
+- The detailed implementation and evidence record is
+  [[file:2026-08-05-prompt-architecture-p2b2.org][Prompt architecture P2b.2]].
 
 *** 2026-08-05: P2b.1 declaration and census boundary
 
@@ -1910,7 +1927,7 @@ from the tools the request actually retains.  The explanation and enforcement
 land together; no copied framework list or main-template registry is allowed.
 
 A successful =load_skill= updates trusted invocation-scoped graph state with
-the exact resolved winning skill and returns its body plus the newly available
+the exact resolved winning skill and returns its complete skill file plus the newly available
 tool names.  The field and reducer must isolate concurrent graph invocations
 and merge parallel successful loads deterministically; mutable middleware
 instance state is forbidden.  Failed loads, fabricated messages, model prose,
@@ -1923,13 +1940,16 @@ kernel.
 The successful tool response also attaches a non-model-visible
 =ToolMessage.artifact= with the closed schema =schema=, =requested_name=,
 =winner_fingerprint=, and =result_sha256=.  The winner fingerprint covers the
-winning name, description, loaded body digest, and declared tool names, but not
+winning name, description, loaded complete-file digest, and declared tool names, but not
 its host path; the result digest covers the exact model-visible tool content.
 Failure responses carry no success artifact.  This message artifact is the sole
 cross-invocation load evidence used by P2c; active tool state itself remains
 invocation-scoped.
 
-This child gates tools owned by bundled Assist/main-only skills.  Tools owned
+This child gates tools owned by bundled Assist/main-only skills.  Bundled
+ownership is explicit at the route backend, not inferred from generic
+read-only access, and the longest matching source wins when prefixes nest.
+Tools owned
 only by domain or embedder skill sources remain explicit baseline-visible
 migration exceptions until P2b.3.  The P2b.1 census names those exceptions;
 there is no source-specific runtime rule beyond leaving them out of the gated
@@ -1947,9 +1967,10 @@ external-source semantics enter the experiment.
 - Two valid loads produce the exact union; a new invocation resets to kernel;
   thread checkpoints never accumulate old disclosure state; concurrent
   invocations on one agent cannot observe each other's loads.
-- A model response containing =load_skill= and a hidden sibling call rejects the
-  sibling regardless of execution order.  The tool appears only on the next
-  model request.
+- A model response containing =load_skill= and a hidden sibling call executes
+  neither call: every call ID receives a paired error and the graph returns to
+  the model.  The tool appears only after a successful load in its own response
+  and only on the next model request.
 - HITL, URL provenance, read-only enforcement, role omission, and existing tool
   argument/resource guards remain unchanged and pass 100% deterministic tests.
 - Baseline/candidate natural cohorts cover travel/directions, specific-site
@@ -2619,7 +2640,7 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 | Agentic/framework fit | final request, provenance map, and enforcement evidence are separate; capability protocol has one owner; provider-wide prompt changes remain isolated; Deep Agents already parses =allowed-tools=; request-time schema filtering is paired with tool-node rejection | Clean |
 | User intention | SMS triage moves to a separate roadmap item; memory retains its existing access model; the framework kernel remains immediately usable; non-kernel tools arrive with the workflow that explains them; domain and embedder skills follow the same contract | Clean |
 | User experience | latency/round-trip guard; complete delegate, memory, research, domain, and embedder journeys; skill selection adds no round trip beyond the existing load; load results name newly available tools | Clean |
-| Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, trusted-composition-root machinery, or tool registry; P2b.1 keeps classification in the census, while P2b.2 must derive filtering and its kernel line from the same final request in the existing skills middleware | Clean |
+| Clean interfaces | no triage-specific builder, permission fields, memory authorization fields, trusted-composition-root machinery, or tool registry; P2b.1 keeps classification in the census, while P2b.2 derives filtering and its kernel line from the same final request in the existing skills middleware; triage's existing composition seam selects its unchanged legacy backends | Clean |
 | Threat model | synthetic census hygiene; fail-closed judge bounds/schema and paired injection hard gates; hidden and same-response sibling calls fail at execution; external declarations can select only already registered tools and do not bypass existing authority | Clean |
 | Event-loop/eval liveness | P0b is deferred pending observed contention; current per-node TERM/KILL bounds, cooperative development lock, infrastructure-failure classification, one-hour blocks, and actual GPU-rest interval govern P1; bare serialized judge remains bounded; disclosure state is graph-run-local, parallel loads merge deterministically, and filtering adds no I/O | Clean |
 | Documentation alignment | changelog records Pierre's boundary revisions; triage and development guidance are excluded; P2b covers bundled, domain, and embedder sources; P2c changes only catalog-row lifetime; phase names, anchors, and current-versus-target wording verified | Clean |
@@ -2627,10 +2648,10 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 Pierre satisfied the original design gate by approving and merging PR #216, and
 P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
 shared-model contention has not been a material problem.  P1 shipped in PR #223,
-P1b shipped in PR #224, P1c is complete, P2 passed its final gate, and P2b.1's
-declaration-only candidate passed its deterministic and behavioral gates in PR
-#227 pending merge.  Adding P2c to the program does not start its implementation
-or any other later phase automatically.
+P1b shipped in PR #224, P1c is complete, P2 passed its final gate, and P2b.1
+shipped in PR #227.  P2b.2 is the active child and has not yet passed its
+behavioral gate.  Adding P2c to the program does not start its implementation or
+any other later phase automatically.
 
 * Decisions deliberately deferred to evidence
 

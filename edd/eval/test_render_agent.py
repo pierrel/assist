@@ -19,18 +19,13 @@ import tempfile
 from textwrap import dedent
 from unittest import TestCase
 
-from deepagents.backends import FilesystemBackend
-
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
+from assist.thread_manager import _web_skill_sources
 
-from .utils import create_filesystem
-
-# The web-only render skill, registered the same way ThreadManager wires it.
-_RENDER_SKILLS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "assist", "web_skills")
+from .utils import agent_tool_calls, create_filesystem
 
 # A render block: a fenced ```render whose body has type: file and the path.
 _RENDER_BLOCK = re.compile(r"```render\b(.*?)```", re.S | re.I)
@@ -76,10 +71,9 @@ class TestRenderAgent(TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
-        skills = {"/render-skill/": FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
-                                                      virtual_mode=True)}
         return AgentHarness(create_agent(self.model, root,
-                                         spec=AgentSpec(skill_sources=skills)))
+                                         spec=AgentSpec(
+                                             skill_sources=_web_skill_sources())))
 
     def create_sandbox_agent(self, filesystem: dict):
         """Production-shaped agent: real Docker execute + persistent sibling /tmp."""
@@ -93,11 +87,9 @@ class TestRenderAgent(TestCase):
             self.skipTest("Docker sandbox unavailable — is assist-sandbox built?")
         self.addCleanup(shutil.rmtree, thread_root, True)
         self.addCleanup(SandboxManager.cleanup, workspace)
-        skills = {"/render-skill/": FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
-                                                      virtual_mode=True)}
         agent = AgentHarness(create_agent(
             self.model, workspace, sandbox_backend=sandbox,
-            spec=AgentSpec(skill_sources=skills)))
+            spec=AgentSpec(skill_sources=_web_skill_sources())))
         return agent, thread_root
 
     def _render_block_paths(self, agent, message_count: int = 0) -> list[str]:
@@ -201,36 +193,21 @@ class TestRenderAgent(TestCase):
 
     def _write_paths(self, agent) -> list:
         """Paths the agent wrote/edited this turn (write_file / edit_file tool calls)."""
-        from langchain_core.messages import AIMessage
         paths = []
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage):
-                continue
-            for tc in (getattr(m, "tool_calls", None) or []):
-                if tc.get("name") in ("write_file", "edit_file"):
-                    args = tc.get("args") or tc.get("arguments") or {}
-                    if isinstance(args, dict):
-                        p = args.get("file_path") or args.get("path") or ""
-                        if p:
-                            paths.append(str(p))
+        for call in agent_tool_calls(agent):
+            if call.get("name") in ("write_file", "edit_file"):
+                args = call.get("args") or call.get("arguments") or {}
+                if isinstance(args, dict):
+                    path = args.get("file_path") or args.get("path") or ""
+                    if path:
+                        paths.append(str(path))
         return paths
-
-    def _tool_calls(self, agent) -> list[dict]:
-        """Every structured tool call emitted by the agent."""
-        from langchain_core.messages import AIMessage
-        return [
-            call
-            for message in agent.all_messages()
-            if isinstance(message, AIMessage)
-            for call in (getattr(message, "tool_calls", None) or [])
-        ]
 
     def _render_skill_was_loaded(self, agent) -> bool:
         """True only for the load_skill tool contract, never a SKILL.md path read."""
         return any(
-            call.get("name") == "load_skill"
-            and (call.get("args") or {}).get("name") == "render"
-            for call in self._tool_calls(agent)
+            (call.get("args") or {}).get("name") == "render"
+            for call in agent_tool_calls(agent, "load_skill")
         )
 
     def test_creates_and_renders_requested_graph(self):
@@ -267,9 +244,9 @@ class TestRenderAgent(TestCase):
         fs = dict(_personal_workspace())
         agent, thread_root = self.create_sandbox_agent(fs)
         self._put_png_in_workspace(thread_root, "pace_trend.png")
-        before = len(self._tool_calls(agent))
+        before = len(agent_tool_calls(agent))
         agent.message("Use the render skill to put /workspace/pace_trend.png in the conversation.")
-        calls = self._tool_calls(agent)[before:]
+        calls = agent_tool_calls(agent)[before:]
         blocks = self._render_block_paths(agent)
         self.assertTrue(self._render_skill_was_loaded(agent), "render skill should load")
         self._assert_no_skill_file_detour(calls)
@@ -286,12 +263,12 @@ class TestRenderAgent(TestCase):
         agent, thread_root = self.create_sandbox_agent(_personal_workspace())
         before_graph = len(agent.all_messages())
         agent.message("Can you show me a graph of how my weight has changed over the last 2 months?")
-        graph_calls = self._tool_calls(agent)
+        graph_calls = agent_tool_calls(agent)
         graph_blocks = self._render_block_paths(agent, before_graph)
 
         before_render = len(agent.all_messages())
         agent.message("Please render the graph here.")
-        render_followup_calls = self._tool_calls(agent)[len(graph_calls):]
+        render_followup_calls = agent_tool_calls(agent)[len(graph_calls):]
         blocks_after_render = self._render_block_paths(agent, before_render)
 
         loaded_initially = any(

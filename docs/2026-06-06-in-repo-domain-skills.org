@@ -275,8 +275,8 @@ that the agent did the work the skill describes.
 - No UI surface (no domain-skill listing/management in the web app).
 - No auto-walk-to-repo-root discovery (deepagents gets the explicit
   =/.claude/skills/= source; we don't replicate Claude Code's ancestor walk).
-- No per-skill =allowed-tools= enforcement (parsed for compat, never gated on —
-  assist never enforced it; nothing regresses).
+- No domain-skill =allowed-tools= enforcement in P2b.2.  Bundled Assist skills
+  are gated after load; domain and embedder skills join that contract in P2b.3.
 - No mid-session hot-reload (see Known limitations).
 - No domain-vs-builtin precedence *config knob* — pick one default (built-ins
   win, recommended) and ship it.
@@ -285,12 +285,13 @@ that the agent did the work the skill describes.
 * Known limitations (call out at merge, not just in code comments)
 1. *Skills are listed once per session and cached in the checkpoint*
    (=skills_metadata= PrivateStateAttr). Consequences:
-   - A skill added to the repo **after** a session's first turn won't appear in
-     the listing until a NEW chat (the =load_skill= tool reads bodies live, so a
-     just-created skill is loadable by *exact name* — but it's invisible in the
-     prompt listing, so the model never learns to call it). The dev-flow
-     "create a skill then use it this session" case is therefore only partially
-     served.
+   - In progressively disclosed profiles, a skill added to the repo **after** a
+     session's first turn won't appear in the listing or become loadable until a
+     NEW chat.  The loader resolves only the winning metadata captured for that
+     graph, so it does not scan live sources for an unlisted exact name.  Inbound
+     SMS triage deliberately retains the legacy live-scanning loader; an exact
+     name under an already mounted domain source can load there, although an
+     unlisted skill still gives the model no discovery signal.
    - On the same thread across sessions, a stale =skills_metadata= short-circuits
      re-discovery, so a domain repo that *gains* skills later won't surface them
      for that thread's life.

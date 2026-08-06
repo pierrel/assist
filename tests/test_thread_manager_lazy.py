@@ -141,3 +141,21 @@ class TestThreadManagerLazy(TestCase):
         self.assertEqual(dict(spec.skill_sources), {})
         self.assertIsNone(spec.interrupt_on)
         self.assertNotIn("agent_dir", thread.call_args.kwargs)
+
+    def test_triage_profile_preserves_pre_disclosure_skill_composition(self):
+        from assist.backends import BundledSkillsBackend, SKILLS_ROUTE
+        from deepagents.backends import FilesystemBackend
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            manager._model = MagicMock()
+            manager.reserve("triage")
+            with patch("assist.thread_manager.Thread") as thread:
+                manager.get("triage", triage=True)
+            manager.close()
+
+        spec = thread.call_args.kwargs["spec"]
+        self.assertIn(SKILLS_ROUTE, spec.skill_sources)
+        for backend in spec.skill_sources.values():
+            self.assertIsInstance(backend, FilesystemBackend)
+            self.assertNotIsInstance(backend, BundledSkillsBackend)

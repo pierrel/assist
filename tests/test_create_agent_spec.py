@@ -17,6 +17,7 @@ from langchain_core.tools import StructuredTool
 from langchain.tools.tool_node import ToolCallRequest
 
 from assist.spec import AgentSpec
+from tests.skill_test_utils import load_skill
 
 
 def _tool_a(x: str) -> str:
@@ -60,7 +61,6 @@ class _CreateAgentHarness:
                 create_agent(MagicMock(), wd, **kwargs)
                 return fake.call_args.kwargs
 
-
 class TestSpecWiring(_CreateAgentHarness):
     """The spec's fields reach create_deep_agent."""
 
@@ -76,6 +76,63 @@ class TestSpecWiring(_CreateAgentHarness):
         from assist.tools import directions, map_data, read_url, travel
         kwargs = self._build(spec=AgentSpec(tools=(_tool_a, _tool_b)))
         assert kwargs["tools"] == [_tool_a, _tool_b, travel, directions, map_data, read_url]
+
+    def test_nested_provider_schema_tool_reaches_create_deep_agent(self):
+        provider_tool = {
+            "type": "function",
+            "function": {
+                "name": "custom_tool",
+                "description": "A custom tool.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+        kwargs = self._build(spec=AgentSpec(tools=(provider_tool,)))
+
+        assert provider_tool in kwargs["tools"]
+
+    def test_provider_schema_name_dedupes_builtin_tool(self):
+        provider_tool = {
+            "type": "function",
+            "function": {
+                "name": "travel",
+                "description": "Provider travel tool.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+        kwargs = self._build(spec=AgentSpec(tools=(provider_tool,)))
+
+        assert kwargs["tools"].count(provider_tool) == 1
+        assert [tool for tool in kwargs["tools"]
+                if getattr(tool, "name", None) == "travel"] == []
+
+    def test_hitl_precedes_skills_and_is_not_appended_by_deepagents(self):
+        from langchain.agents.middleware import HumanInTheLoopMiddleware
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+
+        kwargs = self._build(spec=AgentSpec(
+            interrupt_on={"send_email": True}))
+        middleware = kwargs["middleware"]
+        hitl_index = next(
+            index for index, item in enumerate(middleware)
+            if isinstance(item, HumanInTheLoopMiddleware))
+        skills_index = next(
+            index for index, item in enumerate(middleware)
+            if isinstance(item, SmallModelSkillsMiddleware))
+
+        assert hitl_index < skills_index
+        assert "interrupt_on" not in kwargs
+
+    def test_critique_subagent_keeps_hitl_for_inherited_effect_tools(self):
+        interrupt_on = {"send_email": True}
+        kwargs = self._build(spec=AgentSpec(interrupt_on=interrupt_on))
+        critique = next(
+            subagent for subagent in kwargs["subagents"]
+            if isinstance(subagent, dict)
+            and subagent.get("name") == "critique-agent")
+
+        assert critique["interrupt_on"] == interrupt_on
 
     def test_async_subagent_tools_replace_blocking_subagents(self):
         from assist.agent import create_agent
@@ -157,7 +214,7 @@ class TestSpecWiring(_CreateAgentHarness):
         skills = next(m for m in kwargs["middleware"]
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
-        assert "not found" in skills.tools[0].invoke({"name": "complex-request"})
+        assert "could not be loaded" in load_skill(skills, "complex-request")
         assert provenance._trust_human_messages is False
         assert provenance._trust_task_results is False
         from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
@@ -251,7 +308,7 @@ class TestSpecWiring(_CreateAgentHarness):
         skills = next(m for m in kwargs["middleware"]
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
-        assert "not found" in skills.tools[0].invoke({"name": "complex-request"})
+        assert "could not be loaded" in load_skill(skills, "complex-request")
         assert provenance._trust_human_messages is True
 
     def test_async_main_can_load_supervisor_skill(self):
@@ -265,7 +322,7 @@ class TestSpecWiring(_CreateAgentHarness):
 
         assert "/main-skills/" in skills.sources
         assert skills.sources[0] == "/main-skills/"
-        loaded = skills.tools[0].invoke({"name": "complex-request"})
+        loaded = load_skill(skills, "complex-request")
         assert "start one `delegate-agent` per outcome" in loaded
         task_offload = next(
             middleware for middleware in kwargs["middleware"]

@@ -138,26 +138,15 @@ class AgentTestMixin:
         times a subagent was dispatched, not just whether it was.
         """
         calls = []
-        for m in agent.all_messages():
-            if isinstance(m, AIMessage) and m.tool_calls:
-                for tc in m.tool_calls:
-                    if tc.get("name") == "task":
-                        # deepagents' task tool names the target via
-                        # `subagent_type`, but the small model sometimes
-                        # emits it under `agent`/`name` instead — the
-                        # dev-agent evals (test_dev_agent.py:167,
-                        # test_dev_agent_planning_flow.py:157) carry the
-                        # same fallback against that observed shape, so
-                        # match it here for consistent counting.  The
-                        # `or` chain also recovers an empty `subagent_type`
-                        # (which SubagentTypeInferenceMiddleware would
-                        # otherwise default to general-purpose).
-                        args = tc.get("args") or {}
-                        sa = (args.get("subagent_type")
-                              or args.get("agent")
-                              or args.get("name") or "")
-                        if sa:
-                            calls.append(sa)
+        for tool_call in agent_tool_calls(agent, "task"):
+            # deepagents' task tool names the target via `subagent_type`, but the
+            # small model sometimes emits it under `agent`/`name` instead. The
+            # `or` chain also recovers an empty `subagent_type`.
+            args = tool_call.get("args") or {}
+            subagent = (args.get("subagent_type") or args.get("agent")
+                        or args.get("name") or "")
+            if subagent:
+                calls.append(subagent)
         return calls
 
     def assertSubAgentCall(self, agent, subagent_name: str, msg: str = None):
@@ -253,6 +242,16 @@ def files_in_directory(path: str) -> list[str]:
     """Returns the files in path as a list"""
     return os.listdir(path)
 
+
+def agent_tool_calls(agent, name: str | None = None) -> list[dict]:
+    """Outgoing tool calls in order, optionally filtered by exact name."""
+    calls = [call for message in agent.all_messages()
+             if isinstance(message, AIMessage)
+             for call in (message.tool_calls or [])]
+    return calls if name is None else [
+        call for call in calls if call.get("name") == name]
+
+
 def skill_was_loaded(agent, skill_name: str) -> bool:
     """True iff a tool call loaded the named skill's body.
 
@@ -267,31 +266,20 @@ def skill_was_loaded(agent, skill_name: str) -> bool:
     since the model proves intent the moment it issues the call.
     """
     path_needle = f"/skills/{skill_name}/"
-    for m in agent.all_messages():
-        if not isinstance(m, AIMessage) or not m.tool_calls:
-            continue
-        for tc in m.tool_calls:
-            args = tc.get("args") or {}
-            if tc.get("name") == "load_skill" and args.get("name") == skill_name:
+    for tc in agent_tool_calls(agent):
+        args = tc.get("args") or {}
+        if tc.get("name") == "load_skill" and args.get("name") == skill_name:
+            return True
+        for value in args.values():
+            if isinstance(value, str) and path_needle in value:
                 return True
-            for v in args.values():
-                if isinstance(v, str) and path_needle in v:
-                    return True
     return False
 
 
 def executed_commands(agent) -> list[str]:
     """Command strings from every ``execute`` tool call, in order."""
-    cmds = []
-    for m in agent.all_messages():
-        if not isinstance(m, AIMessage) or not m.tool_calls:
-            continue
-        for tc in m.tool_calls:
-            if tc.get("name") == "execute":
-                cmd = (tc.get("args") or {}).get("command", "")
-                if cmd:
-                    cmds.append(cmd)
-    return cmds
+    return [command for call in agent_tool_calls(agent, "execute")
+            if (command := (call.get("args") or {}).get("command", ""))]
 
 
 def cleanup_workspace(path: str) -> None:

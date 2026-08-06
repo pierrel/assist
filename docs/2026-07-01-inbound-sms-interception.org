@@ -18,8 +18,9 @@ Earlier drafts added a deny-by-default "propose-only" enforcer. Dropped (Pierre)
 turn runs in the per-turn sandbox, so an injected text steering the agent to do something
 bad is contained — worst case, delete the thread (its work is on an isolated thread branch,
 never main). The ONE effect that escapes the sandbox is the outbound **reply**; that (not
-the whole turn) is what needs a gate, and deepagents already provides one:
-~create_deep_agent(interrupt_on={"send_reply": True})~ pauses before the tool runs. The web
+the whole turn) is what needs a gate, and the LangChain agent middleware already provides
+one: Assist installs ~HumanInTheLoopMiddleware(interrupt_on={"send_reply": True})~ before
+the skills middleware, so it pauses before the tool runs. The web
 thread uses a durable ~SqliteSaver~ (threads.db), so the paused interrupt survives across
 requests and restarts; the user approves later and the graph resumes via
 ~Command(resume=…)~. No custom propose-tool / pending-store / enforcer — the framework HITL
@@ -74,7 +75,7 @@ delete-the-thread) and the reply is HITL-gated.
   ~.env.example~.
 
 * HITL protocol (verified against installed langchain)
-~HumanInTheLoopMiddleware~ (added by ~create_deep_agent(interrupt_on=…)~): configure
+~HumanInTheLoopMiddleware~ (installed explicitly by Assist before skills): configure
 ~interrupt_on={"send_reply": {"allowed_decisions": ["approve", "edit", "reject"]}}~. When the
 agent calls ~send_reply~, the graph raises an interrupt carrying ~action_requests:
 [ActionRequest{name, args, …}]~ (args = the draft) — surfaced in the turn result's

@@ -25,11 +25,13 @@ from assist.backends import (
     DOMAIN_SKILLS_PATH,
     STATEFUL_PATHS,
     create_composite_backend,
+    create_bundled_skills_backend,
     create_sandbox_composite_backend,
 )
 from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 from assist.spec import AgentSpec
 from deepagents.backends import FilesystemBackend
+from tests.skill_test_utils import load_skill
 
 
 def _route_backend():
@@ -159,6 +161,19 @@ class TestCreateAgentExtraSkillSources:
             "before any embedder-supplied sources."
         )
         assert "/emacsos-skills/" in mw.sources
+
+    def test_only_explicitly_bundled_extra_routes_gate_tools(self):
+        external = _route_backend()
+        with tempfile.TemporaryDirectory() as root:
+            bundled = create_bundled_skills_backend(root)
+            kwargs = self._build(spec=AgentSpec(skill_sources={
+                "/external/": external,
+                "/bundled/": bundled,
+            }))
+        mw = next(m for m in kwargs["middleware"]
+                  if isinstance(m, SmallModelSkillsMiddleware))
+
+        assert mw._bundled_sources == frozenset({SKILLS_ROUTE, "/bundled/"})
 
     def test_multiple_extra_skill_sources(self):
         extras = {
@@ -337,7 +352,7 @@ class TestCreateAgentDomainSkills:
         backend = _create_standard_backend(wd)
         mw = SmallModelSkillsMiddleware(
             backend=backend, sources=[DOMAIN_SKILLS_PATH, SKILLS_ROUTE])
-        result = mw.tools[0].invoke({"name": "dev"})
+        result = load_skill(mw, "dev")
         assert marker not in result, (
             "load_skill returned the domain dev body; built-in must win"
         )

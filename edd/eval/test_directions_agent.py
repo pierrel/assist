@@ -13,7 +13,7 @@ from unittest import TestCase
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem
+from .utils import create_filesystem, skill_was_loaded
 
 
 class TestDirectionsAgent(TestCase):
@@ -38,6 +38,7 @@ class TestDirectionsAgent(TestCase):
         agent = self._agent()
         agent.message("Give me step-by-step directions from Coit Tower to Oracle "
                       "Park by car.")
+        self.assertTrue(skill_was_loaded(agent, "travel"))
         calls = self._calls(agent)
         self.assertTrue(any(n == "directions" for n, _ in calls),
                         f"expected directions; got {[n for n, _ in calls]}")
@@ -48,6 +49,7 @@ class TestDirectionsAgent(TestCase):
         agent = self._agent()
         agent.message("Which train do I take to get from Civic Center to the "
                       "Embarcadero?")
+        self.assertTrue(skill_was_loaded(agent, "travel"))
         calls = self._calls(agent)
         dir_calls = [a for n, a in calls if n == "directions"]
         self.assertTrue(dir_calls, f"expected directions; got {[n for n, _ in calls]}")
@@ -60,6 +62,7 @@ class TestDirectionsAgent(TestCase):
         agent = self._agent()
         agent.message("Roughly how long is the drive from the Ferry Building to "
                       "Oakland City Hall?")
+        self.assertTrue(skill_was_loaded(agent, "travel"))
         calls = self._calls(agent)
         self.assertTrue(any(n == "travel" for n, _ in calls),
                         f"expected travel; got {[n for n, _ in calls]}")
