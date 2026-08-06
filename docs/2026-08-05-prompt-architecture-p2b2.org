@@ -335,9 +335,12 @@ launch.
 The first baseline launch had no =.dev.env= in its detached worktree and is
 preserved as invalid infrastructure evidence.  The bounded replacement ran the
 merged P2b.1 runtime with the frozen candidate eval files.  The new subscription
-fixture initially supplied a UUID where the store contract requires a string;
-those three samples are also preserved as invalid and will be rerun unchanged
-except for that fixture correction.
+fixture first supplied a UUID where the store contract requires a string.  Its
+first correction then exposed a second production-shaped fixture omission: the
+real web app creates the thread directory before the per-thread store writes,
+but the isolated eval had created only the store root.  Both invalid attempts
+are preserved and excluded.  The final fixture creates its string-named thread
+directory and will be rerun unchanged on both sides.
 
 Across the other 30 valid samples the P2b.1 baseline passed 24/30.  Travel,
 directions, website download, async delegation, render, email, and the time
