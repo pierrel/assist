@@ -1,4 +1,5 @@
 """Natural acceptance eval for bundled subscription-tool disclosure."""
+import os
 import tempfile
 from unittest import TestCase
 
@@ -17,7 +18,9 @@ class TestSubscriptionAgent(TestCase):
         cls.model = select_assistant_model(0.1)
 
     def test_natural_request_loads_skill_and_creates_subscription(self):
-        store = SubscriptionStore(tempfile.mkdtemp(prefix="subscription_eval_store_"))
+        store_root = tempfile.mkdtemp(prefix="subscription_eval_store_")
+        os.makedirs(os.path.join(store_root, "subscription-eval"))
+        store = SubscriptionStore(store_root)
         with stub_research_subagent():
             agent = AgentHarness(
                 create_agent(
