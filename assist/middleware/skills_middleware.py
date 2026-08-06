@@ -399,7 +399,10 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
              else self._cancelled_sibling_message(tool_call))
             for tool_call in last_ai.tool_calls
         ]
-        return {"messages": [last_ai, *results], "jump_to": "model"}
+        # ``last_ai`` is already in the graph state.  Returning it again can
+        # duplicate an ID-less adapter message when ``add_messages`` merges the
+        # update; only the paired results are new state.
+        return {"messages": results, "jump_to": "model"}
 
     async def aafter_model(self, state, runtime):
         return self.after_model(state, runtime)

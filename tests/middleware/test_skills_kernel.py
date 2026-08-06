@@ -342,11 +342,11 @@ def test_after_model_pairs_every_call_and_jumps_past_hitl():
 
     assert [call["name"] for call in message.tool_calls] == [
         "travel", "kernel_tool"]
-    assert len(update["messages"]) == 3
-    assert update["messages"][1].name == "travel"
+    assert len(update["messages"]) == 2
+    assert update["messages"][0].name == "travel"
+    assert update["messages"][0].status == "error"
+    assert update["messages"][1].name == "kernel_tool"
     assert update["messages"][1].status == "error"
-    assert update["messages"][2].name == "kernel_tool"
-    assert update["messages"][2].status == "error"
     assert update["jump_to"] == "model"
 
 
