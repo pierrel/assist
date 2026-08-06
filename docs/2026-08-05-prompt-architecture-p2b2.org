@@ -401,6 +401,17 @@ exactly once only after exploratory skill loads.  There is still no hidden-tool,
 unavailable-schema, timeout, or harness failure.  No prompt or implementation
 tuning is warranted before the pre-registered N=10 stability cadence.
 
+** Stability baseline N=10
+
+The P2b.1 stability side completed 110/110 valid samples in four bounded GPU
+blocks, with the required cooldowns and no timeout or harness error.  It passed
+72/110 overall (65.5 percent): 41/70 natural outcomes (58.6 percent), 21/30
+capability diagnostics, and 10/10 control.  Per-node counts are travel 9,
+directions 10, website download 10, day-of-month scheduling 2, subscription 1,
+referential follow-up 0, async delegation 10, render 10, email 10, time control
+10, and urgent notification 0.  These counts are the final per-node stability
+bar for the candidate; the candidate N=10 side follows unchanged.
+
 * Design-review resolution
 
 - Simplicity and clean-interface review rejected a global owner manifest and
