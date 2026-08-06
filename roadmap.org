@@ -943,9 +943,14 @@ overall and 50/70 natural, met or exceeded all eleven P2b.1 baseline nodes, and
 reduced initial provider schemas from 30 to 15.  See
 [[https://github.com/pierrel/assist/pull/230][PR #230]] and
 [[file:docs/2026-08-05-prompt-architecture-p2b2.org][the P2b.2 state record]].
-**** TODO P2b.3: Apply the contract to domain and embedder skills
+**** DONE P2b.3: Apply the contract to domain and embedder skills
 Use the same winning-skill declaration and current composed tool registry for
 =.claude/skills/= and =AgentSpec.skill_sources=.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-external][P2b.3]].
+Completed on 2026-08-06 in the prompt-architecture-p2b3 lane.  Normal domain
+and embedder sources now share invocation-scoped disclosure and execution
+filtering; SMS triage remains legacy.  Deterministic tests pass 1,611/2, and
+the affected behavioral suites were baseline 18/18, candidate N=3 18/18, N=5
+30/30, and N=10 59/60 with the one miss reproduced by baseline.
 
 *** TODO P2c: Suppress recently loaded skill descriptions until useful again
 After P2b, compare turn-count, provider-reported input-plus-output-token,
