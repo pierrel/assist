@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import get_args, get_type_hints
 from unittest.mock import Mock, patch
 
+from pydantic import PrivateAttr
 from langchain.agents.middleware.types import ModelRequest
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -351,7 +352,15 @@ def test_after_model_pairs_every_call_and_jumps_past_hitl():
 
 
 class _RecordingModel(FakeMessagesListChatModel):
-    bound_tools: list[list[str]] = []
+    _bound_tools: list[list[str]] = PrivateAttr(default_factory=list)
+
+    @property
+    def bound_tools(self):
+        return self._bound_tools
+
+    @bound_tools.setter
+    def bound_tools(self, value):
+        self._bound_tools = value
 
     def bind_tools(self, tools, **_kwargs):
         self.bound_tools.append([
