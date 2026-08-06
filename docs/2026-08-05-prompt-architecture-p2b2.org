@@ -352,8 +352,26 @@ natural outcomes, 8/9 capability diagnostics, and 3/3 control.  Travel,
 directions, website download, async delegation, render, email, and the time
 control each passed 3/3; day-of-month scheduling passed 2/3; subscription and
 the referential follow-up passed 0/3; and urgent notification passed 1/3.
-These are diagnostic N=3 results, not a final gate.  Candidate execution has
-not started.
+These are diagnostic N=3 results, not a final gate; the candidate result follows.
+
+** Candidate N=3
+
+The frozen, rebased candidate completed all 33 samples with no timeout,
+collection error, or other harness failure.  It passed 25/33 overall: 15/21
+natural outcomes (71.4 percent), 7/9 capability diagnostics, and 3/3 control.
+Travel, directions, website download, subscription, async delegation, render,
+email, and the time control passed 3/3; day-of-month scheduling passed 1/3; the
+referential follow-up and urgent notification passed 0/3.
+
+This is +1 overall and +2 natural outcomes versus baseline.  The principal
+P2b.2 journey, natural subscription creation, improved from 0/3 to 3/3 and
+completed the intended load, disclosure, and tool execution.  The two failed
+day-of-month samples successfully loaded =schedule= but ended before invoking
+=create_schedule=.  Each urgent sample invoked =notify= exactly once but first
+loaded schedule/time-related skills, the same strict first-effect failure class
+seen in two of three baseline samples.  The referential follow-up remains 0/3
+on both sides.  No hidden-tool rejection or unavailable-schema failure appeared,
+so the experiment proceeds unchanged to the pre-registered N=5 cadence.
 
 * Design-review resolution
 
