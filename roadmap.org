@@ -935,9 +935,13 @@ match current main at 30/30 in the N=10 stability cohort (2026-08-05).
 Kernel prose moves to P2b.2 with actual gating.
 See [[https://github.com/pierrel/assist/pull/227][PR #227]] and
 [[file:docs/2026-08-05-prompt-architecture-p2b1.org][the P2b.1 state record]].
-**** TODO P2b.2: Gate Assist-owned tools after skill load
+**** DONE P2b.2: Gate Assist-owned tools after skill load
 Filter model schemas and execution from trusted invocation-scoped load state,
 then run the natural/capability cohorts.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-assist][P2b.2]].
+Completed on 2026-08-06 in =1dab6fe=: the stability candidate passed 87/110
+overall and 50/70 natural, met or exceeded all eleven P2b.1 baseline nodes, and
+reduced initial provider schemas from 30 to 15.  See
+[[file:docs/2026-08-05-prompt-architecture-p2b2.org][the P2b.2 state record]].
 **** TODO P2b.3: Apply the contract to domain and embedder skills
 Use the same winning-skill declaration and current composed tool registry for
 =.claude/skills/= and =AgentSpec.skill_sources=.  See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-2b-tools-external][P2b.3]].

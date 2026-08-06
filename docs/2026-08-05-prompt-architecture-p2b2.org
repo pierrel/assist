@@ -2,9 +2,8 @@
 
 * State
 
-Status: implementation and bounded local-review fixes in progress.  The
-deterministic gating slices are green; comparative behavioral evaluation is not
-yet complete.
+Status: implementation, bounded local review, and comparative evaluation are
+complete.  The candidate passes every deterministic and behavioral gate.
 
 * Change log
 
@@ -412,6 +411,25 @@ referential follow-up 0, async delegation 10, render 10, email 10, time control
 10, and urgent notification 0.  These counts are the final per-node stability
 bar for the candidate; the candidate N=10 side follows unchanged.
 
+** Stability candidate N=10
+
+The candidate side also completed 110/110 valid samples in four bounded GPU
+blocks, with no timeout or harness error.  It passed 87/110 overall (79.1
+percent): 50/70 natural outcomes (71.4 percent), 27/30 capability diagnostics,
+and 10/10 control.  Per-node counts are travel 10, directions 10, website
+download 10, day-of-month scheduling 7, subscription 10, referential follow-up
+0, async delegation 10, render 10, email 10, time control 10, and urgent
+notification 0.
+
+Candidate therefore improves +15 overall, +9 natural outcomes, and +6
+capability diagnostics.  It clears the 70 percent natural floor and meets or
+exceeds baseline on every node: travel 10>=9, directions 10=10, website 10=10,
+schedule 7>=2, subscription 10>=1, referential 0=0, async/render/email/time
+10=10, and urgent 0=0.  The narrow 71.4 percent natural margin is an honest
+limitation: referential schedule modification and notify-first urgency remain
+weak on both sides.  They are not P2b.2 regressions and this experiment does
+not tune unrelated behavior around them.
+
 * Design-review resolution
 
 - Simplicity and clean-interface review rejected a global owner manifest and
@@ -472,5 +490,20 @@ raw-file fingerprints versus sanitized results, bounded backend errors, and
 shared eval traversal.  The rejected items were theoretical ID-less call
 recovery and broad graph-matrix expansion without an observed contract.
 
-Implementation outcome, final LOC, maintenance shape, eval results, and any
-remaining hard points will be appended after the code and review loops converge.
+The final diff is 25 files, +1,801/-252 lines: production +412/-64,
+tests/evals +807/-152, and docs/roadmap +582/-36.  Most production logic is confined to
+=SmallModelSkillsMiddleware=; the other production edits mark packaged skill
+backends, preserve triage's existing composition seam, and install the existing
+HITL middleware in the required order.  No new registry, router, authorization
+model, =AgentSpec= provenance field, SMS behavior, memory policy, development
+guidance, or Pi/runtime integration was added.
+
+The final deterministic suite passes 1,606 tests with 2 skipped and 2 subtests
+passed; compilation and =git diff --check= pass.  Local review ran five rounds,
+fixed every verified in-scope finding, and rejected only theoretical recovery
+or broad matrix work without an observed contract.  The N=3, N=5, and N=10
+candidate cohorts all beat aggregate baseline, and the decisive N=10 result
+meets every per-node bar plus the natural floor.  The remaining hard points are
+the framework ordering/state contracts described above and the pre-existing
+referential/urgent behavioral weaknesses, which are reported rather than
+expanded into this objective.
