@@ -427,8 +427,9 @@ keeps progressive disclosure but changes how the model interacts with it:
   middleware, replaces the upstream "use `read_file` with this path"
   mechanism. The model never sees skill paths.
 - A short, imperative **system-prompt template** that ends with a
-  mandatory pre-action check — scan the latest user message against
-  every skill description before any other tool call.
+  mandatory pre-action check: scan the latest user message and the active task
+  established by the conversation against every skill description before any
+  other tool call.
 - A **name-only skill listing** (`- **name**: description`) — upstream's
   `-> Read \`{path}\` for full instructions` line is stripped so there
   are no path strings for the model to copy.
@@ -467,8 +468,8 @@ evidence and must leave its detailed policy in the skill body.
 
 The description is normally the model's routing signal for whether to load. The
 main-only orchestration exception also has the short system-prompt hook above. A
-description is matched against the user's latest message by the
-pre-action check (and by the model's general attention). Every built-in
+description is matched against the user's latest message and the active task
+established by the conversation (and by the model's general attention). Every built-in
 skill uses the same shape — **a one-line capability sentence, a few
 concrete `EXAMPLES`, and a `MUST load before` clause**:
 
@@ -505,10 +506,10 @@ description: Editing or creating org-mode (`.org`) files without breaking headin
 
 ### Writing a skill body
 
-The body is what the agent applies after `load_skill` returns. By the
-time the body is read the agent has already committed to applying the
-skill, so the body's job is to be a clear reference for the rules — not
-to re-justify loading.
+`load_skill` returns the complete `SKILL.md`, including frontmatter. The body
+portion is what the agent applies. By the time the file is loaded the agent has
+already committed to applying the skill, so the body's job is to be a clear
+reference for the rules, not to re-justify loading.
 
 - Skip "When to apply" / "When to use" sections. The description (layer
   3) already covered the trigger conditions, and the body is read only
@@ -531,6 +532,8 @@ to re-justify loading.
    compositions. Those application tools are absent from provider schemas until
    `load_skill` successfully loads the winning bundled skill in the current
    invocation; both schema visibility and execution reset on the next turn.
+   Inbound SMS triage is deliberately excluded and retains its pre-P2b prompt,
+   loader, schemas, and backend behavior.
 2. That's it for a skill shared by every Assist role. `SkillsMiddleware`
    discovers it via the `/skills/` source path on next agent construction;
    the system prompt automatically lists it and
@@ -573,7 +576,7 @@ tools that support it — author once, use everywhere.
 assist serves `<repo>/.claude/skills/` through the working-directory
 backend in both local and sandbox modes; on the first turn of a chat the
 middleware lists every skill it finds there alongside the built-ins, and
-`load_skill(name="<skill-name>")` loads the body. (Skills are listed
+`load_skill(name="<skill-name>")` loads the complete `SKILL.md`. (Skills are listed
 once per chat — add one and start a new chat to pick it up.)
 
 During the P2b migration, domain-repository declarations are validated and

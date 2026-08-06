@@ -21,9 +21,9 @@ from deepagents.middleware.skills import (
 )
 from langchain.agents.middleware.types import (
     ModelRequest,
-    ModelResponse,
     PrivateStateAttr,
     ToolCallRequest,
+    hook_config,
 )
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
@@ -67,6 +67,50 @@ it with `ls`, `read_file`, `task`, `edit_file`, or a newly disclosed tool. Only
 if no skill matches may you proceed directly to the task.
 
 Tools available for this response: {tools_available}.
+"""
+
+# Compatibility boundary: this historical prompt and the legacy loader's tool
+# docstring call the complete SKILL.md file a "body". Inbound SMS triage must
+# remain byte-for-byte on that pre-P2b prompt and schema, so keep the wording.
+LEGACY_SMALL_MODEL_SKILLS_PROMPT = """
+
+## Skills
+
+You have access to named skills. Each skill is a self-contained set of
+rules for a specific domain. The list below shows each skill's *name*
+and *description*; the rules themselves are revealed only when you load
+the skill.
+
+**Available skills:**
+
+{skills_list}
+
+### How to use a skill
+
+1. **Match.** If a skill's description fits what you're about to do, continue to step 2.
+2. **Load.** Call `load_skill(name="<skill name>")`. The tool returns the full skill body.
+3. **Apply.** Use the rules from the loaded skill when you compose your action or response.
+
+The descriptions only summarize *when* to load — they do not contain
+the rules. You will not know the rules until you complete step 2. You
+MUST complete step 2 before performing the matching action; relying on
+the description alone leads to incorrect outcomes.
+
+### Pre-action check (MANDATORY — apply on every turn before any tool call)
+
+Before issuing your first tool call on a turn, scan the user's latest
+message against every skill description above:
+
+1. Look for any keyword, file extension, filename, or topic from a
+   skill description that appears in the user's message.
+2. If a skill matches, your FIRST tool call this turn MUST be
+   `load_skill(name="<matched skill>")`. Do not run `ls`, `read_file`,
+   `task` to a sub-agent, or `edit_file` first — those steps come AFTER
+   the skill is loaded.
+3. Only if no skill matches may you proceed directly to your task.
+
+Skipping this check is a bug. The skill exists precisely because acting
+without it produces incorrect output for that domain.
 """
 
 
@@ -122,17 +166,52 @@ def _load_failure(name: str, reason: str | None = None) -> str:
     )
 
 
-def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
-    """Build the exact-winner loader bound to this middleware instance."""
+def _make_legacy_load_skill_tool(backend, sources):
+    """Build the pre-P2b loader for compositions excluded from disclosure."""
 
     @tool
-    def load_skill(name: str, runtime: ToolRuntime) -> str | Command:
+    def load_skill(name: str) -> str:
         """Load and return the full body of the named skill.
 
         Use this whenever a skill description matches your task. Pass
         only the skill's short name (e.g. "org-format") — no paths.
         Returns the full body of the skill, including the rules you
         must follow before continuing with the task.
+        """
+        for source in reversed(sources):
+            path = f"{source.rstrip('/')}/{name}/SKILL.md"
+            try:
+                responses = backend.download_files([path])
+            except Exception:
+                continue
+            if not responses:
+                continue
+            response = responses[0]
+            if response.error or response.content is None:
+                continue
+            try:
+                return response.content.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        return (
+            f"Skill '{name}' not found. The system prompt's '## Skills' "
+            "section lists every available name; use one of those."
+        )
+
+    return load_skill
+
+
+def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
+    """Build the exact-winner loader bound to this middleware instance."""
+
+    @tool
+    def load_skill(name: str, runtime: ToolRuntime) -> str | Command:
+        """Load and return the complete named skill file.
+
+        Use this whenever a skill description matches your task. Pass
+        only the skill's short name (e.g. "org-format") — no paths.
+        Returns the full SKILL.md content and the tools newly available
+        after the load.
         """
         skill = _winner(runtime.state, name)
         if skill is None:
@@ -148,25 +227,27 @@ def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
             return _load_failure(name)
         response = responses[0]
         if response.error or response.content is None:
-            return _load_failure(name, response.error)
+            return _load_failure(name, "backend error")
         if len(response.content) > MAX_SKILL_FILE_SIZE:
             return _load_failure(name, "skill file is too large")
         try:
-            body = _sanitize(response.content.decode("utf-8"))
+            raw_skill_file = response.content.decode("utf-8")
         except UnicodeDecodeError:
             return _load_failure(name, "skill file is not UTF-8")
+        skill_file = _sanitize(raw_skill_file)
 
-        newly_available = middleware._bundled_declared_tools(runtime.state, skill)
+        newly_available = middleware._bundled_declared_tools(skill)
         already_loaded = frozenset(runtime.state.get("loaded_skill_tools", ()))
-        new_names = sorted(newly_available - already_loaded)
+        new_names = [name for name in skill.get("allowed_tools", ())
+                     if name in newly_available and name not in already_loaded]
         disclosure = (
             "Newly available tools: " + ", ".join(new_names) + "."
             if new_names else "No additional tools became available."
         )
-        content = f"{body}\n\n{disclosure}"
+        content = f"{skill_file}\n\n{disclosure}"
         fingerprint_payload = {
             "allowed_tools": list(skill.get("allowed_tools", ())),
-            "body_sha256": _sha256(body),
+            "skill_file_sha256": _sha256(raw_skill_file),
             "description": skill["description"],
             "name": skill["name"],
         }
@@ -198,11 +279,18 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
 
     state_schema = SmallModelSkillsState
 
-    def __init__(self, *, backend, sources, bundled_sources: Iterable[str] = ()):
+    def __init__(self, *, backend, sources, bundled_sources: Iterable[str] = (),
+                 registered_tools: Iterable[str] | None = None):
         super().__init__(backend=backend, sources=sources)
-        self.system_prompt_template = SMALL_MODEL_SKILLS_PROMPT
         self._bundled_sources = frozenset(bundled_sources)
-        self.tools = [_make_load_skill_tool(self)]
+        self._registered_tools = (None if registered_tools is None
+                                  else frozenset(registered_tools))
+        if self._bundled_sources:
+            self.system_prompt_template = SMALL_MODEL_SKILLS_PROMPT
+            self.tools = [_make_load_skill_tool(self)]
+        else:
+            self.system_prompt_template = LEGACY_SMALL_MODEL_SKILLS_PROMPT
+            self.tools = [_make_legacy_load_skill_tool(backend, sources)]
 
     def _format_skills_list(self, skills):
         """Render only name and description; declarations remain undisclosed."""
@@ -214,21 +302,26 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
 
     def _is_bundled(self, skill: dict[str, Any]) -> bool:
         path = skill.get("path")
-        return isinstance(path, str) and any(
-            _source_contains(source, path) for source in self._bundled_sources)
+        if not isinstance(path, str):
+            return False
+        matches = [source for source in self.sources
+                   if _source_contains(source, path)]
+        return bool(matches) and max(matches, key=len) in self._bundled_sources
 
-    def _bundled_declared_tools(
-            self, state: dict[str, Any], skill: dict[str, Any]) -> frozenset[str]:
-        if not self._is_bundled(skill) or _winner(state, skill["name"]) is not skill:
+    def _bundled_declared_tools(self, skill: dict[str, Any]) -> frozenset[str]:
+        if not self._is_bundled(skill):
             return frozenset()
-        return frozenset(skill.get("allowed_tools", ()))
+        declared = frozenset(skill.get("allowed_tools", ()))
+        return (declared if self._registered_tools is None
+                else declared & self._registered_tools)
 
     def _gated_tools(self, state: dict[str, Any]) -> frozenset[str]:
         gated: set[str] = set()
         for skill in state.get("skills_metadata", ()):
             if self._is_bundled(skill):
                 gated.update(skill.get("allowed_tools", ()))
-        return frozenset(gated)
+        return (frozenset(gated) if self._registered_tools is None
+                else frozenset(gated) & self._registered_tools)
 
     def _tool_is_allowed(self, state: dict[str, Any], name: str) -> bool:
         return name not in self._gated_tools(state) or name in state.get(
@@ -244,9 +337,6 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         names = [name for tool_value in retained
                  if (name := _tool_name(tool_value)) is not None]
         skills_section = self.system_prompt_template.format(
-            skills_locations=self._format_skills_locations(),
-            skills_load_warnings=self._format_skills_load_warnings(
-                request.state.get("skills_load_errors", [])),
             skills_list=self._format_skills_list(
                 request.state.get("skills_metadata", [])),
             tools_available=", ".join(names) if names else "(none)",
@@ -277,6 +367,18 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             tool_call_id=tool_call["id"],
         )
 
+    def _cancelled_sibling_message(self, tool_call: dict[str, Any]) -> ToolMessage:
+        return ToolMessage(
+            content=(
+                f"Tool '{tool_call['name']}' was not run because the response also "
+                "contained an unavailable tool. Retry this call by itself."
+            ),
+            name=tool_call["name"],
+            status="error",
+            tool_call_id=tool_call["id"],
+        )
+
+    @hook_config(can_jump_to=["model"])
     def after_model(self, state, runtime):
         """Reject hidden hallucinated calls before HITL sees outward effects."""
         last_ai = next(
@@ -286,17 +388,18 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         )
         if last_ai is None or not last_ai.tool_calls:
             return None
-        allowed = []
-        rejected = []
-        for tool_call in last_ai.tool_calls:
-            if self._tool_is_allowed(state, tool_call["name"]):
-                allowed.append(tool_call)
-            else:
-                rejected.append(self._hidden_call_message(tool_call))
-        if not rejected:
+        hidden = [tool_call for tool_call in last_ai.tool_calls
+                  if not self._tool_is_allowed(state, tool_call["name"])]
+        if not hidden:
             return None
-        last_ai.tool_calls = allowed
-        return {"messages": [last_ai, *rejected]}
+        hidden_ids = {tool_call["id"] for tool_call in hidden}
+        results = [
+            (self._hidden_call_message(tool_call)
+             if tool_call["id"] in hidden_ids
+             else self._cancelled_sibling_message(tool_call))
+            for tool_call in last_ai.tool_calls
+        ]
+        return {"messages": [last_ai, *results], "jump_to": "model"}
 
     async def aafter_model(self, state, runtime):
         return self.after_model(state, runtime)

@@ -1,9 +1,12 @@
 """Focused tests for bundled skill tool disclosure."""
 import asyncio
 import hashlib
+import json
+import operator
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_args, get_type_hints
 from unittest.mock import Mock, patch
 
 from langchain.agents.middleware.types import ModelRequest
@@ -13,7 +16,12 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.tools import tool
 from langgraph.types import Command, Overwrite
 
-from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
+from assist.middleware.skills_middleware import (
+    LEGACY_SMALL_MODEL_SKILLS_PROMPT,
+    MAX_SKILL_FILE_SIZE,
+    SmallModelSkillsMiddleware,
+    SmallModelSkillsState,
+)
 
 
 @tool
@@ -93,6 +101,31 @@ def test_external_winner_stays_baseline_visible():
     assert [item.name for item in updated.tools] == ["kernel_tool", "travel"]
 
 
+def test_nested_external_source_is_not_claimed_by_bundled_parent():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/", "/skills/external/"],
+        bundled_sources=["/skills/"])
+    state = {
+        "skills_metadata": [_skill("/skills/external/travel/SKILL.md")],
+        "loaded_skill_tools": frozenset(),
+    }
+
+    updated = middleware.modify_request(_request(middleware, state))
+
+    assert [item.name for item in updated.tools] == ["kernel_tool", "travel"]
+
+
+def test_no_bundled_source_keeps_legacy_prompt_and_loader_schema():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/external/"])
+
+    assert len(LEGACY_SMALL_MODEL_SKILLS_PROMPT) == 1577
+    assert hashlib.sha256(LEGACY_SMALL_MODEL_SKILLS_PROMPT.encode()).hexdigest() == \
+        "93d4e684e87d4910f5c97de6919e3bb0798ba41f7239d07ff801d68d7f0dd918"
+    assert middleware.system_prompt_template == LEGACY_SMALL_MODEL_SKILLS_PROMPT
+    assert set(middleware.tools[0].args) == {"name"}
+
+
 def test_before_agent_resets_activation_even_when_metadata_is_checkpointed():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
@@ -129,6 +162,16 @@ def test_successful_load_returns_state_command_and_exact_closed_evidence():
     assert set(message.artifact) == {
         "schema", "requested_name", "winner_fingerprint", "result_sha256"}
     assert message.artifact["requested_name"] == "travel"
+    fingerprint_payload = {
+        "allowed_tools": ["travel"],
+        "skill_file_sha256": hashlib.sha256(
+            body.encode("utf-8")).hexdigest(),
+        "description": "Travel help.",
+        "name": "travel",
+    }
+    assert message.artifact["winner_fingerprint"] == hashlib.sha256(
+        json.dumps(fingerprint_payload, ensure_ascii=False, separators=(",", ":"),
+                   sort_keys=True).encode("utf-8")).hexdigest()
     assert message.artifact["result_sha256"] == hashlib.sha256(
         message.content.encode("utf-8")).hexdigest()
     assert "/skills/" not in str(message.artifact)
@@ -136,6 +179,52 @@ def test_successful_load_returns_state_command_and_exact_closed_evidence():
     visible = middleware.modify_request(_request(
         middleware, {**state, "loaded_skill_tools": frozenset({"travel"})}))
     assert [item.name for item in visible.tools] == ["kernel_tool", "travel"]
+
+
+def test_disclosure_intersects_declarations_with_this_agent_tools():
+    body = "---\nname: travel\ndescription: Travel help.\n---\n\nRULES"
+    backend = SimpleNamespace(download_files=lambda _paths: [
+        SimpleNamespace(error=None, content=body.encode("utf-8"))])
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=["/skills/"], bundled_sources=["/skills/"],
+        registered_tools={"travel"})
+    skill = {**_skill(), "allowed_tools": ["travel", "absent_tool"]}
+    runtime = SimpleNamespace(
+        state={"skills_metadata": [skill], "loaded_skill_tools": frozenset()},
+        config={}, tool_call_id="load-1")
+
+    result = middleware.tools[0].func("travel", runtime)
+
+    assert result.update["loaded_skill_tools"] == frozenset({"travel"})
+    assert result.update["messages"][0].content.endswith(
+        "Newly available tools: travel.")
+
+
+def test_parallel_load_updates_have_union_reducer():
+    body = b"---\nname: skill\ndescription: Help.\n---\n\nRULES"
+    backend = SimpleNamespace(download_files=lambda _paths: [
+        SimpleNamespace(error=None, content=body)])
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=["/skills/"], bundled_sources=["/skills/"])
+    skills = [
+        {**_skill("/skills/one/SKILL.md"), "name": "one",
+         "allowed_tools": ["travel"]},
+        {**_skill("/skills/two/SKILL.md"), "name": "two",
+         "allowed_tools": ["kernel_tool"]},
+    ]
+    state = {"skills_metadata": skills, "loaded_skill_tools": frozenset()}
+    updates = [
+        middleware.tools[0].func(
+            name, SimpleNamespace(state=state, config={}, tool_call_id=name)
+        ).update["loaded_skill_tools"]
+        for name in ("one", "two")
+    ]
+    outer = get_type_hints(
+        SmallModelSkillsState, include_extras=True)["loaded_skill_tools"]
+    annotated = get_args(outer)[0]
+
+    assert operator.or_ in get_args(annotated)[1:]
+    assert operator.or_(*updates) == frozenset({"travel", "kernel_tool"})
 
 
 def test_failed_load_has_no_state_or_artifact():
@@ -149,6 +238,62 @@ def test_failed_load_has_no_state_or_artifact():
 
     assert isinstance(result, str)
     assert "could not be loaded" in result
+
+
+def test_invalid_skill_bytes_do_not_disclose_tools():
+    for content, reason in (
+        (b"x" * (MAX_SKILL_FILE_SIZE + 1), "too large"),
+        (b"\xff", "not UTF-8"),
+    ):
+        backend = SimpleNamespace(download_files=lambda _paths, value=content: [
+            SimpleNamespace(error=None, content=value)])
+        middleware = SmallModelSkillsMiddleware(
+            backend=backend, sources=["/skills/"],
+            bundled_sources=["/skills/"])
+        runtime = SimpleNamespace(
+            state={"skills_metadata": [_skill()],
+                   "loaded_skill_tools": frozenset()},
+            config={}, tool_call_id="load-1")
+
+        result = middleware.tools[0].func("travel", runtime)
+
+        assert isinstance(result, str)
+        assert reason in result
+
+
+def test_backend_error_details_are_not_returned_to_the_model():
+    backend = SimpleNamespace(download_files=lambda _paths: [
+        SimpleNamespace(error="failed reading /home/private/SKILL.md", content=None)])
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=["/skills/"], bundled_sources=["/skills/"])
+    runtime = SimpleNamespace(
+        state={"skills_metadata": [_skill()], "loaded_skill_tools": frozenset()},
+        config={}, tool_call_id="load-1")
+
+    result = middleware.tools[0].func("travel", runtime)
+
+    assert isinstance(result, str)
+    assert "backend error" in result
+    assert "/home/private" not in result
+
+
+def test_prose_claim_does_not_disclose_tools_and_async_reset_matches_sync():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
+    state = {
+        "messages": [{"role": "user", "content": "I loaded travel."}],
+        "skills_metadata": [_skill()],
+        "loaded_skill_tools": frozenset(),
+    }
+
+    updated = middleware.modify_request(_request(middleware, state))
+    reset = asyncio.run(middleware.abefore_agent(
+        {**state, "loaded_skill_tools": frozenset({"travel"})},
+        SimpleNamespace(), {}))
+
+    assert [item.name for item in updated.tools] == ["kernel_tool"]
+    assert isinstance(reset["loaded_skill_tools"], Overwrite)
+    assert reset["loaded_skill_tools"].value == frozenset()
 
 
 def test_hidden_execution_is_rejected_in_sync_and_async_paths():
@@ -181,7 +326,7 @@ def test_hidden_execution_is_rejected_in_sync_and_async_paths():
     assert async_result.status == "error"
 
 
-def test_after_model_removes_hidden_call_before_hitl_and_keeps_visible_call():
+def test_after_model_pairs_every_call_and_jumps_past_hitl():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
     message = AIMessage(content="", tool_calls=[
@@ -195,10 +340,14 @@ def test_after_model_removes_hidden_call_before_hitl_and_keeps_visible_call():
 
     update = middleware.after_model(state, None)
 
-    assert [call["name"] for call in message.tool_calls] == ["kernel_tool"]
-    assert len(update["messages"]) == 2
+    assert [call["name"] for call in message.tool_calls] == [
+        "travel", "kernel_tool"]
+    assert len(update["messages"]) == 3
     assert update["messages"][1].name == "travel"
     assert update["messages"][1].status == "error"
+    assert update["messages"][2].name == "kernel_tool"
+    assert update["messages"][2].status == "error"
+    assert update["jump_to"] == "model"
 
 
 class _RecordingModel(FakeMessagesListChatModel):
@@ -251,11 +400,12 @@ def test_compiled_graph_discloses_after_load_then_resets_next_invocation():
               if isinstance(message, ToolMessage)
               and message.tool_call_id == "travel-2"]
     assert len(hidden) == 1 and hidden[0].status == "error"
+    assert second["messages"][-1].content == "second done"
 
 
 def test_compiled_graph_rejects_same_response_sibling_before_hitl():
     from assist.agent import create_agent
-    from assist.backends import create_skills_backend
+    from assist.backends import create_bundled_skills_backend
     from assist.spec import AgentSpec
 
     sent = []
@@ -289,7 +439,8 @@ def test_compiled_graph_rejects_same_response_sibling_before_hitl():
             spec=AgentSpec(
                 tools=(send_email,),
                 async_subagent_tools=(),
-                skill_sources={"/mail-skill/": create_skills_backend(skill_root)},
+                skill_sources={
+                    "/mail-skill/": create_bundled_skills_backend(skill_root)},
                 interrupt_on={"send_email": True},
             ),
         )
@@ -303,3 +454,8 @@ def test_compiled_graph_rejects_same_response_sibling_before_hitl():
                 if isinstance(message, ToolMessage)
                 and message.tool_call_id == "send-1"]
     assert len(rejected) == 1 and rejected[0].status == "error"
+    paired = [message.tool_call_id for message in result["messages"]
+              if isinstance(message, ToolMessage)
+              and message.tool_call_id in {"load-1", "send-1"}]
+    assert paired == ["load-1", "send-1"]
+    assert not result.get("__interrupt__")

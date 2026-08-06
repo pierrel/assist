@@ -1151,13 +1151,13 @@ def test_p0_through_p2b2_history_matches_the_current_capture(census):
     )
     assert len(historical_p0_prompt) == 31_279
     assert len(current_prompt) == 29_527
-    assert len(schemas) == 17_984
+    assert len(schemas) == 17_956
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 25
-    assert len(artifact_bytes(census)) == 2_992_991
+    assert len(artifact_bytes(census)) == 2_992_683
     assert census["artifact_sha256"] == \
-        "a16e88ba2b5f0187a67423591138a856c81ed7c60aa1a547e4a5768d76df2490"
+            "628b25ac3f13d73ba1482b983b3a9379cf90b642e0a584ad2d7ab449bfa0ad6f"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
@@ -1187,8 +1187,8 @@ def test_p0_through_p2b2_history_matches_the_current_capture(census):
         in p2b1_document
     assert "2,856,251 bytes with 25 retained" in p2b1_document
     assert "29,527 characters" in p2b2_document
-    assert "17,984 characters" in p2b2_document
-    assert "2,992,991 bytes" in p2b2_document
+    assert "17,956 characters" in p2b2_document
+    assert "2,992,683 bytes" in p2b2_document
 
     kernel = _named_text_block("proposed-main-bootstrap-kernel")
     headings = [

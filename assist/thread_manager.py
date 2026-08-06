@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 _RENDER_SKILL_ROUTE = "/render-skill/"
 _RENDER_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "web_skills")
 _render_skill_sources = None
+_triage_skill_sources_cache = None
 
 
 def _web_skill_sources() -> dict:
@@ -57,11 +58,25 @@ def _web_skill_sources() -> dict:
     (same pattern as emacsos-server's _skill_sources)."""
     global _render_skill_sources
     if _render_skill_sources is None:
-        from assist.backends import create_skills_backend
+        from assist.backends import create_bundled_skills_backend
         _render_skill_sources = {
-            _RENDER_SKILL_ROUTE: create_skills_backend(_RENDER_SKILLS_DIR)
+            _RENDER_SKILL_ROUTE: create_bundled_skills_backend(_RENDER_SKILLS_DIR)
         }
     return _render_skill_sources
+
+
+def _triage_skill_sources() -> dict:
+    """The unchanged pre-P2b skill backends used by inbound SMS triage."""
+    global _triage_skill_sources_cache
+    if _triage_skill_sources_cache is None:
+        from deepagents.backends import FilesystemBackend
+        from assist.backends import SKILLS_DIR, SKILLS_ROUTE, create_skills_backend
+        _triage_skill_sources_cache = {
+            SKILLS_ROUTE: create_skills_backend(SKILLS_DIR),
+            _RENDER_SKILL_ROUTE: FilesystemBackend(
+                root_dir=_RENDER_SKILLS_DIR, virtual_mode=True)
+        }
+    return _triage_skill_sources_cache
 
 
 # The web app's main agent also gets the schedule tools, injected by the web composition
@@ -333,7 +348,9 @@ class ThreadManager:
         return Thread(
             working_dir, **thread_kwargs,
             spec=AgentSpec(
-                skill_sources=_web_skill_sources(), tools=tools,
+                skill_sources=(_triage_skill_sources() if triage
+                               else _web_skill_sources()),
+                tools=tools,
                 async_subagent_tools=async_tools,
                 interrupt_on=interrupt_on))
 

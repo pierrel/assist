@@ -1,6 +1,38 @@
 #+title: Prompt architecture P2b.2: bundled skill tool disclosure
 
+* State
+
+Status: implementation and bounded local-review fixes in progress.  The
+deterministic gating slices are green; comparative behavioral evaluation is not
+yet complete.
+
 * Change log
+
+** 2026-08-05: Bounded implementation-review corrections
+
+- Preserved provider history when rejecting a response that mixes hidden and
+  visible calls.  The response now receives one paired error result for every
+  call and jumps back to the model; no sibling call executes or reaches HITL.
+- Replaced backend-class inference with an explicit packaged-skill backend
+  marker.  Generic read-only embedder routes remain external, and longest-source
+  matching prevents a nested external route from being claimed by a bundled
+  parent prefix.
+- Intersected each declaration with the tools registered in that exact agent
+  profile.  A shared declaration can keep its full portable owner list without
+  disclosing tools absent from this graph.
+- Restored the nested provider-schema dict form accepted by =AgentSpec.tools=;
+  registered-name extraction now covers the same BaseTool, callable, and dict
+  shapes as graph construction.
+- Kept inbound SMS triage on its pre-P2b skill prompt, loader, shared-skill
+  backend, and render backend.  This uses its existing composition boundary and
+  adds no triage permission or authorization mechanism.
+- Restored HITL propagation to the declarative critique subagent, which can
+  inherit main-agent tools under Deep Agents even though fixed compiled
+  context/research agents do not.
+- Added deterministic coverage for invalid bytes, parallel union, async reset,
+  prose-only claims, nested sources, registered-tool intersection, critique
+  HITL, and triage composition.  Consolidated changed evals on one tool-call
+  traversal helper.
 
 ** 2026-08-05: Reviewed design
 
@@ -23,20 +55,23 @@
   review identified invocation reset as a risk to an active task such as
   “make it 8 instead.”
 
-** 2026-08-05: Initial deterministic implementation evidence
+** 2026-08-05: Current deterministic implementation evidence
 
 - The canonical initial web-main system message is 29,527 characters, about
   7,382 tokens at the program's four-characters-per-token estimate.  Its 15
-  provider-bound schemas are 17,984 characters, about 4,496 tokens.  The
-  combined bootstrap is 47,511 characters, about 11,878 tokens.
-- After loading =send-email=, the same request has 16 schemas totaling 18,442
+  provider-bound schemas are 17,956 characters, about 4,489 tokens.  The
+  combined bootstrap is 47,483 characters, about 11,871 tokens.
+- After loading =send-email=, the same request has 16 schemas totaling 18,414
   characters; =send_email= is then handled by the unchanged approval pause.
 - The bounded synthetic census records 29 provider calls, 38 construction
   nodes, 25 retained audit findings, successful-load artifacts, and is
-  2,992,991 bytes with SHA-256
-  =a16e88ba2b5f0187a67423591138a856c81ed7c60aa1a547e4a5768d76df2490=.
-- These are implementation-stage measurements.  They will be regenerated after
-  review-driven edits before publication.
+  2,992,683 bytes with SHA-256
+  =628b25ac3f13d73ba1482b983b3a9379cf90b642e0a584ad2d7ab449bfa0ad6f=.
+- These measurements include the bounded round-two review fixes and are pinned
+  by the deterministic census test.  They will be regenerated after any later
+  implementation edit.
+- The final pre-eval deterministic suite passes 1,606 tests with 2 skipped and
+  2 subtests passed.  Python compilation and =git diff --check= also pass.
 
 * Objective
 
@@ -89,10 +124,12 @@ the last-source-wins metadata in =skills_metadata=.  P2b.2 uses that exact
 winner set.
 
 A winning skill is bundled only when its metadata path belongs to a route backed
-by Assist's existing packaged read-only skill backend.  The built-in and
+by Assist's explicit packaged-skill backend marker.  A generic read-only backend
+does not imply Assist ownership.  The built-in and
 main-only routes are bundled unless an embedder overrides them.  The web
 composition mounts its existing packaged web skill directory through the same
-read-only backend.  A losing, shadowed, domain, mutable, or arbitrary embedder
+marked backend.  When source prefixes nest, the longest matching configured
+source owns the path.  A losing, shadowed, domain, mutable, or arbitrary embedder
 source contributes no gated names in this child.
 
 For each model request:
@@ -129,7 +166,7 @@ thread checkpoint still contains skill metadata.
 that recorded path.  It enforces the upstream 10 MiB skill-file limit before
 UTF-8 decoding.  On success it returns a =Command= containing the matching
 =ToolMessage= and the union-state update.  The model-visible result is the
-sanitized winning body plus the exact newly available names.  Missing, failed,
+sanitized complete winning skill file plus the exact newly available names.  Missing, failed,
 oversized, non-UTF-8, or fabricated names return an error message and no state
 or evidence update.  Prose that mentions a skill cannot update private state.
 
@@ -152,10 +189,12 @@ appends =HumanInTheLoopMiddleware= after caller middleware, and after-model hook
 run in reverse order.  A hallucinated hidden =send_email= call could therefore
 pause for approval before reaching tool execution.  Assist installs the same
 HITL middleware explicitly immediately before the skills middleware.  The
-skills after-model hook first removes hidden calls and supplies matching error
-messages; HITL then sees only currently visible outward effects.  The execution
+skills after-model hook first completes every call ID in an invalid mixed
+response with an error and jumps back to the model.  HITL therefore sees none of
+that response, and the model retries with a valid call set.  The execution
 wrapper remains the second defense.  Approval configuration and decisions are
-otherwise unchanged.
+otherwise unchanged.  Declarative subagents receive the same HITL map because
+Deep Agents can give them inherited tools.
 
 ** Load evidence
 
@@ -167,7 +206,8 @@ Each successful load attaches a non-model-visible artifact with exactly:
 - =result_sha256=.
 
 The winner fingerprint hashes canonical JSON containing the winning name,
-description, digest of the loaded body, and ordered declared names.  It contains
+description, digest of the decoded complete skill file before display
+sanitization, and ordered declared names.  It contains
 no host path.  =result_sha256= covers the exact sanitized model-visible content.
 Failures have no artifact.
 
@@ -244,7 +284,7 @@ Stop rather than tune around a regression in an adjacent cohort.
 ** Pre-registered cohort and execution budget
 
 The comparative cohort is frozen before its first P2b.2 model call at these
-eleven natural nodes:
+eleven nodes:
 
 1. =TestTravelAgent::test_calls_travel_for_distance_question=;
 2. =TestDirectionsAgent::test_step_by_step_calls_directions=;
@@ -257,6 +297,11 @@ eleven natural nodes:
 9. =TestSendEmailSkill::test_natural_request_loads_skill_and_proposes_one_email=;
 10. =TestTimeAgent::test_does_not_load_on_non_date_prompt=; and
 11. =TestUrgentNotification::test_imminent_deadline_is_flagged_with_a_message=.
+
+Nodes 3, 5, 6, 7, 8, 9, and 11 are natural outcome journeys.  Nodes 1, 2,
+and 4 are explicit capability diagnostics retained to localize routing or
+argument failures.  Node 10 is the causal no-load control.  Capability and
+control results are reported separately from the natural acceptance rate.
 
 The unchanged baseline is merged P2b.1 commit =d981395=.  Baseline execution
 uses that production tree with only the frozen candidate eval files overlaid,
@@ -285,6 +330,21 @@ result is diagnostic.  Deterministic load/disclose/execute tests localize a
 failure before any prompt tuning; no cohort prompt changes are allowed after
 launch.
 
+** Preliminary baseline N=3
+
+The first baseline launch had no =.dev.env= in its detached worktree and is
+preserved as invalid infrastructure evidence.  The bounded replacement ran the
+merged P2b.1 runtime with the frozen candidate eval files.  The new subscription
+fixture initially supplied a UUID where the store contract requires a string;
+those three samples are also preserved as invalid and will be rerun unchanged
+except for that fixture correction.
+
+Across the other 30 valid samples the P2b.1 baseline passed 24/30.  Travel,
+directions, website download, async delegation, render, email, and the time
+control each passed 3/3; day-of-month scheduling passed 2/3; the referential
+follow-up passed 0/3; and urgent notification passed 1/3.  These are diagnostic
+N=3 results, not a final gate.  Candidate execution has not started.
+
 * Design-review resolution
 
 - Simplicity and clean-interface review rejected a global owner manifest and
@@ -312,11 +372,38 @@ hooks in reverse, and a state-updating tool must return a =Command= with a
 matching =tool_call_id= terminator.  Those contracts were verified from the
 installed Deep Agents, LangChain, and LangGraph sources.
 
+The first implementation review found two additional framework-shaped details.
+Removing hidden calls from an =AIMessage= would leave orphaned tool results in
+provider history, so an invalid mixed response must be completed as a whole and
+retried.  Also, declarative Deep Agents subagents may inherit parent tools, so
+moving HITL from =create_deep_agent(interrupt_on=...)= into explicit middleware
+requires forwarding the same gate to that declarative subagent.  Both fixes are
+small, local, and deterministically tested.
+
+Preserving the explicit “do not change SMS triage” boundary also required care.
+The normal web render route must be marked bundled for this experiment, while
+triage must retain the exact pre-P2b shared and render backends so neither its
+prompt nor schemas change.  The implementation uses the existing triage
+composition seam with two legacy backend entries; it does not add a new triage
+agent, authorization rule, or tool registry.
+
 The initial architect and lens-review invocations also read far beyond the
-bounded question and overran their expected context.  They were stopped and
-redirected to concrete conclusions.  Their broad registry and route-
-centralization suggestions were declined.  No unrelated production cleanup is
-part of this child.
+bounded question and overran their expected context.  The first code-review
+round repeated that cost, producing very large logs and several broad or
+theoretical suggestions.  Only findings directly affecting P2b.2 were accepted:
+history pairing, HITL ordering/propagation, source ownership, per-profile tool
+intersection, production-shaped render coverage, triage parity, and explicit
+design gates.  ID-less-call recovery and broad graph-matrix expansion were
+declined without an observed contract.  No unrelated production cleanup is part
+of this child.
+
+The local code-review loop converged at its five-round cap.  All verified
+P2b.2 findings were fixed: provider-history pairing, HITL ordering and
+declarative-subagent propagation, explicit/longest source ownership,
+per-profile tool intersection, nested dict-form tools, exact triage parity,
+raw-file fingerprints versus sanitized results, bounded backend errors, and
+shared eval traversal.  The rejected items were theoretical ID-less call
+recovery and broad graph-matrix expansion without an observed contract.
 
 Implementation outcome, final LOC, maintenance shape, eval results, and any
 remaining hard points will be appended after the code and review loops converge.

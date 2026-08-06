@@ -9,14 +9,15 @@ import os
 import tempfile
 from unittest import TestCase
 
-from langchain_core.messages import AIMessage
-
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 from assist.schedule.tools import schedule_tools
 from assist.schedule.store import ScheduleStore
-from .utils import create_filesystem, skill_was_loaded, stub_research_subagent
+from .utils import (
+    agent_tool_calls, create_filesystem, skill_was_loaded,
+    stub_research_subagent,
+)
 
 os.environ.setdefault("ASSIST_MODEL_URL", "http://127.0.0.1:8000/v1")
 
@@ -35,21 +36,8 @@ class TestScheduleAgent(TestCase):
 
     def _create_calls(self, agent) -> list:
         """args of every create_schedule call the agent emitted."""
-        calls = []
-        for m in agent.all_messages():
-            if not isinstance(m, AIMessage):
-                continue
-            for tc in (getattr(m, "tool_calls", None) or []):
-                if tc.get("name") == "create_schedule":
-                    calls.append(tc.get("args") or tc.get("arguments") or {})
-        return calls
-
-    @staticmethod
-    def _named_calls(agent, name: str) -> list[dict]:
-        return [tc for message in agent.all_messages()
-                if isinstance(message, AIMessage)
-                for tc in (message.tool_calls or [])
-                if tc.get("name") == name]
+        return [call.get("args") or call.get("arguments") or {}
+                for call in agent_tool_calls(agent, "create_schedule")]
 
     def test_agent_maps_day_of_month(self):
         # Not a research eval — stub the research subagent so a stray dispatch can't hit
@@ -78,12 +66,12 @@ class TestScheduleAgent(TestCase):
         with stub_research_subagent():
             agent = self._agent()
             agent.message("Remind me every day at 7 AM to take my vitamins.")
-            before = len(self._named_calls(agent, "load_skill"))
+            before = len(agent_tool_calls(agent, "load_skill"))
             agent.message("Actually, make it 8 AM instead.")
 
-        later_loads = self._named_calls(agent, "load_skill")[before:]
+        later_loads = agent_tool_calls(agent, "load_skill")[before:]
         self.assertTrue(any(
             (call.get("args") or {}).get("name") == "schedule"
             for call in later_loads), later_loads)
-        self.assertTrue(self._named_calls(agent, "modify_schedule"),
+        self.assertTrue(agent_tool_calls(agent, "modify_schedule"),
                         "follow-up did not modify the existing schedule")

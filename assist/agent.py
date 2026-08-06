@@ -27,7 +27,7 @@ from assist.backends import (
     create_references_backend,
     create_sandbox_composite_backend,
     create_skills_backend,
-    ReadOnlyFilesystemBackend,
+    BundledSkillsBackend,
 )
 from assist.checkpoint_rollback import invoke_with_rollback, RollbackRunnable
 from assist.research_cleanup import ReferencesCleanupRunnable
@@ -58,6 +58,20 @@ from assist.env import env_int
 
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_name(tool_value) -> str:
+    """Name a tool in any form accepted by Deep Agents."""
+    if isinstance(tool_value, dict):
+        function = tool_value.get("function")
+        name = (tool_value.get("name") or
+                (function.get("name") if isinstance(function, dict) else None))
+    else:
+        name = (getattr(tool_value, "name", None)
+                or getattr(tool_value, "__name__", None))
+    if not isinstance(name, str):
+        raise TypeError(f"tool has no registered name: {tool_value!r}")
+    return name
 
 # No auto-added `general-purpose` subagent, anywhere assist builds a deep
 # agent. Evidence (prod logs, 2026-07-21): every observed general-purpose
@@ -363,10 +377,15 @@ def create_agent(model: BaseChatModel,
     # _has_domain_skills is skipped when an embedder already supplied the path.
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
         skill_sources.insert(1 if async_main else 0, DOMAIN_SKILLS_PATH)
-    bundled_skill_sources = {
+    agent_tools = (list(spec.async_subagent_tools or ())
+                   + list(spec.tools)
+                   + [tool_value for tool_value in
+                      (travel, directions, map_data, read_url)
+                      if tool_value not in spec.tools])
+    bundled_skill_sources: set[str] = set()
+    bundled_skill_sources.update(
         source for source, route_backend in extra_routes.items()
-        if isinstance(route_backend, ReadOnlyFilesystemBackend)
-    }
+        if isinstance(route_backend, BundledSkillsBackend))
     if SKILLS_ROUTE not in spec.skill_sources:
         bundled_skill_sources.add(SKILLS_ROUTE)
     if async_main and MAIN_SKILLS_ROUTE not in spec.skill_sources:
@@ -375,6 +394,7 @@ def create_agent(model: BaseChatModel,
         backend=backend,
         sources=skill_sources,
         bundled_sources=bundled_skill_sources,
+        registered_tools=(_tool_name(tool_value) for tool_value in agent_tools),
     )
     memory_mw = SmallModelMemoryMiddleware(
         backend=backend, memories_path=memories_path,
@@ -447,6 +467,7 @@ def create_agent(model: BaseChatModel,
                        SearchUnavailableBreakerMiddleware(
                            threshold=env_int("ASSIST_SEARCH_UNAVAILABLE_THRESHOLD", 4)),
                        EmptyResponseRecoveryMiddleware()],
+        **({"interrupt_on": spec.interrupt_on} if spec.interrupt_on else {}),
     }
 
     delegation_mode = ("legacy" if legacy_subagents else
@@ -522,10 +543,7 @@ def create_agent(model: BaseChatModel,
         # built-ins: direct deterministic real-world lookups the Assist graph answers
         # inline (gated by the travel / render skills), like a calculation — not web
         # research, so not on the research sub-agent.  Skip any a spec supplies (no dup).
-        tools=list(spec.async_subagent_tools or ())
-              + list(spec.tools)
-              + [t for t in (travel, directions, map_data, read_url)
-                 if t not in spec.tools],
+        tools=agent_tools,
     )
 
     return agent

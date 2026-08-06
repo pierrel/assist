@@ -2,15 +2,13 @@
 import tempfile
 from unittest import TestCase
 
-from langchain_core.messages import AIMessage
-
 from assist.agent import AgentHarness, create_agent
 from assist.events.store import SubscriptionStore
 from assist.events.tools import subscription_tools
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
-from .utils import skill_was_loaded, stub_research_subagent
+from .utils import agent_tool_calls, skill_was_loaded, stub_research_subagent
 
 
 class TestSubscriptionAgent(TestCase):
@@ -34,9 +32,7 @@ class TestSubscriptionAgent(TestCase):
                 "asking to schedule something and draft a short reply for me to review."
             )
 
-        calls = [call for message in agent.all_messages()
-                 if isinstance(message, AIMessage)
-                 for call in (message.tool_calls or [])]
+        calls = agent_tool_calls(agent)
         self.assertTrue(skill_was_loaded(agent, "subscribe-events"))
         self.assertTrue(any(call.get("name") == "create_subscription"
                             for call in calls), calls)

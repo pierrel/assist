@@ -1333,7 +1333,7 @@ def _invoke_skill_precedence(trace: CensusTrace, root: Path,
     if embedder:
         extra = root / name / "embedder-skills"
         _write_skill(extra, "dev", "SYNTHETIC EMBEDDER DEV DESCRIPTION",
-                     "SYNTHETIC_EMBEDDER_DEV_BODY")
+                     "\x1b[31mSYNTHETIC_EMBEDDER_DEV_BODY\x1b[0m")
         sources["/synthetic-embedder-skills/"] = FilesystemBackend(
             root_dir=str(extra), virtual_mode=True)
     with _scenario(name):
@@ -1888,7 +1888,10 @@ _DECLARED_TOOL_SCHEMA_HASHES = {
     "list_schedules": {"e0cd57bcb7cd8a6c27e84a665534daf714ef7867e8c95795252c3981caf7217e"},
     "list_subscriptions": {"dcb6ac3c9c61a0dab7c30d0ea6311d20fe5e3502cbc748145ba8032ee1cd931f"},
     "list_threads": {"6ac6da21f65a92eea33c6f825b98322478f3640c944969bf1a47024ed6d7c78b"},
-    "load_skill": {"9870c9427a98117cbe8f4947a569f1b490250611ca3b0b305929ddf1365a629b"},
+    "load_skill": {
+        "9870c9427a98117cbe8f4947a569f1b490250611ca3b0b305929ddf1365a629b",
+        "abc2bc372ed164d625f4f03f3b24602af5e79b99fa43e1c7c60bc5ef2c8233cb",
+    },
     "ls": {"295a42f624bb3d6fd5e8f13e3d3172bf5856df6bc32d5c700c2b4d6b559850de"},
     "map_data": {"0285e871e6f8ebe3d7bdd34068af9fd7dce5841918c76d2866d64e2620f5851f"},
     "modify_schedule": {"2b82e293c48bbdfcaaafe797533693b7d15653b7f3dd2e996c6c06f27a0c16ca"},
@@ -1919,8 +1922,22 @@ _TASK_SCHEMA_HASH_BY_PATH = {
 }
 
 
-def _expected_tool_results() -> dict[str, str]:
+def _expected_skill_file(tool_call_id: str) -> str:
     repo = Path(__file__).resolve().parents[1]
+    files = {
+        "synthetic-call-hitl-skill-load":
+            (repo / "assist/web_skills/send-email/SKILL.md").read_text(
+                encoding="utf-8"),
+        "synthetic-call-skill-precedence-built-in-load":
+            (repo / "assist/skills/dev/SKILL.md").read_text(encoding="utf-8"),
+        "synthetic-call-skill-precedence-embedder-load":
+            "---\nname: dev\ndescription: SYNTHETIC EMBEDDER DEV DESCRIPTION\n"
+            "---\n\n\x1b[31mSYNTHETIC_EMBEDDER_DEV_BODY\x1b[0m\n",
+    }
+    return files[tool_call_id]
+
+
+def _expected_tool_results() -> dict[str, str]:
     return {
         "synthetic-call-safe-exec":
             "SYNTHETIC_EXECUTE_OK\n[Command succeeded with exit code 0]",
@@ -1929,16 +1946,15 @@ def _expected_tool_results() -> dict[str, str]:
             "the web UI.  To publish your work to origin, ask the user to click "
             "'Push to origin' in their browser.",
         "synthetic-call-hitl-skill-load":
-            (repo / "assist/web_skills/send-email/SKILL.md").read_text(
-                encoding="utf-8")
+            _expected_skill_file("synthetic-call-hitl-skill-load")
             + "\n\nNewly available tools: send_email.",
         "synthetic-call-skill-precedence-built-in-load":
-            (repo / "assist/skills/dev/SKILL.md").read_text(encoding="utf-8")
+            _expected_skill_file("synthetic-call-skill-precedence-built-in-load")
             + "\n\nNo additional tools became available.",
         "synthetic-call-skill-precedence-embedder-load":
             "---\nname: dev\ndescription: SYNTHETIC EMBEDDER DEV DESCRIPTION\n"
             "---\n\nSYNTHETIC_EMBEDDER_DEV_BODY\n"
-            "\n\nNo additional tools became available.",
+            + "\n\nNo additional tools became available.",
         "synthetic-call-read-only":
             "Error: this agent is read-only and cannot call 'write_file'. If the "
             "user asked you to write or modify something, do not attempt the write "
@@ -1971,17 +1987,16 @@ def _expected_load_artifact(tool_call_id: str) -> dict[str, str]:
     from deepagents.middleware.skills import _parse_skill_metadata
 
     requested_name = _DECLARED_TOOL_CALLS[tool_call_id][1]["name"]
+    skill_file = _expected_skill_file(tool_call_id)
     content = _expected_tool_results()[tool_call_id]
-    body, separator, _disclosure = content.rpartition("\n\n")
-    if not separator:
-        raise AssertionError("declared load result lacks disclosure suffix")
     metadata = _parse_skill_metadata(
-        body, f"/{requested_name}/SKILL.md", requested_name)
+        skill_file, f"/{requested_name}/SKILL.md", requested_name)
     if metadata is None:
         raise AssertionError("declared load result metadata did not parse")
     fingerprint_payload = {
         "allowed_tools": list(metadata["allowed_tools"]),
-        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "skill_file_sha256": hashlib.sha256(
+            skill_file.encode("utf-8")).hexdigest(),
         "description": metadata["description"],
         "name": metadata["name"],
     }
@@ -2513,7 +2528,8 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
             "path": "/synthetic-embedder-skills/dev/SKILL.md",
             "description": "SYNTHETIC EMBEDDER DEV DESCRIPTION",
             "content": "---\nname: dev\ndescription: SYNTHETIC EMBEDDER DEV "
-                       "DESCRIPTION\n---\n\nSYNTHETIC_EMBEDDER_DEV_BODY\n",
+                       "DESCRIPTION\n---\n\n\x1b[31mSYNTHETIC_EMBEDDER_DEV_BODY"
+                       "\x1b[0m\n",
             "allowed_tools": [],
         },
     }
