@@ -377,11 +377,21 @@ def create_agent(model: BaseChatModel,
     # _has_domain_skills is skipped when an embedder already supplied the path.
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
         skill_sources.insert(1 if async_main else 0, DOMAIN_SKILLS_PATH)
-    agent_tools = (list(spec.async_subagent_tools or ())
-                   + list(spec.tools)
-                   + [tool_value for tool_value in
-                      (travel, directions, map_data, read_url)
-                      if tool_value not in spec.tools])
+    agent_tools = []
+    registered_tool_names = set()
+    for tool_value in (
+        *list(spec.async_subagent_tools or ()),
+        *list(spec.tools),
+        travel, directions, map_data, read_url,
+    ):
+        # Deep Agents binds tools by name.  Specs may use provider-schema dicts
+        # while the built-ins are BaseTool instances, so object identity is not
+        # a sufficient duplicate check.
+        tool_name = _tool_name(tool_value)
+        if tool_name in registered_tool_names:
+            continue
+        registered_tool_names.add(tool_name)
+        agent_tools.append(tool_value)
     bundled_skill_sources: set[str] = set()
     bundled_skill_sources.update(
         source for source, route_backend in extra_routes.items()

@@ -68,8 +68,8 @@ complete.  The candidate passes every deterministic and behavioral gate.
 - The bounded synthetic census records 29 provider calls, 38 construction
   nodes, 25 retained audit findings, successful-load artifacts, and is
   2,992,683 bytes with SHA-256
-  =628b25ac3f13d73ba1482b983b3a9379cf90b642e0a584ad2d7ab449bfa0ad6f=.
-- These measurements include the bounded round-two review fixes and are pinned
+  =ef83c31bb0864f412fcca8f79e0702191a7f3ec5f1d787081519084b7925c7d0=.
+- These measurements include the post-review tool-name deduplication fix and are pinned
   by the deterministic census test.  They will be regenerated after any later
   implementation edit.
 - The final pre-eval deterministic suite passes 1,606 tests with 2 skipped and

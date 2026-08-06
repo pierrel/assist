@@ -91,6 +91,22 @@ class TestSpecWiring(_CreateAgentHarness):
 
         assert provider_tool in kwargs["tools"]
 
+    def test_provider_schema_name_dedupes_builtin_tool(self):
+        provider_tool = {
+            "type": "function",
+            "function": {
+                "name": "travel",
+                "description": "Provider travel tool.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+
+        kwargs = self._build(spec=AgentSpec(tools=(provider_tool,)))
+
+        assert kwargs["tools"].count(provider_tool) == 1
+        assert [tool for tool in kwargs["tools"]
+                if getattr(tool, "name", None) == "travel"] == []
+
     def test_hitl_precedes_skills_and_is_not_appended_by_deepagents(self):
         from langchain.agents.middleware import HumanInTheLoopMiddleware
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
