@@ -24,9 +24,10 @@ where reliability is harder than with frontier APIs.
   lives under `/agent`. Visible web main-agent turns auto-load both; other
   constructions retain repository memory alone.
 
-- **Small-LLM-tuned skills.** Shared skills are progressively-disclosed
-  capability bundles under `assist/skills/<name>/SKILL.md`; supervisor-only
-  workflows live under `assist/main_skills/`. Both are tuned to small LLMs.
+- **Small-LLM-tuned skills.** Shared, domain-repository, and embedder-supplied
+  skills are progressively-disclosed capability bundles. Assist-owned skills
+  live under `assist/skills/<name>/SKILL.md`; supervisor-only workflows live
+  under `assist/main_skills/`; domain skills use `.claude/skills/`.
 
 - **Web-path sandboxing.** When Docker is available, web turns run filesystem
   and code tools inside a per-turn container with the workspace bind-mounted at
@@ -579,10 +580,11 @@ middleware lists every skill it finds there alongside the built-ins, and
 `load_skill(name="<skill-name>")` loads the complete `SKILL.md`. (Skills are listed
 once per chat — add one and start a new chat to pick it up.)
 
-During the P2b migration, domain-repository declarations are validated and
-recorded but do not yet hide tools at runtime. Bundled Assist skills use
-progressive disclosure now; domain and embedder-owned skills join that contract
-in P2b.3.
+Domain-repository and embedder declarations now use the same progressive
+disclosure contract as bundled Assist skills.  A declared tool must already be
+registered in the current graph, remains hidden until its winning skill is
+loaded, and is rejected at execution if it is still hidden.  SMS triage keeps
+its legacy skill composition.
 
 **Authoring one on request.** Ask the agent to "make a skill for X" and
 the `author-skill` built-in walks it through writing a correct

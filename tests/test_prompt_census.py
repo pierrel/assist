@@ -1128,7 +1128,7 @@ def test_keyboard_interrupt_cleans_publication_staging(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".interrupted-*"))
 
 
-def test_p0_through_p2b2_history_matches_the_current_capture(census):
+def test_p0_through_p2b3_history_matches_the_current_capture(census):
     document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
         encoding="utf-8")
     p2_document = Path("docs/2026-08-04-prompt-architecture-p2.org").read_text(
@@ -1138,6 +1138,9 @@ def test_p0_through_p2b2_history_matches_the_current_capture(census):
         encoding="utf-8")
     p2b2_document = Path(
         "docs/2026-08-05-prompt-architecture-p2b2.org").read_text(
+        encoding="utf-8")
+    p2b3_document = Path(
+        "docs/2026-08-06-prompt-architecture-p2b3.org").read_text(
         encoding="utf-8")
     current = _call(census, "web-main-core")
     historical_p0_prompt = _named_text_block("p0-current-web-main-bootstrap")
@@ -1157,8 +1160,10 @@ def test_p0_through_p2b2_history_matches_the_current_capture(census):
     assert len(census["findings"]) == 25
     assert len(artifact_bytes(census)) == 2_992_683
     assert census["artifact_sha256"] == \
-            "d3a0ce22fcf4be92c97423742fc66ebc85ea4b2dc575246b4316625dda82b45d"
+            "879604a08b337fecc5a0f5b2a4b8cfded0c96c9fbcead14f31b401f15362c2b2"
     assert "2,920,942 bytes (2.8 MiB)" in document
+    assert "P2b.3 external-skill disclosure implementation" in document
+    assert "domain and embedder tool disclosure" in p2b3_document
     assert "p0-100aa885-final-v2" in document
     expected_rows = [
         "| Assist role instructions | P0 baseline custom main template: role, routing, trust, research, artifact, and lifecycle procedure | 13,068 | 3,267 |",

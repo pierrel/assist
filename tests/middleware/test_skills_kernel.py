@@ -102,6 +102,20 @@ def test_external_winner_stays_baseline_visible():
     assert [item.name for item in updated.tools] == ["kernel_tool", "travel"]
 
 
+def test_external_source_is_gated_when_disclosure_is_enabled():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/", "/external/"],
+        bundled_sources=["/skills/"], gated_sources=["/skills/", "/external/"])
+    state = {
+        "skills_metadata": [_skill("/external/travel/SKILL.md")],
+        "loaded_skill_tools": frozenset(),
+    }
+
+    updated = middleware.modify_request(_request(middleware, state))
+
+    assert [item.name for item in updated.tools] == ["kernel_tool"]
+
+
 def test_nested_external_source_is_not_claimed_by_bundled_parent():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/", "/skills/external/"],
@@ -197,8 +211,32 @@ def test_disclosure_intersects_declarations_with_this_agent_tools():
     result = middleware.tools[0].func("travel", runtime)
 
     assert result.update["loaded_skill_tools"] == frozenset({"travel"})
-    assert result.update["messages"][0].content.endswith(
-        "Newly available tools: travel.")
+    assert "Newly available tools: travel." in result.update["messages"][0].content
+    assert "Unavailable declared tools ignored: absent_tool." in \
+        result.update["messages"][0].content
+
+
+def test_disclosure_reports_unregistered_names_without_exposing_them():
+    body = b"---\nname: travel\ndescription: Travel help.\n---\n\nRULES"
+    backend = SimpleNamespace(download_files=lambda _paths: [
+        SimpleNamespace(error=None, content=body)])
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=["/external/"],
+        gated_sources=["/external/"], registered_tools={"travel"})
+    skill = {**_skill("/external/travel/SKILL.md"),
+             "allowed_tools": ["travel", "not_registered"]}
+    runtime = SimpleNamespace(
+        state={"skills_metadata": [skill], "loaded_skill_tools": frozenset()},
+        config={}, tool_call_id="load-1")
+
+    result = middleware.tools[0].func("travel", runtime)
+
+    message = result.update["messages"][0]
+    assert result.update["loaded_skill_tools"] == frozenset({"travel"})
+    assert "Unavailable declared tools ignored: not_registered." in message.content
+    updated = middleware.modify_request(_request(
+        middleware, {**runtime.state, "loaded_skill_tools": frozenset({"travel"})}))
+    assert [item.name for item in updated.tools] == ["kernel_tool", "travel"]
 
 
 def test_parallel_load_updates_have_union_reducer():
@@ -412,6 +450,46 @@ def test_compiled_graph_discloses_after_load_then_resets_next_invocation():
     assert second["messages"][-1].content == "second done"
 
 
+def test_compiled_graph_discloses_domain_skill_tool_after_load():
+    from assist.agent import create_agent
+    from assist.spec import AgentSpec
+
+    @tool("travel")
+    def fake_travel(origin: str, destination: str) -> str:
+        """Return a deterministic route."""
+        return f"route:{origin}:{destination}"
+
+    model = _RecordingModel(responses=[
+        AIMessage(content="", tool_calls=[{
+            "name": "load_skill", "args": {"name": "domain-route"},
+            "id": "load-domain"}]),
+        AIMessage(content="", tool_calls=[{
+            "name": "travel", "args": {"origin": "a", "destination": "b"},
+            "id": "travel-domain"}]),
+        AIMessage(content="done"),
+    ])
+    with tempfile.TemporaryDirectory() as wd:
+        skill_dir = Path(wd) / ".claude" / "skills" / "domain-route"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: domain-route\ndescription: Route help.\n"
+            "allowed-tools: travel\n---\n\nUse travel.\n",
+            encoding="utf-8",
+        )
+        with patch("assist.agent.travel", fake_travel):
+            agent = create_agent(
+                model, wd, spec=AgentSpec(async_subagent_tools=()))
+            result = agent.invoke(
+                {"messages": [{"role": "user", "content": "route"}]},
+                {"configurable": {"thread_id": "domain-disclosure"}},
+            )
+
+    assert "travel" not in model.bound_tools[0]
+    assert "travel" in model.bound_tools[1]
+    assert any(message.name == "travel" and message.status == "success"
+               for message in result["messages"] if isinstance(message, ToolMessage))
+
+
 def test_compiled_graph_rejects_same_response_sibling_before_hitl():
     from assist.agent import create_agent
     from assist.backends import create_bundled_skills_backend
@@ -468,3 +546,50 @@ def test_compiled_graph_rejects_same_response_sibling_before_hitl():
               and message.tool_call_id in {"load-1", "send-1"}]
     assert paired == ["load-1", "send-1"]
     assert not result.get("__interrupt__")
+
+
+def test_compiled_graph_discloses_embedder_tool_after_load():
+    from deepagents.backends import FilesystemBackend
+    from assist.agent import create_agent
+    from assist.spec import AgentSpec
+
+    @tool("custom_lookup")
+    def custom_lookup(value: str) -> str:
+        """Return a deterministic custom lookup."""
+        return f"lookup:{value}"
+
+    model = _RecordingModel(responses=[
+        AIMessage(content="", tool_calls=[{
+            "name": "load_skill", "args": {"name": "embedder-route"},
+            "id": "load-embedder"}]),
+        AIMessage(content="", tool_calls=[{
+            "name": "custom_lookup", "args": {"value": "x"},
+            "id": "lookup-embedder"}]),
+        AIMessage(content="done"),
+    ])
+    with tempfile.TemporaryDirectory() as skill_root, tempfile.TemporaryDirectory() as wd:
+        skill_dir = Path(skill_root) / "embedder-route"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: embedder-route\ndescription: Lookup help.\n"
+            "allowed-tools: custom_lookup\n---\n\nUse custom_lookup.\n",
+            encoding="utf-8",
+        )
+        agent = create_agent(
+            model, wd,
+            spec=AgentSpec(
+                tools=(custom_lookup,), async_subagent_tools=(),
+                skill_sources={
+                    "/embedder-skills/": FilesystemBackend(
+                        root_dir=skill_root, virtual_mode=True)}
+            ),
+        )
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": "lookup"}]},
+            {"configurable": {"thread_id": "embedder-disclosure"}},
+        )
+
+    assert "custom_lookup" not in model.bound_tools[0]
+    assert "custom_lookup" in model.bound_tools[1]
+    assert any(message.name == "custom_lookup" and message.status == "success"
+               for message in result["messages"] if isinstance(message, ToolMessage))

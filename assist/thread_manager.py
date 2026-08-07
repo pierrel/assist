@@ -75,9 +75,10 @@ def _triage_skill_sources() -> dict:
     global _triage_skill_sources_cache
     if _triage_skill_sources_cache is None:
         from deepagents.backends import FilesystemBackend
-        from assist.backends import SKILLS_DIR, SKILLS_ROUTE, create_skills_backend
+        from assist.backends import (
+            SKILLS_DIR, SKILLS_ROUTE, create_legacy_skills_backend)
         _triage_skill_sources_cache = {
-            SKILLS_ROUTE: create_skills_backend(SKILLS_DIR),
+            SKILLS_ROUTE: create_legacy_skills_backend(SKILLS_DIR),
             _RENDER_SKILL_ROUTE: FilesystemBackend(
                 root_dir=_RENDER_SKILLS_DIR, virtual_mode=True)
         }

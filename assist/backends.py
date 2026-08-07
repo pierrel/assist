@@ -104,9 +104,18 @@ class BundledSkillsBackend(ReadOnlyFilesystemBackend):
     """Read-only backend marking an Assist-owned packaged skill route."""
 
 
+class LegacySkillsBackend(ReadOnlyFilesystemBackend):
+    """Read-only backend marking the unchanged inbound-SMS skill route."""
+
+
 def create_skills_backend(root_dir: str) -> BackendProtocol:
     """Return a read-only backend for a skill tree."""
     return ReadOnlyFilesystemBackend(root_dir=root_dir, virtual_mode=True)
+
+
+def create_legacy_skills_backend(root_dir: str) -> BackendProtocol:
+    """Return the pre-progressive-disclosure triage skill backend."""
+    return LegacySkillsBackend(root_dir=root_dir, virtual_mode=True)
 
 
 def create_bundled_skills_backend(root_dir: str) -> BackendProtocol:

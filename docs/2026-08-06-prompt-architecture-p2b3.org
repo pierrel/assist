@@ -1,0 +1,58 @@
+#+title: Prompt architecture P2b.3: domain and embedder tool disclosure
+#+date: <2026-08-06>
+
+* Objective
+
+Apply the P2b.2 progressive tool contract to skills loaded from a domain
+repository's =.claude/skills/= tree and from =AgentSpec.skill_sources=.
+SMS triage is deliberately unchanged.
+
+* Design
+
+The existing =SmallModelSkillsMiddleware= remains the sole disclosure and
+execution gate.  A normal progressive composition marks all mounted skill
+sources as gated, while the triage composition has no gated source and keeps
+its legacy loader and visible tools.  A skill's exact =allowed-tools= names
+are intersected with the tools registered in the current graph.  A declaration
+cannot create a tool or expand the graph.  Source precedence remains the
+existing last-source-wins listing/load behavior; only the winning skill's
+declaration is used.
+
+Unknown declarations are excluded from the allowed set and are named in one
+bounded load result diagnostic.  Schema filtering and execution rejection
+remain paired.  Activation is invocation-local and resets at the next graph
+invocation, exactly as in P2b.2.
+
+* Controlled implementation
+
+- `assist/agent.py` passes the complete normal skill-source list to the
+  existing disclosure middleware; triage passes none.
+- `assist/middleware/skills_middleware.py` separates the packaged-source
+  compatibility marker from the complete gated-source set and reports
+  unavailable declared names without exposing them.
+- Deterministic graph tests exercise a real `.claude/skills/` fixture and an
+  `AgentSpec.skill_sources` fixture with a custom tool.
+
+* Evidence and gates
+
+The focused deterministic suite must prove pre-load absence, post-load
+execution, reset, unknown-tool containment, collision behavior, and unchanged
+triage composition.  Natural domain and embedder acceptance cohorts were
+baseline 18/18 at N=3, candidate 18/18 at N=3, 30/30 at N=5, and 59/60 at
+N=10.  The single stability miss was the existing sandbox arithmetic
+variance and reproduced on baseline at 1/5; the skill loaded in both cases.
+
+* Change log
+
+** 2026-08-06: implementation started
+
+- Advanced the lane to merged P2b.2 commit `39d1d39` after detecting the local
+  main ref was stale.
+- Added the shared external-source gate and deterministic domain/embedder
+  coverage.
+
+** 2026-08-06: verification complete
+
+- The local review found and fixed the normal `SKILLS_ROUTE` override escape
+  hatch by marking only SMS triage as legacy.  Full deterministic evidence is
+  1,611 passed, 2 skipped; the focused disclosure suite is 88 passed.

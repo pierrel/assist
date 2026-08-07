@@ -19,6 +19,7 @@ from assist.spec import AgentSpec
 from assist.tools import directions, map_data, read_url, search_internet, travel
 from assist.backends import (
     DOMAIN_SKILLS_PATH,
+    LegacySkillsBackend,
     MAIN_SKILLS_DIR,
     MAIN_SKILLS_ROUTE,
     SKILLS_ROUTE,
@@ -400,10 +401,18 @@ def create_agent(model: BaseChatModel,
         bundled_skill_sources.add(SKILLS_ROUTE)
     if async_main and MAIN_SKILLS_ROUTE not in spec.skill_sources:
         bundled_skill_sources.add(MAIN_SKILLS_ROUTE)
+    legacy_skill_composition = any(
+        isinstance(route_backend, LegacySkillsBackend)
+        for route_backend in extra_routes.values())
     skills_mw = SmallModelSkillsMiddleware(
         backend=backend,
         sources=skill_sources,
         bundled_sources=bundled_skill_sources,
+        # Once a normal progressive-disclosure composition exists, every
+        # mounted skill source participates in the same exact-name contract.
+        # Triage has no bundled source and therefore retains its legacy loader
+        # and visibility unchanged.
+        gated_sources=(() if legacy_skill_composition else skill_sources),
         registered_tools=(_tool_name(tool_value) for tool_value in agent_tools),
     )
     memory_mw = SmallModelMemoryMiddleware(

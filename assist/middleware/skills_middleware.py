@@ -1,9 +1,10 @@
-"""Small-model skill loading and bundled-tool progressive disclosure.
+"""Small-model skill loading and progressive tool disclosure.
 
-The model always sees the skill catalog and ``load_skill``. Tools declared by
-winning packaged Assist skills are withheld until that exact skill loads
-successfully in the current graph invocation. Domain and embedder skill/tool
-sources remain baseline-visible until P2b.3.
+The model always sees the skill catalog and ``load_skill``. In normal
+progressive compositions, tools declared by the winning skill from any
+mounted source are withheld until that exact skill loads successfully in the
+current graph invocation. Inbound SMS triage deliberately retains its legacy
+composition.
 """
 from __future__ import annotations
 
@@ -236,14 +237,19 @@ def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
             return _load_failure(name, "skill file is not UTF-8")
         skill_file = _sanitize(raw_skill_file)
 
-        newly_available = middleware._bundled_declared_tools(skill)
+        newly_available = middleware._disclosed_declared_tools(skill)
         already_loaded = frozenset(runtime.state.get("loaded_skill_tools", ()))
-        new_names = [name for name in skill.get("allowed_tools", ())
+        declared_names = tuple(skill.get("allowed_tools", ()))
+        new_names = [name for name in declared_names
                      if name in newly_available and name not in already_loaded]
         disclosure = (
             "Newly available tools: " + ", ".join(new_names) + "."
             if new_names else "No additional tools became available."
         )
+        unavailable = sorted(set(declared_names) - newly_available)
+        if unavailable:
+            disclosure += " Unavailable declared tools ignored: " + \
+                ", ".join(unavailable) + "."
         content = f"{skill_file}\n\n{disclosure}"
         fingerprint_payload = {
             "allowed_tools": list(skill.get("allowed_tools", ())),
@@ -275,17 +281,20 @@ def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
 
 
 class SmallModelSkillsMiddleware(SkillsMiddleware):
-    """Name-based skill loader with invocation-local bundled-tool disclosure."""
+    """Name-based loader with invocation-local progressive tool disclosure."""
 
     state_schema = SmallModelSkillsState
 
     def __init__(self, *, backend, sources, bundled_sources: Iterable[str] = (),
+                 gated_sources: Iterable[str] | None = None,
                  registered_tools: Iterable[str] | None = None):
         super().__init__(backend=backend, sources=sources)
         self._bundled_sources = frozenset(bundled_sources)
+        self._gated_sources = frozenset(
+            self._bundled_sources if gated_sources is None else gated_sources)
         self._registered_tools = (None if registered_tools is None
                                   else frozenset(registered_tools))
-        if self._bundled_sources:
+        if self._gated_sources:
             self.system_prompt_template = SMALL_MODEL_SKILLS_PROMPT
             self.tools = [_make_load_skill_tool(self)]
         else:
@@ -300,16 +309,16 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             f"- **{skill['name']}**: {skill['description']}" for skill in skills
         )
 
-    def _is_bundled(self, skill: dict[str, Any]) -> bool:
+    def _is_gated(self, skill: dict[str, Any]) -> bool:
         path = skill.get("path")
         if not isinstance(path, str):
             return False
         matches = [source for source in self.sources
                    if _source_contains(source, path)]
-        return bool(matches) and max(matches, key=len) in self._bundled_sources
+        return bool(matches) and max(matches, key=len) in self._gated_sources
 
-    def _bundled_declared_tools(self, skill: dict[str, Any]) -> frozenset[str]:
-        if not self._is_bundled(skill):
+    def _disclosed_declared_tools(self, skill: dict[str, Any]) -> frozenset[str]:
+        if not self._is_gated(skill):
             return frozenset()
         declared = frozenset(skill.get("allowed_tools", ()))
         return (declared if self._registered_tools is None
@@ -318,7 +327,7 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
     def _gated_tools(self, state: dict[str, Any]) -> frozenset[str]:
         gated: set[str] = set()
         for skill in state.get("skills_metadata", ()):
-            if self._is_bundled(skill):
+            if self._is_gated(skill):
                 gated.update(skill.get("allowed_tools", ()))
         return (frozenset(gated) if self._registered_tools is None
                 else frozenset(gated) & self._registered_tools)

@@ -162,7 +162,7 @@ class TestCreateAgentExtraSkillSources:
         )
         assert "/emacsos-skills/" in mw.sources
 
-    def test_only_explicitly_bundled_extra_routes_gate_tools(self):
+    def test_all_normal_extra_routes_gate_tools(self):
         external = _route_backend()
         with tempfile.TemporaryDirectory() as root:
             bundled = create_bundled_skills_backend(root)
@@ -174,6 +174,8 @@ class TestCreateAgentExtraSkillSources:
                   if isinstance(m, SmallModelSkillsMiddleware))
 
         assert mw._bundled_sources == frozenset({SKILLS_ROUTE, "/bundled/"})
+        assert "/external/" in mw._gated_sources
+        assert "/bundled/" in mw._gated_sources
 
     def test_multiple_extra_skill_sources(self):
         extras = {
@@ -208,6 +210,7 @@ class TestCreateAgentExtraSkillSources:
         assert mw.sources.count(SKILLS_ROUTE) == 1, (
             f"SKILLS_ROUTE duplicated in middleware sources: {mw.sources}"
         )
+        assert SKILLS_ROUTE in mw._gated_sources
 
 
 class TestCreateAgentDomainSkills:
@@ -268,6 +271,7 @@ class TestCreateAgentDomainSkills:
         # Prepended → index 0 (lowest precedence under last-wins), built-in next.
         assert mw.sources[0] == DOMAIN_SKILLS_PATH
         assert mw.sources[1] == SKILLS_ROUTE
+        assert DOMAIN_SKILLS_PATH in mw._gated_sources
 
     def test_domain_source_absent_when_no_claude_dir(self):
         wd = self._tmpdir()
@@ -303,6 +307,7 @@ class TestCreateAgentDomainSkills:
             wd, spec=AgentSpec(skill_sources={"/emacsos-skills/": extra})))
         # domain < built-in < embedder-extras.
         assert mw.sources == [DOMAIN_SKILLS_PATH, SKILLS_ROUTE, "/emacsos-skills/"]
+        assert "/emacsos-skills/" in mw._gated_sources
 
     def test_domain_skill_discovered_through_default_backend(self):
         """The assist wiring seam: ``/.claude/skills/`` is NOT a composite

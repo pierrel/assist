@@ -143,7 +143,8 @@ class TestThreadManagerLazy(TestCase):
         self.assertNotIn("agent_dir", thread.call_args.kwargs)
 
     def test_triage_profile_preserves_pre_disclosure_skill_composition(self):
-        from assist.backends import BundledSkillsBackend, SKILLS_ROUTE
+        from assist.backends import (
+            BundledSkillsBackend, LegacySkillsBackend, SKILLS_ROUTE)
         from deepagents.backends import FilesystemBackend
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -156,6 +157,7 @@ class TestThreadManagerLazy(TestCase):
 
         spec = thread.call_args.kwargs["spec"]
         self.assertIn(SKILLS_ROUTE, spec.skill_sources)
+        self.assertIsInstance(spec.skill_sources[SKILLS_ROUTE], LegacySkillsBackend)
         for backend in spec.skill_sources.values():
             self.assertIsInstance(backend, FilesystemBackend)
             self.assertNotIsInstance(backend, BundledSkillsBackend)

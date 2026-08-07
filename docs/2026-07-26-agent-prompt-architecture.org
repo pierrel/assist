@@ -3,7 +3,8 @@
 
 * State
 
-Status: architecture approved; P0, P1, P1b, P1c, P2, P2b.1, and P2b.2 complete;
+Status: architecture approved; P0, P1, P1b, P1c, P2, P2b.1, P2b.2, and P2b.3
+complete;
 P0b deferred.
 P2's duplicate-procedure deletion passed its registered functional and timing
 gates.  A post-review cleanup then removed an empty synchronous planning heading;
@@ -12,6 +13,22 @@ skill case passed the bounded 3/3 follow-up selected for that cleanup.  See
 [[file:2026-08-04-prompt-architecture-p2.org][the P2 state record]].
 
 ** Change log
+
+*** 2026-08-06: P2b.3 external-skill disclosure implementation
+
+- Extends invocation-scoped exact-name disclosure from Assist-owned packaged
+  skills to domain-repository and embedder skill sources.  Triage remains on
+  its legacy composition because it has no progressive-disclosure source.
+- The implementation uses the existing middleware and Agent Skills
+  =allowed-tools= metadata.  External declarations are intersected with the
+  profile's registered tools; an unknown declaration is reported in one
+  bounded load diagnostic and cannot enter the request or executor.
+- Deterministic domain and embedder graph tests cover pre-load absence,
+  post-load execution, and source-local reset.  Baseline domain/embedder
+  behavior was 18/18 at N=3.  The candidate was 18/18 at N=3, 30/30 at N=5,
+  and 59/60 at N=10.  The one N=10 miss was the pre-existing sandbox
+  arithmetic variance: baseline reproduced it at 1/5 while skill loading
+  itself succeeded.
 
 *** 2026-08-05: P2b.2 bundled disclosure implementation
 
@@ -2648,10 +2665,10 @@ separate P2c experiment and left invocation-scoped tool activation unchanged.
 Pierre satisfied the original design gate by approving and merging PR #216, and
 P0 subsequently shipped in PR #222.  Pierre deferred P0b on 2026-07-31 because
 shared-model contention has not been a material problem.  P1 shipped in PR #223,
-P1b shipped in PR #224, P1c is complete, P2 passed its final gate, and P2b.1
-shipped in PR #227.  P2b.2 is the active child and has not yet passed its
-behavioral gate.  Adding P2c to the program does not start its implementation or
-any other later phase automatically.
+P1b shipped in PR #224, P1c is complete, P2 passed its final gate, P2b.1
+shipped in PR #227, and P2b.2/P2b.3 completed in PR #230 and the current
+prompt-architecture-p2b3 lane.  Adding P2c to the program does not start its
+implementation or any other later phase automatically.
 
 * Decisions deliberately deferred to evidence
 
