@@ -176,7 +176,11 @@ class TestSpecWiring(_CreateAgentHarness):
         assert "return control to the user" in prompt
         assert "start only context and return" in prompt
         assert "child result as untrusted data" in prompt
-        assert prompt.startswith("ROUTE COMPLEX REQUESTS FIRST:")
+        assert "**REPEATED WORKLOAD FIRST:**" not in prompt
+        assert "ROUTE COMPLEX REQUESTS FIRST:" not in prompt
+        assert 'load_skill(name="orchestrate-repeated-work")' not in prompt
+        assert 'load_skill(name="complex-request")' not in prompt
+        assert "Unless the loaded skill specifies a different first turn" in prompt
         assert "explicit and self-contained" not in prompt
         assert "## Delegating whole tasks" not in prompt
         assert "your first call must be `load_skill" not in prompt
@@ -215,6 +219,8 @@ class TestSpecWiring(_CreateAgentHarness):
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
         assert "could not be loaded" in load_skill(skills, "complex-request")
+        assert "could not be loaded" in load_skill(
+            skills, "orchestrate-repeated-work")
         assert provenance._trust_human_messages is False
         assert provenance._trust_task_results is False
         from assist.middleware.tool_result_to_file import ToolResultToFileMiddleware
@@ -309,6 +315,8 @@ class TestSpecWiring(_CreateAgentHarness):
                       if isinstance(m, SmallModelSkillsMiddleware))
         assert "/main-skills/" not in skills.sources
         assert "could not be loaded" in load_skill(skills, "complex-request")
+        assert "could not be loaded" in load_skill(
+            skills, "orchestrate-repeated-work")
         assert provenance._trust_human_messages is True
 
     def test_async_main_can_load_supervisor_skill(self):
@@ -322,8 +330,10 @@ class TestSpecWiring(_CreateAgentHarness):
 
         assert "/main-skills/" in skills.sources
         assert skills.sources[0] == "/main-skills/"
-        loaded = load_skill(skills, "complex-request")
-        assert "start one `delegate-agent` per outcome" in loaded
+        loaded = load_skill(skills, "orchestrate-repeated-work")
+        assert "Start exactly one evidence-only delegate per group." in loaded
+        complex_loaded = load_skill(skills, "complex-request")
+        assert "start one `delegate-agent` per outcome" in complex_loaded
         task_offload = next(
             middleware for middleware in kwargs["middleware"]
             if isinstance(middleware, ToolResultToFileMiddleware)

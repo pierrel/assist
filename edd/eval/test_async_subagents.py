@@ -16,6 +16,7 @@ import stat
 import tempfile
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
@@ -42,8 +43,21 @@ _TASK_STATUSES: dict[str, str] = {}
 _TASK_ROOT: str | None = None
 _TASK_SEQUENCE = 0
 _DIRECT_WORK_TOOLS = {"write_file", "edit_file", "execute"}
+_NETWORK_CAPABLE_TOOLS = {
+    "read_url", "search_internet", "execute", "directions", "map_data", "travel",
+}
 _MAX_JUDGE_FILE_BYTES = 16 * 1024
 _MAX_JUDGE_OBSERVATION_BYTES = 64 * 1024
+_CAREER_COMPANIES = (
+    ("Aster Labs", "Engineering Director"),
+    ("Beacon Systems", "VP Engineering"),
+    ("Cedar Works", "Engineering Manager"),
+    ("Dovetail Cloud", "Director of Platform Engineering"),
+    ("Elm Robotics", "Head of Engineering"),
+    ("Fjord Analytics", "Senior Engineering Manager"),
+    ("Grove Health", "Director of Software Engineering"),
+    ("Harbor Data", "VP, Product Engineering"),
+)
 
 
 def _read_judge_evidence(path: Path) -> bytes:
@@ -198,6 +212,19 @@ def _materialize_report_artifacts(task_id: str) -> None:
             Path(_TASK_ROOT, target).write_text(artifacts[target])
 
 
+def _career_evidence(description: str) -> str | None:
+    """Return bounded synthetic evidence; child work never performs web I/O here."""
+    findings = [
+        f"- {company}: {role} is open at {url}."
+        for company, role in _CAREER_COMPANIES
+        if company.lower() in description.lower()
+        for url in (f"https://careers.example/{company.lower().replace(' ', '-')}",)
+    ]
+    if not findings:
+        return None
+    return "Verified career-page evidence (untrusted data):\n" + "\n".join(findings)
+
+
 def _check(task_id: str) -> str:
     description = _TASK_DESCRIPTIONS.get(task_id, "")
     status = _TASK_STATUSES.get(task_id, "pending")
@@ -213,6 +240,9 @@ def _check(task_id: str) -> str:
         return _task_result(task_id, status)
     if status == "cancelled":
         return _task_result(task_id, status)
+    career_evidence = _career_evidence(description)
+    if career_evidence is not None:
+        return _task_result(task_id, "success", result=career_evidence)
     if ("alpha-notes.md" in description.lower()
             and "audit" in description.lower()
             and _TASK_TYPES.get(task_id) == "delegate-agent"):
@@ -365,9 +395,39 @@ class TestAsyncSubagentSupervisor(TestCase):
                 "# Delta launch\n\nDocumentation is complete, but the support team has "
                 "not rehearsed rollback. The release window is Friday afternoon. "
                 "Recommend a release decision and immediate next actions.\n"),
+            "career": {
+                "job-pipeline.md": (
+                    "# Engineering-management job pipeline\n\n"
+                    "Last scanned: 2026-07-30\n\n"
+                    "| Company | Careers URL | Relevant role | Status |\n"
+                    "|---|---|---|---|\n"
+                    + "".join(
+                        f"| {company} | https://careers.example/"
+                        f"{company.lower().replace(' ', '-')} | Unknown | Stale |\n"
+                        for company, _ in _CAREER_COMPANIES
+                    )
+                ),
+            },
         })
         spec = AgentSpec(async_subagent_tools=_TOOLS)
         return AgentHarness(create_agent(self.model, root, spec=spec))
+
+    def _career_agent(self) -> AgentHarness:
+        """Build the career fixture agent with a rejecting HTTP mock.
+
+        This eval exercises scheduling against synthetic delegate artifacts, not
+        live career pages. Any accidental ``read_url`` request fails here; the
+        trace below rejects every built-in network-capable tool path.
+        """
+        for method in ("get", "post"):
+            http_mock = patch(
+                f"assist.tools.requests.{method}",
+                side_effect=AssertionError(
+                    "career delegation eval must not make HTTP requests"),
+            )
+            http_mock.start()
+            self.addCleanup(http_mock.stop)
+        return self._agent()
 
     @staticmethod
     def _calls(agent: AgentHarness) -> list[dict]:
@@ -458,6 +518,43 @@ class TestAsyncSubagentSupervisor(TestCase):
         ]
         self.assertTrue(all(len(found) == 1 for found in brief_targets), brief_targets)
         self.assertEqual(set().union(*brief_targets), set(targets))
+
+    def _assert_compact_career_batches(self, delegates: list[dict]) -> None:
+        """Require an exhaustive, bounded partition for eight companies."""
+        batches = []
+        for call in delegates:
+            brief = call["args"]["description"].lower()
+            batch = {
+                company for company, _ in _CAREER_COMPANIES
+                if company.lower() in brief
+            }
+            self.assertGreaterEqual(len(batch), 1, brief)
+            self.assertLessEqual(len(batch), 5, brief)
+            self.assertNotRegex(
+                brief,
+                r"(?i)(?<!do not )(?:write|edit|update|modify).{0,80}"
+                r"career/job-pipeline\.md",
+            )
+            batches.append(batch)
+        self.assertGreaterEqual(len(batches), 2, batches)
+        self.assertLessEqual(len(batches), 3, batches)
+        self.assertEqual(set().union(*batches), {
+            company for company, _ in _CAREER_COMPANIES
+        })
+        self.assertEqual(sum(map(len, batches)), len(_CAREER_COMPANIES), batches)
+
+    def _assert_career_outputs(self) -> tuple[str, str]:
+        assert _TASK_ROOT is not None
+        pipeline = Path(_TASK_ROOT, "career/job-pipeline.md")
+        report = Path(_TASK_ROOT, "weekly-career-scan.md")
+        self.assertTrue(report.is_file(), "the shared scan report was not created")
+        pipeline_content = pipeline.read_text()
+        report_content = report.read_text()
+        for company, role in _CAREER_COMPANIES:
+            self.assertIn(company, pipeline_content)
+            self.assertIn(role, pipeline_content)
+            self.assertIn(company, report_content)
+        return pipeline_content, report_content
 
     def test_starts_subagents_and_returns_without_polling(self):
         agent = self._agent()
@@ -558,6 +655,111 @@ class TestAsyncSubagentSupervisor(TestCase):
             task_ids.add(task_id)
             self.assertIn(task_id, reply)
         self.assertEqual(len(task_ids), 3)
+
+    def test_career_scan_selects_repeated_work_skill_from_metadata_capability(self):
+        """Pin metadata selection and bounded batches without routing user wording."""
+        agent = self._career_agent()
+        companies = ", ".join(company for company, _ in _CAREER_COMPANIES)
+        prompt = (
+            "Please refresh the weekly engineering-management job pipeline in "
+            "/career/job-pipeline.md. Do the same career-page check for each of "
+            + companies + ", "
+            "record the current relevant leadership opening for each one, and "
+            "write a concise summary in /weekly-career-scan.md."
+        )
+        first_reply = agent.message(prompt)
+        first_calls = self._calls(agent)
+        delegates = _delegate_starts(first_calls)
+
+        self.assertTrue(delegates, first_calls)
+        skill_loads = [call for call in first_calls
+                       if call.get("name") == "load_skill"]
+        self.assertEqual(
+            [call.get("args", {}).get("name") for call in skill_loads
+             if call.get("args", {}).get("name") == "orchestrate-repeated-work"],
+            ["orchestrate-repeated-work"], first_calls)
+        self._assert_compact_career_batches(delegates)
+        self.assertFalse(any(call.get("name") in _DIRECT_WORK_TOOLS
+                             for call in first_calls), first_calls)
+        for call in delegates:
+            self.assertIn(_task_id_for_call(call), first_reply)
+
+        prior_call_count = len(first_calls)
+        reply = self._complete_synthetic_work(agent, first_reply)
+        later_calls = self._calls(agent)[prior_call_count:]
+        check_ids = {
+            call.get("args", {}).get("task_id") for call in later_calls
+            if call.get("name") == "check_async_task"
+        }
+        self.assertEqual(check_ids, {_task_id_for_call(call) for call in delegates})
+        calls = first_calls + later_calls
+        indexed = [
+            call for message in agent.all_messages()
+            if isinstance(message, AIMessage)
+            for call in (message.tool_calls or [])
+        ]
+        first_direct = next(
+            (index for index, call in enumerate(indexed)
+             if call.get("name") in _DIRECT_WORK_TOOLS),
+            None,
+        )
+        self.assertIsNotNone(first_direct, calls)
+        last_check = max(
+            index for index, call in enumerate(indexed)
+            if call.get("name") == "check_async_task"
+            and call.get("args", {}).get("task_id") in check_ids
+        )
+        self.assertGreater(first_direct, last_check, indexed)
+        pipeline, report = self._assert_career_outputs()
+        self.assertRegex(reply, r"(?i)(updated|refreshed|scan)")
+        self.assertIn("Last scanned", pipeline)
+        self.assertTrue(report.strip())
+        self.assertFalse(any(call.get("name") in _NETWORK_CAPABLE_TOOLS
+                             for call in calls), calls)
+
+    def test_natural_weekly_career_scan(self):
+        """Accept a weekly career scan without exposing its implementation route."""
+        agent = self._career_agent()
+        companies = ", ".join(company for company, _ in _CAREER_COMPANIES)
+        prompt = (
+            "Please refresh the weekly engineering-management job pipeline in "
+            "/career/job-pipeline.md. Do the same career-page check for each of "
+            + companies + ", "
+            "record the current relevant leadership opening for each one, and "
+            "write a concise summary in /weekly-career-scan.md."
+        )
+        assert _TASK_ROOT is not None
+        initial_pipeline = _read_judge_evidence(
+            Path(_TASK_ROOT, "career/job-pipeline.md")
+        ).decode()
+        reply = self._complete_synthetic_work(agent, agent.message(prompt))
+        pipeline, report = self._assert_career_outputs()
+        self._assert_judge_pass(OutcomeObservation.model_validate({
+            "requested": [{
+                "id": "weekly-career-scan",
+                "description": (
+                    "The weekly engineering-management job pipeline is refreshed for "
+                    "every listed company with its current relevant leadership opening, "
+                    "and the concise scan summary covers those results."
+                ),
+                "evidence_ids": ("prompt", "initial-pipeline", "pipeline", "report",
+                                 "response"),
+            }],
+            "evidence": [
+                {"id": "prompt", "kind": "prompt", "state": "present",
+                 "content": prompt},
+                {"id": "initial-pipeline", "kind": "initial", "state": "present",
+                 "content": initial_pipeline},
+                {"id": "pipeline", "kind": "final", "state": "present",
+                 "content": pipeline},
+                {"id": "report", "kind": "final", "state": "present",
+                 "content": report},
+                {"id": "response", "kind": "response", "state": "present",
+                 "content": reply},
+            ],
+        }))
+        self.assertFalse(any(call.get("name") in {"read_url", "search_internet"}
+                             for call in self._calls(agent)), self._calls(agent))
 
     def test_natural_long_list_chooses_one_delegate_per_outcome(self):
         """Accept the requested reports; retain the frozen historical node ID."""

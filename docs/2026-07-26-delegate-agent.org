@@ -93,7 +93,9 @@ Add one fixed async assistant type named =delegate-agent=.
 6. The main prompt defines scheduling, not a new scheduler. It chooses an
    execution shape from independently useful, verifiable outcomes: one outcome
    with several steps stays with the main agent; two or more distinct requested
-   outcomes use one delegate per outcome. It launches every currently unblocked outcome in the
+   outcomes use one delegate per outcome. Repeated substantive evidence work across
+   independent named entities that converges on one shared artifact instead uses
+   compact evidence batches, with main-only aggregation. It launches every currently unblocked outcome in the
    same turn and serializes data dependencies and overlapping workspace effects;
    check every completion; launch newly unblocked work; preserve successful
    siblings when one fails; report the blocked dependency rather than inventing
@@ -103,18 +105,21 @@ Add one fixed async assistant type named =delegate-agent=.
    data, and never carries child directives into a later brief. A pure specialist
    lookup still uses context/research/critique directly. A delegate owns an
    end-to-end task that may use specialists.
-7. A built-in =complex-request= skill carries the detailed workflow for
-   mapping several outcomes into advisory TODOs and explicit, self-contained
-   delegate briefs. Its description makes natural multi-result and dependent
-   requests trigger progressive disclosure before work begins. The main agent
-   receives it through a separate read-only =/main-skills/= source. That route is
-   absent from the delegate and legacy non-async main backends, so neither listing
-   nor direct loading can expose it there.
+7. Two built-in main-only skills own the detailed supervision workflows:
+   =complex-request= for distinct outcomes or dependent stages, and
+   =orchestrate-repeated-work= for bounded evidence gathering across repeated
+   named-entity work. Their descriptions recognize only their respective
+   workload shapes; each loaded skill owns its launch and completion procedure.
+   The main agent receives both
+   through a separate read-only =/main-skills/= source. That route is absent
+   from the delegate and legacy non-async main backends, so neither listing nor
+   direct loading can expose either skill there.
 
 * User flow
 
-For “do X for each of [A, B, C], then combine the results,” the main agent starts
-three delegate tasks in one turn, reports their full task IDs, and returns. Each
+For “produce a separate X for each of [A, B, C], then combine the results,” the
+main agent starts three delegate tasks in one turn, reports their full task IDs,
+and returns. Each
 completion wakes the main thread. The main checks the completed task and records
 its result. Only after all three terminal results exist does it start the
 dependent combine task. If B fails, A and C stay
@@ -143,9 +148,10 @@ brief is written after X completes and contains the concrete result it needs.
 - =assist/templates/deepagents/general_instructions.md.j2=: main scheduling and
   briefing guidance; delegate identity and synchronous specialist guidance in
   the same template.
-- =assist/main_skills/complex-request/SKILL.md=: progressively disclosed TODO,
-  dependency, brief, supervision, and final-reconciliation workflow for the
-  main agent only.
+- =assist/main_skills/complex-request/SKILL.md= and
+  =assist/main_skills/orchestrate-repeated-work/SKILL.md=: progressively disclosed
+  direct-outcome and bounded-batch supervision workflows for the main agent
+  only.
 - =assist/backends.py=: reuse the existing discovery and loading path through a
   read-only skill backend, mounting the supervisor source only for the async main.
 - =edd/eval/test_async_subagents.py=: observable parallel, serial, completion,
@@ -195,9 +201,10 @@ start another =delegate-agent= or manage the outer async lifecycle.
    off the asyncio loop, and uses the existing durable wake/recovery paths.
 6. Existing context/research/critique async tasks and all current URL provenance
    tests remain green. Smoke =python -m manage.web= after the construction change.
-7. The async main skill listing exposes =complex-request= and can load its full
-   body; delegate and legacy-main backends do not mount the route, so direct loads
-   return not found. Packaged skill files are read-only in every role.
+7. The async main skill listing exposes =complex-request= and
+   =orchestrate-repeated-work= and can load their full bodies; delegate and
+   legacy-main backends do not mount the route, so direct loads return not
+   found. Packaged skill files are read-only in every role.
 
 ** Real-model behavior
 
@@ -235,5 +242,5 @@ while tuning:
 - Do not copy parent conversation history into the delegate.
 - Do not teach the delegate to self-delegate or expose lifecycle tools and then
   ask it not to use them.
-- Do not expose the main agent's complex-request supervision skill to delegates.
+- Do not expose either main-only supervision skill to delegates.
 - Do not make =delegate-agent= a research alias; research remains a specialist.

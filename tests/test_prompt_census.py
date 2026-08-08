@@ -1128,7 +1128,7 @@ def test_keyboard_interrupt_cleans_publication_staging(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".interrupted-*"))
 
 
-def test_p0_through_p2b3_history_matches_the_current_capture(census):
+def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
         encoding="utf-8")
     p2_document = Path("docs/2026-08-04-prompt-architecture-p2.org").read_text(
@@ -1142,6 +1142,9 @@ def test_p0_through_p2b3_history_matches_the_current_capture(census):
     p2b3_document = Path(
         "docs/2026-08-06-prompt-architecture-p2b3.org").read_text(
         encoding="utf-8")
+    workload_document = Path(
+        "docs/2026-08-07-workload-aware-delegation.org").read_text(
+        encoding="utf-8")
     current = _call(census, "web-main-core")
     historical_p0_prompt = _named_text_block("p0-current-web-main-bootstrap")
     current_prompt = _system_prompt(current)
@@ -1153,14 +1156,14 @@ def test_p0_through_p2b3_history_matches_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    assert len(current_prompt) == 29_527
+    assert len(current_prompt) == 30_089
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 25
-    assert len(artifact_bytes(census)) == 2_992_683
+    assert len(artifact_bytes(census)) == 3_032_927
     assert census["artifact_sha256"] == \
-            "879604a08b337fecc5a0f5b2a4b8cfded0c96c9fbcead14f31b401f15362c2b2"
+            "9116e006058287e4d0d922216f6f76943b1849b34253f4c091c41e0d5a08311a"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document
@@ -1194,6 +1197,10 @@ def test_p0_through_p2b3_history_matches_the_current_capture(census):
     assert "29,527 characters" in p2b2_document
     assert "17,956 characters" in p2b2_document
     assert "2,992,683 bytes" in p2b2_document
+    assert "30,089 characters" in workload_document
+    assert "3,032,927 canonical bytes" in workload_document
+    assert "9116e006058287e4d0d922216f6f76943b1849b34253f4c091c41e0d5a08311a" \
+        in workload_document
 
     kernel = _named_text_block("proposed-main-bootstrap-kernel")
     headings = [
