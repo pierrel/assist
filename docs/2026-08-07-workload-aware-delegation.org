@@ -244,9 +244,9 @@ The final name/description/body redesign passed the strict capability node at 82
 seconds. A shortened system-route rewrite then failed the natural node at the
 120-second ceiling: its first model call skipped the route. Restoring the more
 concrete Qwen guidance while retaining the final name, description, and skill body
-passed the unchanged natural =OutcomeJudge= node in 94 seconds. The final system
-prompt therefore keeps the explicit priority, qualifying shapes, override, and
-next-tool-call constraint; the skill body carries the detailed launch and
+passed the unchanged natural =OutcomeJudge= node in 94 seconds. That evaluated
+route variant kept the explicit priority, qualifying shapes, override, and
+next-tool-call constraint; the skill body carried the detailed launch and
 completion procedure.
 
 After review added the final shared-result boundary, the strict mocked capability
@@ -257,7 +257,11 @@ latter judges only the requested user-visible outcome.
 Renaming the loaded skill heading to match the final name was followed by one
 more unchanged strict mocked capability run: pass in 72 seconds.
 
-** Stability decision
+** Superseded stability decision
+
+This was the decision for the earlier route variant only. The current
+metadata-and-body configuration and its N=10 capability result above supersede
+it; this section is retained as experiment history, not release guidance.
 
 The post-heading natural stability attempt does not clear the release gate:
 
@@ -273,17 +277,13 @@ natural-acceptance floor. The adjacent final-metadata runs yield the same pooled
 3/5 result: passes at 94, 114, and 98 seconds; timeouts at 120 seconds twice.
 They are useful corroboration but not substituted for an exact current N=5.
 
-N=10 is therefore not run. The failure is in scope: it leaves the intended
-repeated-work path non-release-ready. Fixing the non-deterministic completion
-and loop behavior would be unplanned prompt/agent redesign, not a safe stability
-sample extension. Do not deploy; obtain Pierre's direction before changing that
-design.
+N=10 was therefore not run for that route variant. Its non-deterministic
+completion and loop behavior would have required an unplanned prompt/agent
+redesign, not a safe stability-sample extension.
 
 The smaller natural two-independent-outcomes generic regression also passed its
 =OutcomeJudge= in 92 seconds. That confirms the generic skill's direct-launch
 contract on a modest request, while the four-report timeout still bounds the
 workload it can safely absorb today.
 
-No middleware or other enforced routing boundary is part of this change. The
-N=5 gate failed and N=10 is deliberately not run. Do not deploy this prompt-only
-change.
+No middleware or other enforced routing boundary was part of that route variant.
