@@ -416,8 +416,9 @@ class TestAsyncSubagentSupervisor(TestCase):
         """Build the career fixture agent with a rejecting HTTP mock.
 
         This eval exercises scheduling against synthetic delegate artifacts, not
-        live career pages. Any accidental ``read_url`` request fails here; the
-        trace below rejects every built-in network-capable tool path.
+        live career pages. The mock intercepts ``read_url`` HTTP before it leaves
+        Assist; its error result and every other network-capable tool call are
+        rejected by the trace below.
         """
         for method in ("get", "post"):
             http_mock = patch(
