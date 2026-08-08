@@ -444,11 +444,9 @@ the outer rings.
 
 1. **System prompt** (`assist/templates/deepagents/general_instructions.md.j2`)
    — what agents exist, what general process to follow, and the
-   project-wide rules. It normally references the **Skills** section abstractly and
-   leaves skill rules to the body. The async main has one measured exception: a
-   short trigger for its main-only `complex-request` orchestration skill. Natural
-   small-model evals showed that manifest discovery alone missed these requests;
-   the prompt names the loading action, while the skill still owns the workflow.
+   project-wide rules. It references the **Skills** section abstractly and leaves
+   both recognition and procedure to skill metadata and bodies. The async main
+   does not carry special routing text for complex or repeated workloads.
 2. **Skills middleware prompt** (`SMALL_MODEL_SKILLS_PROMPT` in
    `skills_middleware.py`) — how skills work in general: the
    description-then-load contract, the `load_skill` tool, the pre-action
@@ -467,28 +465,26 @@ evidence and must leave its detailed policy in the skill body.
 
 ### Writing a skill description
 
-The description is normally the model's routing signal for whether to load. The
-main-only orchestration exception also has the short system-prompt hook above. A
-description is matched against the user's latest message and the active task
-established by the conversation (and by the model's general attention). Every built-in
-skill uses the same shape — **a one-line capability sentence, a few
-concrete `EXAMPLES`, and a `MUST load before` clause**:
+The description is normally the model's routing signal for whether to load. Core
+orchestration behavior needs repeated natural-eval evidence before it is treated
+as dependable. A description is matched against the user's latest message by the
+pre-action check (and by the model's general attention). The design target for a
+description is recognition only: **a concise capability sentence and a few concrete
+examples of user requests**, never a procedural instruction such as when to make a
+tool call. Existing skills retain legacy imperative wording until they are separately
+migrated:
 
 - **Open with a one-line capability sentence** naming the domain in the
   words a user would actually say (e.g. `Editing or creating org-mode
   (\`.org\`) files without breaking heading structure.`). Leading with
   those words keeps the high-signal tokens early.
-- **Give 2–3 `EXAMPLES — "..."; "..."` of real requests** as natural
-  phrasings, NOT a keyword list. Examples convey the *shape* of a
+- **Give 2–3 examples of real requests** as natural phrasings, NOT a keyword
+  list. Examples convey the *shape* of a
   matching request, so the skill generalizes to new wording without you
   having to keep extending a token list for every new use-case. Prefer
   varied, realistic user phrasings over domain jargon — and don't let
   them mirror your eval prompts, or the eval just measures lexical
   proximity (see the project conventions in `CLAUDE.md`).
-- **End with a `MUST load before <conditions>` clause.** Without an
-  imperative-shaped condition the model treats the description as
-  informational and skips loading — the one place imperative wording
-  earns its keep.
 - **Do not describe the rules.** Anything the body explains belongs in
   the body, not the description. The agent only reads the description
   to decide *whether* to load — once it loads, the body is what it
@@ -501,16 +497,15 @@ Example (the `org-format` skill):
 ```yaml
 ---
 name: org-format
-description: Editing or creating org-mode (`.org`) files without breaking heading structure. EXAMPLES — "add a new section to notes.org under the Q3 plans heading"; "tweak the second bullet under Inbox in todo.org". MUST load before any tool call that reads, edits, writes, or mentions a `.org` file.
+description: Use when editing or creating org-mode (`.org`) files without breaking heading structure. Typical requests include adding a section to notes.org under the Q3 plans heading or tweaking the second bullet under Inbox in todo.org.
 ---
 ```
 
 ### Writing a skill body
 
-`load_skill` returns the complete `SKILL.md`, including frontmatter. The body
-portion is what the agent applies. By the time the file is loaded the agent has
-already committed to applying the skill, so the body's job is to be a clear
-reference for the rules, not to re-justify loading.
+The body is what the agent applies after `load_skill` returns. By the time the
+body is read the agent has already committed to applying the skill, so the body's
+job is to be a clear reference for the rules — not to re-justify loading.
 
 - Skip "When to apply" / "When to use" sections. The description (layer
   3) already covered the trigger conditions, and the body is read only

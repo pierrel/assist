@@ -1,11 +1,20 @@
 ---
 name: complex-request
-description: Planning and completing a request with several distinct deliverables, workstreams, files, or dependent stages. EXAMPLES — "handle the website copy, release checklist, and support announcement while I work on something else"; "compare the options, choose one, then make an implementation plan from that choice"; "revise the budget, then reconcile the totals after the revision is final". MUST load before any tool call for a request with multiple separately useful results or a chain where later work depends on an earlier result.
+description: Use when a request has several distinct deliverables, independently useful workstreams, files, or dependent stages. Typical requests include preparing website copy, a release checklist, and a support announcement; comparing options before making an implementation plan; or revising a budget before reconciling its totals.
 ---
 
 # Complex request workflow
 
-1. List the requested outcomes with `write_todos` when it helps supervision. Use one
+## First action after loading
+
+Make the next tool call only the planned `start_async_task` calls. For an entirely
+context, external-research, or critique request, start that specialist directly.
+Otherwise, start one `delegate-agent` per independent, currently unblocked outcome.
+Do not inspect inputs or start unplanned context, research, or other tasks first;
+known input paths belong in the self-contained task brief.
+
+1. List the requested outcomes with `write_todos` after launch when it helps
+   supervision. Use one
    TODO per independently useful, verifiable result and note real dependencies.
    TODOs are a planning aid; task status and workspace evidence are the truth, and
    imperfect bookkeeping must not prevent useful work.
