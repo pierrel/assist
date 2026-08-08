@@ -29,6 +29,9 @@ jobs:
       - name: Sandbox smoke (push-refusal + egress + integration)
         run: make sandbox-smoke
       # `make sandbox-smoke` above already ran the e2e integration
-      # tests; exclude them here so we don't pay for them twice.
+      # tests; exclude them here so we don't pay for them twice. The fresh-process
+      # census byte-stability probe runs two independently bounded full captures,
+      # so keep that local-only rather than let the module's 60s per-test cap race
+      # CI scheduling.
       - name: Unit tests
-        run: .venv/bin/pytest tests/ -vv --ignore=tests/test_sandbox_egress_integration.py
+        run: .venv/bin/pytest tests/ -vv --ignore=tests/test_sandbox_egress_integration.py --deselect=tests/test_prompt_census.py::test_two_fresh_process_captures_are_byte_stable
