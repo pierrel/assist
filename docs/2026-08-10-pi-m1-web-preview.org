@@ -104,14 +104,15 @@ can resume a LangGraph checkpoint.
 
 Rendering uses a small engine-aware web-chat factory instead of calling
 =ThreadManager.get= for Pi.  =PiConversationStore= is the one canonical Pi
-history: the host appends the durable user event before worker launch, and the
-terminal assistant reply plus collapsed tool events before it marks the Run
-successful/ready.  Each entry is keyed by =run.id= and idempotent on recovery,
-so a crash cannot hide a submitted user message or duplicate a reply.  The
-worker receives bounded history and returns events but never writes a
-session/transcript.  Failed, cancelled, and interrupted runs add no speculative
-assistant success.  The store's =get_messages= reader gives the existing
-renderer chronological bubbles without constructing a Deep graph.
+history: the host appends the durable user event before worker launch, then the
+terminal assistant reply before it marks the Run successful/ready.  M1 retains
+no tool-event transcript or tool-call UI; the worker's tools remain bounded host
+capabilities, not user-visible conversation state.  Each entry is keyed by
+=run.id= and idempotent on recovery, so a crash cannot hide a submitted user
+message or duplicate a reply.  The worker receives bounded history but never
+writes a session/transcript.  Failed, cancelled, and interrupted runs add no
+speculative assistant success.  The store's =get_messages= reader gives the
+existing renderer chronological bubbles without constructing a Deep graph.
 Deep keeps its LangGraph checkpoint rendering.  M1 does not add token streaming
 or falsely call refresh automatic: the existing page refresh/pull-to-refresh
 behavior remains and the Pi processing view says to refresh to see completion.
