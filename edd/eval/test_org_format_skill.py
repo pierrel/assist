@@ -19,7 +19,9 @@ from unittest import TestCase
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem, read_file, stub_research_subagent
+from .utils import (complete_web_main_tasks, create_filesystem,
+                    prompt_rewrite_web_main_spec, read_file,
+                    stub_research_subagent)
 
 
 class TestOrgFormatSkill(TestCase):
@@ -29,7 +31,8 @@ class TestOrgFormatSkill(TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
-        return AgentHarness(create_agent(self.model, root)), root
+        return AgentHarness(create_agent(
+            self.model, root, spec=prompt_rewrite_web_main_spec())), root
 
     def setUp(self):
         self.model = select_assistant_model(0.1)
@@ -69,6 +72,7 @@ class TestOrgFormatSkill(TestCase):
                 "Beta in projects.org. Its description should be 'Gamma is a "
                 "new experimental project.'"
             )
+            complete_web_main_tasks(agent)
 
         content = read_file(os.path.join(root, "projects.org"))
 

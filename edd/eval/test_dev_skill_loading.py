@@ -44,7 +44,8 @@ from langchain_core.tools import tool
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem, skill_was_loaded
+from .utils import (complete_web_main_tasks, create_filesystem,
+                    prompt_rewrite_web_main_spec, skill_was_loaded)
 
 
 _PYPROJECT_FIXTURE = dedent("""\
@@ -123,7 +124,8 @@ class TestDevSkillLoading(TestCase):
             "mathlib.py": _MATHLIB_FIXTURE,
             "README.md": _README_FIXTURE,
         })
-        return AgentHarness(create_agent(self.model, root)), root
+        return AgentHarness(create_agent(
+            self.model, root, spec=prompt_rewrite_web_main_spec())), root
 
     def _attempted_skills(self, agent) -> list[str]:
         """Return the list of names passed to ``load_skill`` (in order)."""
@@ -215,6 +217,7 @@ class TestDevSkillLoading(TestCase):
             agent.message(
                 "Hey, take a look at this code and tell me what it is."
             )
+            complete_web_main_tasks(agent)
 
             self.assertTrue(
                 skill_was_loaded(agent, "dev"),

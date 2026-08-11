@@ -22,9 +22,9 @@ from assist.egress.store import EgressStore, request_key, resolution_prompt
 from assist.egress import tools as egress_tools_mod
 from assist.egress.tools import egress_tools
 from assist.model_manager import select_assistant_model
-from assist.spec import AgentSpec
-
-from .utils import create_filesystem, final_answer, stub_research_subagent
+from .utils import (complete_web_main_tasks, create_filesystem, final_answer,
+                    prompt_rewrite_web_main_spec,
+                    stub_research_subagent)
 
 _DENIAL = (EGRESS_DENIED_GUIDANCE
            + "curl: (56) Received HTTP code 403 from proxy after CONNECT\n")
@@ -76,7 +76,8 @@ class TestEgressApproval(TestCase):
         with stub_research_subagent():
             agent = AgentHarness(create_agent(self.model, root,
                                               sandbox_backend=backend,
-                                              spec=AgentSpec(tools=tools)))
+                                              spec=prompt_rewrite_web_main_spec(
+                                                  tools=tools)))
         return agent, backend
 
     def test_denied_fetch_requests_egress(self):
@@ -87,6 +88,7 @@ class TestEgressApproval(TestCase):
             agent.message(
                 "Download https://api.github.com/repos/acme/widget/releases "
                 "with curl and tell me the latest release version.")
+            complete_web_main_tasks(agent)
         pending = [r for r in self.store.for_thread(self.tid)
                    if r.state == "pending"]
         self.assertEqual([r.host for r in pending], ["api.github.com"],

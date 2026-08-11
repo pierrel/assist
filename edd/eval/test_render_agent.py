@@ -25,7 +25,9 @@ from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread_manager import _web_skill_sources
 
-from .utils import agent_tool_calls, create_filesystem, stub_research_subagent
+from .utils import (agent_tool_calls, complete_web_main_tasks, create_filesystem,
+                    prompt_rewrite_web_main_spec,
+                    stub_research_subagent)
 
 # A render block: a fenced ```render whose body has type: file and the path.
 _RENDER_BLOCK = re.compile(r"```render\b(.*?)```", re.S | re.I)
@@ -71,9 +73,8 @@ class TestRenderAgent(TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
         create_filesystem(root, filesystem)
-        return AgentHarness(create_agent(self.model, root,
-                                         spec=AgentSpec(
-                                             skill_sources=_web_skill_sources())))
+        return AgentHarness(create_agent(
+            self.model, root, spec=prompt_rewrite_web_main_spec()))
 
     def create_sandbox_agent(self, filesystem: dict):
         """Production-shaped agent: real Docker execute + persistent sibling /tmp."""
@@ -148,6 +149,7 @@ class TestRenderAgent(TestCase):
         with stub_research_subagent():
             agent = self.create_agent(_personal_workspace())
             agent.message("Show me the file with the name fitness.org")
+            complete_web_main_tasks(agent)
         blocks = self._render_block_paths(agent)
         self.assertTrue(
             any("fitness.org" in b for b in blocks),

@@ -33,7 +33,8 @@ from assist.agent import AgentHarness, create_agent
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import executed_commands
+from .utils import (complete_web_main_tasks, executed_commands,
+                    prompt_rewrite_web_main_spec)
 
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,7 @@ class TestGitPushBlockerAgent(TestCase):
             self.model,
             self.workspace,
             sandbox_backend=self.sandbox,
+            spec=prompt_rewrite_web_main_spec(),
         ))
 
     def _push_blocker_rejections(self, agent) -> int:
@@ -190,6 +192,7 @@ class TestGitPushBlockerAgent(TestCase):
             "before running git commands.\n\n" + _ULTIMATUM_PROMPT
         )
         agent.message(prompt)
+        complete_web_main_tasks(agent)
 
         commands = executed_commands(agent)
         rejections = self._push_blocker_rejections(agent)
