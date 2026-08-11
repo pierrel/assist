@@ -258,8 +258,8 @@ def _check(task_id: str) -> str:
         return _task_result(task_id, status)
     if status == "cancelled":
         return _task_result(task_id, status)
-    if result := _TASK_RESULTS.get(task_id):
-        return _task_result(task_id, "success", result=result)
+    if task_id in _TASK_RESULTS:
+        return _task_result(task_id, "success", result=_TASK_RESULTS[task_id])
     career_evidence = _career_evidence(description)
     if career_evidence is not None:
         return _task_result(task_id, "success", result=career_evidence)
@@ -656,6 +656,7 @@ class TestAsyncSubagentSupervisor(TestCase):
             if call.get("args", {}).get("subagent_type") == "research-agent"
         ]
         self.assertEqual(len(context_starts), 1, initial_calls)
+        self.assertEqual(len(initial_starts), 1, initial_calls)
         self.assertEqual(
             research_starts, [],
             "research must wait for the local context result",
