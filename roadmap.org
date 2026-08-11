@@ -145,6 +145,19 @@ emacsos channel).  Explore: stand it up on vLLM, re-run =edd/eval/= at
 the standard N=3/5/10 cadence, and quantify the pass-rate delta vs. the
 current model before committing to a switch (VRAM/throughput cost,
 context window, AWQ availability).  Eval-measured, not intuition.
+** TODO Evaluate Muse Glimmer-30B as the local agent model
+Meta's Apache-2.0 Muse Glimmer-30B is explicitly trained for local agentic
+tool use and ships an official 16.8 GB GGUF quant plus optional vision projector
+and speculative drafter for 24 GB GPUs.  Its artifacts are staged beside Qwen;
+do not change the running model or deployment configuration for this.
+
+Start only after the prompt rearchitecture lands, and preferably after the Pi
+runtime lands so its provider contract is part of the comparison.  First prove
+llama.cpp/API compatibility (including Glimmer's always-on reasoning and its
+own chat-template settings), then replay the existing natural and capability
+evals at N=3/5/10 against a dedicated endpoint.  Compare safety, pass rate,
+context behavior, and measured 3090 latency/VRAM against the current Qwen
+baseline before considering a switch.
 * Research improvements
 Research is at the heart of what this agent is capable of. It's strictly guided not to use internal knowledge
 ** TODO Create some evals on how you want it to act
