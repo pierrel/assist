@@ -1803,6 +1803,19 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     tid = run.thread_id
     try:
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority):
+            # The selector's earlier check only permits reservation.  This is
+            # the authority-bearing check: a queued Pi Run cannot outlive a
+            # disable or stale provider-health record and then acquire the
+            # model slot later.
+            if not PI_PREVIEW.claim_admits("pi"):
+                with _RUN_ADMISSION_LOCK:
+                    current = _runs().get(tid, run.id)
+                    if current.status == "pending":
+                        current = _runs().claim(tid, run.id)
+                    if current.status == "running":
+                        _runs().transition(tid, run.id, "error", error="Pi preview is unavailable")
+                _set_status(tid, "error", error="Pi preview is unavailable", pending_message=run.text)
+                return
             with _RUN_ADMISSION_LOCK:
                 current = _runs().get(tid, run.id)
                 if current.status != "pending":
