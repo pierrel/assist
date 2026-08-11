@@ -220,6 +220,15 @@ def render_index() -> str:
     items = []
     for tid in MANAGER.list():
         title = _thread_title(tid)
+        try:
+            engine_label = ("<span style=\"font-size:.7rem; color:#6b7280; background:#fafafa;"
+                            " border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;"
+                            " margin-right:.4rem;\">Pi preview</span>"
+                            if _is_pi_thread(tid) else "")
+        except ThreadEngineError:
+            engine_label = ('<span style="font-size:.7rem; color:#b91c1c; background:#fafafa;'
+                            ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
+                            ' margin-right:.4rem;">engine error</span>')
         status = _get_status(tid)
         stage = status.get("stage", "ready")
         badge = ""
@@ -294,7 +303,7 @@ def render_index() -> str:
             # data-desc carries the lowercased description for the client-side
             # search filter (filterThreads); html.escape keeps it attribute-safe.
             f'<li data-desc="{html.escape(title.lower(), quote=True)}">'
-            f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
+            f'<a class="thread-link" href="/thread/{tid}">{engine_label}{badge}{html.escape(title)}</a>'
             f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
             f'<button type="submit" class="del-btn" aria-label="Delete thread" '
             f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
@@ -498,6 +507,10 @@ def render_thread(
     busy = stage in BUSY_STAGES
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
+    try:
+        engine_title = "Pi preview" if _is_pi_thread(tid) else "Deep Agents"
+    except ThreadEngineError:
+        engine_title = "Engine unavailable"
 
     # Rename is only offered when idle: while busy/initializing the displayed
     # title is the pending-message snippet, not the description, so editing it
@@ -1082,6 +1095,7 @@ def render_thread(
           </script>
           <div id="titleView" style="display:flex; align-items:center; gap:.3rem;">
             <h2 style="font-size:1.2rem; margin:0">{html.escape(title)}</h2>
+            <span style="font-size:.75rem; color:#6b7280; border:1px solid #e5e7eb; border-radius:10px; padding:.1rem .4rem;">{engine_title}</span>
             {rename_button}
           </div>
           {rename_form}
