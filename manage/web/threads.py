@@ -64,6 +64,9 @@ from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
 from assist.thread_manager import InvalidThreadId
+from assist.thread_engine import ThreadEngineError, read_thread_engine
+from assist.pi_conversation import PiConversationStore
+from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested)
 
@@ -1432,6 +1435,27 @@ def _pending_email(chat) -> dict | None:
 
 _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
 _RUN_SERVICES_LOCK = threading.Lock()
+_PI_CONVERSATIONS = PiConversationStore()
+_PI_RUNTIME = PiRuntimeManager()
+
+
+def _pi_system_prompt() -> str:
+    """Read the host-owned Pi prompt for this fresh turn; never use workspace text."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                        "assist", "templates", "pi", "system.md")
+    try:
+        with open(path, encoding="utf-8") as stream:
+            prompt = stream.read(64 * 1024)
+    except OSError as error:
+        raise PiRuntimeError("Pi system prompt is unavailable") from error
+    if not prompt.strip() or len(prompt.encode("utf-8")) > 64 * 1024:
+        raise PiRuntimeError("Pi system prompt is invalid")
+    return prompt
+
+
+def _is_pi_thread(tid: str) -> bool:
+    """Classify once from immutable host storage; malformed identity never runs."""
+    return read_thread_engine(MANAGER.thread_dir(tid)).name == "pi"
 
 
 def _runs():
@@ -1683,6 +1707,21 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     except RunNotFound:
         logging.info("run %s on %s disappeared before dispatch", run_id, tid)
         return
+    try:
+        if _is_pi_thread(tid):
+            _execute_pi_run(run, user_priority=user_priority)
+            return
+    except ThreadEngineError as error:
+        logging.error("thread %s has an invalid engine marker", tid, exc_info=True)
+        if run.status in {"pending", "running", "interrupted"}:
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(tid, run.id)
+                if current.status == "pending":
+                    current = _runs().claim(tid, run.id)
+                if current.status == "running":
+                    _runs().transition(tid, run.id, "error", error=str(error))
+            _set_status(tid, "error", error="Thread engine is unavailable")
+        return
     if run.mode == "child":
         if run.status == "pending":
             if run.multitask_strategy == "cancel":
@@ -1729,6 +1768,60 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
             _dispatch_pending_after(tid, run_id)
     except RunNotFound:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
+
+
+def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
+    """Execute one manual visible Pi turn without constructing a Deep graph."""
+    if (run.mode != "turn" or run.assistant_id != "general-agent" or run.origin is not None
+            or run.sender is not None or run.resume or run.resume_decision is not None
+            or not isinstance(run.text, str) or not run.text):
+        with _RUN_ADMISSION_LOCK:
+            current = _runs().get(run.thread_id, run.id)
+            if current.status == "pending":
+                current = _runs().claim(run.thread_id, run.id)
+            if current.status == "running":
+                _runs().transition(run.thread_id, run.id, "error", error="Pi preview accepts manual web turns only")
+        _set_status(run.thread_id, "error", error="Pi preview accepts manual web turns only")
+        return
+    if run.status != "pending":
+        if run.status in {"running", "interrupted"}:
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(run.thread_id, run.id)
+                if current.status in {"running", "interrupted"}:
+                    _runs().transition(run.thread_id, run.id, "error", error="Pi turns do not resume after interruption")
+            _set_status(run.thread_id, "error", error="Pi turn was interrupted; send the message again")
+        return
+    tid = run.thread_id
+    try:
+        with THREAD_QUEUE.acquire(tid, user_priority=user_priority):
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(tid, run.id)
+                if current.status != "pending":
+                    return
+                run = _runs().claim(tid, run.id)
+            _set_status(tid, "starting_sandbox", pending_message=run.text, started_at=_now_ms())
+            thread_dir = MANAGER.thread_dir(tid)
+            _PI_CONVERSATIONS.append(thread_dir, run.id, "user", run.text)
+            history = [(message.role, message.text)
+                       for message in _PI_CONVERSATIONS.get_messages(thread_dir)[:-1]]
+            _set_status(tid, "processing", pending_message=run.text, started_at=_now_ms())
+            result = _PI_RUNTIME.run(
+                work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
+                prompt=run.text, history=history, system_prompt=_pi_system_prompt())
+            _PI_CONVERSATIONS.append(thread_dir, run.id, "assistant", result.reply)
+            with _RUN_ADMISSION_LOCK:
+                _runs().transition(tid, run.id, "success", result=result.reply)
+            _set_status(tid, "ready")
+            MANAGER.touch(tid)
+    except (PiRuntimeError, ThreadHoldExpired, QueueWaitTimeout) as error:
+        logging.error("Pi run %s failed", run.id, exc_info=True)
+        with _RUN_ADMISSION_LOCK:
+            current = _runs().get(tid, run.id)
+            if current.status == "running":
+                _runs().transition(tid, run.id, "error", error=str(error))
+        _set_status(tid, "error", error=str(error), pending_message=run.text)
+    finally:
+        _dispatch_pending_after(tid, run.id)
 
 
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
