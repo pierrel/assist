@@ -35,6 +35,9 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread import Thread
+from assist.thread_engine import (
+    EngineName, ThreadEngine, ThreadEngineError, read_thread_engine,
+    write_new_thread_engine)
 from assist.async_subagents import async_task_tools
 from assist.agent import create_context_agent, create_research_agent
 
@@ -157,6 +160,10 @@ class ThreadManager:
         # the lock prevents two concurrent first-requests from probing twice.
         self._model = None
         self._model_lock = threading.Lock()
+        # Every directory publisher in the one web process shares this lock.
+        # It prevents generic and engine-marked reservation from racing the
+        # final no-overwrite directory publication.
+        self._thread_reservation_lock = threading.Lock()
 
     @property
     def model(self):
@@ -172,7 +179,8 @@ class ThreadManager:
         for name in os.listdir(self.root_dir):
             dpath = os.path.join(self.root_dir, name)
             if (not os.path.isdir(dpath) or name == "__pycache__"
-                    or name.startswith(".subagent-")):
+                    or name.startswith(".subagent-")
+                    or name.startswith(".thread-")):
                 continue
             if os.path.exists(os.path.join(dpath, ".subagent")):
                 continue
@@ -389,6 +397,11 @@ class ThreadManager:
 
     def reserve(self, thread_id: str | None = None,
                 *, hidden: dict | None = None) -> str:
+        with self._thread_reservation_lock:
+            return self._reserve(thread_id, hidden=hidden)
+
+    def _reserve(self, thread_id: str | None = None,
+                 *, hidden: dict | None = None) -> str:
         """Reserve a thread directory and return its id without building an agent.
 
         Agent Protocol thread creation is a cheap persistence operation. The first run
@@ -429,6 +442,42 @@ class ThreadManager:
             return tid
         os.makedirs(tdir, exist_ok=True)
         return tid
+
+    def reserve_visible(self, engine: EngineName,
+                        thread_id: str | None = None) -> str:
+        """Atomically reserve a visible manual-web thread with its engine marker.
+
+        The ordinary :meth:`reserve` remains the generic/legacy primitive.  New
+        web threads use this method so no caller can publish a visible directory
+        and create its first Run before the immutable engine identity exists.
+        """
+        tid = thread_id or (
+            datetime.now().strftime("%Y%m%d%H%M%S") + "-" + os.urandom(4).hex())
+        tdir = self.thread_dir(tid)
+        identity = ThreadEngine(engine, "manual-web")
+        with self._thread_reservation_lock:
+            if os.path.lexists(tdir):
+                if os.path.islink(tdir) or not os.path.isdir(tdir):
+                    raise ThreadEngineError("visible thread path is not a directory")
+                if os.path.isfile(os.path.join(tdir, ".subagent")):
+                    raise ThreadEngineError("a hidden task cannot become a visible thread")
+                if read_thread_engine(tdir) != identity:
+                    raise ThreadEngineError("visible thread engine conflicts with existing identity")
+                return tid
+
+            pending = tempfile.mkdtemp(prefix=".thread-", dir=self.root_dir)
+            try:
+                write_new_thread_engine(pending, engine)
+                os.rename(pending, tdir)
+                root_fd = os.open(self.root_dir, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(root_fd)
+                finally:
+                    os.close(root_fd)
+                return tid
+            finally:
+                if os.path.isdir(pending):
+                    shutil.rmtree(pending)
 
     def close(self) -> None:
         try:
