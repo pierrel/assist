@@ -1,0 +1,302 @@
+#+title: Pi M1: dual-engine web preview
+#+date: 2026-08-10
+#+startup: overview
+
+* Purpose and decision
+
+M1 is the first usable product step in the practical Pi plan
+([[file:2026-08-05-pi-runtime-p1.org][Pi runtime P1]]).  A person creating a
+new web thread can choose Deep Agents or Pi.  Deep Agents remains the default.
+The choice is visible and immutable, and Pi remains a bounded preview rather
+than a migration or a claim of behavioral parity.
+
+This is intentionally not a wrapper around Deep Agents and not an import of
+=experiments/pi-runtime-p1=.  That directory is a disposable research harness:
+its in-memory session, P1 worker, frozen fixture, and controller lifecycle
+cannot safely become web product infrastructure.  M1 reuses only the proven
+public Pi SDK construction: an owned prompt and resource loader, a model
+runtime registered to a relay, and typed custom coding tools.  The product
+runner gets its own lifecycle and containment boundary.
+
+P1 already supplies the practical entry evidence: a passing mechanical provider
+health probe, prompt-owner and reload/event smokes, and a failed-but-explained
+skill-persistence smoke.  That failure means M1 must not promise dynamic,
+model-authored, cross-turn Pi skills.  It does not justify a marker-only UI or
+block ordinary, sandboxed Pi web work.
+
+* M1 user contract
+
+1. The existing new-thread form gets a visible =Engine= selector with =Deep
+   Agents (default)= and =Pi (preview)=.  Its POST rejects an unavailable Pi
+   choice visibly; it never silently substitutes Deep.
+2. A new Pi thread is clearly labelled =Pi preview= in the list and page
+   header.  Existing and legacy threads are Deep by construction.
+3. A Pi thread accepts only ordinary, user-submitted web turns.  It runs against
+   the same fair queue and one-per-turn Docker workspace lifecycle as a Deep
+   web thread.  Its Pi worker may use only host-routed read, write, edit, and
+   bash operations in that sandbox.
+4. =Continue in Deep Agents= on a Pi thread creates a new labelled Deep web
+   thread.  The user may supply a bounded visible summary.  That summary is the
+   new thread's first user message and identifies the source Pi thread.  There
+   is no hidden conversation/session/tool/approval/credential/agent-dir or
+   sandbox-state transfer.
+5. A server-owned switch can disable the preview.  It closes new Pi admission,
+   makes Pi pages read-only with their transcript and the Deep continuation
+   control still available, terminates/reaps active Pi workers and their turn
+   sandbox, and only then reports completion.  Existing Deep threads keep
+   working.  Re-enabling never resurrects killed Pi work.
+
+M1 deliberately excludes Pi children, continuations, schedules, SMS triage,
+phone, voice, Agent Protocol task routes, approval-resume routes, and any other
+unattended ingress.  Those routes remain Deep-only.  M1 has no Pi email, reply,
+notify, merge, egress-grant, scheduling, subagent, phone, or voice tool, so
+there is no Pi path to approve or cause a host-side outward effect.
+
+* Design
+
+** Immutable engine resource
+
+Add =assist/thread_engine.py= as the engine-identity Resource.  It owns a
+small schema-versioned =engine.json= inside each visible thread directory:
+
+#+begin_src json
+{"version": 1, "engine": "pi", "origin": "manual-web"}
+#+end_src
+
+The resource atomically creates and rereads the marker while reserving a
+visible web thread.  A second or conflicting write is an error.  Missing marker
+means legacy Deep only; corrupt or unknown marker is an unavailable thread, not
+a fallback to Pi.  The engine is not Run metadata and is never trusted from a
+client request.  =ThreadManager= receives a dedicated visible-reservation seam
+rather than teaching its generic =get()= builder Pi behavior.
+
+New manual-web helper functions, called only by =create_thread= and
+=create_thread_with_message=, validate the selector against server policy,
+write this resource, and only then create the first durable Run under the
+existing admission lock.  They do not add a general =engine= parameter to
+=create_thread_with_message_core=: voice already uses that compatibility seam.
+Thus a Pi identity exists before a Run can exist.  The Agent Protocol surface
+does not gain an engine field and cannot create Pi threads.
+
+** A single engine dispatch seam
+
+The normal durable executor (=manage/web/threads.py::_execute_run=) classifies
+the engine as its *first* operation, before child, recovery, or ordinary-run
+branches.  Startup recovery does the same before calling =_recovery_decision=
+or constructing a chat.  Deep retains the current =_process_message= path
+unchanged.  Pi goes through a new =_process_pi_run= manager.  It accepts only a
+visible thread's ordinary =general-agent= turn with user origin, no sender, no
+resume decision, and no continuation/child/retry mode.  A Pi Run that was
+running or interrupted during a crash becomes terminal with an honest
+non-resume message before any =MANAGER.get= call.  Untouched later ordinary user
+Runs may still start fresh; every non-manual or malformed Pi Run is terminalized
+before it gains model or sandbox access.
+
+This is the terminal enforcement backstop, not the only one.  A shared
+=manual_web_pi_run_allowed= predicate is also checked before every producer
+creates or dispatches work to an existing Pi thread: schedule, inbound SMS,
+Agent Protocol, approval, voice, child, continuation, and restart paths reject
+it.  The existing schedule, inbound-SMS, task, approval, child, and recovery
+paths therefore remain Deep-only even when handed a Pi thread ID.  Pi
+interruption/restart recovery is intentionally honest in M1: the Run is
+terminalized with a retry/rollback message.  M1 does not pretend a Pi session
+can resume a LangGraph checkpoint.
+
+Rendering uses a small engine-aware web-chat factory instead of calling
+=ThreadManager.get= for Pi.  =PiConversationStore= is the one canonical Pi
+history: the host appends the durable user event before worker launch, and the
+terminal assistant reply plus collapsed tool events before it marks the Run
+successful/ready.  Each entry is keyed by =run.id= and idempotent on recovery,
+so a crash cannot hide a submitted user message or duplicate a reply.  The
+worker receives bounded history and returns events but never writes a
+session/transcript.  Failed, cancelled, and interrupted runs add no speculative
+assistant success.  The store's =get_messages= reader gives the existing
+renderer chronological bubbles without constructing a Deep graph.
+Deep keeps its LangGraph checkpoint rendering.  M1 does not add token streaming
+or falsely call refresh automatic: the existing page refresh/pull-to-refresh
+behavior remains and the Pi processing view says to refresh to see completion.
+
+** Pi worker and authority boundary
+
+Create a separately pinned TypeScript package under =assist/pi_runtime/= and a
+small Python =PiRuntimeManager=.  The manager is the one in-process owner of
+the preview epoch, active-worker registry, admission/claim/registration
+serialization, cancellation, relay, tool broker, and final durable Run
+transition.  It also writes the host-owned conversation store.  Pi itself is an
+in-memory, fresh worker process per turn.  It starts from a trusted, read-only
+runtime package and sees the current trusted prompt and extension sources on
+each turn.
+Consequently an operator can edit the owned prompt or a reviewed extension and
+the next Pi turn uses it without restarting =assist-web=; a model-writable
+workspace never supplies extensions or a persistent Pi session.
+
+The worker runs in a distinct locked-down container: no network, read-only root,
+non-root user, dropped capabilities, no Docker socket, bounded pids/memory/tmp,
+and only its runtime plus two ephemeral Unix sockets.  It does not receive a
+host workspace path, a Docker handle, an approval store, app state, credentials,
+or =ASSIST_MODEL_URL=.  Its independent Pi sandbox profile uses =include_agent=
+false and an explicit environment allowlist, never the existing generic
+=ASSIST_*= propagation.  The Pi private runtime/state is mounted only into the
+worker, never into the tool sandbox.  It uses public Pi APIs only:
+
+- =ModelRuntime= registered to the per-turn host relay;
+- =DefaultResourceLoader= with ambient extensions, skills, context files,
+  prompts, and themes disabled; and
+- explicit typed read/write/edit/bash definitions whose operations use the
+  tool-broker socket.
+
+The relay listens on an ephemeral private socket, authenticates one
+unguessable per-run capability, accepts only the fixed completion path/model and
+host-owned headers, applies request/response byte and timeout bounds, and
+forwards it to the host's configured model endpoint.  It rejects arbitrary URL,
+path, header, model, or replayed-capability requests.  Pi has model *use* but
+not model endpoint or credential authority.  The broker authenticates its
+worker connection, validates typed bounded frames against a closed operation
+allowlist, and translates only the four operations to the selected current
+=DockerSandboxBackend=.  It owns that sandbox handle and its existing egress
+and command limits; no frame can choose another run or container.  The P1
+worker's direct shell implementation is deliberately not reused.
+
+M1 starts only with the trusted lifecycle kernel required by the public SDK,
+plus prompt and tool sources.  Fresh launch already gives next-turn pickup, so
+M1 adds no session-reload machinery.  These are ownership/type boundaries, not
+a claim that extensions are security boundaries: the host manager remains the
+authority boundary.  Todos, dynamic skills, async subagents, provider
+parallelism/OpenRouter, sandbox management, and phone-specific extensions are
+later separately reviewed additions.
+
+** Pi workspace profile and unavailable routes
+
+Pi uses a dedicated =PiSandboxProfile= to make the tool sandbox from the normal
+per-turn workspace lifecycle without passing =include_agent= or arbitrary
+=ASSIST_*= configuration.  A user may explicitly select a domain at thread
+creation, so that initial clone remains a visible host action, but Pi never
+calls =DomainManager.fetch_origin= during a turn and never calls =sync= or
+=merge= after one.  It therefore receives a stable selected workspace plus the
+ordinary sandbox egress restrictions, but cannot turn a model instruction into
+a host fetch, sync, or merge.  Review, capture, merge, and every approval route
+reject a Pi engine server-side rather than merely hiding a link; Pi description
+is the host-persisted first user text rather than a Deep model call.
+
+** Admission, stop, and rollback
+
+=PiPreviewPolicy= is a small server-owned persisted setting plus health reader,
+not a second lifecycle manager.  =PiRuntimeManager= reads it while selecting
+Pi, rendering/submitting a Pi thread, and immediately before claiming a Pi
+Run.  Health inspection is bounded/cached and runs off the single-worker event
+loop; the index POST redirects to the index with a one-time visible reason on
+rejection, before it reserves any thread.  Its normal admission gate is
+mechanical and fail-closed:
+
+- a schema-valid, successful P1 provider-health record younger than 30 minutes;
+- no active health marker; and
+- a current non-LLM systemd/cgroup identity and OOM snapshot exactly matching
+  that record.
+
+The product reader/snapshot code is rehomed from the P1 contract, not imported
+from its controller.  It accepts only a service-owned regular non-symlink
+record/directory with safe ownership/mode/schema.  If its required system
+inspection is unavailable, Pi is disabled.  An OOM, provider restart, identity
+change, stale record, or malformed record disables Pi and is reported as
+provider health, never as a model failure.
+
+The manager owns an explicit preview-off transition.  Under its one short
+manager lock it advances a monotonic disabled generation, persists the disabled
+setting, closes admissions, atomically marks every pending/running Pi Run inert,
+and snapshots active workers.  Final Pi admission, Run claim, and manager
+registration verify the same enabled generation under that same lock, so a
+queued or racing worker cannot escape the snapshot.  Outside both the manager
+and Run-admission locks it closes each relay/broker,
+TERM-waits then KILLs its process group, cleans the exact SandboxManager
+generation, and writes explanatory terminal Run/status state.  Pi threads are
+then read-only/unavailable to execution but retain transcript and rollback.
+The completion response is emitted only after reaping.  A worker completion
+reacquires the short manager/Run transition gate and appends assistant events,
+marks success, and writes =ready= only when its generation remains enabled and
+its Run is still the owned running Run; otherwise it discards the completion and
+lets preview-off's terminal state stand.  Thread deletion uses this same
+per-thread stop/reap path before removing the workspace.
+
+** Phone and end state
+
+Phone does not enter M1.  After real web use, emacsos will add the same explicit
+new-thread engine identity and display label.  A missing/legacy phone engine is
+Deep.  Its existing Python-owned Emacs backend stays the authority boundary;
+Pi does not acquire phone/config privilege.  Voice remains after its separate
+hardware gate.
+
+The Pi-only end state is a separate deletion phase, not a hidden M1 outcome:
+freeze new Deep admissions, preserve existing Deep threads read-only or migrate
+only through a new visible Pi thread, census unattended bindings, move each
+host lifecycle responsibility into the Pi host manager or a reviewed extension,
+then delete Deep construction and middleware only after Pi is the default and
+recovery evidence is reviewed.  The web selector stays dual-engine through the
+comparison period; it is not removed until that deletion decision.
+
+* Implementation plan
+
+1. Add the state doc, engine Resource, and tests for atomic first write,
+   conflict, corrupt marker, and legacy Deep behavior.  Update the lane record
+   with the overlap on web thread creation, runs, rendering, and sandbox.
+2. Add =PiPreviewPolicy= and its production health reader.  Test stale,
+   active, malformed, unsafe-path, OOM, and identity-mismatch records deny
+   admission.  Test page rendering uses its cached result and all inspection
+   runs off-loop.
+3. Modify new-web-thread forms and routes; render engine labels; add the bounded
+   visible Deep continuation form.  Test UI/default/rejection, disabled
+   read-only Pi rollback, and that no client/Agent Protocol metadata can choose
+   Pi.
+4. Add the engine-aware dispatch/factory and Pi-only Run validator.  Test every
+   excluded ingress, restart state, direct host-effect route, and approval path
+   cannot construct a Deep chat or reach a Pi process, while Deep paths are
+   unchanged.
+5. Build the pinned TypeScript worker, relay, and typed broker around public Pi
+   APIs.  Test request/frame/token bounds, direct-network absence, no model URL
+   or Docker/approval object in the worker request, no =ASSIST_*= or =/agent=
+   visibility in its tool sandbox, malicious relay/broker frames, and each
+   broker operation's selected-sandbox mapping.
+6. Implement per-turn process tracking, cancellation, preview-off reaping, and
+   honest interrupted-run terminalization.  Test queued-before-disable,
+   claim-vs-disable, completion-vs-disable, shutdown, delete-vs-active-worker,
+   restart, and sandbox cleanup races.
+7. Run mocked web boundary tests and TypeScript checks, then one bounded
+   =resource run llm= capability smoke: public SDK, host tool reaches the
+   Docker sandbox, response is atomically durable/renders in a Pi thread, and
+   no Deep graph is built.  Do not make a new statistical campaign.
+8. Deploy only after local review convergence and Pierre's instruction.  Gather
+   actual web-thread evidence before deciding phone work or any default change.
+
+* Risks and non-goals
+
+- Pi SDK package installation/deployment must be reproducible and separate from
+  =experiments/node_modules=; no runtime depends on an untracked local package.
+- The host relay/tool broker is security-sensitive new code, so it gets the
+  heavy adversarial review and bounded live smoke.
+- Pi prompt/extension hot reload applies only to reviewed host-owned runtime
+  sources.  M1 does not execute a model-authored extension in the host.
+- M1 does not provide Pi feature/eval parity, provider parallelism, OpenRouter,
+  a todo extension, async subagents, dynamic skill persistence, phone, voice,
+  default switch, or Deep removal.  Those are deliberate later decisions, not
+  deficits hidden by a premature cutover.
+
+* Review record
+
+2026-08-10 design review found and this revision addresses:
+
+- *Security*: generic sandbox propagation would expose =ASSIST_*= and private
+  =/agent= state; Pi needs its own explicit sandbox profile.  Recovery and all
+  non-web producers must classify/reject Pi before Deep construction.  Relay and
+  broker need closed, authenticated protocols; Pi must not fetch/sync/merge.
+- *UX/liveness*: engine classification has to precede startup recovery; preview
+  disable needs an atomic generation rather than an enumerate-then-kill race;
+  disabled Pi threads stay read-only for visible rollback; health inspection is
+  off-loop; deletion reaps Pi work.
+- *Simplicity/interfaces*: one host-owned Pi conversation store is canonical;
+  no dormant extensions, worker-persisted session, or reload controller is
+  introduced in M1.
+
+The focused rereview converged: the security lens found no remaining design
+blocker; the UX/liveness lens's completion-versus-disable race is fenced by the
+manager/Run finalization rule; and the simplicity/interface lens confirmed one
+manager lifecycle authority plus idempotent host conversation ownership.  Runtime
+code may now begin against this document.
