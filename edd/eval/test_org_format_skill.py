@@ -19,7 +19,7 @@ from unittest import TestCase
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem, read_file
+from .utils import create_filesystem, read_file, stub_research_subagent
 
 
 class TestOrgFormatSkill(TestCase):
@@ -45,27 +45,30 @@ class TestOrgFormatSkill(TestCase):
         prevent. The assertion checks the file's resulting structure: the
         previous heading's body must remain attached to it.
         """
-        agent, root = self.create_agent({
-            "README.org": "My projects are tracked in projects.org",
-            "projects.org": dedent("""\
-                * Project Alpha
-                Alpha is the first project in the portfolio.
+        # This evaluates local org editing, not web research.  Constructing the
+        # agent in the stub is required because it binds its research worker eagerly.
+        with stub_research_subagent():
+            agent, root = self.create_agent({
+                "README.org": "My projects are tracked in projects.org",
+                "projects.org": dedent("""\
+                    * Project Alpha
+                    Alpha is the first project in the portfolio.
 
-                It has multiple paragraphs of description.
+                    It has multiple paragraphs of description.
 
-                ** Status
-                Running well.
+                    ** Status
+                    Running well.
 
-                * Project Beta
-                Beta is the second project.
-                """),
-        })
+                    * Project Beta
+                    Beta is the second project.
+                    """),
+            })
 
-        agent.message(
-            "Add a new top-level project 'Project Gamma' between Alpha and "
-            "Beta in projects.org. Its description should be 'Gamma is a "
-            "new experimental project.'"
-        )
+            agent.message(
+                "Add a new top-level project 'Project Gamma' between Alpha and "
+                "Beta in projects.org. Its description should be 'Gamma is a "
+                "new experimental project.'"
+            )
 
         content = read_file(os.path.join(root, "projects.org"))
 

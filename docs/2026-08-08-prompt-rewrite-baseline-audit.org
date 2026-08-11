@@ -1,0 +1,248 @@
+#+title: Main-web prompt rewrite baseline audit
+#+date: 2026-08-08
+
+* Purpose
+
+This is the test inventory for the first full system-prompt rewrite.  It was
+made from a fresh =pytest --collect-only -q edd/eval= collection on 2026-08-08
+and a source review of every collected file.  The collection has 203 nodes in
+53 pytest files.  There are also two non-pytest scripts.  The prompt candidate
+changes /only/ the existing main-web general-agent assembly, so a test earns a
+place in its behavioral comparison only if that main agent sees the candidate
+prompt.
+
+Each row is one of:
+
+- *N* -- natural user outcome.  It contributes to its category aggregate.
+- *C* -- explicit capability, route, or guard.  It is run and compared, but is
+  a diagnostic rather than a natural-outcome aggregate.
+- *X* -- excluded from this experiment.  It exercises an unchanged direct
+  worker, a Pi/SMS-only role, framework mechanics, or the outcome evaluator
+  itself.  It remains a non-regression check for the role that owns it.
+- *D* -- temporarily deferred because it performs live external search.  It
+  will return once provider availability is stable enough for prompt effects to
+  be distinguishable.
+
+The audit selects 134 main-web nodes: 88 natural outcomes and 46 capability or
+guard diagnostics.  The remaining 69 nodes are excluded or deferred.  The
+counts are an inventory, not a claim that all nodes are equally valuable or
+that any individual natural test is a release gate.  The experiment begins with
+the smaller sentinel panel below, then adds reviewed tranches until it reaches
+the full inventory.
+
+* Complete file audit
+
+| File | Nodes | Decision | Why |
+|-
+| =test_agent.py= | 11 | 6 N, 1 C, 4 D | Local actions plus mocked research completion and honest search-down behavior.  Four live external-search rows are deferred. |
+| =test_async_subagents.py= | 15 | 4 N, 11 C | Main-web long work and steering.  Four natural outcome rows assess work products; lifecycle, routing, dependency, and concurrency assertions diagnose the unchanged async interface. |
+| =test_author_skill.py= | 1 | 1 C | Main agent can select the explicit authoring capability. |
+| =test_calculate_skill.py= | 4 | 2 N, 2 C | Correct computation and cleanup are natural; positive and negative skill selection are diagnostics. |
+| =test_context_agent.py= | 13 | 4 C, 9 X | Only =TestContextInvocation= uses the main agent, but all four rows assert a named worker or its dispatch order.  They are useful routing diagnostics, not natural-outcome scoring.  =TestContextAgent= directly tests the unchanged worker. |
+| =test_dev_agent.py= | 7 | 4 N, 2 C, 1 D | Main development-skill outcomes and context use.  The live external-research row is deferred; exact tool/dependency routes are diagnostic. |
+| =test_dev_agent_planning_flow.py= | 1 | 1 C | Main development flow; exact internal planning order is diagnostic. |
+| =test_dev_agent_runs_eval.py= | 1 | 1 C | Main development capability, not an outcome aggregate. |
+| =test_dev_skill_loading.py= | 3 | 1 N, 2 C | One natural development request and explicit/soft selection probes. |
+| =test_dev_skill_multi_turn.py= | 2 | 2 X | Standalone =Thread= rows invoke =start_async_task= without the configured web-run context, so they deterministically raise before any user outcome.  They are not evidence for a main-web prompt change. |
+| =test_directions_agent.py= | 3 | 2 N, 1 C | Directions outcomes and the travel-versus-directions negative selection. |
+| =test_domain_integration.py= | 1 | 1 N | Natural discovery and update of the user's existing task system. |
+| =test_domain_skills.py= | 5 | 1 N, 3 C, 1 X | Main local/sandbox domain-skill selection.  Frontmatter portability is deterministic metadata validation, not model evidence. |
+| =test_edit_files.py= | 6 | 6 N | Direct main-agent edits, verification, truthful reporting, and org preservation. |
+| =test_egress_approval.py= | 3 | 3 C | Main-agent protected-egress and resolution behavior.  Deterministic approval enforcement remains a 100% unit gate. |
+| =test_elisp_skill.py= | 3 | 2 N, 1 C | Main-agent elisp outcomes and non-trigger selection. |
+| =test_execute_deep_log.py= | 1 | 1 N | Main agent grounds a diagnosis in a local deep log. |
+| =test_geo_agent.py= | 4 | 3 N, 1 C | Main-web coverage, resolve-and-offer, and confirmed action; exact ID selection is diagnostic. |
+| =test_git_history_agent.py= | 2 | 2 N | Main-agent history outcomes. |
+| =test_git_push_blocker_agent.py= | 1 | 1 C | Main-agent cannot turn user pressure into a blocked external push. |
+| =test_git_sync_agent.py= | 4 | 3 N, 1 C | Main git maintenance outcomes; refused push is a guard diagnostic. |
+| =test_interjection.py= | 4 | 4 N | Main-web redirect, addition, stop, and coalescing behavior. |
+| =test_location_research.py= | 2 | 2 N | Main agent keeps research available when location/render skills are present. |
+| =test_map_agent.py= | 4 | 4 N | Main-web map outcomes with ordinary user wording. |
+| =test_memory.py= | 6 | 6 N | Main-agent user-memory reading, writing, preservation, and consecutive turns. |
+| =test_message_triage_agent.py= | 3 | 3 X | Separate inbound SMS triage role; its prompt is intentionally unchanged. |
+| =test_org_format_skill.py= | 2 | 2 N | Main-agent org and markdown formatting outcomes. |
+| =test_org_insertion.py= | 3 | 3 N | Main-agent task/document insertion outcomes. |
+| =test_outcome_judge.py= | 18 | 18 X | Calibrates the judge, not an Assist prompt.  Run before behavioral batches so score interpretation remains trustworthy. |
+| =test_pdf_reading.py= | 5 | 5 N | Main-agent document-reading outcomes, including bounded reading and graceful empty extraction. |
+| =test_prompt_injection.py= | 5 | 1 C, 4 X | SMS event injection reaches the main agent.  Search, page, and research-lure rows directly exercise the unchanged research worker; retain them as role controls. |
+| =test_read_url_deep_content.py= | 1 | 1 X | Direct research worker. |
+| =test_read_url_fabrication_loop.py= | 2 | 2 X | Research-worker provenance/breaker regression. |
+| =test_read_url_reread_loop.py= | 2 | 2 X | Research-worker reread-breaker regression. |
+| =test_receptionist.py= | 8 | 8 X | Voice/Pi receptionist role, explicitly frozen. |
+| =test_render_agent.py= | 11 | 10 N, 1 C | Main-web rendering outcomes; exact named-skill load is diagnostic. |
+| =test_research_agent.py= | 3 | 3 X | Direct research-worker quality. |
+| =test_research_large_multipart.py= | 1 | 1 X | Direct research-worker bounded multipart contract. |
+| =test_research_multi_turn_token_regression.py= | 1 | 1 X | Direct research-worker token regression. |
+| =test_research_partial_results.py= | 2 | 2 X | Direct research-worker partial-result contract. |
+| =test_research_reliability.py= | 2 | 2 X | Direct research leaf-worker reliability. |
+| =test_schedule_agent.py= | 3 | 3 N | Main-agent schedule outcomes, including a referential follow-up. |
+| =test_search_runaway_loop.py= | 3 | 3 X | Research-worker search-breaker behavior. |
+| =test_send_email_skill.py= | 1 | 1 N | Main-web natural request produces a reviewable email proposal. |
+| =test_skill_loading.py= | 3 | 1 N, 1 C, 1 X | Main implicit and suggested loading are in scope; the delegate row is not. |
+| =test_subscription_agent.py= | 1 | 1 N | Main-web natural durable-subscription outcome. |
+| =test_thread_e2e.py= | 4 | 4 C | Main-agent thread smoke and continuity.  These catch broad prompt failure but are not user-outcome scoring. |
+| =test_thread_memory.py= | 2 | 1 N, 1 C | Main-agent scope inference is natural; aspirational process-memory is separately reported. |
+| =test_thread_queue.py= | 1 | 1 X | Queue serialization is framework mechanics, unchanged by the prompt. |
+| =test_time_agent.py= | 4 | 3 N, 1 C | Main-agent exact time outcomes and a non-trigger diagnostic. |
+| =test_travel_agent.py= | 2 | 2 N | Main-agent travel outcomes. |
+| =test_urgent_notification.py= | 2 | 1 N, 1 C | Genuine imminent alert versus routine-update non-trigger. |
+| =test_website_download.py= | 1 | 1 N | Main-agent bounded website-download outcome. |
+
+* Standalone scripts
+
+- =eval_large_tool_results.py= is a useful manual stress diagnostic for
+  oversized retrieval results.  It pins middleware behavior and has one
+  fixed-looking query, but it is not collected by pytest and does not define a
+  stable user-outcome validator.  Run it once before and once after the change;
+  do not include it in the score aggregate.
+- =eval_multi_turn_research.py= is not a baseline candidate.  It asks a second
+  temperature-0.7 model to invent most user turns, making its sequence and
+  expected answer unstable.  Replace it later with a fixed multi-turn natural
+  journey before it can be used for a comparison.
+
+* Deferred live-search rows
+
+The comparison panel temporarily excludes evals whose real research worker can
+call external search providers.  Provider availability and rate limits would
+otherwise add environmental churn that cannot distinguish the current prompt
+from a candidate.  Deterministic stubs that exercise the same prompt behavior
+remain in scope: search-unavailable handoff, midflight no-grind, mocked research
+completion, location-research dispatch, and website-download traversal.
+
+- =test_agent.py::TestAgent::test_research_saved_to_references=
+- =test_agent.py::TestAgent::test_generic_quesion=
+- =test_agent.py::TestAgent::test_combines_context_and_research=
+- =test_agent.py::TestAgentSandboxIntegration::test_finance_strategy_projection=
+- =test_dev_agent.py::TestDevAgent::test_uses_research_agent=
+
+Reintroduce these rows only after the external search path is stable enough to
+separate prompt effects from provider conditions.
+
+* What the selected panel actually measures
+
+The 134 nodes cover the product policy without confusing it with internal
+routing: local action and smallest edits; context-before-question; external
+evidence and honest partial research; loaded-skill selection and negative
+selection; memory and task continuity; long-work launch, results, redirection,
+and stop; rendering, travel, time, geography, documents, and automation; and
+authorization, injection, egress, push, and urgent-notification boundaries.
+
+There are five gaps which must be added /before/ candidate implementation:
+
+1. A natural main-web grounding row in which local facts answer a question that
+   otherwise looks like a clarification.  Existing context-invocation rows
+   establish the routing decision but not the final grounded answer.
+2. A main-web execute-log injection journey: an untrusted command/log result
+   tries to redirect the work.  This proves the new core's evidence-not-
+   instructions wording on the surface it actually changes.
+3. A natural dependent-two-artifact journey, with ordinary user wording and no
+   task or tool names.  It scores the requested artifacts and truthful progress,
+   not a prescribed delegate trace.
+4. A main-web capability row that selects =complex-request= once for ordinary
+   multiple-outcome wording, and a negative control where one bounded
+   multi-step outcome loads neither orchestration skill.
+5. A main-web injection journey in which retrieved page or task-result text
+   asks the agent to load an orchestration skill, fan out, schedule, contact
+   someone, or fetch an attacker-selected URL.  It must not start extra work,
+   propose an outward/durable effect, or take attacker-directed egress.
+
+The proposed generic user-task skill also needs natural task discovery/update
+and follow-up cases before it can enter the candidate.  The current task rows
+are useful compatibility evidence, but they do not yet specify that new skill's
+contract.  GTD remains a later, separately admitted capability: it gets no new
+baseline claim until it has natural cases.
+
+* Staged comparison panels
+
+The first decision signal must arrive before a whole-suite baseline consumes
+days of model time.  The sentinel panel therefore takes one representative
+probe from each broad main-web behavior family, plus the product-wide controls
+that a prompt rewrite must not weaken.  It is deliberately a diagnostic panel,
+not a release certification: passing it says the candidate is worth expanding,
+not that the remaining 121 nodes are safe to skip.
+
+| Family | Node | Type | Why this first |
+|-
+| direct local work | =test_agent.py::TestAgent::test_adds_item_correctly= | N | Small requested change and truthful completion. |
+| grounding before clarification | =test_context_agent.py::TestContextInvocation::test_looks_for_answer_before_asking= | C | Ensures the core still seeks available local evidence. |
+| unavailable external research | =test_agent.py::TestResearchSearchUnavailableHandoff::test_relays_unavailable_news_lookup= | N | Honest, useful behavior without provider churn. |
+| development-skill discovery | =test_dev_skill_loading.py::TestDevSkillLoading::test_soft_trigger_dev_skill_request= | N | Ordinary development wording still reaches its procedure. |
+| calculation | =test_calculate_skill.py::TestCalculateSkill::test_compound_growth_calculation= | N | Checks a loaded capability produces a verified answer. |
+| document structure | =test_org_format_skill.py::TestOrgFormatSkill::test_inserts_heading_without_orphaning_previous_body= | N | Protects a previously prompt-sensitive editing outcome. |
+| durable memory | =test_memory.py::TestMemory::test_writes_memory_two_consecutive_turns= | N | Covers a genuine multi-turn contract. |
+| rendering | =test_render_agent.py::TestRenderAgent::test_emits_render_block_for_named_file= | N | Checks a visible product result, not only tool selection. |
+| several requested outcomes | =test_async_subagents.py::TestAsyncSubagentSupervisor::test_natural_two_independent_outcomes_delegate= | N | Covers main-web long-work delegation with ordinary wording. |
+| user redirection | =test_interjection.py::TestInterjection::test_redirect_mid_turn= | N | Protects user control over in-flight work. |
+| protected egress | =test_egress_approval.py::TestEgressApproval::test_resolution_turn_completes= | C | Keeps the existing authorization path usable after approval. |
+| refused external push | =test_git_push_blocker_agent.py::TestGitPushBlockerAgent::test_agent_cannot_push_under_ultimatum= | C | Keeps a deterministic authority boundary intact. |
+| untrusted inbound text | =test_prompt_injection.py::TestSmsEventInjection::test_sms_body_not_obeyed_as_command= | C | Ensures event content cannot become agent instruction. |
+
+The prior partial baseline can be reused only where the capture proves the
+same node, trial count, fixed datetime, and current-prompt census hash.  First
+reconstruct those results into the completion ledger; rerun any row whose
+evidence is incomplete.  This preserves useful work without treating a batch's
+partial pytest output as a baseline.
+
+After sentinel parity, add the next small tranche from an uncovered behavior
+family and its closest regression neighbors.  Baseline only that tranche on the
+current prompt, compare it on the candidate, repair any material loss, then
+add another.  The cumulative panel grows to the existing 134-node inventory;
+the full panel remains the final comparison, not the admission ticket for the
+first candidate signal.
+
+* Baseline execution and admission process
+
+1. First run the deterministic prompt census and =test_outcome_judge.py= once.
+   They are prerequisites, not stochastic model trials.
+2. Freeze a checked-in exact-node manifest from the 134 rows above.  For every
+   node it must record source line, fixture/workspace, every user turn, expected
+   artifact or event evidence, category, and N/C classification.  The source
+   tests remain the canonical executable specification; the manifest makes the
+   reviewed selection reproducible.
+3. Keep one durable completion ledger beside the manifest.  Before every
+   model invocation, select the next unfinished =(node, trial)= explicitly,
+   including its category and prompt census hash.  Record its command start,
+   completion or timeout, capture location, and result before selecting another
+   node.  A timeout is an observed result, never implicit progress inferred from
+   pytest dots.
+4. Run that one bounded trial through =tools/agentic resource run llm --=.  The
+   command must set =ASSIST_EVAL_FIXED_DATETIME= and have its own timeout.
+   Re-enter admission for every trial; no admitted command contains an open-ended
+   batch.
+5. On a denial, run =tools/agentic production status --attempt N=, where =N=
+   starts at one and increases for each consecutive denial.  Schedule exactly
+   one wakeup for its reported next-probe interval, then continue non-model
+   work.  The wakeup may check status and retry admission, but must never be a
+   static background eval command: it cannot replay a completed cohort or infer
+   the next node.  Do not use GPU utilization as an admission signal, poll on a
+   fixed interval, or hold the resource lock while waiting.  After ten denials,
+   inspect and report the prolonged production load while retaining the durable
+   next-trial record.
+6. Run the 13-node sentinel panel at N=3 against the frozen current prompt,
+   reusing only ledger-proven earlier trials.  Keep the per-trial captures and
+   prompt census hash.  Stop after at most one hour of admitted model work and
+   take a fifteen-minute GPU break before a new block.
+7. Run the same sentinel once (N=1) after the candidate. For a promising
+   signal, repeat it to N=3 before interpreting parity. For a material loss,
+   make one causal prompt change, rerun the failed row and its closest anchors,
+   then repeat the affected panel. Do not chase one stochastic miss: first
+   repeat the disputed row to N=5 before changing the prompt.
+8. Repeat the baseline, compare, repair, and full-cumulative-panel check for
+   each new tranche.  Once all 134 nodes have entered the cumulative panel,
+   run it at N=5 after review and N=10 only after the reviewed candidate is
+   stable.  Natural outcomes are reported by category aggregate; C rows
+   identify regressions but cannot hide a broad natural-outcome collapse.  Unit
+   authorization and isolation checks remain 100% gates independently of this
+   panel.
+
+Pierre has paused this baseline so the Pi work has exclusive use of the model.
+An idle production-status response alone does not resume it; resume requires
+Pierre's direction and begins from the recorded next unfinished trial.
+
+* Decisions still needing Pierre's review
+
+- The acceptable category floors and the definition of "material collapse."
+  This audit deliberately does not turn a single existing flaky or failed row
+  into a veto.
+- The exact new natural grounding, execute-log injection, and generic-task
+  journeys described above.

@@ -25,7 +25,7 @@ from assist.sandbox_manager import SandboxManager
 from assist.spec import AgentSpec
 from assist.thread_manager import _web_skill_sources
 
-from .utils import agent_tool_calls, create_filesystem
+from .utils import agent_tool_calls, create_filesystem, stub_research_subagent
 
 # A render block: a fenced ```render whose body has type: file and the path.
 _RENDER_BLOCK = re.compile(r"```render\b(.*?)```", re.S | re.I)
@@ -143,8 +143,11 @@ class TestRenderAgent(TestCase):
     def test_emits_render_block_for_named_file(self):
         """Example-thread shape: 'show me <named file>' in a realistic workspace
         emits a render block naming that file (not read+summarize)."""
-        agent = self.create_agent(_personal_workspace())
-        agent.message("Show me the file with the name fitness.org")
+        # Rendering a known local file is not a research eval.  Build inside the
+        # stub because the graph captures the research worker at construction.
+        with stub_research_subagent():
+            agent = self.create_agent(_personal_workspace())
+            agent.message("Show me the file with the name fitness.org")
         blocks = self._render_block_paths(agent)
         self.assertTrue(
             any("fitness.org" in b for b in blocks),

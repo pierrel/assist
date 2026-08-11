@@ -155,6 +155,27 @@ class TestSpecWiring(_CreateAgentHarness):
         fake_ctx.assert_not_called()
         fake_res.assert_not_called()
 
+    def test_web_main_is_an_explicit_prompt_composition_identity(self):
+        """Async lifecycle tools alone do not select the web prompt contract."""
+        from assist.middleware.prompt_composition import PromptCompositionMiddleware
+
+        legacy = self._build(spec=AgentSpec(
+            async_subagent_tools=_async_task_tools))
+        web_main = self._build(spec=AgentSpec(
+            async_subagent_tools=_async_task_tools, web_main=True))
+
+        assert not any(isinstance(item, PromptCompositionMiddleware)
+                       for item in legacy["middleware"])
+        assert any(isinstance(item, PromptCompositionMiddleware)
+                   for item in web_main["middleware"])
+
+    def test_web_main_requires_the_main_lifecycle_profile(self):
+        with pytest.raises(ValueError, match="main role with async lifecycle tools"):
+            AgentSpec(web_main=True)
+        with pytest.raises(ValueError, match="main role with async lifecycle tools"):
+            AgentSpec(role="delegate", async_subagent_tools=_async_task_tools,
+                      web_main=True)
+
     def test_explicit_empty_async_tools_disable_all_delegation(self):
         kwargs = self._build(spec=AgentSpec(async_subagent_tools=()))
 

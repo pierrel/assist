@@ -1,0 +1,60 @@
+#+title: Prompt rewrite baseline: web-main evaluation boundary
+#+date: 2026-08-11
+
+* Objective
+
+Run the revised prompt-rewrite sentinel baseline at N=3, then compare the
+first candidate at N=1 without changing product behavior beyond the prompt and
+the narrow prompt-composition support it requires.
+
+* Evidence and completed work
+
+- The sentinel was reduced from an upfront 134-node baseline to 13 broad
+  behavior and authority probes.  Each model invocation is independently
+  admitted, bounded, and recorded.
+- The current-prompt census was captured with fixed time.  Its SHA-256 is
+  =9116e006058287e4d0d922216f6f76943b1849b34253f4c091c41e0d5a08311a=.
+- A first attempted direct-work trial exposed an unmocked research worker
+  reaching SearXNG.  It was terminated and discarded, not counted.  The
+  selected local eval fixtures now bind the established canned research stub.
+- Design review found the full candidate needs two retained web-main rules:
+  yield after task launch with task IDs, and notify first for a genuine imminent
+  deadline.  It also names grounding and research skills that do not yet exist.
+
+* Blocking finding
+
+The rewrite is deliberately main-web-only, but twelve of the thirteen selected
+sentinel rows build the legacy main-agent shape.  They therefore retain the old
+prompt and cannot establish candidate parity.  The context row is worse: it
+asserts the removed legacy context-agent route, while web main uses lifecycle
+tools.  The one relevant row is not enough to represent local work, grounding,
+memory, rendering, task completion, user control, and authority boundaries.
+
+Changing the candidate to affect every main agent would make the evidence easy
+to collect but violates the reviewed web-main-only boundary.  Running the
+existing rows anyway would produce an apparently rigorous but irrelevant
+comparison.
+
+* Impact
+
+No valid baseline or candidate result exists yet.  The stopped invocation held
+the local model briefly but did not generate a result.  No prompt, runtime, or
+production deployment has changed.
+
+* Options
+
+1. *Recommended: build a small real web-main sentinel harness.*  Give each
+   selected journey the actual web profile, controlled lifecycle tools and
+   completion wakes, web-only skill sources, and canned research.  Add an
+   explicit web-main identity to the embedder contract so only ThreadManager's
+   ordinary web agent receives the candidate composition.  Then run the planned
+   N=3/N=1 comparison.  This preserves the reviewed scope and produces valid
+   evidence, but is a new focused evaluation build before model work resumes.
+2. *Broaden the candidate to legacy and embedder main agents.*  Existing evals
+   could compare it quickly, but that changes roles deliberately frozen out of
+   this experiment and risks a much larger product regression surface.
+3. *Use only the one existing async-main row.*  This is fastest, but it would
+   not support a claim about the system prompt outside one delegation journey.
+
+Recommendation: option 1.  Keep the sentinel small, but make every row exercise
+the prompt we are actually proposing to ship.

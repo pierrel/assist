@@ -8,7 +8,7 @@ from unittest import TestCase
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 
-from .utils import read_file, create_filesystem, AgentTestMixin
+from .utils import read_file, create_filesystem, AgentTestMixin, stub_research_subagent
 
 class TestMemory(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
@@ -70,9 +70,12 @@ class TestMemory(AgentTestMixin, TestCase):
         — otherwise the second write's anchor mismatches and the fact
         is lost (or duplicated).
         """
-        agent, root = self.create_agent({"AGENTS.md": ""})
-        agent.message("I have 3 cats.")
-        agent.message("I also have 2 dogs.")
+        # Memory persistence is local.  The research worker must be stubbed at
+        # construction so an accidental dispatch cannot add provider variance.
+        with stub_research_subagent():
+            agent, root = self.create_agent({"AGENTS.md": ""})
+            agent.message("I have 3 cats.")
+            agent.message("I also have 2 dogs.")
         memory_after = read_file(os.path.join(root, "AGENTS.md"))
         self.assertRegex(memory_after, "cats",
                          "Turn 1's fact must survive into the final file")
@@ -99,5 +102,4 @@ class TestMemory(AgentTestMixin, TestCase):
                          "Existing fact about Python should survive")
         self.assertRegex(memory_after, "dogs",
                          "New fact about dogs should be appended")
-
 

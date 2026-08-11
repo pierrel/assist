@@ -103,6 +103,25 @@ class TestThreadManagerLazy(TestCase):
             finally:
                 manager.close()
 
+    def test_visible_general_profile_is_the_only_web_main_identity(self):
+        """Prompt composition must not infer web identity from shared tools."""
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            manager._model = MagicMock()
+            manager.reserve("visible")
+            manager.reserve("triage")
+            try:
+                with patch("assist.thread_manager.Thread") as thread:
+                    manager.get("visible")
+                    visible_spec = thread.call_args.kwargs["spec"]
+                    manager.get("triage", triage=True)
+                    triage_spec = thread.call_args.kwargs["spec"]
+            finally:
+                manager.close()
+
+        self.assertTrue(visible_spec.web_main)
+        self.assertFalse(triage_spec.web_main)
+
     def test_specialized_child_get_does_not_receive_agent_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = ThreadManager(root_dir=tmp)

@@ -39,7 +39,7 @@ from edd.outcome_judge import (
     OutcomeRequirement,
 )
 
-from .utils import create_filesystem
+from .utils import create_filesystem, stub_research_subagent
 
 
 _TASK_DESCRIPTIONS: dict[str, str] = {}
@@ -76,6 +76,11 @@ _CAREER_COMPANIES = (
     ("Grove Health", "Director of Software Engineering"),
     ("Harbor Data", "VP, Product Engineering"),
 )
+
+
+def _candidate_prompt_enabled() -> bool:
+    """Select the candidate only for the explicit rewrite comparison command."""
+    return os.environ.get("ASSIST_PROMPT_REWRITE_CANDIDATE") == "1"
 
 
 def _read_judge_evidence(path: Path) -> bytes:
@@ -431,7 +436,8 @@ class TestAsyncSubagentSupervisor(TestCase):
                 ),
             },
         })
-        spec = AgentSpec(async_subagent_tools=_TOOLS)
+        spec = AgentSpec(async_subagent_tools=_TOOLS,
+                         web_main=_candidate_prompt_enabled())
         return AgentHarness(create_agent(self.model, root, spec=spec))
 
     def _career_agent(self) -> AgentHarness:
@@ -957,7 +963,10 @@ class TestAsyncSubagentSupervisor(TestCase):
 
     def test_natural_two_independent_outcomes_delegate(self):
         """Accept the requested briefs; retain the frozen historical node ID."""
-        agent = self._agent()
+        # This evaluates the main agent's delegation decision against synthetic
+        # child results.  It is not an external-research eval.
+        with stub_research_subagent():
+            agent = self._agent()
         prompt = (
             "Prepare two launch briefs for separate teams while I work on the agenda. "
             "Turn /alpha-notes.md into /alpha-brief.md with a recommendation and "
