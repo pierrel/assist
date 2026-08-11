@@ -187,6 +187,36 @@ def test_result_sink_accepts_only_a_capability_authenticated_result(tmp_path: Pa
         rejected.close()
 
 
+def test_result_sink_exposes_only_allowlisted_worker_failure_codes(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    sink = pi_runtime.PiResultSink(control, "a" * 43)
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(str(control / "result.sock"))
+        client.sendall(json.dumps({
+            "capability": "a" * 43, "status": "failed", "code": "turn-bound-exceeded",
+        }).encode())
+        client.shutdown(socket.SHUT_WR)
+    try:
+        with pytest.raises(pi_runtime.PiRuntimeError, match="turn-bound-exceeded"):
+            sink.receive()
+    finally:
+        sink.close()
+
+    rejected = pi_runtime.PiResultSink(control, "a" * 43)
+    with socket.socket(socket.AF_UNIX) as client:
+        client.connect(str(control / "result.sock"))
+        client.sendall(json.dumps({
+            "capability": "a" * 43, "status": "failed", "code": "host-path:/secret",
+        }).encode())
+        client.shutdown(socket.SHUT_WR)
+    try:
+        with pytest.raises(pi_runtime.PiRuntimeError, match="malformed"):
+            rejected.receive()
+    finally:
+        rejected.close()
+
+
 def test_runtime_rejects_a_nonzero_worker_status(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     work_dir = tmp_path / "thread" / "workspace"
@@ -231,6 +261,46 @@ def test_runtime_rejects_a_nonzero_worker_status(
         "broker.stop", "relay.stop", "sandbox.cleanup", "broker.close", "relay.close",
         "result.close",
     ]
+
+
+def test_runtime_preserves_an_allowlisted_worker_failure_code(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+
+    class FailedResultSink(_ResultSink):
+        def receive(self) -> pi_runtime.PiRuntimeResult:
+            self.events.append("result.receive")
+            raise pi_runtime.PiRuntimeError("Pi worker failed: turn-bound-exceeded")
+
+    class BadWorker(_Worker):
+        def wait(self, *, timeout: int) -> dict[str, int]:
+            self._events.append("worker.wait")
+            return {"StatusCode": 1}
+
+    class BadContainers(_Containers):
+        def run(self, _image: str, **kwargs: object) -> BadWorker:
+            self._events.append("worker.start")
+            return BadWorker(Path(next(iter(kwargs["volumes"]))), self._events)  # type: ignore[index]
+
+    class BadDocker:
+        def __init__(self) -> None:
+            self.containers = BadContainers(_SandboxManager.events)
+
+    monkeypatch.setattr(pi_runtime, "PiResultSink", FailedResultSink)
+    monkeypatch.setattr(_SandboxManager, "_get_docker_client", classmethod(
+        lambda cls: BadDocker()))
+
+    with pytest.raises(pi_runtime.PiRuntimeError, match="turn-bound-exceeded"):
+        pi_runtime.PiRuntimeManager(_SandboxManager).run(
+            work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
+            history=[], system_prompt="be useful",
+        )
 
 
 def test_stop_reaps_an_active_worker_before_returning(

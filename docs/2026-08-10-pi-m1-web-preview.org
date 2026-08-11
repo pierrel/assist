@@ -229,6 +229,14 @@ belongs in a later unattended-Pi phase, before schedules, phone, or any default
 change.  For manual M1 use, the bounded stop leaves threads readable and
 unavailable to execution.
 
+The worker result protocol has two shapes: a completed reply or one of the
+allowlisted failure codes =turn-bound-exceeded= and =worker-failed=.  A failed
+worker exits nonzero, but the host drains that authenticated bounded code before
+container removal and records it on the durable Run.  It never copies worker
+stderr, exception text, paths, tool arguments, provider responses, or container
+logs into the transcript or Run.  M1 permits at most twelve Pi agent turns and
+twelve relayed model calls per visible turn; both are host-enforced bounds.
+
 Thread deletion first retires the thread in that registry, so no later Pi
 worker can register, then waits for its active worker to reap before it removes
 the workspace.  The fair queue uses the same stop path: if another thread needs

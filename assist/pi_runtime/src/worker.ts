@@ -24,6 +24,9 @@ const MAX_REQUEST_BYTES = 512 * 1024;
 const MAX_RESULT_BYTES = 96 * 1024;
 const MAX_HISTORY_MESSAGES = 32;
 const MAX_MESSAGE_BYTES = 32 * 1024;
+const MAX_TURNS = 12;
+
+type FailureCode = "turn-bound-exceeded" | "worker-failed";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type Request = {
@@ -65,7 +68,7 @@ function validateRequest(value: unknown): Request {
     || typeof maxTurns !== "number"
     || !Number.isSafeInteger(maxTurns)
     || maxTurns < 1
-    || maxTurns > 6
+    || maxTurns > MAX_TURNS
     || !Array.isArray(history)
     || history.length > MAX_HISTORY_MESSAGES
   ) {
@@ -158,6 +161,12 @@ async function writeResult(capability: string, value: Record<string, unknown>): 
   resultCommitted = true;
 }
 
+function failureCode(error: unknown): FailureCode {
+  return error instanceof Error && error.message === "Pi turn bound exceeded"
+    ? "turn-bound-exceeded"
+    : "worker-failed";
+}
+
 async function main(): Promise<void> {
   const raw = readRequestBytes();
   const request = validateRequest(JSON.parse(raw.toString("utf8")));
@@ -217,11 +226,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(async () => {
+main().catch(async (error: unknown) => {
   if (!resultCommitted) {
     try {
       const request = validateRequest(JSON.parse(readRequestBytes().toString("utf8")));
-      await writeResult(request.resultCapability, { status: "failed", error: "Pi worker failed" });
+      await writeResult(request.resultCapability, { status: "failed", code: failureCode(error) });
     } catch {
       // The trusted host turns a missing result into an honest failed Run.
     }

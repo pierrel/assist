@@ -28,8 +28,9 @@ _IMAGE = "assist-pi-runtime"
 _MAX_RESULT_BYTES = 96 * 1024
 _MAX_HISTORY_MESSAGES = 32
 _MAX_MESSAGE_BYTES = 32 * 1024
-_MAX_TURNS = 6
+_MAX_TURNS = 12
 _WALL_TIMEOUT_SECONDS = 900
+_WORKER_FAILURE_CODES = {"turn-bound-exceeded", "worker-failed"}
 
 
 class PiRuntimeError(RuntimeError):
@@ -103,13 +104,21 @@ class PiResultSink:
             value = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise PiRuntimeError("Pi worker result is malformed") from error
-        if not isinstance(value, dict) or set(value) != {"capability", "status", "reply", "turns"}:
+        if not isinstance(value, dict) or "capability" not in value:
             raise PiRuntimeError("Pi worker result is malformed")
         capability = value["capability"]
         if not isinstance(capability, str) or not secrets.compare_digest(capability, self._capability):
             raise PiRuntimeError("Pi worker result is unauthorized")
-        if value["status"] != "completed":
-            raise PiRuntimeError("Pi worker did not complete")
+        if value.get("status") == "failed":
+            if set(value) != {"capability", "status", "code"}:
+                raise PiRuntimeError("Pi worker result is malformed")
+            code = value["code"]
+            if not isinstance(code, str) or code not in _WORKER_FAILURE_CODES:
+                raise PiRuntimeError("Pi worker result is malformed")
+            raise PiRuntimeError(f"Pi worker failed: {code}")
+        if value.get("status") != "completed" or set(value) != {
+                "capability", "status", "reply", "turns"}:
+            raise PiRuntimeError("Pi worker result is malformed")
         reply, turns = value["reply"], value["turns"]
         if (not isinstance(reply, str) or not reply.strip() or not isinstance(turns, int)
                 or isinstance(turns, bool) or not 1 <= turns <= _MAX_TURNS
@@ -118,7 +127,7 @@ class PiResultSink:
         return PiRuntimeResult(reply, turns)
 
     def receive(self) -> PiRuntimeResult:
-        """Return the already-drained result only after the worker exited cleanly."""
+        """Return the authenticated result after the worker has exited."""
         if not self._done.wait(5):
             raise PiRuntimeError("Pi worker did not produce a result")
         if self._error is not None:
@@ -352,9 +361,10 @@ class PiRuntimeManager:
                 if status is not None:
                     break
             worker_exited = True
+            result = result_sink.receive()
             if not isinstance(status, dict) or status.get("StatusCode") != 0:
                 raise PiRuntimeError("Pi worker exited unsuccessfully")
-            return result_sink.receive()
+            return result
         except PiRuntimeError:
             raise
         except Exception as error:
