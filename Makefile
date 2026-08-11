@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build pi-runtime-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -37,7 +37,7 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web: sandbox-build
+web: sandbox-build pi-runtime-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 smoke:
@@ -58,6 +58,9 @@ sandbox-build: egress-proxy-build
 # dockerfiles/egress-proxy.py and docs/2026-05-08-sandbox-network-allowlist.org.
 egress-proxy-build:
 	docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .
+
+pi-runtime-build:
+	docker build -t assist-pi-runtime -f dockerfiles/Dockerfile.pi-runtime .
 
 # Build-time smoke.  Three layers, fail-on-first-regression:
 #   - test-sandbox-shim.sh: 18 push-bypass variants + privilege-drop checks
@@ -81,7 +84,7 @@ sandbox-shell:
 
 # === Deployment Targets ===
 
-deploy: deploy-code deploy-sandbox-build deploy-searxng deploy-install deploy-speech-models restart
+deploy: deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-searxng deploy-install deploy-speech-models restart
 	@echo "✓ Deployed everything EXCEPT the systemd service."
 	@echo "  The service unit is left untouched (installing it needs interactive sudo)."
 	@echo "  To apply service/unit changes, run: make deploy-service"
@@ -112,6 +115,11 @@ deploy-sandbox-build:
 	@echo "→ Running egress-smoke on $(DEPLOY_HOST) (allowlist regression gate)..."
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-egress.sh'
 	@echo "✓ Sandbox + egress-proxy images built and smoked"
+
+deploy-pi-runtime-build:
+	@echo "→ Building Pi runtime image on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-pi-runtime -f dockerfiles/Dockerfile.pi-runtime .'
+	@echo "✓ Pi runtime image built"
 
 # Migrate pre-non-root-sandbox thread workspaces to the deploy
 # user's ownership.  Idempotent.  Required after the first deploy

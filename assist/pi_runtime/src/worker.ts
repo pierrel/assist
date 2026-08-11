@@ -1,14 +1,11 @@
 import {
   closeSync,
   constants,
-  fsyncSync,
   fstatSync,
   openSync,
   readSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
 } from "node:fs";
+import { createConnection } from "node:net";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -21,11 +18,10 @@ import { createBrokerTools } from "./broker_client.js";
 import { promptOwner } from "./prompt_owner.js";
 
 const REQUEST_PATH = "/run/pi/request.json";
-const RESULT_PATH = "/run/pi/result.json";
-const CONTROL_DIRECTORY = "/run/pi";
+const RESULT_SOCKET = "/run/pi/result.sock";
 const PROVIDER_URL = "http://127.0.0.1:18765/v1";
 const MAX_REQUEST_BYTES = 512 * 1024;
-const MAX_RESULT_BYTES = 256 * 1024;
+const MAX_RESULT_BYTES = 96 * 1024;
 const MAX_HISTORY_MESSAGES = 32;
 const MAX_MESSAGE_BYTES = 32 * 1024;
 
@@ -37,6 +33,8 @@ type Request = {
   model: string;
   systemPrompt: string;
   brokerCapability: string;
+  providerCapability: string;
+  resultCapability: string;
   maxTurns: number;
 };
 
@@ -47,10 +45,10 @@ function validateRequest(value: unknown): Request {
     throw new Error("Pi request must be an object");
   }
   const request = value as Record<string, unknown>;
-  if (Object.keys(request).sort().join(",") !== "brokerCapability,history,maxTurns,model,prompt,systemPrompt,version") {
+  if (Object.keys(request).sort().join(",") !== "brokerCapability,history,maxTurns,model,prompt,providerCapability,resultCapability,systemPrompt,version") {
     throw new Error("Pi request has an invalid shape");
   }
-  const { brokerCapability, history, maxTurns, model, prompt, systemPrompt, version } = request;
+  const { brokerCapability, history, maxTurns, model, prompt, providerCapability, resultCapability, systemPrompt, version } = request;
   if (
     version !== 1
     || typeof prompt !== "string"
@@ -60,6 +58,10 @@ function validateRequest(value: unknown): Request {
     || !systemPrompt.trim()
     || typeof brokerCapability !== "string"
     || !/^[A-Za-z0-9_-]{43}$/.test(brokerCapability)
+    || typeof providerCapability !== "string"
+    || !/^[A-Za-z0-9_-]{43}$/.test(providerCapability)
+    || typeof resultCapability !== "string"
+    || !/^[A-Za-z0-9_-]{43}$/.test(resultCapability)
     || typeof maxTurns !== "number"
     || !Number.isSafeInteger(maxTurns)
     || maxTurns < 1
@@ -89,7 +91,10 @@ function validateRequest(value: unknown): Request {
   if (Buffer.byteLength(prompt, "utf8") > MAX_MESSAGE_BYTES) {
     throw new Error("Pi request prompt exceeds its bound");
   }
-  return { version, prompt, history: validatedHistory, model, systemPrompt, brokerCapability, maxTurns };
+  return {
+    version, prompt, history: validatedHistory, model, systemPrompt,
+    brokerCapability, providerCapability, resultCapability, maxTurns,
+  };
 }
 
 function readRequestBytes(): Buffer {
@@ -138,43 +143,19 @@ function assistantText(value: unknown): string {
   return text;
 }
 
-function writeResult(value: Record<string, unknown>): void {
-  const raw = Buffer.from(JSON.stringify(value), "utf8");
+async function writeResult(capability: string, value: Record<string, unknown>): Promise<void> {
+  const raw = Buffer.from(JSON.stringify({ capability, ...value }), "utf8");
   if (raw.length > MAX_RESULT_BYTES) {
     throw new Error("Pi result exceeds its bound");
   }
-  const temporaryPath = `${RESULT_PATH}.${process.pid}.tmp`;
-  const descriptor = openSync(
-    temporaryPath,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    try {
-      writeFileSync(descriptor, raw);
-      fsyncSync(descriptor);
-    } finally {
-      closeSync(descriptor);
-    }
-    renameSync(temporaryPath, RESULT_PATH);
-    resultCommitted = true;
-    const directory = openSync(CONTROL_DIRECTORY, constants.O_RDONLY);
-    try {
-      if (!fstatSync(directory).isDirectory()) {
-        throw new Error("Pi control directory is invalid");
-      }
-      fsyncSync(directory);
-    } finally {
-      closeSync(directory);
-    }
-  } catch (error) {
-    try {
-      unlinkSync(temporaryPath);
-    } catch {
-      // The trusted manager reaps the per-turn control directory.
-    }
-    throw error;
-  }
+  await new Promise<void>((resolve, reject) => {
+    const client = createConnection(RESULT_SOCKET);
+    client.setTimeout(5);
+    client.once("connect", () => client.end(raw, resolve));
+    client.once("error", reject);
+    client.once("timeout", () => client.destroy(new Error("Pi result receiver timed out")));
+  });
+  resultCommitted = true;
 }
 
 async function main(): Promise<void> {
@@ -202,7 +183,8 @@ async function main(): Promise<void> {
   const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false, maxRetries: 0 } });
   const loader = new DefaultResourceLoader({
     cwd: "/workspace", agentDir: "/agent", settingsManager: settings,
-    extensionFactories: [promptOwner(request.systemPrompt)], noExtensions: true, noSkills: true,
+    extensionFactories: [promptOwner(request.systemPrompt, request.providerCapability)],
+    noExtensions: true, noSkills: true,
     noPromptTemplates: true, noThemes: true, noContextFiles: true, systemPrompt: request.systemPrompt,
     skillsOverride: () => ({ skills: [], diagnostics: [] }),
     promptsOverride: () => ({ prompts: [], diagnostics: [] }),
@@ -226,16 +208,23 @@ async function main(): Promise<void> {
   try {
     await created.session.prompt(turnInput(request.history, request.prompt));
     if (turns > request.maxTurns) throw new Error("Pi turn bound exceeded");
-    writeResult({ status: "completed", reply: assistantText(created.session.messages.at(-1)), turns });
+    await writeResult(request.resultCapability, {
+      status: "completed", reply: assistantText(created.session.messages.at(-1)), turns,
+    });
   } finally {
     unsubscribe();
     created.session.dispose();
   }
 }
 
-main().catch(() => {
+main().catch(async () => {
   if (!resultCommitted) {
-    writeResult({ status: "failed", error: "Pi worker failed" });
+    try {
+      const request = validateRequest(JSON.parse(readRequestBytes().toString("utf8")));
+      await writeResult(request.resultCapability, { status: "failed", error: "Pi worker failed" });
+    } catch {
+      // The trusted host turns a missing result into an honest failed Run.
+    }
   }
   process.exitCode = 1;
 });

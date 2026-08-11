@@ -132,7 +132,8 @@ workspace never supplies extensions or a persistent Pi session.
 
 The worker runs in a distinct locked-down container: no network, read-only root,
 non-root user, dropped capabilities, no Docker socket, bounded pids/memory/tmp,
-and only its runtime plus two ephemeral Unix sockets.  It does not receive a
+and only its runtime plus an ephemeral Unix socket and private loopback adapter.
+It does not receive a
 host workspace path, a Docker handle, an approval store, app state, credentials,
 or =ASSIST_MODEL_URL=.  Its independent Pi sandbox profile uses =include_agent=
 false and an explicit environment allowlist, never the existing generic
@@ -144,6 +145,11 @@ worker, never into the tool sandbox.  It uses public Pi APIs only:
   prompts, and themes disabled; and
 - explicit typed read/write/edit/bash definitions whose operations use the
   tool-broker socket.
+
+The control mount is read-only to the worker: the host creates the request and
+all sockets, and the worker returns one bounded completion over a host listener
+instead of writing a result file.  Thus the worker cannot consume host disk or
+inodes through a control-directory write path.
 
 The relay listens on an ephemeral private socket, authenticates one
 unguessable per-run capability, accepts only the fixed completion path/model and
@@ -168,8 +174,9 @@ later separately reviewed additions.
 ** Pi workspace profile and unavailable routes
 
 Pi uses a dedicated =PiSandboxProfile= to make the tool sandbox from the normal
-per-turn workspace lifecycle without passing =include_agent= or arbitrary
-=ASSIST_*= configuration.  A user may explicitly select a domain at thread
+per-turn workspace lifecycle without passing =include_agent=, arbitrary
+=ASSIST_*= configuration, or a thread-scoped egress-approval enrollment.  A
+user may explicitly select a domain at thread
 creation, so that initial clone remains a visible host action, but Pi never
 calls =DomainManager.fetch_origin= during a turn and never calls =sync= or
 =merge= after one.  It therefore receives a stable selected workspace plus the
@@ -206,10 +213,10 @@ setting, closes admissions, atomically marks every pending/running Pi Run inert,
 and snapshots active workers.  Final Pi admission, Run claim, and manager
 registration verify the same enabled generation under that same lock, so a
 queued or racing worker cannot escape the snapshot.  Outside both the manager
-and Run-admission locks it stops broker admission, TERM-waits then KILLs its
-worker process group, cleans the exact SandboxManager generation to interrupt
-any admitted tool call, drains the relay/broker, and writes explanatory terminal
-Run/status state.  Pi threads are
+and Run-admission locks it stops broker and relay admission, TERM-waits then
+KILLs and reaps its worker process group, cleans the exact SandboxManager
+generation to interrupt any admitted tool call, drains the broker/relay, and
+writes explanatory terminal Run/status state.  Pi threads are
 then read-only/unavailable to execution but retain transcript and rollback.
 The completion response is emitted only after reaping.  A worker completion
 reacquires the short manager/Run transition gate and appends assistant events,

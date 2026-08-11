@@ -536,7 +536,9 @@ class TestSandboxManager(TestCase):
 
         with patch.dict(os.environ, {"ASSIST_MODEL_URL": "http://model.example.test"}):
             with patch.object(SandboxManager, '_get_docker_client', return_value=mock_client):
-                SandboxManager.get_pi_sandbox_backend(test_path)
+                with patch.object(SandboxManager, '_record_egress_client') as enroll:
+                    SandboxManager.get_pi_sandbox_backend(test_path)
+        enroll.assert_not_called()
 
         sandbox_call = next(c for c in mock_client.containers.run.call_args_list
                             if c.args and c.args[0] == "assist-sandbox")

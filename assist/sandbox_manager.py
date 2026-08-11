@@ -265,7 +265,8 @@ class SandboxManager:
 
     @classmethod
     def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
-                             agent_dir: str | None, include_assist_env: bool):
+                             agent_dir: str | None, include_assist_env: bool,
+                             include_egress_approvals: bool):
         """Create one per-turn sandbox from a named authority profile.
 
         ``include_assist_env`` is the line between ordinary Deep Agents work and
@@ -423,7 +424,8 @@ class SandboxManager:
             )
             logger.info("Started sandbox container %s for %s", container.id[:12], work_dir)
             cls._containers[work_dir] = container
-            cls._record_egress_client(container, work_dir)
+            if include_egress_approvals:
+                cls._record_egress_client(container, work_dir)
             from assist.sandbox import DockerSandboxBackend
             return DockerSandboxBackend(
                 container, native_agent_dir=agent_dir is not None)
@@ -435,12 +437,14 @@ class SandboxManager:
     def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
                             agent_dir: str | None = None):
         """Return the ordinary Docker sandbox, including its established app env."""
-        return cls._get_sandbox_backend(work_dir, tz, agent_dir, include_assist_env=True)
+        return cls._get_sandbox_backend(
+            work_dir, tz, agent_dir, include_assist_env=True, include_egress_approvals=True)
 
     @classmethod
     def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None):
         """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
-        return cls._get_sandbox_backend(work_dir, tz, None, include_assist_env=False)
+        return cls._get_sandbox_backend(
+            work_dir, tz, None, include_assist_env=False, include_egress_approvals=False)
 
     # work_dir -> egress-network IP for the client-attribution map (thread-
     # scoped egress grants; docs/2026-07-21-egress-approval-hitl.org).

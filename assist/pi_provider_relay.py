@@ -1,0 +1,253 @@
+"""One-turn, capability-authenticated relay from Pi to the local model server."""
+from __future__ import annotations
+
+import hmac
+import http.client
+import json
+import os
+import socket
+import socketserver
+import stat
+import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+from typing import Any
+
+
+_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_MAX_MODEL_CALLS = 12
+_MAX_TOKENS = 8192
+_SOCKET_TIMEOUT_SECONDS = 5
+_CAPABILITY_HEADER = "x-assist-pi-capability"
+_PATH = "/v1/chat/completions"
+
+
+class PiProviderRelayError(ValueError):
+    """The host cannot safely expose its model through this Pi relay."""
+
+
+class _UnixHTTPServer(socketserver.UnixStreamServer):
+    """One request at a time: M1 deliberately has no provider parallelism."""
+
+
+class PiProviderRelay:
+    """Forward only bounded, authenticated chat-completion requests to one model."""
+
+    def __init__(self, control_dir: str | Path, upstream_url: str,
+                 api_key: str, model: str, capability: str) -> None:
+        self._control_dir = Path(control_dir)
+        self._socket_path = self._control_dir / "provider.sock"
+        self._upstream = self._validate_upstream(upstream_url)
+        self._api_key = api_key
+        self._model = model
+        self._capability = capability
+        self._validate_control_dir()
+        if self._socket_path.exists():
+            raise PiProviderRelayError("Pi provider socket already exists")
+        handler = type("BoundPiProviderHandler", (_ProviderHandler,), {"relay": self})
+        self._server = _UnixHTTPServer(str(self._socket_path), handler)
+        os.chmod(self._socket_path, 0o600)
+        self._thread = threading.Thread(target=self._server.serve_forever,
+                                        name="pi-provider-relay", daemon=True)
+        self._started = False
+        self._state_lock = threading.Lock()
+        self._calls = 0
+        self._stopping = False
+        self._connections: set[http.client.HTTPConnection] = set()
+        self._clients: set[socket.socket] = set()
+
+    @property
+    def socket_path(self) -> Path:
+        """Private Unix endpoint for the worker-namespace loopback adapter."""
+        return self._socket_path
+
+    def start(self) -> None:
+        """Begin accepting requests after the manager has mounted the socket."""
+        if self._started:
+            raise RuntimeError("Pi provider relay is already running")
+        self._started = True
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop model admission and close any forwarding connection in progress."""
+        self.stop_admission()
+        if self._started:
+            shutdown = threading.Thread(target=self._server.shutdown,
+                                        name="pi-provider-relay-stop", daemon=True)
+            shutdown.start()
+            shutdown.join(timeout=5)
+            self._thread.join(timeout=5)
+            if shutdown.is_alive() or self._thread.is_alive():
+                raise RuntimeError("Pi provider relay did not drain")
+            self._started = False
+        self._server.server_close()
+        self._socket_path.unlink(missing_ok=True)
+
+    def stop_admission(self) -> None:
+        """Fence new model calls and interrupt any already-forwarding call."""
+        with self._state_lock:
+            self._stopping = True
+            connections = tuple(self._connections)
+            clients = tuple(self._clients)
+        for connection in connections:
+            if connection.sock is not None:
+                try:
+                    connection.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            connection.close()
+        for client in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            client.close()
+
+    @staticmethod
+    def _validate_upstream(value: str) -> urllib.parse.SplitResult:
+        parsed = urllib.parse.urlsplit(value)
+        if (parsed.scheme not in {"http", "https"}
+                or parsed.hostname not in {"127.0.0.1", "::1"}
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or parsed.path.rstrip("/") != "/v1"):
+            raise PiProviderRelayError("Pi model endpoint is not local OpenAI /v1")
+        return parsed
+
+    def _validate_control_dir(self) -> None:
+        metadata = os.lstat(self._control_dir)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077):
+            raise PiProviderRelayError("Pi control directory is unsafe")
+
+    def register_client(self, client: socket.socket) -> None:
+        """Reserve an accepted private client so preview-off can interrupt it."""
+        with self._state_lock:
+            if self._stopping:
+                raise PiProviderRelayError("Pi provider relay is stopped")
+            self._clients.add(client)
+
+    def finish_client(self, client: socket.socket) -> None:
+        """Release a client after it has finished receiving its response."""
+        with self._state_lock:
+            self._clients.discard(client)
+
+    def validate_request(self, method: str, path: str, headers: object,
+                         body: bytes) -> bytes:
+        """Validate an inbound request before it can consume model authority."""
+        if method != "POST" or path != _PATH or len(body) > _MAX_REQUEST_BYTES:
+            raise PiProviderRelayError("Pi model request is invalid")
+        if not hasattr(headers, "get"):
+            raise PiProviderRelayError("Pi model request is invalid")
+        content_type = headers.get("Content-Type")
+        capability = headers.get(_CAPABILITY_HEADER)
+        if (not isinstance(content_type, str) or not content_type.lower().startswith("application/json")
+                or not isinstance(capability, str)
+                or not hmac.compare_digest(capability, self._capability)):
+            raise PiProviderRelayError("Pi model request is unauthorized")
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise PiProviderRelayError("Pi model request is malformed") from error
+        if not isinstance(payload, dict) or payload.get("model") != self._model:
+            raise PiProviderRelayError("Pi model request uses an invalid model")
+        if ("max_completion_tokens" in payload
+                or "n" in payload and payload["n"] != 1
+                or "stream" in payload and not isinstance(payload["stream"], bool)):
+            raise PiProviderRelayError("Pi model request changes its generation policy")
+        normalized = dict(payload)
+        normalized["model"] = self._model
+        normalized["max_tokens"] = _MAX_TOKENS
+        normalized["n"] = 1
+        normalized["temperature"] = 0.1
+        canonical = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
+        if len(canonical) > _MAX_REQUEST_BYTES:
+            raise PiProviderRelayError("Pi model request exceeds its bound")
+        with self._state_lock:
+            if self._stopping or self._calls >= _MAX_MODEL_CALLS:
+                raise PiProviderRelayError("Pi model turn bound exceeded")
+            self._calls += 1
+        return canonical
+
+    def forward(self, body: bytes) -> tuple[int, str, list[bytes]]:
+        """Forward one already-authorized request without forwarding its headers."""
+        connection_type = (http.client.HTTPSConnection
+                           if self._upstream.scheme == "https" else http.client.HTTPConnection)
+        connection = connection_type(self._upstream.hostname, self._upstream.port, timeout=_SOCKET_TIMEOUT_SECONDS)
+        with self._state_lock:
+            if self._stopping:
+                raise PiProviderRelayError("Pi provider relay is stopped")
+            self._connections.add(connection)
+            # Holding the short connection/send operation under this gate means
+            # close() cannot complete before a post-stop request is impossible.
+            try:
+                connection.request(
+                    "POST", _PATH, body=body,
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self._api_key}"},
+                )
+            except BaseException:
+                self._connections.discard(connection)
+                connection.close()
+                raise
+        try:
+            if connection.sock is not None:
+                connection.sock.settimeout(650)
+            response = connection.getresponse()
+            chunks: list[bytes] = []
+            total = 0
+            while chunk := response.read(65536):
+                total += len(chunk)
+                if total > _MAX_RESPONSE_BYTES:
+                    raise PiProviderRelayError("Pi model response exceeds its bound")
+                chunks.append(chunk)
+            return response.status, "application/json", chunks
+        finally:
+            with self._state_lock:
+                self._connections.discard(connection)
+            connection.close()
+
+
+class _ProviderHandler(BaseHTTPRequestHandler):
+    """Tiny HTTP boundary used only behind a private Unix socket."""
+
+    protocol_version = "HTTP/1.1"
+    relay: PiProviderRelay
+
+    def setup(self) -> None:
+        self.request.settimeout(_SOCKET_TIMEOUT_SECONDS)
+        super().setup()
+
+    def do_POST(self) -> None:
+        registered = False
+        try:
+            try:
+                self.relay.register_client(self.connection)
+                registered = True
+                length_text = self.headers.get("Content-Length")
+                if (not isinstance(length_text, str) or not length_text.isdecimal()
+                        or int(length_text) > _MAX_REQUEST_BYTES):
+                    self.send_error(413)
+                    return
+                body = self.rfile.read(int(length_text))
+                body = self.relay.validate_request(self.command, self.path, self.headers, body)
+                status, content_type, chunks = self.relay.forward(body)
+            except PiProviderRelayError:
+                self.send_error(403)
+                return
+            except (OSError, http.client.HTTPException):
+                self.send_error(502)
+                return
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for chunk in chunks:
+                self.wfile.write(chunk)
+        finally:
+            if registered:
+                self.relay.finish_client(self.connection)
+            self.close_connection = True
+
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
