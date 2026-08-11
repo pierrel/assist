@@ -47,6 +47,7 @@ from assist.geo.tools import geo_tools
 from assist.thread_manager import (
     ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on,
     set_web_triage_interrupt_on)
+from assist.pi_preview import PiPreviewPolicy
 
 
 def _configure_logging() -> None:
@@ -102,6 +103,7 @@ load_dev_env()
 
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
+PI_PREVIEW = PiPreviewPolicy(ROOT)
 
 # The one shared schedule store (disk-as-truth on the thread root) — used by the
 # Scheduler (started in the lifespan, see threads.py) AND the schedule tools AND the

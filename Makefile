@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build pi-runtime-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -61,6 +61,15 @@ egress-proxy-build:
 
 pi-runtime-build:
 	docker build -t assist-pi-runtime -f dockerfiles/Dockerfile.pi-runtime .
+
+pi-preview-enable:
+	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py enable)
+
+pi-preview-disable:
+	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py disable)
+
+pi-preview-status:
+	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py status)
 
 # Build-time smoke.  Three layers, fail-on-first-regression:
 #   - test-sandbox-shim.sh: 18 push-bypass variants + privilege-drop checks

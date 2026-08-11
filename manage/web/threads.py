@@ -93,6 +93,7 @@ from manage.web.state import (
     MANAGER,
     MERGE_LOCK,
     MESSAGE_BACKLOG,
+    PI_PREVIEW,
     RUN_SERVICE,
     SCHEDULE_STORE,
     SUBSCRIPTION_STORE,
@@ -307,6 +308,8 @@ def render_index() -> str:
         "\n".join(item_html for _, item_html in items)
         if items else "<li><em>No threads yet</em></li>"
     )
+    pi_option = ('<option value="pi">Pi preview</option>' if PI_PREVIEW.admits("pi")
+                 else '<option value="pi" disabled>Pi preview (unavailable)</option>')
     return f"""
     <html>
       <head>
@@ -361,6 +364,10 @@ def render_index() -> str:
             {_GEO_SEND_SCRIPT}
             <form action="/threads/with-message" method="post" id="newThreadForm" onsubmit="return assistSend(this);">
               {_domain_selector_html()}
+              <select name="engine" aria-label="Agent engine" style="margin-bottom:.5rem; width:100%;">
+                <option value="deepagents" selected>Deep Agents</option>
+                {pi_option}
+              </select>
               <textarea
                 id="initialMessage"
                 name="text"
@@ -477,6 +484,7 @@ _ELAPSED_TICKER_SCRIPT = """<script>
 def render_thread(
     tid: str,
     chat: Thread | None,
+    pi_messages: list[dict] | None = None,
     captured: bool = False,
     merged: bool = False,
     reviewed: bool = False,
@@ -518,7 +526,8 @@ def render_thread(
     ) if can_rename else ""
 
     # During the initial setup stages there is no agent state worth showing yet.
-    msgs: list[dict] = [] if is_init or chat is None else chat.get_messages()
+    msgs: list[dict] = [] if is_init else (pi_messages if pi_messages is not None
+                                            else ([] if chat is None else chat.get_messages()))
 
     # Completed-turn elapsed badges: map each turn's CONCLUDING assistant bubble (the last
     # assistant strictly before the next user bubble) to its recorded elapsed seconds.
@@ -2447,9 +2456,19 @@ async def apple_touch_icon() -> Response:
     )
 
 
+def _require_new_thread_engine(engine: str) -> str:
+    """Admit only the immutable server-owned engine choice for a new web thread."""
+    if engine not in {"deepagents", "pi"}:
+        raise HTTPException(status_code=400, detail="Unknown thread engine")
+    if engine == "pi" and not PI_PREVIEW.claim_admits("pi"):
+        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
+    return engine
+
+
 @app.post("/threads")
-async def create_thread(domain: str | None = Form(None)):
-    tid = await run_in_threadpool(MANAGER.reserve)
+async def create_thread(domain: str | None = Form(None), engine: str = Form("deepagents")):
+    selected_engine = _require_new_thread_engine(engine)
+    tid = await run_in_threadpool(MANAGER.reserve_visible, selected_engine)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected:
         await run_in_threadpool(
@@ -2466,13 +2485,14 @@ async def create_thread_with_message(
     background_tasks: BackgroundTasks,
     text: str = Form(...),
     domain: str | None = Form(None),
+    engine: str = Form("deepagents"),
     sent_at: str | None = Form(None), tz: str | None = Form(None),
     lat: str | None = Form(None), lon: str | None = Form(None),
 ):
     rider = _build_rider(sent_at, tz, lat, lon)
     tid, run_id, selected = await run_in_threadpool(
         create_thread_with_message_core,
-        text, domain, rider,
+        text, domain, rider, engine,
     )
     background_tasks.add_task(
         _initialize_thread, tid, run_id, selected, rider,
@@ -2481,10 +2501,10 @@ async def create_thread_with_message(
 
 
 def create_thread_with_message_core(
-    text: str, domain: str | None, rider: ContextRider | None = None,
+    text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
-    tid = MANAGER.reserve()
+    tid = MANAGER.reserve_visible(_require_new_thread_engine(engine))
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
@@ -2507,13 +2527,18 @@ async def get_thread(
         _clear_urgent(tid)
         stage = _get_status(tid).get("stage", "ready")
         chat: Thread | None = None
-        if stage not in INIT_STAGES:
+        pi_messages: list[dict] | None = None
+        is_pi = _is_pi_thread(tid)
+        if stage not in INIT_STAGES and is_pi:
+            pi_messages = [{"role": message.role, "content": message.text}
+                           for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
+        elif stage not in INIT_STAGES:
             try:
                 chat = MANAGER.get(tid, sandbox_backend=None)
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail="Thread not found")
         return render_thread(
-            tid, chat, captured=bool(captured), merged=bool(merged),
+            tid, chat, pi_messages=pi_messages, captured=bool(captured), merged=bool(merged),
             reviewed=bool(reviewed), pushed=bool(pushed))
 
     return await run_in_threadpool(load_and_render)
