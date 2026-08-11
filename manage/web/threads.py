@@ -1867,7 +1867,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             result = _PI_RUNTIME.run(
                 work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
                 prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
-                turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
+                turn_id=tid, admitted=lambda: PI_PREVIEW.claim_admits("pi"),
                 should_yield=_pi_should_yield)
             # A worker can exit in the interval after its last one-second
             # admission observation. Recheck before making its reply durable.
