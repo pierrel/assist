@@ -161,6 +161,15 @@ that a prompt rewrite must not weaken.  It is deliberately a diagnostic panel,
 not a release certification: passing it says the candidate is worth expanding,
 not that the remaining 121 nodes are safe to skip.
 
+The table below is the historical proposed panel and is not runnable evidence.
+The exact implemented panel is the 13-node web-main manifest in
+=docs/2026-08-11-prompt-rewrite-sentinel-manifest.org=: it replaces the
+legacy-context, unavailable-research, durable-memory, resolution-turn, and SMS
+rows with real-web-main direct, lifecycle, egress-request, page-result, and
+task-result journeys.  The manifest is authoritative for node, fixture, user
+sequence, validator, and capture path; the results ledger records its N=3
+baseline and candidate comparisons.
+
 | Family | Node | Type | Why this first |
 |-
 | direct local work | =test_agent.py::TestAgent::test_adds_item_correctly= | N | Small requested change and truthful completion. |
