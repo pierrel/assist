@@ -14,6 +14,48 @@ from assist.middleware.url_provenance import normalize_url
 from assist.domain_manager import clone_repo
 
 
+def prompt_rewrite_web_main_spec(*, tools=(), interrupt_on=None):
+    """Return the ordinary web-main shape for prompt-rewrite comparisons.
+
+    The environment switch changes only whether that web shape receives the
+    candidate static prompt.  Both sides retain the actual web lifecycle tools
+    and web-only skill sources, so a comparison cannot silently exercise the
+    legacy in-process-subagent agent instead.
+    """
+    from assist.spec import AgentSpec
+    from assist.thread_manager import _web_skill_sources
+    # The production tools require an ASGI RunService.  The prompt-rewrite
+    # journey supplies the same names, schemas, and visible lifecycle contract
+    # through its deterministic local task fixture instead.
+    from .test_async_subagents import _TOOLS
+
+    return AgentSpec(
+        async_subagent_tools=_TOOLS,
+        web_main=os.environ.get("ASSIST_PROMPT_REWRITE_CANDIDATE") == "1",
+        skill_sources=_web_skill_sources(),
+        tools=tools,
+        interrupt_on=interrupt_on,
+    )
+
+
+def complete_web_main_tasks(agent, *, limit=8):
+    """Deliver deterministic completion wakes for task-fixture work.
+
+    This makes a selected journey exercise the ordinary two-turn web lifecycle
+    rather than treating a launch response as a completed user outcome.
+    """
+    from .test_async_subagents import _TASK_STATUSES, _completion_wake
+
+    reply = ""
+    for _ in range(limit):
+        task_id = next((task_id for task_id, status in _TASK_STATUSES.items()
+                        if status in {"pending", "running"}), None)
+        if task_id is None:
+            return reply
+        reply = agent.message(_completion_wake(task_id, "success"))
+    raise AssertionError(f"web-main task fixture exceeded {limit} completion wakes")
+
+
 def _git(*args, cwd=None):
     return subprocess.run(["git", *args], cwd=cwd, check=True,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

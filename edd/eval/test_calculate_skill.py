@@ -41,7 +41,8 @@ from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import create_filesystem, skill_was_loaded, executed_commands, cleanup_workspace
+from .utils import (complete_web_main_tasks, create_filesystem, cleanup_workspace, executed_commands,
+                    prompt_rewrite_web_main_spec, skill_was_loaded)
 
 
 class TestCalculateSkill(TestCase):
@@ -84,6 +85,7 @@ class TestCalculateSkill(TestCase):
             self.model,
             self.workspace,
             sandbox_backend=self.sandbox,
+            spec=prompt_rewrite_web_main_spec(),
         ))
 
     def _ran_python(self, agent) -> bool:
@@ -148,6 +150,7 @@ class TestCalculateSkill(TestCase):
             "If I invest $10,000 at 6.5% annual return compounded "
             "monthly, what is the balance after 25 years?"
         )
+        res = complete_web_main_tasks(agent) or res
 
         self.assertTrue(
             skill_was_loaded(agent, "calculate"),

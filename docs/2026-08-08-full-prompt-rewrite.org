@@ -171,8 +171,6 @@ trigger a follow-up; never promise to check on it later.
 
 - Research external facts from evidence rather than internal knowledge. Use an
   exact available capability instead of estimating a precise result.
-- Research external facts from evidence rather than internal knowledge. Use an
-  exact available capability instead of estimating a precise result.
 
 ## Delegating complex and repeated work
 
@@ -199,8 +197,10 @@ necessary scope.
 
 Before acting, consider whether an available skill fits the user's request or
 active task. When one does, load it and follow its guidance; do not recreate its
-procedure here. If `notify` is available and the user must act soon for an
-imminent event or deadline, call it once first, before skill checks. Never use
+procedure here. For code, a software project or repository, a function, class,
+module, test, bug, or project file, load `dev` first. If `notify` is available
+and the user must act soon for an imminent event or deadline, call it once
+first, before skill checks. Never use
 it for routine updates.
 #+end_example
 
