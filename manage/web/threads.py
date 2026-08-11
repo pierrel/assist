@@ -950,13 +950,16 @@ def render_thread(
                     '<a href="/geo">review them on the regions page</a>.'
                     '</div></div>')
 
-    # Disable the input form during the initial setup phase
-    form_disabled = "disabled" if is_init else ""
-    form_note = (
-        "Thread is being set up, please wait..."
-        if is_init
-        else "If you close or refresh, your message will still be processed."
-    )
+    # Disabled Pi is intentionally readable but cannot accept more work. This
+    # is a product mirror of the server-side admission check, not its authority.
+    try:
+        pi_read_only = _is_pi_thread(tid) and not PI_PREVIEW.admits("pi")
+    except ThreadEngineError:
+        pi_read_only = True
+    form_disabled = "disabled" if is_init or pi_read_only else ""
+    form_note = ("Thread is being set up, please wait..." if is_init else
+                 "Pi preview is unavailable; this thread is read-only." if pi_read_only else
+                 "If you close or refresh, your message will still be processed.")
     return f"""
     <html>
       <head>
