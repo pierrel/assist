@@ -8,10 +8,13 @@ import shutil
 import socket
 import tempfile
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
+
+from requests.exceptions import ReadTimeout
 
 from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
@@ -38,6 +41,14 @@ class PiRuntimeResult:
 
     reply: str
     turns: int
+
+
+@dataclass
+class _ActivePiTurn:
+    """The host-owned cancellation state for one worker lifetime."""
+
+    stopped: threading.Event
+    finished: threading.Event
 
 
 class PiResultSink:
@@ -133,6 +144,45 @@ class PiRuntimeManager:
 
     def __init__(self, sandbox_manager: type[SandboxManager] = SandboxManager) -> None:
         self._sandbox_manager = sandbox_manager
+        self._active_lock = threading.Lock()
+        self._active: dict[str, _ActivePiTurn] = {}
+        self._retired: set[str] = set()
+
+    def _register(self, turn_id: str | None) -> _ActivePiTurn | None:
+        if turn_id is None:
+            return None
+        active = _ActivePiTurn(threading.Event(), threading.Event())
+        with self._active_lock:
+            if turn_id in self._retired:
+                raise PiRuntimeError("Pi thread is no longer available")
+            if turn_id in self._active:
+                raise PiRuntimeError("Pi turn is already active")
+            self._active[turn_id] = active
+        return active
+
+    def _finish(self, turn_id: str | None, active: _ActivePiTurn | None) -> None:
+        if active is None:
+            return
+        active.finished.set()
+        with self._active_lock:
+            if self._active.get(turn_id) is active:
+                del self._active[turn_id]
+
+    def stop(self, turn_id: str, *, timeout: float = 20) -> None:
+        """Stop one active worker and wait until its authority is torn down."""
+        with self._active_lock:
+            active = self._active.get(turn_id)
+        if active is None:
+            return
+        active.stopped.set()
+        if not active.finished.wait(timeout):
+            raise PiRuntimeError("Pi worker did not stop within its bound")
+
+    def retire(self, turn_id: str, *, timeout: float = 20) -> None:
+        """Permanently prevent new worker registration before thread deletion."""
+        with self._active_lock:
+            self._retired.add(turn_id)
+        self.stop(turn_id, timeout=timeout)
 
     @staticmethod
     def _control_dir(work_dir: str) -> Path:
@@ -226,7 +276,9 @@ class PiRuntimeManager:
 
     def run(self, *, work_dir: str, timezone: str | None, prompt: str,
             history: Iterable[tuple[str, str]], system_prompt: str,
-            max_turns: int = _MAX_TURNS) -> PiRuntimeResult:
+            max_turns: int = _MAX_TURNS, turn_id: str | None = None,
+            admitted: Callable[[], bool] | None = None,
+            should_yield: Callable[[], bool] | None = None) -> PiRuntimeResult:
         """Run one fresh Pi worker and tear down every authority it used."""
         if (not isinstance(prompt, str) or not isinstance(system_prompt, str)
                 or not system_prompt.strip() or not isinstance(max_turns, int)
@@ -236,6 +288,7 @@ class PiRuntimeManager:
             raise PiRuntimeError("Pi prompt exceeds its bound")
         config = current_model_config()
         control_dir = self._control_dir(work_dir)
+        active = self._register(turn_id)
         sandbox: DockerSandboxBackend | None = None
         broker: PiToolBroker | None = None
         relay: PiProviderRelay | None = None
@@ -273,7 +326,20 @@ class PiRuntimeManager:
                 volumes={str(control_dir): {"bind": "/run/pi", "mode": "ro"}},
                 environment={}, labels={"assist.pi-runtime": "true"},
             )
-            status = worker.wait(timeout=_WALL_TIMEOUT_SECONDS)
+            deadline = time.monotonic() + _WALL_TIMEOUT_SECONDS
+            while True:
+                if ((active is not None and active.stopped.is_set())
+                        or (admitted is not None and not admitted())):
+                    raise PiRuntimeError("Pi preview was stopped")
+                if should_yield is not None and should_yield():
+                    raise PiRuntimeError("Pi preview yielded to waiting work")
+                if time.monotonic() >= deadline:
+                    raise PiRuntimeError("Pi worker timed out")
+                try:
+                    status = worker.wait(timeout=1)
+                    break
+                except ReadTimeout:
+                    continue
             worker_exited = True
             if not isinstance(status, dict) or status.get("StatusCode") != 0:
                 raise PiRuntimeError("Pi worker exited unsuccessfully")
@@ -306,5 +372,8 @@ class PiRuntimeManager:
                 if result_sink is not None:
                     self._attempt(teardown_errors, result_sink.close)
                 self._attempt(teardown_errors, lambda: shutil.rmtree(control_dir))
-            if teardown_errors:
-                raise PiRuntimeError("Pi worker teardown failed") from teardown_errors[0]
+            try:
+                if teardown_errors:
+                    raise PiRuntimeError("Pi worker teardown failed") from teardown_errors[0]
+            finally:
+                self._finish(turn_id, active)

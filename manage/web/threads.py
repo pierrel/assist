@@ -68,7 +68,8 @@ from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.pi_conversation import PiConversationStore
 from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
-                                 ThreadHoldExpired, ThreadPauseRequested)
+                                 ThreadHoldExpired, ThreadPauseRequested,
+                                 active_handle)
 
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
@@ -508,8 +509,10 @@ def render_thread(
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
     try:
-        engine_title = "Pi preview" if _is_pi_thread(tid) else "Deep Agents"
+        is_pi = _is_pi_thread(tid)
+        engine_title = "Pi preview" if is_pi else "Deep Agents"
     except ThreadEngineError:
+        is_pi = True
         engine_title = "Engine unavailable"
 
     # Rename is only offered when idle: while busy/initializing the displayed
@@ -592,7 +595,7 @@ def render_thread(
     # top-of-page block, separate from the message bubbles, so the per-file
     # collapse stack and the Merge / Review buttons sit together.
     diffs: list[Change] = []
-    if not is_init:
+    if not is_init and not is_pi:
         try:
             dm = _get_domain_manager(tid)
             if dm:
@@ -607,7 +610,7 @@ def render_thread(
     # ``processing`` ↔ ``ready`` transitions so the user can ask the
     # agent to fix the conflict and the banner doesn't disappear when
     # the agent's response lands.
-    conflict_state = _get_conflict(tid) if not is_init else None
+    conflict_state = _get_conflict(tid) if not is_init and not is_pi else None
     conflict_banner_html = ""
     if conflict_state:
         files = conflict_state.get("files") or []
@@ -866,7 +869,7 @@ def render_thread(
     # task text quoted + escaped as its unverified words. All of a thread's
     # pending cards render (<=3 by the tool's cap).
     egress_banner = ""
-    if EGRESS_STORE is not None:
+    if not is_pi and EGRESS_STORE is not None:
         for _er in sorted((r for r in EGRESS_STORE.peek()
                            if r.origin_tid == tid and r.state == "pending"),
                           key=lambda r: r.created_at):
@@ -912,7 +915,7 @@ def render_thread(
                 f'</div></div>')
 
     geo_banner = ""
-    if GEO_PROPOSALS is not None:
+    if not is_pi and GEO_PROPOSALS is not None:
         try:
             mine = [p for p in GEO_PROPOSALS.all() if p.origin_tid == tid]
         except Exception:
@@ -966,7 +969,7 @@ def render_thread(
     # Disabled Pi is intentionally readable but cannot accept more work. This
     # is a product mirror of the server-side admission check, not its authority.
     try:
-        pi_read_only = _is_pi_thread(tid) and not PI_PREVIEW.admits("pi")
+        pi_read_only = is_pi and not PI_PREVIEW.admits("pi")
     except ThreadEngineError:
         pi_read_only = True
     form_disabled = "disabled" if is_init or pi_read_only else ""
@@ -1099,7 +1102,7 @@ def render_thread(
             {rename_button}
           </div>
           {rename_form}
-          {_thread_domain_html(tid)}
+          {"" if is_pi else _thread_domain_html(tid)}
           {status_banner}
           {geo_banner}
           {egress_banner}
@@ -1115,12 +1118,12 @@ def render_thread(
             {_RIDER_HIDDEN_INPUTS}
             <div class="button-group">
               <button class="btn" type="submit" {form_disabled}>Send</button>
-              <button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>
+              {"" if is_pi else f'<button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>'}
             </div>
             <div style="font-size:.85rem; color:#6b7280; margin-top:.4rem;">{form_note}</div>
           </form>
 
-          <!-- Capture Modal -->
+          {"" if is_pi else f'''<!-- Capture Modal -->
           <div id="captureModal" class="modal">
             <div class="modal-content">
               <h3>Capture Conversation</h3>
@@ -1134,7 +1137,7 @@ def render_thread(
                 </div>
               </form>
             </div>
-          </div>
+          </div>'''}
 
           <script>
             function showRename() {{
@@ -1479,9 +1482,24 @@ def _pi_system_prompt() -> str:
     return prompt
 
 
+def _pi_should_yield() -> bool:
+    """Bridge the queue's current fair-stop request into the Pi worker wait."""
+    handle = active_handle()
+    return bool(handle and (handle.expired or handle.pause_requested))
+
+
 def _is_pi_thread(tid: str) -> bool:
     """Classify once from immutable host storage; malformed identity never runs."""
     return read_thread_engine(MANAGER.thread_dir(tid)).name == "pi"
+
+
+def _require_deep_thread(tid: str) -> None:
+    """Refuse an endpoint whose implementation depends on a Deep graph."""
+    try:
+        if _is_pi_thread(tid):
+            raise HTTPException(status_code=409, detail="This action is unavailable in Pi preview")
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
 
 
 def _runs():
@@ -1808,6 +1826,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             if current.status == "running":
                 _runs().transition(run.thread_id, run.id, "error", error="Pi preview accepts manual web turns only")
         _set_status(run.thread_id, "error", error="Pi preview accepts manual web turns only")
+        _dispatch_pending_after(run.thread_id, run.id)
         return
     if run.status != "pending":
         if run.status in {"running", "interrupted"}:
@@ -1816,6 +1835,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 if current.status in {"running", "interrupted"}:
                     _runs().transition(run.thread_id, run.id, "error", error="Pi turns do not resume after interruption")
             _set_status(run.thread_id, "error", error="Pi turn was interrupted; send the message again")
+            _dispatch_pending_after(run.thread_id, run.id)
         return
     tid = run.thread_id
     try:
@@ -1846,7 +1866,13 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             _set_status(tid, "processing", pending_message=run.text, started_at=_now_ms())
             result = _PI_RUNTIME.run(
                 work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
-                prompt=run.text, history=history, system_prompt=_pi_system_prompt())
+                prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
+                turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
+                should_yield=_pi_should_yield)
+            # A worker can exit in the interval after its last one-second
+            # admission observation. Recheck before making its reply durable.
+            if not PI_PREVIEW.claim_admits("pi"):
+                raise PiRuntimeError("Pi preview was stopped")
             _PI_CONVERSATIONS.append(thread_dir, run.id, "assistant", result.reply)
             with _RUN_ADMISSION_LOCK:
                 _runs().transition(tid, run.id, "success", result=result.reply)
@@ -1891,6 +1917,24 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     successor by construction.
     """
     tid = run.thread_id
+    # Pi has no LangGraph checkpoint or resumable session. Classify before
+    # `_recovery_decision`, which legitimately constructs a Deep chat for
+    # legacy threads. An abandoned Pi head is terminal and its ordinary
+    # followers may start as fresh Pi turns.
+    try:
+        is_pi = _is_pi_thread(tid)
+    except ThreadEngineError:
+        is_pi = True
+    if is_pi:
+        with _RUN_ADMISSION_LOCK:
+            current = _runs().get(tid, run.id)
+            if current.status == "pending":
+                current = _runs().claim(tid, run.id)
+            if current.status in {"running", "interrupted"}:
+                _runs().transition(tid, run.id, "error", error="Pi turn was interrupted; send the message again")
+        _set_status(tid, "error", error="Pi turn was interrupted; send the message again")
+        _dispatch_pending_after(tid, run.id)
+        return
     pending_text = run.pending_text or run.text or _get_status(tid).get("pending_message")
     if run.status == "interrupted":
         successor = next((candidate for candidate in _runs().list(tid)
@@ -2420,7 +2464,7 @@ def _capture_conversation(tid: str, reason: str) -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return render_index()
+    return await run_in_threadpool(render_index)
 
 
 # Favicon set — a psychedelic brain (a lobular body under a magenta->cyan->yellow
@@ -2708,6 +2752,7 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str) -> None:
     THREAD_QUEUE serializes it (overlap waits) and the per-turn sandbox + middleware
     apply. A time-only rider gives the turn 'now' in the schedule's zone. No
     _mark_pending — there's no waiting render to win."""
+    _require_deep_thread(tid)
     rider = _build_rider(datetime.now(timezone.utc).isoformat(), tz)
     # origin="system": a machine-initiated turn — it neither clears queued
     # continuations (only a USER message supersedes the agent's plan) nor counts
@@ -2727,6 +2772,11 @@ def _dispatch_event(sender: str, text: str) -> None:
     sub = SUBSCRIPTION_STORE.route(sender)
     if sub is None:
         logging.info("inbound message from %s matched no subscription; recorded only", sender)
+        return
+    try:
+        _require_deep_thread(sub.thread_id)
+    except HTTPException:
+        logging.warning("inbound message matched Pi preview thread %s; not dispatched", sub.thread_id)
         return
     rendered = sub.render(sender, text)
     stage = _get_status(sub.thread_id).get("stage")
@@ -2818,6 +2868,7 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     turn off the loop (the resume runs the tool → the outbound POST, so it must not run on
     the event loop; the BackgroundTask puts it in the threadpool)."""
     _existing_thread_dir(tid)  # 404 on a bad/missing tid — cheap, no agent build
+    _require_deep_thread(tid)
     if decision not in _REPLY_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
     status = _get_status(tid)
@@ -2848,6 +2899,7 @@ def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
                    seen_body: str = Form(default="")):
     """Approve, edit, or reject the exact pending email proposal off the event loop."""
     _existing_thread_dir(tid)
+    _require_deep_thread(tid)
     if decision not in _EMAIL_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
     status = _get_status(tid)
@@ -3971,6 +4023,7 @@ async def delete_thread(tid: str):
 
 def _delete_thread_and_children(tid: str) -> None:
     """Delete a visible thread and each non-running hidden task directory."""
+    _PI_RUNTIME.retire(tid)
     with _RUN_ADMISSION_LOCK:
         child_ids = {
             child.thread_id for child in _runs().scan_children()
@@ -4004,6 +4057,7 @@ async def rename_thread(tid: str, description: str = Form("")):
 
 @app.post("/thread/{tid}/capture")
 async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: str = Form(...)):
+    await run_in_threadpool(_require_deep_thread, tid)
     try:
         thread = MANAGER.get(tid)
     except FileNotFoundError:
@@ -4047,6 +4101,7 @@ def merge_thread(tid: str):
     the sandbox is concurrently writing into the same working tree,
     and the lock doesn't extend across the host/sandbox boundary.
     """
+    _require_deep_thread(tid)
     try:
         thread = MANAGER.get(tid)
     except FileNotFoundError:

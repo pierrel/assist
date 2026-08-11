@@ -30,3 +30,15 @@ def test_new_pi_thread_requires_fresh_host_admission(monkeypatch) -> None:
     assert error.value.status_code == 503
     monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
     assert threads._require_new_thread_engine("pi") == "pi"
+
+
+def test_merge_refuses_pi_before_constructing_a_deep_thread(monkeypatch) -> None:
+    monkeypatch.setattr(threads, "_is_pi_thread", lambda tid: True)
+    monkeypatch.setattr(
+        threads.MANAGER, "get",
+        lambda *args, **kwargs: pytest.fail("Pi must not construct a Deep thread"))
+
+    with pytest.raises(HTTPException) as error:
+        threads.merge_thread("pi-thread")
+
+    assert error.value.status_code == 409

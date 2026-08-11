@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,7 @@ class _Worker:
         self._events = events
 
     def wait(self, *, timeout: int) -> dict[str, int]:
-        assert timeout == 900
+        assert timeout == 1
         self._events.append("worker.wait")
         return {"StatusCode": 0}
 
@@ -214,6 +215,117 @@ def test_runtime_rejects_a_nonzero_worker_status(
     assert _SandboxManager.events[-6:] == [
         "broker.stop", "relay.stop", "sandbox.cleanup", "broker.close", "relay.close",
         "result.close",
+    ]
+
+
+def test_stop_reaps_an_active_worker_before_returning(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    started = threading.Event()
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    class WaitingWorker(_Worker):
+        stopped = False
+
+        def wait(self, *, timeout: int) -> dict[str, int]:
+            self._events.append("worker.wait")
+            started.set()
+            if not self.stopped:
+                raise pi_runtime.ReadTimeout("still running")
+            return {"StatusCode": 0}
+
+        def stop(self, *, timeout: int) -> None:
+            self._events.append("worker.stop")
+            self.stopped = True
+
+        def kill(self) -> None:
+            self._events.append("worker.kill")
+
+    class WaitingContainers(_Containers):
+        def run(self, _image: str, **kwargs: object) -> WaitingWorker:
+            self._events.append("worker.start")
+            return WaitingWorker(Path(next(iter(kwargs["volumes"]))), self._events)  # type: ignore[index]
+
+    class WaitingDocker:
+        def __init__(self) -> None:
+            self.containers = WaitingContainers(_SandboxManager.events)
+
+    monkeypatch.setattr(_SandboxManager, "_get_docker_client", classmethod(
+        lambda cls: WaitingDocker()))
+    manager = pi_runtime.PiRuntimeManager(_SandboxManager)
+    errors: list[Exception] = []
+
+    def run() -> None:
+        try:
+            manager.run(work_dir=str(work_dir), timezone="America/Los_Angeles",
+                        prompt="hello", history=[], system_prompt="be useful", turn_id="thread")
+        except Exception as error:
+            errors.append(error)
+
+    runner = threading.Thread(target=run)
+    runner.start()
+    assert started.wait(2)
+    manager.stop("thread", timeout=5)
+    runner.join(5)
+
+    assert not runner.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], pi_runtime.PiRuntimeError)
+    assert "stopped" in str(errors[0])
+    assert _SandboxManager.events[-8:] == [
+        "broker.stop", "relay.stop", "worker.stop", "worker.wait", "sandbox.cleanup",
+        "broker.close", "relay.close", "result.close",
+    ]
+
+
+def test_withdrawn_admission_reaps_the_worker(tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    class StoppableWorker(_Worker):
+        def wait(self, *, timeout: int) -> dict[str, int]:
+            self._events.append("worker.wait")
+            return {"StatusCode": 0}
+
+        def stop(self, *, timeout: int) -> None:
+            self._events.append("worker.stop")
+
+        def kill(self) -> None:
+            self._events.append("worker.kill")
+
+    class StoppableContainers(_Containers):
+        def run(self, _image: str, **kwargs: object) -> StoppableWorker:
+            self._events.append("worker.start")
+            return StoppableWorker(Path(next(iter(kwargs["volumes"]))), self._events)  # type: ignore[index]
+
+    class StoppableDocker:
+        def __init__(self) -> None:
+            self.containers = StoppableContainers(_SandboxManager.events)
+
+    monkeypatch.setattr(_SandboxManager, "_get_docker_client", classmethod(
+        lambda cls: StoppableDocker()))
+
+    with pytest.raises(pi_runtime.PiRuntimeError, match="preview was stopped"):
+        pi_runtime.PiRuntimeManager(_SandboxManager).run(
+            work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="hello",
+            history=[], system_prompt="be useful", turn_id="thread", admitted=lambda: False)
+
+    assert _SandboxManager.events[-8:] == [
+        "broker.stop", "relay.stop", "worker.stop", "worker.wait", "sandbox.cleanup",
+        "broker.close", "relay.close", "result.close",
     ]
 
 

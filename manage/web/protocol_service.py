@@ -23,6 +23,7 @@ from manage.web.threads import (
     _RUN_ADMISSION_LOCK,
     _create_run,
     _dispatch_pending_after,
+    _require_deep_thread,
     _runs,
 )
 from assist.thread_queue import THREAD_QUEUE
@@ -87,6 +88,7 @@ class WebAgentProtocolService:
                 required = {"parent_thread_id", "parent_run_id", "dispatch_key"}
                 if set(metadata or {}) != required:
                     raise HTTPException(status_code=422, detail="Invalid task metadata")
+                _require_deep_thread(metadata["parent_thread_id"])
                 if not os.path.isdir(MANAGER.thread_dir(metadata["parent_thread_id"])):
                     raise FileNotFoundError(metadata["parent_thread_id"])
                 existing = thread_id and os.path.isdir(MANAGER.thread_dir(thread_id))

@@ -207,23 +207,26 @@ inspection is unavailable, Pi is disabled.  An OOM, provider restart, identity
 change, stale record, or malformed record disables Pi and is reported as
 provider health, never as a model failure.
 
-The manager owns an explicit preview-off transition.  Under its one short
-manager lock it advances a monotonic disabled generation, persists the disabled
-setting, closes admissions, atomically marks every pending/running Pi Run inert,
-and snapshots active workers.  Final Pi admission, Run claim, and manager
-registration verify the same enabled generation under that same lock, so a
-queued or racing worker cannot escape the snapshot.  Outside both the manager
-and Run-admission locks it stops broker and relay admission, TERM-waits then
-KILLs and reaps its worker process group, cleans the exact SandboxManager
-generation to interrupt any admitted tool call, drains the broker/relay, and
-writes explanatory terminal Run/status state.  Pi threads are
-then read-only/unavailable to execution but retain transcript and rollback.
-The completion response is emitted only after reaping.  A worker completion
-reacquires the short manager/Run transition gate and appends assistant events,
-marks success, and writes =ready= only when its generation remains enabled and
-its Run is still the owned running Run; otherwise it discards the completion and
-lets preview-off's terminal state stand.  Thread deletion uses this same
-per-thread stop/reap path before removing the workspace.
+M1 uses one small, host-owned active-worker registry keyed by visible thread.
+The runtime checks the persisted operator/health admission state between
+one-second bounded Docker waits.  Thus a separate-process =pi-preview disable=
+closes future claims immediately and an active worker notices the changed state
+within one wait interval, closes its broker/relay admission, TERM-waits then
+KILLs/reaps, cleans its exact sandbox generation, and records an honest terminal
+error.  The host rechecks admission immediately before committing a worker
+reply, so it discards every completion for which disable was observed.  This is
+a bounded shutdown guarantee, not a claim of a distributed atomic transaction across the
+CLI process and =assist-web=.  That stronger cross-process generation protocol
+belongs in a later unattended-Pi phase, before schedules, phone, or any default
+change.  For manual M1 use, the bounded stop leaves threads readable and
+unavailable to execution.
+
+Thread deletion first retires the thread in that registry, so no later Pi
+worker can register, then waits for its active worker to reap before it removes
+the workspace.  The fair queue uses the same stop path: if another thread needs
+the single model slot, Pi ends the fresh, non-resumable turn with a visible retry
+message rather than holding the slot past the quantum.  A future resumable Pi
+session may improve this UX, but M1 does not fake a Deep checkpoint resume.
 
 ** Phone and end state
 
@@ -263,10 +266,12 @@ comparison period; it is not removed until that deletion decision.
    or Docker/approval object in the worker request, no =ASSIST_*= or =/agent=
    visibility in its tool sandbox, malicious relay/broker frames, and each
    broker operation's selected-sandbox mapping.
-6. Implement per-turn process tracking, cancellation, preview-off reaping, and
-   honest interrupted-run terminalization.  Test queued-before-disable,
-   claim-vs-disable, completion-vs-disable, shutdown, delete-vs-active-worker,
-   restart, and sandbox cleanup races.
+6. Implement per-turn process tracking, cancellation, bounded preview-off
+   reaping, fair-queue yield, and honest interrupted-run terminalization.  Test
+   shutdown, delete-vs-active-worker, restart, follower dispatch, and sandbox
+   cleanup races.  Treat exact cross-process disable/claim linearization as a
+   later unattended-Pi prerequisite, not a reason to hold back the manual web
+   preview.
 7. Run mocked web boundary tests and TypeScript checks, then one bounded
    =resource run llm= capability smoke: public SDK, host tool reaches the
    Docker sandbox, response is atomically durable/renders in a Pi thread, and
@@ -287,6 +292,19 @@ comparison period; it is not removed until that deletion decision.
   default switch, or Deep removal.  Those are deliberate later decisions, not
   deficits hidden by a premature cutover.
 
+* Current implementation state
+
+The feature branch now has the host conversation store, persisted engine marker,
+health-gated Pi selector, public-SDK worker, relay, typed broker, no-network
+worker container, and manual-web dispatch.  The present hardening pass adds
+recovery classification before Deep construction; server-side Deep-only route
+rejection for review, capture, merge, approvals, egress resolution, schedules,
+SMS, and Agent Protocol children; bounded active-worker stop on preview-off or
+fair-queue yield; and delete-before-reap retirement.  Focused mocked tests cover
+the worker stop/reap order, Pi recovery without a Deep graph, and direct merge
+rejection; TypeScript typecheck/build and the affected web/runtime tests are
+required before a real-web smoke.
+
 * Review record
 
 2026-08-10 design review found and this revision addresses:
@@ -303,8 +321,8 @@ comparison period; it is not removed until that deletion decision.
   no dormant extensions, worker-persisted session, or reload controller is
   introduced in M1.
 
-The focused rereview converged: the security lens found no remaining design
-blocker; the UX/liveness lens's completion-versus-disable race is fenced by the
-manager/Run finalization rule; and the simplicity/interface lens confirmed one
-manager lifecycle authority plus idempotent host conversation ownership.  Runtime
-code may now begin against this document.
+The first implementation review found three real gaps: route-level Deep fallback,
+restart recovery constructing a Deep graph, and no active-worker stop.  The
+current hardening pass addresses those gaps with tests.  A fresh local review is
+still required after the remaining implementation and before any deployment or
+real-web smoke.
