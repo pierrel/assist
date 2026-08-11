@@ -2497,7 +2497,7 @@ def _require_new_thread_engine(engine: str) -> str:
 
 @app.post("/threads")
 async def create_thread(domain: str | None = Form(None), engine: str = Form("deepagents")):
-    selected_engine = _require_new_thread_engine(engine)
+    selected_engine = await run_in_threadpool(_require_new_thread_engine, engine)
     tid = await run_in_threadpool(MANAGER.reserve_visible, selected_engine)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected:
