@@ -5,10 +5,11 @@
 
 - Current-prompt census: =prompt-rearch-sentinel-baseline-20260811=
 - Census SHA-256: =9116e006058287e4d0d922216f6f76943b1849b34253f4c091c41e0d5a08311a=
-- Current candidate census: =prompt-rearch-sentinel-candidate-v5=
-- Candidate census SHA-256: =a23678b491cf3afef1c229fdf0a847ff846f00e55268f0c6010f6283abd43eda=
+- Current candidate census: =prompt-rearch-sentinel-candidate-v10=
+- Candidate census SHA-256: =2a95dec09f414504a3546a6d5e640cdb2ffd955b8926a484b07b771d4db1cef8=
 - Fixed prompt time: =2026-08-08T12:00:00-07:00=
-- Baseline target: N=3 per sentinel node.  Candidate target: N=1.
+- Baseline and final-candidate target: N=3 per sentinel node.  Final candidate
+  execution is in progress.
 
 * Admission notes
 
@@ -20,6 +21,15 @@
   comparison.
 - Every recorded trial uses a separate =resource run llm= admission and its own
   bounded per-test process.  A denial records no trial result.
+
+* Current iteration
+
+- Candidate v10 keeps the web-main-only base-then-core composition.  Its skills
+  section now precedes grounding: code inspection loads =dev= before asking for
+  a path or snippet, and a named file is rendered as that file rather than
+  copied or converted merely for display.  Both corrections are prompt-only.
+- Earlier v5/v9 candidate trials are exploratory evidence only.  The final
+  comparison below will use only separate N=3 runs under v10's recorded census.
 
 * Baseline ledger
 
