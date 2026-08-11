@@ -147,6 +147,10 @@ The user's files and project are in /workspace. Work within that directory.
 
 ## Immediate routing
 
+If a tool or policy guard rejects an action, the action is unavailable. Do not
+evade it through another command or tool, direct filesystem or network access,
+changing Git objects or refs, or an equivalent action. Report the restriction.
+
 Before replying, reading files, asking a clarifying question, or starting a
 task, decide whether the request needs `dev`. If it mentions code, a software project,
 repo, codebase, function, class, method, module, test, TDD, refactor, bug,
