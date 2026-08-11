@@ -17,6 +17,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { createBrokerTools } from "./broker_client.js";
 import { promptOwner } from "./prompt_owner.js";
 
 const REQUEST_PATH = "/run/pi/request.json";
@@ -35,6 +36,7 @@ type Request = {
   history: HistoryMessage[];
   model: string;
   systemPrompt: string;
+  brokerCapability: string;
   maxTurns: number;
 };
 
@@ -45,10 +47,10 @@ function validateRequest(value: unknown): Request {
     throw new Error("Pi request must be an object");
   }
   const request = value as Record<string, unknown>;
-  if (Object.keys(request).sort().join(",") !== "history,maxTurns,model,prompt,systemPrompt,version") {
+  if (Object.keys(request).sort().join(",") !== "brokerCapability,history,maxTurns,model,prompt,systemPrompt,version") {
     throw new Error("Pi request has an invalid shape");
   }
-  const { history, maxTurns, model, prompt, systemPrompt, version } = request;
+  const { brokerCapability, history, maxTurns, model, prompt, systemPrompt, version } = request;
   if (
     version !== 1
     || typeof prompt !== "string"
@@ -56,6 +58,8 @@ function validateRequest(value: unknown): Request {
     || !model
     || typeof systemPrompt !== "string"
     || !systemPrompt.trim()
+    || typeof brokerCapability !== "string"
+    || !/^[A-Za-z0-9_-]{43}$/.test(brokerCapability)
     || typeof maxTurns !== "number"
     || !Number.isSafeInteger(maxTurns)
     || maxTurns < 1
@@ -85,7 +89,7 @@ function validateRequest(value: unknown): Request {
   if (Buffer.byteLength(prompt, "utf8") > MAX_MESSAGE_BYTES) {
     throw new Error("Pi request prompt exceeds its bound");
   }
-  return { version, prompt, history: validatedHistory, model, systemPrompt, maxTurns };
+  return { version, prompt, history: validatedHistory, model, systemPrompt, brokerCapability, maxTurns };
 }
 
 function readRequestBytes(): Buffer {
@@ -208,7 +212,8 @@ async function main(): Promise<void> {
   await loader.reload();
   const created = await createAgentSession({
     cwd: "/workspace", agentDir: "/agent", model, modelRuntime: runtime, thinkingLevel: "off",
-    noTools: "builtin", resourceLoader: loader, sessionManager: SessionManager.inMemory("/workspace"),
+    noTools: "builtin", tools: ["read", "write", "edit", "bash"], customTools: createBrokerTools(request.brokerCapability),
+    resourceLoader: loader, sessionManager: SessionManager.inMemory("/workspace"),
     settingsManager: settings,
   });
   let turns = 0;

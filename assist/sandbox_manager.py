@@ -264,13 +264,14 @@ class SandboxManager:
         )
 
     @classmethod
-    def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
-                            agent_dir: str | None = None):
-        """Return a DockerSandboxBackend for work_dir, creating a container if needed.
+    def _get_sandbox_backend(cls, work_dir: str, tz: str | None,
+                             agent_dir: str | None, include_assist_env: bool):
+        """Create one per-turn sandbox from a named authority profile.
 
-        Passing ``agent_dir`` mounts it at ``/agent``. The web composition passes
-        it only for visible main-agent turns; child turns omit it. Returns None if
-        Docker is not available.
+        ``include_assist_env`` is the line between ordinary Deep Agents work and
+        Pi preview work.  A Pi sandbox retains Docker's workspace and egress
+        containment but receives no generic application environment or private
+        agent mount.
         """
         # Per-turn lifecycle: never reuse a container across turns.  The web
         # layer tears each container down at the end of its turn
@@ -371,11 +372,12 @@ class SandboxManager:
                 "http_proxy": proxy_url,
                 "TZ": _sandbox_timezone(tz),  # local time (rider tz > host), not UTC
             }
-            sandbox_env.update({
-                k: _rewrite_localhost(v)
-                for k, v in os.environ.items()
-                if k.startswith("ASSIST_")
-            })
+            if include_assist_env:
+                sandbox_env.update({
+                    k: _rewrite_localhost(v)
+                    for k, v in os.environ.items()
+                    if k.startswith("ASSIST_")
+                })
             # Persistent /tmp: a host dir SIBLING of work_dir, bind-mounted at the
             # container's /tmp so it survives the per-turn container teardown (the
             # container's own /tmp would be lost with it).  Lets the agent stash a
@@ -428,6 +430,17 @@ class SandboxManager:
         except DockerException as e:
             logger.warning("Docker sandbox unavailable: %s", e)
             return None
+
+    @classmethod
+    def get_sandbox_backend(cls, work_dir: str, tz: str | None = None,
+                            agent_dir: str | None = None):
+        """Return the ordinary Docker sandbox, including its established app env."""
+        return cls._get_sandbox_backend(work_dir, tz, agent_dir, include_assist_env=True)
+
+    @classmethod
+    def get_pi_sandbox_backend(cls, work_dir: str, tz: str | None = None):
+        """Return Pi's workspace-only Docker sandbox, without app secrets or `/agent`."""
+        return cls._get_sandbox_backend(work_dir, tz, None, include_assist_env=False)
 
     # work_dir -> egress-network IP for the client-attribution map (thread-
     # scoped egress grants; docs/2026-07-21-egress-approval-hitl.org).

@@ -206,9 +206,10 @@ setting, closes admissions, atomically marks every pending/running Pi Run inert,
 and snapshots active workers.  Final Pi admission, Run claim, and manager
 registration verify the same enabled generation under that same lock, so a
 queued or racing worker cannot escape the snapshot.  Outside both the manager
-and Run-admission locks it closes each relay/broker,
-TERM-waits then KILLs its process group, cleans the exact SandboxManager
-generation, and writes explanatory terminal Run/status state.  Pi threads are
+and Run-admission locks it stops broker admission, TERM-waits then KILLs its
+worker process group, cleans the exact SandboxManager generation to interrupt
+any admitted tool call, drains the relay/broker, and writes explanatory terminal
+Run/status state.  Pi threads are
 then read-only/unavailable to execution but retain transcript and rollback.
 The completion response is emitted only after reaping.  A worker completion
 reacquires the short manager/Run transition gate and appends assistant events,
