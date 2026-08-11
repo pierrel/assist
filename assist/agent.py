@@ -55,6 +55,7 @@ from assist.middleware.thread_queue_middleware import ThreadQueueMiddleware
 from assist.middleware.context_rider_middleware import ContextRiderMiddleware
 from assist.middleware.interjection import InterjectionMiddleware
 from assist.middleware.image_input_guard import ImageInputGuardMiddleware
+from assist.middleware.prompt_composition import PromptCompositionMiddleware
 from assist.env import env_int
 
 
@@ -491,17 +492,24 @@ def create_agent(model: BaseChatModel,
 
     delegation_mode = ("legacy" if legacy_subagents else
                        "async" if spec.async_subagent_tools else "disabled")
+    prompt_template = ("deepagents/assist_core.md.j2" if spec.web_main
+                       else "deepagents/general_instructions.md.j2")
+    static_prompt = base_prompt_for(
+        prompt_template,
+        workspace_dir=workspace_dir,
+        references_dir=references_dir,
+        delegation_mode=delegation_mode,
+        agent_role=spec.role,
+    )
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
-        system_prompt=base_prompt_for(
-            "deepagents/general_instructions.md.j2",
-            workspace_dir=workspace_dir,
-            references_dir=references_dir,
-            delegation_mode=delegation_mode,
-            agent_role=spec.role,
-        ),
+        system_prompt=static_prompt,
         middleware=mw + [
+            # This is deliberately first among Assist middleware: framework
+            # prompt appenders remain outside it, while Assist prompt owners
+            # keep their existing order inside it.
+            *([PromptCompositionMiddleware(static_prompt)] if spec.web_main else []),
             # Offload a large execute result (a long build/test log) to a file +
             # hand the model a preview + grep instruction — big logs are the classic
             # context-flooder for the small model.  head_tail preview: a log's salient

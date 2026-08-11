@@ -496,6 +496,7 @@ _OWNER_SOURCE_IDS = {
     "deepagents.SummarizationMiddleware": "python:deepagents.middleware.summarization",
     "langchain.TodoListMiddleware": "python:langchain.agents.middleware.todo",
     "assist.ContextRiderMiddleware": "python:assist.middleware.context_rider_middleware",
+    "assist.PromptCompositionMiddleware": "python:assist.middleware.prompt_composition",
     "assist.SmallModelSkillsMiddleware": "python:assist.middleware.skills_middleware",
 }
 
@@ -677,6 +678,48 @@ def _content_segments(owner: str, text: str, scenario: str,
                       operation: str = "append") -> list[dict[str, Any]]:
     if not text:
         return []
+    if owner == "assist.PromptCompositionMiddleware" and operation == "replace":
+        if prior_spans is None:
+            raise AssertionError("prompt composition replacement lacks prior provenance")
+        base = next((span for span in prior_spans
+                     if span.get("source_id") == "python:deepagents.graph.BASE_AGENT_PROMPT"),
+                    None)
+        core = next((span for span in prior_spans
+                     if span.get("owner") == "assist.agent template"), None)
+        if base is None or core is None:
+            raise AssertionError("prompt composition static sources are absent")
+        base_text = before_text[base["start"]:base["end"]]
+        core_text = before_text[core["start"]:core["end"]]
+        suffix = before_text[base["end"]:]
+        if text != f"{base_text}\n\n{core_text}{suffix}":
+            raise AssertionError(f"prompt composition replacement drifted in {scenario}")
+        segments = [
+            {"start": 0, "end": len(base_text),
+             "source_ids": [base["source_id"]],
+             "owner": "deepagents.graph.BASE_AGENT_PROMPT"},
+            {"start": len(base_text), "end": len(base_text) + 2,
+             "source_ids": ["python:deepagents.graph"],
+             "owner": "framework prompt composer"},
+            {"start": len(base_text) + 2, "end": len(text),
+             "source_ids": [core["source_id"]],
+             "owner": "assist.agent template"},
+        ]
+        cursor = len(base_text) + 2 + len(core_text)
+        for span in prior_spans:
+            if span["start"] < base["end"]:
+                continue
+            value = before_text[span["start"]:span["end"]]
+            sources = ([span["source_id"]] if "source_id" in span
+                       else span["source_ids"])
+            segments.append({"start": cursor, "end": cursor + len(value),
+                             "source_ids": sources,
+                             **({"owner": span["owner"]} if "owner" in span else {})})
+            cursor += len(value)
+        # The core segment ends before later framework-owned blocks.
+        segments[2]["end"] = len(base_text) + 2 + len(core_text)
+        if cursor != len(text):
+            raise AssertionError("prompt composition suffix attribution drifted")
+        return segments
     if owner == "deepagents.SkillsMiddleware":
         from assist.middleware.skills_middleware import SMALL_MODEL_SKILLS_PROMPT
         formatter_id = (
@@ -1032,6 +1075,7 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
     import langchain.agents.middleware.todo as todo_mod
     import assist.agent as assist_agent_mod
     import assist.middleware.context_rider_middleware as rider_mod
+    import assist.middleware.prompt_composition as composition_mod
     import assist.middleware.skills_middleware as assist_skills_mod
     import edd.agent as capture_agent_mod
     from deepagents import create_deep_agent as real_create_deep_agent
@@ -1132,6 +1176,10 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
             rider_mod.ContextRiderMiddleware, "wrap_model_call",
             _wrap_model_prompt("assist.ContextRiderMiddleware",
                                rider_mod.ContextRiderMiddleware.wrap_model_call)))
+        stack.enter_context(patch.object(
+            composition_mod.PromptCompositionMiddleware, "wrap_model_call",
+            _wrap_model_prompt("assist.PromptCompositionMiddleware",
+                               composition_mod.PromptCompositionMiddleware.wrap_model_call)))
         stack.enter_context(patch.object(factory_mod, "ToolNode", tracing_tool_node))
         stack.enter_context(patch.object(
             skills_mod.SkillsMiddleware, "before_agent", traced_skills_before))
@@ -1528,6 +1576,7 @@ def _expected_async_launch() -> str:
 def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
     import assist.agent as assist_agent_mod
     import assist.middleware.context_rider_middleware as rider_mod
+    import assist.middleware.prompt_composition as composition_mod
     import assist.middleware.memory_middleware as assist_memory_mod
     import assist.middleware.skills_middleware as assist_skills_mod
     import deepagents.graph as graph_mod
@@ -1549,6 +1598,7 @@ def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
         "python:deepagents.middleware.summarization": summarization_mod,
         "python:langchain.agents.middleware.todo": todo_mod,
         "python:assist.middleware.context_rider_middleware": rider_mod,
+        "python:assist.middleware.prompt_composition": composition_mod,
         "python:assist.middleware.memory_middleware": assist_memory_mod,
         "python:assist.middleware.skills_middleware": assist_skills_mod,
     }
@@ -1671,6 +1721,9 @@ _TOOL_ORIGINS = {
 }
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
+    "assist/templates/deepagents/assist_core.md.j2": {
+        "2112b0dc99fbdb2a372cafca03592a57e8fe007885b09a470d51371b07656a33",
+    },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
         "e79b9a545fec4ed27d3b2917b674f6999a1869eb4bbea713416304f0c22bac74",
@@ -1713,6 +1766,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
 }
 
 _REFERENCED_TEMPLATE_LOCATORS = {
+    "assist/templates/deepagents/assist_core.md.j2",
     "assist/templates/deepagents/context_agent.md.j2",
     "assist/templates/deepagents/describe_system.md.j2",
     "assist/templates/deepagents/fact_checker.md.j2",
@@ -2033,7 +2087,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "23c21e4f481c1603f4cc0df936cbc1e3b79193d2928c9b4ca88500add34f14e6"
+    "8df499b4201722c3d675f42ecbc9e3198dfb727feb9e0b57e1945ed83d63b846"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

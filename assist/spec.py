@@ -87,6 +87,13 @@ class AgentSpec:
     # mechanism without a second mode flag.
     async_subagent_tools: tuple[BaseTool, ...] | None = None
 
+    # Closed identity for the ordinary visible web assistant.  It is not
+    # inferred from tools or asynchronous delegation because embedders may
+    # legitimately use those capabilities with a different prompt contract.
+    # The prompt-rewrite composition seam uses this identity to leave legacy,
+    # delegate, triage, and embedder agents unchanged.
+    web_main: bool = False
+
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
     # InterruptOnConfig}`` installed as LangChain's HumanInTheLoopMiddleware. Web
     # profiles gate outward-effect tools (normal: ``send_email``; inbound triage:
@@ -121,6 +128,13 @@ class AgentSpec:
         if self.async_subagent_tools is not None:
             object.__setattr__(self, "async_subagent_tools",
                                tuple(self.async_subagent_tools))
+
+        if not isinstance(self.web_main, bool):
+            raise TypeError(
+                f"AgentSpec.web_main must be bool, got {type(self.web_main).__name__}")
+        if self.web_main and (self.role != "main" or not self.async_subagent_tools):
+            raise ValueError(
+                "AgentSpec.web_main requires a main role with async lifecycle tools")
 
         if not isinstance(self.skill_sources, Mapping):
             raise TypeError(

@@ -373,6 +373,31 @@ def test_every_prompt_transition_is_observed_and_attributed(census):
     assert "deepagents.MemoryMiddleware" in projected_owners
 
 
+def test_web_main_alone_has_the_attributed_static_prompt_reorder(census):
+    from deepagents.graph import BASE_AGENT_PROMPT
+    from assist.promptable import base_prompt_for
+
+    core = base_prompt_for(
+        "deepagents/assist_core.md.j2", workspace_dir="/workspace",
+        references_dir="/workspace/references", delegation_mode="async",
+        agent_role="main")
+    for scenario in ("web-main-core", "web-main-full"):
+        call = _call(census, scenario)
+        composition = [transition for transition in call["provenance"]["transitions"]
+                       if transition["owner"] == "assist.PromptCompositionMiddleware"]
+        assert len(composition) == 1
+        assert composition[0]["operation"] == "replace"
+        assert composition[0]["exact_change"].startswith(
+            f"{BASE_AGENT_PROMPT}\n\n{core}")
+
+    for call in census["calls"]:
+        if call["scenario"] in {"web-main-core", "web-main-full"}:
+            continue
+        assert not any(
+            transition["owner"] == "assist.PromptCompositionMiddleware"
+            for transition in call["provenance"]["transitions"])
+
+
 def test_ambiguous_constructor_prompt_ownership_fails():
     call = {
         "scenario": "synthetic-ambiguity",
@@ -511,8 +536,6 @@ def test_expected_audit_findings_are_reported_not_hidden(census):
         ("argument-contract-mismatch", "capture:0"),
         ("argument-contract-mismatch", "capture:0"),
         ("prompt-flattening", "web-main-full:0"),
-        ("return-shape-claim-mismatch", "web-main-core:0"),
-        ("return-shape-claim-mismatch", "web-main-full:0"),
     ]
     assert not any(
         finding["kind"] == "unavailable-capability-claim"
@@ -855,9 +878,8 @@ def test_artifact_is_bounded_and_hygiene_checked(census, tmp_path):
     initial_span["source_id"] = "python:assist.middleware.context_rider_middleware"
     final_span = next(
         span for span in call["provenance"]["final_spans"]
-        if span.get("source_id") == original_source
-        and span["start"] == initial_span["start"])
-    final_span["source_id"] = initial_span["source_id"]
+        if original_source in span.get("source_ids", []))
+    final_span["source_ids"] = [initial_span["source_id"]]
     with pytest.raises(AssertionError, match="prompt block provenance|base prompt source"):
         _assert_hygiene(bad, tmp_path)
 
@@ -1156,14 +1178,16 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
         separators=(",", ":"),
     )
     assert len(historical_p0_prompt) == 31_279
-    assert len(current_prompt) == 30_089
+    # The rewrite moves the stock base ahead of the compact Assist core. The
+    # historical rows below deliberately retain their original P0-P2b3 values.
+    assert len(current_prompt) == 21_243
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 38
-    assert len(census["findings"]) == 25
-    assert len(artifact_bytes(census)) == 3_032_927
+    assert len(census["findings"]) == 23
+    assert len(artifact_bytes(census)) == 2_971_039
     assert census["artifact_sha256"] == \
-            "9116e006058287e4d0d922216f6f76943b1849b34253f4c091c41e0d5a08311a"
+            "5681956e3f2fafa2fae30296ce1ad619d528a9c3c7b793495be5475024cc2985"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

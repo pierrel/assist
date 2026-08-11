@@ -14,7 +14,8 @@ from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 
-from .utils import read_file, create_filesystem, AgentTestMixin, skill_was_loaded, cleanup_workspace
+from .utils import (read_file, create_filesystem, AgentTestMixin, skill_was_loaded,
+                    cleanup_workspace, stub_research_subagent)
 
 class TestAgent(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
@@ -28,16 +29,19 @@ class TestAgent(AgentTestMixin, TestCase):
         self.model = select_assistant_model(0.1)
 
     def test_adds_item_correctly(self):
-        agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
-                                         "gtd": {"inbox.org":
-                                                 dedent("""\
-                                                 * Tasks
-                                                 ** TODO Fold laundry
-                                                 Just get it done
-                                                 ** TODO Buy new pants
-                                                 Size 31
-                                                 """)}})
-        res = agent.message("I need a new washer/dryer")
+        # This is a local task-system outcome, not a research eval.  Build inside
+        # the stub so an unnecessary research dispatch cannot hit SearXNG.
+        with stub_research_subagent():
+            agent, root = self.create_agent({"README.org": "All of my todos are in gtd/inbox.org",
+                                             "gtd": {"inbox.org":
+                                                     dedent("""\
+                                                     * Tasks
+                                                     ** TODO Fold laundry
+                                                     Just get it done
+                                                     ** TODO Buy new pants
+                                                     Size 31
+                                                     """)}})
+            res = agent.message("I need a new washer/dryer")
         inbox_contents = read_file(f"{root}/gtd/inbox.org")
         self.assertRegex(res, "(?i)updated|added", "Should mention that a change was made.")
         self.assertRegex(inbox_contents,

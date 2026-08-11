@@ -1,0 +1,54 @@
+# Frozen current-main selectors for the main-web full-prompt baseline.
+# Collection must remain 134 nodes: 88 natural outcomes and 46 diagnostics.
+# Live external-search nodes are deferred; deterministic search stubs remain.
+# The audit document explains the category and N/C classification for every node.
+edd/eval/test_agent.py::TestAgent::test_adds_item_correctly
+edd/eval/test_agent.py::TestAgent::test_finds_and_updates_relevant_files_direct
+edd/eval/test_agent.py::TestResearchSearchUnavailableHandoff
+edd/eval/test_agent.py::TestResearchRunsToCompletion
+edd/eval/test_agent.py::TestSearchDownMidflightDoesNotGrind
+edd/eval/test_async_subagents.py
+edd/eval/test_author_skill.py
+edd/eval/test_calculate_skill.py
+edd/eval/test_context_agent.py::TestContextInvocation
+edd/eval/test_dev_agent.py::TestDevAgent::test_explains_codebase
+edd/eval/test_dev_agent.py::TestDevAgent::test_updates_documentation
+edd/eval/test_dev_agent.py::TestDevAgent::test_discovers_and_installs_dependencies
+edd/eval/test_dev_agent.py::TestDevAgent::test_writes_and_runs_tests
+edd/eval/test_dev_agent.py::TestDevAgent::test_uses_context_agent_before_changes
+edd/eval/test_dev_agent.py::TestDevAgent::test_leverages_existing_utilities
+edd/eval/test_dev_agent_planning_flow.py
+edd/eval/test_dev_agent_runs_eval.py
+edd/eval/test_dev_skill_loading.py
+edd/eval/test_directions_agent.py
+edd/eval/test_domain_integration.py
+edd/eval/test_domain_skills.py::TestDomainSkillLoadingLocal
+edd/eval/test_domain_skills.py::TestDomainSkillLoadingSandbox
+edd/eval/test_edit_files.py
+edd/eval/test_egress_approval.py
+edd/eval/test_elisp_skill.py
+edd/eval/test_execute_deep_log.py
+edd/eval/test_geo_agent.py
+edd/eval/test_git_history_agent.py
+edd/eval/test_git_push_blocker_agent.py
+edd/eval/test_git_sync_agent.py
+edd/eval/test_interjection.py
+edd/eval/test_location_research.py
+edd/eval/test_map_agent.py
+edd/eval/test_memory.py
+edd/eval/test_org_format_skill.py
+edd/eval/test_org_insertion.py
+edd/eval/test_pdf_reading.py
+edd/eval/test_prompt_injection.py::TestSmsEventInjection
+edd/eval/test_render_agent.py
+edd/eval/test_schedule_agent.py
+edd/eval/test_send_email_skill.py
+edd/eval/test_skill_loading.py::TestSkillLoading::test_suggested_skill_request
+edd/eval/test_skill_loading.py::TestSkillLoading::test_implicit_skill_request
+edd/eval/test_subscription_agent.py
+edd/eval/test_thread_e2e.py
+edd/eval/test_thread_memory.py
+edd/eval/test_time_agent.py
+edd/eval/test_travel_agent.py
+edd/eval/test_urgent_notification.py
+edd/eval/test_website_download.py
