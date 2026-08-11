@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from manage.web import threads
+from manage.web import state
 from assist.thread_engine import read_thread_engine
 
 
@@ -29,8 +30,10 @@ class _Preview:
 def pi_threads_root(tmp_path, monkeypatch):
     monkeypatch.setattr(threads.MANAGER, "root_dir", str(tmp_path))
     threads._RUN_SERVICES_BY_ROOT.pop(str(tmp_path), None)
+    state.DESCRIPTION_CACHE.clear()
     yield tmp_path
     threads._RUN_SERVICES_BY_ROOT.pop(str(tmp_path), None)
+    state.DESCRIPTION_CACHE.clear()
 
 
 def test_new_thread_engine_defaults_to_deep_and_rejects_unknown(monkeypatch) -> None:
@@ -132,6 +135,7 @@ def test_first_pi_message_creation_creates_its_empty_workspace(
     assert run_id
     assert selected is None
     assert (pi_threads_root / tid / "domain").is_dir()
+    assert (pi_threads_root / tid / "description.txt").read_text() == "hello"
 
 
 def test_empty_pi_thread_creation_creates_its_workspace(
@@ -144,6 +148,77 @@ def test_empty_pi_thread_creation_creates_its_workspace(
 
     tid = response.headers["location"].removeprefix("/thread/")
     assert (pi_threads_root / tid / "domain").is_dir()
+
+
+def test_empty_pi_thread_never_generates_a_deep_title(
+    pi_threads_root, monkeypatch,
+) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    monkeypatch.setattr(
+        threads.MANAGER, "get",
+        lambda *args, **kwargs: pytest.fail("Pi title lookup must not construct Deep"),
+    )
+
+    assert state.get_cached_description(tid) == "Pi thread"
+    assert not (pi_threads_root / tid / "description.txt").exists()
+
+
+def test_first_message_on_an_empty_pi_thread_persists_its_title(
+    pi_threads_root,
+) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._create_empty_pi_workspace(tid)
+
+    threads._accept_message_run(tid, "  First useful line\nmore detail")
+
+    assert (pi_threads_root / tid / "description.txt").read_text() == "First useful line"
+
+
+def test_pi_title_uses_its_first_durable_user_message(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._PI_CONVERSATIONS.append(
+        threads.MANAGER.thread_dir(tid), "first-run", "user", "Original first message")
+
+    threads._accept_message_run(tid, "A later submission")
+
+    assert (pi_threads_root / tid / "description.txt").read_text() == "Original first message"
+
+
+def test_opening_a_pre_title_pi_thread_backfills_its_first_user_title(
+    pi_threads_root,
+) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._PI_CONVERSATIONS.append(
+        threads.MANAGER.thread_dir(tid), "pi-run", "user", "Repair this title")
+    threads._PI_CONVERSATIONS.append(
+        threads.MANAGER.thread_dir(tid), "pi-run", "assistant", "Done")
+
+    page = asyncio.run(threads.get_thread(tid))
+
+    assert "Repair this title" in page
+    assert (pi_threads_root / tid / "description.txt").read_text() == "Repair this title"
+
+
+def test_pi_title_backfill_preserves_a_user_rename(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    state.set_description(tid, "A name I chose")
+    threads._PI_CONVERSATIONS.append(
+        threads.MANAGER.thread_dir(tid), "pi-run", "user", "Do not replace my name")
+
+    threads._backfill_pi_description(tid)
+
+    assert (pi_threads_root / tid / "description.txt").read_text() == "A name I chose"
+
+
+def test_first_pi_turn_failure_still_reports_setup_failure(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._ensure_pi_description(tid, "A first message")
+    threads._create_run(tid, "A first message")
+    threads._set_status(tid, "error", error="Pi preview is unavailable")
+
+    page = threads.render_thread(tid, None, pi_messages=[])
+
+    assert "Setup failed:" in page
 
 
 def test_empty_workspace_setup_cannot_recreate_a_deleted_pi_thread(

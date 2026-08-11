@@ -47,6 +47,7 @@ from assist.geo.tools import geo_tools
 from assist.thread_manager import (
     ThreadManager, set_web_tools, set_web_triage_tools, set_web_interrupt_on,
     set_web_triage_interrupt_on)
+from assist.thread_engine import read_thread_engine
 from assist.pi_preview import PiPreviewPolicy
 
 
@@ -187,6 +188,7 @@ set_web_triage_interrupt_on(REPLY_INTERRUPT_ON)
 _raw = os.getenv("ASSIST_DOMAINS", "")
 DOMAINS: list[str] = [d.strip() for d in _raw.split(",") if d.strip()]
 DESCRIPTION_CACHE: Dict[str, str] = {}
+DESCRIPTION_LOCK = threading.Lock()
 DOMAIN_MANAGERS: Dict[str, DomainManager] = {}  # tid -> DomainManager
 
 # Serialises ``DomainManager.merge_to_main`` and ``push_main`` across
@@ -329,11 +331,13 @@ def _get_conflict(tid: str) -> dict | None:
         return None
 
 
-def _atomic_write(path: str, data: str) -> None:
+def _atomic_write(path: str, data: str, *, create_parent: bool = True) -> None:
     """Write ``data`` to ``path`` atomically: a uniquely-named temp file in the
-    same directory + os.replace. The unique temp name means concurrent writers
+    same directory + os.replace. ``create_parent=False`` makes a vanished parent
+    fail rather than resurrecting it. The unique temp name means concurrent writers
     for the same path can't clobber a shared temp or leave a half-written file."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if create_parent:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
                                prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
@@ -634,6 +638,8 @@ def get_cached_description(tid: str) -> str:
         if os.path.isfile(description_file):
             with open(description_file, 'r') as f:
                 DESCRIPTION_CACHE[tid] = f.read()
+        elif read_thread_engine(MANAGER.thread_dir(tid)).name == "pi":
+            return "Pi thread"
         else:
             set_description(tid, MANAGER.get(tid).description())
         return DESCRIPTION_CACHE[tid]
@@ -646,7 +652,27 @@ def set_description(tid: str, description: str) -> None:
     the cache. Because ``get_cached_description`` only generates when
     description.txt is ABSENT, a value written here is never auto-regenerated —
     the rename sticks across later turns."""
-    _atomic_write(os.path.join(MANAGER.thread_dir(tid), "description.txt"), description)
+    with DESCRIPTION_LOCK:
+        _write_description(tid, description)
+
+
+def set_description_if_absent(tid: str, description: str) -> bool:
+    """Persist an initial title only when no user or system title exists yet."""
+    with DESCRIPTION_LOCK:
+        path = os.path.join(MANAGER.thread_dir(tid), "description.txt")
+        if os.path.exists(path):
+            return False
+        try:
+            _write_description(tid, description)
+        except FileNotFoundError:
+            return False  # deletion won; never recreate a thread for its title
+        return True
+
+
+def _write_description(tid: str, description: str) -> None:
+    """Write one caller-authorized title while holding ``DESCRIPTION_LOCK``."""
+    _atomic_write(os.path.join(MANAGER.thread_dir(tid), "description.txt"), description,
+                  create_parent=False)
     DESCRIPTION_CACHE[tid] = description
 
 

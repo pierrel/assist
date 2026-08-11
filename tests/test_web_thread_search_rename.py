@@ -100,6 +100,21 @@ class TestSetDescription:
         leftover = [f for f in os.listdir(threads_root / "t1") if f.endswith(".tmp")]
         assert leftover == [], f"temp files leaked: {leftover}"
 
+    def test_initial_description_never_replaces_a_title(self, threads_root):
+        os.makedirs(threads_root / "t1", exist_ok=True)
+        state.set_description("t1", "A name I chose")
+
+        claimed = state.set_description_if_absent("t1", "Automatic title")
+
+        assert not claimed
+        assert (threads_root / "t1" / "description.txt").read_text() == "A name I chose"
+
+    def test_initial_description_never_recreates_a_deleted_thread(self, threads_root):
+        claimed = state.set_description_if_absent("t1", "Automatic title")
+
+        assert not claimed
+        assert not (threads_root / "t1").exists()
+
     def test_rename_sticks_without_regeneration(self, threads_root, monkeypatch):
         # The load-bearing contract: once description.txt exists, the title is
         # READ from disk, never regenerated via the model.

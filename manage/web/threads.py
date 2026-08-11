@@ -122,6 +122,7 @@ from manage.web.state import (
     _thread_title,
     get_cached_description,
     set_description,
+    set_description_if_absent,
 )
 
 
@@ -785,11 +786,14 @@ def render_thread(
         )
     elif stage == "error":
         err = html.escape(status.get("error", "Unknown error"))
-        # description.txt is only written after the first successful turn, so
-        # its absence distinguishes a setup-time failure from a mid-conversation one.
-        had_prior_turn = os.path.isfile(
-            os.path.join(MANAGER.thread_dir(tid), "description.txt")
-        )
+        # Pi titles are written when a message is admitted, so use successful
+        # Pi Runs rather than description.txt to keep its first-turn error a
+        # setup failure. Deep retains its established description-file signal.
+        if is_pi:
+            had_prior_turn = any(run.status == "success" for run in _runs().list(tid))
+        else:
+            had_prior_turn = os.path.isfile(
+                os.path.join(MANAGER.thread_dir(tid), "description.txt"))
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
     elif stage == "awaiting_approval" and status.get("pending_email_token"):
@@ -1485,6 +1489,7 @@ _RUN_SERVICES_LOCK = threading.Lock()
 _PI_CONVERSATIONS = PiConversationStore()
 _PI_RUNTIME = PiRuntimeManager()
 _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
+_PI_DESCRIPTION_LIMIT = 120
 
 
 def _pi_system_prompt() -> str:
@@ -1510,6 +1515,34 @@ def _pi_should_yield() -> bool:
 def _is_pi_thread(tid: str) -> bool:
     """Classify once from immutable host storage; malformed identity never runs."""
     return read_thread_engine(MANAGER.thread_dir(tid)).name == "pi"
+
+
+def _pi_initial_description(text: str) -> str:
+    """Make Pi's deterministic first-message title without asking a model."""
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return first_line[:_PI_DESCRIPTION_LIMIT] or "Pi thread"
+
+
+def _first_pi_user_text(tid: str) -> str | None:
+    """Return Pi's earliest durable user text, if this thread has one."""
+    for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid)):
+        if message.role == "user":
+            return message.text
+    return None
+
+
+def _ensure_pi_description(tid: str, text: str) -> None:
+    """Persist Pi's first user title, preserving an existing user rename."""
+    first_user_text = _first_pi_user_text(tid)
+    title_text = first_user_text if first_user_text is not None else text
+    set_description_if_absent(tid, _pi_initial_description(title_text))
+
+
+def _backfill_pi_description(tid: str) -> None:
+    """Repair a pre-title Pi thread from its first durable user conversation event."""
+    first_user_text = _first_pi_user_text(tid)
+    if first_user_text is not None:
+        set_description_if_absent(tid, _pi_initial_description(first_user_text))
 
 
 def _require_deep_thread(tid: str) -> None:
@@ -2642,6 +2675,8 @@ def create_thread_with_message_core(
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected_engine == "pi" and selected is None:
         _create_empty_pi_workspace(tid)
+    if selected_engine == "pi":
+        _ensure_pi_description(tid, text)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
     run = _create_run(tid, text, rider=rider)
@@ -2678,6 +2713,7 @@ async def get_thread(
         pi_messages: list[dict] | None = None
         is_pi = _is_pi_thread(tid)
         if stage not in INIT_STAGES and is_pi:
+            _backfill_pi_description(tid)
             pi_messages = [{"role": message.role, "content": message.text}
                            for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
         elif stage not in INIT_STAGES:
@@ -2765,6 +2801,13 @@ def _accept_message_run(tid: str, text: str, rider=None) -> tuple[Run, bool]:
             raise _EmailApprovalPending
         prior_stage = _get_status(tid).get("stage")
         busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
+        try:
+            if _is_pi_thread(tid):
+                _ensure_pi_description(tid, text)
+        except ThreadEngineError:
+            # Dispatch will make the existing invalid-engine error durable; title
+            # best-effort must not change message-admission semantics.
+            pass
         run = _create_run(tid, text, rider=rider)
         if busy:
             # Cover both wait points. The paused head may still be queued on
@@ -4140,7 +4183,10 @@ async def rename_thread(tid: str, description: str = Form("")):
     _existing_thread_dir(tid)
     new = description.strip()[:120]
     if new:  # ignore an empty rename — keep the existing title
-        set_description(tid, new)
+        try:
+            set_description(tid, new)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="Thread not found") from error
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
