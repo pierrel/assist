@@ -369,3 +369,15 @@ workspace.  Workspace creation now uses =mkdir= rather than parent-creating
 =makedirs= and runs on both web creation paths.  The final local review found
 no further concrete defect.  Full unit tests passed 1,681 tests with 2 skipped;
 the Pi TypeScript typecheck and build also passed.
+
+2026-08-11 live use exposed a generic =Pi worker exited unsuccessfully= terminal
+error after the worker performed workspace operations.  The auto-removed worker
+left no safe diagnostic, so this did not prove whether the six-turn cap or an
+internal worker error caused that particular Run.  The follow-up preserves only
+an authenticated allowlisted failure code, raises the bounded turn cap from six
+to twelve to match the already-existing twelve relayed-model-call cap, and adds
+protocol coverage that rejects arbitrary error text.  Full deterministic tests
+then passed 1,685 tests with 2 skipped, and a disposable live web smoke required
+a Pi =bash pwd= tool call before returning its exact response.  It passed and
+deleted its temporary thread.  This validates the previously untested tool path;
+it does not replay or alter the original failed thread.
