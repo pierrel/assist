@@ -208,7 +208,7 @@ Skill-specific:
 - `test_dev_skill_multi_turn.py` — dev skill on the general agent: multi-turn TDD with approvals + mid-task clarification
 
 Cross-cutting:
-- `test_async_subagents.py` — 13-case supervisor/delegation acceptance suite
+- `test_async_subagents.py` — 16-case supervisor/delegation acceptance suite
 - `test_domain_integration.py` — git integration and domain management
 - `test_memory.py`, `test_thread_memory.py` — memory behavior
 - `test_thread_e2e.py` — thread/conversation persistence
