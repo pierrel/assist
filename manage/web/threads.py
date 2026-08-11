@@ -976,6 +976,23 @@ def render_thread(
     form_note = ("Thread is being set up, please wait..." if is_init else
                  "Pi preview is unavailable; this thread is read-only." if pi_read_only else
                  "If you close or refresh, your message will still be processed.")
+    pi_continuation_html = ""
+    if is_pi:
+        pi_continuation_html = f"""
+          <section class="pi-continuation">
+            <h3>Continue in Deep Agents</h3>
+            <p>Create a new Deep Agents thread. The Pi transcript and workspace are not
+               transferred. You may add a short summary for the new thread.</p>
+            <form action="/thread/{tid}/continue-deep" method="post">
+              <label for="continue-summary">Summary (optional)</label>
+              <textarea id="continue-summary" name="summary" maxlength="{_PI_CONTINUATION_SUMMARY_LIMIT}"
+                        placeholder="What should the new thread know?"></textarea>
+              <div class="button-group">
+                <button class="btn btn-secondary" type="submit">Continue in Deep Agents</button>
+              </div>
+            </form>
+          </section>
+        """
     return f"""
     <html>
       <head>
@@ -1122,6 +1139,7 @@ def render_thread(
             </div>
             <div style="font-size:.85rem; color:#6b7280; margin-top:.4rem;">{form_note}</div>
           </form>
+          {pi_continuation_html}
 
           {"" if is_pi else f'''<!-- Capture Modal -->
           <div id="captureModal" class="modal">
@@ -1466,6 +1484,7 @@ _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
 _RUN_SERVICES_LOCK = threading.Lock()
 _PI_CONVERSATIONS = PiConversationStore()
 _PI_RUNTIME = PiRuntimeManager()
+_PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 
 
 def _pi_system_prompt() -> str:
@@ -1500,6 +1519,44 @@ def _require_deep_thread(tid: str) -> None:
             raise HTTPException(status_code=409, detail="This action is unavailable in Pi preview")
     except ThreadEngineError as error:
         raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+
+
+def _require_pi_thread(tid: str) -> None:
+    """Refuse the Pi-only handoff endpoint for any other engine."""
+    try:
+        if not _is_pi_thread(tid):
+            raise HTTPException(status_code=409, detail="This action is available only in Pi preview")
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+
+
+def _pi_continuation_message(source_tid: str, summary: str) -> str:
+    """Make the sole, visible input passed from a Pi thread to a fresh Deep one."""
+    if len(summary) > _PI_CONTINUATION_SUMMARY_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Continuation summary must be at most {_PI_CONTINUATION_SUMMARY_LIMIT} characters",
+        )
+    source = f"Continue this work from Pi preview thread {source_tid}."
+    boundary = (
+        "The Pi transcript, workspace, tools, credentials, approvals, and agent state "
+        "were not transferred."
+    )
+    stripped = summary.strip()
+    if not stripped:
+        return f"{source}\n\n{boundary}"
+    return f"{source}\n\n{boundary}\n\nUser-provided summary:\n{stripped}"
+
+
+def _continue_pi_in_deep(source_tid: str, summary: str) -> tuple[str, str, str | None]:
+    """Create an independent Deep thread from a Pi source and visible summary only."""
+    _existing_thread_dir(source_tid)
+    _require_pi_thread(source_tid)
+    return create_thread_with_message_core(
+        _pi_continuation_message(source_tid, summary),
+        domain=None,
+        engine="deepagents",
+    )
 
 
 def _runs():
@@ -3394,6 +3451,21 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
     if not busy:
         background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+@app.post("/thread/{tid}/continue-deep")
+async def continue_pi_in_deep(
+    tid: str,
+    background_tasks: BackgroundTasks,
+    summary: str = Form(""),
+):
+    """Start an independent Deep thread from one optional, visible Pi handoff summary."""
+    new_tid, run_id, domain = await anyio.to_thread.run_sync(
+        lambda: _continue_pi_in_deep(tid, summary),
+        limiter=_get_run_admission_limiter(),
+    )
+    background_tasks.add_task(_initialize_thread, new_tid, run_id, domain)
+    return RedirectResponse(url=f"/thread/{new_tid}", status_code=303)
 
 
 def _existing_thread_dir(tid: str) -> str:

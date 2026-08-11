@@ -300,10 +300,15 @@ worker container, and manual-web dispatch.  The present hardening pass adds
 recovery classification before Deep construction; server-side Deep-only route
 rejection for review, capture, merge, approvals, egress resolution, schedules,
 SMS, and Agent Protocol children; bounded active-worker stop on preview-off or
-fair-queue yield; and delete-before-reap retirement.  Focused mocked tests cover
-the worker stop/reap order, Pi recovery without a Deep graph, and direct merge
-rejection; TypeScript typecheck/build and the affected web/runtime tests are
-required before a real-web smoke.
+fair-queue yield; delete-before-reap retirement; and the visible Pi-to-Deep
+handoff.  That handoff creates an independently initialized Deep thread whose
+only source input is the bounded, visible user summary plus an explicit source
+Pi-thread identifier.  It never copies the Pi JSONL transcript or workspace,
+and stays available while Pi is disabled.  Focused mocked tests cover the
+worker stop/reap order, Pi recovery without a Deep graph, direct merge
+rejection, disabled-page handoff rendering, independent Deep-thread creation,
+and summary/source validation; TypeScript typecheck/build and the affected
+web/runtime tests are required before a real-web smoke.
 
 * Review record
 
@@ -323,6 +328,9 @@ required before a real-web smoke.
 
 The first implementation review found three real gaps: route-level Deep fallback,
 restart recovery constructing a Deep graph, and no active-worker stop.  The
-current hardening pass addresses those gaps with tests.  A fresh local review is
-still required after the remaining implementation and before any deployment or
-real-web smoke.
+current hardening pass addresses those gaps with tests.  The final handoff review
+found that its pre-acceptance work used the shared AnyIO pool, which can starve
+behind queued turns.  The handoff now uses the existing private admission limiter
+and has an unmocked exhausted-default-pool test.  The follow-up local review found
+no further concrete defect.  A real-web smoke is still required before any
+deployment decision.

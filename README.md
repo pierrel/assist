@@ -73,9 +73,14 @@ where reliability is harder than with frontier APIs.
   with edits isolated until you choose to merge. Multiple domains
   coexist.
 
-- **Multiple frontends, one agent core.** Web UI, CLI, and an Emacs
-  integration all share the same agent runtime, memory, and domain
-  repos.
+- **Multiple frontends, one Deep Agents core.** Web UI, CLI, and an Emacs
+  integration share the standard agent runtime, memory, and domain repos.
+
+- **Pi web preview.** A new web thread can explicitly select a bounded Pi
+  preview; Deep Agents remains the default. Pi threads are visibly labelled,
+  run only ordinary manual web turns, and can start a new Deep Agents thread
+  from an optional visible summary without transferring their transcript or
+  workspace.
 
 ---
 
