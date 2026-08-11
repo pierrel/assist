@@ -153,7 +153,8 @@ class TestRenderAgent(TestCase):
         blocks = self._render_block_paths(agent)
         self.assertTrue(
             any("fitness.org" in b for b in blocks),
-            f"expected a render block for fitness.org; render blocks: {blocks}",
+            f"expected a render block for fitness.org; render blocks: {blocks}; "
+            f"messages: {agent.all_messages()}",
         )
 
     def test_emits_render_block_alternate_verb(self):
