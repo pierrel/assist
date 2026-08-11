@@ -3309,6 +3309,11 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
                        sent_at: str | None = Form(None), tz: str | None = Form(None),
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
+    admitted = await anyio.to_thread.run_sync(
+        lambda: not _is_pi_thread(tid) or PI_PREVIEW.claim_admits("pi"),
+        limiter=_get_run_admission_limiter())
+    if not admitted:
+        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
     rider = _build_rider(sent_at, tz, lat, lon)
     try:
         run, busy = await anyio.to_thread.run_sync(
