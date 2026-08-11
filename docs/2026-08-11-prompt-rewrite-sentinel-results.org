@@ -21,7 +21,7 @@
 - Every recorded trial uses a separate =resource run llm= admission and its own
   bounded per-test process.  A denial records no trial result.
 
-* Current iteration
+* Historical v17 iteration
 
 - Candidate v17 keeps the web-main-only base-then-core composition.  Its first
   Assist-core section declares that a rejected policy guard cannot be evaded,
@@ -31,6 +31,15 @@
 - Earlier v5 through v16 candidate trials are exploratory or historical
   evidence only. The v17 comparison below uses separate N=3 runs under its
   recorded census.
+
+* Pending post-comment iteration
+
+The successor removes non-core skill names and procedures from the system core.
+It moves the development and named-file render routes into their existing skill
+metadata. Focused probes: context completion passed; delegation passed; the
+revised =dev= metadata passed; revised =render= metadata passed 3/3. A complete
+N=3 comparison will receive its own current-candidate table rather than being
+mixed with the historical v17 row.
 
 * Baseline ledger
 

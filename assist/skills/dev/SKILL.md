@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Software development work in a code project. EXAMPLES — "fix the bug in render_diff that drops the trailing newline"; "walk me through how the thread manager talks to the sandbox"; "add a retries kwarg to api_client.get with a test that exercises it". MUST load before any tool call that explores, explains, writes, edits, or runs code in a codebase.
+description: Any request to inspect, understand, explain, debug, test, or change code in a project or codebase. EXAMPLES — "fix the bug in render_diff that drops the trailing newline"; "take a look at this code and tell me what it is"; "walk me through how the thread manager talks to the sandbox". MUST load before any tool call that explores, explains, writes, edits, or runs code in a codebase.
 ---
 
 # Software Development Workflow

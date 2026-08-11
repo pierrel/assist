@@ -1,6 +1,6 @@
 ---
 name: render
-description: Rendering things in the user's web view (web UI only) beyond plain text — files, generated PNG graphs/charts, existing PNG artifacts, and maps. MUST load when the user wants to see a file in the conversation, asks for a graph or chart to be created and displayed, refers back to a PNG artifact they want displayed, names the render skill, or discusses places/routes that would be clearer on a map.
+description: MUST load before reading or replying when the user asks to show, open, view, or display a named or existing workspace file in the web conversation. Also use for rendering generated or existing PNG graphs/charts and maps. EXAMPLES — "show me fitness.org"; "open the project notes"; "display the chart here"; "show that PNG again".
 allowed-tools: map_data
 ---
 

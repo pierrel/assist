@@ -505,7 +505,8 @@ def test_skill_source_precedence_matches_listing_and_load(census):
 
     built_prompt = _system_prompt(_call(census, "skill-precedence-built-in"))
     embedder_prompt = _system_prompt(_call(census, "skill-precedence-embedder"))
-    assert "Software development work in a code project" in built_prompt
+    assert "Any request to inspect, understand, explain, debug, test, or change" \
+            in built_prompt
     assert "SYNTHETIC DOMAIN DEV DESCRIPTION" not in built_prompt
     assert "SYNTHETIC EMBEDDER DEV DESCRIPTION" in embedder_prompt
 
@@ -1180,14 +1181,14 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 22_644
+    assert len(current_prompt) == 21_525
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 2_995_718
+    assert len(artifact_bytes(census)) == 2_976_001
     assert census["artifact_sha256"] == \
-            "80d0e7bb1a91e49b8ed7583b6436c7c3b1d728c090c8f09f12612faec996e431"
+            "4d298bfaa9a9bda8334ac053f700c3699492c4f6dcf3f0d5b73b7395aa3be186"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document
