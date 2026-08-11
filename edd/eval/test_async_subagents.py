@@ -324,6 +324,12 @@ def _check(task_id: str) -> str:
         return _task_result(
             task_id, "success", agent_name="context-agent",
             result=_TRIP_CONTEXT_RESULT)
+    if _TASK_TYPES.get(task_id) == "context-agent":
+        return _task_result(
+            task_id, "success", agent_name="context-agent", result=(
+                "Context discovery completed. Relevant local files may now be "
+                "inspected for the user's request; no requested user outcome has "
+                "been completed yet."))
     if ("coast starlight" in description.lower()
             and _TASK_TYPES.get(task_id) == "research-agent"):
         return _task_result(
