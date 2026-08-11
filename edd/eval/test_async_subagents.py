@@ -32,7 +32,12 @@ from assist.async_subagents import (
 )
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
-from edd.outcome_judge import OutcomeJudge, OutcomeObservation
+from edd.outcome_judge import (
+    Evidence,
+    OutcomeJudge,
+    OutcomeObservation,
+    OutcomeRequirement,
+)
 
 from .utils import create_filesystem
 
@@ -40,6 +45,7 @@ from .utils import create_filesystem
 _TASK_DESCRIPTIONS: dict[str, str] = {}
 _TASK_TYPES: dict[str, str] = {}
 _TASK_STATUSES: dict[str, str] = {}
+_TASK_RESULTS: dict[str, str] = {}
 _TASK_ROOT: str | None = None
 _TASK_SEQUENCE = 0
 _DIRECT_WORK_TOOLS = {"write_file", "edit_file", "execute"}
@@ -48,6 +54,18 @@ _NETWORK_CAPABLE_TOOLS = {
 }
 _MAX_JUDGE_FILE_BYTES = 16 * 1024
 _MAX_JUDGE_OBSERVATION_BYTES = 64 * 1024
+_TRIP_CONTEXT_RESULT = "Weekend rail service resumes May 2 according to trip.org."
+_COAST_RESEARCH_RESULT = (
+    "The current published timetable lists Coast Starlight train 14 "
+    "departing Los Angeles at 9:51 a.m."
+)
+_ORCHID_CONTEXT_RESULT = (
+    "Trip notes say the Orchid Express weekend service resumes on May 17."
+)
+_ORCHID_RESEARCH_RESULT = (
+    "The mock operator timetable lists the northbound Orchid Express leaving "
+    "Harbor Junction at 06:47."
+)
 _CAREER_COMPANIES = (
     ("Aster Labs", "Engineering Director"),
     ("Beacon Systems", "VP Engineering"),
@@ -240,6 +258,8 @@ def _check(task_id: str) -> str:
         return _task_result(task_id, status)
     if status == "cancelled":
         return _task_result(task_id, status)
+    if result := _TASK_RESULTS.get(task_id):
+        return _task_result(task_id, "success", result=result)
     career_evidence = _career_evidence(description)
     if career_evidence is not None:
         return _task_result(task_id, "success", result=career_evidence)
@@ -298,13 +318,12 @@ def _check(task_id: str) -> str:
             and _TASK_TYPES.get(task_id) == "context-agent"):
         return _task_result(
             task_id, "success", agent_name="context-agent",
-            result="Weekend rail service resumes May 2 according to trip.org.")
+            result=_TRIP_CONTEXT_RESULT)
     if ("coast starlight" in description.lower()
             and _TASK_TYPES.get(task_id) == "research-agent"):
         return _task_result(
             task_id, "success", agent_name="research-agent", result=(
-                "The current published timetable lists Coast Starlight train 14 "
-                "departing Los Angeles at 9:51 a.m."
+                _COAST_RESEARCH_RESULT
             ))
     return _task_result(
         task_id, "success", result="The requested outcome is complete.")
@@ -368,17 +387,20 @@ class TestAsyncSubagentSupervisor(TestCase):
         _TASK_DESCRIPTIONS.clear()
         _TASK_TYPES.clear()
         _TASK_STATUSES.clear()
+        _TASK_RESULTS.clear()
         _TASK_ROOT = None
         _TASK_SEQUENCE = 0
         self.model = select_assistant_model(0.1)
 
-    def _agent(self) -> AgentHarness:
+    def _agent(
+            self, *, trip_note: str = "Weekend rail service resumes May 2."
+    ) -> AgentHarness:
         global _TASK_ROOT
         root = tempfile.mkdtemp()
         _TASK_ROOT = root
         create_filesystem(root, {
             "README.org": "Personal notes live here.",
-            "trip.org": "* Possible trip\nWeekend rail service resumes May 2.\n",
+            "trip.org": f"* Possible trip\n{trip_note}\n",
             "alpha-notes.md": (
                 "# Alpha launch\n\nPilot users like the faster setup. The import flow "
                 "still loses tags. Support needs a migration runbook. Decide whether "
@@ -609,6 +631,116 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertEqual(checks[-1]["args"]["task_id"], task_id)
         self.assertFalse(any(call.get("name") == "read_file" for call in calls), calls)
         self.assertRegex(reply, r"(?i)weekend.*May 2")
+
+    def test_context_result_informs_research_then_final_response(self):
+        """A dependent research request waits for context and closes the loop."""
+        prompt = (
+            "I'm planning to take the Orchid Express the weekend service resumes. "
+            "I saved the date in my trip notes. What time does the northbound train "
+            "leave Harbor Junction that day?"
+        )
+        agent = self._agent(
+            trip_note="Orchid Express weekend service resumes on May 17.")
+        agent.message(prompt)
+        initial_calls = self._calls(agent)
+        initial_starts = [
+            call for call in initial_calls
+            if call.get("name") == "start_async_task"
+        ]
+        context_starts = [
+            call for call in initial_starts
+            if call.get("args", {}).get("subagent_type") == "context-agent"
+        ]
+        research_starts = [
+            call for call in initial_starts
+            if call.get("args", {}).get("subagent_type") == "research-agent"
+        ]
+        self.assertEqual(len(context_starts), 1, initial_calls)
+        self.assertEqual(
+            research_starts, [],
+            "research must wait for the local context result",
+        )
+
+        context_id = _task_id_for_call(context_starts[0])
+        context_result = _ORCHID_CONTEXT_RESULT
+        _TASK_RESULTS[context_id] = context_result
+        before_context_completion = len(initial_calls)
+        agent.message(_completion_wake(context_id, "success"))
+        context_completion_calls = self._calls(agent)[before_context_completion:]
+        self.assertTrue(
+            any(
+                call.get("name") == "check_async_task"
+                and call.get("args", {}).get("task_id") == context_id
+                for call in context_completion_calls
+            ),
+            context_completion_calls,
+        )
+        research_starts = [
+            call for call in context_completion_calls
+            if call.get("name") == "start_async_task"
+            and call.get("args", {}).get("subagent_type") == "research-agent"
+        ]
+        self.assertEqual(len(research_starts), 1, context_completion_calls)
+        research_brief = research_starts[0]["args"]["description"]
+        self.assertIn(
+            "may 17",
+            research_brief.lower(),
+            "the research brief must use the mocked context result",
+        )
+
+        research_id = _task_id_for_call(research_starts[0])
+        research_result = _ORCHID_RESEARCH_RESULT
+        _TASK_RESULTS[research_id] = research_result
+        before_research_completion = len(self._calls(agent))
+        final_reply = agent.message(_completion_wake(research_id, "success"))
+        research_completion_calls = self._calls(agent)[before_research_completion:]
+        self.assertTrue(
+            any(
+                call.get("name") == "check_async_task"
+                and call.get("args", {}).get("task_id") == research_id
+                for call in research_completion_calls
+            ),
+            research_completion_calls,
+        )
+
+        self._assert_judge_pass(OutcomeObservation(
+            requested=(OutcomeRequirement(
+                id="researched-train-answer",
+                description=(
+                    "The final reply tells the user that Orchid Express service resumes "
+                    "May 17 and that the northbound train leaves Harbor Junction at "
+                    "06:47."
+                ),
+                evidence_ids=("research-result", "final-reply"),
+            ),),
+            evidence=(
+                Evidence(id="prompt", kind="prompt", state="present", content=prompt),
+                Evidence(
+                    id="context-result",
+                    kind="event",
+                    state="present",
+                    content=context_result,
+                ),
+                Evidence(
+                    id="research-brief",
+                    kind="event",
+                    state="present",
+                    content=research_brief,
+                ),
+                Evidence(
+                    id="research-result",
+                    kind="event",
+                    state="present",
+                    content=research_result,
+                ),
+                Evidence(
+                    id="final-reply",
+                    kind="final",
+                    state="present",
+                    content=final_reply,
+                ),
+            ),
+        ))
 
     def test_user_stop_request_reports_cancellation_requested_for_running_tasks(self):
         agent = self._agent()
