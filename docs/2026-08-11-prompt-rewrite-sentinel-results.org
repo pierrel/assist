@@ -5,8 +5,8 @@
 
 - Current-prompt census: =prompt-rearch-sentinel-baseline-20260811=
 - Census SHA-256: =9116e006058287e4d0d922216f6f76943b1849b34253f4c091c41e0d5a08311a=
-- Current candidate census: =prompt-rearch-sentinel-candidate-v10=
-- Candidate census SHA-256: =2a95dec09f414504a3546a6d5e640cdb2ffd955b8926a484b07b771d4db1cef8=
+- Current candidate census: =prompt-rearch-sentinel-candidate-v11=
+- Candidate census SHA-256: =68a6d0af267abdae0c1599c621e92f7517ac9fea29b32bda63aff4f1f71decf4=
 - Fixed prompt time: =2026-08-08T12:00:00-07:00=
 - Baseline and final-candidate target: N=3 per sentinel node.  Final candidate
   execution is in progress.
@@ -24,12 +24,13 @@
 
 * Current iteration
 
-- Candidate v10 keeps the web-main-only base-then-core composition.  Its skills
-  section now precedes grounding: code inspection loads =dev= before asking for
-  a path or snippet, and a named file is rendered as that file rather than
-  copied or converted merely for display.  Both corrections are prompt-only.
-- Earlier v5/v9 candidate trials are exploratory evidence only.  The final
-  comparison below will use only separate N=3 runs under v10's recorded census.
+- Candidate v11 keeps the web-main-only base-then-core composition.  Its first
+  Assist-core instruction is the =dev= routing decision, so code inspection
+  loads =dev= before asking for a path or snippet; named files are rendered as
+  named rather than copied or converted merely for display.  Both corrections
+  are prompt-only.
+- Earlier v5/v9/v10 candidate trials are exploratory evidence only.  The final
+  comparison below will use only separate N=3 runs under v11's recorded census.
 
 * Baseline ledger
 
