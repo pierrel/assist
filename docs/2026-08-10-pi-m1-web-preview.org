@@ -208,6 +208,13 @@ inspection is unavailable, Pi is disabled.  An OOM, provider restart, identity
 change, stale record, or malformed record disables Pi and is reported as
 provider health, never as a model failure.
 
+The operator configures =ASSIST_PI_HEALTH_DIR= and
+=ASSIST_PI_PROVIDER_SERVICE= in the ignored deployment environment.  The
+service installer transports both values into =assist-web=; if either is absent,
+the preview stays disabled.  The health directory is P1-owned operational
+evidence, not a model-writable workspace or an artifact that M1 copies into a
+thread.
+
 M1 uses one small, host-owned active-worker registry keyed by visible thread.
 The runtime checks the persisted operator/health admission state between
 one-second bounded Docker waits.  Thus a separate-process =pi-preview disable=
