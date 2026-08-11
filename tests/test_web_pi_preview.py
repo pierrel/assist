@@ -1,6 +1,9 @@
 """The visible Pi choice is host-gated before a thread can be reserved."""
 from __future__ import annotations
 
+import asyncio
+import shutil
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -115,6 +118,43 @@ def test_empty_pi_handoff_summary_copies_no_transcript() -> None:
         "The Pi transcript, workspace, tools, credentials, approvals, and agent state "
         "were not transferred."
     )
+
+
+def test_first_pi_message_creation_creates_its_empty_workspace(
+    pi_threads_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
+    monkeypatch.setattr(threads, "DOMAINS", [])
+
+    tid, run_id, selected = threads.create_thread_with_message_core(
+        "hello", None, engine="pi")
+
+    assert run_id
+    assert selected is None
+    assert (pi_threads_root / tid / "domain").is_dir()
+
+
+def test_empty_pi_thread_creation_creates_its_workspace(
+    pi_threads_root, monkeypatch,
+) -> None:
+    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
+    monkeypatch.setattr(threads, "DOMAINS", [])
+
+    response = asyncio.run(threads.create_thread(None, "pi"))
+
+    tid = response.headers["location"].removeprefix("/thread/")
+    assert (pi_threads_root / tid / "domain").is_dir()
+
+
+def test_empty_workspace_setup_cannot_recreate_a_deleted_pi_thread(
+    pi_threads_root,
+) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    shutil.rmtree(pi_threads_root / tid)
+
+    threads._create_empty_pi_workspace(tid)
+
+    assert not (pi_threads_root / tid).exists()
 
 
 def test_continue_deep_refuses_non_pi_source_before_creating_a_thread(

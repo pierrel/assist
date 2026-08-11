@@ -334,3 +334,22 @@ behind queued turns.  The handoff now uses the existing private admission limite
 and has an unmocked exhausted-default-pool test.  The follow-up local review found
 no further concrete defect.  A real-web smoke is still required before any
 deployment decision.
+
+2026-08-11 provider health passed one Pi and one Deep first completion without
+a provider restart or OOM.  The first isolated real-web Pi smoke found two
+product defects: a no-domain Pi thread had no empty workspace because it does
+not construct a Deep graph, and Docker's one-second =wait= timeout arrived as a
+wrapped connection error and was treated as worker failure.  Initialization now
+creates the ordinary empty host workspace for Pi on both web thread-creation
+paths, and the runtime recognizes both documented Docker timeout forms.  The
+rerun passed with the actual web selector, engine marker, sandbox, worker,
+relay, model completion, and durable Pi transcript; it asserted no Deep-thread
+construction.  It used a temporary thread root and did not alter the live web
+service.
+
+The post-smoke local review found the deleted-thread resurrection hazard in an
+initial workspace implementation, then the no-message thread path missing that
+workspace.  Workspace creation now uses =mkdir= rather than parent-creating
+=makedirs= and runs on both web creation paths.  The final local review found
+no further concrete defect.  Full unit tests passed 1,681 tests with 2 skipped;
+the Pi TypeScript typecheck and build also passed.

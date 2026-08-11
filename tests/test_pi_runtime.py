@@ -7,6 +7,8 @@ import threading
 from pathlib import Path
 
 import pytest
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig
 from assist import pi_runtime
@@ -14,6 +16,19 @@ from assist import pi_runtime
 
 class _Backend:
     container = object()
+
+
+def test_worker_wait_keeps_running_on_dockers_wrapped_read_timeout() -> None:
+    """docker-py wraps its timed wait in ConnectionError on this host."""
+    class _TimedWorker:
+        def wait(self, *, timeout: int) -> dict[str, int]:
+            assert timeout == 1
+            try:
+                raise ReadTimeoutError(None, None, "timed out")
+            except ReadTimeoutError:
+                raise RequestsConnectionError("docker wait timed out")
+
+    assert pi_runtime.PiRuntimeManager._wait_worker_once(_TimedWorker()) is None
 
 
 class _Worker:

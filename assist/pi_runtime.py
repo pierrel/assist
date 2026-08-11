@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from requests.exceptions import ReadTimeout
+from requests.exceptions import ConnectionError as RequestsConnectionError, ReadTimeout
+from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
@@ -268,6 +269,18 @@ class PiRuntimeManager:
         worker.wait(timeout=5)
 
     @staticmethod
+    def _wait_worker_once(worker: object) -> object | None:
+        """Return an exit status, keeping the worker alive on Docker's two timeout forms."""
+        try:
+            return worker.wait(timeout=1)
+        except ReadTimeout:
+            return None
+        except RequestsConnectionError as error:
+            if isinstance(error.__context__, ReadTimeoutError):
+                return None
+            raise
+
+    @staticmethod
     def _attempt(errors: list[Exception], operation: Callable[[], None]) -> None:
         try:
             operation()
@@ -335,11 +348,9 @@ class PiRuntimeManager:
                     raise PiRuntimeError("Pi preview yielded to waiting work")
                 if time.monotonic() >= deadline:
                     raise PiRuntimeError("Pi worker timed out")
-                try:
-                    status = worker.wait(timeout=1)
+                status = self._wait_worker_once(worker)
+                if status is not None:
                     break
-                except ReadTimeout:
-                    continue
             worker_exited = True
             if not isinstance(status, dict) or status.get("StatusCode") != 0:
                 raise PiRuntimeError("Pi worker exited unsuccessfully")

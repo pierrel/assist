@@ -2608,6 +2608,8 @@ async def create_thread(domain: str | None = Form(None), engine: str = Form("dee
             selected,
             branch_suffix=tid[-4:]
         )
+    elif selected_engine == "pi":
+        await run_in_threadpool(_create_empty_pi_workspace, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -2635,12 +2637,27 @@ def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
-    tid = MANAGER.reserve_visible(_require_new_thread_engine(engine))
+    selected_engine = _require_new_thread_engine(engine)
+    tid = MANAGER.reserve_visible(selected_engine)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
+    if selected_engine == "pi" and selected is None:
+        _create_empty_pi_workspace(tid)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
     run = _create_run(tid, text, rider=rider)
     return tid, run.id, selected
+
+
+def _create_empty_pi_workspace(tid: str) -> None:
+    """Create Pi's ordinary empty host workspace without recreating a deleted thread."""
+    workspace = os.path.join(
+        MANAGER.thread_dir(tid), MANAGER.DEFAULT_THREAD_WORKING_DIRECTORY)
+    try:
+        os.mkdir(workspace)
+    except FileExistsError:
+        pass
+    except FileNotFoundError:
+        return
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
