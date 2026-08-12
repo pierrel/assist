@@ -108,6 +108,53 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     assert payload["stream"] is True
 
 
+def test_provider_relay_traces_only_an_admitted_request(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    events: list[tuple[str, object, object]] = []
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+        trace_start=lambda: events.append(("start", "model request", None)) or "model",
+        trace_settle=lambda operation, completed: events.append(("settle", operation, completed)),
+    )
+    relay.start()
+    try:
+        denied = _request(relay.socket_path, "b" * 43)
+        accepted = _request(relay.socket_path, "a" * 43)
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in denied
+    assert b" 200 " in accepted
+    assert events == [("start", "model request", None), ("settle", "model", True)]
+
+
+def test_provider_relay_continues_when_trace_callbacks_fail(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+        trace_start=lambda: (_ for _ in ()).throw(RuntimeError("trace failed")),
+    )
+    relay.start()
+    try:
+        accepted = _request(relay.socket_path, "a" * 43)
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 200 " in accepted
+
+
 def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> None:
     upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
     thread = threading.Thread(target=upstream.serve_forever, daemon=True)

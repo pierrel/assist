@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from manage.web import threads
 from manage.web import state
 from assist.pi_runtime import PiRuntimeError
+from assist.pi_trace import PiTraceEvent
 from assist.thread_engine import read_thread_engine
 
 
@@ -225,6 +226,39 @@ def test_opening_a_pre_title_pi_thread_backfills_its_first_user_title(
 
     assert "Repair this title" in page
     assert (pi_threads_root / tid / "description.txt").read_text() == "Repair this title"
+
+
+def test_pi_activity_renders_between_a_user_turn_and_its_reply(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    page = threads.render_thread(
+        tid, None,
+        pi_messages=[
+            {"role": "user", "content": "Check the workspace", "run_id": "run-1"},
+            {"role": "assistant", "content": "Done", "run_id": "run-1"},
+        ],
+        pi_traces=[
+            PiTraceEvent("run-1", 1, 1, "tool", "read", "started"),
+            PiTraceEvent("run-1", 2, 1, "tool", "read", "completed"),
+        ],
+    )
+
+    assert "Pi activity: read" in page
+    assert page.index("Done") < page.index("Pi activity: read") < page.index("Check the workspace")
+
+
+def test_terminal_pi_turn_without_a_trace_is_unavailable(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    run = threads._runs().create(tid, "main", "Check the workspace")
+    threads._runs().claim(tid, run.id)
+    threads._runs().transition(tid, run.id, "success")
+
+    page = threads.render_thread(
+        tid, None,
+        pi_messages=[{"role": "user", "content": "Check the workspace", "run_id": run.id}],
+        pi_traces=[],
+    )
+
+    assert "Activity unavailable" in page
 
 
 def test_pi_title_backfill_preserves_a_user_rename(pi_threads_root) -> None:

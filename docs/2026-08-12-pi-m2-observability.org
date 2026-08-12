@@ -1,0 +1,126 @@
+#+title: Pi M2: visible activity traces
+#+date: 2026-08-12
+#+startup: overview
+
+State: Coding
+
+* Purpose
+
+M1 makes a Pi web thread usable, but it records only visible user and assistant
+messages.  A person cannot tell whether Pi is reasoning, calling the model, or
+using the workspace tools.  M2 adds a small, host-owned activity trace to each
+manual Pi turn.  It is observability, not a new Pi capability or an attempt to
+make Pi internally resemble Deep Agents.
+
+* User contract
+
+1. A Pi thread page shows the current turn's activity after an ordinary page
+   refresh, and completed turns retain their activity between the user message
+   and assistant reply.
+2. The trace is collapsed by default.  Its summary is short and useful, such as
+   =Pi activity: model, read, bash=.  Expanding it shows fixed labels and
+   completion state for each model request and workspace operation.
+3. The page still uses M1's existing refresh model.  M2 adds neither polling,
+   token streaming, a new browser endpoint, nor an unattended ingress path.
+4. Traces never disclose a command, path, file content, tool result, prompt,
+   hidden reasoning, provider response, exception text, capability, credential,
+   or container detail.  A failed action is shown only as =did not complete=.
+
+* Design
+
+** Host-owned trace resource
+
+Add =assist/pi_trace.py= beside =pi_conversation.py=.  It owns one private,
+schema-versioned, append-only =pi-trace.jsonl= per Pi thread.  A record contains
+only the durable Run id, a monotonically increasing per-Run sequence, an opaque
+per-Run operation number, a closed event kind (=model= or =tool=), a closed display name (=model request=, =read=,
+=write=, or =bash=), and an outcome (=started=, =completed=, or =did not
+complete=).  Broker =access(read)= maps to =read=; =access(write)= and =mkdir=
+map to =write=.  Thus every accepted broker request has one simple, fixed label
+without exposing its request fields.  The resource has strict regular-file,
+ownership, mode, record-count, byte,
+UTF-8, ordering, and duplicate checks matching the conversation store.  The
+worker never writes this file and does not receive its path.
+
+The resource is intentionally separate from the visible conversation.  Message
+history remains exactly user/assistant, which preserves M1's prompt and
+continuation boundary.  Trace corruption therefore makes traces unavailable
+without changing the transcript or causing a Deep graph to be constructed.
+
+** Trusted event producers
+
+=PiProviderRelay= records one =model request= only after it accepts the fixed,
+authenticated request.  =PiToolBroker= records a tool start only after it has
+parsed, authenticated, and admitted a closed broker request.  It maps the broker
+operation to a fixed visible label.  Neither forwards request fields nor a
+sandbox response to the trace callback.
+
+=PiRuntimeManager= creates the per-Run recorder and gives callbacks only to its
+relay and broker.  A recorder returns an opaque operation token on start and
+settles that exact token atomically under its own lock.  Callbacks execute on
+their existing worker threads, never in an async web handler.  The manager calls
+=finish_unsettled= only after =broker.close()= and =relay.close()= have drained
+their producer threads.  This gives each persisted start at most one terminal
+outcome and makes the final record ordering deterministic through cancellation.
+
+A trace write failure is contained to the activity view: it cannot change a
+provider request, tool result, worker cleanup, Run result, or visible
+conversation.  The recorder becomes unavailable after a failed write.  On a
+terminal Run, a poisoned recorder, unmatched persisted =started=, or missing
+trace renders =Activity unavailable=, never a false in-progress or completion
+claim.  This also makes pre-M2 Pi turns explicit about their lack of recorded
+activity.
+
+M2 does not subscribe to arbitrary Pi SDK session events.  Those event payloads
+are not a stable display contract and can contain model text, tool arguments, or
+reasoning.  The relay and broker already own the two externally observable
+operations and make the narrowest safe trace boundary.
+
+** Rendering
+
+=get_thread= reads the Pi conversation and trace resources together off the
+event loop and passes both to the existing renderer.  It retains each
+conversation record's Run id instead of reducing Pi messages to role and text.
+The renderer groups trace records only with a known user record carrying the
+same Run id.  Because the page renders newest-first, it inserts the collapsed
+trace immediately before that user bubble, which visually puts it between the
+user message and the later assistant reply.  An unknown, orphaned, or malformed
+trace Run id makes activity unavailable rather than silently joining it by
+position.  The renderer uses host constants for every visible label and never
+puts a Run id or other trace field into the DOM.  A malformed trace yields a
+small unavailable notice rather than an empty claim that no tools ran.
+
+* Scope and exclusions
+
+M2 remains manual visible web Pi only.  It does not add token/reasoning
+streaming, model/provider parallelism, Pi skills or todos, async subagents,
+phone/emacsos, schedules, approvals, egress, a Deep trace retrofit, or a
+Pi-only cutover decision.  It does not change Pi tool authority, provider
+policy, sandbox policy, queue behavior, transcript persistence, or the prompt.
+
+* Implementation plan
+
+1. Add the bounded host trace resource and focused corruption, idempotency,
+   ordering, persistence-failure, and no-payload-leak tests.
+2. Thread a narrow fixed-label recorder through the relay, broker, and runtime;
+   test every operation mapping and concurrent settle/teardown so each accepted
+   operation has exactly one terminal outcome without changing request or result
+   contracts.
+3. Render grouped collapsed traces for Pi pages and add browser-level tests for
+   completed, in-progress, old, malformed, and escaped trace states.
+4. Run the full deterministic suite and a Pi web smoke that exercises a tool;
+   review the real rendered page rather than only the JSONL file.
+
+* Design review record
+
+The design review found three important gaps and this revision resolves them:
+
+- Pi rendering discarded durable Run ids, so traces could not be placed without
+  unsafe positional matching.  M2 retains the Run id through rendering and
+  states the reverse-order insertion rule.
+- The broker accepts =access= and =mkdir= in addition to =read=, =write=, and
+  =bash=.  M2 maps every accepted operation to one closed, non-sensitive label.
+- Producer callbacks could settle after a generic teardown terminal outcome, or
+  a persistence failure could leave a false =started= record.  The recorder now
+  owns opaque tokens and finalizes only after both producers drain; a poisoned or
+  unresolved terminal trace is explicitly unavailable.

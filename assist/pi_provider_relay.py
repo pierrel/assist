@@ -12,7 +12,7 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -36,13 +36,17 @@ class PiProviderRelay:
     """Forward only bounded, authenticated chat-completion requests to one model."""
 
     def __init__(self, control_dir: str | Path, upstream_url: str,
-                 api_key: str, model: str, capability: str) -> None:
+                 api_key: str, model: str, capability: str,
+                 trace_start: Callable[[], object] | None = None,
+                 trace_settle: Callable[[object, bool], None] | None = None) -> None:
         self._control_dir = Path(control_dir)
         self._socket_path = self._control_dir / "provider.sock"
         self._upstream = self._validate_upstream(upstream_url)
         self._api_key = api_key
         self._model = model
         self._capability = capability
+        self._trace_start = trace_start
+        self._trace_settle = trace_settle
         self._validate_control_dir()
         if self._socket_path.exists():
             raise PiProviderRelayError("Pi provider socket already exists")
@@ -174,8 +178,9 @@ class PiProviderRelay:
             self._calls += 1
         return canonical
 
-    def forward(self, body: bytes) -> tuple[int, str, list[bytes]]:
+    def forward(self, body: bytes, trace_operation: object | None = None) -> tuple[int, str, list[bytes]]:
         """Forward one already-authorized request without forwarding its headers."""
+        completed = False
         connection_type = (http.client.HTTPSConnection
                            if self._upstream.scheme == "https" else http.client.HTTPConnection)
         connection = connection_type(self._upstream.hostname, self._upstream.port, timeout=_SOCKET_TIMEOUT_SECONDS)
@@ -205,11 +210,31 @@ class PiProviderRelay:
                 if total > _MAX_RESPONSE_BYTES:
                     raise PiProviderRelayError("Pi model response exceeds its bound")
                 chunks.append(chunk)
+            completed = True
             return response.status, "application/json", chunks
         finally:
             with self._state_lock:
                 self._connections.discard(connection)
             connection.close()
+            self.settle_trace(trace_operation, completed)
+
+    def start_trace(self) -> object | None:
+        """Keep optional activity recording from changing model admission."""
+        if self._trace_start is None:
+            return None
+        try:
+            return self._trace_start()
+        except Exception:
+            return None
+
+    def settle_trace(self, operation: object | None, completed: bool) -> None:
+        """Contain recorder failures after an admitted model request."""
+        if operation is None or self._trace_settle is None:
+            return
+        try:
+            self._trace_settle(operation, completed)
+        except Exception:
+            pass
 
 
 class _ProviderHandler(BaseHTTPRequestHandler):
@@ -235,7 +260,8 @@ class _ProviderHandler(BaseHTTPRequestHandler):
                     return
                 body = self.rfile.read(int(length_text))
                 body = self.relay.validate_request(self.command, self.path, self.headers, body)
-                status, content_type, chunks = self.relay.forward(body)
+                operation = self.relay.start_trace()
+                status, content_type, chunks = self.relay.forward(body, operation)
             except PiProviderRelayError:
                 self.send_error(403)
                 return

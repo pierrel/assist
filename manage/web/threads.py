@@ -67,6 +67,7 @@ from assist.thread_manager import InvalidThreadId
 from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.pi_conversation import PiConversationStore
 from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
+from assist.pi_trace import PiTraceError, PiTraceStore
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
@@ -444,6 +445,32 @@ def _tools_summary(names) -> str:
     return html.escape(", ".join(seen)) if seen else "tool call"
 
 
+def _render_pi_activity(events, terminal: bool) -> str:
+    """Render only validated fixed Pi activity labels, never operation payloads."""
+    started = {}
+    outcomes = {}
+    for event in events:
+        if event.outcome == "started":
+            started[event.operation] = event
+        else:
+            outcomes[event.operation] = event.outcome
+    if terminal and any(operation not in outcomes for operation in started):
+        return '<div class="msg tools"><div class="content">Activity unavailable</div></div>'
+    labels = []
+    details = []
+    for operation in sorted(started):
+        event = started[operation]
+        label = event.name
+        outcome = outcomes.get(operation, "in progress")
+        if label not in labels:
+            labels.append(label)
+        details.append(f"{html.escape(label)}: {html.escape(outcome)}")
+    if not details:
+        return ""
+    return (f'<details class="msg tools"><summary>Pi activity: {html.escape(", ".join(labels))}'
+            f'</summary><div class="content">{"<br/>".join(details)}</div></details>')
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -496,6 +523,8 @@ def render_thread(
     tid: str,
     chat: Thread | None,
     pi_messages: list[dict] | None = None,
+    pi_traces: list | None = None,
+    pi_trace_unavailable: bool = False,
     captured: bool = False,
     merged: bool = False,
     reviewed: bool = False,
@@ -545,6 +574,15 @@ def render_thread(
     # During the initial setup stages there is no agent state worth showing yet.
     msgs: list[dict] = [] if is_init else (pi_messages if pi_messages is not None
                                             else ([] if chat is None else chat.get_messages()))
+    trace_by_run = {}
+    trace_run_ids = set()
+    if is_pi and pi_traces is not None:
+        user_run_ids = {message.get("run_id") for message in msgs if message.get("role") == "user"}
+        for event in pi_traces:
+            trace_run_ids.add(event.run_id)
+            trace_by_run.setdefault(event.run_id, []).append(event)
+        pi_trace_unavailable = pi_trace_unavailable or not trace_run_ids.issubset(user_run_ids)
+    pi_run_status = {run.id: run.status for run in _runs().list(tid)} if is_pi else {}
 
     # Completed-turn elapsed badges: map each turn's CONCLUDING assistant bubble (the last
     # assistant strictly before the next user bubble) to its recorded elapsed seconds.
@@ -724,7 +762,17 @@ def render_thread(
                          f'{html.escape(_format_elapsed(badge_at[_i]))}</span>')
             bubble = (f'<div class="msg {cls}"><div class="role">{role}{badge}</div>'
                       f'<div class="content">{content_html}</div></div>')
+        if is_pi and role == "user":
+            run_id = m.get("run_id")
+            terminal = pi_run_status.get(run_id) in {"success", "error", "cancelled"}
+            trace = _render_pi_activity(trace_by_run.get(run_id, []), terminal)
+            if terminal and not trace:
+                trace = '<div class="msg tools"><div class="content">Activity unavailable</div></div>'
+            if trace:
+                rendered.append(trace)
         rendered.append(bubble)
+    if is_pi and pi_trace_unavailable:
+        rendered.insert(0, '<div class="msg tools"><div class="content">Activity unavailable</div></div>')
     if busy:
         rendered.insert(
             0,
@@ -1487,6 +1535,7 @@ def _pending_email(chat) -> dict | None:
 _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
 _RUN_SERVICES_LOCK = threading.Lock()
 _PI_CONVERSATIONS = PiConversationStore()
+_PI_TRACES = PiTraceStore()
 _PI_RUNTIME = PiRuntimeManager()
 _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 _PI_DESCRIPTION_LIMIT = 120
@@ -1968,7 +2017,7 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
                 work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
                 prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
                 turn_id=tid, admitted=lambda: PI_PREVIEW.claim_admits("pi"),
-                should_yield=_pi_should_yield)
+                should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id)
             # A worker can exit in the interval after its last one-second
             # admission observation. Recheck before making its reply durable.
             if not PI_PREVIEW.claim_admits("pi"):
@@ -2721,21 +2770,29 @@ async def get_thread(
         stage = _get_status(tid).get("stage", "ready")
         chat: Thread | None = None
         pi_messages: list[dict] | None = None
+        pi_traces = None
+        pi_trace_unavailable = False
         try:
             is_pi = _is_pi_thread(tid)
         except ThreadEngineError as error:
             raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
         if stage not in INIT_STAGES and is_pi:
             _backfill_pi_description(tid)
-            pi_messages = [{"role": message.role, "content": message.text}
+            pi_messages = [{"role": message.role, "content": message.text, "run_id": message.run_id}
                            for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
+            try:
+                pi_traces = _PI_TRACES.get_events(MANAGER.thread_dir(tid))
+            except PiTraceError:
+                pi_traces = []
+                pi_trace_unavailable = True
         elif stage not in INIT_STAGES:
             try:
                 chat = MANAGER.get(tid, sandbox_backend=None)
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail="Thread not found")
         return render_thread(
-            tid, chat, pi_messages=pi_messages, captured=bool(captured), merged=bool(merged),
+            tid, chat, pi_messages=pi_messages, pi_traces=pi_traces,
+            pi_trace_unavailable=pi_trace_unavailable, captured=bool(captured), merged=bool(merged),
             reviewed=bool(reviewed), pushed=bool(pushed))
 
     return await run_in_threadpool(load_and_render)
