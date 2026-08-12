@@ -33,7 +33,7 @@ from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
 from .utils import (create_filesystem, read_file, skill_was_loaded,
-                    stub_research_subagent)
+                    prompt_rewrite_web_main_spec, stub_research_subagent)
 
 
 _PROJECTS_FIXTURE = dedent("""\
@@ -63,7 +63,8 @@ class TestSkillLoading(TestCase):
             "README.org": "My projects are tracked in projects.org",
             "projects.org": _PROJECTS_FIXTURE,
         })
-        spec = AgentSpec(role=role) if role == "delegate" else None
+        spec = (AgentSpec(role=role) if role == "delegate"
+                else prompt_rewrite_web_main_spec())
         return AgentHarness(create_agent(self.model, root, spec=spec)), root
 
     def _assert_alpha_body_preserved(self, root: str):

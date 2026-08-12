@@ -12,9 +12,8 @@ from unittest import TestCase
 from assist.agent import AgentHarness, create_agent
 from assist.events.notify import notify_tools
 from assist.model_manager import select_assistant_model
-from assist.spec import AgentSpec
-
-from .utils import agent_tool_calls, stub_research_subagent
+from .utils import (agent_tool_calls, prompt_rewrite_web_main_spec,
+                    stub_research_subagent)
 
 
 class TestUrgentNotification(TestCase):
@@ -32,7 +31,8 @@ class TestUrgentNotification(TestCase):
         with stub_research_subagent():
             return AgentHarness(create_agent(
                 self.model, self.root,
-                spec=AgentSpec(tools=notify_tools(lambda _tid: None))))
+                spec=prompt_rewrite_web_main_spec(
+                    tools=notify_tools(lambda _tid: None))))
 
     def test_imminent_deadline_is_flagged_with_a_message(self):
         agent = self._agent()
