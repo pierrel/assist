@@ -1181,14 +1181,14 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 21_543
+    assert len(current_prompt) == 21_947
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 29
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 2_976_906
+    assert len(artifact_bytes(census)) == 2_983_977
     assert census["artifact_sha256"] == \
-            "27cb54377d6399e3cb7a1b8e5b18dadbd459b470d7c411882d782d0176f7bea1"
+            "bd7704281bd066b53526debeec41a3b7a88da95f2c3a96e84f0e791403364358"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document
