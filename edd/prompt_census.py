@@ -1722,7 +1722,7 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
-        "13be1d15425981a288ea4c9f48a7f7744feadc726a72e6d5c740106ac2e755bd",
+        "a296e189ef708efc42acd29ba251ef1aa51e2dcfb6db20fe90e1e870fe2351be",
     },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
@@ -2087,7 +2087,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "0524a6b8bbf7544a0c9fca0b979c47575dbabc0ac53c74fded3876e236305c6c"
+    "3cefdae7d51c837e6660f44684db9240a51e01262fcfef7ce7d7b17b8aba468c"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
