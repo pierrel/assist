@@ -27,7 +27,7 @@ from assist.egress.store import remaining_lifetime, request_key
 from manage.web.app import app
 from manage.web.state import EGRESS_CSRF, EGRESS_STORE, MANAGER
 from manage.web.threads import (_FAVICON_LINKS, _PULL_TO_REFRESH_SCRIPT,
-                                _dispatch_egress_resolution)
+                                _dispatch_egress_resolution, _require_deep_thread)
 
 
 def _require_egress():
@@ -98,6 +98,7 @@ def _resolve_record(tid: str, host: str, port: int, decision: str) -> bool:
     reply_decision precedent): a full agent turn must never run where the
     HTTP response waits (it acquires THREAD_QUEUE — behind a running turn
     that's up to the 2h hold before the browser would get its 303)."""
+    _require_deep_thread(tid)
     if not os.path.isdir(MANAGER.thread_dir(tid)):
         # Thread deleted between request and approval: no consumer — drop ALL
         # the dead thread's records (projection-safe; also mops up anything

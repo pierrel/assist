@@ -1,0 +1,8 @@
+.git
+.dev.env
+.deploy.env
+.venv
+.pytest_cache
+**/__pycache__
+assist/pi_runtime/node_modules
+assist/pi_runtime/dist

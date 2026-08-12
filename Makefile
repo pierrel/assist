@@ -29,7 +29,7 @@ define with-prod-env
 	fi
 endef
 
-.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
+.PHONY: eval test web smoke deploy deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-service deploy-install deploy-speech-models restart status logs setup-sudo help sandbox-build egress-proxy-build pi-runtime-build pi-preview-enable pi-preview-disable pi-preview-status sandbox-smoke sandbox-shell pull-eval-history vacuum-now searxng-up searxng-down deploy-searxng
 
 eval:
 	$(call with-dev-env,./scripts/run-evals.sh)
@@ -37,7 +37,7 @@ eval:
 test:
 	$(call with-dev-env,.venv/bin/pytest --junit-xml=tests/history/results-$$(date +%Y%m%d-%H%M).xml tests)
 
-web: sandbox-build
+web: sandbox-build pi-runtime-build
 	$(call with-dev-env,.venv/bin/python -m manage.web)
 
 smoke:
@@ -58,6 +58,18 @@ sandbox-build: egress-proxy-build
 # dockerfiles/egress-proxy.py and docs/2026-05-08-sandbox-network-allowlist.org.
 egress-proxy-build:
 	docker build -t assist-egress-proxy -f dockerfiles/Dockerfile.egress-proxy .
+
+pi-runtime-build:
+	docker build -t assist-pi-runtime -f dockerfiles/Dockerfile.pi-runtime .
+
+pi-preview-enable:
+	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py enable)
+
+pi-preview-disable:
+	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py disable)
+
+pi-preview-status:
+	$(call with-dev-env,$(PYTHON) scripts/pi-preview.py status)
 
 # Build-time smoke.  Three layers, fail-on-first-regression:
 #   - test-sandbox-shim.sh: 18 push-bypass variants + privilege-drop checks
@@ -81,7 +93,7 @@ sandbox-shell:
 
 # === Deployment Targets ===
 
-deploy: deploy-code deploy-sandbox-build deploy-searxng deploy-install deploy-speech-models restart
+deploy: deploy-code deploy-sandbox-build deploy-pi-runtime-build deploy-searxng deploy-install deploy-speech-models restart
 	@echo "✓ Deployed everything EXCEPT the systemd service."
 	@echo "  The service unit is left untouched (installing it needs interactive sudo)."
 	@echo "  To apply service/unit changes, run: make deploy-service"
@@ -113,6 +125,11 @@ deploy-sandbox-build:
 	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && bash dockerfiles/test-sandbox-egress.sh'
 	@echo "✓ Sandbox + egress-proxy images built and smoked"
 
+deploy-pi-runtime-build:
+	@echo "→ Building Pi runtime image on $(DEPLOY_HOST)..."
+	@ssh $(DEPLOY_HOST) 'cd $(DEPLOY_PATH) && docker build -t assist-pi-runtime -f dockerfiles/Dockerfile.pi-runtime .'
+	@echo "✓ Pi runtime image built"
+
 # Migrate pre-non-root-sandbox thread workspaces to the deploy
 # user's ownership.  Idempotent.  Required after the first deploy
 # of the non-root sandbox layer (docs/2026-05-08-...) — without it,
@@ -125,7 +142,7 @@ deploy-migrate-workspaces:
 	@ssh $(DEPLOY_HOST) 'sudo chown -R $$USER:$$USER $(ASSIST_THREADS_DIR)'
 	@echo "✓ Workspace ownership migrated"
 
-export DEPLOY_PATH SERVICE_NAME ASSIST_THREADS_DIR ASSIST_PORT ASSIST_MODEL_URL ASSIST_DOMAINS ASSIST_SEARCH_URL TAVILY_API_KEY ASSIST_ROUTING_URL ASSIST_GEOCODER_URL TRAVEL_INFRA_DIR ASSIST_EGRESS_APPROVALS_DIR ASSIST_SSL_CERT ASSIST_SSL_KEY ASSIST_SMS_SECRET ASSIST_SMS_OUTBOUND_URL URGENT_SMS_RECIPIENT URGENT_SMS_THREAD_URL_BASE ASSIST_VOICE_SECRET ASSIST_VOICE_PIN ASSIST_VOICE_CALLERS ASSIST_VOICE_CALL_LOG_DIR ASSIST_VOICE_PIPER_MODEL ASSIST_VOICE_WHISPER_MODEL EMAIL_RESEND_API_KEY_FILE EMAIL_FROM_ADDRESS EMAIL_FROM_NAME EMAIL_ALWAYS_CC ASSIST_THREAD_QUANTUM_S
+export DEPLOY_PATH SERVICE_NAME ASSIST_THREADS_DIR ASSIST_PORT ASSIST_MODEL_URL ASSIST_DOMAINS ASSIST_SEARCH_URL TAVILY_API_KEY ASSIST_ROUTING_URL ASSIST_GEOCODER_URL TRAVEL_INFRA_DIR ASSIST_EGRESS_APPROVALS_DIR ASSIST_PI_HEALTH_DIR ASSIST_PI_PROVIDER_SERVICE ASSIST_SSL_CERT ASSIST_SSL_KEY ASSIST_SMS_SECRET ASSIST_SMS_OUTBOUND_URL URGENT_SMS_RECIPIENT URGENT_SMS_THREAD_URL_BASE ASSIST_VOICE_SECRET ASSIST_VOICE_PIN ASSIST_VOICE_CALLERS ASSIST_VOICE_CALL_LOG_DIR ASSIST_VOICE_PIPER_MODEL ASSIST_VOICE_WHISPER_MODEL EMAIL_RESEND_API_KEY_FILE EMAIL_FROM_ADDRESS EMAIL_FROM_NAME EMAIL_ALWAYS_CC ASSIST_THREAD_QUANTUM_S
 
 deploy-service:
 	@echo "→ Installing systemd service..."
