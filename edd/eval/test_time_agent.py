@@ -17,7 +17,8 @@ from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import skill_was_loaded, executed_commands, cleanup_workspace
+from .utils import (cleanup_workspace, complete_web_main_tasks, executed_commands,
+                    prompt_rewrite_web_main_spec, skill_was_loaded)
 
 
 class TestTimeAgent(TestCase):
@@ -38,7 +39,14 @@ class TestTimeAgent(TestCase):
 
     def _agent(self):
         return AgentHarness(create_agent(self.model, self.workspace,
-                                         sandbox_backend=self.sandbox))
+                                         sandbox_backend=self.sandbox,
+                                         spec=prompt_rewrite_web_main_spec()))
+
+    @staticmethod
+    def _ask(agent, prompt):
+        """Finish any web lifecycle work before judging the visible answer."""
+        reply = agent.message(prompt)
+        return complete_web_main_tasks(agent) or reply
 
     def _ran_date(self, agent) -> bool:
         # `date` at command position — NOT `datetime.date`: the prefix class
@@ -66,14 +74,14 @@ class TestTimeAgent(TestCase):
 
     def test_weekday_of_a_date(self):
         agent = self._agent()
-        reply = str(agent.message("What day of the week does the 5th of July land on?") or "").lower()
+        reply = str(self._ask(agent, "What day of the week does the 5th of July land on?") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
         self.assertIn(self._date_parts("7/5")[0], reply)   # the prompt asks for the weekday
 
     def test_relative_date(self):
         agent = self._agent()
-        reply = str(agent.message("What's the date on the upcoming Thursday?") or "").lower()
+        reply = str(self._ask(agent, "What's the date on the upcoming Thursday?") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
         self.assertIn("thursday", reply)              # next Thursday is a Thursday
@@ -81,7 +89,7 @@ class TestTimeAgent(TestCase):
 
     def test_today(self):
         agent = self._agent()
-        reply = str(agent.message("Remind me what the date is right now.") or "").lower()
+        reply = str(self._ask(agent, "Remind me what the date is right now.") or "").lower()
         self.assertTrue(skill_was_loaded(agent, "time"), "time skill should load")
         self.assertTrue(self._ran_date(agent), "agent should run the date command")
         self._asserts_full_date(reply, "today")
@@ -89,6 +97,6 @@ class TestTimeAgent(TestCase):
     def test_does_not_load_on_non_date_prompt(self):
         # Anti-test: an off-topic prompt must not trip the time skill.
         agent = self._agent()
-        agent.message("Write a haiku about the ocean.")
+        self._ask(agent, "Write a haiku about the ocean.")
         self.assertFalse(skill_was_loaded(agent, "time"),
                          "time skill should NOT load for a non-date prompt")

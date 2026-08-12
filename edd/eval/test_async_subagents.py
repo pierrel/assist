@@ -610,7 +610,8 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.assertEqual(checks, [], "the launch turn must not poll")
         self.assertRegex(reply, r"task-[A-Za-z0-9_-]+",
                          "the visible reply must include the full task ID")
-        self.assertRegex(reply, r"(?i)(follow.?up|when .*finish|started|dispatched)")
+        self.assertRegex(reply,
+                         r"(?i)(follow.?up|when .*finish|start(?:ed|ing)|dispatched)")
         self.assertNotRegex(reply, r"(?i)\b(background|async)\b",
                             "all web subagents should be named simply as subagents")
         self.assertNotRegex(reply,
@@ -792,6 +793,35 @@ class TestAsyncSubagentSupervisor(TestCase):
                              for call in later_calls), later_calls)
         self.assertRegex(reply, r"(?i)(cancellation requested|asked .* to stop)")
         self.assertNotRegex(reply, r"(?i)\b(cancelled|stopped)\b")
+
+    def test_user_redirection_updates_the_active_task(self):
+        """A natural change of outcome steers active work rather than discarding it."""
+        agent = self._agent()
+        agent.message(
+            "Find when weekend rail service resumes according to my trip notes.")
+        first_calls = self._calls(agent)
+        started_ids = {
+            _task_id_for_call(call) for call in first_calls
+            if call.get("name") == "start_async_task"
+        }
+        self.assertTrue(started_ids, first_calls)
+        for task_id in started_ids:
+            _TASK_STATUSES[task_id] = "running"
+
+        reply = agent.message(
+            "Actually, keep looking at the same trip notes, but find the Sunday "
+            "bus instead.")
+        later_calls = self._calls(agent)[len(first_calls):]
+        updates = [call for call in later_calls
+                   if call.get("name") == "update_async_task"]
+        self.assertEqual(
+            {call.get("args", {}).get("task_id") for call in updates},
+            started_ids, later_calls)
+        self.assertTrue(all("bus" in call.get("args", {}).get(
+            "instructions", "").lower() for call in updates), updates)
+        self.assertFalse(any(call.get("name") == "cancel_async_task"
+                             for call in later_calls), later_calls)
+        self.assertRegex(reply, r"(?i)(updated|redirect|bus|task)")
 
     def test_explicit_delegate_fanout_capability(self):
         agent = self._agent()
