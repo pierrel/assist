@@ -246,6 +246,14 @@ def _get_config() -> Optional[OpenAIConfig]:
         return _cached_config
 
 
+def current_model_config() -> OpenAIConfig:
+    """Return the local model identity, or fail instead of choosing a fallback."""
+    config = _get_config()
+    if config is None:
+        raise RuntimeError("ASSIST_MODEL_URL is required for the local model")
+    return config
+
+
 def invalidate_config_cache() -> None:
     """Bust the cache.  Next ``_get_config()`` call re-probes."""
     global _cached_config

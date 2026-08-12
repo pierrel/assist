@@ -64,8 +64,12 @@ from assist.sandbox import SandboxContainerLostError
 from assist.sandbox_manager import SandboxManager
 from assist.thread import Thread
 from assist.thread_manager import InvalidThreadId
+from assist.thread_engine import ThreadEngineError, read_thread_engine
+from assist.pi_conversation import PiConversationStore
+from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
-                                 ThreadHoldExpired, ThreadPauseRequested)
+                                 ThreadHoldExpired, ThreadPauseRequested,
+                                 active_handle)
 
 from manage.web.app import app
 from manage.web.diff import _DIFF_CSS, _render_inline_diffs
@@ -90,6 +94,7 @@ from manage.web.state import (
     MANAGER,
     MERGE_LOCK,
     MESSAGE_BACKLOG,
+    PI_PREVIEW,
     RUN_SERVICE,
     SCHEDULE_STORE,
     SUBSCRIPTION_STORE,
@@ -117,6 +122,7 @@ from manage.web.state import (
     _thread_title,
     get_cached_description,
     set_description,
+    set_description_if_absent,
 )
 
 
@@ -216,6 +222,15 @@ def render_index() -> str:
     items = []
     for tid in MANAGER.list():
         title = _thread_title(tid)
+        try:
+            engine_label = ("<span style=\"font-size:.7rem; color:#6b7280; background:#fafafa;"
+                            " border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;"
+                            " margin-right:.4rem;\">Pi preview</span>"
+                            if _is_pi_thread(tid) else "")
+        except ThreadEngineError:
+            engine_label = ('<span style="font-size:.7rem; color:#b91c1c; background:#fafafa;'
+                            ' border:1px solid #e5e7eb; padding:.1rem .4rem; border-radius:10px;'
+                            ' margin-right:.4rem;">engine error</span>')
         status = _get_status(tid)
         stage = status.get("stage", "ready")
         badge = ""
@@ -290,7 +305,7 @@ def render_index() -> str:
             # data-desc carries the lowercased description for the client-side
             # search filter (filterThreads); html.escape keeps it attribute-safe.
             f'<li data-desc="{html.escape(title.lower(), quote=True)}">'
-            f'<a class="thread-link" href="/thread/{tid}">{badge}{html.escape(title)}</a>'
+            f'<a class="thread-link" href="/thread/{tid}">{engine_label}{badge}{html.escape(title)}</a>'
             f'<form action="/thread/{tid}/delete" method="post" style="margin:0">'
             f'<button type="submit" class="del-btn" aria-label="Delete thread" '
             f'onclick="return confirm(\'Permanently delete this thread? This cannot be undone.\')">&#x2715;</button>'
@@ -304,6 +319,8 @@ def render_index() -> str:
         "\n".join(item_html for _, item_html in items)
         if items else "<li><em>No threads yet</em></li>"
     )
+    pi_option = ('<option value="pi">Pi preview</option>' if PI_PREVIEW.admits("pi")
+                 else '<option value="pi" disabled>Pi preview (unavailable)</option>')
     return f"""
     <html>
       <head>
@@ -358,6 +375,10 @@ def render_index() -> str:
             {_GEO_SEND_SCRIPT}
             <form action="/threads/with-message" method="post" id="newThreadForm" onsubmit="return assistSend(this);">
               {_domain_selector_html()}
+              <select name="engine" aria-label="Agent engine" style="margin-bottom:.5rem; width:100%;">
+                <option value="deepagents" selected>Deep Agents</option>
+                {pi_option}
+              </select>
               <textarea
                 id="initialMessage"
                 name="text"
@@ -474,6 +495,7 @@ _ELAPSED_TICKER_SCRIPT = """<script>
 def render_thread(
     tid: str,
     chat: Thread | None,
+    pi_messages: list[dict] | None = None,
     captured: bool = False,
     merged: bool = False,
     reviewed: bool = False,
@@ -487,6 +509,12 @@ def render_thread(
     busy = stage in BUSY_STAGES
     is_init = stage in INIT_STAGES
     title = _thread_title(tid)
+    try:
+        is_pi = _is_pi_thread(tid)
+        engine_title = "Pi preview" if is_pi else "Deep Agents"
+    except ThreadEngineError:
+        is_pi = True
+        engine_title = "Engine unavailable"
 
     # Rename is only offered when idle: while busy/initializing the displayed
     # title is the pending-message snippet, not the description, so editing it
@@ -515,7 +543,8 @@ def render_thread(
     ) if can_rename else ""
 
     # During the initial setup stages there is no agent state worth showing yet.
-    msgs: list[dict] = [] if is_init or chat is None else chat.get_messages()
+    msgs: list[dict] = [] if is_init else (pi_messages if pi_messages is not None
+                                            else ([] if chat is None else chat.get_messages()))
 
     # Completed-turn elapsed badges: map each turn's CONCLUDING assistant bubble (the last
     # assistant strictly before the next user bubble) to its recorded elapsed seconds.
@@ -567,7 +596,7 @@ def render_thread(
     # top-of-page block, separate from the message bubbles, so the per-file
     # collapse stack and the Merge / Review buttons sit together.
     diffs: list[Change] = []
-    if not is_init:
+    if not is_init and not is_pi:
         try:
             dm = _get_domain_manager(tid)
             if dm:
@@ -582,7 +611,7 @@ def render_thread(
     # ``processing`` ↔ ``ready`` transitions so the user can ask the
     # agent to fix the conflict and the banner doesn't disappear when
     # the agent's response lands.
-    conflict_state = _get_conflict(tid) if not is_init else None
+    conflict_state = _get_conflict(tid) if not is_init and not is_pi else None
     conflict_banner_html = ""
     if conflict_state:
         files = conflict_state.get("files") or []
@@ -757,11 +786,14 @@ def render_thread(
         )
     elif stage == "error":
         err = html.escape(status.get("error", "Unknown error"))
-        # description.txt is only written after the first successful turn, so
-        # its absence distinguishes a setup-time failure from a mid-conversation one.
-        had_prior_turn = os.path.isfile(
-            os.path.join(MANAGER.thread_dir(tid), "description.txt")
-        )
+        # Pi titles are written when a message is admitted, so use successful
+        # Pi Runs rather than description.txt to keep its first-turn error a
+        # setup failure. Deep retains its established description-file signal.
+        if is_pi:
+            had_prior_turn = any(run.status == "success" for run in _runs().list(tid))
+        else:
+            had_prior_turn = os.path.isfile(
+                os.path.join(MANAGER.thread_dir(tid), "description.txt"))
         label = "Couldn't process your message:" if had_prior_turn else "Setup failed:"
         status_banner = f'<div class="error-msg"><strong>{label}</strong> {err}</div>'
     elif stage == "awaiting_approval" and status.get("pending_email_token"):
@@ -841,7 +873,7 @@ def render_thread(
     # task text quoted + escaped as its unverified words. All of a thread's
     # pending cards render (<=3 by the tool's cap).
     egress_banner = ""
-    if EGRESS_STORE is not None:
+    if not is_pi and EGRESS_STORE is not None:
         for _er in sorted((r for r in EGRESS_STORE.peek()
                            if r.origin_tid == tid and r.state == "pending"),
                           key=lambda r: r.created_at):
@@ -887,7 +919,7 @@ def render_thread(
                 f'</div></div>')
 
     geo_banner = ""
-    if GEO_PROPOSALS is not None:
+    if not is_pi and GEO_PROPOSALS is not None:
         try:
             mine = [p for p in GEO_PROPOSALS.all() if p.origin_tid == tid]
         except Exception:
@@ -938,13 +970,33 @@ def render_thread(
                     '<a href="/geo">review them on the regions page</a>.'
                     '</div></div>')
 
-    # Disable the input form during the initial setup phase
-    form_disabled = "disabled" if is_init else ""
-    form_note = (
-        "Thread is being set up, please wait..."
-        if is_init
-        else "If you close or refresh, your message will still be processed."
-    )
+    # Disabled Pi is intentionally readable but cannot accept more work. This
+    # is a product mirror of the server-side admission check, not its authority.
+    try:
+        pi_read_only = is_pi and not PI_PREVIEW.admits("pi")
+    except ThreadEngineError:
+        pi_read_only = True
+    form_disabled = "disabled" if is_init or pi_read_only else ""
+    form_note = ("Thread is being set up, please wait..." if is_init else
+                 "Pi preview is unavailable; this thread is read-only." if pi_read_only else
+                 "If you close or refresh, your message will still be processed.")
+    pi_continuation_html = ""
+    if is_pi:
+        pi_continuation_html = f"""
+          <section class="pi-continuation">
+            <h3>Continue in Deep Agents</h3>
+            <p>Create a new Deep Agents thread. The Pi transcript and workspace are not
+               transferred. You may add a short summary for the new thread.</p>
+            <form action="/thread/{tid}/continue-deep" method="post">
+              <label for="continue-summary">Summary (optional)</label>
+              <textarea id="continue-summary" name="summary" maxlength="{_PI_CONTINUATION_SUMMARY_LIMIT}"
+                        placeholder="What should the new thread know?"></textarea>
+              <div class="button-group">
+                <button class="btn btn-secondary" type="submit">Continue in Deep Agents</button>
+              </div>
+            </form>
+          </section>
+        """
     return f"""
     <html>
       <head>
@@ -1067,10 +1119,11 @@ def render_thread(
           </script>
           <div id="titleView" style="display:flex; align-items:center; gap:.3rem;">
             <h2 style="font-size:1.2rem; margin:0">{html.escape(title)}</h2>
+            <span style="font-size:.75rem; color:#6b7280; border:1px solid #e5e7eb; border-radius:10px; padding:.1rem .4rem;">{engine_title}</span>
             {rename_button}
           </div>
           {rename_form}
-          {_thread_domain_html(tid)}
+          {"" if is_pi else _thread_domain_html(tid)}
           {status_banner}
           {geo_banner}
           {egress_banner}
@@ -1086,12 +1139,13 @@ def render_thread(
             {_RIDER_HIDDEN_INPUTS}
             <div class="button-group">
               <button class="btn" type="submit" {form_disabled}>Send</button>
-              <button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>
+              {"" if is_pi else f'<button class="btn btn-secondary" type="button" onclick="showCaptureModal()" {form_disabled}>Capture Conversation</button>'}
             </div>
             <div style="font-size:.85rem; color:#6b7280; margin-top:.4rem;">{form_note}</div>
           </form>
+          {pi_continuation_html}
 
-          <!-- Capture Modal -->
+          {"" if is_pi else f'''<!-- Capture Modal -->
           <div id="captureModal" class="modal">
             <div class="modal-content">
               <h3>Capture Conversation</h3>
@@ -1105,7 +1159,7 @@ def render_thread(
                 </div>
               </form>
             </div>
-          </div>
+          </div>'''}
 
           <script>
             function showRename() {{
@@ -1432,6 +1486,120 @@ def _pending_email(chat) -> dict | None:
 
 _RUN_SERVICES_BY_ROOT = {RUN_SERVICE.root_dir: RUN_SERVICE}
 _RUN_SERVICES_LOCK = threading.Lock()
+_PI_CONVERSATIONS = PiConversationStore()
+_PI_RUNTIME = PiRuntimeManager()
+_PI_CONTINUATION_SUMMARY_LIMIT = 8_000
+_PI_DESCRIPTION_LIMIT = 120
+_PI_SYSTEM_PROMPT_MAX_BYTES = 64 * 1024
+
+
+def _pi_system_prompt() -> str:
+    """Read the host-owned Pi prompt for this fresh turn; never use workspace text."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                        "assist", "templates", "pi", "system.md")
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(_PI_SYSTEM_PROMPT_MAX_BYTES + 1)
+        prompt = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise PiRuntimeError("Pi system prompt is unavailable") from error
+    if not prompt.strip() or len(raw) > _PI_SYSTEM_PROMPT_MAX_BYTES:
+        raise PiRuntimeError("Pi system prompt is invalid")
+    return prompt
+
+
+def _pi_should_yield() -> bool:
+    """Bridge the queue's current fair-stop request into the Pi worker wait."""
+    handle = active_handle()
+    return bool(handle and (handle.expired or handle.pause_requested))
+
+
+def _is_pi_thread(tid: str) -> bool:
+    """Classify once from immutable host storage; malformed identity never runs."""
+    return read_thread_engine(MANAGER.thread_dir(tid)).name == "pi"
+
+
+def _pi_message_admits(tid: str) -> bool:
+    """Apply the Pi admission gate, failing closed for an invalid engine marker."""
+    try:
+        return not _is_pi_thread(tid) or PI_PREVIEW.claim_admits("pi")
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+
+
+def _pi_initial_description(text: str) -> str:
+    """Make Pi's deterministic first-message title without asking a model."""
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    return first_line[:_PI_DESCRIPTION_LIMIT] or "Pi thread"
+
+
+def _first_pi_user_text(tid: str) -> str | None:
+    """Return Pi's earliest durable user text, if this thread has one."""
+    for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid)):
+        if message.role == "user":
+            return message.text
+    return None
+
+
+def _ensure_pi_description(tid: str, text: str) -> None:
+    """Persist Pi's first user title, preserving an existing user rename."""
+    first_user_text = _first_pi_user_text(tid)
+    title_text = first_user_text if first_user_text is not None else text
+    set_description_if_absent(tid, _pi_initial_description(title_text))
+
+
+def _backfill_pi_description(tid: str) -> None:
+    """Repair a pre-title Pi thread from its first durable user conversation event."""
+    first_user_text = _first_pi_user_text(tid)
+    if first_user_text is not None:
+        set_description_if_absent(tid, _pi_initial_description(first_user_text))
+
+
+def _require_deep_thread(tid: str) -> None:
+    """Refuse an endpoint whose implementation depends on a Deep graph."""
+    try:
+        if _is_pi_thread(tid):
+            raise HTTPException(status_code=409, detail="This action is unavailable in Pi preview")
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+
+
+def _require_pi_thread(tid: str) -> None:
+    """Refuse the Pi-only handoff endpoint for any other engine."""
+    try:
+        if not _is_pi_thread(tid):
+            raise HTTPException(status_code=409, detail="This action is available only in Pi preview")
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+
+
+def _pi_continuation_message(source_tid: str, summary: str) -> str:
+    """Make the sole, visible input passed from a Pi thread to a fresh Deep one."""
+    if len(summary) > _PI_CONTINUATION_SUMMARY_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Continuation summary must be at most {_PI_CONTINUATION_SUMMARY_LIMIT} characters",
+        )
+    source = f"Continue this work from Pi preview thread {source_tid}."
+    boundary = (
+        "The Pi transcript, workspace, tools, credentials, approvals, and agent state "
+        "were not transferred."
+    )
+    stripped = summary.strip()
+    if not stripped:
+        return f"{source}\n\n{boundary}"
+    return f"{source}\n\n{boundary}\n\nUser-provided summary:\n{stripped}"
+
+
+def _continue_pi_in_deep(source_tid: str, summary: str) -> tuple[str, str, str | None]:
+    """Create an independent Deep thread from a Pi source and visible summary only."""
+    _existing_thread_dir(source_tid)
+    _require_pi_thread(source_tid)
+    return create_thread_with_message_core(
+        _pi_continuation_message(source_tid, summary),
+        domain=None,
+        engine="deepagents",
+    )
 
 
 def _runs():
@@ -1683,6 +1851,21 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     except RunNotFound:
         logging.info("run %s on %s disappeared before dispatch", run_id, tid)
         return
+    try:
+        if _is_pi_thread(tid):
+            _execute_pi_run(run, user_priority=user_priority)
+            return
+    except ThreadEngineError as error:
+        logging.error("thread %s has an invalid engine marker", tid, exc_info=True)
+        if run.status in {"pending", "running", "interrupted"}:
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(tid, run.id)
+                if current.status == "pending":
+                    current = _runs().claim(tid, run.id)
+                if current.status == "running":
+                    _runs().transition(tid, run.id, "error", error=str(error))
+            _set_status(tid, "error", error="Thread engine is unavailable")
+        return
     if run.mode == "child":
         if run.status == "pending":
             if run.multitask_strategy == "cancel":
@@ -1731,6 +1914,81 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
         pass  # thread deletion removes its run store while a dispatcher unwinds.
 
 
+def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
+    """Execute one manual visible Pi turn without constructing a Deep graph."""
+    if (run.mode != "turn" or run.assistant_id != "general-agent" or run.origin is not None
+            or run.sender is not None or run.resume or run.resume_decision is not None
+            or not isinstance(run.text, str) or not run.text):
+        with _RUN_ADMISSION_LOCK:
+            current = _runs().get(run.thread_id, run.id)
+            if current.status == "pending":
+                current = _runs().claim(run.thread_id, run.id)
+            if current.status == "running":
+                _runs().transition(run.thread_id, run.id, "error", error="Pi preview accepts manual web turns only")
+        _set_status(run.thread_id, "error", error="Pi preview accepts manual web turns only")
+        _dispatch_pending_after(run.thread_id, run.id)
+        return
+    if run.status != "pending":
+        if run.status in {"running", "interrupted"}:
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(run.thread_id, run.id)
+                if current.status in {"running", "interrupted"}:
+                    _runs().transition(run.thread_id, run.id, "error", error="Pi turns do not resume after interruption")
+            _set_status(run.thread_id, "error", error="Pi turn was interrupted; send the message again")
+            _dispatch_pending_after(run.thread_id, run.id)
+        return
+    tid = run.thread_id
+    try:
+        with THREAD_QUEUE.acquire(tid, user_priority=user_priority):
+            # The selector's earlier check only permits reservation.  This is
+            # the authority-bearing check: a queued Pi Run cannot outlive a
+            # disable or stale provider-health record and then acquire the
+            # model slot later.
+            if not PI_PREVIEW.claim_admits("pi"):
+                with _RUN_ADMISSION_LOCK:
+                    current = _runs().get(tid, run.id)
+                    if current.status == "pending":
+                        current = _runs().claim(tid, run.id)
+                    if current.status == "running":
+                        _runs().transition(tid, run.id, "error", error="Pi preview is unavailable")
+                _set_status(tid, "error", error="Pi preview is unavailable", pending_message=run.text)
+                return
+            with _RUN_ADMISSION_LOCK:
+                current = _runs().get(tid, run.id)
+                if current.status != "pending":
+                    return
+                run = _runs().claim(tid, run.id)
+            _set_status(tid, "starting_sandbox", pending_message=run.text, started_at=_now_ms())
+            thread_dir = MANAGER.thread_dir(tid)
+            _PI_CONVERSATIONS.append(thread_dir, run.id, "user", run.text)
+            history = [(message.role, message.text)
+                       for message in _PI_CONVERSATIONS.get_messages(thread_dir)[:-1]]
+            _set_status(tid, "processing", pending_message=run.text, started_at=_now_ms())
+            result = _PI_RUNTIME.run(
+                work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
+                prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
+                turn_id=tid, admitted=lambda: PI_PREVIEW.claim_admits("pi"),
+                should_yield=_pi_should_yield)
+            # A worker can exit in the interval after its last one-second
+            # admission observation. Recheck before making its reply durable.
+            if not PI_PREVIEW.claim_admits("pi"):
+                raise PiRuntimeError("Pi preview was stopped")
+            _PI_CONVERSATIONS.append(thread_dir, run.id, "assistant", result.reply)
+            with _RUN_ADMISSION_LOCK:
+                _runs().transition(tid, run.id, "success", result=result.reply)
+            _set_status(tid, "ready")
+            MANAGER.touch(tid)
+    except (PiRuntimeError, ThreadHoldExpired, QueueWaitTimeout) as error:
+        logging.error("Pi run %s failed", run.id, exc_info=True)
+        with _RUN_ADMISSION_LOCK:
+            current = _runs().get(tid, run.id)
+            if current.status == "running":
+                _runs().transition(tid, run.id, "error", error=str(error))
+        _set_status(tid, "error", error=str(error), pending_message=run.text)
+    finally:
+        _dispatch_pending_after(tid, run.id)
+
+
 def _dispatch_pending_after(tid: str, run_id: str | None = None) -> None:
     """Queue the next pending run, user tier first and FIFO within each tier."""
     runs = _runs().list(tid)
@@ -1759,6 +2017,24 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
     successor by construction.
     """
     tid = run.thread_id
+    # Pi has no LangGraph checkpoint or resumable session. Classify before
+    # `_recovery_decision`, which legitimately constructs a Deep chat for
+    # legacy threads. An abandoned Pi head is terminal and its ordinary
+    # followers may start as fresh Pi turns.
+    try:
+        is_pi = _is_pi_thread(tid)
+    except ThreadEngineError:
+        is_pi = True
+    if is_pi:
+        with _RUN_ADMISSION_LOCK:
+            current = _runs().get(tid, run.id)
+            if current.status == "pending":
+                current = _runs().claim(tid, run.id)
+            if current.status in {"running", "interrupted"}:
+                _runs().transition(tid, run.id, "error", error="Pi turn was interrupted; send the message again")
+        _set_status(tid, "error", error="Pi turn was interrupted; send the message again")
+        _dispatch_pending_after(tid, run.id)
+        return
     pending_text = run.pending_text or run.text or _get_status(tid).get("pending_message")
     if run.status == "interrupted":
         successor = next((candidate for candidate in _runs().list(tid)
@@ -2288,7 +2564,7 @@ def _capture_conversation(tid: str, reason: str) -> None:
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return render_index()
+    return await run_in_threadpool(render_index)
 
 
 # Favicon set — a psychedelic brain (a lobular body under a magenta->cyan->yellow
@@ -2354,9 +2630,19 @@ async def apple_touch_icon() -> Response:
     )
 
 
+def _require_new_thread_engine(engine: str) -> str:
+    """Admit only the immutable server-owned engine choice for a new web thread."""
+    if engine not in {"deepagents", "pi"}:
+        raise HTTPException(status_code=400, detail="Unknown thread engine")
+    if engine == "pi" and not PI_PREVIEW.claim_admits("pi"):
+        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
+    return engine
+
+
 @app.post("/threads")
-async def create_thread(domain: str | None = Form(None)):
-    tid = await run_in_threadpool(MANAGER.reserve)
+async def create_thread(domain: str | None = Form(None), engine: str = Form("deepagents")):
+    selected_engine = await run_in_threadpool(_require_new_thread_engine, engine)
+    tid = await run_in_threadpool(MANAGER.reserve_visible, selected_engine)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
     if selected:
         await run_in_threadpool(
@@ -2365,6 +2651,8 @@ async def create_thread(domain: str | None = Form(None)):
             selected,
             branch_suffix=tid[-4:]
         )
+    elif selected_engine == "pi":
+        await run_in_threadpool(_create_empty_pi_workspace, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
@@ -2373,13 +2661,14 @@ async def create_thread_with_message(
     background_tasks: BackgroundTasks,
     text: str = Form(...),
     domain: str | None = Form(None),
+    engine: str = Form("deepagents"),
     sent_at: str | None = Form(None), tz: str | None = Form(None),
     lat: str | None = Form(None), lon: str | None = Form(None),
 ):
     rider = _build_rider(sent_at, tz, lat, lon)
     tid, run_id, selected = await run_in_threadpool(
         create_thread_with_message_core,
-        text, domain, rider,
+        text, domain, rider, engine,
     )
     background_tasks.add_task(
         _initialize_thread, tid, run_id, selected, rider,
@@ -2388,15 +2677,32 @@ async def create_thread_with_message(
 
 
 def create_thread_with_message_core(
-    text: str, domain: str | None, rider: ContextRider | None = None,
+    text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
-    tid = MANAGER.reserve()
+    selected_engine = _require_new_thread_engine(engine)
+    tid = MANAGER.reserve_visible(selected_engine)
     selected = domain or (DOMAINS[0] if DOMAINS else None)
+    if selected_engine == "pi" and selected is None:
+        _create_empty_pi_workspace(tid)
+    if selected_engine == "pi":
+        _ensure_pi_description(tid, text)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
     run = _create_run(tid, text, rider=rider)
     return tid, run.id, selected
+
+
+def _create_empty_pi_workspace(tid: str) -> None:
+    """Create Pi's ordinary empty host workspace without recreating a deleted thread."""
+    workspace = os.path.join(
+        MANAGER.thread_dir(tid), MANAGER.DEFAULT_THREAD_WORKING_DIRECTORY)
+    try:
+        os.mkdir(workspace)
+    except FileExistsError:
+        pass
+    except FileNotFoundError:
+        return
 
 
 @app.get("/thread/{tid}", response_class=HTMLResponse)
@@ -2414,13 +2720,22 @@ async def get_thread(
         _clear_urgent(tid)
         stage = _get_status(tid).get("stage", "ready")
         chat: Thread | None = None
-        if stage not in INIT_STAGES:
+        pi_messages: list[dict] | None = None
+        try:
+            is_pi = _is_pi_thread(tid)
+        except ThreadEngineError as error:
+            raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
+        if stage not in INIT_STAGES and is_pi:
+            _backfill_pi_description(tid)
+            pi_messages = [{"role": message.role, "content": message.text}
+                           for message in _PI_CONVERSATIONS.get_messages(MANAGER.thread_dir(tid))]
+        elif stage not in INIT_STAGES:
             try:
                 chat = MANAGER.get(tid, sandbox_backend=None)
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail="Thread not found")
         return render_thread(
-            tid, chat, captured=bool(captured), merged=bool(merged),
+            tid, chat, pi_messages=pi_messages, captured=bool(captured), merged=bool(merged),
             reviewed=bool(reviewed), pushed=bool(pushed))
 
     return await run_in_threadpool(load_and_render)
@@ -2499,6 +2814,13 @@ def _accept_message_run(tid: str, text: str, rider=None) -> tuple[Run, bool]:
             raise _EmailApprovalPending
         prior_stage = _get_status(tid).get("stage")
         busy = prior_stage in BUSY_STAGES or THREAD_QUEUE.peek_holder() == tid
+        try:
+            if _is_pi_thread(tid):
+                _ensure_pi_description(tid, text)
+        except ThreadEngineError:
+            # Dispatch will make the existing invalid-engine error durable; title
+            # best-effort must not change message-admission semantics.
+            pass
         run = _create_run(tid, text, rider=rider)
         if busy:
             # Cover both wait points. The paused head may still be queued on
@@ -2560,6 +2882,7 @@ def _scheduled_dispatch(tid: str, prompt: str, tz: str) -> None:
     THREAD_QUEUE serializes it (overlap waits) and the per-turn sandbox + middleware
     apply. A time-only rider gives the turn 'now' in the schedule's zone. No
     _mark_pending — there's no waiting render to win."""
+    _require_deep_thread(tid)
     rider = _build_rider(datetime.now(timezone.utc).isoformat(), tz)
     # origin="system": a machine-initiated turn — it neither clears queued
     # continuations (only a USER message supersedes the agent's plan) nor counts
@@ -2579,6 +2902,11 @@ def _dispatch_event(sender: str, text: str) -> None:
     sub = SUBSCRIPTION_STORE.route(sender)
     if sub is None:
         logging.info("inbound message from %s matched no subscription; recorded only", sender)
+        return
+    try:
+        _require_deep_thread(sub.thread_id)
+    except HTTPException:
+        logging.warning("inbound message matched Pi preview thread %s; not dispatched", sub.thread_id)
         return
     rendered = sub.render(sender, text)
     stage = _get_status(sub.thread_id).get("stage")
@@ -2670,6 +2998,7 @@ def reply_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
     turn off the loop (the resume runs the tool → the outbound POST, so it must not run on
     the event loop; the BackgroundTask puts it in the threadpool)."""
     _existing_thread_dir(tid)  # 404 on a bad/missing tid — cheap, no agent build
+    _require_deep_thread(tid)
     if decision not in _REPLY_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
     status = _get_status(tid)
@@ -2700,6 +3029,7 @@ def email_decision(tid: str, decision: str, background_tasks: BackgroundTasks,
                    seen_body: str = Form(default="")):
     """Approve, edit, or reject the exact pending email proposal off the event loop."""
     _existing_thread_dir(tid)
+    _require_deep_thread(tid)
     if decision not in _EMAIL_DECISIONS:
         raise HTTPException(status_code=400, detail="decision must be approve, reject or edit")
     status = _get_status(tid)
@@ -3178,6 +3508,10 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
                        sent_at: str | None = Form(None), tz: str | None = Form(None),
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
+    admitted = await anyio.to_thread.run_sync(
+        _pi_message_admits, tid, limiter=_get_run_admission_limiter())
+    if not admitted:
+        raise HTTPException(status_code=503, detail="Pi preview is unavailable")
     rider = _build_rider(sent_at, tz, lat, lon)
     try:
         run, busy = await anyio.to_thread.run_sync(
@@ -3189,6 +3523,21 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
     if not busy:
         background_tasks.add_task(_execute_run, run.id, tid)
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
+
+
+@app.post("/thread/{tid}/continue-deep")
+async def continue_pi_in_deep(
+    tid: str,
+    background_tasks: BackgroundTasks,
+    summary: str = Form(""),
+):
+    """Start an independent Deep thread from one optional, visible Pi handoff summary."""
+    new_tid, run_id, domain = await anyio.to_thread.run_sync(
+        lambda: _continue_pi_in_deep(tid, summary),
+        limiter=_get_run_admission_limiter(),
+    )
+    background_tasks.add_task(_initialize_thread, new_tid, run_id, domain)
+    return RedirectResponse(url=f"/thread/{new_tid}", status_code=303)
 
 
 def _existing_thread_dir(tid: str) -> str:
@@ -3818,6 +4167,7 @@ async def delete_thread(tid: str):
 
 def _delete_thread_and_children(tid: str) -> None:
     """Delete a visible thread and each non-running hidden task directory."""
+    _PI_RUNTIME.retire(tid)
     with _RUN_ADMISSION_LOCK:
         child_ids = {
             child.thread_id for child in _runs().scan_children()
@@ -3845,12 +4195,16 @@ async def rename_thread(tid: str, description: str = Form("")):
     _existing_thread_dir(tid)
     new = description.strip()[:120]
     if new:  # ignore an empty rename — keep the existing title
-        set_description(tid, new)
+        try:
+            set_description(tid, new)
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="Thread not found") from error
     return RedirectResponse(url=f"/thread/{tid}", status_code=303)
 
 
 @app.post("/thread/{tid}/capture")
 async def capture_thread(tid: str, background_tasks: BackgroundTasks, reason: str = Form(...)):
+    await run_in_threadpool(_require_deep_thread, tid)
     try:
         thread = MANAGER.get(tid)
     except FileNotFoundError:
@@ -3894,6 +4248,7 @@ def merge_thread(tid: str):
     the sandbox is concurrently writing into the same working tree,
     and the lock doesn't extend across the host/sandbox boundary.
     """
+    _require_deep_thread(tid)
     try:
         thread = MANAGER.get(tid)
     except FileNotFoundError:

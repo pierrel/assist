@@ -23,6 +23,7 @@ from manage import web
 from manage.web import threads
 from manage.web.state import MESSAGE_BACKLOG, _get_status, _set_status
 from assist.backlog import MessageBacklog, PendingMessage
+from assist.thread_engine import write_new_thread_engine
 
 
 @pytest.fixture
@@ -212,6 +213,24 @@ def test_recovery_dispatches_committed_pending_run_without_status_duplicate(
         (run.id, "accepted")]
     queued = threads._RESUME_SCHEDULER._q.get_nowait()
     assert queued["run_id"] == run.id
+
+
+def test_recovering_pi_head_never_builds_a_deep_graph(wired, monkeypatch):
+    tid, tmp_path = wired
+    write_new_thread_engine(tmp_path / tid, "pi")
+    head = threads._create_run(tid, "abandoned Pi turn")
+    head = threads._runs().claim(tid, head.id)
+    follower = threads._create_run(tid, "later manual turn")
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda *args, **kwargs: pytest.fail("Pi recovery must not construct a Deep graph"))
+
+    threads._recover_run(head)
+
+    recovered = threads._runs().get(tid, head.id)
+    assert recovered.status == "error"
+    queued = threads._RESUME_SCHEDULER._q.get_nowait()
+    assert queued["run_id"] == follower.id
 
 
 def test_journal_only_recovery_skips_head_and_stays_healthy(wired, monkeypatch):

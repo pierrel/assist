@@ -21,10 +21,64 @@ import tempfile
 from unittest import TestCase
 from unittest.mock import patch, MagicMock
 
+from assist.thread_engine import ThreadEngine, ThreadEngineError, read_thread_engine
 from assist.thread_manager import ThreadManager
 
 
 class TestThreadManagerLazy(TestCase):
+    def test_reserve_visible_publishes_engine_before_returning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            try:
+                tid = manager.reserve_visible("pi", thread_id="pi-thread")
+                self.assertEqual(tid, "pi-thread")
+                self.assertEqual(
+                    ThreadEngine("pi", "manual-web"),
+                    read_thread_engine(manager.thread_dir(tid)),
+                )
+            finally:
+                manager.close()
+
+    def test_reserve_visible_rejects_engine_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            try:
+                manager.reserve_visible("pi", thread_id="pi-thread")
+                with self.assertRaises(ThreadEngineError):
+                    manager.reserve_visible("deepagents", thread_id="pi-thread")
+            finally:
+                manager.close()
+
+    def test_reserve_visible_never_replaces_generic_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            try:
+                manager.reserve("existing")
+                with self.assertRaises(ThreadEngineError):
+                    manager.reserve_visible("pi", thread_id="existing")
+                self.assertTrue(os.path.isdir(manager.thread_dir("existing")))
+                self.assertFalse(os.path.exists(
+                    os.path.join(manager.thread_dir("existing"), "engine.json")))
+            finally:
+                manager.close()
+
+    def test_hidden_visible_reservation_staging_is_not_listed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            try:
+                os.mkdir(os.path.join(tmp, ".thread-pending"))
+                self.assertEqual(manager.list(), [])
+            finally:
+                manager.close()
+
+    def test_list_preserves_existing_dot_prefixed_thread_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            try:
+                manager.reserve(".visible")
+                self.assertEqual(manager.list(), [".visible"])
+            finally:
+                manager.close()
     def test_thread_agent_dir_is_a_sibling_of_workspace_and_isolated_by_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = ThreadManager(root_dir=tmp)

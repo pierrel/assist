@@ -354,6 +354,7 @@ async def get_review(tid: str) -> str:
     def load_and_render() -> str:
         if not os.path.isdir(MANAGER.thread_dir(tid)):
             raise HTTPException(status_code=404, detail="Thread not found")
+        _threads._require_deep_thread(tid)
         try:
             chat = MANAGER.get(tid, sandbox_backend=None)
         except FileNotFoundError:
@@ -374,6 +375,7 @@ async def post_review(tid: str, request: Request,
     tdir = MANAGER.thread_dir(tid)
     if not os.path.isdir(tdir):
         raise HTTPException(status_code=404, detail="Thread not found")
+    await run_in_threadpool(_threads._require_deep_thread, tid)
     body = bytearray()
     async for chunk in request.stream():
         if len(body) + len(chunk) > 66_000:
