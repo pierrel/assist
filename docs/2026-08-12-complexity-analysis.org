@@ -1,0 +1,129 @@
+#+TITLE: Assist Codebase Complexity Analysis
+#+DATE: 2026-08-12
+
+* Summary
+
+Codebase: 1,859 functions across ~180 Python files, 28,504 non-comment lines of code.
+
+| Metric                        | Value           |
+|-------------------------------+-----------------+
+| Average Cyclomatic Complexity | 4.3 (Grade A)   |
+| Functions exceeding CCN 15    | 182             |
+| Functions rated D/E/F         | 124             |
+| Files with MI < 15            | 6               |
+| Files with MI = 0.00          | 3 (critical)    |
+
+* Worst Functions by Cyclomatic Complexity (CCN)
+
+| CCN | Function                        | File                              | Lines     |
+|-----+---------------------------------+-----------------------------------+-----------|
+| 115 | _assert_source_links            | edd/prompt_census.py:2566         | 259 lines |
+| 110 | render_thread                   | manage/web/threads.py:495         | 705 lines |
+|  94 | _process_message                | manage/web/threads.py:2078        | 462 lines |
+|  71 | _assert_declared_inputs         | edd/prompt_census.py:2348         | 216 lines |
+|  50 | _assert_closed_artifact_shapes  | edd/prompt_census.py:2169         | 177 lines |
+|  46 | create_agent                    | assist/agent.py:269               | 300 lines |
+|  45 | _record_admits                  | assist/pi_health.py:310           | 57 lines  |
+|  45 | RunService.create               | assist/run_service.py:163         | 102 lines |
+|  43 | _prompt_provenance              | edd/prompt_census.py:814          | 162 lines |
+|  41 | _findings                       | edd/prompt_census.py:2994         | 109 lines |
+|  40 | queue_recovery_runs             | manage/web/threads.py:3241        | 103 lines |
+|  36 | VoiceSession._drain_events      | manage/voice/session.py:367       | 66 lines  |
+|  34 | WebAgentProtocolService.create_run | manage/web/protocol_service.py:189 | 64 lines |
+|  34 | PiRuntimeManager.run            | assist/pi_runtime.py:299          | 102 lines |
+|  32 | _provider_identity_snapshot     | assist/pi_health.py:220           | 65 lines  |
+|  31 | _arm_is_valid                   | assist/pi_health.py:369           | 33 lines  |
+|  31 | JsonValidationMiddleware.before_model | assist/middleware/json_validation_middleware.py:261 | 138 lines |
+|  30 | _census_is_valid                | assist/pi_health.py:63            | 35 lines  |
+
+* Worst Files by Maintainability Index
+
+| MI     | Grade | File                          |
+|--------+-------+-------------------------------|
+| 0.00   | C     | manage/web/threads.py         |
+| 0.00   | C     | assist/pi_health.py           |
+| 0.00   | C     | edd/prompt_census.py          |
+| 6.47   | C     | assist/pi_runtime.py          |
+| 11.51  | B     | manage/voice/session.py       |
+| 11.54  | B     | manage/web/protocol_service.py|
+| 15.24  | B     | manage/voice/wire.py          |
+| 15.70  | B     | assist/tools.py               |
+
+* Hotspot Analysis
+
+**manage/web/threads.py** (MI = 0.00) -- The message-submit hot path. Three functions dominate:
+- ~render_thread~ (CCN 110, 705 lines) -- renders the entire thread UI
+- ~_process_message~ (CCN 94, 462 lines) -- the core message processing loop
+- ~queue_recovery_runs~ (CCN 40, 103 lines) -- recovery orchestration
+
+These are load-bearing paths per AGENTS.md. High complexity here is a risk for both human and agent modifications.
+
+**edd/prompt_census.py** (MI = 0.00) -- Eval infrastructure. Five functions with CCN > 40, all assertion-heavy test helpers. These are eval fixtures, not runtime code -- high CCN is expected for exhaustive assertion chains.
+
+**assist/pi_health.py** (MI = 0.00) -- PI runtime health monitoring. Four functions rated D/F, all in the 30-45 CCN range. Health census and admission control logic.
+
+**assist/agent.py:269** -- ~create_agent~ (CCN 46, 300 lines). Agent factory that assembles the full agent spec. Core infrastructure.
+
+* Research: Code Complexity vs. AI Agent Performance
+
+**Key finding: Traditional complexity metrics do NOT reliably predict AI agent performance.**
+
+**1. Traditional metrics fail under length control** (Xie et al., arXiv:2602.07882, Feb 2026)
+
+After controlling for code length, cyclomatic complexity, Halstead complexity, and maintainability index show NO statistically reliable correlation with LLM performance across program repair, code translation, and execution reasoning tasks. Halstead's apparent correlation (r = -0.97) collapses entirely under length control -- it's just a proxy for code size.
+
+The authors propose LM-CC (LLM-aware cyclomatic complexity) based on token-level entropy and semantic compositional hierarchy. LM-CC achieves partial correlations of -0.92 to -0.97 with LLM performance. Causal intervention: reducing LM-CC while keeping CC constant improved LLM program repair performance by up to 20.9%.
+
+**2. Agents degrade code quality when refactoring** (Horikawa et al., MSR 2026, arXiv:2603.13723)
+
+Analysis of 403 readability-focused AI agent commits:
+- Maintainability Index DECREASED in 56.1% of commits
+- Cyclomatic Complexity INCREASED in 42.7% of commits
+- Lines of Code INCREASED in 71.5% of cases
+
+AI agents targeting "readability improvements" often make code harder to maintain by traditional metrics.
+
+**3. Structural complexity matters more than CCN** (SWE-PolyBench, AWS, arXiv:2504.08703)
+
+Agent pass rates stratified by structural complexity:
+- "Class Only" / "Single Class" modifications: 25-40% pass rate
+- "Mixed" changes (class + function): 8-15% pass rate
+- 3+ file edits: below 10% pass rate
+
+Multi-file edits and cross-module changes are dramatically harder than single-file complexity.
+
+**4. Agents accumulate complexity over time** (SlopCodeBench, arXiv:2603.24755)
+
+- Mean maximum CCN rises from 27.1 to 68.2 over iterative agent checkpoints
+- Agent code concentrates 0.68 of complexity mass in high-CC functions vs 0.31 for human-maintained repos (2.2x gap)
+- Structural erosion rises in 80% of agent trajectories
+- No agent solves any 20-step problem end-to-end; highest checkpoint solve rate is 17.2%
+
+**5. Hard tasks = more reading, less coding** (SWE-AGI, arXiv:2602.09447)
+
+On hard tasks, "Read" (code understanding) becomes the dominant activity at 41-65% of logged actions. Agents spend most of their effort trying to understand complex code rather than modifying it.
+
+**6. Domain expertise > code simplicity** (Anthropic, June 2026)
+
+Based on ~400,000 Claude Code sessions: expert-rated sessions reach verified success 28-33% of the time vs 15% for novice-rated sessions. Domain expertise matters more than raw code simplicity for agent success.
+
+* What This Means for the Assist Codebase
+
+1. ~render_thread~ (CCN 110, 705 lines) and ~_process_message~ (CCN 94, 462 lines) are the highest-risk targets for agent modification. They are also load-bearing paths. Agents will struggle to understand these (SWE-AGI: hard tasks = 41-65% read actions) and are likely to introduce regressions.
+
+2. The edd/prompt_census.py functions are eval infrastructure -- high CCN is expected and acceptable for exhaustive assertion chains. Not a runtime risk.
+
+3. assist/pi_health.py (MI = 0.00) has four D/F-rated functions in a small file. This is a candidate for targeted refactoring since the functions are short (33-65 lines) but dense with branching logic.
+
+4. When asking agents to modify threads.py or agent.py, expect lower success rates and higher review overhead. The SWE-PolyBench data suggests multi-file changes in this complexity range have 8-15% pass rates.
+
+5. Traditional CCN thresholds (10, 15, 20) are poor predictors of agent difficulty. The Xie et al. study shows LM-CC (semantic hierarchy, not just branch count) is the better signal. A flat switch with 20 cases (CCN 21) is easier for an agent than 3 nested conditionals (CCN 4) with domain-specific logic.
+
+* Sources
+
+- Xie et al. "Rethinking Code Complexity Through the Lens of Large Language Models" arXiv:2602.07882
+- Orlanski et al. "SlopCodeBench" arXiv:2603.24755
+- Rashid et al. "SWE-PolyBench" arXiv:2504.08703
+- Horikawa et al. "Do AI Agents Really Improve Code Readability?" MSR 2026, arXiv:2603.13723
+- Zhang et al. "SWE-AGI" arXiv:2602.09447
+- Anthropic "Agentic coding and persistent returns to expertise" June 2026
