@@ -1490,6 +1490,7 @@ _PI_CONVERSATIONS = PiConversationStore()
 _PI_RUNTIME = PiRuntimeManager()
 _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 _PI_DESCRIPTION_LIMIT = 120
+_PI_SYSTEM_PROMPT_MAX_BYTES = 64 * 1024
 
 
 def _pi_system_prompt() -> str:
@@ -1497,11 +1498,12 @@ def _pi_system_prompt() -> str:
     path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                         "assist", "templates", "pi", "system.md")
     try:
-        with open(path, encoding="utf-8") as stream:
-            prompt = stream.read(64 * 1024)
-    except OSError as error:
+        with open(path, "rb") as stream:
+            raw = stream.read(_PI_SYSTEM_PROMPT_MAX_BYTES + 1)
+        prompt = raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as error:
         raise PiRuntimeError("Pi system prompt is unavailable") from error
-    if not prompt.strip() or len(prompt.encode("utf-8")) > 64 * 1024:
+    if not prompt.strip() or len(raw) > _PI_SYSTEM_PROMPT_MAX_BYTES:
         raise PiRuntimeError("Pi system prompt is invalid")
     return prompt
 
@@ -1515,6 +1517,14 @@ def _pi_should_yield() -> bool:
 def _is_pi_thread(tid: str) -> bool:
     """Classify once from immutable host storage; malformed identity never runs."""
     return read_thread_engine(MANAGER.thread_dir(tid)).name == "pi"
+
+
+def _pi_message_admits(tid: str) -> bool:
+    """Apply the Pi admission gate, failing closed for an invalid engine marker."""
+    try:
+        return not _is_pi_thread(tid) or PI_PREVIEW.claim_admits("pi")
+    except ThreadEngineError as error:
+        raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
 
 
 def _pi_initial_description(text: str) -> str:
@@ -2711,7 +2721,10 @@ async def get_thread(
         stage = _get_status(tid).get("stage", "ready")
         chat: Thread | None = None
         pi_messages: list[dict] | None = None
-        is_pi = _is_pi_thread(tid)
+        try:
+            is_pi = _is_pi_thread(tid)
+        except ThreadEngineError as error:
+            raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
         if stage not in INIT_STAGES and is_pi:
             _backfill_pi_description(tid)
             pi_messages = [{"role": message.role, "content": message.text}
@@ -3496,8 +3509,7 @@ async def post_message(tid: str, background_tasks: BackgroundTasks,
                        lat: str | None = Form(None), lon: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     admitted = await anyio.to_thread.run_sync(
-        lambda: not _is_pi_thread(tid) or PI_PREVIEW.claim_admits("pi"),
-        limiter=_get_run_admission_limiter())
+        _pi_message_admits, tid, limiter=_get_run_admission_limiter())
     if not admitted:
         raise HTTPException(status_code=503, detail="Pi preview is unavailable")
     rider = _build_rider(sent_at, tz, lat, lon)

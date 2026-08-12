@@ -154,13 +154,17 @@ class PiProviderRelay:
             raise PiProviderRelayError("Pi model request uses an invalid model")
         if ("max_completion_tokens" in payload
                 or "n" in payload and payload["n"] != 1
-                or "stream" in payload and not isinstance(payload["stream"], bool)):
+                or "stream" in payload and payload["stream"] is not True):
             raise PiProviderRelayError("Pi model request changes its generation policy")
         normalized = dict(payload)
         normalized["model"] = self._model
         normalized["max_tokens"] = _MAX_TOKENS
         normalized["n"] = 1
         normalized["temperature"] = 0.1
+        # Pi's provider adapter expects the OpenAI stream shape. The relay
+        # bounds and buffers that response before handing it back to the worker,
+        # so the worker cannot choose a non-streaming or unbounded mode.
+        normalized["stream"] = True
         canonical = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
         if len(canonical) > _MAX_REQUEST_BYTES:
             raise PiProviderRelayError("Pi model request exceeds its bound")

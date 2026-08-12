@@ -105,6 +105,7 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     assert payload["max_tokens"] == 8192
     assert payload["n"] == 1
     assert payload["temperature"] == 0.1
+    assert payload["stream"] is True
 
 
 def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> None:
@@ -123,6 +124,8 @@ def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> No
         multiple = _request(relay.socket_path, "a" * 43, extra={"n": 2})
         alternate_limit = _request(
             relay.socket_path, "a" * 43, extra={"max_completion_tokens": 999999})
+        streaming = _request(relay.socket_path, "a" * 43, extra={"stream": False})
+        accepted_streaming = _request(relay.socket_path, "a" * 43, extra={"stream": True})
     finally:
         relay.close()
         upstream.shutdown()
@@ -130,7 +133,9 @@ def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> No
 
     assert b" 403 " in multiple
     assert b" 403 " in alternate_limit
-    assert _Upstream.requests == []
+    assert b" 403 " in streaming
+    assert b" 200 " in accepted_streaming
+    assert _Upstream.requests[0][2]["stream"] is True
 
 
 def test_provider_relay_refuses_nonlocal_or_malformed_endpoints(tmp_path: Path) -> None:

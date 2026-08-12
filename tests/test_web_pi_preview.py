@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import shutil
 
 import pytest
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from manage.web import threads
 from manage.web import state
+from assist.pi_runtime import PiRuntimeError
 from assist.thread_engine import read_thread_engine
 
 
@@ -52,6 +54,20 @@ def test_new_pi_thread_requires_fresh_host_admission(monkeypatch) -> None:
     assert threads._require_new_thread_engine("pi") == "pi"
 
 
+def test_pi_system_prompt_rejects_an_oversized_file(monkeypatch) -> None:
+    original_open = open
+
+    def oversized_open(path, mode="r", *args, **kwargs):
+        if path.endswith("assist/templates/pi/system.md") and mode == "rb":
+            return io.BytesIO(b"x" * (threads._PI_SYSTEM_PROMPT_MAX_BYTES + 1))
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", oversized_open)
+
+    with pytest.raises(PiRuntimeError, match="invalid"):
+        threads._pi_system_prompt()
+
+
 def test_merge_refuses_pi_before_constructing_a_deep_thread(monkeypatch) -> None:
     monkeypatch.setattr(threads, "_is_pi_thread", lambda tid: True)
     monkeypatch.setattr(
@@ -62,6 +78,18 @@ def test_merge_refuses_pi_before_constructing_a_deep_thread(monkeypatch) -> None
         threads.merge_thread("pi-thread")
 
     assert error.value.status_code == 409
+
+
+def test_invalid_engine_marker_returns_controlled_web_errors(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    (pi_threads_root / tid / "engine.json").write_text("{}")
+    client = TestClient(threads.app)
+
+    page = client.get(f"/thread/{tid}")
+    message = client.post(f"/thread/{tid}/message", data={"text": "hello"})
+
+    assert page.status_code == 409
+    assert message.status_code == 409
 
 
 def test_pi_page_offers_deep_continuation_when_preview_is_disabled(
