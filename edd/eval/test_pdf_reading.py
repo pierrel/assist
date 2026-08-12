@@ -32,7 +32,7 @@ from assist.agent import AgentHarness, create_agent
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import skill_was_loaded, cleanup_workspace
+from .utils import cleanup_workspace, prompt_rewrite_web_main_spec, skill_was_loaded
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -89,6 +89,7 @@ class TestPdfReading(TestCase):
             self.model,
             self.workspace,
             sandbox_backend=self.sandbox,
+            spec=prompt_rewrite_web_main_spec(),
         ))
 
     def _execute_commands(self, agent) -> list[str]:

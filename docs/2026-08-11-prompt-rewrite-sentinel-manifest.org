@@ -35,3 +35,29 @@ The fourteenth row was added after the rebase to =upstream/main=. It exercises
 the same boundary for a context result forwarded to research and records raw
 captures at =/tmp/prompt-rewrite-context-research-v25-baseline-<N>.log= and
 =/tmp/prompt-rewrite-context-research-v27-<N>.log=.
+
+* v28 staged comparison additions
+
+These are the first four small expansion cohorts after the original sentinel.
+They use the same fixed datetime and one bounded admission per trial.  A
+fixture that imports =prompt_rewrite_web_main_spec()= uses the candidate only
+when =ASSIST_PROMPT_REWRITE_CANDIDATE= is set; its baseline retains the same
+web tools and skill sources but uses the legacy static prompt.  Every raw
+capture path below is a replayable =pytest= node with a =baseline= or
+=candidate= segment and trial number.
+
+| Cohort | Pytest node | Natural journey and validator | Capture path |
+|-
+| direct documents | =test_edit_files.py::TestBulkEdit::test_does_not_confabulate_an_impossible_edit= | Mark a real task done and honestly report an absent one; workspace state plus final response | =/tmp/prompt-rewrite-v28-edit-{baseline,candidate}-<N>.log= |
+| PDF | =test_pdf_reading.py::TestPdfReading::test_orient_then_answer_page_count= | Ask page count of a fixture PDF; skill load, =pdfinfo= use, and answer | =/tmp/prompt-rewrite-v28-pdf-{baseline,candidate}-<N>.log= |
+| org structure | =test_org_format_skill.py::TestOrgFormatSkill::test_inserts_heading_without_orphaning_previous_body= | Insert a project heading while preserving preceding body | =/tmp/prompt-rewrite-v28-org-<N>.log= |
+| rendering | =test_render_agent.py::TestRenderAgent::test_emits_render_block_for_named_file= | Show a named workspace file; emitted render block names it | =/tmp/prompt-rewrite-v28-render-<N>.log= |
+| development | =test_dev_skill_loading.py::TestDevSkillLoading::test_soft_trigger_dev_skill_request= | Natural code-inspection request reaches catalog-selected development guidance | =/tmp/prompt-rewrite-v28-dev-<N>.log= |
+| task continuity | =test_domain_integration.py::TestPromptRewriteDomainTask::test_finds_and_updates_task_with_web_main_prompt= | Find Yosemite then normalize its due date; response plus file state; reset synthetic task state, reject HTTP | =/tmp/prompt-rewrite-v28-domain-{baseline,candidate}-r<N>.log= |
+| memory continuity | =test_memory.py::TestMemory::test_writes_memory_two_consecutive_turns= | Persist cats then dogs across two turns; repository memory is validated while the private thread-memory scope is mounted empty, as in a new production thread | =/tmp/prompt-rewrite-v28-memory-{baseline,candidate}-r<N>.log= |
+
+The org, render, and development baseline is the unchanged, ledger-proven v21
+web-main comparison.  The edit, PDF, task, and memory rows acquired new
+web-main fixture wiring for v28 and therefore received fresh N=3 baselines.
+The first task and memory attempts are superseded: they omitted, respectively,
+fixture isolation/no-fetch enforcement and the production private memory source.

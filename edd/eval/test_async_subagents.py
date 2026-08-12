@@ -394,15 +394,20 @@ _CANCEL = StructuredTool.from_function(
 _TOOLS = (_START, _CHECK, _UPDATE, _CANCEL, _LIST)
 
 
+def reset_task_fixture() -> None:
+    """Clear process-local lifecycle state before an independent web-main eval."""
+    global _TASK_ROOT, _TASK_SEQUENCE
+    _TASK_DESCRIPTIONS.clear()
+    _TASK_TYPES.clear()
+    _TASK_STATUSES.clear()
+    _TASK_RESULTS.clear()
+    _TASK_ROOT = None
+    _TASK_SEQUENCE = 0
+
+
 class TestAsyncSubagentSupervisor(TestCase):
     def setUp(self):
-        global _TASK_ROOT, _TASK_SEQUENCE
-        _TASK_DESCRIPTIONS.clear()
-        _TASK_TYPES.clear()
-        _TASK_STATUSES.clear()
-        _TASK_RESULTS.clear()
-        _TASK_ROOT = None
-        _TASK_SEQUENCE = 0
+        reset_task_fixture()
         self.model = select_assistant_model(0.1)
 
     def _agent(

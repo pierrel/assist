@@ -28,7 +28,7 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
 from .utils import (build_thread_repo, cleanup_workspace, executed_commands,
-                    skill_was_loaded, _git)
+                    prompt_rewrite_web_main_spec, skill_was_loaded, _git)
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,8 @@ class _EditScenario(TestCase):
 
     def _run(self, prompt):
         agent = AgentHarness(create_agent(self.model, self.workspace,
-                                          sandbox_backend=self.sandbox))
+                                          sandbox_backend=self.sandbox,
+                                          spec=prompt_rewrite_web_main_spec()))
         summary = agent.message(prompt)
         return agent, summary
 
