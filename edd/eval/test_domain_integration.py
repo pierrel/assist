@@ -3,10 +3,16 @@ import tempfile
 import shutil
 
 from unittest import TestCase
+from unittest.mock import patch
 from langchain_core.messages import ToolMessage
 
+from assist.agent import AgentHarness, create_agent
 from assist.thread_manager import ThreadManager
 from assist.domain_manager import DomainManager
+from assist.model_manager import select_assistant_model
+
+from .test_async_subagents import reset_task_fixture
+from .utils import complete_web_main_tasks, prompt_rewrite_web_main_spec
 
 def create_structure(root: str):
     os.makedirs(root, exist_ok=True)
@@ -63,3 +69,43 @@ class TestDomainIntegration(TestCase):
             content = f.read()
         self.assertIn("2026-11-07", content,
                       "Inbox should contain normalized due date")
+
+
+class TestPromptRewriteDomainTask(TestCase):
+    """Compare the natural task journey in the exact prompt-rewrite web shape.
+
+    ThreadManager deliberately always constructs the production web-main prompt,
+    so its integration test cannot provide the legacy side of this comparison.
+    This fixture retains the same workspace and natural user request while the
+    shared prompt-rewrite helper switches only the static prompt composition.
+    """
+
+    def setUp(self):
+        self.working_dir = tempfile.mkdtemp()
+        self.agent_dir = tempfile.mkdtemp()
+        create_structure(self.working_dir)
+        reset_task_fixture()
+        self.model = select_assistant_model(0.1)
+
+    def tearDown(self):
+        shutil.rmtree(self.working_dir, ignore_errors=True)
+        shutil.rmtree(self.agent_dir, ignore_errors=True)
+
+    def test_finds_and_updates_task_with_web_main_prompt(self):
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("task eval must not fetch URLs")) as get:
+            agent = AgentHarness(create_agent(
+                self.model, self.working_dir, agent_dir=self.agent_dir,
+                spec=prompt_rewrite_web_main_spec()))
+            agent.message(
+                "What is my next task? Then update it to be due on 11/7/2026."
+            )
+            response = complete_web_main_tasks(agent)
+        get.assert_not_called()
+
+        self.assertRegex(response, "Yosemite",
+                         "Should surface Yosemite as the next task")
+        with open(os.path.join(self.working_dir, "gtd", "inbox.org"),
+                  encoding="utf-8") as inbox:
+            self.assertIn("2026-11-07", inbox.read(),
+                          "Inbox should contain normalized due date")

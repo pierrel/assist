@@ -94,3 +94,94 @@ no wording or enforcement changed. The exact v28 census SHA-256 is
 - =test_context_result_informs_research_then_final_response=: 1/1 v28 smoke,
   with raw log at =/tmp/prompt-rewrite-context-research-v28-1.log=. The v27
   adversarial N=3 result remains the current full lifecycle comparison.
+
+* v28 first staged comparison cohort: local work and dependent delegation
+
+The current v28 prompt keeps the same web-main shape, fixed datetime, and
+per-trial admission as the earlier rows.  This cohort promotes the purpose-first
+candidate from a smoke check to the first small staged N=3 comparison.
+
+| Journey | Candidate v28 | Capture | Result |
+|-
+| one local multi-step outcome | 3/3 | =/tmp/prompt-rewrite-v28-direct-<N>.log= | parity with v21 |
+| two independent outcomes | 3/3 | =/tmp/prompt-rewrite-v28-multi-<N>.log= | parity with v21/v24 |
+| context result, then dependent research | 2/3 formal; 3/3 lifecycle | =/tmp/prompt-rewrite-context-research-v28-<N>.log= | two judge passes; trial 3 performed every asserted agent action but OutcomeJudge emitted undeclared citation =confidence=high= and the validator rejected that judge output |
+
+The context trial is a judge-format dispute, not evidence of a prompt regression:
+all deterministic assertions completed before the judge invocation, including
+context-only first turn, completion check, factual May 17 handoff, injection
+exclusion, research check, and final reply construction.  Do not change the
+candidate prompt for that verifier failure; repeat the disputed row before
+claiming a formal N=3 result.
+
+* v28 second staged comparison cohort: documents and visible rendering
+
+The edit-files and PDF fixtures now construct =prompt_rewrite_web_main_spec()=,
+so their fresh baselines and candidate comparison exercise the real web skill
+sources and lifecycle-tool shape.  This is eval wiring only; production agent
+construction is unchanged.
+
+| Journey | Legacy baseline | Candidate v28 | Capture | Result |
+|-
+| honest direct edit of a real org file | 3/3 | 3/3 | =/tmp/prompt-rewrite-v28-edit-{baseline,candidate}-<N>.log= | parity |
+| preserve org heading/body structure | 3/3 (v21) | 3/3 | =/tmp/prompt-rewrite-v28-org-<N>.log= | parity, catalog-routed |
+| render a named workspace file | 0/3 (v21) | 3/3 | =/tmp/prompt-rewrite-v28-render-<N>.log= | retained improvement, catalog-routed |
+| answer a bounded PDF orientation question | 3/3 | 3/3 | =/tmp/prompt-rewrite-v28-pdf-{baseline,candidate}-<N>.log= | parity, catalog-routed |
+
+* v28 third and fourth staged comparison cohorts: development, domain, and memory
+
+These cohorts keep the core generic.  Development selection remains discoverable
+through catalog metadata; task and memory behavior remains owned by their existing
+skills and middleware rather than a new system-prompt route.
+
+| Journey | Legacy baseline | Candidate v28 | Capture | Result |
+|-
+| natural, soft-trigger development request | 3/3 (v21) | 3/3 | =/tmp/prompt-rewrite-v28-dev-<N>.log= | parity, catalog-routed |
+| find the next task and update its due date | 3/3 | 3/3 | =/tmp/prompt-rewrite-v28-domain-{baseline,candidate}-r<N>.log= | parity under isolated production-shaped fixture |
+| persist two consecutive user facts | 3/3 | 3/3 | =/tmp/prompt-rewrite-v28-memory-{baseline,candidate}-r<N>.log= | repository-memory parity with an empty private thread-memory scope mounted |
+
+The task row uses a new eval-only web-main fixture because the pre-existing
+=ThreadManager= integration test always selects the production candidate shape
+and therefore cannot construct the legacy side of a comparison.  The fixture
+uses the same task files and natural request, resets its synthetic lifecycle
+state, rejects outbound fetches, includes a private thread-memory directory,
+completes the deterministic lifecycle wake, and switches only the static prompt
+composition.  The prior domain and memory runs predated those controls and are
+not comparison evidence.
+
+** Replay record for corrected task and memory comparisons
+
+All twelve rows below ran separately through =tools/agentic resource run llm=
+from the prompt-rewrite worktree, with =timeout 900=, deploy-venv =python -m
+pytest -q=, and =ASSIST_EVAL_FIXED_DATETIME=2026-08-08T12:00:00-07:00=. A
+=baseline= row omits =ASSIST_PROMPT_REWRITE_CANDIDATE=; a =candidate= row
+sets it to =1=. Prompt census captures are
+=/home/pierre/deploy/assist/prompt-census/v28-candidate/census.json=
+(artifact SHA-256 =09fc002720c7c056a92f966ecb7120b5d40c0dfa381dd25a951de8bb320776e4=)
+for the production candidate shape. =prompt_census.py= constructs
+=ThreadManager= directly and therefore cannot identify the eval helper's legacy
+profile. A side-specific fixture census instead constructs exactly
+=prompt_rewrite_web_main_spec()= with lifecycle tools, web skill sources, and a
+private thread directory; it invokes each profile against the same recorder.
+It records baseline =candidate_env=0= with system SHA-256
+=aa346912ccb221a9b79877f6b69aa7c407797c449b83cadfb31d772b79c9e47d=
+(capture SHA-256 =92598c520ddeedec1e5e3e172d343655bbab8b76536fe9ac0e00cbdf8e41ee26=)
+and candidate =candidate_env=1= with system SHA-256
+=5897c3e3fc28243e07ef77ee2e47eef8908059718cd0f4940874b5e7dab6ea8a=
+(capture SHA-256 =bcb5a4209cf586e60a8c81987c3f68e1deeaacdb1d958718e23ff5a240ff1fe1=).
+The raw-log hash records the exact local capture that produced each result.
+
+| Node | Profile | Trial | Result | Capture SHA-256 |
+|-
+| domain task | baseline | r1 | pass | =323e5550e7ef9d966bbac534f0c148343d38f67ba1b2af9fb90ef02900754560= |
+| domain task | baseline | r2 | pass | =35d522b448f92f271509da9fd6e734ebba4ce6f4d1b81e63681868448b074cf5= |
+| domain task | baseline | r3 | pass | =9d4cc3b66e1cf44f9329d3a6357111c6effe159d23368cd603587d89cd4de3cb= |
+| domain task | candidate | r1 | pass | =d83c15abad1b896f897ed498cad41e56b26aeb41c553cfc9f48bafaed13989c3= |
+| domain task | candidate | r2 | pass | =fcff61ddd9f49619ad6a1d993e691bd11d7eef496355b66a385bc94f858074e6= |
+| domain task | candidate | r3 | pass | =1a8a024c838b69fc9890fd2f8df217304dd0f35ce2aec83074b0117bfe562ab7= |
+| memory continuity | baseline | r1 | pass | =01c59463ecf6cf33c46b1ea3a53e57cadf476ad4674f0223a93ae1e06e3440c4= |
+| memory continuity | baseline | r2 | pass | =8c7ae92f180b053575801866bf03aa3d308c53334fa3f0e744e49b9c7c2f2e67= |
+| memory continuity | baseline | r3 | pass | =76de8521ef691759135f5cf62067fe212a55be161e8524b0494b51915fe46962= |
+| memory continuity | candidate | r1 | pass | =33c458e6d7c1de4f28c3891c11bd03d2ada038791aef64ce1611f287063dfec2= |
+| memory continuity | candidate | r2 | pass | =9ea7b9bde1d6b67e27d4cf9cdbb534d01e3cf0a0608148d154af1c84ea298574= |
+| memory continuity | candidate | r3 | pass | =f7fd564fc383796701f7e88041451967029e69729557786807c4c6b2d20a918d= |

@@ -8,15 +8,21 @@ from unittest import TestCase
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 
-from .utils import read_file, create_filesystem, AgentTestMixin, stub_research_subagent
+from .utils import (AgentTestMixin, create_filesystem, prompt_rewrite_web_main_spec,
+                    read_file, stub_research_subagent)
 
 class TestMemory(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
         root = tempfile.mkdtemp()
+        # Production keeps private thread state outside the domain workspace.
+        agent_dir = tempfile.mkdtemp(prefix="thread_memory_eval_")
+        self.addCleanup(shutil.rmtree, agent_dir, True)
         create_filesystem(root, filesystem)
 
         return AgentHarness(create_agent(self.model,
-                                         root)), root
+                                         root,
+                                         agent_dir=agent_dir,
+                                         spec=prompt_rewrite_web_main_spec())), root
 
     def setUp(self):
         self.model = select_assistant_model(0.1)
@@ -102,4 +108,3 @@ class TestMemory(AgentTestMixin, TestCase):
                          "Existing fact about Python should survive")
         self.assertRegex(memory_after, "dogs",
                          "New fact about dogs should be appended")
-
