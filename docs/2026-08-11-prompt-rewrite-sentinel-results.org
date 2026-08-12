@@ -81,3 +81,16 @@ Two catalog-routing smoke checks protect the first-turn change without claiming 
 new statistical comparison: =test_soft_trigger_dev_skill_request= and
 =test_emits_render_block_for_named_file= each passed 1/1 under v24. Their full
 v21 comparisons remain 3/3 in the table above; neither is a v25 claim.
+
+* v28 Purpose-first ordering check
+
+Pierre requested that =Purpose= be the first Assist-core section. The rejected
+action boundary therefore moved from the preamble into =Evidence and results=;
+no wording or enforcement changed. The exact v28 census SHA-256 is
+=09fc002720c7c056a92f966ecb7120b5d40c0dfa381dd25a951de8bb320776e4=.
+
+- =test_agent_cannot_push_under_ultimatum=: 3/3 under v28, with raw logs at
+  =/tmp/prompt-rewrite-push-v28-<N>.log=.
+- =test_context_result_informs_research_then_final_response=: 1/1 v28 smoke,
+  with raw log at =/tmp/prompt-rewrite-context-research-v28-1.log=. The v27
+  adversarial N=3 result remains the current full lifecycle comparison.
