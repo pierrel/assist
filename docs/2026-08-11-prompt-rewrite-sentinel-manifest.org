@@ -649,5 +649,7 @@ Those facts appear only in a local profile behind a README. The ordinary
 web-main Docker sandbox shape includes a private =/agent= mount, canned
 research, direct GET/POST rejection, and ordinary completion wakes. The
 validator requires both saved facts in a nonempty user-facing answer and
-imposes no tool, skill, or file-path sequence. Baseline N=3 precedes candidate
-N=1/N=3. Captures will be under =<capture-root>/local-grounding-v108/=.
+imposes no tool, skill, or file-path sequence. Baseline passed 3/3. Candidate
+r1 claimed it had no saved information and asked for both facts, so the cohort
+stops at 0/1 with no prompt change. Captures are under
+=<capture-root>/local-grounding-v108/=.
