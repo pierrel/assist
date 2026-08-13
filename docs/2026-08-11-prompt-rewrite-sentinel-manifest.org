@@ -291,3 +291,25 @@ profile and canned research worker. The operation is local to the temporary
 repository and does not access a remote network. Both profiles run N=3 under
 bounded admission; captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/git-history-v76/=.
+
+* v77 full-codebase development explanation probe: stopped for scale
+
+The natural request asks for an explanation of the copied Assist codebase. The
+selected fixture was corrected to deliver the ordinary web completion wake
+before grading its answer; the prior synchronous assertion only observed the
+context-launch acknowledgement. The valid baseline probe produced no final
+output after two minutes on the full copied workspace, so it was terminated to
+release the model slot. It is not a baseline result and no candidate trial was
+started. The temporary comparison-fixture adaptation was removed; add it back
+only as an explicit bounded full-codebase tranche. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/dev-explain-v77/=.
+
+* v78 mocked website-download cohort
+
+The natural request asks to download a kettle manual from a supplied website
+and report its page count. The fixture serves a fully mocked two-hop,
+asset-heavy site through both sandbox =curl= and =read_url=, so no external
+network operation occurs. The validator requires the correct PDF download,
+the =explore-website= skill, no asset-dead-end crawl, and at most three page
+fetches. Both profiles run N=3 under bounded admission; captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/website-v78/=.
