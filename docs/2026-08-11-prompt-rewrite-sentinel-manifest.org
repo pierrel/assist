@@ -624,5 +624,6 @@ with a separate private agent directory. Research is canned at construction;
 direct GET and POST are rejected; and, if the model launches lifecycle work,
 the harness supplies ordinary completion wakes before judging the final README
 content. The outcome requires a real README change mentioning =SandboxManager=.
-Baseline N=3 precedes candidate N=1/N=3. Captures will be under
+Baseline trials 1 and 2 passed, but trial 3 left README unchanged, so the
+baseline stops at 2/3 and no candidate run is warranted. Captures are under
 =<capture-root>/dev-docs-v106/=.
