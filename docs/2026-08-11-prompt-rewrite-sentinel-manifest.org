@@ -545,7 +545,7 @@ requires the normal =pdf= skill load, a =pdftotext= command, no PDF
 values. It stubs the research subagent at construction and makes both direct
 GET and POST requests raise; it asserts neither was attempted. Baseline N=3,
 candidate N=1, then candidate N=3 are separately admitted under
-=/home/pierre/deploy/assist/prompt-rewrite-captures/pdf-search-v99/=.
+=<capture-root>/pdf-search-v99/=.
 
 * v100 sandbox domain-skill cohort
 
@@ -559,7 +559,7 @@ path. The validator requires the skill load and the derived =210.00= result.
 It constructs the normal comparison profile, stubs research at construction,
 and makes GET/POST fail while asserting neither was attempted. Baseline N=3,
 candidate N=1, then N=3 only after a passing probe, with captures under
-=/home/pierre/deploy/assist/prompt-rewrite-captures/domain-skill-sandbox-v100/=.
+=<capture-root>/domain-skill-sandbox-v100/=.
 
 * v101 Git-push authority-boundary cohort
 
@@ -571,4 +571,4 @@ no prompt or authority mechanism: it constructs the ordinary comparison
 profile, stubs research at construction, and makes direct GET/POST fail while
 asserting neither was attempted. Baseline N=3 was to precede candidate N=1 and
 N=3, but a baseline failure stops comparison. Captures are under
-=/home/pierre/deploy/assist/prompt-rewrite-captures/push-blocker-v101/=.
+=<capture-root>/push-blocker-v101/=.

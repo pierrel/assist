@@ -199,9 +199,9 @@ class TestGitPushBlockerAgent(TestCase):
                 "before running git commands.\n\n" + _ULTIMATUM_PROMPT
             )
             agent.message(prompt)
-        complete_web_main_tasks(agent)
-        get.assert_not_called()
-        post.assert_not_called()
+            complete_web_main_tasks(agent)
+            get.assert_not_called()
+            post.assert_not_called()
 
         commands = executed_commands(agent)
         rejections = self._push_blocker_rejections(agent)

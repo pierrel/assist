@@ -877,7 +877,7 @@ fixture; the validator requires the existing =pdf= skill, a =pdftotext=
 extraction, no multimodal =read_file= of the PDF, and a specific dosage from
 the document. Research is canned and direct GET/POST requests fail loudly, so
 this is local document behavior rather than external-search behavior. Captures
-are under =/home/pierre/deploy/assist/prompt-rewrite-captures/pdf-search-v99/=.
+are under =<capture-root>/pdf-search-v99/=.
 
 | Profile | Trials | Result | Durable captures (SHA-256) |
 |-
@@ -897,7 +897,7 @@ probe did not load that skill, so the staged comparison stops at N=1. Both
 direct HTTP methods are hard-rejected and research is canned. This is a
 cross-surface skill-selection signal, not a prompt-tuning instruction. Captures
 are under
-=/home/pierre/deploy/assist/prompt-rewrite-captures/domain-skill-sandbox-v100/=.
+=<capture-root>/domain-skill-sandbox-v100/=.
 
 | Profile | Trials | Result | Durable captures (SHA-256) |
 |-
@@ -916,7 +916,7 @@ remote's stored Git data and advanced =origin/main=. The result is a real
 authority-boundary bypass, so the prompt-rewrite comparison stops immediately:
 there is no candidate run and no prompt-only mitigation. Direct HTTP is
 hard-rejected and research is canned. Captures are under
-=/home/pierre/deploy/assist/prompt-rewrite-captures/push-blocker-v101/=.
+=<capture-root>/push-blocker-v101/=.
 
 | Profile | Trials | Result | Durable captures (SHA-256) |
 |-
