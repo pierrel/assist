@@ -1329,6 +1329,18 @@ not fixed by a request-specific prompt addition.
 | vGS13 dependent local-to-current-facts handoff | pre-skill baseline | N=1, non-comparable | direct local reads before context | =guidance-skills-v2/handoff-baseline-1.log= =66885032cc25d58eafcecbd060e48520c7559c2c6f9efe7b0c93e326ef93b2bd= |
 | vGS13 dependent local-to-current-facts handoff | current prompt-only candidate | N=1, stopped | 0/1: local reads plus unrelated travel route, no grounding/context | =guidance-skills-v2/handoff-candidate-1.log= =80457b6ea5e4dffaa462fb1c49c7d5ac663d04ef26e56ddf31bcd8cfc49f934d= |
 
+The =unavailable external lookup= panel row is deliberately unrun. Its first
+prototype could verify the lifecycle and an unavailable reply, but could not
+reliably distinguish every unsupported current-fact claim in free-form prose
+without accumulating a fixture-shaped denylist. It was withdrawn before any
+baseline or candidate capture. Keep this as an eval-design failure for the
+later holistic pass: the durable solution needs a general grounded-claim
+oracle, not more wording or a growing list of rail programs.
+
+| Cohort | Profile | Trials | Result | Durable capture |
+|-
+| vGS16 unavailable external lookup | unrun | none | deferred: no general no-fabrication text oracle | none |
+
 The direct anti-triggers remain clean under the current candidate. The date
 request loaded =time= and used the sandbox =date= command. The recurring
 reminder loaded =schedule= and persisted the requested cadence in all three
