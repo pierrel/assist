@@ -14,6 +14,68 @@ The candidate is isolated to the ordinary visible web-main profile and remains
 undeployed. Behavioral comparison starts only from the durable next-trial
 record through the production-priority admission process in the baseline audit.
 
+The displayed first-candidate static prompt below is historical. Its mandatory
+first-turn context-dispatch language and associated candidate-only prompt
+experiments were deliberately withdrawn after they proved brittle and
+eval-shaped. The current candidate is the checked-in =assist_core.md.j2= under
+the same web-main-only composition seam. Current behavioral evidence and the
+side-specific profile capture are recorded in
+=2026-08-11-prompt-rewrite-sentinel-results.org=.
+
+* Post-v109 holistic review: proposed next candidate, pending review
+
+Three fresh, independent outcome cohorts expose a current-candidate reliability
+loss: local plan creation, answering from available local profile facts, and
+completing two requested reports. Their current baseline is 9/9; the candidate
+stopped at 0/3 first probes. This is not evidence for a plan-, profile-, or
+report-specific rider. It is enough evidence to pause broader coverage and
+review the kernel as a whole.
+
+The current core explains what to do /after/ a context task completes, but it
+does not express the product decision to obtain relevant local evidence before
+claiming it is unavailable, asking the user for it, or deciding a local result.
+The historical first candidate tried to encode that decision as an exact first
+tool call, which collided with other procedural prompt blocks. The next
+candidate must not restore that tool-order contract.
+
+The proposed candidate-only changes are two outcome-level principles, each
+placed in the current core's Purpose/Evidence guidance rather than a skill,
+tool schema, or middleware block:
+
+#+begin_example
+For a request involving the user's files or personal information, gather
+relevant available local evidence before saying it is absent, asking the user
+for it, or deciding what to change.
+
+For a request with explicit deliverables, complete and verify every requested
+deliverable before presenting the request as done.
+#+end_example
+
+This remains a compact product kernel: it names no tool, skill, task type,
+file path, source format, report label, first-turn order, memory operation, or
+test fixture. Existing skills and runtime blocks still own how local evidence
+is discovered and how an artifact is produced. No tool, routing, state,
+middleware, or guard change is proposed.
+
+These are distinct causal candidates and must not first be tested together:
+
+1. Candidate v2a adds only the local-evidence principle. Run v107 fitness plan
+   and v108 local-grounded answer at N=1 against their retained baselines.
+   Also run the current-candidate-parity v56 honest local-edit cohort as a
+   no-regression anchor. If either target or that anchor fails, stop and record
+   the variant; otherwise repeat v107, v108, and v56 at N=3 before advancing.
+2. Candidate v2b starts from the current candidate and adds only the
+   deliverable-completeness principle. Run v109 two reports at N=1 and use the
+   current-candidate-parity v81 Elisp authoring-and-verification cohort as its
+   no-regression anchor. If either fails, stop and record the variant; otherwise
+   repeat v109 and v81 at N=3 before advancing.
+3. Only if each standalone principle reaches its relevant N=3 result should a
+   combined candidate v2c run all three target rows and both no-regression
+   anchors at N=1, then all five rows at N=3 before broader coverage resumes.
+
+A continued failure is a reason to reconsider the core/skill boundary rather
+than append another clause.
+
 * Objective and boundaries
 
 The experiment asks whether a compact product kernel plus loaded skills keeps
