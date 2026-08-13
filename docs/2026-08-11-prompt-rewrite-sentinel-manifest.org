@@ -473,3 +473,15 @@ recipient, nonempty subject, and Tuesday meeting-change body; the graph pauses
 before provider delivery. Agent construction is inside canned research and
 generic URL fetching hard-fails. Baseline N=3 and candidate N=1 then N=3
 captures are under =/home/pierre/deploy/assist/prompt-rewrite-captures/email-v93/=.
+
+* v94 bounded website-download cohort
+
+The natural prompt asks the agent to download the Fathom Tide Kettle user manual
+PDF from a supplied site, save it to the workspace, and report its page count.
+The existing =prompt_rewrite_web_main_spec()= fixture retains the real
+=explore-website= skill and download workflow but serves every URL read from a
+strict in-memory site. It validates the intended PDF was downloaded, no asset
+dead ends were read, page traversal stayed bounded, and the skill was loaded.
+Agent construction is inside canned research; the local site replaces all
+network access. Baseline N=3 and candidate N=1 then N=3 captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/website-v94/=.
