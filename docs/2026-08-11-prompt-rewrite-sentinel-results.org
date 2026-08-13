@@ -55,6 +55,7 @@ signals, not prompt-tuning instructions.
 | v103 weekly review | superseded incomplete-oracle / infrastructure attempt | =test_edit_files.py::TestPromptRewriteWeeklyReview::test_weekly_review_completes_and_reconciles= | r2 exhausted model retries before action; review then added preservation and exact-marker requirements | =weekly-review-v103/baseline-2.log= SHA-256 =202a5b65bfc6649831bca71d0fdc8812cd15a6f511490be87327be2e3b22e920= |
 | v105 weekly review | baseline N=1, discarded validator attempt | =test_edit_files.py::TestPromptRewriteWeeklyReview::test_weekly_review_completes_and_reconciles= | reused =Renew the parking permit= from a different bulk-edit scenario as a required deletion; the natural weekly-review request correctly retains it | =weekly-review-v105/baseline-1.log= SHA-256 =1b4a9243ee7a570765e785ee3cf4834285af707fb44111de0805a90e8e860c30= |
 | v105 weekly review | candidate N=2, stopped comparison | =test_edit_files.py::TestPromptRewriteWeeklyReview::test_weekly_review_completes_and_reconciles= | completed the requested edits but derived =# ACTIVE: 8= despite the resulting file containing 11 TODO headings | =weekly-review-v105/candidate-2.log= SHA-256 =e6736c3fd44a8dfe1ee2d560dca2eda2377b44b2e92b814dec46e10660f5ea2f= |
+| v106 development documentation | baseline N=3, stopped comparison | =test_dev_agent.py::TestPromptRewriteDevDocumentation::test_updates_documentation= | third full-workspace trial left README unchanged | =dev-docs-v106/baseline-3.log= SHA-256 =bad17e23420f8e75428d714f9acaac13bba7974781a611c03935bac27b65b1e6= |
 
 ** Current pattern candidates
 
@@ -71,9 +72,10 @@ instructions to tune the current prompt.
   separate product areas, but both leave a requested durable state change
   incomplete without a tool error.
 - *Scale or lifecycle-shaped incompletion:* v70 returned empty after a supplied
-  completion wake, v77 stalled on a copied full workspace, and v82 left the
-  dense roadmap unchanged. Treat this as a distinct reliability cluster from
-  small local edits, which have multiple retained parity rows.
+  completion wake, v77 stalled on a copied full workspace, v82 left the dense
+  roadmap unchanged, and v106 left the copied-workspace README unchanged.
+  Treat this as a distinct reliability cluster from small local edits, which
+  have multiple retained parity rows.
 - *Fixture/oracle drift, not behavior evidence:* v77 pre-wake, v83, v84,
   v86's first attempt, and v105 baseline r1 were discarded because their
   harness did not model the web completion lifecycle or current deterministic
@@ -1002,6 +1004,19 @@ warranted and no prompt change follows.
 |-
 | baseline | N=3 | 3/3 | =baseline-1-valid.log= =c5c3a5ebb3ed79cd200ceb647a89dde80589cabe46a6178162149a5e9e53ee11=; =baseline-2.log= =a6928d08ad4693cb5e268d03d987b97ea5428abf3425bfc4ec2e5145d1592adf=; =baseline-3.log= =29b3e61706d5247798e6f5690f313c80540e9a76fd01b031b333b6e211ac5e56= |
 | candidate | N=2, stopped | 1/2 | =candidate-1.log= =9710b631a2262e3cb368e12059e9b3696c6047c999fa3756e9687c9f1b885f20=; =candidate-2.log= =e6736c3fd44a8dfe1ee2d560dca2eda2377b44b2e92b814dec46e10660f5ea2f= |
+
+* v106 development documentation-update cohort: stopped baseline
+
+This full-workspace web-main fixture uses the real Docker sandbox and private
+=/agent= mount, canned research, direct HTTP rejection, and ordinary completion
+wakes. It verifies a real README update that explains =SandboxManager= and
+contrasts =DomainManager=. Baseline r1-r2 passed, but r3 left README unchanged.
+The baseline is therefore 2/3, no candidate run is warranted, and no prompt
+change follows. Captures are under =<capture-root>/dev-docs-v106/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3, stopped | 2/3 | =baseline-1.log= =b8b744160594d5867b0af1d1493b90758f8797626f159592c0f5211881e35f7c=; =baseline-2.log= =87fb916c7004d4651dcd9e8f4321b3cda2d279cfe2aab7165e918db1b74690d4=; =baseline-3.log= =bad17e23420f8e75428d714f9acaac13bba7974781a611c03935bac27b65b1e6= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
