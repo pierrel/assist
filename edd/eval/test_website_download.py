@@ -26,9 +26,9 @@ from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 from assist.agent import create_agent, AgentHarness
 from assist.checkpoint_rollback import invoke_with_rollback
 from assist.model_manager import select_assistant_model
-from assist.spec import AgentSpec
 
-from .utils import create_filesystem, skill_was_loaded, stub_research_subagent
+from .utils import (create_filesystem, prompt_rewrite_web_main_spec,
+                    skill_was_loaded, stub_research_subagent)
 
 # --- the fictional site (clearly not real; .example is reserved) --------------
 _BASE = "https://www.fathomcoffee.example"
@@ -138,7 +138,7 @@ class TestWebsiteDownload(TestCase):
         with mock.patch("assist.tools.requests.get", _mock_requests_get), \
              stub_research_subagent():
             agent = create_agent(self.model, root, sandbox_backend=backend,
-                                 spec=AgentSpec())
+                                 spec=prompt_rewrite_web_main_spec())
             harness = AgentHarness(agent, thread_id="eval-web-dl")
             # 220 = headroom for a legit ~5-tool-call navigation through the
             # deep middleware stack (each model turn is many supersteps), still

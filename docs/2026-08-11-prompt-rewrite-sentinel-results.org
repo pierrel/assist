@@ -37,6 +37,8 @@ signals, not prompt-tuning instructions.
 | v67 Markdown task | baseline N=1 | =test_org_format_skill.py::TestOrgFormatSkill::test_md_file_uses_markdown_conventions= | left =tasks.md= unchanged | =markdown-v67/baseline-1.log= SHA-256 =d63f997be6b6a97bc3608d6cab0b4c3a67ba2faa8567802d327f1e213df2924a= |
 | v69 local-only egress | baseline N=1 | =test_egress_approval.py::TestEgressApproval::test_no_gratuitous_requests= | treated local =bike.org= filename as a URL, then requested egress approval | =egress-local-v69/baseline-1.log= SHA-256 =8ea8c4eb183a53ba65cfbd471b2db85e8ac055c807710c34937ccd45e2b8f904= |
 | v70 task discovery/update | candidate N=1 | =test_domain_integration.py::TestPromptRewriteDomainTask::test_finds_and_updates_task_with_web_main_prompt= | empty final response after deterministic completion wake | =domain-v70/candidate-1.log= SHA-256 =3dbe58f0a18ab93fcb9ce6631d12b66cb402690bc08799f16aa8c149a5f1c316= |
+| v77 dev explanation pre-wake | baseline N=1, discarded fixture attempt | =test_dev_agent.py::TestDevAgent::test_explains_codebase= | graded the context-launch acknowledgement before delivering the normal completion wake | =dev-explain-v77/baseline-1.log= SHA-256 =12682c27edbf6892a65045521b56456273f982904a87d81f10a1027d8ba0f5a9= |
+| v77 dev explanation valid lifecycle | baseline N=1b, stopped scale probe | =test_dev_agent.py::TestDevAgent::test_explains_codebase= | no final output after two minutes on the copied full-codebase workspace; terminated to release the model slot | =dev-explain-v77/baseline-1b.log= (empty capture; terminated) |
 
 * Current v21 iteration
 
@@ -522,6 +524,17 @@ evening change disappeared while the earlier morning and noon work remained.
 |-
 | baseline | N=3 | 3/3 | =baseline-1.log= =8e43eb27e832062f74b91e15f48d61d4d190c08d84943e76770c76b4e0b8bbe0=; =baseline-2.log= =084b6718520b346212d31ce861398f920dd25c0be8e223973864eab41a5f918f=; =baseline-3.log= =87d93996d05f4b2cf927c744659c3adee3a0e0c28b940a5c5e173901f8f70ca6= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =0c9c90071383e4714058c03baf92d5f6be70c838cb927162cafc115c957d8f4b=; =candidate-2.log= =2526a70c88bb37a9b441065a0e65cf942d27712ce4ab7f67c5c39ff244db2535=; =candidate-3.log= =c3f37ef99b4c4e91cfea2a4ab2f5af0bc01058203dd0afc8f3456c5b6222f5ec= |
+
+* v78 mocked website-download cohort
+
+Both profiles completed the bounded two-hop website journey N=3: each loaded
+=explore-website=, downloaded the correct manual PDF, and did not crawl any
+asset dead ends or over-fetch pages.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =5e9d8aa7d6478981f1a75ce7515ebfd7309449e67bb3b8a94f6c5330cce81919=; =baseline-2.log= =727867dc08cfe10c844e433863eaa4100858604837e44ee633801162c71b1d7d=; =baseline-3.log= =c4fcf55901af9ce124ccfd7f9600eafffba93374bd2f238bc2e0bb13864dc259= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =507f4809cf2f70eb02b745c7f82397aa0272b85a0caa3e0f8bc4a1aca63cb740=; =candidate-2.log= =d22ce884cc5cf307cf5a0e104bed365a84900b608f6966c07a23cbc8d56ebdfa=; =candidate-3.log= =eb76aa06f04f2b9991ca6c56ad85d508b8f8015b22ec9c6de594f7abc983122c= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
