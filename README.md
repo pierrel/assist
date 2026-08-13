@@ -27,7 +27,9 @@ where reliability is harder than with frontier APIs.
 - **Small-LLM-tuned skills.** Shared, domain-repository, and embedder-supplied
   skills are progressively-disclosed capability bundles. Assist-owned skills
   live under `assist/skills/<name>/SKILL.md`; supervisor-only workflows live
-  under `assist/main_skills/`; domain skills use `.claude/skills/`.
+  under `assist/main_skills/`; domain skills use `.claude/skills/`. The
+  candidate web-main profile also has grounding and research guidance skills
+  that direct the existing context and research workers without adding tools.
 
 - **Web-path sandboxing.** When Docker is available, web turns run filesystem
   and code tools inside a per-turn container with the workspace bind-mounted at

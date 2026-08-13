@@ -204,13 +204,6 @@ class TestSpecWiring(_CreateAgentHarness):
 
         assert WEB_MAIN_SKILLS_ROUTE not in ordinary_skills.sources
         assert candidate_skills.sources[0] == WEB_MAIN_SKILLS_ROUTE
-        assert candidate_skills._supplemental_tool_disclosures == {
-            "grounding": frozenset({
-                "write_todos", "ls", "read_file", "write_file", "edit_file",
-                "glob", "grep", "start_async_task",
-            }),
-            "research": frozenset({"start_async_task"}),
-        }
         assert isinstance(candidate["backend"].routes[WEB_MAIN_SKILLS_ROUTE],
                           BundledSkillsBackend)
         assert "# Grounding workflow" in load_skill(candidate_skills, "grounding")

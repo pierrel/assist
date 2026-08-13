@@ -171,19 +171,13 @@ On a local-context request Qwen therefore chose =glob=/=read_file=; on an
 external-fact request it chose =start_async_task(research-agent)=. Both routes
 bypassed the named skill despite the candidate core and catalog descriptions.
 
-The candidate therefore extends progressive disclosure only for these two
-web-main skills. The existing local filesystem/execute and async-launch schemas
-remain visible, so the framework's filesystem and memory guidance stays true.
-Before the matching skill loads, the same existing after-model guard rejects a
-guidance-owned local or async-launch call before it executes and tells the model
-to load its matching skill. Loading =grounding= authorizes the local-work and
-context-launch surface; loading =research= authorizes only the existing
-research-launch surface. =check_async_task= remains directly available because a
-completion wake begins a new graph invocation after progressive state resets.
-This is a bounded execution boundary, not a semantic router: self-contained
-tools and every non-candidate profile retain prior visibility and behavior.
-Census/profile tests prove the scope; capability rows prove that a rejected
-bypass cannot run and the subsequent load dispatches the intended existing worker.
+The candidate adds only the two web-main skill sources and their catalog/core
+guidance. Existing local filesystem, execution, and async-launch schemas remain
+visible and retain their ordinary authorization behavior. The loaded contracts
+instruct the model which existing worker to use; they do not create a new
+tool-gating or argument-routing mechanism. Census/profile tests prove source
+scope, and capability rows measure whether the model follows the loaded
+procedure without overstating a prompt preference as deterministic enforcement.
 
 * Objective and boundaries
 
