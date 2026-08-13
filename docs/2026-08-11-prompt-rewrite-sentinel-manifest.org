@@ -662,5 +662,7 @@ ordinary web-main lifecycle fixture with synthetic completed child work, a
 real temporary workspace, and direct GET/POST rejection. The validator requires
 each persisted report to contain its own recommendation, risks, and next actions
 while preserving both sources; it does not require a particular skill or
-delegate trace. Baseline N=3 precedes candidate N=1/N=3. Captures will be under
+delegate trace. Its initial baseline attempt was discarded because the new
+validator passed report bytes to its text parser after the reports were created.
+The corrected baseline N=3 precedes candidate N=1/N=3. Captures will be under
 =<capture-root>/two-reports-v109/=.

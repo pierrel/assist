@@ -1383,7 +1383,7 @@ class TestPromptRewriteTwoReports(TestPromptRewriteIndependentBriefs):
             self.assertEqual(_read_judge_evidence(source_path), source,
                              f"agent changed {source_path.name}")
             report = self._validated_field_evidence(
-                _read_judge_evidence(report_path),
+                _read_judge_evidence(report_path).decode(),
                 ("recommendation", "risks", "next actions"),
             )
             source_id = f"{workstream}-source"
