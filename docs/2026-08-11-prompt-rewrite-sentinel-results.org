@@ -1158,13 +1158,10 @@ separately failed local-evidence principle should be combined with it.
 This is the active follow-on to v2b. The candidate keeps the ordinary web-main
 prompt composition and existing lifecycle tools, then adds a candidate-only,
 read-only =/web-main-skills/= prompt source. It contains =grounding= and
-=research= only; no new action tools, worker descriptions, state, or semantic
-routing changed. The candidate does extend the existing progressive-skills
-after-model enforcement so the two skills own their existing local/lifecycle
-entry tools: an un-loaded bypass is rejected before execution, then the loaded
-skill authorizes the appropriate existing worker procedure. The compact candidate
-core directs applicable local-context requests to =grounding= and applicable
-external-fact requests to =research=.
+=research= only; no new action tools, worker descriptions, state, tool gating,
+or semantic routing changed. The compact candidate core directs applicable
+local-context requests to =grounding= and applicable external-fact requests to
+=research=; the loaded skills describe how to use the existing workers.
 
 The pre-skill baseline uses the exact v2b web-main prompt with the new source
 opt-in disabled. Candidate and baseline profile captures are deterministic and
@@ -1174,8 +1171,8 @@ The paired initial/final profile hashes are baseline
 =7e038465ec3a215bb8b2775c9cf8c73cb22de442c7558af9652c60201d6631f2= /
 =7062e214a2741998c933fe9d61e6cc9eee4273c4a8c95b8b4625331fe2d1b976=
 and candidate
-=816f053b0cbb5f919109ac3926598d5031238f846d5220e0830bc604d3c1db03= /
-=e64c8f1806fa7d559c1fa4c914f59e283baf687dabd8c900f67b53010b70a2d8=.
+=7555622b1db5ec2f2f8662c6a8d8916a9ff33c8449fffe0d0c9fc36114b6fa75= /
+=4065a293fd326fc208cf1c13324676a0f92b304d656162038e1be22e83319cae=.
 
 | Cohort | Profile | Trials | Result | Durable capture (SHA-256) |
 |-
@@ -1212,13 +1209,15 @@ it produced the same behavior. A candidate-only Skills-prompt priority rider was
 then tried and discarded: r3 still bypassed =grounding= for =glob=/=read_file=,
 while the parallel research r2 bypassed =research= and directly launched the
 existing =research-agent=. The rider therefore added no selection reliability and
-is not part of the current candidate. The current candidate instead retains the
-truthful framework schemas and uses the existing no-hidden-call guard to reject
-the initial un-loaded local/lifecycle call. Both capability rows then loaded the
-named skill and dispatched its existing worker. The first natural local-grounding
-row initially failed because the generic lifecycle fixture returned no local fact;
-the repaired fixture supplies the checked =profile.org= evidence that a real
-context worker would return. Current baseline and candidate each passed N=3.
+is not part of the current candidate. A short-lived supplemental after-model
+gate then rejected un-loaded local/lifecycle calls, but local review found that
+it also broke ordinary skills sharing those tools and could not bind an async
+launch to its intended worker. It was removed rather than expanded. Its r5/r3
+capability passes are historical diagnostic evidence only, not current candidate
+evidence. The first natural local-grounding row initially failed because the
+generic lifecycle fixture returned no local fact; the repaired fixture supplies
+the checked =profile.org= evidence that a real context worker would return.
+Current baseline and candidate each passed N=3 before the gate removal.
 The direct schedule anti-trigger also passed N=3 for both profiles, so the
 candidate did not force grounding/research before a self-contained matching
 capability. The pure external-fact row likewise passed N=3 for both profiles:
@@ -1249,14 +1248,12 @@ was buffered and therefore empty after termination, so the run cannot support a
 behavioral failure claim beyond non-completion. A future bounded rerun must use
 unbuffered capture if this anchor is needed for a merge decision.
 
-vGS6 found and corrected a scope error in the new candidate-only authorization
-map. =execute= is not a grounding entry tool: adding it made a separately loaded
+vGS6 exposed the supplemental gate's overreach: it made a separately loaded
 =time= skill appear unable to use its ordinary date command. R1 therefore
-returned an honest refusal instead of a weekday. The map now owns only local
-filesystem and lifecycle entry tools, so R2 loaded =time=, ran =date=, and
-answered correctly. This is a general authorization-boundary correction, not a
-time-specific prompt change; its paired pre-skill baseline must be refreshed
-before treating the row as parity evidence.
+returned an honest refusal instead of a weekday. Removing the gate restores the
+ordinary tool surface, and R2 loaded =time=, ran =date=, and answered correctly.
+The rejected gate and both runs are kept as diagnostic evidence; a fresh
+pre-skill baseline is needed before this row is used as parity evidence.
 
 vGS7 validates the natural request to find the user's next task and move its
 due date to 2026-11-07. It builds the real local Org task file, provides an
@@ -1268,11 +1265,38 @@ dropped a direct agent response whenever no async task had launched; it now
 retains that response before judging. The repaired baseline and candidate both
 passed N=3 without an added task-specific prompt rule.
 
-vGS8 provides an adjacent execution check after vGS6 narrowed grounding's
-authorization surface: the candidate loaded =calculate=, ran Python in the
-real sandbox, and returned the requested compound-growth value. The historical
-v2b N=3 control remains documented above; a fresh pre-skill run is still needed
-before this probe is used as paired parity evidence.
+vGS8 provides an adjacent execution check after vGS6 removed the supplemental
+gate: the candidate loaded =calculate=, ran Python in the real sandbox, and
+returned the requested compound-growth value. The historical v2b N=3 control
+remains documented above; a fresh pre-skill run is still needed before this
+probe is used as paired parity evidence.
+
+** Review reset
+
+The local implementation review found the supplemental after-model gate was not
+safe: shared filesystem and lifecycle tool names made unrelated ordinary skills
+unavailable, and a name-only check could not constrain =start_async_task= to
+the worker named by a loaded guidance skill. The gate was removed in favor of
+the approved prompt-only design. Consequently, every candidate result in vGS1
+through vGS8 above is historical diagnostic evidence for the withdrawn gate,
+not current-candidate evidence. Pre-skill baseline captures remain valid where
+their fixtures have not changed. The next current candidate row starts again at
+N=1 with no tool-gating, then promotes only after it passes.
+
+** Current prompt-only selection probes
+
+The first no-gate candidate probes use the current profile hashes above and
+hard-reject HTTP. The local-context request again called =glob= twice and then
+=read_file= without loading =grounding=, so it fails the selection contract and
+is recorded for the later holistic failure-pattern review. The separate
+current-facts request did load =research= and then dispatch =research-agent=,
+so it is a promising N=1 capability result only. It must be repeated before it
+can support a comparison claim; neither row establishes parity.
+
+| Cohort | Profile | Trials | Result | Durable capture (SHA-256) |
+|-
+| vGS9 local grounding selection | current prompt-only candidate | N=1 | 0/1: direct local reads, no =grounding= load | =guidance-skills-v2/grounding-core-r2.log= =d4ecd0ffda80083df8a6114e8b305fa231178ae6be5a2c23e693c92dffd0efba= |
+| vGS10 external research selection | current prompt-only candidate | N=1 | 1/1: loaded =research= then dispatched =research-agent= | =guidance-skills-v2/research-core-r2.log= =9030608d3f29a7dbfe04d98a8efee27a38560b7f2cdfccaa034953e47f475e8c= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 

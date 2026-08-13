@@ -94,30 +94,6 @@ def test_request_filters_only_winning_bundled_declarations_and_preserves_order()
         updated.system_message)
 
 
-def test_supplemental_disclosure_can_own_an_existing_framework_tool():
-    middleware = SmallModelSkillsMiddleware(
-        backend=Mock(), sources=["/web-main-skills/"],
-        bundled_sources=["/web-main-skills/"],
-        registered_tools=["travel"],
-        supplemental_tool_disclosures={"grounding": ["glob"]})
-    skill = {
-        "name": "grounding", "description": "Local context.",
-        "path": "/web-main-skills/grounding/SKILL.md", "allowed_tools": [],
-        "license": None, "compatibility": None, "metadata": {},
-    }
-    state = {"skills_metadata": [skill], "loaded_skill_tools": frozenset()}
-
-    visible = middleware.modify_request(_request(
-        middleware, state, tools=(kernel_tool, glob)))
-    assert [item.name for item in visible.tools] == ["kernel_tool", "glob"]
-    assert not middleware._tool_is_allowed(state, "glob")
-
-    opened = middleware.modify_request(_request(
-        middleware, {**state, "loaded_skill_tools": frozenset({"glob"})},
-        tools=(kernel_tool, glob)))
-    assert [item.name for item in opened.tools] == ["kernel_tool", "glob"]
-
-
 def test_external_winner_stays_baseline_visible():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/", "/external/"],

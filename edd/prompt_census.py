@@ -1738,6 +1738,7 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "d0bf608e2e7b8c0b5bad52e2dd87fe17b91f357d06bb449742406f08230eb32d",
         "cbc483e291b07adf34e6be71a409f486bee4de7a6f520f0c15994ede69dbf30c",
         "41d234fb460cd2a09f3ff18bef2b243b99f8f0faa5d444763f30c7ee314b0cfe",
+        "c4ac60cad1b9ed89cd617682eefa1b300b29166725d873bb8e41af7272bda233",
     },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
@@ -2019,8 +2020,7 @@ def _expected_tool_results() -> dict[str, str]:
     return {
         "synthetic-call-grounding-load":
             _expected_skill_file("synthetic-call-grounding-load")
-            + "\n\nNewly available tools: edit_file, glob, grep, ls, "
-            "read_file, start_async_task, write_file, write_todos.",
+            + "\n\nNo additional tools became available.",
         "synthetic-call-safe-exec":
             "SYNTHETIC_EXECUTE_OK\n[Command succeeded with exit code 0]",
         "synthetic-call-git-push":
@@ -2075,13 +2075,8 @@ def _expected_load_artifact(tool_call_id: str) -> dict[str, str]:
         skill_file, f"/{requested_name}/SKILL.md", requested_name)
     if metadata is None:
         raise AssertionError("declared load result metadata did not parse")
-    allowed_tools = (
-        ["edit_file", "glob", "grep", "ls", "read_file",
-         "start_async_task", "write_file", "write_todos"]
-        if tool_call_id == "synthetic-call-grounding-load"
-        else list(metadata["allowed_tools"]))
     fingerprint_payload = {
-        "allowed_tools": allowed_tools,
+        "allowed_tools": list(metadata["allowed_tools"]),
         "skill_file_sha256": hashlib.sha256(
             skill_file.encode("utf-8")).hexdigest(),
         "description": metadata["description"],
@@ -2117,7 +2112,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "5ef7fc64dd9593f0ed5b16468ab00e61abb0580875c73ddfdfe487c52e97a1fc"
+    "715a432fbeb616c10e598cff88cd286996799755aa7ae8fd41c625b29003f06d"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2964,15 +2959,7 @@ def _skill_tool_owners(source_manifest: list[dict[str, Any]], *,
             continue
         if _packaged_skill_path(source) is None:
             continue
-        declared_tools = list(source["allowed_tools"])
-        if scenario in {"web-main-core", "web-main-full"}:
-            if source["name"] == "grounding":
-                declared_tools.extend((
-                    "write_todos", "ls", "read_file", "write_file", "edit_file",
-                    "glob", "grep", "start_async_task"))
-            elif source["name"] == "research":
-                declared_tools.append("start_async_task")
-        for tool_name in declared_tools:
+        for tool_name in source["allowed_tools"]:
             owners.setdefault(tool_name, []).append(source["name"])
     return {name: sorted(set(skill_names))
             for name, skill_names in owners.items()}

@@ -78,20 +78,6 @@ def _tool_name(tool_value) -> str:
         raise TypeError(f"tool has no registered name: {tool_value!r}")
     return name
 
-
-# The candidate's guidance skills own the existing local-work entry surface.
-# They do not register tools: this only makes already-bound tools visible after
-# the matching skill loads. ``check_async_task`` stays available for completion
-# wakes, which start a fresh graph invocation after skill state resets.
-_WEB_MAIN_GUIDANCE_TOOL_DISCLOSURES = {
-    "grounding": frozenset({
-        "write_todos", "ls", "read_file", "write_file", "edit_file", "glob",
-        "grep", "start_async_task",
-    }),
-    "research": frozenset({"start_async_task"}),
-}
-
-
 # No auto-added `general-purpose` subagent, anywhere assist builds a deep
 # agent. Evidence (prod logs, 2026-07-21): every observed general-purpose
 # dispatch was misrouted work belonging to a NAMED agent — context-agent
@@ -446,9 +432,6 @@ def create_agent(model: BaseChatModel,
         # and visibility unchanged.
         gated_sources=(() if legacy_skill_composition else skill_sources),
         registered_tools=(_tool_name(tool_value) for tool_value in agent_tools),
-        supplemental_tool_disclosures=(
-            _WEB_MAIN_GUIDANCE_TOOL_DISCLOSURES
-            if spec.web_main_guidance_skills else None),
     )
     memory_mw = SmallModelMemoryMiddleware(
         backend=backend, memories_path=memories_path,
