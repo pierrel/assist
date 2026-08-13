@@ -378,3 +378,16 @@ An initial literal-word confirmation assertion was discarded because the
 durable schedule was correct and the agent truthfully described the reminder
 and next run. Baseline N=3 and candidate N=1 then N=3 captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/schedule-v84-valid/=.
+
+* v85 incoming-text subscription cohort
+
+The natural prompt is: “Whenever a text comes in from a 415 number, check
+whether it is asking to schedule something and draft a short reply for me to
+review.” The fixture supplies real subscription tools over a temporary
+thread-scoped disk-backed store. It builds =prompt_rewrite_web_main_spec()=
+inside the standard canned-research context and hard-rejects host URL fetches.
+The validator requires exactly one persisted subscription whose sender matcher
+contains =415= and whose reply template covers scheduling and a reply, plus a
+user-visible subscription confirmation. It asserts no lifecycle or
+skill-loading order. Baseline N=3 and candidate N=1 then N=3 captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/subscription-v85/=.
