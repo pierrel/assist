@@ -242,6 +242,64 @@ class TestPromptRewriteFitnessPlan(TestCase):
         self.assertTrue(response.strip(), "The user should receive a completion response")
 
 
+class TestPromptRewriteLocalGrounding(TestCase):
+    """Compare a local factual answer in the ordinary web-main shape."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = select_assistant_model(0.1)
+
+    def setUp(self):
+        self.workspace = tempfile.mkdtemp(prefix="local_grounding_eval_")
+        self.agent_dir = tempfile.mkdtemp(prefix="prompt_rewrite_grounding_agent_")
+        create_filesystem(self.workspace, {
+            "README.org": "Personal details are in profile.org.",
+            "profile.org": dedent("""\
+                * Me
+                Home: Lakeside neighborhood, Centerville
+                Food: noodles and dumplings
+                """),
+        })
+        self.sandbox = SandboxManager.get_sandbox_backend(
+            self.workspace, agent_dir=self.agent_dir)
+        if self.sandbox is None:
+            self.skipTest("Docker sandbox unavailable — is Docker running and assist-sandbox built?")
+        reset_task_fixture()
+
+    def tearDown(self):
+        SandboxManager.cleanup(self.workspace)
+        cleanup_workspace(self.workspace)
+        shutil.rmtree(self.agent_dir, ignore_errors=True)
+
+    def test_answers_dinner_preferences_from_local_profile(self):
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("local-grounding eval must not fetch URLs")) as get, \
+             patch("assist.tools.requests.post",
+                   side_effect=AssertionError("local-grounding eval must not post URLs")) as post, \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model,
+                self.workspace,
+                agent_dir=self.agent_dir,
+                sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec(),
+            ))
+            initial_response = agent.message(
+                "I'm choosing dinner at home tonight. What neighborhood am I in, "
+                "and what food do I usually like?")
+            completion_response = complete_web_main_tasks(agent)
+        get.assert_not_called()
+        post.assert_not_called()
+
+        response = (completion_response if agent_tool_calls(agent, "start_async_task")
+                    else initial_response)
+        self.assertTrue(response.strip(), "The user should receive an answer")
+        self.assertRegex(response, r"(?i)lakeside|centerville",
+                         "The answer must use the saved neighborhood")
+        self.assertRegex(response, r"(?i)noodles?.*dumplings?|dumplings?.*noodles?",
+                         "The answer must use the saved food preferences")
+
+
 def _extract_dollar_amounts(text: str) -> list[float]:
     """Pull dollar amounts out of free-form text in common shapes.
 
