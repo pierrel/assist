@@ -520,3 +520,15 @@ record one pending =api.github.com= request and the reply must explain the
 approval need without retrying. Direct URL fetching hard-fails and agent
 construction uses canned research. Baseline N=3 and candidate N=1 then N=3
 captures are under =/home/pierre/deploy/assist/prompt-rewrite-captures/egress-v97/=.
+
+* v98 independent launch-brief cohort
+
+The natural prompt asks for separate launch briefs from =alpha-notes.md= and
+=beta-notes.md= while the user works on the agenda. The comparison-only
+=TestPromptRewriteIndependentBriefs= uses =prompt_rewrite_web_main_spec()=,
+the real lifecycle surface, and deterministic delegate results. Its bounded
+outcome judge validates each generated brief's required decision fields against
+the unchanged source notes. Research is canned and both direct HTTP methods
+hard-fail. Baseline N=3 and candidate N=1 then N=3 are staged under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/independent-briefs-v98-final/=;
+a baseline failure stops the cohort before candidate comparison.
