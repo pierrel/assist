@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from assist.agent import AgentHarness, create_agent
 from assist.domain_manager import clone_repo
@@ -86,11 +86,14 @@ class _HistoryScenario(TestCase):
         # The rollback is fully local to the temporary branch. Use the same
         # comparison web-main shape and canned research worker as other
         # prompt-rewrite rows so provider availability cannot affect it.
-        with stub_research_subagent():
+        with mock.patch("assist.tools.requests.get",
+                        side_effect=AssertionError("git-history eval must not fetch URLs")) as get, \
+             stub_research_subagent():
             agent = AgentHarness(create_agent(
                 self.model, self.workspace, sandbox_backend=self.sandbox,
                 spec=prompt_rewrite_web_main_spec()))
-        agent.message(prompt)
+            agent.message(prompt)
+        get.assert_not_called()
         return agent
 
     def _exists(self, name):
