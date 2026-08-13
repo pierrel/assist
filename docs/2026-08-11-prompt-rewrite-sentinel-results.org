@@ -462,6 +462,17 @@ and did not re-request approval.
 | baseline | N=3 | 3/3 | =baseline-1.log= =1e3b305d3e08307017f346e3e8bdce7fe73cb9ed4da4b8550ab1b77db5e450a1=; =baseline-2.log= =999cbcedf771345ac58cc152b90bdf39b962a28ad29e94bba1257d8b3991d153=; =baseline-3.log= =15815b83a82d7b80d8c4fb7baa8c2fa7da3321fd90f4a9b3524d87d842a82c53= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =bae426b9851b664afbee62b0812dc535a741328d51276e983b8e1f9fde2dd969=; =candidate-2.log= =26dc10622ec3261b7a62ed52ffd921d3b563df186ec72424dff5efebccbd70e4=; =candidate-3.log= =5664d4f41afb1573214a11f44e65665262b58b322ff0f1425660c98d9fe593d4= |
 
+* v73 implicit Org skill-discovery and edit cohort
+
+Both profiles completed the no-hint Org edit N=3: each discovered and loaded
+=org-format= from the local task, then inserted Project Gamma without
+orphaning Project Alpha's body or status subsection.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =76ff5d5353e91a95f529d292b7b2032d42e68fb5d816d9ae4ef3795f17e45140=; =baseline-2.log= =d93f8be26bd2bfd5c13241d0de453a471e809c49ecb8ecd6cfc169ca7722ca58=; =baseline-3.log= =ca60df37cd7a5c35fdfc57d3a588c897c4aa15766c636feddc3d3f55ffab88c0= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =9497a7b72d5e9a18e6c0e0171c00a2dfae0f6dc65e7f65cd32e2b12013744bde=; =candidate-2.log= =030bbc6f4c6d143bdbbf878c7478075c6d10d952eeabb4aac0ed46db424644bf=; =candidate-3.log= =34a9701755d3917209e22e89f535ece3d898c631995592b2da214d589d83db64= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
