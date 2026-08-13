@@ -211,7 +211,7 @@ lifecycle harness, or an ambiguous request into prompt evidence.
 | local and document work | several clean N=3 parity rows; the dense roadmap and ambiguous washer/dryer request stopped at baseline | retain the stopped cases as reliability signals; select a different naturally explicit local action only with a production-shaped completion fixture |
 | automation and durable state | schedule, subscription, and repository/thread-memory outcomes reached parity; geo proposal stopped candidate 1/2 | add another durable action only with a real temporary store and a user-visible success boundary |
 | Git history | last-turn rollback reached parity; described-point rollback stopped at baseline | retain the failure; do not substitute a capability assertion for the user outcome |
-| travel, directions, and maps | inventory remains uncovered in the current no-live-search panel | build one fixture that stubs geocoding and routing responses at the resource boundary, then test the natural output rather than only a tool name |
+| travel, directions, and maps | v90 travel, v91 transit directions, and v92 map rendering each reached deterministic N=3 parity | retain these resource-boundary fixtures; add route or map shapes only when a distinct user outcome needs coverage |
 | interjection and long work | existing harnesses need the actual web completion/in-flight shape | add an explicit production-shaped lifecycle fixture before treating a synchronous final-answer assertion as behavior evidence |
 | research-dependent outcomes | live providers remain excluded | keep canned handoff/injection rows; restore real-search rows only when provider availability is separable from prompt behavior |
 

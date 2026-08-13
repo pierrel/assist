@@ -14,8 +14,9 @@ Real-LLM eval (small model) — deploy venv; partial pass rates expected.
 """
 import os
 import re
+import shutil
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from deepagents.backends import FilesystemBackend
 
@@ -23,7 +24,8 @@ from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
-from .utils import create_filesystem, AgentTestMixin
+from .utils import (agent_tool_calls, create_filesystem, AgentTestMixin,
+                    prompt_rewrite_web_main_spec, stub_research_subagent)
 
 _RENDER_SKILLS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "assist", "web_skills")
@@ -36,6 +38,23 @@ _PIN = re.compile(r"^\s*pin:\s*(?:origin\s+)?(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s+\
 # An origin pin = the user's location (the renderer colors it green).
 _ORIGIN_PIN = re.compile(r"^\s*pin:\s*origin\s+-?\d+\.\d+\s*,\s*-?\d+\.\d+", re.M | re.I)
 _PATH = re.compile(r"^\s*path:\s*\S+\s+\S", re.M)
+
+
+def _map_geocoder_fixture(path: str, params: dict):
+    """Local geocoding resource for the real map_data comparison path."""
+    if path != "/api/v1/geocode":
+        raise AssertionError(f"unexpected mapping request: {path} {params}")
+    query = str(params["text"]).lower()
+    places = {
+        "four barrel": ("Four Barrel Coffee", 37.7609, -122.4210),
+        "ritual": ("Ritual Coffee", 37.7615, -122.4217),
+        "haus": ("Haus Coffee", 37.7597, -122.4202),
+    }
+    match = next((item for needle, item in places.items() if needle in query), None)
+    if match is None:
+        raise AssertionError(f"unexpected geocoder query: {query}")
+    name, lat, lon = match
+    return [{"name": name, "lat": lat, "lon": lon}]
 
 
 class TestMapAgent(AgentTestMixin, TestCase):
@@ -109,3 +128,37 @@ class TestMapAgent(AgentTestMixin, TestCase):
         self.assertTrue(
             any(_ORIGIN_PIN.search(b) for b in blocks),
             f"expected an `origin`-marked pin for the user's location; blocks: {blocks}")
+
+
+class TestPromptRewriteMapOutcome(TestMapAgent):
+    """Natural web-main comparison for a visible map rendered from local coordinates."""
+
+    test_emits_map_block_for_places = None
+    test_emits_map_with_route = None
+    test_emits_map_alternate_wording = None
+    test_recommendation_renders_map_with_origin_pin = None
+
+    def _agent(self):
+        root = tempfile.mkdtemp(prefix="map_web_main_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        create_filesystem(root, {"README.org": "Personal assistant workspace."})
+        return AgentHarness(create_agent(
+            self.model, root, spec=prompt_rewrite_web_main_spec()))
+
+    def test_renders_canned_places_map(self):
+        with mock.patch.dict("os.environ", {
+                "ASSIST_ROUTING_URL": "http://routing-fixture",
+                "ASSIST_GEOCODER_URL": "",
+             }), \
+             mock.patch("assist.tools._motis_get", side_effect=_map_geocoder_fixture), \
+             mock.patch("assist.tools.requests.get",
+                        side_effect=AssertionError("map eval must not fetch URLs")) as get, \
+             stub_research_subagent():
+            agent = self._agent()
+            agent.message("Show me these coffee shops on a map: Four Barrel, Ritual "
+                          "Coffee, and Haus Coffee — all on or near Valencia Street in "
+                          "San Francisco.")
+
+        get.assert_not_called()
+        self.assertTrue(agent_tool_calls(agent, "map_data"), agent.all_messages())
+        self._assert_wellformed(self._map_blocks(agent))
