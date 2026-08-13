@@ -613,3 +613,16 @@ hard GET/POST rejection. The valid baseline passed N=3; candidate r1 passed
 but r2 completed the file edits while deriving the wrong real-file count, so
 the staged comparison stopped at candidate 1/2. Captures are under
 =<capture-root>/weekly-review-v105/=.
+
+* v106 development documentation-update cohort
+
+The comparison-only =TestPromptRewriteDevDocumentation= preserves the natural
+request to add a README section contrasting =SandboxManager= and
+=DomainManager=. It reuses the real copied Assist workspace and Docker sandbox
+from =TestDevAgent=, but constructs the ordinary web-main comparison profile
+with a separate private agent directory. Research is canned at construction;
+direct GET and POST are rejected; and, if the model launches lifecycle work,
+the harness supplies ordinary completion wakes before judging the final README
+content. The outcome requires a real README change mentioning =SandboxManager=.
+Baseline N=3 precedes candidate N=1/N=3. Captures will be under
+=<capture-root>/dev-docs-v106/=.

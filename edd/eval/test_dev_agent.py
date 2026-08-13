@@ -13,10 +13,12 @@ Expected behaviors:
 """
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import uuid
 from unittest import TestCase
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -24,7 +26,9 @@ from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 
-from .utils import executed_commands, cleanup_workspace
+from .test_async_subagents import reset_task_fixture
+from .utils import (cleanup_workspace, complete_web_main_tasks, executed_commands,
+                    prompt_rewrite_web_main_spec, stub_research_subagent)
 
 
 logger = logging.getLogger(__name__)
@@ -350,3 +354,66 @@ class TestDevAgent(TestCase):
             f"Agent should discover and reference existing promptable.py utility. "
             f"Response preview: {response[:500]}",
         )
+
+
+class TestPromptRewriteDevDocumentation(TestDevAgent):
+    """Compare one real documentation update in the ordinary web-main shape."""
+
+    test_explains_codebase = None
+    test_discovers_and_installs_dependencies = None
+    test_writes_and_runs_tests = None
+    test_uses_context_agent_before_changes = None
+    test_uses_research_agent = None
+    test_leverages_existing_utilities = None
+
+    def setUp(self):
+        self.workspace = tempfile.mkdtemp(prefix="dev_agent_eval_")
+        _rsync_project(self.workspace)
+        self.agent_dir = tempfile.mkdtemp(prefix="prompt_rewrite_dev_agent_")
+        self.sandbox = SandboxManager.get_sandbox_backend(
+            self.workspace, agent_dir=self.agent_dir)
+        if self.sandbox is None:
+            self.skipTest("Docker sandbox unavailable — is Docker running and assist-sandbox built?")
+        self.model = select_assistant_model(0.1)
+        reset_task_fixture()
+
+    def tearDown(self):
+        SandboxManager.cleanup(self.workspace)
+        cleanup_workspace(self.workspace)
+        shutil.rmtree(self.agent_dir, ignore_errors=True)
+
+    def _create_agent(self):
+        with stub_research_subagent():
+            return AgentHarness(create_agent(
+                self.model,
+                self.workspace,
+                agent_dir=self.agent_dir,
+                sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec(),
+            ))
+
+    def _invoke(self, agent, text: str) -> str:
+        response = agent.message(text)
+        return complete_web_main_tasks(agent) or response
+
+    def test_updates_documentation(self):
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("dev-docs eval must not fetch URLs")) as get, \
+             patch("assist.tools.requests.post",
+                   side_effect=AssertionError("dev-docs eval must not post URLs")) as post:
+            before = open(os.path.join(self.workspace, "README.md"), encoding="utf-8").read()
+            agent = self._create_agent()
+            self._invoke(
+                agent,
+                "Update the README.md to add a section explaining the "
+                "SandboxManager class — what it does and how it differs "
+                "from DomainManager.",
+            )
+        get.assert_not_called()
+        post.assert_not_called()
+        after = open(os.path.join(self.workspace, "README.md"), encoding="utf-8").read()
+        self.assertNotEqual(before, after, "README.md was not changed")
+        self.assertRegex(after, r"(?i)sandboxmanager",
+                         "README.md must explain SandboxManager")
+        self.assertRegex(after, r"(?i)domainmanager",
+                         "README.md must contrast DomainManager")
