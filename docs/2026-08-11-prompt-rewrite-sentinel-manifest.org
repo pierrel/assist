@@ -586,11 +586,21 @@ found it omitted a validator for the separately requested deletion step, so it
 is historical only and is replaced by v103. Its captures are under
 =<capture-root>/weekly-review-v102/=.
 
-* v103 weekly-review complete-outcome cohort
+* v103 weekly-review intermediate oracle: superseded
 
-The replacement =TestPromptRewriteWeeklyReview= validates the same natural
-request in a single run, but requires both the exact derived remaining-TODO
-count and removal of all requested DONE/CANCELLED headings. It retains the real
-temporary Git workspace, Docker sandbox, canned research, and hard GET/POST
-rejection. Baseline N=3 is required before a candidate N=1 probe and candidate
-N=3 promotion. Captures are under =<capture-root>/weekly-review-v103/=.
+The intermediate replacement required the exact derived remaining-TODO count
+and removal of requested DONE/CANCELLED headings. Local review found it still
+could accept a destructive rewrite or a malformed marker placement, so it is
+superseded by v104 before a valid comparison. Captures are under
+=<capture-root>/weekly-review-v103/=.
+
+* v104 weekly-review complete-outcome cohort
+
+The current =TestPromptRewriteWeeklyReview= validates the same natural request
+in one run. Its final-file oracle requires: an exact first-line =# ACTIVE: N=
+marker, a count equal to the remaining TODO headings, deletion of every
+requested DONE/CANCELLED heading, and preservation of the exact unrelated TODO
+headings and states. It retains the real temporary Git workspace, Docker
+sandbox, canned research, and hard GET/POST rejection. Baseline N=3 is required
+before a candidate N=1 probe and candidate N=3 promotion. Captures will be
+under =<capture-root>/weekly-review-v104/=.
