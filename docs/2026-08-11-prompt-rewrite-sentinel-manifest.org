@@ -249,3 +249,12 @@ and rejects a renewed pending approval request. It is fully stubbed and has no
 external network operation. Both profiles run N=3 under bounded admission;
 captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/egress-resolution-v72/=.
+
+* v73 implicit Org skill-discovery and edit cohort
+
+This is the no-hint sibling of v71: the user asks only to insert a top-level
+project in =projects.org=. The validator requires the real =org-format= skill
+load and proves the edit retains Alpha's body and subsection. It is a local
+natural outcome, with no URL, search path, or prescribed lifecycle route. Both
+profiles run N=3 under bounded admission; captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/org-skill-implicit-v73/=.
