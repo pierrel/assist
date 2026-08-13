@@ -1341,6 +1341,17 @@ grounding or research ahead of a self-contained exact capability.
 | vGS14 date anti-trigger | current prompt-only candidate | N=1 | 1/1: loaded =time= and used =date= | =guidance-skills-v2/time-antitrigger-candidate-1.log= =8e4543becf5c0ec1101d443b101f3627c37e9874201627f5494269994615d57c= |
 | vGS15 recurring schedule anti-trigger | current prompt-only candidate | N=3 | 3/3 | =guidance-skills-v2/schedule-antitrigger-candidate-1.log= =525558bc65824b711dc70ef485a2a22a62970b8a124d9ca9ba7547579a9be78c=; =candidate-2.log= =6cc80c014438b8cf4c4a4dfa88cb0484f4ba8c5bf48c01f24851ab38508af43f=; =candidate-3.log= =b3a0573895fff1392d623ed4176c38e66c2344c16c270ae938729403e4a9d60f= |
 
+The retained two-report anchor also cleared N=3 on the current candidate. Its
+matching v2b control already passed N=3 with the same canned-research and
+no-fetch construction. Each candidate trial created both requested reports
+with recommendation, risks, and next-actions content. This preserves the
+accepted deliverable-completeness result while local-grounding selection remains
+an explicitly separate failure pattern.
+
+| Cohort | Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| v109 two independent reports | current prompt-only candidate | N=3 | 3/3 | =guidance-skills-v2/two-reports-candidate-1.log= =3f01a12fe79a069fbdad64905cac4cdfccd28a27515037445f798acb305e6092=; =candidate-2.log= =5df9ce2c033c0a266a5505c5dc89046ca664d20cb7a16dcd54f6c5a57a8aea6b=; =candidate-3.log= =031d71897c811058d2d85e8482202953fc0f5ba2feb3fa82b87d52d1849ea5c3= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
