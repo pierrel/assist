@@ -449,3 +449,16 @@ not recognize the agent's normal city-qualified geocoder query; its corrected
 name-prefix matcher retains unknown-place rejection. Baseline N=3 and candidate
 N=1 then N=3 captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/directions-v91/=.
+
+* v92 local-geocoding map-render cohort
+
+The natural prompt asks: “Show me these coffee shops on a map: Four Barrel,
+Ritual Coffee, and Haus Coffee — all on or near Valencia Street in San
+Francisco.” The fixture constructs =prompt_rewrite_web_main_spec()=, retaining
+the ordinary web render skill and real =map_data= tool. It replaces only
+=assist.tools._motis_get= with a strict local geocoder for the three named
+places, rejects every other resource request, and hard-rejects generic URL
+fetching. Canned research covers the legacy route. The validator requires the
+real =map_data= tool and a well-formed visible =type: map= block with valid pin
+coordinates. Baseline N=3 and candidate N=1 then N=3 captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/map-v92/=.

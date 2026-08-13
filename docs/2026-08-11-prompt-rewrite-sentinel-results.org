@@ -734,6 +734,22 @@ places and every unexpected routing call. Captures are under
 | baseline | N=3 after discarded fixture attempts | 3/3 | =baseline-1-valid.log= =6f8ec0bfcf916b5dc58c5834a4042649c61d70248d62e06927948815c7f7614a=; =baseline-2-valid.log= =1610531c7fa79bf41aac711092f3d8e13b6a93e80cc81912f80b5c2f9e0a5825=; =baseline-3.log= =9f9e33ceaaacd34497269071896f11b12bd95a9e620ebc70093a5950bb9488ac= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =6ecc7a0ff8caaf4de0e4680f515c86f1b2d803d5e50d33d8c045c62b5c6df5da=; =candidate-2.log= =87262f97aa8a3cdd14398a1b9283fa2e64cce5e1f1f5d4295dfd860a43f8cfd3=; =candidate-3.log= =6b32739bdb544907febdc87c954959874c595bd19eb662e5141853326723e25b= |
 
+* v92 local-geocoding map-render cohort
+
+Both profiles completed the natural visible-map outcome N=3. The user asks to
+show three named coffee shops on a map. The fixture retains the real =map_data=
+tool and ordinary web render skill, replacing only the geocoder resource with
+three fixed local responses. It requires a real =map_data= call followed by a
+well-formed =type: map= render block with valid pin coordinates. Research is
+canned and generic URL fetching raises, so neither lookup nor rendering reaches
+an external service. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/map-v92/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =169d342cde08e32be1541e7be715c66a1b29583c002999ec1156daf9d924965c=; =baseline-2.log= =7726aebb00311d333505f5511118cfe508ad50d0ecabc2df82045166bd0bbd11=; =baseline-3.log= =339cd7006ba1f8a85f74cccdaf12389d32d57b4d56aa7e96b29cd7e0a37081c9= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =49fc6561070be33077514797e58e747c65d73a9be9a7e8f150c1206728f3935d=; =candidate-2.log= =e2551e785b014e81a968e7567ea97f3ce73136cfb003a85feb2f365e6d63c55b=; =candidate-3.log= =bbf57ddd10a012f1eb477f35a7c9a63b696d2844f70e83d811f6deddbef324dc= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
