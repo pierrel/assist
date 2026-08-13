@@ -319,7 +319,8 @@ class TestPromptRewriteWeeklyReview(TestMultiStepPlan):
             "weekly review removed, duplicated, or retained an unexpected TODO" + diag,
         )
 
-        deleted_titles = set(_EXPECT_DONE) | {
+        deleted_titles = {
+            "Buy groceries", "Call the dentist", "Start the new novel",
             "Fix the leaky faucet", "Replace the air filter", "Paint the fence",
             "Clean the gutters", "Service the furnace",
             "Finish the Lowy book", "File the expense report",
