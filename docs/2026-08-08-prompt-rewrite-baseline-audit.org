@@ -213,7 +213,7 @@ lifecycle harness, or an ambiguous request into prompt evidence.
 | Git history | last-turn rollback reached parity; described-point rollback stopped at baseline | retain the failure; do not substitute a capability assertion for the user outcome |
 | travel, directions, and maps | v90 travel, v91 transit directions, and v92 map rendering each reached deterministic N=3 parity | retain these resource-boundary fixtures; add route or map shapes only when a distinct user outcome needs coverage |
 | interjection and long work | v95 repaired the mid-turn redirect fixture with an actual completion wake; its baseline passed N=3 and candidate stopped 1/2 on missing context launch | retain as explicit lifecycle coverage; do not tune a context-first exception from this small stopped cohort |
-| research-dependent outcomes | the bounded website-download journey reached parity against an entirely local site; live providers remain excluded | keep canned handoff/injection rows; restore real-search rows only when provider availability is separable from prompt behavior |
+| research-dependent outcomes | the bounded website-download journey and protected-egress denial reached parity through local resource boundaries; live providers remain excluded | keep canned handoff/injection rows; restore real-search rows only when provider availability is separable from prompt behavior |
 
 * Baseline execution and admission process
 
