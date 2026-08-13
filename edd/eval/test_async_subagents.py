@@ -1342,3 +1342,68 @@ class TestPromptRewriteIndependentBriefs(TestAsyncSubagentSupervisor):
             trip_note=trip_note,
             spec=prompt_rewrite_web_main_spec(),
         )
+
+
+class TestPromptRewriteTwoReports(TestPromptRewriteIndependentBriefs):
+    """Compare two bounded, independent local report outcomes."""
+
+    test_natural_two_independent_outcomes_delegate = None
+
+    def test_creates_two_launch_reports(self):
+        with stub_research_subagent():
+            agent = self._agent()
+        prompt = (
+            "Prepare a launch report for each of the two teams before tomorrow's "
+            "meeting. Turn /alpha-notes.md into /alpha-report.md with a "
+            "recommendation, risks, and next actions. Also turn /beta-notes.md "
+            "into /beta-report.md with its own recommendation, risks, and next actions."
+        )
+        assert _TASK_ROOT is not None
+        reports = {
+            "alpha": "the alpha launch decision",
+            "beta": "the beta launch decision",
+        }
+        source_bytes = {
+            workstream: _read_judge_evidence(
+                Path(_TASK_ROOT, f"{workstream}-notes.md"))
+            for workstream in reports
+        }
+        reply = self._complete_synthetic_work(agent, agent.message(prompt))
+        evidence = [
+            {"id": "prompt", "kind": "prompt", "state": "present",
+             "content": prompt},
+            {"id": "response", "kind": "response", "state": "present",
+             "content": reply},
+        ]
+        requested = []
+        for workstream, decision in reports.items():
+            source = source_bytes[workstream]
+            source_path = Path(_TASK_ROOT, f"{workstream}-notes.md")
+            report_path = Path(_TASK_ROOT, f"{workstream}-report.md")
+            self.assertEqual(_read_judge_evidence(source_path), source,
+                             f"agent changed {source_path.name}")
+            report = self._validated_field_evidence(
+                _read_judge_evidence(report_path),
+                ("recommendation", "risks", "next actions"),
+            )
+            source_id = f"{workstream}-source"
+            report_id = f"{workstream}-report"
+            evidence.extend((
+                {"id": source_id, "kind": "initial", "state": "present",
+                 "content": source.decode()},
+                {"id": report_id, "kind": "final", "state": "present",
+                 "content": report},
+            ))
+            requested.append({
+                "id": f"{workstream}-launch-report",
+                "description": (
+                    f"The requested /{workstream}-report.md gives a recommendation, "
+                    f"risks, and next actions for {decision}, grounded in "
+                    f"/{workstream}-notes.md."
+                ),
+                "evidence_ids": ("prompt", source_id, report_id, "response"),
+            })
+        self._assert_judge_pass(OutcomeObservation.model_validate({
+            "requested": requested,
+            "evidence": evidence,
+        }))
