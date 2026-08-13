@@ -627,3 +627,14 @@ content. The outcome requires a real README change mentioning =SandboxManager=.
 Baseline trials 1 and 2 passed, but trial 3 left README unchanged, so the
 baseline stops at 2/3 and no candidate run is warranted. Captures are under
 =<capture-root>/dev-docs-v106/=.
+
+* v107 local fitness-plan cohort
+
+The comparison-only =TestPromptRewriteFitnessPlan= asks to create a 2026 swim
+plan from the existing =fitness.org= goal and 2025 history. It uses the
+ordinary web-main prompt profile in a real Docker sandbox with native private
+=/agent= state, canned research, direct GET/POST rejection, and ordinary
+completion wakes. The outcome requires a persisted 2026 plan while preserving
+the existing 2025 history and a nonempty user response. Baseline N=3 precedes
+candidate N=1/N=3. Captures will be under
+=<capture-root>/fitness-plan-v107/=.
