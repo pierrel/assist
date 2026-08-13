@@ -21,15 +21,17 @@ many bold-looking lines — because smaller synthetic files don't reproduce
 it (34/34 passed).  The inbox fixture is synthetic (gtd files have PII).
 See ``docs/2026-06-03-org-insertion-mid-section.org``.
 """
+import shutil
 import tempfile
 from pathlib import Path
 from textwrap import dedent
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 
-from .utils import read_file, create_filesystem, AgentTestMixin
+from .utils import (read_file, create_filesystem, AgentTestMixin,
+                    prompt_rewrite_web_main_spec, stub_research_subagent)
 
 
 def _heading_depth(line: str) -> int | None:
@@ -128,6 +130,28 @@ class TestAddTopLevelSection(OrgInsertionMixin, TestCase):
         agent.message(
             "Add Moonshot to the roadmap — the idea of a self-improving agent "
             "that rewrites its own skills.")
+        after = read_file(f"{root}/roadmap.org")
+        self.assertRegex(after, r"(?im)^\* .*moonshot",
+                         f"Expected a top-level Moonshot heading.\n---\n{after}")
+        self.assertNoSplit(after, 1, _ROADMAP_TARGETS)
+
+
+class TestPromptRewriteLargeOrgInsertion(OrgInsertionMixin, TestCase):
+    """Production-shaped structural-edit comparison over the dense roadmap fixture."""
+
+    def test_does_not_split_section(self):
+        root = tempfile.mkdtemp(prefix="org_insert_web_main_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        create_filesystem(root, {"roadmap.org": _ROADMAP})
+        with mock.patch("assist.tools.requests.get",
+                        side_effect=AssertionError("org insertion eval must not fetch URLs")) as get, \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, root, spec=prompt_rewrite_web_main_spec()))
+            agent.message(
+                "Add Moonshot to the roadmap — the idea of a self-improving agent "
+                "that rewrites its own skills.")
+        get.assert_not_called()
         after = read_file(f"{root}/roadmap.org")
         self.assertRegex(after, r"(?im)^\* .*moonshot",
                          f"Expected a top-level Moonshot heading.\n---\n{after}")

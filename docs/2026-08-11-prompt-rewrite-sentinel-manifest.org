@@ -351,3 +351,15 @@ action. It is a natural outcome row, not capability-only coverage, and has no
 user URL or external-search path; the fixture hard-rejects host URL fetches.
 Baseline N=3 and candidate N=1 then N=3 captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/elisp-v81/=.
+
+* v82 large Org insertion probe
+
+The natural prompt asks to add Moonshot to a roadmap as the idea of a
+self-improving agent that rewrites its own skills. The fixture is a frozen,
+dense, production-shaped roadmap snapshot whose structural validator requires
+the new top-level heading and preservation of the bracketed bodies of three
+unrelated sections. It constructs the web-main comparison profile inside the
+standard canned-research context and hard-rejects host URL fetches. The first
+baseline left the fixture unchanged, so this is stopped at N=1 with no
+candidate comparison or prompt change. Its capture is under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/org-large-v82/baseline-1.log=.
