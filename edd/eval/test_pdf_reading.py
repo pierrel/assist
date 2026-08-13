@@ -25,6 +25,7 @@ import tempfile
 import unittest
 
 from unittest import TestCase
+from unittest.mock import patch
 
 from langchain_core.messages import AIMessage
 
@@ -32,7 +33,8 @@ from assist.agent import AgentHarness, create_agent
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import cleanup_workspace, prompt_rewrite_web_main_spec, skill_was_loaded
+from .utils import (cleanup_workspace, prompt_rewrite_web_main_spec,
+                    skill_was_loaded, stub_research_subagent)
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -305,3 +307,35 @@ class TestPdfReading(TestCase):
             f"Response should hedge / surface the failure rather than "
             f"hallucinating content.  Got: {res[:400]}",
         )
+
+
+class TestPromptRewritePdfSearchOutcome(TestPdfReading):
+    """Prompt-rewrite comparison for a natural, local PDF lookup.
+
+    The real sandbox and PDF fixture exercise the normal ``pdf`` skill.  Research
+    and direct HTTP are rejected so this remains a local-document comparison.
+    """
+
+    test_orient_then_answer_page_count = None
+    test_page_range_targeted_read = None
+    test_does_not_dump_full_pdf = None
+    test_handles_empty_extract_gracefully = None
+
+    def setUp(self):
+        super().setUp()
+        self._get = patch(
+            "assist.tools.requests.get",
+            side_effect=AssertionError("PDF-search eval must not fetch URLs"),
+        ).start()
+        self._post = patch(
+            "assist.tools.requests.post",
+            side_effect=AssertionError("PDF-search eval must not post URLs"),
+        ).start()
+        self.addCleanup(self._get.stop)
+        self.addCleanup(self._post.stop)
+        self.addCleanup(self._get.assert_not_called)
+        self.addCleanup(self._post.assert_not_called)
+
+    def _create_agent(self):
+        with stub_research_subagent():
+            return super()._create_agent()
