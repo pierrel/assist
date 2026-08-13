@@ -323,3 +323,18 @@ provider delivery, so no external email is sent. The validator requires the
 skill, exactly one proposal, the recipient, a Tuesday body reference, and a
 nonempty subject. Both profiles run N=3 under bounded admission; captures are
 under =/home/pierre/deploy/assist/prompt-rewrite-captures/email-v79/=.
+
+* v80 Git-sync rebase cohort
+
+The natural prompt is: “Please sync this branch with the latest main.” The
+fixture builds a temporary local bare =origin=, creates a thread branch with
+one commit, advances the bare repository's =main= through a separate seed
+clone, and host-fetches that local =origin/main= into the thread workspace.
+It constructs the agent with =prompt_rewrite_web_main_spec()= inside the
+standard canned-research context and supplies the real sandbox Git interface.
+The validator requires =origin/main= to be an ancestor of =HEAD= and requires
+both the new main file and the thread's own file to remain. This is a natural
+durable-outcome row, not capability-only coverage. It uses no user URL, no
+external remote, no external search, and hard-rejects host URL fetches.
+Baseline N=3 and candidate N=1 then N=3 captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/git-sync-v80-no-fetch/=.
