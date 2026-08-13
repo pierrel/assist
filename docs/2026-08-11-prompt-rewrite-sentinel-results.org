@@ -1298,6 +1298,20 @@ can support a comparison claim; neither row establishes parity.
 | vGS9 local grounding selection | current prompt-only candidate | N=1 | 0/1: direct local reads, no =grounding= load | =guidance-skills-v2/grounding-core-r2.log= =d4ecd0ffda80083df8a6114e8b305fa231178ae6be5a2c23e693c92dffd0efba= |
 | vGS10 external research selection | current prompt-only candidate | N=1 | 1/1: loaded =research= then dispatched =research-agent= | =guidance-skills-v2/research-core-r2.log= =9030608d3f29a7dbfe04d98a8efee27a38560b7f2cdfccaa034953e47f475e8c= |
 
+The natural current-facts outcome then established a fresh paired row with the
+same request, fake lifecycle tools, canned completion result, and HTTP hard
+rejection. The pre-skill control dispatched the existing =research-agent= and
+returned the canned departure time in all three trials. The candidate loaded
+=research= before that dispatch, checked the completion, and returned the same
+supported answer in all three trials. This is the first current prompt-only
+parity result for a migrated procedure. It does not make the failed grounding
+selection reliable, and it does not establish panel-wide parity.
+
+| Cohort | Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| vGS11 natural current-facts outcome | pre-skill baseline | N=3 | 3/3 | =guidance-skills-v2/external-outcome-baseline-1.log= =5f633e746c158b62cc60d69b587c7e785f282b838412f431bae5fcbb45a0cabe=; =baseline-2.log= =5cad759a6220391d3317f6e69be77e9cdffbfc2e19aea7167a5c354c99b12186=; =baseline-3.log= =212bd8358a616048e11baeee6dee7a145c92ac93650b5cfcb610e18a886b4585= |
+| vGS11 natural current-facts outcome | current prompt-only candidate | N=3 | 3/3 | =guidance-skills-v2/external-outcome-candidate-1.log= =c2db0579062bd1e9a5605126a42af61d1a62a0fa55908b5399dd1d80ebef3317=; =candidate-2.log= =8a770a5d341652454015c76497c1aabd0ce24dda5d9f375bcb75cf59eb4f6b5c=; =candidate-3.log= =6b1c8e7b435eee522f882301d40156676d0811e9202d9965f806f923d8465c0d= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
