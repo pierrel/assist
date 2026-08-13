@@ -363,3 +363,18 @@ standard canned-research context and hard-rejects host URL fetches. The first
 baseline left the fixture unchanged, so this is stopped at N=1 with no
 candidate comparison or prompt change. Its capture is under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/org-large-v82/baseline-1.log=.
+
+* v84 recurring-schedule outcome cohort
+
+The natural prompt is: “Remind me at 9 AM on the 25th of every two months to
+review my finances.” The fixture supplies the real schedule tools over a
+temporary disk-backed store and a fixed America/Los_Angeles web-run context.
+It builds =prompt_rewrite_web_main_spec()= with those tools inside the
+standard canned-research context and hard-rejects host URL fetches. The
+validator requires exactly one persisted schedule with the requested day,
+month interval, hour, and finance purpose, plus a user-visible confirmation of
+the reminder or next run. It does not assert lifecycle or skill-loading order.
+An initial literal-word confirmation assertion was discarded because the
+durable schedule was correct and the agent truthfully described the reminder
+and next run. Baseline N=3 and candidate N=1 then N=3 captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/schedule-v84-valid/=.

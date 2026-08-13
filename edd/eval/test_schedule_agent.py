@@ -7,15 +7,18 @@ the NL→args mapping and doesn't need the run config's tz to be wired.
 """
 import os
 import tempfile
-from unittest import TestCase
+from types import SimpleNamespace
+from unittest import TestCase, mock
 
 from assist.agent import create_agent, AgentHarness
+from assist.context_rider import CONTEXT_RIDER_KEY
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 from assist.schedule.tools import schedule_tools
 from assist.schedule.store import ScheduleStore
 from .utils import (
     agent_tool_calls, create_filesystem, skill_was_loaded,
+    prompt_rewrite_web_main_spec,
     stub_research_subagent,
 )
 
@@ -75,3 +78,44 @@ class TestScheduleAgent(TestCase):
             for call in later_loads), later_loads)
         self.assertTrue(agent_tool_calls(agent, "modify_schedule"),
                         "follow-up did not modify the existing schedule")
+
+
+class TestPromptRewriteScheduleOutcome(TestCase):
+    """Natural web-main comparison with a persisted recurring schedule outcome."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = select_assistant_model(0.1)
+
+    def test_creates_requested_recurring_reminder(self):
+        thread_id = "schedule-eval"
+        with tempfile.TemporaryDirectory(prefix="schedule_web_main_store_") as store_root, \
+                tempfile.TemporaryDirectory(prefix="schedule_web_main_workspace_") as root:
+            os.makedirs(os.path.join(store_root, thread_id))
+            create_filesystem(root, {"README.org": "Personal workspace."})
+            store = ScheduleStore(store_root)
+            config = {"configurable": {
+                "thread_id": thread_id,
+                CONTEXT_RIDER_KEY: SimpleNamespace(tz="America/Los_Angeles"),
+            }}
+            with mock.patch("assist.schedule.tools.get_config", return_value=config), \
+                 mock.patch("assist.tools.requests.get",
+                            side_effect=AssertionError("schedule eval must not fetch URLs")) as get, \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root,
+                    spec=prompt_rewrite_web_main_spec(
+                        tools=tuple(schedule_tools(store)))),
+                    thread_id=thread_id)
+                reply = agent.message(
+                    "Remind me at 9 AM on the 25th of every two months to review my finances.")
+            get.assert_not_called()
+            saved = store.for_thread(thread_id)
+
+        self.assertEqual(len(saved), 1, saved)
+        cadence = saved[0].cadence
+        self.assertEqual(cadence.day_of_month, 25)
+        self.assertEqual(cadence.month_interval, 2)
+        self.assertEqual(cadence.hour, 9)
+        self.assertIn("financ", saved[0].prompt.lower())
+        self.assertRegex(str(reply).lower(), r"(reminder|scheduled|next run)")
