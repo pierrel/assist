@@ -17,10 +17,10 @@ from assist.domain_manager import clone_repo
 def prompt_rewrite_web_main_spec(*, tools=(), interrupt_on=None):
     """Return the ordinary web-main shape for prompt-rewrite comparisons.
 
-    The environment switch changes only whether that web shape receives the
-    candidate static prompt.  Both sides retain the actual web lifecycle tools
-    and web-only skill sources, so a comparison cannot silently exercise the
-    legacy in-process-subagent agent instead.
+    The environment switch changes only the web-main prompt text and its
+    composition. Both sides retain the actual web lifecycle tools, web-only
+    skill sources, and runtime mechanics, so a comparison cannot silently
+    exercise the legacy in-process-subagent agent instead.
     """
     from assist.spec import AgentSpec
     from assist.thread_manager import _web_skill_sources
