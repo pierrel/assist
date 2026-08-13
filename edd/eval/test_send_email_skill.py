@@ -10,10 +10,8 @@ from unittest import TestCase
 from assist.agent import AgentHarness, create_agent
 from assist.events.email import EMAIL_INTERRUPT_ON, email_tools
 from assist.model_manager import select_assistant_model
-from assist.spec import AgentSpec
-from assist.thread_manager import _web_skill_sources
 
-from .utils import skill_was_loaded
+from .utils import prompt_rewrite_web_main_spec, skill_was_loaded
 
 
 def _proposed_email(harness) -> dict | None:
@@ -39,8 +37,8 @@ class TestSendEmailSkill(TestCase):
     def test_natural_request_loads_skill_and_proposes_one_email(self):
         agent = AgentHarness(create_agent(
             self.model, self.root,
-            spec=AgentSpec(skill_sources=_web_skill_sources(), tools=email_tools(),
-                           interrupt_on=EMAIL_INTERRUPT_ON)))
+            spec=prompt_rewrite_web_main_spec(
+                tools=email_tools(), interrupt_on=EMAIL_INTERRUPT_ON)))
 
         agent.message(
             "Could you let Robin know at robin@example.test that the Tuesday meeting is "

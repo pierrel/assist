@@ -536,6 +536,18 @@ asset dead ends or over-fetch pages.
 | baseline | N=3 | 3/3 | =baseline-1.log= =5e9d8aa7d6478981f1a75ce7515ebfd7309449e67bb3b8a94f6c5330cce81919=; =baseline-2.log= =727867dc08cfe10c844e433863eaa4100858604837e44ee633801162c71b1d7d=; =baseline-3.log= =c4fcf55901af9ce124ccfd7f9600eafffba93374bd2f238bc2e0bb13864dc259= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =507f4809cf2f70eb02b745c7f82397aa0272b85a0caa3e0f8bc4a1aca63cb740=; =candidate-2.log= =d22ce884cc5cf307cf5a0e104bed365a84900b608f6966c07a23cbc8d56ebdfa=; =candidate-3.log= =eb76aa06f04f2b9991ca6c56ad85d508b8f8015b22ec9c6de594f7abc983122c= |
 
+* v79 human-approved email-proposal cohort
+
+Both profiles completed the natural email-proposal outcome N=3: each loaded
+=send-email= and produced one approval-gated message to the requested recipient
+with the meeting change in its body and a nonempty subject. No provider delivery
+occurred.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =2433fd0f28f44f5e5e92467a570928e4f9b5c99554b08176225d857ea99be9b5=; =baseline-2.log= =b2040797aba3d39563aeb6559e9e0d80dcd515c42bc719647bf44f8c6cb3e07d=; =baseline-3.log= =78133235362b124789acbd29f252f4983aed442eed9539c2a6468189925ccc3a= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =c06f3e18d5ec014d2f4a36488a35420080dfceed4eb10757323f2e55f6c7ac8a=; =candidate-2.log= =82898ded9748072a04501899c6f3ce196dcd49e765c2a5088a6ef9a33db0ddd4=; =candidate-3.log= =21865a632703252102b51a8f6da98cd3c4345374a4e179994cb3da37beb44dab= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
