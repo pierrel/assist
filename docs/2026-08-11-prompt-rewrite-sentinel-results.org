@@ -40,6 +40,7 @@ signals, not prompt-tuning instructions.
 | v77 dev explanation pre-wake | baseline N=1, discarded fixture attempt | =test_dev_agent.py::TestDevAgent::test_explains_codebase= | graded the context-launch acknowledgement before delivering the normal completion wake | =dev-explain-v77/baseline-1.log= SHA-256 =12682c27edbf6892a65045521b56456273f982904a87d81f10a1027d8ba0f5a9= |
 | v77 dev explanation valid lifecycle | baseline N=1b, stopped scale probe | =test_dev_agent.py::TestDevAgent::test_explains_codebase= | no final output after two minutes on the copied full-codebase workspace; terminated to release the model slot | =dev-explain-v77/baseline-1b.log= (empty capture; terminated) |
 | v82 large Org insertion | baseline N=1 | =test_org_insertion.py::TestPromptRewriteLargeOrgInsertion::test_does_not_split_section= | left the dense =roadmap.org= fixture unchanged; the requested Moonshot section was absent | =org-large-v82/baseline-1.log= SHA-256 =dac3ac2967508c2aed0969c9b20e9d06aa2be93d4ea725da8a89bd9117d0cfef= |
+| v83 mid-turn interjection | baseline N=1, discarded fixture attempt | temporary web-main adaptation of =test_interjection.py::TestInterjection::test_redirect_mid_turn= | harness graded the context-launch response without delivering a completion wake | =interjection-v83/baseline-1.log= SHA-256 =77e8d8fd521f91c8195774219f63633cdb9ee57ecc6a86f38a9bb7a8db9f9357= |
 
 ** Historical diagnostic clusters
 
@@ -56,6 +57,7 @@ withdrawn, superseded, or repaired.
 | grounding catalog precedence | v52-v54 | a broad and then explicit grounding-skill description did not reliably beat an exact =schedule= skill match | [[*Withdrawn v37-v54 lifecycle/grounding experiment][withdrawn grounding record]] |
 | historical baseline variance | v21 | rendering was baseline 0/3 before the v21 candidate reached 3/3; refused external push was baseline 2/3 before the candidate reached 3/3 | [[*Baseline ledger][v21 ledger]] |
 | dense structural editing | v82 | the large production-shaped Org roadmap was left unchanged, despite smaller Org structure cohorts reaching parity | [[*Current-profile stopped and failed-eval index][current v82 record]] |
+| incomplete async lifecycle fixtures | v77, v83 | a synchronous final-answer assertion after the web main's context launch is not a behavioral result; it must inject the normal completion wake first | [[*Current-profile stopped and failed-eval index][current discarded records]] |
 
 * Current v21 iteration
 
