@@ -199,6 +199,22 @@ add another.  The cumulative panel grows to the existing 134-node inventory;
 the full panel remains the final comparison, not the admission ticket for the
 first candidate signal.
 
+** Post-resumption next-tranche roster
+
+The original pause has ended and the staged outcome work resumed. The current
+results ledger is authoritative for capture-level status. This shortlist keeps
+the next selection from silently converting an external dependency, a broken
+lifecycle harness, or an ambiguous request into prompt evidence.
+
+| Family | Current evidence | Next meaningful comparison prerequisite |
+|-
+| local and document work | several clean N=3 parity rows; the dense roadmap and ambiguous washer/dryer request stopped at baseline | retain the stopped cases as reliability signals; select a different naturally explicit local action only with a production-shaped completion fixture |
+| automation and durable state | schedule, subscription, and repository/thread-memory outcomes reached parity; geo proposal stopped candidate 1/2 | add another durable action only with a real temporary store and a user-visible success boundary |
+| Git history | last-turn rollback reached parity; described-point rollback stopped at baseline | retain the failure; do not substitute a capability assertion for the user outcome |
+| travel, directions, and maps | inventory remains uncovered in the current no-live-search panel | build one fixture that stubs geocoding and routing responses at the resource boundary, then test the natural output rather than only a tool name |
+| interjection and long work | existing harnesses need the actual web completion/in-flight shape | add an explicit production-shaped lifecycle fixture before treating a synchronous final-answer assertion as behavior evidence |
+| research-dependent outcomes | live providers remain excluded | keep canned handoff/injection rows; restore real-search rows only when provider availability is separable from prompt behavior |
+
 * Baseline execution and admission process
 
 1. First run the deterministic prompt census and =test_outcome_judge.py= once.
@@ -244,9 +260,9 @@ first candidate signal.
    authorization and isolation checks remain 100% gates independently of this
    panel.
 
-Pierre has paused this baseline so the Pi work has exclusive use of the model.
-An idle production-status response alone does not resume it; resume requires
-Pierre's direction and begins from the recorded next unfinished trial.
+Pierre's temporary pause for Pi work has ended. Each resumed model trial still
+uses the shared admission protocol above and begins from an explicit next
+unfinished row in the ledger.
 
 * Decisions still needing Pierre's review
 
