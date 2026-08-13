@@ -46,6 +46,7 @@ signals, not prompt-tuning instructions.
 | v86 geo proposal | candidate N=2, stopped comparison | =test_geo_agent.py::TestPromptRewriteGeoProposalOutcome::test_creates_requested_geo_proposal= | after the same natural confirmation, made no =propose_region_download= call and persisted no Oregon proposal | =geo-v86/candidate-2.log= SHA-256 =fd6772de87a75233ad9b47e9a7f5be4764abb9b78e72483cc08e7673a6b33022= |
 | v88 washer/dryer task | baseline N=1, stopped ambiguous journey | temporary web-main adaptation of =test_agent.py::TestAgent::test_adds_item_correctly= | interpreted “I need a new washer/dryer” as a request for shopping advice, launching context and research instead of the test's implied TODO | =direct-task-v88/baseline-1.log= SHA-256 =c2f1d29d212a8d5dd2491e84b0a3a58e3e03226274ab6d8f50436da85f1c5c8a= |
 | v89 described Git rollback | baseline N=1, stopped comparison | =test_git_history_agent.py::TestRollbackToDescribedPoint::test_agent_rolls_back_to_the_morning= | loaded neither =git-history= nor a Git command, leaving work after the requested morning point unchanged | =git-history-v89/baseline-1.log= SHA-256 =573591e97ab95504ab8fe4d6c942f8b481a57b22f80e63e23145d75f574b5883= |
+| v90 travel fixture | baseline N=1, discarded fixture attempt | =test_travel_agent.py::TestPromptRewriteTravelOutcome::test_reports_canned_travel_time= | local geocoder fixture did not accept the natural tool argument “the Ferry Building” | =travel-v90/baseline-1.log= SHA-256 =0c8da5df902ca100cd25e0da671cfcb93f49be01c19044ca3f461dc65fa54193= |
 
 ** Current pattern candidates
 
@@ -692,6 +693,25 @@ Captures are under
 |-
 | baseline | N=3 | 3/3 | =baseline-1.log= =9ae2c8a89103dfcb1c3bd0b5a9b249188c896e970d91e141acfb0b52897c8f01=; =baseline-2.log= =1c1bbaafcaaa846e894abf66de256840d5011ef3f6752c497c51d4ec2ecaa8d8=; =baseline-3.log= =c0aaae4e9c370c8b25b41dd8a7199be6b86edd3cc52f326540f2f9a139ac0fd8= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =e59ff86aeac107b986f75ee02a16b95ba4fab108d2f97767e88b6a70aeb55271=; =candidate-2.log= =164edd336285cd6b02c2ffa96d6fe8f496269ba6a699d83fbda715a53b94b5ae=; =candidate-3.log= =5b65d3cd986ceb7b60795a52053aa797e32662c6c983ac8fc149465d854df0c8= |
+
+* v90 local-routing travel-time cohort
+
+Both profiles completed the natural travel-time outcome N=3. The user asks how
+long it takes from the Ferry Building to Oakland City Hall. The fixture keeps
+the real =travel= tool and skill path but replaces only the self-hosted routing
+resource with local geocode and per-mode plan responses. The validator requires
+a real =travel= call and a user-visible 18-minute result. Research is canned
+and generic URL fetching is hard-rejected.
+
+The first baseline attempt is discarded because the local geocoder fixture did
+not normalize the ordinary article in “the Ferry Building.” The repaired fixture
+normalizes that natural tool argument; it is not a prompt result. Captures are
+under =/home/pierre/deploy/assist/prompt-rewrite-captures/travel-v90/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 after discarded fixture attempt | 3/3 | =baseline-1-valid.log= =525ac1d848cdde9733fa1abe90645d5496f5e60968c5dea2b925d50201d763a2=; =baseline-2.log= =c5dcf508c801d25c0afde2d699d8f8c9b87c98ab7248c0a90197d0a739bacbee=; =baseline-3.log= =3ab7de0f9ef5e1bebb15604b5559655580022fe45acefeba9cbf6f9cf61bbd10= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =c29c0d650560ab672b886e5ab3281da0ef4b6ad0b1f07588e6297055e977536f=; =candidate-2.log= =f416735ffbf70aa858ebae91687a660e956f9dd6f85eeb2866412a980f4dba0f=; =candidate-3.log= =7820b747be71afccebcb3a2ce71de09b8a3d1a492fb184516ec8a782ddc390a4= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
