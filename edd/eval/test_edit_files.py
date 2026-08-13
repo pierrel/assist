@@ -22,13 +22,15 @@ import re
 import tempfile
 from textwrap import dedent
 from unittest import TestCase
+from unittest.mock import patch
 
 from assist.agent import AgentHarness, create_agent
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
 from .utils import (build_thread_repo, cleanup_workspace, executed_commands,
-                    prompt_rewrite_web_main_spec, skill_was_loaded, _git)
+                    prompt_rewrite_web_main_spec, skill_was_loaded,
+                    stub_research_subagent, _git)
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +256,31 @@ class TestMultiStepPlan(_EditScenario):
                     if re.match(r"^\*+\s+(DONE|CANCELLED|CANCELED)\s+\S", line)]
         self.assertEqual(leftover, [],
                          f"DONE/CANCELLED headings not deleted: {leftover}" + diag)
+
+
+class TestPromptRewriteWeeklyReview(TestMultiStepPlan):
+    """Prompt-rewrite comparison for a durable multi-step local edit."""
+
+    test_deletions_actually_happened = None
+
+    def setUp(self):
+        super().setUp()
+        self._get = patch(
+            "assist.tools.requests.get",
+            side_effect=AssertionError("weekly-review eval must not fetch URLs"),
+        ).start()
+        self._post = patch(
+            "assist.tools.requests.post",
+            side_effect=AssertionError("weekly-review eval must not post URLs"),
+        ).start()
+        self.addCleanup(self._get.stop)
+        self.addCleanup(self._post.stop)
+        self.addCleanup(self._get.assert_not_called)
+        self.addCleanup(self._post.assert_not_called)
+
+    def _run(self, prompt):
+        with stub_research_subagent():
+            return super()._run(prompt)
 
 
 class TestOrgTension(_EditScenario):
