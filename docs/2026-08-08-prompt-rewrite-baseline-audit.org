@@ -208,7 +208,7 @@ lifecycle harness, or an ambiguous request into prompt evidence.
 
 | Family | Current evidence | Next meaningful comparison prerequisite |
 |-
-| local and document work | several clean N=3 parity rows; the dense roadmap and ambiguous washer/dryer request stopped at baseline | retain the stopped cases as reliability signals; select a different naturally explicit local action only with a production-shaped completion fixture |
+| local and document work | several clean N=3 parity rows, including deep local build-log diagnosis; the dense roadmap and ambiguous washer/dryer request stopped at baseline | retain the stopped cases as reliability signals; select a different naturally explicit local action only with a production-shaped completion fixture |
 | automation and durable state | schedule, subscription, repository/thread memory, and the review-gated email proposal reached parity; geo proposal stopped candidate 1/2 | add another durable action only with a real temporary store and a user-visible success boundary |
 | Git history | last-turn rollback reached parity; described-point rollback stopped at baseline | retain the failure; do not substitute a capability assertion for the user outcome |
 | travel, directions, and maps | v90 travel, v91 transit directions, and v92 map rendering each reached deterministic N=3 parity | retain these resource-boundary fixtures; add route or map shapes only when a distinct user outcome needs coverage |
