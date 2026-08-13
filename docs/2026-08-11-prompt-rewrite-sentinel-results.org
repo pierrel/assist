@@ -47,6 +47,29 @@ signals, not prompt-tuning instructions.
 | v88 washer/dryer task | baseline N=1, stopped ambiguous journey | temporary web-main adaptation of =test_agent.py::TestAgent::test_adds_item_correctly= | interpreted “I need a new washer/dryer” as a request for shopping advice, launching context and research instead of the test's implied TODO | =direct-task-v88/baseline-1.log= SHA-256 =c2f1d29d212a8d5dd2491e84b0a3a58e3e03226274ab6d8f50436da85f1c5c8a= |
 | v89 described Git rollback | baseline N=1, stopped comparison | =test_git_history_agent.py::TestRollbackToDescribedPoint::test_agent_rolls_back_to_the_morning= | loaded neither =git-history= nor a Git command, leaving work after the requested morning point unchanged | =git-history-v89/baseline-1.log= SHA-256 =573591e97ab95504ab8fe4d6c942f8b481a57b22f80e63e23145d75f574b5883= |
 
+** Current pattern candidates
+
+These are observed groupings for a later holistic design review, not causes or
+instructions to tune the current prompt.
+
+- *Ambiguous user intent versus a narrow artifact oracle:* v88's everyday
+  appliance need reasonably led to shopping research, while its inherited
+  validator assumed a task-list edit. It is not evidence that the assistant
+  should always infer a TODO from an undeclared purchase.
+- *Capability selection for stateful follow-ups:* v86 candidate r2 did not
+  create the offered geo proposal after confirmation, and v89 baseline did not
+  select the Git-history capability for a described rollback. These are
+  separate product areas, but both leave a requested durable state change
+  incomplete without a tool error.
+- *Scale or lifecycle-shaped incompletion:* v70 returned empty after a supplied
+  completion wake, v77 stalled on a copied full workspace, and v82 left the
+  dense roadmap unchanged. Treat this as a distinct reliability cluster from
+  small local edits, which have multiple retained parity rows.
+- *Fixture/oracle drift, not behavior evidence:* v77 pre-wake, v83, v84, and
+  v86's first attempt were discarded because their harness did not model the
+  web completion lifecycle or current deterministic tool contract. They remain
+  in the index to prevent a future retest from repeating the same setup error.
+
 ** Historical diagnostic clusters
 
 These are compact pointers to earlier failed or stopped probes. They are useful
