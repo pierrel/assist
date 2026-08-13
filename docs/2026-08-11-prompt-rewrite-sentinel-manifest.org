@@ -546,3 +546,17 @@ values. It stubs the research subagent at construction and makes both direct
 GET and POST requests raise; it asserts neither was attempted. Baseline N=3,
 candidate N=1, then candidate N=3 are separately admitted under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/pdf-search-v99/=.
+
+* v100 sandbox domain-skill cohort
+
+The comparison-only =TestPromptRewriteDomainSkillSandbox= asks the existing
+natural billing question: “I exported =billing-2026.csv=. The bottom line is
+supposed to match the charges above it, but the books don't balance — one entry
+must be wrong. Which one?” Its fresh workspace contains the packaged
+=ledger-audit= skill under =.claude/skills= and the mismatched CSV. The real
+Docker sandbox exercises the production =/workspace/.claude/skills= resolution
+path. The validator requires the skill load and the derived =210.00= result.
+It constructs the normal comparison profile, stubs research at construction,
+and makes GET/POST fail while asserting neither was attempted. Baseline N=3,
+candidate N=1, then N=3 only after a passing probe, with captures under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/domain-skill-sandbox-v100/=.

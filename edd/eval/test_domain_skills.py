@@ -44,6 +44,7 @@ import shutil
 import tempfile
 from textwrap import dedent
 from unittest import TestCase
+from unittest.mock import patch
 
 import yaml
 
@@ -247,6 +248,44 @@ class TestDomainSkillLoadingSandbox(TestCase):
         )
         self.assertRegex(
             response, _CORRECT_SUM_RE,
+            f"skill loaded but reconciliation not done — derived figure "
+            f"{_CORRECT_SUM}.00 absent (loaded != used)",
+        )
+
+
+class TestPromptRewriteDomainSkillSandbox(TestDomainSkillLoadingSandbox):
+    """Prompt-rewrite comparison for an in-repo skill in the real sandbox."""
+
+    def test_loads_with_domain_hint_in_sandbox(self):
+        create_filesystem(self.workspace, _fixture())
+        with patch(
+            "assist.tools.requests.get",
+            side_effect=AssertionError("domain-skill eval must not fetch URLs"),
+        ) as get, patch(
+            "assist.tools.requests.post",
+            side_effect=AssertionError("domain-skill eval must not post URLs"),
+        ) as post, stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model,
+                self.workspace,
+                sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec(),
+            ))
+            response = agent.message(
+                "I exported `billing-2026.csv`. The bottom line is supposed to "
+                "match the charges above it, but the books don't balance — one "
+                "entry must be wrong. Which one?"
+            )
+
+        get.assert_not_called()
+        post.assert_not_called()
+        self.assertTrue(
+            skill_was_loaded(agent, _SKILL_NAME),
+            "agent did not load the in-repo ledger-audit skill inside the sandbox",
+        )
+        self.assertRegex(
+            response,
+            _CORRECT_SUM_RE,
             f"skill loaded but reconciliation not done — derived figure "
             f"{_CORRECT_SUM}.00 absent (loaded != used)",
         )
