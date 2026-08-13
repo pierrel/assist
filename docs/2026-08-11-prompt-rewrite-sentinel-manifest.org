@@ -313,3 +313,13 @@ network operation occurs. The validator requires the correct PDF download,
 the =explore-website= skill, no asset-dead-end crawl, and at most three page
 fetches. Both profiles run N=3 under bounded admission; captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/website-v78/=.
+
+* v79 human-approved email-proposal cohort
+
+The natural request asks to notify a named recipient that a meeting moved. The
+fixture uses the real =send-email= skill, email proposal tool, and production
+interrupt configuration. The graph pauses at the human-approval request before
+provider delivery, so no external email is sent. The validator requires the
+skill, exactly one proposal, the recipient, a Tuesday body reference, and a
+nonempty subject. Both profiles run N=3 under bounded admission; captures are
+under =/home/pierre/deploy/assist/prompt-rewrite-captures/email-v79/=.
