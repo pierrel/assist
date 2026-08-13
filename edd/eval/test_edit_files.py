@@ -261,6 +261,7 @@ class TestMultiStepPlan(_EditScenario):
 class TestPromptRewriteWeeklyReview(TestMultiStepPlan):
     """Prompt-rewrite comparison for a durable multi-step local edit."""
 
+    test_derived_count_matches_reality = None
     test_deletions_actually_happened = None
 
     def setUp(self):
@@ -281,6 +282,29 @@ class TestPromptRewriteWeeklyReview(TestMultiStepPlan):
     def _run(self, prompt):
         with stub_research_subagent():
             return super()._run(prompt)
+
+    def test_weekly_review_completes_and_reconciles(self):
+        """The user-facing outcome: all requested edits plus the final count."""
+        agent, summary = self._run(self._PROMPT)
+        final = self._final()
+        diag = self._diag(agent, summary)
+
+        actual = _count_todo(final)
+        marker = re.search(r"#\s*ACTIVE:\s*(\d+)", final)
+        self.assertIsNotNone(marker, "the '# ACTIVE: N' top line was not added" + diag)
+        self.assertEqual(
+            int(marker.group(1)),
+            actual,
+            f"'{marker.group(0)}' but the file actually has {actual} TODO items" + diag,
+        )
+
+        leftover = [line.strip() for line in final.splitlines()
+                    if re.match(r"^\*+\s+(DONE|CANCELLED|CANCELED)\s+\S", line)]
+        self.assertEqual(
+            leftover,
+            [],
+            f"DONE/CANCELLED headings not deleted: {leftover}" + diag,
+        )
 
 
 class TestOrgTension(_EditScenario):
