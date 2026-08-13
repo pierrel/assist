@@ -289,9 +289,13 @@ class TestPromptRewriteWeeklyReview(TestMultiStepPlan):
         final = self._final()
         diag = self._diag(agent, summary)
 
+        lines = final.splitlines()
+        marker = re.fullmatch(r"# ACTIVE: (\d+)", lines[0] if lines else "")
+        self.assertIsNotNone(
+            marker,
+            "the first line must be exactly '# ACTIVE: N'" + diag,
+        )
         actual = _count_todo(final)
-        marker = re.search(r"#\s*ACTIVE:\s*(\d+)", final)
-        self.assertIsNotNone(marker, "the '# ACTIVE: N' top line was not added" + diag)
         self.assertEqual(
             int(marker.group(1)),
             actual,
@@ -304,6 +308,23 @@ class TestPromptRewriteWeeklyReview(TestMultiStepPlan):
             leftover,
             [],
             f"DONE/CANCELLED headings not deleted: {leftover}" + diag,
+        )
+
+        expected_remaining = {
+            "Return library books", "Pick up dry cleaning", "Renew the parking permit",
+            "Mow the lawn", "Trim the hedges", "Plant the tomatoes", "Rake the leaves",
+            "Return the Lowy book", "Email Sam about the offsite", "Review Jordan's draft",
+            "Prepare the Q3 slides",
+        }
+        states = _states(final)
+        self.assertEqual(
+            set(states),
+            expected_remaining,
+            "weekly review removed or retained an unexpected task heading" + diag,
+        )
+        self.assertTrue(
+            all(states[item] == "TODO" for item in expected_remaining),
+            "remaining tasks must preserve their TODO state" + diag,
         )
 
 
