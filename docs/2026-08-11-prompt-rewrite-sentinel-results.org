@@ -50,6 +50,7 @@ signals, not prompt-tuning instructions.
 | v91 directions fixture | baseline N=2, discarded fixture attempts | =test_directions_agent.py::TestPromptRewriteTransitDirectionsOutcome::test_reports_canned_train_directions= | local geocoder did not accept natural city-qualified forms for Civic Center | =directions-v91/baseline-1.log= SHA-256 =74554ff8e83a35a27a19412671329f5a481524a0b95addd162e3babd6d5a1032=; =baseline-2.log= SHA-256 =388444ed1f8e145222d2baa2561fc515e55c7bca18c2756a8acc8a9f167dced5= |
 | v95 web interjection lifecycle | candidate N=2, stopped comparison | =test_interjection.py::TestPromptRewriteInterjectionOutcome::test_redirect_mid_turn_with_web_completion= | second candidate run did not launch the required context task, so no completion wake was possible | =interjection-v95/lifecycle-candidate-2.log= SHA-256 =f9ce583ddfa9d04b5f17006001a4e966a8325363faee1441c9ee4a1effc49bb2= |
 | v98 independent launch briefs | baseline N=3, stopped comparison | =test_async_subagents.py::TestPromptRewriteIndependentBriefs::test_natural_two_independent_outcomes_delegate= | third baseline wrote a brief with an empty required Recommendation field | =independent-briefs-v98-final/baseline-3.log= SHA-256 =56a371d510fd059f0a1c7feaee51858da7cd7f7d0a23fb4cd9355268f714803a= |
+| v100 sandbox domain skill | candidate N=1, stopped comparison | =test_domain_skills.py::TestPromptRewriteDomainSkillSandbox::test_loads_with_domain_hint_in_sandbox= | did not load the in-repo =ledger-audit= skill for the natural local billing question | =domain-skill-sandbox-v100/candidate-1.log= SHA-256 =3d30332776be51ef6cb1891afabe630f2edab34065cd430833d5f0913c330913= |
 
 ** Current pattern candidates
 
@@ -82,6 +83,11 @@ instructions to tune the current prompt.
   work-product reliability signal distinct from the v95 task-launch variance;
   retain it for a later holistic review rather than filling the prompt with
   brief-template instructions.
+- *Cross-surface progressive-skill selection:* v100's candidate did not load
+  the workspace-provided =ledger-audit= skill in the real sandbox, although
+  v75 reached local no-hint parity for the same reconciliation shape. Retain it
+  as an execution-surface signal for a later holistic review, not a reason to
+  strengthen an individual skill description.
 
 ** Historical diagnostic clusters
 
@@ -874,6 +880,23 @@ are under =/home/pierre/deploy/assist/prompt-rewrite-captures/pdf-search-v99/=.
 
 This extends the earlier orientation-only PDF result to a content lookup. It
 does not establish parity for targeted-page reading or large-document bounds.
+
+* v100 sandbox domain-skill cohort: stopped candidate
+
+This follows the no-hint local domain-skill result with the same natural
+billing question but the real sandbox path, where the workspace-provided skill
+must resolve from =/workspace/.claude/skills=. The baseline completed N=3: it
+loaded =ledger-audit= and reported the derived =210.00= total. The candidate
+probe did not load that skill, so the staged comparison stops at N=1. Both
+direct HTTP methods are hard-rejected and research is canned. This is a
+cross-surface skill-selection signal, not a prompt-tuning instruction. Captures
+are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/domain-skill-sandbox-v100/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =15e53182b2f7fcc46cac03127ebed7019be775ab2be0497bc32b8259ff84e9d4=; =baseline-2.log= =6aa9a1538584127f2b2760575707263e6fbfd22da22c99ff8e81d6a6ecc16de7=; =baseline-3.log= =1cd6cfe80bcc79a4f905ced8d481878c1c647a56a2928ec4b5a56f36f2423d87= |
+| candidate | N=1, stopped | 0/1 | =candidate-1.log= =3d30332776be51ef6cb1891afabe630f2edab34065cd430833d5f0913c330913= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
