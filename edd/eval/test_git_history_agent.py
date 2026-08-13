@@ -17,7 +17,8 @@ from assist.domain_manager import clone_repo
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import executed_commands, skill_was_loaded
+from .utils import (executed_commands, prompt_rewrite_web_main_spec,
+                    skill_was_loaded, stub_research_subagent)
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +83,13 @@ class _HistoryScenario(TestCase):
         _git("commit", "-m", msg, cwd=self.workspace)
 
     def _run(self, prompt):
-        agent = AgentHarness(create_agent(self.model, self.workspace,
-                                          sandbox_backend=self.sandbox))
+        # The rollback is fully local to the temporary branch. Use the same
+        # comparison web-main shape and canned research worker as other
+        # prompt-rewrite rows so provider availability cannot affect it.
+        with stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, self.workspace, sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec()))
         agent.message(prompt)
         return agent
 

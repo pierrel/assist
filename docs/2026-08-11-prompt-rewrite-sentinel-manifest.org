@@ -280,3 +280,14 @@ pass. The local fixture builds the same web-main profile and canned research
 worker as the comparison panel; no external network operation is possible.
 Both profiles run N=3 under bounded admission; captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/domain-skill-v75/=.
+
+* v76 Git-history rollback cohort
+
+The natural request asks to undo the last change on a temporary thread branch.
+The fixture creates a local bare origin and three committed turns, then exposes
+the real sandbox and validates branch state: the evening file must disappear
+while morning and noon remain. Agent construction uses the comparison web-main
+profile and canned research worker. The operation is local to the temporary
+repository and does not access a remote network. Both profiles run N=3 under
+bounded admission; captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/git-history-v76/=.
