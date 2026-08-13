@@ -2,7 +2,10 @@
 
 from deepagents.graph import BASE_AGENT_PROMPT
 
-from edd.prompt_census import capture_prompt_rewrite_profiles
+from edd.prompt_census import (
+    capture_prompt_rewrite_guidance_skill_profiles,
+    capture_prompt_rewrite_profiles,
+)
 
 
 def test_prompt_rewrite_profile_capture_uses_the_eval_helper_on_both_sides():
@@ -19,6 +22,28 @@ def test_prompt_rewrite_profile_capture_uses_the_eval_helper_on_both_sides():
     assert candidate["final_text"].startswith(
         f"{BASE_AGENT_PROMPT}\n\n## Purpose\n\nYou are Assist")
     assert "assist.PromptCompositionMiddleware" not in baseline["transition_owners"]
+    assert "assist.PromptCompositionMiddleware" in candidate["transition_owners"]
+    assert baseline["initial_sha256"] != candidate["initial_sha256"]
+    assert baseline["final_sha256"] != candidate["final_sha256"]
+
+
+def test_guidance_skill_profile_capture_keeps_web_main_shape_on_both_sides():
+    profiles = capture_prompt_rewrite_guidance_skill_profiles()
+    baseline = profiles["baseline"]
+    candidate = profiles["candidate"]
+
+    assert baseline["guidance_skills_env"] is False
+    assert candidate["guidance_skills_env"] is True
+    assert baseline["initial_text"].startswith("## Purpose\n\nYou are Assist")
+    assert candidate["initial_text"].startswith("## Purpose\n\nYou are Assist")
+    assert "- **grounding**:" not in baseline["final_text"]
+    assert "- **research**:" not in baseline["final_text"]
+    assert "- **grounding**:" in candidate["final_text"]
+    assert "- **research**:" in candidate["final_text"]
+    assert "load `grounding` before deciding" not in baseline["initial_text"]
+    assert "load `grounding` before deciding" in candidate["initial_text"]
+    assert baseline["visible_tools"] == candidate["visible_tools"]
+    assert "assist.PromptCompositionMiddleware" in baseline["transition_owners"]
     assert "assist.PromptCompositionMiddleware" in candidate["transition_owners"]
     assert baseline["initial_sha256"] != candidate["initial_sha256"]
     assert baseline["final_sha256"] != candidate["final_sha256"]

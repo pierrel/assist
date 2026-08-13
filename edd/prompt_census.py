@@ -57,7 +57,7 @@ REQUIRED_PATHS = {
     "capture",
 }
 EXPECTED_PATHS_BY_SCENARIO = {
-    "web-main-core": ("main", "main", "main"),
+    "web-main-core": ("main", "main", "main", "main"),
     "web-main-full": ("main", "main"),
     "web-delegate": ("delegate",),
     "legacy-main": ("legacy-main",),
@@ -445,8 +445,10 @@ def _call(name: str, args: dict[str, Any], suffix: str) -> AIMessage:
 def _scripted_response(scenario: str, index: int) -> AIMessage:
     if scenario == "web-main-core":
         if index == 0:
-            return _call("execute", {"command": "printf synthetic-ok"}, "safe-exec")
+            return _call("load_skill", {"name": "grounding"}, "grounding-load")
         if index == 1:
+            return _call("execute", {"command": "printf synthetic-ok"}, "safe-exec")
+        if index == 2:
             return _call("execute", {"command": "git push origin main"}, "git-push")
     if scenario == "web-main-full":
         if index == 0:
@@ -503,6 +505,7 @@ _OWNER_SOURCE_IDS = {
 _PACKAGED_SKILL_ROOTS = {
     "/skills/": Path("assist/skills"),
     "/main-skills/": Path("assist/main_skills"),
+    "/web-main-skills/": Path("assist/web_main_skills"),
     "/render-skill/": Path("assist/web_skills"),
 }
 
@@ -1733,6 +1736,8 @@ _TOOL_ORIGINS = {
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
         "d0bf608e2e7b8c0b5bad52e2dd87fe17b91f357d06bb449742406f08230eb32d",
+        "cbc483e291b07adf34e6be71a409f486bee4de7a6f520f0c15994ede69dbf30c",
+        "41d234fb460cd2a09f3ff18bef2b243b99f8f0faa5d444763f30c7ee314b0cfe",
     },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
@@ -1897,6 +1902,8 @@ def _capability_claims(call: dict[str, Any]) -> list[dict[str, str]]:
     return claims
 
 _DECLARED_TOOL_CALLS = {
+    "synthetic-call-grounding-load": (
+        "load_skill", {"name": "grounding"}),
     "synthetic-call-safe-exec": (
         "execute", {"command": "printf synthetic-ok"}),
     "synthetic-call-git-push": (
@@ -1993,6 +2000,9 @@ _TASK_SCHEMA_HASH_BY_PATH = {
 def _expected_skill_file(tool_call_id: str) -> str:
     repo = Path(__file__).resolve().parents[1]
     files = {
+        "synthetic-call-grounding-load":
+            (repo / "assist/web_main_skills/grounding/SKILL.md").read_text(
+                encoding="utf-8"),
         "synthetic-call-hitl-skill-load":
             (repo / "assist/web_skills/send-email/SKILL.md").read_text(
                 encoding="utf-8"),
@@ -2007,6 +2017,10 @@ def _expected_skill_file(tool_call_id: str) -> str:
 
 def _expected_tool_results() -> dict[str, str]:
     return {
+        "synthetic-call-grounding-load":
+            _expected_skill_file("synthetic-call-grounding-load")
+            + "\n\nNewly available tools: edit_file, glob, grep, ls, "
+            "read_file, start_async_task, write_file, write_todos.",
         "synthetic-call-safe-exec":
             "SYNTHETIC_EXECUTE_OK\n[Command succeeded with exit code 0]",
         "synthetic-call-git-push":
@@ -2061,8 +2075,13 @@ def _expected_load_artifact(tool_call_id: str) -> dict[str, str]:
         skill_file, f"/{requested_name}/SKILL.md", requested_name)
     if metadata is None:
         raise AssertionError("declared load result metadata did not parse")
+    allowed_tools = (
+        ["edit_file", "glob", "grep", "ls", "read_file",
+         "start_async_task", "write_file", "write_todos"]
+        if tool_call_id == "synthetic-call-grounding-load"
+        else list(metadata["allowed_tools"]))
     fingerprint_payload = {
-        "allowed_tools": list(metadata["allowed_tools"]),
+        "allowed_tools": allowed_tools,
         "skill_file_sha256": hashlib.sha256(
             skill_file.encode("utf-8")).hexdigest(),
         "description": metadata["description"],
@@ -2079,6 +2098,7 @@ def _expected_load_artifact(tool_call_id: str) -> dict[str, str]:
 
 
 _TOOL_RESULT_METADATA = {
+    "synthetic-call-grounding-load": ("load_skill", "success"),
     "synthetic-call-safe-exec": ("execute", "success"),
     "synthetic-call-git-push": ("execute", "error"),
     "synthetic-call-hitl-skill-load": ("load_skill", "success"),
@@ -2097,7 +2117,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "776b5fa21111a509929088e018c741d977c09e9e8867f3d1754a66b2117f23ac"
+    "5ef7fc64dd9593f0ed5b16468ab00e61abb0580875c73ddfdfe487c52e97a1fc"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -2140,7 +2160,8 @@ def _expected_message_history(scenario: str, index: int) -> list[dict[str, Any]]
     messages = [{"content": f"SYNTHETIC USER {user_suffix}", "role": "user"}]
     ids: list[str] = []
     if scenario == "web-main-core":
-        ids = ["synthetic-call-safe-exec", "synthetic-call-git-push"][:index]
+        ids = ["synthetic-call-grounding-load", "synthetic-call-safe-exec",
+               "synthetic-call-git-push"][:index]
     elif scenario == "web-main-full" and index == 1:
         ids = ["synthetic-call-hitl-skill-load"]
     elif scenario.startswith("skill-precedence-") and index == 1:
@@ -2560,7 +2581,8 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
                 and observation["sandbox_commands"] != expected_commands[scenario]:
             raise AssertionError(f"{scenario} has undeclared sandbox commands")
         expected_tool_ids = {
-            "web-main-core": ["synthetic-call-safe-exec",
+            "web-main-core": ["synthetic-call-grounding-load",
+                              "synthetic-call-safe-exec",
                               "synthetic-call-git-push"],
             "web-main-full": ["synthetic-call-hitl-skill-load"],
             "web-delegate": [],
@@ -2942,7 +2964,15 @@ def _skill_tool_owners(source_manifest: list[dict[str, Any]], *,
             continue
         if _packaged_skill_path(source) is None:
             continue
-        for tool_name in source["allowed_tools"]:
+        declared_tools = list(source["allowed_tools"])
+        if scenario in {"web-main-core", "web-main-full"}:
+            if source["name"] == "grounding":
+                declared_tools.extend((
+                    "write_todos", "ls", "read_file", "write_file", "edit_file",
+                    "glob", "grep", "start_async_task"))
+            elif source["name"] == "research":
+                declared_tools.append("start_async_task")
+        for tool_name in declared_tools:
             owners.setdefault(tool_name, []).append(source["name"])
     return {name: sorted(set(skill_names))
             for name, skill_names in owners.items()}
@@ -3304,6 +3334,60 @@ def capture_prompt_rewrite_profiles() -> dict[str, dict[str, Any]]:
                     "final_text": _system_prompt(call),
                     "initial_sha256": call["provenance"]["initial_sha256"],
                     "final_sha256": call["provenance"]["final_sha256"],
+                    "visible_tools": call["visible_tools"],
+                    "transition_owners": [
+                        event["owner"] for event in call["prompt_events"]],
+                }
+        finally:
+            env.globals["current_datetime"] = original_clock
+    return profiles
+
+
+def capture_prompt_rewrite_guidance_skill_profiles() -> dict[str, dict[str, Any]]:
+    """Capture pre- and post-migration web-main eval-helper profiles.
+
+    Unlike the historical layout comparison above, both sides use the ordinary
+    web-main prompt composition. The only profile switch is whether the
+    candidate-only grounding/research prompt source is mounted.
+    """
+    from assist.agent import create_agent
+    from assist.promptable import env
+    from edd.eval.utils import prompt_rewrite_web_main_spec
+
+    profiles: dict[str, dict[str, Any]] = {}
+    original_clock = env.globals["current_datetime"]
+    with tempfile.TemporaryDirectory(prefix="assist-guidance-skill-profiles-") as tmp:
+        root = Path(tmp)
+        env.globals["current_datetime"] = lambda: FIXED_NOW
+        try:
+            for name, enabled in (("baseline", False), ("candidate", True)):
+                trace = CensusTrace()
+                workspace = root / name / "workspace"
+                agent_dir = root / name / "agent"
+                workspace.mkdir(parents=True)
+                agent_dir.mkdir()
+                with patch.dict(
+                        os.environ,
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": str(int(enabled))},
+                        clear=False), _instrument(trace), _scenario("observer-probe"):
+                    agent = create_agent(
+                        RecordingChatModel(trace), str(workspace),
+                        agent_dir=str(agent_dir),
+                        spec=prompt_rewrite_web_main_spec())
+                    _invoke_agent(agent, "observer-probe")
+                if trace.faults:
+                    raise trace.faults[0]
+                if len(trace.calls) != 1:
+                    raise AssertionError(
+                        f"guidance-skill {name} profile made {len(trace.calls)} calls")
+                call = trace.calls[0]
+                profiles[name] = {
+                    "guidance_skills_env": enabled,
+                    "initial_text": call["provenance"]["initial_text"],
+                    "final_text": _system_prompt(call),
+                    "initial_sha256": call["provenance"]["initial_sha256"],
+                    "final_sha256": call["provenance"]["final_sha256"],
+                    "visible_tools": call["visible_tools"],
                     "transition_owners": [
                         event["owner"] for event in call["prompt_events"]],
                 }

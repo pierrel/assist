@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 
@@ -40,7 +40,7 @@ from edd.outcome_judge import (
 )
 
 from .utils import (create_filesystem, prompt_rewrite_web_main_spec,
-                    stub_research_subagent)
+                    skill_was_loaded, stub_research_subagent)
 
 
 _TASK_DESCRIPTIONS: dict[str, str] = {}
@@ -683,6 +683,11 @@ class TestAsyncSubagentSupervisor(TestCase):
             research_starts, [],
             "research must wait for the local context result",
         )
+        if os.environ.get("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS") == "1":
+            self.assertTrue(
+                skill_was_loaded(agent, "grounding"),
+                "the candidate must load grounding before its context worker",
+            )
 
         context_id = _task_id_for_call(context_starts[0])
         context_result = _ORCHID_CONTEXT_RESULT
@@ -704,6 +709,11 @@ class TestAsyncSubagentSupervisor(TestCase):
             and call.get("args", {}).get("subagent_type") == "research-agent"
         ]
         self.assertEqual(len(research_starts), 1, context_completion_calls)
+        if os.environ.get("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS") == "1":
+            self.assertTrue(
+                skill_was_loaded(agent, "research"),
+                "the candidate must load research before its research worker",
+            )
         research_brief = research_starts[0]["args"]["description"]
         self.assertIn(
             "may 17",
@@ -1382,6 +1392,7 @@ class TestPromptRewriteTwoReports(TestPromptRewriteIndependentBriefs):
             report_path = Path(_TASK_ROOT, f"{workstream}-report.md")
             self.assertEqual(_read_judge_evidence(source_path), source,
                              f"agent changed {source_path.name}")
+            self.assertTrue(report_path.is_file(), self._calls(agent))
             report = self._validated_field_evidence(
                 _read_judge_evidence(report_path).decode(),
                 ("recommendation", "risks", "next actions"),
@@ -1407,3 +1418,141 @@ class TestPromptRewriteTwoReports(TestPromptRewriteIndependentBriefs):
             "requested": requested,
             "evidence": evidence,
         }))
+
+
+class TestPromptRewriteGuidanceSkills(TestAsyncSubagentSupervisor):
+    """Candidate-only capability coverage for the two web-main guidance skills.
+
+    These rows do not compare an outcome with the pre-skill profile: neither
+    capability exists there. They prove the new catalog's loaded procedures use
+    the existing lifecycle workers without adding a tool or performing research.
+    """
+
+    @staticmethod
+    def _tool_call_batches(agent: AgentHarness) -> list[list[dict]]:
+        return [message.tool_calls for message in agent.all_messages()
+                if isinstance(message, AIMessage) and message.tool_calls]
+
+    @staticmethod
+    def _error_results(agent: AgentHarness) -> list[ToolMessage]:
+        return [message for message in agent.all_messages()
+                if isinstance(message, ToolMessage) and message.status == "error"]
+
+    def _candidate_agent(self) -> AgentHarness:
+        return self._agent(spec=prompt_rewrite_web_main_spec())
+
+    def test_grounding_skill_loads_then_dispatches_context(self):
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("capability probe must not fetch")) as get, \
+             patch.dict(os.environ,
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        clear=False):
+            agent = self._candidate_agent()
+            agent.message(
+                "What do my trip notes say about when weekend rail service resumes?")
+
+        get.assert_not_called()
+
+        batches = self._tool_call_batches(agent)
+        self.assertTrue(skill_was_loaded(agent, "grounding"), batches)
+        load_index = next(index for index, batch in enumerate(batches)
+                          if [call["name"] for call in batch] == ["load_skill"]
+                          and batch[0]["args"].get("name") == "grounding")
+        preloads = [call for batch in batches[:load_index] for call in batch]
+        self.assertTrue(all(call["name"] in {"glob", "grep", "ls", "read_file"}
+                            for call in preloads))
+        if preloads:
+            self.assertTrue(any("Load its matching skill" in message.content
+                                for message in self._error_results(agent)))
+        self.assertGreater(len(batches), load_index + 1, batches)
+        self.assertEqual([call["name"] for call in batches[load_index + 1]],
+                         ["start_async_task"])
+        self.assertEqual(
+            batches[load_index + 1][0]["args"].get("subagent_type"), "context-agent")
+
+    def test_research_skill_loads_then_dispatches_research(self):
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("capability probe must not fetch")) as get, \
+             patch.dict(os.environ,
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        clear=False):
+            agent = self._candidate_agent()
+            agent.message(
+                "What current national rail discount programs are available?")
+
+        get.assert_not_called()
+
+        batches = self._tool_call_batches(agent)
+        self.assertTrue(skill_was_loaded(agent, "research"), batches)
+        load_index = next(index for index, batch in enumerate(batches)
+                          if [call["name"] for call in batch] == ["load_skill"]
+                          and batch[0]["args"].get("name") == "research")
+        preloads = [call for batch in batches[:load_index] for call in batch]
+        self.assertTrue(all(call["name"] == "start_async_task" for call in preloads))
+        if preloads:
+            self.assertTrue(any("Load its matching skill" in message.content
+                                for message in self._error_results(agent)))
+        self.assertGreater(len(batches), load_index + 1, batches)
+        self.assertEqual([call["name"] for call in batches[load_index + 1]],
+                         ["start_async_task"])
+        self.assertEqual(
+            batches[load_index + 1][0]["args"].get("subagent_type"), "research-agent")
+
+
+class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
+    """Natural external-fact outcome under the paired guidance-skill profiles."""
+
+    test_career_scan_selects_repeated_work_skill_from_metadata_capability = None
+    test_completion_wake_checks_then_uses_result = None
+    test_context_result_informs_research_then_final_response = None
+    test_explicit_delegate_fanout_capability = None
+    test_explicit_dependent_delegate_starts_after_prerequisite_completion = None
+    test_explicit_failed_sibling_preserves_success_and_blocks_join = None
+    test_explicit_timed_out_prerequisite_blocks_dependent_delegate = None
+    test_natural_long_list_chooses_one_delegate_per_outcome = None
+    test_natural_two_independent_outcomes_delegate = None
+    test_natural_weekly_career_scan = None
+    test_overlapping_workspace_changes_are_serialized = None
+    test_pure_external_research_uses_research_not_delegate = None
+    test_single_outcome_with_several_steps_stays_with_main = None
+    test_starts_independent_context_and_research_without_polling = None
+    test_starts_subagents_and_returns_without_polling = None
+    test_user_redirection_updates_the_active_task = None
+    test_user_stop_request_reports_cancellation_requested_for_running_tasks = None
+
+    def _agent(self, **kwargs) -> AgentHarness:
+        return super()._agent(spec=prompt_rewrite_web_main_spec(), **kwargs)
+
+    def test_answers_current_train_time(self):
+        candidate = os.environ.get("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS") == "1"
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("research eval must not fetch")) as get:
+            agent = self._agent()
+            agent.message(
+                "What time does the northbound Coast Starlight currently leave Los Angeles?")
+            starts = [call for call in self._calls(agent)
+                      if call.get("name") == "start_async_task"]
+            research = next(call for call in reversed(starts)
+                            if call.get("args", {}).get(
+                                "subagent_type") == "research-agent")
+            if candidate:
+                self.assertTrue(skill_was_loaded(agent, "research"))
+            self.assertFalse(any(call.get("args", {}).get("subagent_type") == "delegate-agent"
+                                 for call in starts), starts)
+            task_id = _task_id_for_call(research)
+            reply = agent.message(_completion_wake(task_id, "success"))
+        get.assert_not_called()
+        self.assertTrue(any(
+            call.get("name") == "check_async_task"
+            and call.get("args", {}).get("task_id") == task_id
+            for call in self._calls(agent)), self._calls(agent))
+        self.assertRegex(reply, r"(?i)Coast Starlight.*9:51")
+
+
+class TestPromptRewriteGuidanceHandoff(TestPromptRewriteIndependentBriefs):
+    """Natural local-to-research handoff under the paired guidance profiles."""
+
+    test_natural_two_independent_outcomes_delegate = None
+    test_context_result_informs_research_then_final_response = (
+        TestAsyncSubagentSupervisor.test_context_result_informs_research_then_final_response
+    )

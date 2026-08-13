@@ -97,6 +97,94 @@ full-suite parity and does not establish the separately failed v2a
 local-evidence principle. The combined v2c variant remains out of scope because
 v2a did not clear its standalone gate.
 
+* Grounding and research skill migration
+
+The direct grounding/research procedure in the current core predates real skill
+contracts. This phase moves that detailed procedure into two progressively
+loaded, web-main-only guidance skills while keeping =context-agent= and
+=research-agent= as the existing execution workers. It changes no lifecycle
+tool, worker implementation, tool registration, or middleware order.
+
+The initial grounding-catalog experiment did not establish a usable front door:
+on a schedule request, Qwen selected the exact =schedule= match instead of a
+generic early-grounding entry. This migration therefore does not ask a catalog
+description to override every matching domain capability. The compact core
+selects the contract by outcome shape:
+
+- load =grounding= when the user's files, personal information, prior work, or
+  current task state may affect the answer or action;
+- load =research= when the user expects externally verified or current facts;
+- when both apply, load =grounding= first so checked local evidence scopes the
+  research task; self-contained capability requests continue to select their
+  matching skill directly.
+
+The loaded =grounding= contract owns the context-task brief, its launch/return
+behavior, checked-completion handling, untrusted-result treatment, and the
+decision to pass its extracted facts to =research=. The loaded =research=
+contract owns a complete research-task brief, launch/return behavior, checked
+report consumption, source-backed answer, and honest partial/unavailable
+result. Neither skill introduces a tool or grants authority; both use the
+existing async-task lifecycle.
+
+** Comparison boundary
+
+Add a closed =AgentSpec.web_main_guidance_skills= opt-in, default false and
+valid only for the existing =web_main= identity. ThreadManager enables it for
+the ordinary visible web assistant. The eval helper keeps =web_main=true= on
+both sides, then switches only this opt-in: the pre-skill baseline retains the
+current v2b core and catalog; the candidate receives the refactored core and a
+read-only bundled =/web-main-skills/= source containing the two contracts.
+Every other role remains byte-for-byte unchanged. The prompt census and paired
+profile capture must prove the catalog/body source and core variant appear only
+on the opted-in web-main calls.
+
+** Capped behavioral panel
+
+The whole panel is fifteen rows maximum. Every row uses the same current v2b
+pre-skill profile for its N=3 baseline unless an exact matching v2b capture
+already exists; candidate starts N=1 and promotes a promising row to N=3. It
+uses canned research and URL-fetch rejection unless the row itself tests the
+research lifecycle, in which case it supplies deterministic child results. No
+row performs live search.
+
+| Role | Rows | Purpose |
+|-
+| Natural grounding | v108 local dinner answer; v107 fitness plan; v70 task discovery/update; v56 honest local edit | Local facts and action without a fixture-shaped route |
+| Natural research | context-result-to-research rail handoff; pure external research rather than delegate; unavailable external lookup | Context-scoped research, self-contained research, honest no-result behavior |
+| Existing outcome anchors | v109 two reports; v81 Elisp authoring/verification | Preserve the accepted deliverable change and unrelated authored artifact quality |
+| Direct-capability anti-triggers | v50 recurring schedule; v59 calculation; v55 time | Do not ground/research self-contained matching capabilities |
+| Safety | task-result injection | Checked child data remains untrusted while the new skills route it |
+| Explicit capability | new grounding contract selection/launch; new research contract selection/launch | Prove the catalog body actually loads and dispatches the intended existing worker |
+
+The pre-skill baseline can reuse v2b's existing N=3 captures for v109 and v81.
+All other rows need a fresh pre-skill baseline because their only existing
+captures use a different core revision or different static composition. A
+candidate failure is recorded and diagnosed, not repaired with a row-specific
+example or another front-door instruction.
+
+** Selection gate
+
+The first capability probes show a boundary in the current progressive-skills
+implementation: skill declarations can disclose Assist action tools, but they
+cannot own framework filesystem tools or the generic async-task lifecycle tool.
+On a local-context request Qwen therefore chose =glob=/=read_file=; on an
+external-fact request it chose =start_async_task(research-agent)=. Both routes
+bypassed the named skill despite the candidate core and catalog descriptions.
+
+The candidate therefore extends progressive disclosure only for these two
+web-main skills. The existing local filesystem/execute and async-launch schemas
+remain visible, so the framework's filesystem and memory guidance stays true.
+Before the matching skill loads, the same existing after-model guard rejects a
+guidance-owned local or async-launch call before it executes and tells the model
+to load its matching skill. Loading =grounding= authorizes the local-work and
+context-launch surface; loading =research= authorizes only the existing
+research-launch surface. =check_async_task= remains directly available because a
+completion wake begins a new graph invocation after progressive state resets.
+This is a bounded execution boundary, not a semantic router: self-contained
+tools and every non-candidate profile retain prior visibility and behavior.
+Census/profile tests prove the scope; capability rows prove that a rejected
+bypass cannot run and the subsequent load dispatches the intended existing worker.
+
 * Objective and boundaries
 
 The experiment asks whether a compact product kernel plus loaded skills keeps

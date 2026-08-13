@@ -97,10 +97,10 @@ class TestPromptRewriteDomainTask(TestCase):
             agent = AgentHarness(create_agent(
                 self.model, self.working_dir, agent_dir=self.agent_dir,
                 spec=prompt_rewrite_web_main_spec()))
-            agent.message(
+            initial_response = agent.message(
                 "What is my next task? Then update it to be due on 11/7/2026."
             )
-            response = complete_web_main_tasks(agent)
+            response = complete_web_main_tasks(agent) or initial_response
         get.assert_not_called()
 
         self.assertRegex(response, "Yosemite",

@@ -12,7 +12,8 @@ from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 
-from .test_async_subagents import reset_task_fixture
+from .test_async_subagents import (_TASK_RESULTS, _task_id_for_call,
+                                   reset_task_fixture)
 from .utils import (AgentTestMixin, cleanup_workspace, complete_web_main_tasks,
                     agent_tool_calls, create_filesystem,
                     prompt_rewrite_web_main_spec, read_file, skill_was_loaded,
@@ -287,6 +288,13 @@ class TestPromptRewriteLocalGrounding(TestCase):
             initial_response = agent.message(
                 "I'm choosing dinner at home tonight. What neighborhood am I in, "
                 "and what food do I usually like?")
+            context = next((
+                call for call in agent_tool_calls(agent, "start_async_task")
+                if call["args"].get("subagent_type") == "context-agent"), None)
+            if context is not None:
+                _TASK_RESULTS[_task_id_for_call(context)] = (
+                    "Found /profile.org. Home: Lakeside neighborhood, Centerville. "
+                    "Food: noodles and dumplings.")
             completion_response = complete_web_main_tasks(agent)
         get.assert_not_called()
         post.assert_not_called()

@@ -17,10 +17,12 @@ from assist.domain_manager import clone_repo
 def prompt_rewrite_web_main_spec(*, tools=(), interrupt_on=None):
     """Return the ordinary web-main shape for prompt-rewrite comparisons.
 
-    The environment switch changes only the web-main prompt text and its
-    composition. Both sides retain the actual web lifecycle tools, web-only
-    skill sources, and runtime mechanics, so a comparison cannot silently
-    exercise the legacy in-process-subagent agent instead.
+    The historical candidate switch compares the legacy prompt layout with the
+    current web-main composition. The guidance-skills switch compares two
+    production-shaped web-main profiles: the same lifecycle tools, web-only
+    sources, and runtime mechanics, with the candidate alone receiving the
+    compact core plus its grounding/research skill source. Neither switch can
+    silently exercise the legacy in-process-subagent agent instead.
     """
     from assist.spec import AgentSpec
     from assist.thread_manager import _web_skill_sources
@@ -29,9 +31,12 @@ def prompt_rewrite_web_main_spec(*, tools=(), interrupt_on=None):
     # through its deterministic local task fixture instead.
     from .test_async_subagents import _TOOLS
 
+    guidance_skills = os.environ.get("ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS")
     return AgentSpec(
         async_subagent_tools=_TOOLS,
-        web_main=os.environ.get("ASSIST_PROMPT_REWRITE_CANDIDATE") == "1",
+        web_main=(guidance_skills is not None
+                  or os.environ.get("ASSIST_PROMPT_REWRITE_CANDIDATE") == "1"),
+        web_main_guidance_skills=guidance_skills == "1",
         skill_sources=_web_skill_sources(),
         tools=tools,
         interrupt_on=interrupt_on,

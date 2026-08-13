@@ -380,7 +380,7 @@ def test_web_main_alone_has_the_attributed_static_prompt_reorder(census):
     core = base_prompt_for(
         "deepagents/assist_core.md.j2", workspace_dir="/workspace",
         references_dir="/workspace/references", delegation_mode="async",
-        agent_role="main")
+        agent_role="main", guidance_skills=True)
     for scenario in ("web-main-core", "web-main-full"):
         call = _call(census, scenario)
         composition = [transition for transition in call["provenance"]["transitions"]
@@ -398,6 +398,21 @@ def test_web_main_alone_has_the_attributed_static_prompt_reorder(census):
             for transition in call["provenance"]["transitions"])
 
 
+def test_grounding_and_research_skill_sources_are_web_main_only(census):
+    guidance_sources = [
+        source for source in census["source_manifest"]
+        if source.get("kind") == "skill"
+        and source.get("source") == "/web-main-skills/"
+    ]
+
+    assert {(source["name"], source["path"]) for source in guidance_sources} == {
+        ("grounding", "/web-main-skills/grounding/SKILL.md"),
+        ("research", "/web-main-skills/research/SKILL.md"),
+    }
+    assert {source["scenario"] for source in guidance_sources} == {
+        "web-main-core", "web-main-full"}
+    for call in census["calls"]:
+        prompt = _system_prompt(call)
 def test_ambiguous_constructor_prompt_ownership_fails():
     call = {
         "scenario": "synthetic-ambiguity",
@@ -456,8 +471,8 @@ def test_enforcement_is_exercised_not_inferred(census):
     core = census["observations"]["web-main-core"]
     assert core["sandbox_commands"] == ["printf synthetic-ok"]
     assert [message["status"] for message in core["tool_messages"]] == [
-        "success", "error"]
-    assert "direct git push is not allowed" in core["tool_messages"][1]["content"]
+        "success", "success", "error"]
+    assert "direct git push is not allowed" in core["tool_messages"][2]["content"]
 
     full = census["observations"]["web-main-full"]
     assert full["interrupted"] is True
@@ -692,7 +707,7 @@ def test_artifact_is_bounded_and_hygiene_checked(census, tmp_path):
 
     bad = _unsigned_copy(census)
     bad["capabilities"]["web-main-core:0"]["effective_actions"][
-        "load_skill"] = "observed-permitted"
+        "load_skill"] = "unexercised"
     with pytest.raises(AssertionError, match="capability surfaces drifted"):
         _assert_hygiene(bad, tmp_path)
 
@@ -1181,14 +1196,14 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 21_877
+    assert len(current_prompt) == 21_587
     assert len(schemas) == 17_956
-    assert len(census["calls"]) == 29
+    assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 2_982_732
+    assert len(artifact_bytes(census)) == 3_180_277
     assert census["artifact_sha256"] == \
-            "37aec10fa182858e194e206232a31e1c290d8c2080b6958ed16226064f997f50"
+            "d80e4b5623fdd7c7bab269ac6ea9efa8db48e36c52789caa0e88bedfc2716124"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

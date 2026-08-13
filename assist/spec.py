@@ -65,10 +65,11 @@ class AgentSpec:
 
     # ADDITIVE skill routes: virtual path -> backend holding SKILL.md
     # trees, merged with built-in and domain skills.  Precedence on a
-    # name collision is main-only < domain < built-in < embedder sources for
-    # the async main, and domain < built-in < embedder sources otherwise (the
-    # deepagents listing is last-source-wins). Re-passing the built-in
-    # SKILLS_ROUTE as a key overrides the built-in backend.
+    # name collision is web-main guidance < main-only < domain < built-in <
+    # embedder sources for the async main, and domain < built-in < embedder
+    # sources otherwise (the deepagents listing is last-source-wins).
+    # Re-passing the built-in SKILLS_ROUTE as a key overrides the built-in
+    # backend.
     skill_sources: Mapping[str, BackendProtocol] = field(default_factory=dict)
 
     # The composite backend's DEFAULT ROUTE target — where non-routed
@@ -93,6 +94,13 @@ class AgentSpec:
     # The prompt-rewrite composition seam uses this identity to leave legacy,
     # delegate, triage, and embedder agents unchanged.
     web_main: bool = False
+
+    # Closed opt-in for the ordinary web assistant's progressive grounding and
+    # research guidance. It selects only prompt-source material: the compact
+    # web-main core and two read-only skills. It stays separate from
+    # ``web_main`` so evals can compare the pre-migration and candidate prompts
+    # with the same production-shaped web agent.
+    web_main_guidance_skills: bool = False
 
     # Tools to gate with human-in-the-loop: a mapping ``{tool_name -> True |
     # InterruptOnConfig}`` installed as LangChain's HumanInTheLoopMiddleware. Web
@@ -135,6 +143,13 @@ class AgentSpec:
         if self.web_main and (self.role != "main" or not self.async_subagent_tools):
             raise ValueError(
                 "AgentSpec.web_main requires a main role with async lifecycle tools")
+        if not isinstance(self.web_main_guidance_skills, bool):
+            raise TypeError(
+                "AgentSpec.web_main_guidance_skills must be bool, got "
+                f"{type(self.web_main_guidance_skills).__name__}")
+        if self.web_main_guidance_skills and not self.web_main:
+            raise ValueError(
+                "AgentSpec.web_main_guidance_skills requires web_main")
 
         if not isinstance(self.skill_sources, Mapping):
             raise TypeError(
