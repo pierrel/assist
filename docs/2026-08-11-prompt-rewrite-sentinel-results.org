@@ -58,6 +58,7 @@ signals, not prompt-tuning instructions.
 | v106 development documentation | baseline N=3, stopped comparison | =test_dev_agent.py::TestPromptRewriteDevDocumentation::test_updates_documentation= | third full-workspace trial left README unchanged | =dev-docs-v106/baseline-3.log= SHA-256 =bad17e23420f8e75428d714f9acaac13bba7974781a611c03935bac27b65b1e6= |
 | v107 fitness plan | candidate N=1, stopped comparison | =test_agent.py::TestPromptRewriteFitnessPlan::test_creates_2026_swim_plan= | baseline passed 3/3, but candidate left =fitness.org= unchanged and created no requested 2026 plan | =fitness-plan-v107/candidate-1.log= SHA-256 =9bdb093d394b32613bba8a3892fe2afdeadd9d59e30935dbd0368af27ba42bdb= |
 | v108 local grounding | candidate N=1, stopped comparison | =test_agent.py::TestPromptRewriteLocalGrounding::test_answers_dinner_preferences_from_local_profile= | baseline answered both saved facts 3/3, but candidate claimed no saved information and asked for the neighborhood and food preferences already in local files | =local-grounding-v108/candidate-1.log= SHA-256 =f78991748ce9af08719143a6ac678658ef60ae9b5a459c7fe66aa2d94c614ae6= |
+| v109 two launch reports | candidate N=1, stopped comparison | =test_async_subagents.py::TestPromptRewriteTwoReports::test_creates_two_launch_reports= | baseline completed both reports 3/3, but candidate left a required =Next actions= field empty | =two-reports-v109/candidate-1.log= SHA-256 =0aebdf305cca7223c8b168a83415a27cb928b75b98ea9e3a99fd6293f9155e73= |
 
 ** Current pattern candidates
 
@@ -97,6 +98,10 @@ instructions to tune the current prompt.
   work-product reliability signal distinct from the v95 task-launch variance;
   retain it for a later holistic review rather than filling the prompt with
   brief-template instructions.
+- *Multi-artifact completeness:* v109's candidate left a required =Next
+  actions= field empty in one of two independently requested launch reports,
+  despite a clean 3/3 baseline. Treat it alongside v98 as a broad work-product
+  completion signal, not a reason to prescribe a report template in the core.
 - *Cross-surface progressive-skill selection:* v100's candidate did not load
   the workspace-provided =ledger-audit= skill in the real sandbox, although
   v75 reached local no-hint parity for the same reconciliation shape. Retain it
@@ -1057,6 +1062,23 @@ with no prompt change. Captures are under =<capture-root>/local-grounding-v108/=
 |-
 | baseline | N=3 | 3/3 | =baseline-1.log= =31108bb6956a1761f46330e30c8a359291444287ac0cd15fc6347e90899e86be=; =baseline-2.log= =e371f6126903e9964a411433e6eb0f0526aca1f2ed4fd9cd525bdc0b55cd2981=; =baseline-3.log= =4dfa84b7d46615427faf2cad41d9713c8f1d15a324a23c0d9d404281a602ca21= |
 | candidate | N=1, stopped | 0/1 | =candidate-1.log= =f78991748ce9af08719143a6ac678658ef60ae9b5a459c7fe66aa2d94c614ae6= |
+
+* v109 two launch-report cohort: stopped candidate
+
+This bounded multi-outcome fixture asks for separate launch reports grounded in
+two existing local note files. It validates each persisted report's
+recommendation, risks, and next actions, preserving both sources without
+prescribing a skill or delegate trace. The initial baseline attempt is discarded
+because the new validator passed bytes to its text parser after both reports
+existed. The corrected baseline passed 3/3. Candidate r1 left a required =Next
+actions= field empty, so the comparison stops at 0/1 without a prompt change.
+Captures are under =<capture-root>/two-reports-v109/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | r1 original | discarded fixture error | =baseline-1.log= =f6240884a5213f819f0541dfaf1befb62851744e77f69bf937e1fe0520079ed6= |
+| baseline | N=3 | 3/3 | =baseline-1-retry.log= =19002b1dbe865f9e60044ea91dba13a54320dbd08a45f0208d83aa6875c1a1bd=; =baseline-2.log= =e89ea31fff3771102c3c4c24fa70e374c543de49b30421e5183e4ed01b0dec18=; =baseline-3.log= =02cf3a7f8aacd50c61d5a2ed7f9494f1674c3e1a7c28b7f851e358aad639e063= |
+| candidate | N=1, stopped | 0/1 | =candidate-1.log= =0aebdf305cca7223c8b168a83415a27cb928b75b98ea9e3a99fd6293f9155e73= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
