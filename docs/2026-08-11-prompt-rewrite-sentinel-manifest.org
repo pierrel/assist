@@ -594,13 +594,21 @@ could accept a destructive rewrite or a malformed marker placement, so it is
 superseded by v104 before a valid comparison. Captures are under
 =<capture-root>/weekly-review-v103/=.
 
-* v104 weekly-review complete-outcome cohort
+* v104 weekly-review intermediate complete-outcome oracle: superseded
+
+The intermediate version required an exact first-line =# ACTIVE: N= marker, a
+count equal to remaining TODO headings, and absence of stateful deleted
+headings. Review found it could still accept duplicates or stripped-state
+deleted headings, so its N=3 results are historical only. Captures are under
+=<capture-root>/weekly-review-v104/=.
+
+* v105 weekly-review fully specified cohort
 
 The current =TestPromptRewriteWeeklyReview= validates the same natural request
-in one run. Its final-file oracle requires: an exact first-line =# ACTIVE: N=
-marker, a count equal to the remaining TODO headings, deletion of every
-requested DONE/CANCELLED heading, and preservation of the exact unrelated TODO
-headings and states. It retains the real temporary Git workspace, Docker
-sandbox, canned research, and hard GET/POST rejection. Baseline N=3 is required
-before a candidate N=1 probe and candidate N=3 promotion. Captures will be
-under =<capture-root>/weekly-review-v104/=.
+in one run. Its final-file oracle requires the exact first-line marker, a count
+equal to the remaining TODO headings, exact raw multiplicity of every unrelated
+preserved TODO, and complete title absence for every requested deletion. It
+retains the real temporary Git workspace, Docker sandbox, canned research, and
+hard GET/POST rejection. Baseline N=3 is required before candidate N=1 probe
+and candidate N=3 promotion. Captures will be under
+=<capture-root>/weekly-review-v105/=.
