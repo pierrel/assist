@@ -635,8 +635,8 @@ plan from the existing =fitness.org= goal and 2025 history. It uses the
 ordinary web-main prompt profile in a real Docker sandbox with native private
 =/agent= state, canned research, direct GET/POST rejection, and ordinary
 completion wakes. The outcome requires a persisted 2026 plan while preserving
-the existing 2025 history and a nonempty user response. Baseline r1 passed.
-During r2, production work arrived after admission and the eval was terminated
-before it emitted a behavioral result; it is deferred rather than counted as a
-failure. No candidate trial was run. Captures are under
+the existing 2025 history and a nonempty user response. The valid baseline
+passed 3/3; its original second trial was interrupted for production priority
+and replaced by a clean retry. Candidate r1 left =fitness.org= unchanged, so
+the cohort stops at 0/1 candidate with no prompt change. Captures are under
 =<capture-root>/fitness-plan-v107/=.
