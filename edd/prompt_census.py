@@ -722,6 +722,9 @@ def _content_segments(owner: str, text: str, scenario: str,
         return segments
     if owner == "deepagents.SkillsMiddleware":
         from assist.middleware.skills_middleware import SMALL_MODEL_SKILLS_PROMPT
+        skills_prompt = SMALL_MODEL_SKILLS_PROMPT
+        prompt_source = (
+            "python:assist.middleware.skills_middleware.SMALL_MODEL_SKILLS_PROMPT")
         formatter_id = (
             "python:assist.middleware.skills_middleware."
             "SmallModelSkillsMiddleware._format_skills_list")
@@ -746,13 +749,13 @@ def _content_segments(owner: str, text: str, scenario: str,
             _append_owned(listing_segments, listing_parts[0], [formatter_id])
         listing = "".join(listing_parts)
         tools_match = re.search(
-            r"Tools available for this response: ([^\n]+)\.\n?$", text)
+            r"Tools available for this response: ([^\n]+)\.", text)
         if tools_match is None:
             raise AssertionError(
                 f"retained tool guidance is absent from {scenario}")
         rendered, segments = _render_owned_template(
-            SMALL_MODEL_SKILLS_PROMPT,
-            "python:assist.middleware.skills_middleware.SMALL_MODEL_SKILLS_PROMPT",
+            skills_prompt,
+            prompt_source,
             {
                 "skills_list": {"value": listing, "segments": listing_segments},
                 "tools_available": {
@@ -767,18 +770,24 @@ def _content_segments(owner: str, text: str, scenario: str,
             SMALL_MODEL_MEMORY_PROMPT,
             THREAD_MEMORY_PROMPT,
         )
+        memory_prompt = SMALL_MODEL_MEMORY_PROMPT
+        memory_source = (
+            "python:assist.middleware.memory_middleware.SMALL_MODEL_MEMORY_PROMPT")
+        thread_prompt = THREAD_MEMORY_PROMPT
+        thread_source = (
+            "python:assist.middleware.memory_middleware.THREAD_MEMORY_PROMPT")
         formatter_id = (
             "python:assist.middleware.memory_middleware."
             "SmallModelMemoryMiddleware._format_agent_memory")
         agent_memory = _fixture_or_literal(
             sources, scenario, "agent_memory", "(No memory loaded)", formatter_id)
-        memory_path_match = re.search(r"file `([^`]+)`", text)
+        memory_path_match = re.search(r"(?:file|at) `([^`]+)`", text)
         if memory_path_match is None:
             raise AssertionError(f"memory path is absent from {scenario}")
         memory_path = memory_path_match.group(1)
         repo_prompt, repo_segments = _render_owned_template(
-            SMALL_MODEL_MEMORY_PROMPT,
-            "python:assist.middleware.memory_middleware.SMALL_MODEL_MEMORY_PROMPT",
+            memory_prompt,
+            memory_source,
             {
                 "agent_memory": {"value": agent_memory["value"],
                                  "source_ids": [agent_memory["id"]]},
@@ -797,8 +806,8 @@ def _content_segments(owner: str, text: str, scenario: str,
             if thread_path_match is None:
                 raise AssertionError(f"thread memory path is absent from {scenario}")
             rendered, segments = _render_owned_template(
-                THREAD_MEMORY_PROMPT,
-                "python:assist.middleware.memory_middleware.THREAD_MEMORY_PROMPT",
+                thread_prompt,
+                thread_source,
                 {
                     "repo_prompt": {"value": repo_prompt,
                                     "segments": repo_segments},
@@ -1642,7 +1651,8 @@ def _source_manifest(trace: CensusTrace) -> list[dict[str, Any]]:
              assist_memory_mod.SMALL_MODEL_MEMORY_PROMPT),
             ("python:assist.middleware.memory_middleware.THREAD_MEMORY_PROMPT",
              "assist.middleware.memory_middleware.THREAD_MEMORY_PROMPT",
-             assist_memory_mod.THREAD_MEMORY_PROMPT)):
+             assist_memory_mod.THREAD_MEMORY_PROMPT),
+            ):
         if source_id in referenced:
             entries.append({
                 "id": source_id,
@@ -1722,7 +1732,7 @@ _TOOL_ORIGINS = {
 
 _DECLARED_TEMPLATE_RENDER_HASHES = {
     "assist/templates/deepagents/assist_core.md.j2": {
-        "dd52b05c892fa2d1d471910b372866801036ffbd2405ebde7abdc84897d06598",
+        "01326cb9d728d7a3ae144e76b775aa0671f71b0836f6938718ee4bfded211c06",
     },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
@@ -2087,7 +2097,7 @@ _DECLARED_CAPTURE_TASK_SHA256 = \
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
     "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "cc73bfca9d5d4605fc36c7b0f47eaadaf639fae9ed3a6dd0fe09d83685243eef"
+    "ed715d4c3ec1cee466ccf32fd58115743e2cbc82777cceeaec0ca4c1d0f6267b"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:
@@ -3244,6 +3254,62 @@ def capture_census() -> dict[str, Any]:
     artifact = _run_isolated_json("--stdout-census")
     _assert_hygiene(artifact, Path("/synthetic-parent-validation-root"))
     return artifact
+
+
+def capture_prompt_rewrite_profiles() -> dict[str, dict[str, Any]]:
+    """Capture the exact legacy and candidate eval-helper prompt profiles.
+
+    The production census intentionally constructs ThreadManager and therefore
+    observes only the deployed web-main composition. Prompt-rewrite behavioral
+    comparisons instead use ``prompt_rewrite_web_main_spec``. This small,
+    deterministic companion capture uses that same helper for both environment
+    profiles so a result ledger can identify each static prompt honestly.
+    """
+    from assist.agent import create_agent
+    from assist.promptable import env
+    from edd.eval.utils import prompt_rewrite_web_main_spec
+
+    profiles: dict[str, dict[str, Any]] = {}
+    original_clock = env.globals["current_datetime"]
+    with tempfile.TemporaryDirectory(prefix="assist-prompt-rewrite-profiles-") as tmp:
+        root = Path(tmp)
+        env.globals["current_datetime"] = lambda: FIXED_NOW
+        try:
+            for name, candidate in (("baseline", False), ("candidate", True)):
+                trace = CensusTrace()
+                workspace = root / name / "workspace"
+                agent_dir = root / name / "agent"
+                workspace.mkdir(parents=True)
+                agent_dir.mkdir()
+                environment = ({"ASSIST_PROMPT_REWRITE_CANDIDATE": "1"}
+                               if candidate else {})
+                with patch.dict(os.environ, environment, clear=False):
+                    if not candidate:
+                        os.environ.pop("ASSIST_PROMPT_REWRITE_CANDIDATE", None)
+                    with _instrument(trace), _scenario("observer-probe"):
+                        agent = create_agent(
+                            RecordingChatModel(trace), str(workspace),
+                            agent_dir=str(agent_dir),
+                            spec=prompt_rewrite_web_main_spec())
+                        _invoke_agent(agent, "observer-probe")
+                if trace.faults:
+                    raise trace.faults[0]
+                if len(trace.calls) != 1:
+                    raise AssertionError(
+                        f"prompt-rewrite {name} profile made {len(trace.calls)} calls")
+                call = trace.calls[0]
+                profiles[name] = {
+                    "candidate_env": candidate,
+                    "initial_text": call["provenance"]["initial_text"],
+                    "final_text": _system_prompt(call),
+                    "initial_sha256": call["provenance"]["initial_sha256"],
+                    "final_sha256": call["provenance"]["final_sha256"],
+                    "transition_owners": [
+                        event["owner"] for event in call["prompt_events"]],
+                }
+        finally:
+            env.globals["current_datetime"] = original_clock
+    return profiles
 
 
 def _capture_census() -> dict[str, Any]:

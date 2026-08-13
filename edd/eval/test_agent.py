@@ -8,8 +8,6 @@ from textwrap import dedent
 from unittest import TestCase
 from unittest.mock import patch
 
-from langchain_core.messages import AIMessage
-
 from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager

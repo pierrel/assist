@@ -157,7 +157,9 @@ class TestSpecWiring(_CreateAgentHarness):
 
     def test_web_main_is_an_explicit_prompt_composition_identity(self):
         """Async lifecycle tools alone do not select the web prompt contract."""
+        from assist.middleware.memory_middleware import SmallModelMemoryMiddleware
         from assist.middleware.prompt_composition import PromptCompositionMiddleware
+        from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
         legacy = self._build(spec=AgentSpec(
             async_subagent_tools=_async_task_tools))
@@ -168,6 +170,16 @@ class TestSpecWiring(_CreateAgentHarness):
                        for item in legacy["middleware"])
         assert any(isinstance(item, PromptCompositionMiddleware)
                    for item in web_main["middleware"])
+        legacy_skills = next(item for item in legacy["middleware"]
+                             if isinstance(item, SmallModelSkillsMiddleware))
+        web_main_skills = next(item for item in web_main["middleware"]
+                               if isinstance(item, SmallModelSkillsMiddleware))
+        legacy_memory = next(item for item in legacy["middleware"]
+                             if isinstance(item, SmallModelMemoryMiddleware))
+        web_main_memory = next(item for item in web_main["middleware"]
+                               if isinstance(item, SmallModelMemoryMiddleware))
+        assert legacy_skills.system_prompt_template == web_main_skills.system_prompt_template
+        assert legacy_memory.sources == web_main_memory.sources
 
     def test_web_main_requires_the_main_lifecycle_profile(self):
         with pytest.raises(ValueError, match="main role with async lifecycle tools"):
