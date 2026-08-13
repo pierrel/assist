@@ -120,7 +120,9 @@ class TestThreadManagerLazy(TestCase):
                 manager.close()
 
         self.assertTrue(visible_spec.web_main)
+        self.assertTrue(visible_spec.web_main_guidance_skills)
         self.assertFalse(triage_spec.web_main)
+        self.assertFalse(triage_spec.web_main_guidance_skills)
 
     def test_specialized_child_get_does_not_receive_agent_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

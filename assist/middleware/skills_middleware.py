@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import operator
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Annotated, Any, NotRequired, TypedDict
 
 import deepagents.middleware.skills as deepagents_skills
@@ -239,7 +239,7 @@ def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
 
         newly_available = middleware._disclosed_declared_tools(skill)
         already_loaded = frozenset(runtime.state.get("loaded_skill_tools", ()))
-        declared_names = tuple(skill.get("allowed_tools", ()))
+        declared_names = tuple(sorted(middleware._declared_tools(skill)))
         new_names = [name for name in declared_names
                      if name in newly_available and name not in already_loaded]
         disclosure = (
@@ -252,7 +252,7 @@ def _make_load_skill_tool(middleware: "SmallModelSkillsMiddleware"):
                 ", ".join(unavailable) + "."
         content = f"{skill_file}\n\n{disclosure}"
         fingerprint_payload = {
-            "allowed_tools": list(skill.get("allowed_tools", ())),
+            "allowed_tools": list(declared_names),
             "skill_file_sha256": _sha256(raw_skill_file),
             "description": skill["description"],
             "name": skill["name"],
@@ -287,13 +287,18 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
 
     def __init__(self, *, backend, sources, bundled_sources: Iterable[str] = (),
                  gated_sources: Iterable[str] | None = None,
-                 registered_tools: Iterable[str] | None = None):
+                 registered_tools: Iterable[str] | None = None,
+                 supplemental_tool_disclosures: Mapping[str, Iterable[str]] | None = None):
         super().__init__(backend=backend, sources=sources)
         self._bundled_sources = frozenset(bundled_sources)
         self._gated_sources = frozenset(
             self._bundled_sources if gated_sources is None else gated_sources)
         self._registered_tools = (None if registered_tools is None
                                   else frozenset(registered_tools))
+        self._supplemental_tool_disclosures = {
+            name: frozenset(names)
+            for name, names in (supplemental_tool_disclosures or {}).items()
+        }
         if self._gated_sources:
             self.system_prompt_template = SMALL_MODEL_SKILLS_PROMPT
             self.tools = [_make_load_skill_tool(self)]
@@ -317,22 +322,40 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
                    if _source_contains(source, path)]
         return bool(matches) and max(matches, key=len) in self._gated_sources
 
+    def _declared_tools(self, skill: dict[str, Any]) -> frozenset[str]:
+        """Return source declarations plus this composition's tool disclosure."""
+        return (frozenset(skill.get("allowed_tools", ()))
+                | self._supplemental_tool_disclosures.get(skill["name"], frozenset()))
+
     def _disclosed_declared_tools(self, skill: dict[str, Any]) -> frozenset[str]:
         if not self._is_gated(skill):
             return frozenset()
         declared = frozenset(skill.get("allowed_tools", ()))
-        return (declared if self._registered_tools is None
-                else declared & self._registered_tools)
+        supplemental = self._supplemental_tool_disclosures.get(
+            skill["name"], frozenset())
+        return ((declared | supplemental) if self._registered_tools is None
+                else (declared & self._registered_tools) | supplemental)
+
+    def _supplemental_tools(self) -> frozenset[str]:
+        return frozenset().union(*self._supplemental_tool_disclosures.values())
 
     def _gated_tools(self, state: dict[str, Any]) -> frozenset[str]:
         gated: set[str] = set()
         for skill in state.get("skills_metadata", ()):
             if self._is_gated(skill):
-                gated.update(skill.get("allowed_tools", ()))
-        return (frozenset(gated) if self._registered_tools is None
-                else frozenset(gated) & self._registered_tools)
+                declared = frozenset(skill.get("allowed_tools", ()))
+                gated.update(declared if self._registered_tools is None
+                             else declared & self._registered_tools)
+        return frozenset(gated)
 
     def _tool_is_allowed(self, state: dict[str, Any], name: str) -> bool:
+        if name in self._supplemental_tools():
+            return name in state.get("loaded_skill_tools", ())
+        return name not in self._gated_tools(state) or name in state.get(
+            "loaded_skill_tools", ())
+
+    def _tool_is_visible(self, state: dict[str, Any], name: str) -> bool:
+        """Keep framework tool instructions truthful while enforcing guidance."""
         return name not in self._gated_tools(state) or name in state.get(
             "loaded_skill_tools", ())
 
@@ -341,7 +364,7 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         retained = [
             tool_value for tool_value in request.tools
             if (name := _tool_name(tool_value)) is None
-            or self._tool_is_allowed(request.state, name)
+            or self._tool_is_visible(request.state, name)
         ]
         names = [name for tool_value in retained
                  if (name := _tool_name(tool_value)) is not None]
