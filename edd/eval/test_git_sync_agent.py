@@ -14,14 +14,15 @@ import os
 import shutil
 import subprocess
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from assist.agent import AgentHarness, create_agent
 from assist.domain_manager import clone_repo
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import executed_commands, skill_was_loaded
+from .utils import (executed_commands, prompt_rewrite_web_main_spec,
+                    skill_was_loaded, stub_research_subagent)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,18 @@ class _GitSyncScenario(TestCase):
         agent.message(prompt)
         return agent
 
+    def _run_prompt_rewrite_web_main(self, prompt):
+        """Run the selected row with the controlled no-fetch web-main profile."""
+        with mock.patch("assist.tools.requests.get",
+                        side_effect=AssertionError("git-sync eval must not fetch URLs")) as get, \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, self.workspace, sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec()))
+            agent.message(prompt)
+        get.assert_not_called()
+        return agent
+
     def _head(self, ref="HEAD"):
         return _git("rev-parse", ref, cwd=self.workspace, check=False).stdout.strip()
 
@@ -131,6 +144,24 @@ class TestCleanRebase(_GitSyncScenario):
 
     def test_agent_rebases_onto_advanced_main(self):
         agent = self._run("Please sync this branch with the latest main.")
+        self.assertTrue(self._head_contains_advanced_main(),
+                        "thread branch was not rebased on top of origin/main" + self._diag(agent))
+        self.assertTrue(os.path.exists(os.path.join(self.workspace, "other.txt")),
+                        "main's new file did not come in via the rebase")
+        self.assertTrue(os.path.exists(os.path.join(self.workspace, "feature.txt")),
+                        "the thread's own work was lost")
+
+
+class TestPromptRewriteCleanRebase(_GitSyncScenario):
+    """Natural web-main comparison: rebase a thread branch onto local origin/main."""
+
+    def _diverge(self):
+        self._thread_commit("feature.txt", "my work\n", "thread work")
+        self._advance_main("other.txt", "unrelated main change\n", "main advanced")
+
+    def test_agent_rebases_onto_advanced_main(self):
+        agent = self._run_prompt_rewrite_web_main(
+            "Please sync this branch with the latest main.")
         self.assertTrue(self._head_contains_advanced_main(),
                         "thread branch was not rebased on top of origin/main" + self._diag(agent))
         self.assertTrue(os.path.exists(os.path.join(self.workspace, "other.txt")),
