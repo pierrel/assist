@@ -41,7 +41,7 @@ signals, not prompt-tuning instructions.
 | v77 dev explanation valid lifecycle | baseline N=1b, stopped scale probe | =test_dev_agent.py::TestDevAgent::test_explains_codebase= | no final output after two minutes on the copied full-codebase workspace; terminated to release the model slot | =dev-explain-v77/baseline-1b.log= (empty capture; terminated) |
 | v82 large Org insertion | baseline N=1 | =test_org_insertion.py::TestPromptRewriteLargeOrgInsertion::test_does_not_split_section= | left the dense =roadmap.org= fixture unchanged; the requested Moonshot section was absent | =org-large-v82/baseline-1.log= SHA-256 =dac3ac2967508c2aed0969c9b20e9d06aa2be93d4ea725da8a89bd9117d0cfef= |
 | v83 mid-turn interjection | baseline N=1, discarded fixture attempt | temporary web-main adaptation of =test_interjection.py::TestInterjection::test_redirect_mid_turn= | harness graded the context-launch response without delivering a completion wake | =interjection-v83/baseline-1.log= SHA-256 =77e8d8fd521f91c8195774219f63633cdb9ee57ecc6a86f38a9bb7a8db9f9357= |
-| v84 schedule wording | baseline N=2, discarded oracle attempt | =test_schedule_agent.py::TestPromptRewriteScheduleOutcome::test_creates_requested_recurring_reminder= | durable reminder was correct but the initial oracle required the literal word =scheduled=, rejecting a truthful reminder/next-run confirmation | =schedule-v84/baseline-2.log= |
+| v84 schedule wording | baseline N=2, discarded oracle attempt | =test_schedule_agent.py::TestPromptRewriteScheduleOutcome::test_creates_requested_recurring_reminder= | durable reminder was correct but the initial oracle required the literal word =scheduled=, rejecting a truthful reminder/next-run confirmation | =schedule-v84/baseline-2.log= SHA-256 =0aeda332dccf5a13302e9db1ab61b6a6c2cf5843b352271959094c2564ffc355= |
 
 ** Historical diagnostic clusters
 
@@ -611,6 +611,22 @@ under =/home/pierre/deploy/assist/prompt-rewrite-captures/schedule-v84-valid/=.
 |-
 | baseline | N=3 | 3/3 | =baseline-1.log= =2809402ddd774404d243d476cf21dd05dbdd6426f90841114ca161cc3d03f370=; =baseline-2.log= =bea36dce984af81c6bba290091552ec00b9260feb003c4376da3062175392d60=; =baseline-3.log= =3ac77c5c1d19b98ed8a7309f4df0f3db4a3a3dd611622c2e281f2576cfafda48= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =138d096346c11a8d2a9b56bbdc28df347ba92e8c3b53e328c0843a5bc99a0f50=; =candidate-2.log= =df646d4082f848d3f61ad9559e1be6382e8ffbbf9dd94b4dd440156314a99dd4=; =candidate-3.log= =1eb2f3b66cbb222e166355b18cfde391d97988ac80b4917ebcf2a666413d3fb7= |
+
+* v85 incoming-text subscription cohort
+
+Both profiles completed the natural subscription outcome N=3. Each persisted a
+thread-scoped subscription for incoming 415 numbers whose messages ask to
+schedule something, with a short review-reply template, and gave a user-visible
+confirmation. The fixture uses the real disk-backed subscription store and
+tools, the ordinary web-main comparison profile, canned research, and a hard
+URL-fetch rejection. It asserts no lifecycle or skill-loading sequence.
+Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/subscription-v85/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =f07ce26f4712037eb2cbcee701b16464937543760e6e3e5e0467c17d63472c00=; =baseline-2.log= =bef8f4cc3bbb6c467161578df8b7097dc9348a6c2640e76ba57775b263288ed1=; =baseline-3.log= =26581b3ea3eb78a484a96550fab869ffad47bbd08c5cc1b36cfcc89d095dd88f= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =fd3c69b0b7dd9ee78d160fe1cce099479137644dcb13c11b0d8ce8778e80c6bf=; =candidate-2.log= =df50a8a7ed7013bdd058c61da00ea2400f12adde564e8ec9b843435b7292a94d=; =candidate-3.log= =1a31dce0a369eb9a181ec46397ba99bfdbc82949454b6fd4fcb4500d54d344fe= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
