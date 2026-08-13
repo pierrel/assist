@@ -22,7 +22,7 @@ the same web-main-only composition seam. Current behavioral evidence and the
 side-specific profile capture are recorded in
 =2026-08-11-prompt-rewrite-sentinel-results.org=.
 
-* Post-v109 holistic review: proposed next candidate, pending review
+* Post-v109 holistic review: causal candidates and outcomes
 
 Three fresh, independent outcome cohorts expose a current-candidate reliability
 loss: local plan creation, answering from available local profile facts, and
@@ -38,7 +38,7 @@ The historical first candidate tried to encode that decision as an exact first
 tool call, which collided with other procedural prompt blocks. The next
 candidate must not restore that tool-order contract.
 
-The proposed candidate-only changes are two outcome-level principles, each
+The initial candidate proposal contained two outcome-level principles, each
 placed in the current core's Purpose/Evidence guidance rather than a skill,
 tool schema, or middleware block:
 
@@ -57,7 +57,7 @@ test fixture. Existing skills and runtime blocks still own how local evidence
 is discovered and how an artifact is produced. No tool, routing, state,
 middleware, or guard change is proposed.
 
-These are distinct causal candidates and must not first be tested together:
+They are distinct causal candidates and were not tested together:
 
 1. Candidate v2a adds only the local-evidence principle. Run v107 fitness plan
    and v108 local-grounded answer at N=1 against their retained baselines.
@@ -75,6 +75,27 @@ These are distinct causal candidates and must not first be tested together:
 
 A continued failure is a reason to reconsider the core/skill boundary rather
 than append another clause.
+
+** v2a outcome: stopped and reverted
+
+v2a added only the local-evidence principle. Its first v107 candidate trial
+left =fitness.org= unchanged, despite the existing 3/3 baseline; direct HTTP
+remained rejected. Under the staged protocol, v108 and the v56 anchor were not
+run. The candidate-only text and its census assertions were reverted before
+starting the independent v2b experiment. The durable capture is recorded in
+=2026-08-11-prompt-rewrite-sentinel-results.org=.
+
+** v2b outcome: accepted standalone candidate
+
+v2b added only the deliverable-completeness principle. Its v109 two-report
+target passed 3/3, and the unrelated v81 Elisp authoring-and-verification
+no-regression anchor also passed 3/3. Both use the production-shaped web-main
+comparison fixture, canned research, and hard URL-fetch rejection. This is
+evidence that this one principle improves the selected multi-artifact outcome
+without regressing the retained authoring-and-verification surface. It is not
+full-suite parity and does not establish the separately failed v2a
+local-evidence principle. The combined v2c variant remains out of scope because
+v2a did not clear its standalone gate.
 
 * Objective and boundaries
 
