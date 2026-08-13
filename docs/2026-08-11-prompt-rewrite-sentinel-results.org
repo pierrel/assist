@@ -857,6 +857,24 @@ reliability signal, with no prompt change. Captures are under
 |-
 | baseline | N=3, stopped | 2/3 | =baseline-1.log= =5c180f89f53d590749cd7a0c74ae6fc7c7d144c90400090e0eda13c21d677206=; =baseline-2.log= =e56f7266b7985270c7bef2149d1f02e8ec7eefd13682bb62c3d9e92e7d937098=; =baseline-3.log= =56a371d510fd059f0a1c7feaee51858da7cd7f7d0a23fb4cd9355268f714803a= |
 
+* v99 local PDF-search cohort
+
+Both profiles completed a distinct PDF-search outcome N=3. The natural request
+asks what =sample.pdf= says about dosage. The real sandbox holds the local
+fixture; the validator requires the existing =pdf= skill, a =pdftotext=
+extraction, no multimodal =read_file= of the PDF, and a specific dosage from
+the document. Research is canned and direct GET/POST requests fail loudly, so
+this is local document behavior rather than external-search behavior. Captures
+are under =/home/pierre/deploy/assist/prompt-rewrite-captures/pdf-search-v99/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =7f3f2cad6deec4488c21cde0d9345470052e17e498c49948bb2f7045334457f1=; =baseline-2.log= =f7e3bad753ea3a682409a398626fc85d4f4fe21ceeb980912344d7db4a4e42a9=; =baseline-3.log= =a65b83e8d06de8fafffe6234a6404d17e0e59c6ea74337f2495aae5129a1b0ca= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =713d6b438cd7883a354b92ef8cc694de93d490463539514f3078e4e22dbab7c8=; =candidate-2.log= =97b734100ff481587e86f09ef2824525809f238233aba9314249b672312c51e8=; =candidate-3.log= =c304897b4afe7109b2b9ad802b2a03b4bd2bdf5850dd0306322a1c7602caf619= |
+
+This extends the earlier orientation-only PDF result to a content lookup. It
+does not establish parity for targeted-page reading or large-document bounds.
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.

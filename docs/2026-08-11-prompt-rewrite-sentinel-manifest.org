@@ -532,3 +532,17 @@ the unchanged source notes. Research is canned and both direct HTTP methods
 hard-fail. Baseline N=3 and candidate N=1 then N=3 are staged under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/independent-briefs-v98-final/=;
 a baseline failure stops the cohort before candidate comparison.
+
+* v99 local PDF-search cohort
+
+The comparison-only =TestPromptRewritePdfSearchOutcome= inherits the ordinary
+PDF keyword request: “What does sample.pdf say about dosage?” It creates a
+fresh workspace and real Docker sandbox, copies the five-page local PDF
+fixture, and constructs the agent with =prompt_rewrite_web_main_spec()=.
+The only profile switch is =ASSIST_PROMPT_REWRITE_CANDIDATE=. The evaluator
+requires the normal =pdf= skill load, a =pdftotext= command, no PDF
+=read_file=, and an answer that cites one of the fixture's specific dosage
+values. It stubs the research subagent at construction and makes both direct
+GET and POST requests raise; it asserts neither was attempted. Baseline N=3,
+candidate N=1, then candidate N=3 are separately admitted under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/pdf-search-v99/=.
