@@ -47,6 +47,7 @@ signals, not prompt-tuning instructions.
 | v88 washer/dryer task | baseline N=1, stopped ambiguous journey | temporary web-main adaptation of =test_agent.py::TestAgent::test_adds_item_correctly= | interpreted “I need a new washer/dryer” as a request for shopping advice, launching context and research instead of the test's implied TODO | =direct-task-v88/baseline-1.log= SHA-256 =c2f1d29d212a8d5dd2491e84b0a3a58e3e03226274ab6d8f50436da85f1c5c8a= |
 | v89 described Git rollback | baseline N=1, stopped comparison | =test_git_history_agent.py::TestRollbackToDescribedPoint::test_agent_rolls_back_to_the_morning= | loaded neither =git-history= nor a Git command, leaving work after the requested morning point unchanged | =git-history-v89/baseline-1.log= SHA-256 =573591e97ab95504ab8fe4d6c942f8b481a57b22f80e63e23145d75f574b5883= |
 | v90 travel fixture | baseline N=1, discarded fixture attempt | =test_travel_agent.py::TestPromptRewriteTravelOutcome::test_reports_canned_travel_time= | local geocoder fixture did not accept the natural tool argument “the Ferry Building” | =travel-v90/baseline-1.log= SHA-256 =0c8da5df902ca100cd25e0da671cfcb93f49be01c19044ca3f461dc65fa54193= |
+| v91 directions fixture | baseline N=2, discarded fixture attempts | =test_directions_agent.py::TestPromptRewriteTransitDirectionsOutcome::test_reports_canned_train_directions= | local geocoder did not accept natural city-qualified forms for Civic Center | =directions-v91/baseline-1.log= SHA-256 =74554ff8e83a35a27a19412671329f5a481524a0b95addd162e3babd6d5a1032=; =baseline-2.log= SHA-256 =388444ed1f8e145222d2baa2561fc515e55c7bca18c2756a8acc8a9f167dced5= |
 
 ** Current pattern candidates
 
@@ -712,6 +713,26 @@ under =/home/pierre/deploy/assist/prompt-rewrite-captures/travel-v90/=.
 |-
 | baseline | N=3 after discarded fixture attempt | 3/3 | =baseline-1-valid.log= =525ac1d848cdde9733fa1abe90645d5496f5e60968c5dea2b925d50201d763a2=; =baseline-2.log= =c5dcf508c801d25c0afde2d699d8f8c9b87c98ab7248c0a90197d0a739bacbee=; =baseline-3.log= =3ab7de0f9ef5e1bebb15604b5559655580022fe45acefeba9cbf6f9cf61bbd10= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =c29c0d650560ab672b886e5ab3281da0ef4b6ad0b1f07588e6297055e977536f=; =candidate-2.log= =f416735ffbf70aa858ebae91687a660e956f9dd6f85eeb2866412a980f4dba0f=; =candidate-3.log= =7820b747be71afccebcb3a2ce71de09b8a3d1a492fb184516ec8a782ddc390a4= |
+
+* v91 local-routing transit-directions cohort
+
+Both profiles completed the natural transit outcome N=3. The user asks which
+train to take from Civic Center to Embarcadero. The fixture keeps the real
+=directions= tool and its transit-narrative formatter, while replacing only the
+self-hosted routing resource with a short walk plus BART itinerary. The
+validator requires a real =directions= call and a user-visible BART instruction.
+Research is canned and generic URL fetching is hard-rejected.
+
+The first two baseline attempts are discarded because the local geocoder did
+not initially accept the agent's natural city-qualified variants for Civic
+Center. The corrected fixture accepts those normal forms but rejects unknown
+places and every unexpected routing call. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/directions-v91/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 after discarded fixture attempts | 3/3 | =baseline-1-valid.log= =6f8ec0bfcf916b5dc58c5834a4042649c61d70248d62e06927948815c7f7614a=; =baseline-2-valid.log= =1610531c7fa79bf41aac711092f3d8e13b6a93e80cc81912f80b5c2f9e0a5825=; =baseline-3.log= =9f9e33ceaaacd34497269071896f11b12bd95a9e620ebc70093a5950bb9488ac= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =6ecc7a0ff8caaf4de0e4680f515c86f1b2d803d5e50d33d8c045c62b5c6df5da=; =candidate-2.log= =87262f97aa8a3cdd14398a1b9283fa2e64cce5e1f1f5d4295dfd860a43f8cfd3=; =candidate-3.log= =6b32739bdb544907febdc87c954959874c595bd19eb662e5141853326723e25b= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 

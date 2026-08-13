@@ -8,12 +8,43 @@ other. Prompts deliberately avoid the skill's example wording (probe generalizat
 not lexical proximity).
 """
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem, skill_was_loaded
+from .utils import (agent_tool_calls, create_filesystem,
+                    prompt_rewrite_web_main_spec, skill_was_loaded,
+                    stub_research_subagent)
+
+
+def _motis_fixture(path: str, params: dict):
+    """Minimal local transit resource for the prompt-comparison outcome."""
+    if path == "/api/v1/geocode":
+        query = str(params["text"]).removeprefix("the ").strip()
+        hits = {
+            "Civic Center": {"name": "Civic Center", "lat": 37.7793, "lon": -122.4142},
+            "Embarcadero": {"name": "Embarcadero", "lat": 37.7929, "lon": -122.3971},
+        }
+        place = next((name for name in hits if query.startswith(name)), None)
+        if place is None:
+            raise AssertionError(f"unexpected geocoder query: {query}")
+        return [hits[place]]
+    if path == "/api/v1/plan" and params.get("transitModes") == "TRANSIT":
+        return {"itineraries": [{
+            "duration": 21 * 60,
+            "startTime": "2026-08-13T15:00:00Z",
+            "endTime": "2026-08-13T15:21:00Z",
+            "legs": [
+                {"mode": "WALK", "duration": 3 * 60,
+                 "from": {"name": "Civic Center"}, "to": {"name": "Civic Center BART"}},
+                {"mode": "SUBWAY", "duration": 15 * 60,
+                 "from": {"name": "Civic Center BART"}, "to": {"name": "Embarcadero"},
+                 "routeShortName": "BART", "headsign": "Dublin/Pleasanton",
+                 "intermediateStops": [{}, {}], "startTime": "2026-08-13T15:03:00Z"},
+            ],
+        }]}
+    raise AssertionError(f"unexpected routing request: {path} {params}")
 
 
 class TestDirectionsAgent(TestCase):
@@ -68,3 +99,32 @@ class TestDirectionsAgent(TestCase):
                         f"expected travel; got {[n for n, _ in calls]}")
         self.assertFalse(any(n == "directions" for n, _ in calls),
                          "travel-shaped prompt should not call directions")
+
+
+class TestPromptRewriteTransitDirectionsOutcome(TestCase):
+    """Natural web-main comparison using the real directions tool over local transit data."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = select_assistant_model(0.1)
+
+    def test_reports_canned_train_directions(self):
+        with tempfile.TemporaryDirectory(prefix="directions_web_main_") as root:
+            create_filesystem(root, {"README.org": "Personal notes."})
+            with mock.patch.dict("os.environ", {
+                    "ASSIST_ROUTING_URL": "http://routing-fixture",
+                    "ASSIST_GEOCODER_URL": "",
+                 }), \
+                 mock.patch("assist.tools._motis_get", side_effect=_motis_fixture), \
+                 mock.patch("assist.tools.requests.get",
+                            side_effect=AssertionError("directions eval must not fetch URLs")) as get, \
+                 stub_research_subagent():
+                agent = AgentHarness(create_agent(
+                    self.model, root, spec=prompt_rewrite_web_main_spec()))
+                reply = agent.message("Which train do I take to get from Civic Center to the "
+                                      "Embarcadero?")
+
+            get.assert_not_called()
+            calls = agent_tool_calls(agent, "directions")
+            self.assertTrue(calls, agent.all_messages())
+            self.assertIn("bart", str(reply).lower())
