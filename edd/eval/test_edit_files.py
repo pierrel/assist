@@ -302,29 +302,40 @@ class TestPromptRewriteWeeklyReview(TestMultiStepPlan):
             f"'{marker.group(0)}' but the file actually has {actual} TODO items" + diag,
         )
 
-        leftover = [line.strip() for line in final.splitlines()
-                    if re.match(r"^\*+\s+(DONE|CANCELLED|CANCELED)\s+\S", line)]
-        self.assertEqual(
-            leftover,
-            [],
-            f"DONE/CANCELLED headings not deleted: {leftover}" + diag,
-        )
-
         expected_remaining = {
             "Return library books", "Pick up dry cleaning", "Renew the parking permit",
             "Mow the lawn", "Trim the hedges", "Plant the tomatoes", "Rake the leaves",
             "Return the Lowy book", "Email Sam about the offsite", "Review Jordan's draft",
             "Prepare the Q3 slides",
         }
-        states = _states(final)
-        self.assertEqual(
-            set(states),
+        todo_titles = [
+            match.group(1).strip()
+            for line in final.splitlines()
+            if (match := re.match(r"^\*+\s+TODO\s+(.+?)\s*$", line))
+        ]
+        self.assertCountEqual(
+            todo_titles,
             expected_remaining,
-            "weekly review removed or retained an unexpected task heading" + diag,
+            "weekly review removed, duplicated, or retained an unexpected TODO" + diag,
         )
-        self.assertTrue(
-            all(states[item] == "TODO" for item in expected_remaining),
-            "remaining tasks must preserve their TODO state" + diag,
+
+        deleted_titles = set(_EXPECT_DONE) | {
+            "Fix the leaky faucet", "Replace the air filter", "Paint the fence",
+            "Clean the gutters", "Service the furnace",
+            "Finish the Lowy book", "File the expense report",
+        }
+        all_heading_titles = [
+            match.group(1).strip()
+            for line in final.splitlines()
+            if (match := re.match(
+                r"^\*+\s+(?:(?:TODO|DONE|CANCELLED|CANCELED)\s+)?(.+?)\s*$",
+                line,
+            ))
+        ]
+        retained_deleted = deleted_titles.intersection(all_heading_titles)
+        self.assertFalse(
+            retained_deleted,
+            f"requested deletions still appear as headings: {sorted(retained_deleted)}" + diag,
         )
 
 

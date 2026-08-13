@@ -961,6 +961,30 @@ stable model admission. Captures are under =<capture-root>/weekly-review-v103/=.
 |-
 | baseline | historical intermediate oracle | incomplete | =baseline-1.log= =aeaa87c0e3693d01b01e20a9fa5509df12575136ac8c8ffed73cec5a60a8ac1b=; =baseline-2.log= =202a5b65bfc6649831bca71d0fdc8812cd15a6f511490be87327be2e3b22e920= |
 
+* v104 weekly-review intermediate complete-outcome oracle: superseded
+
+Both profiles completed the intermediate weekly-review oracle N=3. The natural
+request requires ordered local edits, deletion of finished entries, and a
+derived =# ACTIVE: N= marker. Review then found that the oracle could accept
+duplicated preserved TODOs or a requested deletion with its state keyword
+stripped. The captures are historical diagnostics, not complete-outcome parity
+evidence. The fixture uses the real temporary Git workspace and sandbox with
+canned research and hard direct-HTTP rejection. Captures are under
+=<capture-root>/weekly-review-v104/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3, historical intermediate oracle | 3/3 | =baseline-1.log= =85d325d2ed9cbb3bfe3e9a665b613a3cf74e89a5c3db0d33530a7bbfbfb7d8e2=; =baseline-2.log= =17d60927b538b9dd4165dc72674cd30eb93249809809fd4cd235f39a4adeaac4=; =baseline-3.log= =7058de461bde922a2daf81d5c3ff88a3539a6475828229e3790ab5c4079ad93b= |
+| candidate | N=3, historical intermediate oracle | 3/3 | =candidate-1.log= =6c2357cae273b7c4f006d0ba7a50cb8eccb65cc2e7caa4f6faf5cf08b135a86b=; =candidate-2.log= =beee40566040986bfaff5130205a87affd019504572ce1a99789bcbc84d78a09=; =candidate-3.log= =4594dd5957f15785a701bc642cd9ac45bc73543721d4eac126f1ecaaf15291f6= |
+
+* v105 weekly-review fully specified cohort
+
+The current oracle retains the exact first-line marker and count checks, and
+also compares raw TODO-heading multiplicity against the expected preserved set
+while rejecting all requested deleted titles even if their state keyword is
+removed. Baseline N=3 is required before candidate N=1/N=3; no v105 model
+result is recorded yet.
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
