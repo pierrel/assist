@@ -49,6 +49,7 @@ signals, not prompt-tuning instructions.
 | v90 travel fixture | baseline N=1, discarded fixture attempt | =test_travel_agent.py::TestPromptRewriteTravelOutcome::test_reports_canned_travel_time= | local geocoder fixture did not accept the natural tool argument “the Ferry Building” | =travel-v90/baseline-1.log= SHA-256 =0c8da5df902ca100cd25e0da671cfcb93f49be01c19044ca3f461dc65fa54193= |
 | v91 directions fixture | baseline N=2, discarded fixture attempts | =test_directions_agent.py::TestPromptRewriteTransitDirectionsOutcome::test_reports_canned_train_directions= | local geocoder did not accept natural city-qualified forms for Civic Center | =directions-v91/baseline-1.log= SHA-256 =74554ff8e83a35a27a19412671329f5a481524a0b95addd162e3babd6d5a1032=; =baseline-2.log= SHA-256 =388444ed1f8e145222d2baa2561fc515e55c7bca18c2756a8acc8a9f167dced5= |
 | v95 web interjection lifecycle | candidate N=2, stopped comparison | =test_interjection.py::TestPromptRewriteInterjectionOutcome::test_redirect_mid_turn_with_web_completion= | second candidate run did not launch the required context task, so no completion wake was possible | =interjection-v95/lifecycle-candidate-2.log= SHA-256 =f9ce583ddfa9d04b5f17006001a4e966a8325363faee1441c9ee4a1effc49bb2= |
+| v98 independent launch briefs | baseline N=3, stopped comparison | =test_async_subagents.py::TestPromptRewriteIndependentBriefs::test_natural_two_independent_outcomes_delegate= | third baseline wrote a brief with an empty required Recommendation field | =independent-briefs-v98-final/baseline-3.log= SHA-256 =56a371d510fd059f0a1c7feaee51858da7cd7f7d0a23fb4cd9355268f714803a= |
 
 ** Current pattern candidates
 
@@ -76,6 +77,11 @@ instructions to tune the current prompt.
   fixture passed baseline N=3 and candidate r1, but candidate r2 did not start
   the required local-context task. Retain it as a small explicit lifecycle
   coverage signal, not a reason to reinstate the withdrawn context-first rider.
+- *Multi-artifact long-work variance:* v98's strict local two-brief fixture
+  passed baseline r1-r2 but produced an empty required field in r3. This is a
+  work-product reliability signal distinct from the v95 task-launch variance;
+  retain it for a later holistic review rather than filling the prompt with
+  brief-template instructions.
 
 ** Historical diagnostic clusters
 
@@ -834,6 +840,22 @@ the local denied sandbox path. Research is canned. Captures are under
 |-
 | baseline | N=3 | 3/3 | =baseline-1.log= =dac15e6d9bc7de68569e93f4f7cbd1701217b45914466f8f09abe70fa57bfc15=; =baseline-2.log= =550e8ae714bc9f1d72a5a68caf1b7dab2d39d2616e692cfb4b13b967c2b7ff9a=; =baseline-3.log= =0397b037abd560520a77ebfde0c35eff943f44321e9ccc907e2ddf485a0373f9= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =b2fca8367beb73af3651a67e73125c17c99da4628cb6fd9f5daff9dec4cf6182=; =candidate-2.log= =a0740b816446471ec11276e07ba8e203009087edc8e50aa874b2a35ca5cd117b=; =candidate-3.log= =4ee9c4f26ad46bc5aa3d5fcdca328d48f618bfbaeb2868d7a72ee5efdb9548ec= |
+
+* v98 independent launch-brief cohort: stopped baseline
+
+This natural long-work request asks for separate alpha and beta launch briefs,
+each with its own decision fields. The fixture uses real web-main lifecycle
+tools and two deterministic delegate results, then validates both generated
+brief files with the bounded outcome judge. Canned research and hard rejections
+of both direct HTTP methods make the run local. Baseline r1-r2 passed, but r3
+wrote a brief with an empty required Recommendation field. The baseline is 2/3,
+so no candidate run is comparison evidence. It is retained as a work-product
+reliability signal, with no prompt change. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/independent-briefs-v98-final/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3, stopped | 2/3 | =baseline-1.log= =5c180f89f53d590749cd7a0c74ae6fc7c7d144c90400090e0eda13c21d677206=; =baseline-2.log= =e56f7266b7985270c7bef2149d1f02e8ec7eefd13682bb62c3d9e92e7d937098=; =baseline-3.log= =56a371d510fd059f0a1c7feaee51858da7cd7f7d0a23fb4cd9355268f714803a= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 

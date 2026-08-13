@@ -39,7 +39,8 @@ from edd.outcome_judge import (
     OutcomeRequirement,
 )
 
-from .utils import create_filesystem, stub_research_subagent
+from .utils import (create_filesystem, prompt_rewrite_web_main_spec,
+                    stub_research_subagent)
 
 
 _TASK_DESCRIPTIONS: dict[str, str] = {}
@@ -411,7 +412,8 @@ class TestAsyncSubagentSupervisor(TestCase):
         self.model = select_assistant_model(0.1)
 
     def _agent(
-            self, *, trip_note: str = "Weekend rail service resumes May 2."
+            self, *, trip_note: str = "Weekend rail service resumes May 2.",
+            spec: AgentSpec | None = None,
     ) -> AgentHarness:
         global _TASK_ROOT
         root = tempfile.mkdtemp()
@@ -449,8 +451,8 @@ class TestAsyncSubagentSupervisor(TestCase):
                 ),
             },
         })
-        spec = AgentSpec(async_subagent_tools=_TOOLS,
-                         web_main=_candidate_prompt_enabled())
+        spec = spec or AgentSpec(async_subagent_tools=_TOOLS,
+                                 web_main=_candidate_prompt_enabled())
         return AgentHarness(create_agent(self.model, root, spec=spec))
 
     def _career_agent(self) -> AgentHarness:
@@ -1302,3 +1304,41 @@ class TestAsyncSubagentSupervisor(TestCase):
                             and call.get("args", {}).get("task_id") == research_id
                             for call in later_calls), later_calls)
         self.assertRegex(reply, r"(?i)Coast Starlight.*9:51")
+
+
+class TestPromptRewriteIndependentBriefs(TestAsyncSubagentSupervisor):
+    """Ordinary web-profile comparison for two independent, completed outcomes."""
+
+    test_starts_subagents_and_returns_without_polling = None
+    test_starts_independent_context_and_research_without_polling = None
+    test_completion_wake_checks_then_uses_result = None
+    test_context_result_informs_research_then_final_response = None
+    test_user_stop_request_reports_cancellation_requested_for_running_tasks = None
+    test_user_redirection_updates_the_active_task = None
+    test_explicit_delegate_fanout_capability = None
+    test_career_scan_selects_repeated_work_skill_from_metadata_capability = None
+    test_natural_weekly_career_scan = None
+    test_natural_long_list_chooses_one_delegate_per_outcome = None
+    test_single_outcome_with_several_steps_stays_with_main = None
+    test_explicit_dependent_delegate_starts_after_prerequisite_completion = None
+    test_explicit_timed_out_prerequisite_blocks_dependent_delegate = None
+    test_overlapping_workspace_changes_are_serialized = None
+    test_explicit_failed_sibling_preserves_success_and_blocks_join = None
+    test_pure_external_research_uses_research_not_delegate = None
+
+    def _agent(
+            self, *, trip_note: str = "Weekend rail service resumes May 2.",
+            spec: AgentSpec | None = None,
+    ) -> AgentHarness:
+        for method in ("get", "post"):
+            http_mock = patch(
+                f"assist.tools.requests.{method}",
+                side_effect=AssertionError(
+                    "independent-brief eval must not make HTTP requests"),
+            )
+            http_mock.start()
+            self.addCleanup(http_mock.stop)
+        return super()._agent(
+            trip_note=trip_note,
+            spec=prompt_rewrite_web_main_spec(),
+        )
