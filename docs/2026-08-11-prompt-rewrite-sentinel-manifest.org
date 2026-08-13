@@ -420,3 +420,17 @@ validator requires the all-conversations convention only in repository memory
 and the current workflow state only in private thread memory. It prescribes no
 skill or tool sequence. Baseline N=3 and candidate N=1 then N=3 captures are
 under =/home/pierre/deploy/assist/prompt-rewrite-captures/thread-memory-v87/=.
+
+* v90 local-routing travel-time cohort
+
+The natural prompt asks: “How long does it take to get from the Ferry Building
+to Oakland City Hall?” The fixture constructs =prompt_rewrite_web_main_spec()=
+with the ordinary travel tool surface and skill catalog. It replaces only
+=assist.tools._motis_get= with local geocode and direct/transit plan responses,
+so the real =travel= tool formats its normal result while neither routing nor
+geocoding reaches a service. Research is canned and generic URL fetches raise.
+The validator requires a =travel= tool call and a final answer containing the
+known 18-minute result. The first baseline attempt was discarded after the
+fixture failed to accept the natural tool phrase “the Ferry Building”; the
+repaired fixture then ran baseline N=3 and candidate N=1 then N=3. Captures are
+under =/home/pierre/deploy/assist/prompt-rewrite-captures/travel-v90/=.
