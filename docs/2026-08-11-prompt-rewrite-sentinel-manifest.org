@@ -391,3 +391,20 @@ contains =415= and whose reply template covers scheduling and a reply, plus a
 user-visible subscription confirmation. It asserts no lifecycle or
 skill-loading order. Baseline N=3 and candidate N=1 then N=3 captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/subscription-v85/=.
+
+* v86 review-gated geo-proposal cohort
+
+The natural sequence is: “I'm going to be spending a week in Eugene and I'll
+need help getting around town — can you do that?” followed by “Yes please, go
+ahead and set that up.” The fixture supplies a temporary region registry with
+Northern California loaded, a deterministic local catalog containing Oregon,
+and a canned 700 MB on-host =HEAD= response for its download. It constructs
+=prompt_rewrite_web_main_spec()= inside the canned-research context and
+hard-rejects host URL fetches. The validator requires exactly one persisted
+=us/oregon= proposal and an approval-boundary response, without prescribing a
+skill or tool sequence. The first baseline attempt was discarded after its
+outdated mock lacked the production tool's =is_redirect= response attribute.
+The repaired baseline reached N=3; candidate passed once then failed to create
+the proposal on its second trial, so the comparison stopped at 1/2 with no
+candidate N=3 or parity claim. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/geo-v86/=.
