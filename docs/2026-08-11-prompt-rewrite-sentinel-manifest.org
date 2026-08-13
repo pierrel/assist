@@ -258,3 +258,25 @@ load and proves the edit retains Alpha's body and subsection. It is a local
 natural outcome, with no URL, search path, or prescribed lifecycle route. Both
 profiles run N=3 under bounded admission; captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/org-skill-implicit-v73/=.
+
+* v74 author-skill artifact cohort
+
+The natural request asks the assistant to create a reusable limerick-writing
+skill for a local, version-controlled repository. The validator requires the
+real =author-skill= load and exactly one discoverable SKILL.md with valid
+leading YAML frontmatter, a matching name and folder, a description, and an H1
+body. Agent construction uses the same web-main comparison helper and canned
+research worker as the other local rows; no network operation is possible.
+Both profiles run N=3 under bounded admission; captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/author-v74/=.
+
+* v75 workspace domain-skill cohort
+
+The no-hint natural request asks whether the bottom-line figure in a local
+billing CSV matches the entries above it. The workspace supplies a packaged
+=ledger-audit= skill. The validator requires loading that skill and reporting
+the derived =210.00= total, absent from the CSV, so selection alone cannot
+pass. The local fixture builds the same web-main profile and canned research
+worker as the comparison panel; no external network operation is possible.
+Both profiles run N=3 under bounded admission; captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/domain-skill-v75/=.
