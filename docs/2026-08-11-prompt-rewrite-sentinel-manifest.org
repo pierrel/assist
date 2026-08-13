@@ -408,3 +408,15 @@ The repaired baseline reached N=3; candidate passed once then failed to create
 the proposal on its second trial, so the comparison stopped at 1/2 with no
 candidate N=3 or parity claim. Captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/geo-v86/=.
+
+* v87 repository-versus-thread-memory cohort
+
+The natural prompt is: “Across all conversations, use my label atlas-grid for
+compact tables. For this thread's application workflow, use the stage name
+candidate-replied after I answer.” The fixture creates a workspace =AGENTS.md=
+and a separate private agent directory, constructs =prompt_rewrite_web_main_spec()=
+with that directory, stubs research, and hard-rejects host URL fetches. The
+validator requires the all-conversations convention only in repository memory
+and the current workflow state only in private thread memory. It prescribes no
+skill or tool sequence. Baseline N=3 and candidate N=1 then N=3 captures are
+under =/home/pierre/deploy/assist/prompt-rewrite-captures/thread-memory-v87/=.
