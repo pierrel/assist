@@ -750,6 +750,21 @@ an external service. Captures are under
 | baseline | N=3 | 3/3 | =baseline-1.log= =169d342cde08e32be1541e7be715c66a1b29583c002999ec1156daf9d924965c=; =baseline-2.log= =7726aebb00311d333505f5511118cfe508ad50d0ecabc2df82045166bd0bbd11=; =baseline-3.log= =339cd7006ba1f8a85f74cccdaf12389d32d57b4d56aa7e96b29cd7e0a37081c9= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =49fc6561070be33077514797e58e747c65d73a9be9a7e8f150c1206728f3935d=; =candidate-2.log= =e2551e785b014e81a968e7567ea97f3ce73136cfb003a85feb2f365e6d63c55b=; =candidate-3.log= =bbf57ddd10a012f1eb477f35a7c9a63b696d2844f70e83d811f6deddbef324dc= |
 
+* v93 review-gated email-proposal cohort
+
+Both profiles completed the natural email-proposal outcome N=3. The user asks
+to notify Robin that Tuesday's meeting moves to 2pm and ask whether that still
+works. The fixture keeps the real email tools and interrupt gate: it validates
+the reviewable, paused =send_email= proposal's recipient, nonempty subject, and
+meeting-change body. No provider delivery runs. Research is canned and generic
+URL fetching raises. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/email-v93/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =f758aa2617683dd4068b68e30dc77ca9dd1b0c48739270825e5311181770eebb=; =baseline-2.log= =3e74174beef30503e1583232a3e53f22ba3450f5a9b36d62c24c9cabcf03bc96=; =baseline-3.log= =00bace0dfe2084245cc3787c913c3393394cd00067c36e1fbefb21992b249af0= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =a15302c87b96d196caa889857db6076a9a82de5ff784c81ed99d0cbcf0752914=; =candidate-2.log= =33a88f7517902192af385936f932a0cfcd6bfd78c38c1f32364c0ed46bc45432=; =candidate-3.log= =1158ed3fdaebb6ac426b5b98f7fe0a42408078dfeb38ff76bdb4cb9e1fc12cfc= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
