@@ -120,6 +120,29 @@ instructions to tune the current prompt.
   candidate r2 completed the local edits. Retain both traces for later holistic
   work-execution analysis, not count- or task-specific prompting.
 
+** v107-v109 decision point: stop breadth expansion before a holistic review
+
+These three new cohorts are independent natural outcomes under the same
+side-specific, deterministic profile capture: baseline initial/final hashes
+=d936185424e443036ff8e3399678bc47f887e7d4f341b25606a488f0cda08653= /
+=ed8775a1d91b650b18915285ed367f17b1b9357bbe64abf5f7013d7d8ba09414=;
+candidate initial/final hashes
+=d43da44c9f89817433fe6893641e203672bf595cad7553001fba6b0bad86b4b6= /
+=616730f6a147d96004be6f48d49295ef967e0ef741eadba9282888375db8bb8b=.
+They have the same lifecycle tools, skill sources, sandbox shape, canned
+research, and direct-HTTP rejection; the candidate changes web-main prompt
+text/composition only.
+
+The current baseline is 9/9 across v107-v109. The current candidate is 0/3
+at its first staged trial: no requested local plan, an unsupported request for
+already-saved local facts, and one incomplete required report field. This is
+enough to pause adding more breadth to the current candidate. It does not prove
+which instruction or ordering causes the regressions, and it does not justify
+an outcome-specific rider. The next design step is a holistic review of the
+candidate core and its relationship to the stock base, capability catalog, and
+progressive prompt blocks; a new candidate variant should then receive a small
+cross-cohort confirmation before expansion resumes.
+
 ** Historical diagnostic clusters
 
 These are compact pointers to earlier failed or stopped probes. They are useful
