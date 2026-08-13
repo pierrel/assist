@@ -640,3 +640,14 @@ passed 3/3; its original second trial was interrupted for production priority
 and replaced by a clean retry. Candidate r1 left =fitness.org= unchanged, so
 the cohort stops at 0/1 candidate with no prompt change. Captures are under
 =<capture-root>/fitness-plan-v107/=.
+
+* v108 local-grounded dinner-answer cohort
+
+The comparison-only =TestPromptRewriteLocalGrounding= asks what neighborhood
+the user is in and what food they usually like while deciding dinner at home.
+Those facts appear only in a local profile behind a README. The ordinary
+web-main Docker sandbox shape includes a private =/agent= mount, canned
+research, direct GET/POST rejection, and ordinary completion wakes. The
+validator requires both saved facts in a nonempty user-facing answer and
+imposes no tool, skill, or file-path sequence. Baseline N=3 precedes candidate
+N=1/N=3. Captures will be under =<capture-root>/local-grounding-v108/=.
