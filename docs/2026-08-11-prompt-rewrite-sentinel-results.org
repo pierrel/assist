@@ -513,6 +513,16 @@ line.
 | baseline | N=3 | 3/3 | =baseline-1.log= =6d623c4bf31e74b856a4e1f477e78c5b1d6c6d394642bd4730959a4524461f96=; =baseline-2.log= =28f1ae9b4feebf7cb513f7e7a1d2f4cb79d7dda967b19b37c783f31432df6144=; =baseline-3.log= =c3d8e69338ab264d29ccb8372b570eab9483f8e5f026de13a2eaff3671553a83= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =ee02d8e0ab1fa6294239e6b21bbd9281fdc3447d6e31b804b4d568f63444132f=; =candidate-2.log= =7203afbe51480b603acf0b5b2a91cb2956f93cd265cd02847ad8e9cd9ab89367=; =candidate-3.log= =75113f9ae4a4a14d9699ca23059fa8dd4a40d210876806bad490c6578aa5856a= |
 
+* v76 Git-history rollback cohort
+
+Both profiles completed the natural temporary-branch rollback N=3: the last
+evening change disappeared while the earlier morning and noon work remained.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =8e43eb27e832062f74b91e15f48d61d4d190c08d84943e76770c76b4e0b8bbe0=; =baseline-2.log= =084b6718520b346212d31ce861398f920dd25c0be8e223973864eab41a5f918f=; =baseline-3.log= =87d93996d05f4b2cf927c744659c3adee3a0e0c28b940a5c5e173901f8f70ca6= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =0c9c90071383e4714058c03baf92d5f6be70c838cb927162cafc115c957d8f4b=; =candidate-2.log= =2526a70c88bb37a9b441065a0e65cf942d27712ce4ab7f67c5c39ff244db2535=; =candidate-3.log= =c3f37ef99b4c4e91cfea2a4ab2f5af0bc01058203dd0afc8f3456c5b6222f5ec= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
