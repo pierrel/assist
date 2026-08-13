@@ -485,3 +485,17 @@ dead ends were read, page traversal stayed bounded, and the skill was loaded.
 Agent construction is inside canned research; the local site replaces all
 network access. Baseline N=3 and candidate N=1 then N=3 captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/website-v94/=.
+
+* v95 completion-shaped mid-turn redirect cohort
+
+The natural initial request asks for a month-by-month bike maintenance plan; a
+queued follow-up narrows it to the remaining parts to buy. This is explicit
+lifecycle coverage in addition to the visible redirect outcome: the fixture
+uses =prompt_rewrite_web_main_spec()=, requires the agent to launch a context
+task, supplies its normal trusted completion wake, then requires the narrowed
+answer to name a needed part rather than resume the monthly plan. The in-memory
+interjection journal is released only at the second model boundary, as in the
+existing mid-turn harness. Research is canned and URL fetching hard-fails.
+Baseline N=3 and candidate N=1 then N=3 are staged under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/interjection-v95/=; a
+candidate failure stops the cohort before N=3.

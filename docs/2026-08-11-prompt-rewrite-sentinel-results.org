@@ -48,6 +48,7 @@ signals, not prompt-tuning instructions.
 | v89 described Git rollback | baseline N=1, stopped comparison | =test_git_history_agent.py::TestRollbackToDescribedPoint::test_agent_rolls_back_to_the_morning= | loaded neither =git-history= nor a Git command, leaving work after the requested morning point unchanged | =git-history-v89/baseline-1.log= SHA-256 =573591e97ab95504ab8fe4d6c942f8b481a57b22f80e63e23145d75f574b5883= |
 | v90 travel fixture | baseline N=1, discarded fixture attempt | =test_travel_agent.py::TestPromptRewriteTravelOutcome::test_reports_canned_travel_time= | local geocoder fixture did not accept the natural tool argument “the Ferry Building” | =travel-v90/baseline-1.log= SHA-256 =0c8da5df902ca100cd25e0da671cfcb93f49be01c19044ca3f461dc65fa54193= |
 | v91 directions fixture | baseline N=2, discarded fixture attempts | =test_directions_agent.py::TestPromptRewriteTransitDirectionsOutcome::test_reports_canned_train_directions= | local geocoder did not accept natural city-qualified forms for Civic Center | =directions-v91/baseline-1.log= SHA-256 =74554ff8e83a35a27a19412671329f5a481524a0b95addd162e3babd6d5a1032=; =baseline-2.log= SHA-256 =388444ed1f8e145222d2baa2561fc515e55c7bca18c2756a8acc8a9f167dced5= |
+| v95 web interjection lifecycle | candidate N=2, stopped comparison | =test_interjection.py::TestPromptRewriteInterjectionOutcome::test_redirect_mid_turn_with_web_completion= | second candidate run did not launch the required context task, so no completion wake was possible | =interjection-v95/lifecycle-candidate-2.log= SHA-256 =f9ce583ddfa9d04b5f17006001a4e966a8325363faee1441c9ee4a1effc49bb2= |
 
 ** Current pattern candidates
 
@@ -71,6 +72,10 @@ instructions to tune the current prompt.
   v86's first attempt were discarded because their harness did not model the
   web completion lifecycle or current deterministic tool contract. They remain
   in the index to prevent a future retest from repeating the same setup error.
+- *Lifecycle-selection variance:* v95's repaired, completion-shaped redirect
+  fixture passed baseline N=3 and candidate r1, but candidate r2 did not start
+  the required local-context task. Retain it as a small explicit lifecycle
+  coverage signal, not a reason to reinstate the withdrawn context-first rider.
 
 ** Historical diagnostic clusters
 
@@ -780,6 +785,24 @@ is reached. Captures are under
 |-
 | baseline | N=3 | 3/3 | =baseline-1.log= =ce01b919cd1eeb7ee70767bc043438702241470148c4c0eb953a5aed3a2b690b=; =baseline-2.log= =ecee9d277465e2724e0075790f12c3e74b02f4b61a5204163222cc195bd1300b=; =baseline-3.log= =f1a5e1ec331b09c13256e8f330bbc229c880e8640efa0412d51d7cf22ddf186b= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =c448edf5245270f7b1508564099bad5df31bc356e32e4e7e99bf94608fcf9439=; =candidate-2.log= =e855ae7239d4624c4de2c2bd8e137831f5f1783f1e7f76ffaaeaea1c90373ef0=; =candidate-3.log= =8f0135439b8987bfc935a0c4b77ddff968c7d6a2257b1bbca6870b83b7bd9f37= |
+
+* v95 completion-shaped mid-turn redirect cohort: stopped candidate
+
+This repaired version of the old v83 harness uses the ordinary web-main
+lifecycle tools, requires an actual context-task launch, delivers its trusted
+completion wake, and then validates that a queued mid-turn user narrowing wins
+over the original year-long bike-plan request. It hard-rejects URL fetches and
+uses canned research. The baseline passed N=3. Candidate r1 passed, but r2
+read the local file directly and never launched the required context task, so
+the lifecycle contract could not be exercised. The candidate is stopped at
+1/2; this is explicit lifecycle coverage, not a natural-outcome parity claim,
+and it prompted no guidance change. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/interjection-v95/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =lifecycle-baseline-1.log= =d3ee71e44d910bde3dcef564cf9798806376877acf2525733b4e59268e3490b0=; =lifecycle-baseline-2.log= =bd576a99bfb90429ef5469cd8d5b3e2adb007ce28495a968b56f056080f4b6c2=; =lifecycle-baseline-3.log= =e4f8897a73c0797a38e4257fd3d6d6f023e2c6bbfe4fc38faf6cfcd13da3977b= |
+| candidate | N=2, stopped | 1/2 | =lifecycle-candidate-1.log= =5037bd849ac2e7fb320d10c02b68a5680010e474435a20f45b686686efac3bc7=; =lifecycle-candidate-2.log= =f9ce583ddfa9d04b5f17006001a4e966a8325363faee1441c9ee4a1effc49bb2= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
