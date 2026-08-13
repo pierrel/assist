@@ -33,7 +33,7 @@ from assist.geo.tools import geo_tools
 from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 
-from .utils import stub_research_subagent
+from .utils import prompt_rewrite_web_main_spec, stub_research_subagent
 
 
 class _FakeHead:
@@ -41,6 +41,7 @@ class _FakeHead:
     def __init__(self, url, **kw):
         self.url = url
         self.status_code = 200
+        self.is_redirect = False
         self.headers = {"Content-Length": "700000000"}
 
 # A small deterministic catalog (subset of the real Geofabrik index ids/bboxes).
@@ -61,7 +62,7 @@ class TestGeoAgent(TestCase):
     def setUpClass(cls):
         cls.model = select_assistant_model(0.1)
 
-    def _agent(self):
+    def _agent(self, *, web_main=False):
         """An agent with the geo tools over fixture stores: only NorCal loaded.
         Returns (harness, proposal_store) so tests can assert what got recorded."""
         root = tempfile.mkdtemp()
@@ -72,7 +73,9 @@ class TestGeoAgent(TestCase):
         with open(f"{geo_dir}/{CATALOG_FILE}", "w") as f:
             json.dump(_CATALOG, f)
         props = ProposalStore(geo_dir)
-        spec = AgentSpec(tools=tuple(geo_tools(reg, Catalog(geo_dir), props)))
+        tools = tuple(geo_tools(reg, Catalog(geo_dir), props))
+        spec = (prompt_rewrite_web_main_spec(tools=tools) if web_main
+                else AgentSpec(tools=tools))
         return AgentHarness(create_agent(self.model, root, spec=spec)), props
 
     def _calls(self, agent):
@@ -158,3 +161,33 @@ class TestGeoAgent(TestCase):
         # NorCal covers SF → should say yes, not propose downloading a region
         self.assertNotIn("download", text,
                          f"should not offer a download for an already-covered area: {text[:300]}")
+
+
+class TestPromptRewriteGeoProposalOutcome(TestGeoAgent):
+    """Natural web-main comparison for a review-gated geo-download proposal."""
+
+    test_coverage_question_calls_list_regions = None
+    test_out_of_region_resolves_and_offers = None
+    test_user_confirms_then_propose_with_exact_id = None
+    test_already_covered_does_not_over_offer = None
+
+    def _agent(self, *, web_main=True):
+        return super()._agent(web_main=web_main)
+
+    def test_creates_requested_geo_proposal(self):
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("geo eval must not fetch URLs")) as get, \
+             patch("assist.geo.tools.requests.head", _FakeHead), \
+             stub_research_subagent():
+            agent, props = self._agent()
+            agent.message("I'm going to be spending a week in Eugene and I'll "
+                          "need help getting around town — can you do that?")
+            reply = agent.message("Yes please, go ahead and set that up.")
+
+        get.assert_not_called()
+        proposals = [args for name, args in self._calls(agent)
+                     if name == "propose_region_download"]
+        self.assertEqual(len(proposals), 1, proposals)
+        self.assertEqual(proposals[0].get("region_id"), "us/oregon")
+        self.assertIsNotNone(props.get("us/oregon"))
+        self.assertIn("approv", self._text(reply).lower())

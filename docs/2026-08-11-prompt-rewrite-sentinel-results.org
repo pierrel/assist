@@ -42,6 +42,8 @@ signals, not prompt-tuning instructions.
 | v82 large Org insertion | baseline N=1 | =test_org_insertion.py::TestPromptRewriteLargeOrgInsertion::test_does_not_split_section= | left the dense =roadmap.org= fixture unchanged; the requested Moonshot section was absent | =org-large-v82/baseline-1.log= SHA-256 =dac3ac2967508c2aed0969c9b20e9d06aa2be93d4ea725da8a89bd9117d0cfef= |
 | v83 mid-turn interjection | baseline N=1, discarded fixture attempt | temporary web-main adaptation of =test_interjection.py::TestInterjection::test_redirect_mid_turn= | harness graded the context-launch response without delivering a completion wake | =interjection-v83/baseline-1.log= SHA-256 =77e8d8fd521f91c8195774219f63633cdb9ee57ecc6a86f38a9bb7a8db9f9357= |
 | v84 schedule wording | baseline N=2, discarded oracle attempt | =test_schedule_agent.py::TestPromptRewriteScheduleOutcome::test_creates_requested_recurring_reminder= | durable reminder was correct but the initial oracle required the literal word =scheduled=, rejecting a truthful reminder/next-run confirmation | =schedule-v84/baseline-2.log= SHA-256 =0aeda332dccf5a13302e9db1ab61b6a6c2cf5843b352271959094c2564ffc355= |
+| v86 geo proposal fixture | baseline N=1, discarded fixture attempt | =test_geo_agent.py::TestPromptRewriteGeoProposalOutcome::test_creates_requested_geo_proposal= | mocked =HEAD= response lacked the current =is_redirect= attribute required by the geo tool | =geo-v86/baseline-1.log= SHA-256 =7b0b0d76a0f8bac4bf33fa607ba42faf8e07c465ea090f30e59f49358587a88e= |
+| v86 geo proposal | candidate N=2, stopped comparison | =test_geo_agent.py::TestPromptRewriteGeoProposalOutcome::test_creates_requested_geo_proposal= | after the same natural confirmation, made no =propose_region_download= call and persisted no Oregon proposal | =geo-v86/candidate-2.log= SHA-256 =fd6772de87a75233ad9b47e9a7f5be4764abb9b78e72483cc08e7673a6b33022= |
 
 ** Historical diagnostic clusters
 
@@ -627,6 +629,28 @@ Captures are under
 |-
 | baseline | N=3 | 3/3 | =baseline-1.log= =f07ce26f4712037eb2cbcee701b16464937543760e6e3e5e0467c17d63472c00=; =baseline-2.log= =bef8f4cc3bbb6c467161578df8b7097dc9348a6c2640e76ba57775b263288ed1=; =baseline-3.log= =26581b3ea3eb78a484a96550fab869ffad47bbd08c5cc1b36cfcc89d095dd88f= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =fd3c69b0b7dd9ee78d160fe1cce099479137644dcb13c11b0d8ce8778e80c6bf=; =candidate-2.log= =df50a8a7ed7013bdd058c61da00ea2400f12adde564e8ec9b843435b7292a94d=; =candidate-3.log= =1a31dce0a369eb9a181ec46397ba99bfdbc82949454b6fd4fcb4500d54d344fe= |
+
+* v86 review-gated geo-proposal cohort
+
+The natural two-turn journey asks whether the assistant can help during a week
+in Eugene, then accepts its offer to set up coverage. The fixture provides a
+temporary geo registry with Northern California loaded, a small local catalog
+including Oregon, and a canned size =HEAD= response. It validates one persisted
+=us/oregon= proposal and a user-visible approval boundary. Research is canned
+and host URL fetching is hard-rejected.
+
+The first baseline attempt is discarded because the old mock response no longer
+implemented the production tool's =is_redirect= attribute. After repairing the
+fixture-only mock, baseline completed N=3. Candidate trial 1 passed, but trial 2
+did not create a proposal after the same confirmation. The cohort is stopped at
+candidate 1/2: it is failure evidence, not parity, and prompted no guidance or
+runtime change. Captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/geo-v86/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 after discarded fixture attempt | 3/3 | =baseline-1-valid.log= =56cc80db84de2fedd84fa911cff4bce14b4d90c49a30c4c7c7064035bdb9717f=; =baseline-2.log= =cfd9bbdbaf8a8b981a5443ab55a728f9aca38c65b0b66eac92ecaafd5cda4be4=; =baseline-3.log= =bda9900d10f088212db20cc2070bf7aed623054c47cced8f0453b35a4cc2ba69= |
+| candidate | N=2, stopped | 1/2 | =candidate-1.log= =67f9fb8af0a0f46bef19a9dfefb18429560608ba36b962e9b462aff4f3d639ca=; =candidate-2.log= =fd6772de87a75233ad9b47e9a7f5be4764abb9b78e72483cc08e7673a6b33022= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
