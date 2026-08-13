@@ -572,3 +572,16 @@ profile, stubs research at construction, and makes direct GET/POST fail while
 asserting neither was attempted. Baseline N=3 was to precede candidate N=1 and
 N=3, but a baseline failure stops comparison. Captures are under
 =<capture-root>/push-blocker-v101/=.
+
+* v102 weekly-review cohort
+
+The comparison-only =TestPromptRewriteWeeklyReview= takes the ordinary weekly
+review request over the realistic local =projects.org= fixture. It asks to
+complete named items, cancel a project, delete finished entries, then derive
+the exact remaining TODO count in a top-line marker. The validator reads the
+final file directly and compares the claimed count to the actual headings; it
+does not inspect a proposed plan or tool choice. The real temporary Git
+workspace and sandbox are retained. Research is stubbed at construction and
+both direct HTTP methods raise throughout the run. Baseline N=3, candidate N=1,
+then candidate N=3 only after a passing probe, with captures under
+=<capture-root>/weekly-review-v102/=.
