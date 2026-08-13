@@ -40,6 +40,21 @@ signals, not prompt-tuning instructions.
 | v77 dev explanation pre-wake | baseline N=1, discarded fixture attempt | =test_dev_agent.py::TestDevAgent::test_explains_codebase= | graded the context-launch acknowledgement before delivering the normal completion wake | =dev-explain-v77/baseline-1.log= SHA-256 =12682c27edbf6892a65045521b56456273f982904a87d81f10a1027d8ba0f5a9= |
 | v77 dev explanation valid lifecycle | baseline N=1b, stopped scale probe | =test_dev_agent.py::TestDevAgent::test_explains_codebase= | no final output after two minutes on the copied full-codebase workspace; terminated to release the model slot | =dev-explain-v77/baseline-1b.log= (empty capture; terminated) |
 
+** Historical diagnostic clusters
+
+These are compact pointers to earlier failed or stopped probes. They are useful
+when looking for a broader prompt-design pattern, but are not active evidence
+for the retained candidate because their prompt variants or fixtures were
+withdrawn, superseded, or repaired.
+
+| Cluster | Trials | Repeated observation | Detail |
+|-
+| early lifecycle and handoff | v32-v33 | local work displaced context launch; after a context check, travel-tool selection displaced the intended research handoff | [[*v32-v36 staged control and untrusted-input cohorts][v32-v36 record]] |
+| task-list action versus scratch state | v38-v48 | repository/private memory, a TODO, or a replacement task file displaced the requested local task update or its then-required context step | [[*Withdrawn v37-v54 lifecycle/grounding experiment][withdrawn task record]] |
+| schedule skill precedence | v50-v51 | the exact =schedule= skill loaded before the then-required context dispatch, even after the context task description was strengthened | [[*Withdrawn v37-v54 lifecycle/grounding experiment][withdrawn schedule record]] |
+| grounding catalog precedence | v52-v54 | a broad and then explicit grounding-skill description did not reliably beat an exact =schedule= skill match | [[*Withdrawn v37-v54 lifecycle/grounding experiment][withdrawn grounding record]] |
+| historical baseline variance | v21 | rendering was baseline 0/3 before the v21 candidate reached 3/3; refused external push was baseline 2/3 before the candidate reached 3/3 | [[*Baseline ledger][v21 ledger]] |
+
 * Current v21 iteration
 
 - Candidate v21 keeps the web-main-only base-then-core composition. The core
