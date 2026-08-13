@@ -653,3 +653,14 @@ imposes no tool, skill, or file-path sequence. Baseline passed 3/3. Candidate
 r1 claimed it had no saved information and asked for both facts, so the cohort
 stops at 0/1 with no prompt change. Captures are under
 =<capture-root>/local-grounding-v108/=.
+
+* v109 two launch-report cohort
+
+The comparison-only =TestPromptRewriteTwoReports= asks for independent launch
+reports for two teams, each grounded in its existing local notes. It uses the
+ordinary web-main lifecycle fixture with synthetic completed child work, a
+real temporary workspace, and direct GET/POST rejection. The validator requires
+each persisted report to contain its own recommendation, risks, and next actions
+while preserving both sources; it does not require a particular skill or
+delegate trace. Baseline N=3 precedes candidate N=1/N=3. Captures will be under
+=<capture-root>/two-reports-v109/=.
