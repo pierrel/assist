@@ -1312,6 +1312,35 @@ selection reliable, and it does not establish panel-wide parity.
 | vGS11 natural current-facts outcome | pre-skill baseline | N=3 | 3/3 | =guidance-skills-v2/external-outcome-baseline-1.log= =5f633e746c158b62cc60d69b587c7e785f282b838412f431bae5fcbb45a0cabe=; =baseline-2.log= =5cad759a6220391d3317f6e69be77e9cdffbfc2e19aea7167a5c354c99b12186=; =baseline-3.log= =212bd8358a616048e11baeee6dee7a145c92ac93650b5cfcb610e18a886b4585= |
 | vGS11 natural current-facts outcome | current prompt-only candidate | N=3 | 3/3 | =guidance-skills-v2/external-outcome-candidate-1.log= =c2db0579062bd1e9a5605126a42af61d1a62a0fa55908b5399dd1d80ebef3317=; =candidate-2.log= =8a770a5d341652454015c76497c1aabd0ce24dda5d9f375bcb75cf59eb4f6b5c=; =candidate-3.log= =6b1c8e7b435eee522f882301d40156676d0811e9202d9965f806f923d8465c0d= |
 
+The natural local-facts outcome is the matching product-level failure: instead
+of reading the saved profile, the candidate said no information was recorded
+and asked the user to supply it. This confirms vGS9 is not merely a
+capability-oracle mismatch. The dependent local-to-current-facts handoff is not
+a paired baseline row: the pre-skill profile directly scanned local files, so
+it cannot satisfy the candidate's context-worker procedure. The candidate also
+bypassed =grounding=, scanned the trip file, then loaded =travel= and attempted
+its HTTP-backed tool. The fixture rejected that request; no network activity
+occurred. Both failures are retained as one grounding-and-substitution pattern,
+not fixed by a request-specific prompt addition.
+
+| Cohort | Profile | Trials | Result | Durable capture (SHA-256) |
+|-
+| vGS12 natural local-facts outcome | current prompt-only candidate | N=1, stopped | 0/1: denied saved profile and asked user to repeat it | =guidance-skills-v2/local-outcome-candidate-1.log= =b903b24b02d6b008529f59be6cdacf80a8a1eea892de4af9d90f93dd834d96c2= |
+| vGS13 dependent local-to-current-facts handoff | pre-skill baseline | N=1, non-comparable | direct local reads before context | =guidance-skills-v2/handoff-baseline-1.log= =66885032cc25d58eafcecbd060e48520c7559c2c6f9efe7b0c93e326ef93b2bd= |
+| vGS13 dependent local-to-current-facts handoff | current prompt-only candidate | N=1, stopped | 0/1: local reads plus unrelated travel route, no grounding/context | =guidance-skills-v2/handoff-candidate-1.log= =80457b6ea5e4dffaa462fb1c49c7d5ac663d04ef26e56ddf31bcd8cfc49f934d= |
+
+The direct anti-triggers remain clean under the current candidate. The date
+request loaded =time= and used the sandbox =date= command. The recurring
+reminder loaded =schedule= and persisted the requested cadence in all three
+candidate trials. The existing v2b schedule baseline is unchanged and remains
+the paired N=3 control. These rows show the new catalog/core does not force
+grounding or research ahead of a self-contained exact capability.
+
+| Cohort | Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| vGS14 date anti-trigger | current prompt-only candidate | N=1 | 1/1: loaded =time= and used =date= | =guidance-skills-v2/time-antitrigger-candidate-1.log= =8e4543becf5c0ec1101d443b101f3627c37e9874201627f5494269994615d57c= |
+| vGS15 recurring schedule anti-trigger | current prompt-only candidate | N=3 | 3/3 | =guidance-skills-v2/schedule-antitrigger-candidate-1.log= =525558bc65824b711dc70ef485a2a22a62970b8a124d9ca9ba7547579a9be78c=; =candidate-2.log= =6cc80c014438b8cf4c4a4dfa88cb0484f4ba8c5bf48c01f24851ab38508af43f=; =candidate-3.log= =b3a0573895fff1392d623ed4176c38e66c2344c16c270ae938729403e4a9d60f= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.
