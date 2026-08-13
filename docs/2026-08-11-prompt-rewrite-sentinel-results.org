@@ -57,6 +57,7 @@ signals, not prompt-tuning instructions.
 | v105 weekly review | candidate N=2, stopped comparison | =test_edit_files.py::TestPromptRewriteWeeklyReview::test_weekly_review_completes_and_reconciles= | completed the requested edits but derived =# ACTIVE: 8= despite the resulting file containing 11 TODO headings | =weekly-review-v105/candidate-2.log= SHA-256 =e6736c3fd44a8dfe1ee2d560dca2eda2377b44b2e92b814dec46e10660f5ea2f= |
 | v106 development documentation | baseline N=3, stopped comparison | =test_dev_agent.py::TestPromptRewriteDevDocumentation::test_updates_documentation= | third full-workspace trial left README unchanged | =dev-docs-v106/baseline-3.log= SHA-256 =bad17e23420f8e75428d714f9acaac13bba7974781a611c03935bac27b65b1e6= |
 | v107 fitness plan | candidate N=1, stopped comparison | =test_agent.py::TestPromptRewriteFitnessPlan::test_creates_2026_swim_plan= | baseline passed 3/3, but candidate left =fitness.org= unchanged and created no requested 2026 plan | =fitness-plan-v107/candidate-1.log= SHA-256 =9bdb093d394b32613bba8a3892fe2afdeadd9d59e30935dbd0368af27ba42bdb= |
+| v108 local grounding | candidate N=1, stopped comparison | =test_agent.py::TestPromptRewriteLocalGrounding::test_answers_dinner_preferences_from_local_profile= | baseline answered both saved facts 3/3, but candidate claimed no saved information and asked for the neighborhood and food preferences already in local files | =local-grounding-v108/candidate-1.log= SHA-256 =f78991748ce9af08719143a6ac678658ef60ae9b5a459c7fe66aa2d94c614ae6= |
 
 ** Current pattern candidates
 
@@ -77,6 +78,10 @@ instructions to tune the current prompt.
   roadmap unchanged, and v106 left the copied-workspace README unchanged.
   Treat this as a distinct reliability cluster from small local edits, which
   have multiple retained parity rows.
+- *Available-local-evidence omission:* v108's candidate asked the user for
+  neighborhood and food preferences despite a README pointing to a local
+  profile with both facts. Retain it with v70's empty completion as a grounding
+  reliability signal, not a reason to add a diner/profile-specific prompt rule.
 - *Fixture/oracle drift, not behavior evidence:* v77 pre-wake, v83, v84,
   v86's first attempt, and v105 baseline r1 were discarded because their
   harness did not model the web completion lifecycle or current deterministic
@@ -1037,6 +1042,21 @@ no prompt change follows. Captures are under =<capture-root>/fitness-plan-v107/=
 | baseline | N=3 | 3/3 | =baseline-1.log= =9f72515c7de1507dab2960fef7290a438070b155641c1d69e64dc8d9a6bbf892=; =baseline-2-retry.log= =7b47615706831e0d7100a2f3e3facca24c87999f1924cfe5c99560758469484e=; =baseline-3.log= =521ac41a31fa96f9a012f5cb635123600f1b13d2332e066ad6054c05e9ba3ed5= |
 | baseline | r2 original | interrupted | =baseline-2.log= empty; terminated for production priority |
 | candidate | N=1, stopped | 0/1 | =candidate-1.log= =9bdb093d394b32613bba8a3892fe2afdeadd9d59e30935dbd0368af27ba42bdb= |
+
+* v108 local-grounded dinner-answer cohort: stopped candidate
+
+This local factual-answer fixture asks for the user's saved neighborhood and
+food preferences while deciding dinner at home. A README points to the local
+profile containing both facts; direct HTTP is rejected and the normal web-main
+completion wake is available without prescribing any tool sequence. Baseline
+passed 3/3. Candidate r1 instead claimed it had no saved information and asked
+the user to supply both facts. The staged comparison stops at 0/1 candidate,
+with no prompt change. Captures are under =<capture-root>/local-grounding-v108/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =31108bb6956a1761f46330e30c8a359291444287ac0cd15fc6347e90899e86be=; =baseline-2.log= =e371f6126903e9964a411433e6eb0f0526aca1f2ed4fd9cd525bdc0b55cd2981=; =baseline-3.log= =4dfa84b7d46615427faf2cad41d9713c8f1d15a324a23c0d9d404281a602ca21= |
+| candidate | N=1, stopped | 0/1 | =candidate-1.log= =f78991748ce9af08719143a6ac678658ef60ae9b5a459c7fe66aa2d94c614ae6= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
