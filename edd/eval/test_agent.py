@@ -12,8 +12,11 @@ from assist.model_manager import select_assistant_model
 from assist.agent import create_agent, AgentHarness
 from assist.sandbox_manager import SandboxManager
 
-from .utils import (read_file, create_filesystem, AgentTestMixin, skill_was_loaded,
-                    cleanup_workspace, stub_research_subagent)
+from .test_async_subagents import reset_task_fixture
+from .utils import (AgentTestMixin, cleanup_workspace, complete_web_main_tasks,
+                    agent_tool_calls, create_filesystem,
+                    prompt_rewrite_web_main_spec, read_file, skill_was_loaded,
+                    stub_research_subagent)
 
 class TestAgent(AgentTestMixin, TestCase):
     def create_agent(self, filesystem: dict):
@@ -151,6 +154,92 @@ class TestAgent(AgentTestMixin, TestCase):
         self.assertToolCall(agent, "task", "Should use subagent for research or context")
         # Response should reference the user's specific goal
         self.assertIn("40", res, "Should reference the user's specific goal")
+
+
+class TestPromptRewriteFitnessPlan(TestCase):
+    """Compare a bounded local planning edit in the ordinary web-main shape."""
+
+    _FITNESS = dedent("""\
+        * 2025
+        I swam 20mi in 3 months
+        ** Program
+        January: 2 times a week, 20m each
+        February: 2 times a week, 30m each
+        March: 3 times a week, 30m each
+        July: 3 times a week, 1mi each
+        October: 3 times a week, 2mi each
+        December: 3mi swim
+        * 2026
+        Goal: swim 40mi
+        """)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = select_assistant_model(0.1)
+
+    def setUp(self):
+        self.workspace = tempfile.mkdtemp(prefix="fitness_plan_eval_")
+        self.agent_dir = tempfile.mkdtemp(prefix="prompt_rewrite_fitness_agent_")
+        create_filesystem(self.workspace, {
+            "README.org": "All of my plans are in fitness.org",
+            "fitness.org": self._FITNESS,
+        })
+        self.sandbox = SandboxManager.get_sandbox_backend(
+            self.workspace, agent_dir=self.agent_dir)
+        if self.sandbox is None:
+            self.skipTest("Docker sandbox unavailable — is Docker running and assist-sandbox built?")
+        reset_task_fixture()
+
+    def tearDown(self):
+        SandboxManager.cleanup(self.workspace)
+        cleanup_workspace(self.workspace)
+        shutil.rmtree(self.agent_dir, ignore_errors=True)
+
+    def test_creates_2026_swim_plan(self):
+        plan_path = os.path.join(self.workspace, "fitness.org")
+        before = read_file(plan_path)
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("fitness-plan eval must not fetch URLs")) as get, \
+             patch("assist.tools.requests.post",
+                   side_effect=AssertionError("fitness-plan eval must not post URLs")) as post, \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model,
+                self.workspace,
+                agent_dir=self.agent_dir,
+                sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec(),
+            ))
+            initial_response = agent.message(
+                "Create a plan for me to reach my swim goal for 2026.")
+            completion_response = complete_web_main_tasks(agent)
+        get.assert_not_called()
+        post.assert_not_called()
+
+        after = read_file(plan_path)
+        self.assertNotEqual(before, after, "The requested 2026 plan was not added")
+        self.assertIn("I swam 20mi in 3 months", after,
+                      "The existing 2025 history must be preserved")
+        section_start = after.index("* 2026")
+        next_section = after.find("\n* ", section_start + 1)
+        section = after[section_start:next_section if next_section >= 0 else None]
+        self.assertRegex(section, r"(?i)40\s*(?:mi|miles)",
+                         "The 2026 40-mile goal must be retained")
+        self.assertRegex(section, r"(?i)(program|plan|training|schedule)",
+                         "The 2026 section must contain a swim plan")
+        concrete_plan_lines = {
+            line.strip()
+            for line in section.splitlines()
+            if "goal:" not in line.lower()
+            and re.search(r"(?i)\b(?:week|month|mile|swim)\b", line)
+        }
+        self.assertGreaterEqual(
+            len(concrete_plan_lines), 2,
+            "The 2026 plan needs at least two concrete training or milestone lines",
+        )
+        response = (completion_response if agent_tool_calls(agent, "start_async_task")
+                    else initial_response)
+        self.assertTrue(response.strip(), "The user should receive a completion response")
 
 
 def _extract_dollar_amounts(text: str) -> list[float]:
