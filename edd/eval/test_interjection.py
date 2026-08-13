@@ -14,6 +14,7 @@ harness runs outside THREAD_QUEUE.acquire (production sets it per turn).
 Research is stubbed per the mocking rule. Prompts avoid the guide's own
 vocabulary ("redirect", "fold", "mid-turn") to probe steering, not echo.
 """
+import shutil
 import tempfile
 import uuid
 from types import SimpleNamespace
@@ -27,7 +28,8 @@ from assist.model_manager import select_assistant_model
 from assist.spec import AgentSpec
 from manage.web.threads import _INTERJECTION_FRAME, _INTERJECTION_GUIDE
 
-from .utils import create_filesystem, final_answer, stub_research_subagent
+from .utils import (complete_web_main_tasks, create_filesystem, final_answer,
+                    prompt_rewrite_web_main_spec, stub_research_subagent)
 
 _BIKE_ORG = """* My bike — Linus Roadster
 ** Parts I still need
@@ -168,3 +170,56 @@ class TestInterjection(TestCase):
                         f"first interjection lost: {answer[:400]}")
         self.assertIn("valencia", answer,
                       f"second interjection lost: {answer[:400]}")
+
+
+class TestPromptRewriteInterjectionOutcome(TestInterjection):
+    """Compare an ordinary web turn, including a completion wake if it launches work."""
+
+    test_redirect_mid_turn = None
+    test_incorporate_addition = None
+    test_stop_halts_with_account = None
+    test_coalesce_two_rapid_interjections = None
+
+    def _run_web_main(self, files, ask, interjections):
+        from .test_async_subagents import _TASK_STATUSES, reset_task_fixture
+
+        reset_task_fixture()
+        journal = _Journal()
+        for text in interjections:
+            journal.add(text)
+        root = tempfile.mkdtemp(prefix="interjection_web_main_")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        create_filesystem(root, files)
+        with mock.patch("assist.middleware.interjection.active_handle",
+                        lambda: SimpleNamespace(thread_id="eval")), \
+             mock.patch("assist.middleware.interjection._CALLBACKS",
+                        {"peek": journal.peek, "consume": journal.consume,
+                         "frame": journal.frame}), \
+             mock.patch("assist.tools.requests.get",
+                        side_effect=AssertionError("interjection eval must not fetch URLs")) as get, \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, root, spec=prompt_rewrite_web_main_spec()))
+            agent.message(ask)
+            launched_work = any(status in {"pending", "running"}
+                                for status in _TASK_STATUSES.values())
+            if launched_work:
+                complete_web_main_tasks(agent)
+
+        get.assert_not_called()
+        return agent, journal, launched_work
+
+    def test_redirect_mid_turn_with_web_completion(self):
+        """A mid-turn narrowing still wins after any ordinary task completion wake."""
+        agent, journal, launched_work = self._run_web_main(
+            {"bike.org": _BIKE_ORG},
+            "Look through my files and give me a complete maintenance plan "
+            "for my bike for the rest of the year, month by month.",
+            ["forget the plan — just list the parts I still need to buy"])
+        self.assertTrue(launched_work,
+                        "comparison must exercise the web completion lifecycle")
+        self._assert_presented(agent, journal)
+        answer = final_answer(agent).lower()
+        self.assertTrue("light" in answer or "bell" in answer,
+                        f"answer ignored the narrowed ask: {answer[:400]}")
+        self.assertNotIn("december", answer)
