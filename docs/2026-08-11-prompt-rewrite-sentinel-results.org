@@ -340,7 +340,7 @@ both lifecycle boundaries explicit.  No runtime behavior changed.
 
 - Current reproducible prompt-census signature (the internal
   =artifact_sha256=, not a retained raw capture) is
-  =612a67b994f8770bbae4dfc55e0f82ffda64cf9c6ef8670030addc015b0ea9b1=.
+  =37aec10fa182858e194e206232a31e1c290d8c2080b6958ed16226064f997f50=.
   The v35 post-rejection wording was removed: it was added solely to chase the
   synthetic local-bare-remote fixture and did not provide a reliable security
   boundary.
@@ -1102,6 +1102,56 @@ Captures are under =<capture-root>/two-reports-v109/=.
 | baseline | r1 original | discarded fixture error | =baseline-1.log= =f6240884a5213f819f0541dfaf1befb62851744e77f69bf937e1fe0520079ed6= |
 | baseline | N=3 | 3/3 | =baseline-1-retry.log= =19002b1dbe865f9e60044ea91dba13a54320dbd08a45f0208d83aa6875c1a1bd=; =baseline-2.log= =e89ea31fff3771102c3c4c24fa70e374c543de49b30421e5183e4ed01b0dec18=; =baseline-3.log= =02cf3a7f8aacd50c61d5a2ed7f9494f1674c3e1a7c28b7f851e358aad639e063= |
 | candidate | N=1, stopped | 0/1 | =candidate-1.log= =0aebdf305cca7223c8b168a83415a27cb928b75b98ea9e3a99fd6293f9155e73= |
+
+* v2a local-evidence principle: stopped and reverted
+
+This isolated candidate added one general core sentence directing the assistant
+to gather relevant available local evidence before claiming it absent, asking
+the user for it, or deciding what to change. It changed no tools, skill
+sources, routing, state, or middleware. The side-specific v2a profile had
+baseline initial/final hashes
+=d936185424e443036ff8e3399678bc47f887e7d4f341b25606a488f0cda08653= /
+=ed8775a1d91b650b18915285ed367f17b1b9357bbe64abf5f7013d7d8ba09414=
+and candidate hashes
+=0ab467fe9fa478718cd09730dd921d357b80aa3a9dcf1ed6a7c6ec77b2c82262= /
+=b7f567617a034816fcc94cb07050b320302aea9d914618f4e91fdac36672601c=.
+
+The v107 fitness-plan N=1 candidate probe left =fitness.org= unchanged. Its
+existing baseline remains 3/3; the fixture retained canned research and hard
+GET/POST rejection, and neither network path was called. The principle did not
+clear its first relevant target, so the v108 target and v56 no-regression anchor
+were deliberately not run. The v2a text and its census fingerprints were
+reverted before the separate v2b experiment; this is failure evidence, not a
+current profile or parity claim.
+
+| Profile | Trials | Result | Durable capture (SHA-256) |
+|-
+| v2a candidate | v107 N=1, stopped | 0/1 | =fitness-plan-v2a/candidate-1.log= =f19a85837b6c20e8d66009cecaefd1bf6e9d424cbb862057cbddd1154ae4b544= |
+
+* v2b deliverable-completeness principle: accepted standalone candidate
+
+This independent candidate adds only the general Evidence rule that explicit
+deliverables must each be completed and verified before presenting the request
+as done. It is web-main candidate prompt text only, with no tool, routing,
+state, middleware, skill-source, or action-mechanic change. Its side-specific
+profile has baseline initial/final hashes
+=d936185424e443036ff8e3399678bc47f887e7d4f341b25606a488f0cda08653= /
+=ed8775a1d91b650b18915285ed367f17b1b9357bbe64abf5f7013d7d8ba09414=
+and candidate hashes
+=7e038465ec3a215bb8b2775c9cf8c73cb22de442c7558af9652c60201d6631f2= /
+=7062e214a2741998c933fe9d61e6cc9eee4273c4a8c95b8b4625331fe2d1b976=.
+
+The v109 two-report target passed N=3, with each run creating both requested
+reports and all required recommendation, risks, and next-actions fields. The
+v81 Elisp authoring-and-verification no-regression anchor also passed N=3. All
+runs retained canned research and hard URL-fetch rejection. This accepts v2b as
+a standalone candidate, not as full-suite parity and not as proof that the
+separately failed local-evidence principle should be combined with it.
+
+| Cohort | Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| v109 two reports | v2b candidate | N=3 | 3/3 | =two-reports-v2b/candidate-1.log= =dca940d28ec9fa7201acf2ae6f7e5b2da141f6c7b01aa6278e06d3af2e264cf3=; =candidate-2.log= =4a55deab43270ed4018707f76444665ff98fc4f7d99fbb26f6c6352e0ac5c870=; =candidate-3.log= =5f706e09da0df245710fa92c4831c3592988272576c41a844e393a7e77d267f4= |
+| v81 Elisp authoring | v2b candidate | N=3 | 3/3 | =elisp-v2b/candidate-1.log= =cda94e904809f93045db5cafee0717c1938a614ac78d2f5cfb4481b2bb6cff0d=; =candidate-2.log= =f382a0cbd1487676b68bed425af581b22ba4b7a76e6e451f1a94445f18be5a8c=; =candidate-3.log= =a766902843f7ed2302c098c30eb1237f4f3e8f21bd3a47ea537fa2713358490f= |
 
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
