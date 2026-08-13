@@ -578,6 +578,20 @@ makes no external-network request. Captures are under
 | baseline | N=3 | 3/3 | =baseline-1.log= =eecef796ddc88a08dd8c9d9866f7255588d5ac90d29ff401e5d8e6581e3bb480=; =baseline-2.log= =4005d7dc55b5c3e9fbc46b1d012804a68ebba968bd6d4f105d0d89887cee40bc=; =baseline-3.log= =5105486d4ff4a2d5ab5a30ba4c2d5bc9118b28e1e4088f0691f643fb1735b70c= |
 | candidate | N=3 | 3/3 | =candidate-1.log= =674d629eef10ee65df8ef5db285af7a2c240324fbc0def0d0e226b5c49c15bcf=; =candidate-2.log= =004e110f971a28f7005dc5990f8a9535c584d1b1179e63dcf3901f976e40ba48=; =candidate-3.log= =66b0df8b5c6afa2debb8e6e701b643028353f0f1799a7e143731b5fdc4688aa8= |
 
+* v81 Elisp authoring-and-verification cohort
+
+Both profiles completed the natural Emacs Lisp authoring journey N=3. Each
+loaded =elisp=, wrote =sum.el=, and ran an =emacs --batch= load, compile, test,
+or check action against that file. The
+fixture uses the real sandbox image with Emacs, the comparison web-main profile,
+a canned research worker, and a hard host-URL-fetch rejection. Captures are
+under =/home/pierre/deploy/assist/prompt-rewrite-captures/elisp-v81/=.
+
+| Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| baseline | N=3 | 3/3 | =baseline-1.log= =b9c50fa96a7f9643ee5ba91abbbcf81a5df9ed8a71594d830402f039b0cc94df=; =baseline-2.log= =294668285d736cbec7a89fdf2c6e632bc5b27f8fa66398dced54d9c396a7bf67=; =baseline-3.log= =5125e4f696d0cca33297c990cc05b3c13dd0651792d4ecfdcc4881a693914e71= |
+| candidate | N=3 | 3/3 | =candidate-1.log= =619031926affbc1830ee1d307987468bf66bb583ac4469a6e3420f9034cf7944=; =candidate-2.log= =ecb5be1ff2eb945812648331221c43a7506b35036af9618a8d640e40125d64b0=; =candidate-3.log= =9804678dc599716aee00582e1ae19a125f12caa83f20f8b93e212214ff1fabf3= |
+
 * Withdrawn v37-v54 lifecycle/grounding experiment
 
 These are historical diagnostic captures, not current comparison evidence.

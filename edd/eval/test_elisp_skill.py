@@ -19,13 +19,15 @@ import re
 import shutil
 import subprocess
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager, SANDBOX_IMAGE
 
-from .utils import cleanup_workspace, executed_commands, skill_was_loaded
+from .utils import (cleanup_workspace, executed_commands,
+                    prompt_rewrite_web_main_spec, skill_was_loaded,
+                    stub_research_subagent)
 
 
 class TestElispSkillSandbox(TestCase):
@@ -88,7 +90,6 @@ class TestElispSkillSandbox(TestCase):
             "emacs --batch (byte-compile / ERT / load) — it should not just "
             "emit elisp and trust it",
         )
-
     def _sandbox_sh(self, script: str) -> subprocess.CompletedProcess:
         """Run a shell snippet in a fresh sandbox container against the
         workspace, capturing output — used to independently verify the elisp
@@ -155,6 +156,35 @@ class TestElispSkillSandbox(TestCase):
         self.assertIn(
             "120", run.stdout,
             f"(mathy-factorial 5) did not return 120:\n{run.stdout}\n{run.stderr}",
+        )
+
+
+class TestPromptRewriteElispSkillSandbox(TestElispSkillSandbox):
+    """Natural web-main comparison with the existing real Emacs verification oracle."""
+
+    test_loads_and_verifies = None
+    test_writes_wellformed_elisp = None
+
+    def test_creates_and_verifies_elisp(self):
+        with mock.patch("assist.tools.requests.get",
+                        side_effect=AssertionError("elisp eval must not fetch URLs")) as get, \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, self.workspace, sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec()))
+            agent.message(
+                "Write an Emacs Lisp function `demo/sum-list` that returns the sum "
+                "of a list of numbers, in a file `sum.el`. Make sure it actually "
+                "works."
+            )
+        get.assert_not_called()
+        self.assertTrue(os.path.exists(os.path.join(self.workspace, "sum.el")),
+                        "agent did not write sum.el")
+        self.assertTrue(skill_was_loaded(agent, "elisp"),
+                        "agent did not load elisp for an Emacs-Lisp authoring task")
+        self.assertTrue(
+            self._verified_file_in_emacs(agent, "sum.el"),
+            "agent did not verify sum.el with an Emacs batch action",
         )
 
 
