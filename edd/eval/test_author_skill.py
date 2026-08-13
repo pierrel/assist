@@ -37,7 +37,8 @@ import assist
 from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 
-from .utils import create_filesystem, read_file, skill_was_loaded, stub_research_subagent
+from .utils import (create_filesystem, prompt_rewrite_web_main_spec, read_file,
+                    skill_was_loaded, stub_research_subagent)
 
 # The loader's own frontmatter extraction (deepagents skills middleware): the
 # file MUST start with `---`, or it is dropped. Mirror it exactly so the test
@@ -86,7 +87,13 @@ class TestAuthorSkill(TestCase):
         subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
         subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
-        return AgentHarness(create_agent(self.model, root)), root
+        # Build under the canned research stub: authoring is entirely local and
+        # this comparison must not bind a live-search worker. The helper is the
+        # same web-main profile used by baseline/candidate prompt comparisons.
+        with stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, root, spec=prompt_rewrite_web_main_spec()))
+        return agent, root
 
     def _assert_valid_skill_authored(self, root: str):
         paths = glob.glob(os.path.join(root, ".claude", "skills", "*", "SKILL.md"))

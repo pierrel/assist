@@ -51,7 +51,9 @@ from assist.agent import create_agent, AgentHarness
 from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
-from .utils import create_filesystem, skill_was_loaded, cleanup_workspace
+from .utils import (cleanup_workspace, create_filesystem,
+                    prompt_rewrite_web_main_spec, skill_was_loaded,
+                    stub_research_subagent)
 
 
 _SKILL_NAME = "ledger-audit"          # NOT a built-in name (no collision)
@@ -143,7 +145,13 @@ class TestDomainSkillLoadingLocal(TestCase):
         root = tempfile.mkdtemp(prefix="domain_skill_eval_")
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         create_filesystem(root, _fixture())
-        return AgentHarness(create_agent(self.model, root))
+        # This local skill journey is entirely fixture-backed. Build with the
+        # real web-main comparison profile and the standard canned research
+        # worker so it cannot turn into provider availability evidence.
+        with stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, root, spec=prompt_rewrite_web_main_spec()))
+        return agent
 
     def _assert_loaded_and_applied(self, agent, response):
         """Loaded AND used: the domain skill was discovered + loaded, AND the
