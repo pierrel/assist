@@ -434,3 +434,18 @@ known 18-minute result. The first baseline attempt was discarded after the
 fixture failed to accept the natural tool phrase “the Ferry Building”; the
 repaired fixture then ran baseline N=3 and candidate N=1 then N=3. Captures are
 under =/home/pierre/deploy/assist/prompt-rewrite-captures/travel-v90/=.
+
+* v91 local-routing transit-directions cohort
+
+The natural prompt asks: “Which train do I take to get from Civic Center to the
+Embarcadero?” The fixture constructs =prompt_rewrite_web_main_spec()= with the
+ordinary directions tool surface and travel skill. It replaces only
+=assist.tools._motis_get= with local geocode and one transit itinerary, so the
+real =directions= tool renders its normal walk/board/alight result while no
+routing or geocoding reaches a service. Research is canned and generic URL
+fetches raise. The validator requires a =directions= call and BART in the final
+answer. Two early baseline captures are discarded because the local fixture did
+not recognize the agent's normal city-qualified geocoder query; its corrected
+name-prefix matcher retains unknown-place rejection. Baseline N=3 and candidate
+N=1 then N=3 captures are under
+=/home/pierre/deploy/assist/prompt-rewrite-captures/directions-v91/=.
