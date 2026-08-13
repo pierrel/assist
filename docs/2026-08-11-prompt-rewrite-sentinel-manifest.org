@@ -609,6 +609,7 @@ in one run. Its final-file oracle requires the exact first-line marker, a count
 equal to the remaining TODO headings, exact raw multiplicity of every unrelated
 preserved TODO, and complete title absence for every requested deletion. It
 retains the real temporary Git workspace, Docker sandbox, canned research, and
-hard GET/POST rejection. Baseline N=3 is required before candidate N=1 probe
-and candidate N=3 promotion. Captures will be under
+hard GET/POST rejection. The valid baseline passed N=3; candidate r1 passed
+but r2 completed the file edits while deriving the wrong real-file count, so
+the staged comparison stopped at candidate 1/2. Captures are under
 =<capture-root>/weekly-review-v105/=.
