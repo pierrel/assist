@@ -462,3 +462,14 @@ fetching. Canned research covers the legacy route. The validator requires the
 real =map_data= tool and a well-formed visible =type: map= block with valid pin
 coordinates. Baseline N=3 and candidate N=1 then N=3 captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/map-v92/=.
+
+* v93 review-gated email-proposal cohort
+
+The natural prompt asks: “Could you let Robin know at robin@example.test that
+the Tuesday meeting is moving to 2pm, and ask whether that still works?” The
+fixture constructs =prompt_rewrite_web_main_spec()= with the real =email_tools=
+and =EMAIL_INTERRUPT_ON= gate. It validates the pending =send_email= proposal's
+recipient, nonempty subject, and Tuesday meeting-change body; the graph pauses
+before provider delivery. Agent construction is inside canned research and
+generic URL fetching hard-fails. Baseline N=3 and candidate N=1 then N=3
+captures are under =/home/pierre/deploy/assist/prompt-rewrite-captures/email-v93/=.

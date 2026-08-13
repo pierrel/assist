@@ -5,13 +5,14 @@ mechanism, sender, or CC. The graph pauses before delivery, so no provider reque
 """
 import shutil
 import tempfile
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from assist.agent import AgentHarness, create_agent
 from assist.events.email import EMAIL_INTERRUPT_ON, email_tools
 from assist.model_manager import select_assistant_model
 
-from .utils import prompt_rewrite_web_main_spec, skill_was_loaded
+from .utils import (prompt_rewrite_web_main_spec, skill_was_loaded,
+                    stub_research_subagent)
 
 
 def _proposed_email(harness) -> dict | None:
@@ -35,16 +36,19 @@ class TestSendEmailSkill(TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_natural_request_loads_skill_and_proposes_one_email(self):
-        agent = AgentHarness(create_agent(
-            self.model, self.root,
-            spec=prompt_rewrite_web_main_spec(
-                tools=email_tools(), interrupt_on=EMAIL_INTERRUPT_ON)))
+        with mock.patch("assist.tools.requests.get",
+                        side_effect=AssertionError("email eval must not fetch URLs")) as get, \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model, self.root,
+                spec=prompt_rewrite_web_main_spec(
+                    tools=email_tools(), interrupt_on=EMAIL_INTERRUPT_ON)))
+            agent.message(
+                "Could you let Robin know at robin@example.test that the Tuesday meeting is "
+                "moving to 2pm, and ask whether that still works?"
+            )
 
-        agent.message(
-            "Could you let Robin know at robin@example.test that the Tuesday meeting is "
-            "moving to 2pm, and ask whether that still works?"
-        )
-
+        get.assert_not_called()
         proposal = _proposed_email(agent)
         self.assertTrue(skill_was_loaded(agent, "send-email"))
         self.assertIsNotNone(proposal, "agent did not propose an email for the request")
