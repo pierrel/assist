@@ -261,6 +261,21 @@ def test_terminal_pi_turn_without_a_trace_is_unavailable(pi_threads_root) -> Non
     assert "Activity unavailable" in page
 
 
+def test_corrupt_pi_trace_renders_one_unavailable_notice(pi_threads_root) -> None:
+    tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    run = threads._runs().create(tid, "main", "Check the workspace")
+    threads._runs().claim(tid, run.id)
+    threads._runs().transition(tid, run.id, "success")
+
+    page = threads.render_thread(
+        tid, None,
+        pi_messages=[{"role": "user", "content": "Check the workspace", "run_id": run.id}],
+        pi_traces=[], pi_trace_unavailable=True,
+    )
+
+    assert page.count("Activity unavailable") == 1
+
+
 def test_pi_title_backfill_preserves_a_user_rename(pi_threads_root) -> None:
     tid = threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
     state.set_description(tid, "A name I chose")

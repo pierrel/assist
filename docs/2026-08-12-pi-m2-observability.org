@@ -124,3 +124,7 @@ The design review found three important gaps and this revision resolves them:
   a persistence failure could leave a false =started= record.  The recorder now
   owns opaque tokens and finalizes only after both producers drain; a poisoned or
   unresolved terminal trace is explicitly unavailable.
+- Copilot review clarified that a fully read upstream HTTP error is not a
+  completed model request, and a corrupt trace must produce one unavailable
+  notice.  M2 records completion only for a 2xx response and suppresses the
+  per-turn fallback when the page already carries the corrupt-trace notice.

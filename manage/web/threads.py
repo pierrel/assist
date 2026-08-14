@@ -766,7 +766,7 @@ def render_thread(
             run_id = m.get("run_id")
             terminal = pi_run_status.get(run_id) in {"success", "error", "cancelled"}
             trace = _render_pi_activity(trace_by_run.get(run_id, []), terminal)
-            if terminal and not trace:
+            if terminal and not trace and not pi_trace_unavailable:
                 trace = '<div class="msg tools"><div class="content">Activity unavailable</div></div>'
             if trace:
                 rendered.append(trace)

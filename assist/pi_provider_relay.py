@@ -210,7 +210,7 @@ class PiProviderRelay:
                 if total > _MAX_RESPONSE_BYTES:
                     raise PiProviderRelayError("Pi model response exceeds its bound")
                 chunks.append(chunk)
-            completed = True
+            completed = 200 <= response.status < 300
             return response.status, "application/json", chunks
         finally:
             with self._state_lock:

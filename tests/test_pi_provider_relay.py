@@ -54,6 +54,17 @@ class _StalledUpstream(http.server.BaseHTTPRequestHandler):
         return
 
 
+class _FailedUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(500)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
 def _request(path: Path, capability: str, *, model: str = "qwen",
              extra: dict[str, object] | None = None) -> bytes:
     body = json.dumps({"model": model, "messages": []} | (extra or {})).encode()
@@ -153,6 +164,29 @@ def test_provider_relay_continues_when_trace_callbacks_fail(tmp_path: Path) -> N
         upstream.server_close()
 
     assert b" 200 " in accepted
+
+
+def test_provider_relay_marks_an_upstream_error_did_not_complete(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FailedUpstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    outcomes: list[bool] = []
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+        trace_start=lambda: "model", trace_settle=lambda _operation, completed: outcomes.append(completed),
+    )
+    relay.start()
+    try:
+        response = _request(relay.socket_path, "a" * 43)
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 500 " in response
+    assert outcomes == [False]
 
 
 def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> None:
