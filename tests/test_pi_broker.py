@@ -80,6 +80,52 @@ def test_broker_rejects_wrong_capability(tmp_path: Path) -> None:
     assert backend.commands == []
 
 
+def test_broker_traces_only_admitted_fixed_labels(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    events: list[tuple[str, object, object]] = []
+    broker = PiToolBroker(
+        _Backend(), control, "a" * 43,
+        trace_start=lambda name: events.append(("start", name, None)) or name,
+        trace_settle=lambda operation, completed: events.append(("settle", operation, completed)),
+    )  # type: ignore[arg-type]
+    broker.start()
+    try:
+        denied = _request(broker.socket_path, {
+            "version": 1, "id": 1, "capability": "b" * 43,
+            "operation": "read", "path": "/workspace/file.txt",
+        })
+        accepted = _request(broker.socket_path, {
+            "version": 1, "id": 2, "capability": "a" * 43,
+            "operation": "access", "path": "/workspace/file.txt", "mode": "read",
+        })
+    finally:
+        broker.close()
+
+    assert denied["ok"] is False
+    assert accepted["ok"] is True
+    assert events == [("start", "read", None), ("settle", "read", True)]
+
+
+def test_broker_continues_when_trace_callbacks_fail(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    broker = PiToolBroker(
+        _Backend(), control, "a" * 43,
+        trace_start=lambda _name: (_ for _ in ()).throw(RuntimeError("trace failed")),
+    )  # type: ignore[arg-type]
+    broker.start()
+    try:
+        response = _request(broker.socket_path, {
+            "version": 1, "id": 1, "capability": "a" * 43,
+            "operation": "read", "path": "/workspace/file.txt",
+        })
+    finally:
+        broker.close()
+
+    assert response["ok"] is True
+
+
 def test_broker_rejects_multiple_frames_without_a_backend_call(tmp_path: Path) -> None:
     broker, backend, capability = _broker(tmp_path)
     try:

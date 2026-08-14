@@ -80,7 +80,9 @@ where reliability is harder than with frontier APIs.
   preview; Deep Agents remains the default. Pi threads are visibly labelled,
   run only ordinary manual web turns, and can start a new Deep Agents thread
   from an optional visible summary without transferring their transcript or
-  workspace.
+  workspace. Each Pi turn also retains a collapsed, redacted activity trace
+  for model requests and workspace actions; it never includes prompts, paths,
+  commands, content, or tool results.
 
 ---
 
