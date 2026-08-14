@@ -1340,19 +1340,20 @@ cohort stops before N=3 or a candidate comparison claim. The earlier candidate
 probe is retained only as a matching diagnostic. No fitness-specific prompt
 change follows from this shared baseline failure.
 
-The distinct vGS18 task-discovery/update outcome will supply a current
-local-action control. The natural user request finds Yosemite and changes its
-due date to 2026-11-07 in the real Org file. It resets process-local lifecycle
-state, mounts both production-shaped memory scopes, stubs research, and
-hard-rejects HTTP. The first capture set used a weak oracle that accepted the
-date anywhere in =inbox.org=; all six captures are discarded. The repaired
-oracle requires the Yosemite entry itself to contain the date, so the row must
-restart at pre-skill baseline N=3. It does not erase or reinterpret the
-separate grounding-selection failures above.
+The vGS18 task-discovery/update outcome is a current local-action control. The
+natural user request finds Yosemite and changes its due date to 2026-11-07 in
+the real Org file. It resets process-local lifecycle state, mounts both
+production-shaped memory scopes, stubs research, and hard-rejects HTTP. The
+first capture set used a weak oracle that accepted the date anywhere in
+=inbox.org=; all six captures are discarded. The repaired oracle requires the
+Yosemite entry itself to contain the date. A fresh pre-skill baseline and the
+guidance-skills candidate each passed N=3. This parity row does not erase or
+reinterpret the separate grounding-selection failures above.
 
 | Cohort | Profile | Trials | Result | Durable captures (SHA-256) |
 |-
-| vGS18 natural task discovery and update | pre-skill baseline N=3 and candidate N=3 | discarded | weak oracle accepted the date on any task | =guidance-skills-v2/domain-task-{baseline,candidate}-{1,2,3}.log= |
+| vGS18 natural task discovery and update | pre-skill baseline | N=3 | 3/3 under repaired Yosemite-subtree oracle | =guidance-skills-v2/domain-task-r2-baseline-1.log= =af512a2bb88cc9f7c9a396bf32530247712a3dbd5a9eb0ba6fff6ccd791b286f=; =baseline-2.log= =4ef0ce442a28119137ef0dfa084c1c324044204d2068d8f0ff193d89406a4fa9=; =baseline-3.log= =7c82eedf8a01c3a1f4c284bda18f5e42e8fad3518c066c0ab586e52a71fe0fa6= |
+| vGS18 natural task discovery and update | guidance-skills candidate | N=3 | 3/3 under repaired Yosemite-subtree oracle | =guidance-skills-v2/domain-task-r2-candidate-1.log= =050e0cd12e983286ace3da7e4a32c7d7d90c263657650628d17a8cf5646ddd0d=; =candidate-2.log= =3715b46fd91e25b0ea8f6d654581512eaa1db0922e527ea8d2b90c7ac40c6a01=; =candidate-3.log= =ab5effa74ad3b86626c1f51bfcff1f0c27f6fd3d73f2168a413ad3b8fc689208= |
 
 The =unavailable external lookup= panel row is deliberately unrun. Its first
 prototype could verify the lifecycle and an unavailable reply, but could not
