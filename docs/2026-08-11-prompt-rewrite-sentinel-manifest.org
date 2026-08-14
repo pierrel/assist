@@ -54,7 +54,7 @@ capture path below is a replayable =pytest= node with a =baseline= or
 | org structure | =test_org_format_skill.py::TestOrgFormatSkill::test_inserts_heading_without_orphaning_previous_body= | Insert a project heading while preserving preceding body | =/tmp/prompt-rewrite-v28-org-<N>.log= |
 | rendering | =test_render_agent.py::TestRenderAgent::test_emits_render_block_for_named_file= | Show a named workspace file; emitted render block names it | =/tmp/prompt-rewrite-v28-render-<N>.log= |
 | development | =test_dev_skill_loading.py::TestDevSkillLoading::test_soft_trigger_dev_skill_request= | Natural code-inspection request reaches catalog-selected development guidance | =/tmp/prompt-rewrite-v28-dev-<N>.log= |
-| task continuity | =test_domain_integration.py::TestPromptRewriteDomainTask::test_finds_and_updates_task_with_web_main_prompt= | Find Yosemite then normalize its due date; response plus file state; reset synthetic task state, reject HTTP | =/tmp/prompt-rewrite-v28-domain-{baseline,candidate}-r<N>.log= |
+| task continuity | =test_domain_integration.py::TestPromptRewriteDomainTask::test_finds_and_updates_task_with_web_main_prompt= | Find Yosemite then normalize its own due date; response plus the Yosemite Org subtree; reset synthetic task state, reject HTTP | =/tmp/prompt-rewrite-v28-domain-{baseline,candidate}-r<N>.log= |
 | memory continuity | =test_memory.py::TestMemory::test_writes_memory_two_consecutive_turns= | Persist cats then dogs across two turns; repository memory is validated while the private thread-memory scope is mounted empty, as in a new production thread | =/tmp/prompt-rewrite-v28-memory-{baseline,candidate}-r<N>.log= |
 
 The org, render, and development baseline is the unchanged, ledger-proven v21
@@ -222,11 +222,12 @@ or guard change is warranted. Its capture is under
 
 The natural request asks for the next task and changes its due date. The
 production-shaped web-main fixture resets lifecycle state, mounts both memory
-scopes, and hard-rejects HTTP; it validates that Yosemite is surfaced and the
-Org file records =2026-11-07=. Baseline N=3 is a stable control. Candidate r1
-returned an empty final response after the deterministic completion wake, so
-the candidate is stopped at N=1 without a new lifecycle rule or task-specific
-prompt change. Captures are under
+scopes, and hard-rejects HTTP; it now validates that Yosemite itself, rather
+than any task in the file, records =2026-11-07=. Historical captures used the
+weaker whole-file assertion and are not a stable control. Candidate r1
+returned an empty final response after the deterministic completion wake; it
+remains a user-visible failure, but the task-state comparison must restart
+under the repaired oracle. Captures are under
 =/home/pierre/deploy/assist/prompt-rewrite-captures/domain-v70/=.
 
 * v71 Org skill-discovery and edit cohort
