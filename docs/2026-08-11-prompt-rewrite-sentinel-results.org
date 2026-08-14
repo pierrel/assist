@@ -1328,6 +1328,16 @@ not fixed by a request-specific prompt addition.
 | vGS12 natural local-facts outcome | current prompt-only candidate | N=1, stopped | 0/1: denied saved profile and asked user to repeat it | =guidance-skills-v2/local-outcome-candidate-1.log= =b903b24b02d6b008529f59be6cdacf80a8a1eea892de4af9d90f93dd834d96c2= |
 | vGS13 dependent local-to-current-facts handoff | pre-skill baseline | N=1, non-comparable | direct local reads before context | =guidance-skills-v2/handoff-baseline-1.log= =66885032cc25d58eafcecbd060e48520c7559c2c6f9efe7b0c93e326ef93b2bd= |
 | vGS13 dependent local-to-current-facts handoff | current prompt-only candidate | N=1, stopped | 0/1: local reads plus unrelated travel route, no grounding/context | =guidance-skills-v2/handoff-candidate-1.log= =80457b6ea5e4dffaa462fb1c49c7d5ac663d04ef26e56ddf31bcd8cfc49f934d= |
+| vGS17 natural fitness-plan outcome | current v2b pre-skill baseline | N=1, stopped | 0/1: left =fitness.org= unchanged and created no requested 2026 plan | =guidance-skills-v2/fitness-baseline-1.log= =bf90032082f2bd53ba13586127486e048217e7fca4afc2eadff5a00f31ad3e2b= |
+| vGS17 natural fitness-plan outcome | current prompt-only candidate | N=1, diagnostic only | 0/1: left =fitness.org= unchanged and created no requested 2026 plan | =guidance-skills-v2/fitness-candidate-1.log= =96cb014a52d8edca520ad9a524420042d6a68d758231e456b72197942e919ec4= |
+
+vGS17 uses the real Docker sandbox, canned research, and HTTP GET/POST
+rejection. It is a distinct persisted local outcome, not another fact-answering
+oracle. The historical v107 N=3 baseline predates the current v2b pre-skill
+profile. A fresh v2b baseline then also left =fitness.org= unchanged, so the
+cohort stops before N=3 or a candidate comparison claim. The earlier candidate
+probe is retained only as a matching diagnostic. No fitness-specific prompt
+change follows from this shared baseline failure.
 
 The =unavailable external lookup= panel row is deliberately unrun. Its first
 prototype could verify the lifecycle and an unavailable reply, but could not
