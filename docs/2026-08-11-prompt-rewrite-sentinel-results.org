@@ -1390,6 +1390,8 @@ grounding or research ahead of a self-contained exact capability.
 |-
 | vGS14 date anti-trigger | current prompt-only candidate | N=3 | 3/3: loaded =time= and used =date= | =guidance-skills-v2/time-antitrigger-candidate-1.log= =8e4543becf5c0ec1101d443b101f3627c37e9874201627f5494269994615d57c=; =candidate-2.log= =d928dd0b7b4ab77d4866d9e4b7b31c1ba8eb71cfc2fdbdf238796d0041fd2da4=; =candidate-3.log= =df3f049251336401660aac6ae961a3f5bff09702fe78772b420346a7682c73d5= |
 | vGS15 recurring schedule anti-trigger | current prompt-only candidate | N=3 | 3/3 | =guidance-skills-v2/schedule-antitrigger-candidate-1.log= =525558bc65824b711dc70ef485a2a22a62970b8a124d9ca9ba7547579a9be78c=; =candidate-2.log= =6cc80c014438b8cf4c4a4dfa88cb0484f4ba8c5bf48c01f24851ab38508af43f=; =candidate-3.log= =b3a0573895fff1392d623ed4176c38e66c2344c16c270ae938729403e4a9d60f= |
+| vGS20 compound calculation anti-trigger | pre-skill baseline | N=3 | 3/3 | =guidance-skills-v2/calculate-v59-r2/baseline-1.log= =7d8fcc442b5b964568afd04f915adc9fdc4557b68df6f9f8515b74db20948734=; =baseline-2.log= =2bfedc2f61d4863e2fbf7381414ba4d939f879803f7bf3d35f7de1bb7166590c=; =baseline-3.log= =4ce7b13768cc497f924c11b0e67d356fe343d93fe14c51431c40fef0fb057b97= |
+| vGS20 compound calculation anti-trigger | guidance-skills candidate | N=3 | 3/3 | =guidance-skills-v2/calculate-v59-r2/candidate-1.log= =cead95dbe908c01985bc326252c87f354f5d25ac7aabb7cd0d490b98966d78ed=; =candidate-2.log= =8c60262731178ad056940ccf860a1d6d2c3785ba68cd152b99b77f2d44f45627=; =candidate-3.log= =b5363910a172bd03d8ecee52e9896b0abaa214bb895a47bbd87e66bcb50fc9a4= |
 
 The retained two-report anchor also cleared N=3 on the current candidate. Its
 matching v2b control already passed N=3 with the same canned-research and
