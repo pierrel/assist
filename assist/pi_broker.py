@@ -17,7 +17,7 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Callable, Literal, TypedDict
 
 from assist.sandbox import DockerSandboxBackend
 
@@ -53,11 +53,15 @@ class PiToolBroker:
     """Serve Pi coding-tool requests against exactly one Docker sandbox."""
 
     def __init__(self, backend: DockerSandboxBackend, control_dir: str | Path,
-                 capability: str) -> None:
+                 capability: str,
+                 trace_start: Callable[[str], object] | None = None,
+                 trace_settle: Callable[[object, bool], None] | None = None) -> None:
         self._backend = backend
         self._control_dir = Path(control_dir)
         self._socket_path = self._control_dir / "broker.sock"
         self._capability = capability
+        self._trace_start = trace_start
+        self._trace_settle = trace_settle
         self._listener: socket.socket | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -134,6 +138,8 @@ class PiToolBroker:
 
     def _serve_connection(self, connection: socket.socket) -> None:
         admitted = False
+        trace_operation: object | None = None
+        completed = False
         try:
             with connection:
                 connection.settimeout(5)
@@ -144,7 +150,11 @@ class PiToolBroker:
                     request_id = request["id"]
                     self._admit_request()
                     admitted = True
+                    name = self._trace_name(request)
+                    if name is not None:
+                        trace_operation = self._start_trace(name)
                     value = self._dispatch(request)
+                    completed = True
                     response: dict[str, Any] = {
                         "version": _VERSION, "id": request_id, "ok": True, "value": value,
                     }
@@ -155,9 +165,37 @@ class PiToolBroker:
                     }
                 self._write_frame(connection, response)
         finally:
+            self._settle_trace(trace_operation, completed)
             if admitted:
                 self._finish_request()
             self._request_slot.release()
+
+    @staticmethod
+    def _trace_name(request: _BrokerRequest) -> str | None:
+        """Map a fully admitted closed operation to a redacted display label."""
+        operation = request["operation"]
+        if operation == "access":
+            mode = request.get("mode")
+            return "read" if mode == "read" else "write" if mode == "write" else None
+        return {"mkdir": "write", "read": "read", "write": "write", "bash": "bash"}[operation]
+
+    def _start_trace(self, name: str) -> object | None:
+        """Keep optional observability from changing a permitted tool operation."""
+        if self._trace_start is None:
+            return None
+        try:
+            return self._trace_start(name)
+        except Exception:
+            return None
+
+    def _settle_trace(self, operation: object | None, completed: bool) -> None:
+        """Contain an activity-recorder failure after the tool operation ends."""
+        if operation is None or self._trace_settle is None:
+            return
+        try:
+            self._trace_settle(operation, completed)
+        except Exception:
+            pass
 
     def _admit_request(self) -> None:
         with self._request_gate:

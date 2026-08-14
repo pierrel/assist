@@ -19,6 +19,7 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
+from assist.pi_trace import PiTraceRecorder, PiTraceStore
 from assist.pi_provider_relay import PiProviderRelay
 from assist.sandbox import DockerSandboxBackend
 from assist.sandbox_manager import SandboxManager
@@ -300,7 +301,8 @@ class PiRuntimeManager:
             history: Iterable[tuple[str, str]], system_prompt: str,
             max_turns: int = _MAX_TURNS, turn_id: str | None = None,
             admitted: Callable[[], bool] | None = None,
-            should_yield: Callable[[], bool] | None = None) -> PiRuntimeResult:
+            should_yield: Callable[[], bool] | None = None,
+            trace_dir: str | None = None, trace_run_id: str | None = None) -> PiRuntimeResult:
         """Run one fresh Pi worker and tear down every authority it used."""
         if (not isinstance(prompt, str) or not isinstance(system_prompt, str)
                 or not system_prompt.strip() or not isinstance(max_turns, int)
@@ -309,6 +311,10 @@ class PiRuntimeManager:
         if len(prompt.encode("utf-8")) > _MAX_MESSAGE_BYTES:
             raise PiRuntimeError("Pi prompt exceeds its bound")
         config = current_model_config()
+        if (trace_dir is None) != (trace_run_id is None):
+            raise PiRuntimeError("Pi activity trace is invalid")
+        recorder = (PiTraceRecorder(PiTraceStore(), trace_dir, trace_run_id)
+                    if trace_dir is not None and trace_run_id is not None else None)
         control_dir = self._control_dir(work_dir)
         active = self._register(turn_id)
         sandbox: DockerSandboxBackend | None = None
@@ -332,10 +338,21 @@ class PiRuntimeManager:
             sandbox = self._sandbox_manager.get_pi_sandbox_backend(work_dir, timezone)
             if sandbox is None:
                 raise PiRuntimeError("Pi workspace sandbox is unavailable")
-            broker = PiToolBroker(sandbox, control_dir, broker_capability)
-            relay = PiProviderRelay(
-                control_dir, self._relay_url(config), config.api_key,
-                config.model, provider_capability)
+            if recorder is None:
+                broker = PiToolBroker(sandbox, control_dir, broker_capability)
+                relay = PiProviderRelay(
+                    control_dir, self._relay_url(config), config.api_key,
+                    config.model, provider_capability)
+            else:
+                broker = PiToolBroker(
+                    sandbox, control_dir, broker_capability,
+                    trace_start=lambda name: recorder.start("tool", name),
+                    trace_settle=recorder.settle)
+                relay = PiProviderRelay(
+                    control_dir, self._relay_url(config), config.api_key,
+                    config.model, provider_capability,
+                    trace_start=lambda: recorder.start("model", "model request"),
+                    trace_settle=recorder.settle)
             broker.start()
             relay.start()
             client = self._sandbox_manager._get_docker_client()
@@ -390,6 +407,8 @@ class PiRuntimeManager:
                     self._attempt(teardown_errors, broker.close)
                 if relay is not None:
                     self._attempt(teardown_errors, relay.close)
+                if recorder is not None:
+                    self._attempt(teardown_errors, recorder.finish_unsettled)
                 if result_sink is not None:
                     self._attempt(teardown_errors, result_sink.close)
                 self._attempt(teardown_errors, lambda: shutil.rmtree(control_dir))
