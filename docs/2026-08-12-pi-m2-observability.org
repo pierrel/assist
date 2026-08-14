@@ -2,7 +2,7 @@
 #+date: 2026-08-12
 #+startup: overview
 
-State: Coding
+State: Done (2026-08-14, PR #236)
 
 * Purpose
 
