@@ -1194,7 +1194,7 @@ and candidate
 | v109 two independent reports | pre-skill v2b control | N=3 | 3/3 historical control | =two-reports-v2b/candidate-1.log= =dca940d28ec9fa7201acf2ae6f7e5b2da141f6c7b01aa6278e06d3af2e264cf3=; =candidate-2.log= =4a55deab43270ed4018707f76444665ff98fc4f7d99fbb26f6c6352e0ac5c870=; =candidate-3.log= =5f706e09da0df245710fa92c4831c3592988272576c41a844e393a7e77d267f4= |
 | v109 two independent reports | current candidate | N=3, stopped | 1/3 | =guidance-skills-v1/two-reports-candidate-1.log= =2e74224e5fac84e2561008a0884df81f9d912e6c6a0603fc20b9208ef7550bf6=; =candidate-2.log= =9332260f4f4a1212c299db4713c7eae2e4148613052b91337f45326af732f146=; =candidate-3.log= =78bdfd20b10ddfa6c4f1924889d9e5ce3447263928607b331f582a1572d0cdc2= |
 | v81 Elisp authoring and verification | pre-skill v2b control | N=3 | 3/3 historical control | =elisp-v2b/candidate-1.log= =cda940d28ec9fa7201acf2ae6f7e5b2da141f6c7b01aa6278e06d3af2e264cf3=; =candidate-2.log= =f382a0cbd1487676b68bed425af581b22ba4b7a76e6e451f1a94445f18be5a8c=; =candidate-3.log= =a766902843f7ed2302c098c30eb1237f4f3e8f21bd3a47ea537fa2713358490f= |
-| v81 Elisp authoring and verification | current candidate | N=1, invalid capture | timed out at 10 minutes | stdout capture was buffered and empty; no result is claimed |
+| v81 Elisp authoring and verification | guidance-skills candidate | N=3 | 3/3 | =guidance-skills-v2/elisp-v81-r2/candidate-1.log= =fad988dcd97b97ac9fdf21abc19a3055eda4a811c91d4180ccc1900937882271=; =candidate-2.log= =6365eb961994efca60e2d09702aba67ae42903acdc45657f0a117b718b8a933a=; =candidate-3.log= =a5826e66caad262ce15d96140a24c67196e5a6a3c08aabacd00fa2176cff16a4= |
 | vGS6 self-contained date outcome | current candidate r1 | N=1 | 0/1 implementation defect | =guidance-skills-v1/time-candidate-1.log= =4f3a12b8353535beac81eb039861364349795776892dd8ee316f016217677c03= |
 | vGS6 self-contained date outcome | current candidate r2 | N=1 | 1/1 | =guidance-skills-v1/time-candidate-2.log= =d24b46814656c5bdbc0e0f8d8147f5e8afed5cd03b9de3ab239a1014d96ce9b6= |
 | vGS7 local task discovery and due-date update | pre-skill baseline | N=3, discarded | weak whole-file date oracle | =guidance-skills-v1/domain-task-baseline-{1b,2,3}.log= |
@@ -1242,11 +1242,10 @@ inspection-to-deliverable failure pattern for the later holistic review. It is
 not repaired by adding report- or fixture-specific text to either system prompt
 or skill, and the row is stopped at N=3 rather than retried for a favorable run.
 
-The v81 candidate trial reached its 10-minute bound while the model continued
-adding tool-turn context rather than terminating. The redirected pytest output
-was buffered and therefore empty after termination, so the run cannot support a
-behavioral failure claim beyond non-completion. A future bounded rerun must use
-unbuffered capture if this anchor is needed for a merge decision.
+The earlier v81 candidate trial reached its 10-minute bound with buffered
+output, so it was not evidence. An unbuffered bounded rerun then completed the
+same existing authoring-and-verification oracle 3/3 on the guidance-skills
+candidate. The v2b pre-skill control remains the exact matching N=3 baseline.
 
 vGS6 exposed the supplemental gate's overreach: it made a separately loaded
 =time= skill appear unable to use its ordinary date command. R1 therefore
