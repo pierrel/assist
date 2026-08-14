@@ -1389,7 +1389,7 @@ grounding or research ahead of a self-contained exact capability.
 
 | Cohort | Profile | Trials | Result | Durable captures (SHA-256) |
 |-
-| vGS14 date anti-trigger | current prompt-only candidate | N=1 | 1/1: loaded =time= and used =date= | =guidance-skills-v2/time-antitrigger-candidate-1.log= =8e4543becf5c0ec1101d443b101f3627c37e9874201627f5494269994615d57c= |
+| vGS14 date anti-trigger | current prompt-only candidate | N=3 | 3/3: loaded =time= and used =date= | =guidance-skills-v2/time-antitrigger-candidate-1.log= =8e4543becf5c0ec1101d443b101f3627c37e9874201627f5494269994615d57c=; =candidate-2.log= =d928dd0b7b4ab77d4866d9e4b7b31c1ba8eb71cfc2fdbdf238796d0041fd2da4=; =candidate-3.log= =df3f049251336401660aac6ae961a3f5bff09702fe78772b420346a7682c73d5= |
 | vGS15 recurring schedule anti-trigger | current prompt-only candidate | N=3 | 3/3 | =guidance-skills-v2/schedule-antitrigger-candidate-1.log= =525558bc65824b711dc70ef485a2a22a62970b8a124d9ca9ba7547579a9be78c=; =candidate-2.log= =6cc80c014438b8cf4c4a4dfa88cb0484f4ba8c5bf48c01f24851ab38508af43f=; =candidate-3.log= =b3a0573895fff1392d623ed4176c38e66c2344c16c270ae938729403e4a9d60f= |
 
 The retained two-report anchor also cleared N=3 on the current candidate. Its
