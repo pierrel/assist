@@ -35,7 +35,7 @@ class PromptCompositionMiddleware(AgentMiddleware):
 
     def _reordered(self, request: ModelRequest) -> ModelRequest:
         system = request.system_message
-        blocks = list(system.content_blocks) if system is not None else []
+        blocks = [dict(block) for block in system.content_blocks] if system else []
         if (not blocks or blocks[0].get("type") != "text"
                 or blocks[0].get("text") != self._expected):
             raise RuntimeError(

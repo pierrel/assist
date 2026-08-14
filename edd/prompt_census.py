@@ -712,10 +712,10 @@ def _content_segments(owner: str, text: str, scenario: str,
             if span["start"] < base["end"]:
                 continue
             value = before_text[span["start"]:span["end"]]
-            sources = ([span["source_id"]] if "source_id" in span
-                       else span["source_ids"])
+            span_source_ids = ([span["source_id"]] if "source_id" in span
+                               else span["source_ids"])
             segments.append({"start": cursor, "end": cursor + len(value),
-                             "source_ids": sources,
+                             "source_ids": span_source_ids,
                              **({"owner": span["owner"]} if "owner" in span else {})})
             cursor += len(value)
         # The core segment ends before later framework-owned blocks.
