@@ -67,8 +67,12 @@ class TestDomainIntegration(TestCase):
         inbox_path = os.path.join(dm.domain(), "gtd", "inbox.org")
         with open(inbox_path, "r", encoding="utf-8") as f:
             content = f.read()
-        self.assertIn("2026-11-07", content,
-                      "Inbox should contain normalized due date")
+        self.assertRegex(
+            content,
+            r"(?ms)^\*\* TODO Plan Yosemite vacation[^\n]*\b2026-11-07\b"
+            r"|^\*\* TODO Plan Yosemite vacation\n(?:(?!^\*+ ).)*\b2026-11-07\b",
+            "The Yosemite task itself should contain the normalized due date",
+        )
 
 
 class TestPromptRewriteDomainTask(TestCase):
@@ -107,5 +111,9 @@ class TestPromptRewriteDomainTask(TestCase):
                          "Should surface Yosemite as the next task")
         with open(os.path.join(self.working_dir, "gtd", "inbox.org"),
                   encoding="utf-8") as inbox:
-            self.assertIn("2026-11-07", inbox.read(),
-                          "Inbox should contain normalized due date")
+            self.assertRegex(
+                inbox.read(),
+                r"(?ms)^\*\* TODO Plan Yosemite vacation[^\n]*\b2026-11-07\b"
+                r"|^\*\* TODO Plan Yosemite vacation\n(?:(?!^\*+ ).)*\b2026-11-07\b",
+                "The Yosemite task itself should contain the normalized due date",
+            )
