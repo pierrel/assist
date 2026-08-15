@@ -51,7 +51,7 @@ where = ["."]
 # this, a non-editable install crashes at prompt-render time — which
 # is why emacsos-server historically required an editable install.
 [tool.setuptools.package-data]
-assist = ["templates/**/*", "skills/**/*", "main_skills/**/*", "web_main_skills/**/*"]
+assist = ["templates/**/*", "skills/**/*", "main_skills/**/*", "main_guidance_skills/**/*"]
 
 [tool.mypy]
 python_version = "3.14.2"

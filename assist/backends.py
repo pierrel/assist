@@ -83,9 +83,9 @@ SKILLS_ROUTE = "/skills/"
 SKILLS_DIR = os.path.join(os.path.dirname(__file__), "skills")
 MAIN_SKILLS_ROUTE = "/main-skills/"
 MAIN_SKILLS_DIR = os.path.join(os.path.dirname(__file__), "main_skills")
-WEB_MAIN_SKILLS_ROUTE = "/web-main-skills/"
-WEB_MAIN_SKILLS_DIR = os.path.join(
-    os.path.dirname(__file__), "web_main_skills")
+MAIN_GUIDANCE_SKILLS_ROUTE = "/main-guidance-skills/"
+MAIN_GUIDANCE_SKILLS_DIR = os.path.join(
+    os.path.dirname(__file__), "main_guidance_skills")
 
 
 class ReadOnlyFilesystemBackend(FilesystemBackend):

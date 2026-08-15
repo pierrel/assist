@@ -172,13 +172,13 @@ class TestSpecWiring(_CreateAgentHarness):
                    for item in web_main["middleware"])
         legacy_skills = next(item for item in legacy["middleware"]
                              if isinstance(item, SmallModelSkillsMiddleware))
-        web_main_skills = next(item for item in web_main["middleware"]
+        composed_skills = next(item for item in web_main["middleware"]
                                if isinstance(item, SmallModelSkillsMiddleware))
         legacy_memory = next(item for item in legacy["middleware"]
                              if isinstance(item, SmallModelMemoryMiddleware))
         web_main_memory = next(item for item in web_main["middleware"]
                                if isinstance(item, SmallModelMemoryMiddleware))
-        assert legacy_skills.system_prompt_template == web_main_skills.system_prompt_template
+        assert legacy_skills.system_prompt_template == composed_skills.system_prompt_template
         assert legacy_memory.sources == web_main_memory.sources
 
     def test_web_main_requires_the_main_lifecycle_profile(self):
@@ -188,23 +188,23 @@ class TestSpecWiring(_CreateAgentHarness):
             AgentSpec(role="delegate", async_subagent_tools=_async_task_tools,
                       web_main=True)
 
-    def test_web_main_guidance_skills_are_closed_to_that_identity(self):
-        from assist.backends import WEB_MAIN_SKILLS_ROUTE, BundledSkillsBackend
+    def test_main_guidance_skills_are_closed_to_that_identity(self):
+        from assist.backends import MAIN_GUIDANCE_SKILLS_ROUTE, BundledSkillsBackend
         from assist.middleware.skills_middleware import SmallModelSkillsMiddleware
 
         ordinary = self._build(spec=AgentSpec(
             async_subagent_tools=_async_task_tools, web_main=True))
         candidate = self._build(spec=AgentSpec(
             async_subagent_tools=_async_task_tools, web_main=True,
-            web_main_guidance_skills=True))
+            main_guidance_skills=True))
         ordinary_skills = next(item for item in ordinary["middleware"]
                                if isinstance(item, SmallModelSkillsMiddleware))
         candidate_skills = next(item for item in candidate["middleware"]
                                 if isinstance(item, SmallModelSkillsMiddleware))
 
-        assert WEB_MAIN_SKILLS_ROUTE not in ordinary_skills.sources
-        assert candidate_skills.sources[0] == WEB_MAIN_SKILLS_ROUTE
-        assert isinstance(candidate["backend"].routes[WEB_MAIN_SKILLS_ROUTE],
+        assert MAIN_GUIDANCE_SKILLS_ROUTE not in ordinary_skills.sources
+        assert candidate_skills.sources[0] == MAIN_GUIDANCE_SKILLS_ROUTE
+        assert isinstance(candidate["backend"].routes[MAIN_GUIDANCE_SKILLS_ROUTE],
                           BundledSkillsBackend)
         assert "# Grounding workflow" in load_skill(candidate_skills, "grounding")
         assert "# Research workflow" in load_skill(candidate_skills, "research")

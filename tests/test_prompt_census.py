@@ -398,16 +398,16 @@ def test_web_main_alone_has_the_attributed_static_prompt_reorder(census):
             for transition in call["provenance"]["transitions"])
 
 
-def test_grounding_and_research_skill_sources_are_web_main_only(census):
+def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):
     guidance_sources = [
         source for source in census["source_manifest"]
         if source.get("kind") == "skill"
-        and source.get("source") == "/web-main-skills/"
+        and source.get("source") == "/main-guidance-skills/"
     ]
 
     assert {(source["name"], source["path"]) for source in guidance_sources} == {
-        ("grounding", "/web-main-skills/grounding/SKILL.md"),
-        ("research", "/web-main-skills/research/SKILL.md"),
+        ("grounding", "/main-guidance-skills/grounding/SKILL.md"),
+        ("research", "/main-guidance-skills/research/SKILL.md"),
     }
     assert {source["scenario"] for source in guidance_sources} == {
         "web-main-core", "web-main-full"}
@@ -1201,9 +1201,9 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 3_181_217
+    assert len(artifact_bytes(census)) == 3_181_697
     assert census["artifact_sha256"] == \
-            "ad62a99f8b868f286ff795f948f384a169628f85eb90c54262f128eb55bd4dd9"
+            "35cffdea8d37ea0d28283a8c65bcf909c7cd5f93c09dcd1b0cc2968c79e16ff8"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

@@ -22,8 +22,8 @@ from assist.backends import (
     LegacySkillsBackend,
     MAIN_SKILLS_DIR,
     MAIN_SKILLS_ROUTE,
-    WEB_MAIN_SKILLS_DIR,
-    WEB_MAIN_SKILLS_ROUTE,
+    MAIN_GUIDANCE_SKILLS_DIR,
+    MAIN_GUIDANCE_SKILLS_ROUTE,
     SKILLS_ROUTE,
     STATEFUL_PATHS,
     create_composite_backend,
@@ -301,8 +301,8 @@ def create_agent(model: BaseChatModel,
     sandbox modes.  It is registered only when present (a gated ``ls``;
     the absent case stays silent). The async main lists its main-only
     orchestration source first for small-model salience. When selected, the
-    web-main guidance source precedes it. Last-source-wins collision precedence
-    is ``web-main guidance < main-only < domain < built-in <
+    main guidance source precedes it. Last-source-wins collision precedence is
+    ``main guidance < main-only < domain < built-in <
     embedder-extras``; other roles omit both main-only sources. A same-named
     domain skill does not override a built-in (the safety skills ``dev`` /
     ``git-sync`` are the floor).
@@ -340,10 +340,10 @@ def create_agent(model: BaseChatModel,
     # Plain dict copy of the spec's read-only mapping; the backend
     # factories treat an empty mapping and None identically.
     extra_routes = dict(spec.skill_sources)
-    if spec.web_main_guidance_skills:
+    if spec.main_guidance_skills:
         extra_routes.setdefault(
-            WEB_MAIN_SKILLS_ROUTE,
-            create_bundled_skills_backend(WEB_MAIN_SKILLS_DIR))
+            MAIN_GUIDANCE_SKILLS_ROUTE,
+            create_bundled_skills_backend(MAIN_GUIDANCE_SKILLS_DIR))
     if async_main:
         extra_routes.setdefault(
             MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
@@ -359,11 +359,11 @@ def create_agent(model: BaseChatModel,
                                            extra_routes=extra_routes,
                                            default_backend=spec.default_backend)
 
-    # Put web-main guidance and the async main's orchestration skills before
+    # Put main guidance and the async main's orchestration skills before
     # broad shared/domain skills. Source order is prompt salience, not an access
     # guard; delegates never mount either route.
     skill_sources = (
-        ([WEB_MAIN_SKILLS_ROUTE] if spec.web_main_guidance_skills else [])
+        ([MAIN_GUIDANCE_SKILLS_ROUTE] if spec.main_guidance_skills else [])
         + ([MAIN_SKILLS_ROUTE] if async_main else [])
         + [SKILLS_ROUTE]
     )
@@ -380,7 +380,7 @@ def create_agent(model: BaseChatModel,
     # no route needed — see DOMAIN_SKILLS_PATH).  Registered only when the dir
     # actually holds skills, so an absent/empty one adds no useless source.
     # Placed before shared built-ins: the deepagents listing is last-source-wins, so
-    # precedence is web-main guidance < main-only < domain < built-in <
+    # precedence is main guidance < main-only < domain < built-in <
     # embedder-extras for the async main, and domain < built-in <
     # embedder-extras otherwise. Built-in safety skills (dev, git-sync) are NOT
     # overridable by a same-named domain skill. (An
@@ -391,7 +391,7 @@ def create_agent(model: BaseChatModel,
     # Cheap membership check first so the (possibly sandbox-exec'd) `ls` in
     # _has_domain_skills is skipped when an embedder already supplied the path.
     if DOMAIN_SKILLS_PATH not in skill_sources and _has_domain_skills(backend):
-        main_source_count = int(spec.web_main_guidance_skills) + int(async_main)
+        main_source_count = int(spec.main_guidance_skills) + int(async_main)
         skill_sources.insert(main_source_count, DOMAIN_SKILLS_PATH)
     agent_tools = []
     registered_tool_names = set()
@@ -416,9 +416,9 @@ def create_agent(model: BaseChatModel,
         bundled_skill_sources.add(SKILLS_ROUTE)
     if async_main and MAIN_SKILLS_ROUTE not in spec.skill_sources:
         bundled_skill_sources.add(MAIN_SKILLS_ROUTE)
-    if (spec.web_main_guidance_skills
-            and WEB_MAIN_SKILLS_ROUTE not in spec.skill_sources):
-        bundled_skill_sources.add(WEB_MAIN_SKILLS_ROUTE)
+    if (spec.main_guidance_skills
+            and MAIN_GUIDANCE_SKILLS_ROUTE not in spec.skill_sources):
+        bundled_skill_sources.add(MAIN_GUIDANCE_SKILLS_ROUTE)
     legacy_skill_composition = any(
         isinstance(route_backend, LegacySkillsBackend)
         for route_backend in extra_routes.values())
@@ -517,7 +517,7 @@ def create_agent(model: BaseChatModel,
         references_dir=references_dir,
         delegation_mode=delegation_mode,
         agent_role=spec.role,
-        guidance_skills=spec.web_main_guidance_skills,
+        guidance_skills=spec.main_guidance_skills,
     )
     agent = create_deep_agent(
         model=model,

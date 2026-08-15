@@ -1427,7 +1427,7 @@ class TestPromptRewriteTwoReports(TestPromptRewriteIndependentBriefs):
 
 
 class TestPromptRewriteGuidanceSkills(TestAsyncSubagentSupervisor):
-    """Candidate-only capability coverage for the two web-main guidance skills.
+    """Candidate-only capability coverage for the two main guidance skills.
 
     These rows do not compare an outcome with the pre-skill profile: neither
     capability exists there. They prove the new catalog's loaded procedures use

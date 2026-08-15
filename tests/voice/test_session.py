@@ -238,8 +238,11 @@ def test_default_submit_registers_before_its_turn_runner(monkeypatch):
     import manage.web.threads as threads
 
     session = VoiceSession(pin="000000", allowed_callers=frozenset(), speech=FakeSpeech())
+    submitted = []
     monkeypatch.setattr(
-        threads, "_create_run", lambda _tid, _text: SimpleNamespace(id="voice-run"),
+        threads, "_create_run",
+        lambda _tid, _text, **kwargs: (
+            submitted.append(kwargs) or SimpleNamespace(id="voice-run")),
     )
 
     def finish(run_id, tid):
@@ -248,6 +251,9 @@ def test_default_submit_registers_before_its_turn_runner(monkeypatch):
     monkeypatch.setattr(threads, "_execute_run", finish)
 
     assert session._default_submit_turn("thread-1", "hello") == "voice-run"
+    # Omitting ``assistant_id`` selects _create_run's ordinary general-agent,
+    # which ThreadManager constructs with the main guidance profile.
+    assert submitted == [{}]
     reply = session._events.get(timeout=1)
     assert reply == _Reply("thread-1", "ready", "done", "voice-run")
 

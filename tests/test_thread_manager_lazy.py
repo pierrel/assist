@@ -120,9 +120,24 @@ class TestThreadManagerLazy(TestCase):
                 manager.close()
 
         self.assertTrue(visible_spec.web_main)
-        self.assertTrue(visible_spec.web_main_guidance_skills)
+        self.assertTrue(visible_spec.main_guidance_skills)
         self.assertFalse(triage_spec.web_main)
-        self.assertFalse(triage_spec.web_main_guidance_skills)
+        self.assertFalse(triage_spec.main_guidance_skills)
+
+    def test_new_uses_the_ordinary_main_guidance_profile(self):
+        """The CLI's ``ThreadManager.new`` path keeps main guidance enabled."""
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            manager._model = MagicMock()
+            try:
+                with patch("assist.thread_manager.Thread") as thread:
+                    manager.new(working_dir=tmp)
+                spec = thread.call_args.kwargs["spec"]
+            finally:
+                manager.close()
+
+        self.assertTrue(spec.web_main)
+        self.assertTrue(spec.main_guidance_skills)
 
     def test_specialized_child_get_does_not_receive_agent_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
