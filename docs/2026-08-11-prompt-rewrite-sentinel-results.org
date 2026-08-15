@@ -58,6 +58,8 @@ signals, not prompt-tuning instructions.
 | v106 development documentation | baseline N=3, stopped comparison | =test_dev_agent.py::TestPromptRewriteDevDocumentation::test_updates_documentation= | third full-workspace trial left README unchanged | =dev-docs-v106/baseline-3.log= SHA-256 =bad17e23420f8e75428d714f9acaac13bba7974781a611c03935bac27b65b1e6= |
 | v107 fitness plan | candidate N=1, stopped comparison | =test_agent.py::TestPromptRewriteFitnessPlan::test_creates_2026_swim_plan= | baseline passed 3/3, but candidate left =fitness.org= unchanged and created no requested 2026 plan | =fitness-plan-v107/candidate-1.log= SHA-256 =9bdb093d394b32613bba8a3892fe2afdeadd9d59e30935dbd0368af27ba42bdb= |
 | v108 local grounding | candidate N=1, stopped comparison | =test_agent.py::TestPromptRewriteLocalGrounding::test_answers_dinner_preferences_from_local_profile= | baseline answered both saved facts 3/3, but candidate claimed no saved information and asked for the neighborhood and food preferences already in local files | =local-grounding-v108/candidate-1.log= SHA-256 =f78991748ce9af08719143a6ac678658ef60ae9b5a459c7fe66aa2d94c614ae6= |
+| v108 local grounding after workspace guidance | candidate N=5, stopped comparison | =test_agent.py::TestPromptRewriteLocalGrounding::test_answers_dinner_preferences_from_local_profile= | all five trials claimed no saved information and asked for the neighborhood and food preferences already present in the local profile | =guidance-skills-v1/local-grounding-workspace-r{1,2,3,4,5}.log= SHA-256 =6b4f8aad727a66dcbdceee44ed102d30a8c2e359a1710f6d6539b619fcb099d5=, =7e84a8c3a4462fa928b96b4560d05533dcda44dfa6b37f7dd64171419f94ce52=, =5728e0d0c0fdfb44220a7ec766b14a1b027aa88da551c4ac7d276b6f15dfe414=, =c2090ff7b80334c5e3d5112d8629674e8d09e8c5015d668a5022bb8779131b83=, =91f66606622360ebc1ef7ef410cd70c547a98ab6c54e4fcc695591532e2c8e36= |
+| vGS3 grounding capability after workspace guidance | candidate N=5, stopped comparison | =test_async_subagents.py::TestPromptRewriteGuidanceSkills::test_grounding_skill_loads_then_dispatches_context= | all five trials globbed/read the local trip file directly and never loaded =grounding= | =guidance-skills-v1/grounding-capability-workspace-r{1,2,3,4,5}.log= SHA-256 =32eb851726ae43b10b3d036f4ac79d757516f765a2909e3a0dd3a31fbf5202ea=, =be0f56e04cfb3762e9421b1d030f715097db98d72e9bc247167ec918c08f16ea=, =8688acda8e37d262fefbed8276ee5ee4de108d3fcf3f9d0515d08457881c1ee0=, =c618ff038683d4596e7eb2e2b57c0bd105f5a77c19cd34e7fb665fb9bc26be22=, =b6cd105d7465e3e0de2bcd652ff919585bffc8ce83e456adc685c125c0f86610= |
 | v109 two launch reports | candidate N=1, stopped comparison | =test_async_subagents.py::TestPromptRewriteTwoReports::test_creates_two_launch_reports= | baseline completed both reports 3/3, but candidate left a required =Next actions= field empty | =two-reports-v109/candidate-1.log= SHA-256 =0aebdf305cca7223c8b168a83415a27cb928b75b98ea9e3a99fd6293f9155e73= |
 
 ** Current pattern candidates
@@ -81,8 +83,11 @@ instructions to tune the current prompt.
   have multiple retained parity rows.
 - *Available-local-evidence omission:* v108's candidate asked the user for
   neighborhood and food preferences despite a README pointing to a local
-  profile with both facts. v70's empty response remains a user-visible failure,
-  but its task-state oracle is superseded and it is not grounding evidence.
+  profile with both facts. The workspace-guidance N=5 recurrence also bypassed
+  that profile, and the paired grounding capability N=5 bypassed =grounding=
+  itself to glob/read the trip file. v70's empty response remains a user-visible
+  failure, but its task-state oracle is superseded and it is not grounding
+  evidence.
 - *Fixture/oracle drift, not behavior evidence:* v77 pre-wake, v83, v84,
   v86's first attempt, and v105 baseline r1 were discarded because their
   harness did not model the web completion lifecycle or current deterministic
