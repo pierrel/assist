@@ -7,7 +7,7 @@ Implemented candidate, awaiting the normal review and paired live checks.  This
 milestone makes the ordinary web Deep Agents and Pi routes consume one
 authoritative Assist policy source.  It follows the merged full prompt rewrite
 (GitHub #234, merge commit =8969b7c=) rather than duplicating it.  The code lane
-is rebased onto the current deployed prompt-rearchitecture commit =699150d=.
+is rebased onto the current GitHub =main= prompt-rearchitecture commit =a7b964f=.
 That incorporates the later grounding and private-workspace guidance rather
 than freezing the earlier rewrite text.
 
