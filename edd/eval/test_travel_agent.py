@@ -24,7 +24,13 @@ def _motis_fixture(path: str, params: dict):
             "Ferry Building": {"name": "Ferry Building", "lat": 37.7955, "lon": -122.3937},
             "Oakland City Hall": {"name": "Oakland City Hall", "lat": 37.8054, "lon": -122.2727},
         }
-        return [hits[place]]
+        # The natural question already establishes San Francisco.  Supplying
+        # that city again is an equivalent, valid geocoding request, not an
+        # outcome difference.
+        for canonical, hit in hits.items():
+            if place.startswith(canonical):
+                return [hit]
+        raise AssertionError(f"unexpected fixture geocode: {place!r}")
     if path != "/api/v1/plan":
         raise AssertionError(f"unexpected routing path: {path}")
     if params.get("transitModes") == "TRANSIT":

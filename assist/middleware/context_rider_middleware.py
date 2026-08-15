@@ -1,14 +1,13 @@
 """Inject the per-turn context rider into the model call.
 
-The client attaches a ``ContextRider`` (when/where the message was sent) to the
-turn's ``configurable``; this middleware renders its prose line into an EPHEMERAL
-system message for the current model call only — via ``request.override``, so it is
-NOT written to the checkpoint (location isn't persisted, and a later turn without a
-rider carries no stale context). Installed on main and delegate Assist graphs, but
-never on specialists (including web-egress research), so a location line
-can't ride out in an outbound query. The web delegate currently receives no rider,
-making this middleware inert there. See assist/context_rider.py +
-docs/2026-06-29-context-rider.org.
+The client attaches a ``ContextRider`` (when the message was sent) to the turn's
+``configurable``; this middleware renders its time line into an EPHEMERAL system
+message for the current model call only — via ``request.override``, so it is NOT
+written to the checkpoint. Browser location is intentionally excluded from the
+rider prose and is available only through the private current-location tool.
+Installed on main and delegate Assist graphs, but never on specialists. The web
+delegate currently receives no rider, making this middleware inert there. See
+assist/context_rider.py + docs/2026-08-15-location-context-tool.org.
 """
 from __future__ import annotations
 

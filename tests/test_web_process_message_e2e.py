@@ -37,6 +37,13 @@ from fastapi.testclient import TestClient
 from manage import web
 from manage.web import threads
 from manage.web.state import _get_status, _set_status
+from assist.location import LOCATION_CONTEXT_KEY, LocationStore
+
+
+def test_browser_send_script_requests_a_fresh_location_fix():
+    """Each submitted web turn asks the browser for a current, not cached, fix."""
+    assert "maximumAge:0" in threads._GEO_SEND_SCRIPT
+    assert 'name="location_token"' in threads._RIDER_HIDDEN_INPUTS
 
 
 @pytest.fixture
@@ -55,6 +62,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(
         web.MANAGER, "thread_default_working_dir", lambda tid: str(tmp_path / tid),
     )
+    monkeypatch.setattr(threads, "LOCATION_STORE", LocationStore(str(tmp_path)))
     return TestClient(web.app)
 
 
@@ -418,10 +426,11 @@ def test_pending_bubble_not_duplicated_when_already_persisted(client, monkeypatc
     )
 
 
-def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
+def test_rider_flows_to_sandbox_tz_and_private_location_config(client, monkeypatch):
     """Symptom test: a POST carrying sent_at+tz reaches BOTH rider consumers —
     the sandbox TZ (so `date` is the user's local time) and the turn's
-    `configurable` (so the middleware can render the model line)."""
+    `configurable` (so the middleware can render the time line). Location is
+    persisted globally and supplied only as private tool configuration."""
     from assist.context_rider import CONTEXT_RIDER_KEY
     captured = {}
     monkeypatch.setattr("manage.web.threads._get_sandbox_backend",
@@ -450,7 +459,8 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
         data={"text": "what's today?",
               "sent_at": "2026-06-29T21:05:00.000Z",  # real browser toISOString() format
               "tz": "America/Los_Angeles",
-              "lat": "37.7749", "lon": "-122.4194"},
+              "lat": "37.7749", "lon": "-122.4194",
+              "location_token": threads._LOCATION_FORM_TOKEN},
         follow_redirects=False,
     )
     assert r.status_code == 303, r.text
@@ -460,6 +470,60 @@ def test_rider_flows_to_sandbox_tz_and_configurable(client, monkeypatch):
     rider = (captured.get("configurable") or {}).get(CONTEXT_RIDER_KEY)
     assert rider is not None and rider.tz == "America/Los_Angeles"
     assert rider.lat == 37.7749 and rider.lon == -122.4194  # coords flow to the rider too
+    location = (captured.get("configurable") or {}).get(LOCATION_CONTEXT_KEY)
+    assert location is not None and location.lat == 37.7749 and location.lon == -122.4194
+    run = threads._runs().list("thread-e2e")[0]
+    persisted = threads._location_from_fields(run.location)
+    assert persisted == location
+
+
+def test_cross_site_style_coordinate_post_cannot_reach_location_admission(client, monkeypatch):
+    """A form that cannot read the rendered token cannot poison the global fix."""
+    captured = {}
+    monkeypatch.setattr(threads, "_pi_message_admits", lambda tid: True)
+
+    def admit(tid, text, rider):
+        captured["rider"] = rider
+        return None, True
+
+    monkeypatch.setattr(
+        threads, "_admit_message_with_location",
+        admit,
+    )
+
+    response = client.post(
+        "/thread/thread-e2e/message",
+        data={"text": "forged", "lat": "40.0", "lon": "-70.0"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert captured["rider"] is None
+
+
+def test_child_turn_never_receives_global_location(client, monkeypatch):
+    """A context/research child cannot read the visible agent's private location."""
+    threads.LOCATION_STORE.record(37.7749, -122.4194)
+    captured = {}
+
+    class _FakeChat:
+        def message(self, text):
+            return "ok"
+        def pending_reply(self):
+            return None
+        def get_messages(self):
+            return [{"role": "user", "content": "child"}]
+
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda *args, **kwargs: captured.update(configurable=kwargs.get("configurable")) or _FakeChat())
+    monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads.get_cached_description", lambda tid: "stub")
+
+    threads._process_message("thread-e2e", "find local files", assistant_id="context-agent")
+    assert LOCATION_CONTEXT_KEY not in (captured.get("configurable") or {})
 
 
 def test_new_thread_form_flows_rider(client, monkeypatch):
@@ -478,7 +542,8 @@ def test_new_thread_form_flows_rider(client, monkeypatch):
         "/threads/with-message",
         data={"text": "find a restaurant nearby",
               "sent_at": "2026-06-29T21:05:00.000Z", "tz": "America/Los_Angeles",
-              "lat": "37.7749", "lon": "-122.4194"},
+              "lat": "37.7749", "lon": "-122.4194",
+              "location_token": threads._LOCATION_FORM_TOKEN},
         follow_redirects=False,
     )
     assert r.status_code == 303, r.text

@@ -1252,6 +1252,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.events.tools import subscription_tools
     from assist.schedule.store import ScheduleStore
     from assist.schedule.tools import schedule_tools
+    from assist.location import get_location
 
     root.mkdir(parents=True, exist_ok=True)
     tools = (
@@ -1259,6 +1260,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
         + subscription_tools(SubscriptionStore(str(root)))
         + notify_tools(lambda _tid: None)
         + email_tools()
+        + [get_location]
     )
     if full:
         from assist.egress.store import EgressStore
@@ -1713,6 +1715,7 @@ _TOOL_ORIGINS = {
     "edit_file": "deepagents.middleware.filesystem",
     "execute": "deepagents.middleware.filesystem",
     "find_regions": "assist.geo.tools",
+    "get_location": "assist.location",
     "glob": "deepagents.middleware.filesystem",
     "grep": "deepagents.middleware.filesystem",
     "list_allowed_hosts": "assist.egress.tools",
@@ -1776,6 +1779,9 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "102082e634233200a9b0fc4c0240ac93b6afc7e922fba97ffec254ea7f82eafd",
         "1b8e35f63bf4be8dd8676e477a084171d0ee50e01e812656c4ab594024ba3629",
         "1e9fb38a54b05e59da69f1199c231a8dacba1c6500a609c4603196cc9a51b5e7",
+        "4e743d18a1a8d365d59c7406780b622bcb58d3536c6815085fd4c83ce1bd8280",
+        "938031ff65bff73b082bab7a0e5b893e01ab0c0efb285fb49d7aab119cafbb07",
+        "c8b3ee9bb2dfcbc220f4d359f8cd982e70df9cbd01a549cd2a88869818d36d12",
         "3c8878748692f95d9490f931e3c24ec2b0bb85134abb9d5067602df829966b5a",
         "24eb808031adfa5ec188311e03035d0ea8824915dbb4d3c8b75b6b151347ebf5",
         "5288bb0e5d96033aceeedab00b227264a409f2304531050d4a4b0d88ee468055",
@@ -2129,9 +2135,9 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_CAPTURE_TASK_SHA256 = \
     "dc6155e1863f23b35006efd98f0a5e2ea0c1b392650567596cd7c86a6c6af402"
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "47543010e202c1c99aa62e953eafad99b81d55a345e75100ef58556f1f61ad04"
+    "61b7d662212a4acadf5de72079ecb3186eec03f519d8530be20e32b68d868c96"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "0bfba686ddb0f3b91d7931b6468aeaa00bfe32e9ee01bcd77636182ac696edd9"
+    "cbbf77a3a07861936b21fa22987a5f0ed7bf621408269c4dc2bad95c0f2e3e21"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

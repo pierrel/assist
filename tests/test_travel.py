@@ -259,7 +259,7 @@ def test_geocode_passes_through_coord_string():
         "lat": 37.7749, "lon": -122.4194, "name": "your location"}
     assert tools._geocode("37.7749, -122.4194") == {
         "lat": 37.7749, "lon": -122.4194, "name": "your location"}
-    # the model copies the context-prose form "~<lat>, <lon>" — must still parse
+    # preserve a caller-provided legacy coordinate spelling
     assert tools._parse_coord_string("~37.77, -122.42") == {
         "lat": 37.77, "lon": -122.42, "name": "your location"}
     # real names / non-coords → None (fall through to the geocoder)
@@ -267,6 +267,17 @@ def test_geocode_passes_through_coord_string():
         assert tools._parse_coord_string(name) is None
     # out-of-range numbers are not coords
     assert tools._parse_coord_string("200,200") is None
+
+
+def test_geocode_resolves_current_location_handle_only_from_turn_config(monkeypatch):
+    from datetime import datetime, timezone
+    from assist.location import CURRENT_LOCATION, LOCATION_CONTEXT_KEY, LocationSnapshot
+
+    snapshot = LocationSnapshot(37.7749, -122.4194, datetime.now(timezone.utc))
+    monkeypatch.setattr("assist.location.get_config",
+                        lambda: {"configurable": {LOCATION_CONTEXT_KEY: snapshot}})
+    assert tools._geocode(CURRENT_LOCATION) == {
+        "lat": 37.7749, "lon": -122.4194, "name": "your location"}
 
 
 def test_geocode_falls_back_from_overspecified_address(monkeypatch):

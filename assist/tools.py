@@ -32,6 +32,8 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from assist.location import CURRENT_LOCATION, LocationUnavailable, resolve_location_handle
+
 logger = logging.getLogger(__name__)
 
 # Self-hosted SearXNG metasearch endpoint (see scripts/searxng.sh /
@@ -569,10 +571,11 @@ def _nominatim_geocode(place: str) -> dict | None:
 
 def _parse_coord_string(place: str) -> dict | None:
     """A bare ``"lat,lon"`` (exactly two in-range numbers) → a geocode hit
-    {lat, lon, name}, so "from here" routes from the user's coordinates without a
-    forward-geocode. Tolerates the leading ``~`` the model sees in the context prose
-    (``~37.77, -122.42``) + surrounding whitespace. A real place name (anything that
-    isn't two numbers) → None, falling through to geocoding."""
+    {lat, lon, name}, preserving an explicit caller-provided coordinate without a
+    forward geocode. Tolerates a legacy leading ``~`` + surrounding whitespace. A
+    real place name (anything that isn't two numbers) → None, falling through to
+    geocoding. The private current-location path uses ``CURRENT_LOCATION`` instead.
+    """
     parts = str(place).split(",")
     if len(parts) != 2:
         return None
@@ -589,11 +592,15 @@ def _parse_coord_string(place: str) -> dict | None:
 def _geocode(place: str) -> dict | None:
     """Resolve a place NAME to {lat, lon, name} (top match, with the resolved name
     so the agent can say what it routed to), or None if nothing matched.  A bare
-    ``"lat,lon"`` is passed through directly (no geocode) so "from here" routes from
-    the user's coordinates.  Uses the self-hosted Nominatim geocoder when
+    user-supplied ``"lat,lon"`` is passed through directly (no geocode).  The
+    private ``CURRENT_LOCATION`` handle is resolved before either path.  Uses the
+    self-hosted Nominatim geocoder when
     ASSIST_GEOCODER_URL is set (far better at real addresses/POIs than MOTIS's
     built-in geocoder), else falls back to MOTIS /api/v1/geocode.  Raises
     _TravelBackendError if the chosen backend is down."""
+    location = resolve_location_handle(place)
+    if location:
+        return location
     coords = _parse_coord_string(place)
     if coords:
         return coords
@@ -650,6 +657,9 @@ def _resolve_od(origin: str, destination: str):
     try:
         o = _geocode(origin)
         d = _geocode(destination)
+    except LocationUnavailable:
+        return ("No current or recent browser location is available for this turn. "
+                "Ask the user to send a new message from the web app with location enabled.")
     except _TravelBackendError as e:
         return _travel_unavailable(str(e))  # service down -> "unavailable", not "not found"
     if o is None:
@@ -669,8 +679,8 @@ def travel(origin: str, destination: str) -> str:
     take the train" question.  It gives times + distances, NOT turn-by-turn
     directions.  Pass plain place
     NAMES/addresses as the user said them (e.g. "the Ferry Building", "123 Main
-    St"); the one exception is the user's current location for "from here"/"near
-    me", which you pass as "<lat>,<lon>" from the message context.  Returns a short per-mode summary computed by
+    St"); for a current location, first call ``get_location`` and pass its
+    ``CURRENT_LOCATION`` handle. Returns a short per-mode summary computed by
     the routing service -- time and distance for car/bike/walk, time for transit
     (transit distance isn't reported); relay those numbers, never invent your own.
     Covers the loaded metro area(s); a place outside them comes back as no route,
@@ -902,9 +912,8 @@ def directions(origin: str, destination: str, mode: str) -> str:
     Use this when the user wants DIRECTIONS / how to actually get somewhere -- "how
     do I get to X", "directions to Y", "which bus do I take", "walk me through it" --
     as opposed to "how long / how far" (use `travel` for that).  Pass plain place
-    NAMES (the geocoder resolves them) -- except the user's current location for
-    "from here"/"near me", which you pass as "<lat>,<lon>" from the message context
-    -- and a `mode`: "car", "bike", "walk", or
+    NAMES (the geocoder resolves them) -- for a current location, first call
+    ``get_location`` and pass its ``CURRENT_LOCATION`` handle -- and a `mode`: "car", "bike", "walk", or
     "transit".  Returns a numbered list -- turns + streets for car/bike/walk
     (street turns are approximate), or walk/board/transfer/alight for transit -- in
     US units (miles).  Relay it; never invent streets or lines.  A place outside the
@@ -955,10 +964,14 @@ def map_data(places: str = "", routes: str = "") -> str:
         # _geocode, but a backend-down (_TravelBackendError) yields None instead of raising
         # — map_data's contract is fail-loud-but-RETURNED (an unplaceable spot is NAMED).
         # Memoized per call (a place reused as a route endpoint geocodes once).
+        # Current location remains opaque to the model; returning a map pin would
+        # disclose its exact coordinates through this tool result.
+        if spot.strip() == CURRENT_LOCATION:
+            return None
         if spot not in cache:
             try:
                 cache[spot] = _geocode(spot)
-            except _TravelBackendError:
+            except (LocationUnavailable, _TravelBackendError):
                 cache[spot] = None
         return cache[spot]
 

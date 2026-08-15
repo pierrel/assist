@@ -124,9 +124,7 @@ It returns a `lat,lon` per place and a walking polyline per route.
 **2. Emit one `type: map` render block** — this is required, not optional: once
 `map_data` returns coordinates you MUST emit the block (don't answer in prose alone — the
 coordinates are useless to the user without it). Copy them in — one `pin:` per place; one
-`path:` per route. If the user's own location is in the message context, add it as a pin
-prefixed with `origin` (bare `lat,lon` — drop any `~`) so it stands out; skip it if it's
-a different city:
+`path:` per route. Never derive an origin pin from conversation context:
 
 ```render
 type: map

@@ -853,7 +853,7 @@ def test_artifact_is_bounded_and_hygiene_checked(census, tmp_path):
     system = next(message for message in full["provider_payload"]["messages"]
                   if message["role"] == "system")
     system["content"] = system["content"].replace(
-        "SYNTHETIC PLACE", "PIERRE ACTUAL HOUSE")
+        "You are a deep agent", "SYNTHETIC PRIVATE HOME")
     with pytest.raises(AssertionError):
         _assert_hygiene(bad, tmp_path)
 

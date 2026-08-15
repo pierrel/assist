@@ -49,6 +49,7 @@ from assist.thread_manager import (
     set_web_triage_interrupt_on)
 from assist.thread_engine import read_thread_engine
 from assist.pi_preview import PiPreviewPolicy
+from assist.location import LocationStore, get_location
 
 
 def _configure_logging() -> None:
@@ -105,6 +106,7 @@ load_dev_env()
 ROOT = os.getenv("ASSIST_THREADS_DIR", "/tmp/assist_threads")
 MANAGER = ThreadManager(ROOT)
 PI_PREVIEW = PiPreviewPolicy(ROOT)
+LOCATION_STORE = LocationStore(ROOT)
 
 # The one shared schedule store (disk-as-truth on the thread root) — used by the
 # Scheduler (started in the lifespan, see threads.py) AND the schedule tools AND the
@@ -181,7 +183,7 @@ _egress_tools = (egress_tools(EGRESS_STORE, EGRESS_BASE_HOSTS,
 
 set_web_tools(schedule_tools(SCHEDULE_STORE) + subscription_tools(SUBSCRIPTION_STORE)
               + notify_tools(lambda tid: _mark_urgent(tid))
-              + _geo_tools + _egress_tools + email_tools())
+              + _geo_tools + _egress_tools + email_tools() + [get_location])
 set_web_triage_tools(reply_tools())
 set_web_interrupt_on(EMAIL_INTERRUPT_ON)
 set_web_triage_interrupt_on(REPLY_INTERRUPT_ON)

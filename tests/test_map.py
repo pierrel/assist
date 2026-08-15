@@ -12,6 +12,8 @@ from manage.web.threads import (
     _parse_render_block, _render_map_block, _render_assistant_content,
     _MAP_MAX_PINS, _MAP_MAX_PATHS,
 )
+from assist.location import CURRENT_LOCATION
+from assist.tools import map_data
 
 
 def _block(body: str) -> dict:
@@ -74,14 +76,19 @@ class TestRenderMapBlock(TestCase):
         # (not dropped) — a stray word never drops a valid coordinate; and it's not origin.
         self.assertEqual(_parse_pin("green 37.7,-122.4 x")["color"], "#1d4ed8")   # default, not green
         self.assertIsNone(_parse_pin("origin nope label"))                        # no valid coord -> dropped
-        # the model may copy the message-context location ("sent from ~37.77, -122.42")
-        # verbatim — a leading ~ and a space after the comma must still parse, else the
-        # origin pin (the user's own location) is silently dropped.
+        # Preserve legacy user-provided coordinate spelling — a leading ~ and a
+        # space after the comma must still parse.
         tilde = _parse_pin("origin ~37.77, -122.42 Home")
         self.assertEqual((tilde["lat"], tilde["lon"], tilde["color"]), (37.77, -122.42, "#15803d"))
         # the origin pin's green hex reaches the data island the map JS reads
         html = _render_map_block("t", _block("type: map\npin: origin 37.77,-122.42 Home"))
         self.assertIn("#15803d", html)
+
+    def test_private_current_location_handle_never_becomes_a_map_pin(self):
+        """A map result is model-visible, so it cannot resolve the opaque handle."""
+        rendered = map_data(places=CURRENT_LOCATION)
+        self.assertIn("could not locate", rendered)
+        self.assertNotIn("37.", rendered)
 
     def test_count_caps(self):
         many = "type: map\n" + "".join(f"pin: 1,{i} p{i}\n" for i in range(_MAP_MAX_PINS + 1))

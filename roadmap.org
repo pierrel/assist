@@ -422,26 +422,18 @@ Relates to the single-LLM-slot constraint and [[queued-research-rate-limit-resil
 the jobs this would interleave).
 
 * Context rider
-** TODO "Last seen" location saver — every turn (incl. scheduled/triggered) gets a geo tag
-The geo rider (PR #155) only tags INTERACTIVE turns — the browser reads Geolocation on
-submit. Scheduled turns (#161) and inbound-SMS-triage turns (#164) have NO live browser, so
-they get no geo and the agent can't reason about "where I am" on those. Fix: persist a
-"last seen" location server-side and fall back to it when there's no live fix.
-- On every WEB-APP OPEN, record the current browser location (Geolocation API) and persist
-  it server-side (per-user; a small file, like the unseen/urgent badge markers). So it's
-  always kept fresh as long as Pierre opens the app.
-- *24h FRESHNESS CAP:* never tag a turn with a last-seen location older than 24h — a stale
-  location is worse than none (don't route "near me" from yesterday's city). Past 24h, omit
-  geo rather than use it.
-- Every turn's rider resolves geo as: the live fix if present → else the <24h last-seen →
-  else no geo. Interactive turns still prefer the live fix. Ties into the coarse-persisted /
-  ephemeral-precise privacy model already designed for the rider.
-** TODO Add TIMEZONE to the context rider (so the agent always knows location AND tz)
+** DONE "Last seen" location saver — deliberate tool lookup, 2026-08-15
+Every web message records a fresh browser fix in one private global record. A normal
+visible agent can deliberately call =get_location= and pass =CURRENT_LOCATION= to
+travel/directions tools; coordinates and inferred places never enter the model context.
+The record has a 24h freshness cap. Inbound-SMS triage and child agents never receive
+it. See =docs/2026-08-15-location-context-tool.org=.
+** TODO Retain TIMEZONE for scheduled/triggered turns
 The rider carries the message TIME (#153) but the agent should also always know the user's
-current TIMEZONE — for relative-date + travel reasoning without guessing. Add tz to the
-rider: the client already sends it interactively (the sandbox-TZ seam); for
-scheduled/triggered turns, carry the last-seen tz alongside the last-seen location. Goal
-(Pierre): "the agent can always know my location and time zone for context on its responses."
+current TIMEZONE — for relative-date reasoning without guessing. The client already sends it
+interactively (the sandbox-TZ seam); for scheduled/triggered turns, retain the last-seen tz.
+Location deliberately follows the separate private =get_location= contract above rather than
+entering model context.
 
 * Notifications
 ** DONE Notify/urgent evals + firm up the guidance on WHEN to flag urgent

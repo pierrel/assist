@@ -125,6 +125,7 @@ def test_triage_tools_exclude_host_effect_tools():
     assert "delete_subscription" not in triage
     assert "create_subscription" in normal and "send_reply" not in normal
     assert "send_email" in normal
+    assert "get_location" in normal and "get_location" not in triage
     assert "send_email" in tm._web_interrupt_on
     assert "send_reply" in tm._web_triage_interrupt_on
 

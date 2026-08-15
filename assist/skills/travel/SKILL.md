@@ -1,7 +1,7 @@
 ---
 name: travel
 description: Real-world travel between places — time and distance by car/bike/walk/transit, AND step-by-step directions (turns, which bus or train), across a metro area and nearby cities, PLUS which geographic areas are covered and adding new ones on request. EXAMPLES — "how long from home to the Ferry Building"; "is it faster to bike or take the train"; "drive time to the airport"; "how far is the office"; "directions to City Hall"; "which bus do I take"; "what areas do you cover"; "can you do directions in Seattle"; "download the Los Angeles area". MUST load before answering any question about travel time, distance, the fastest mode, how to get from one place to another, OR which regions are covered / adding a region.
-allowed-tools: travel directions list_regions find_regions propose_region_download
+allowed-tools: get_location travel directions list_regions find_regions propose_region_download
 ---
 
 # Travel & directions — real map data, two tools
@@ -25,9 +25,9 @@ or which line to take from your own knowledge** — call the tool.
 ## Calling `travel(origin, destination)`
 
 Pass plain place **names/addresses as the user said them** ("home", "the Ferry
-Building", "123 Main St") — the one coordinate exception is the user's current
-location for "from here"/"near me" (see *Place names* below). Don't pass a mode — it
-returns all four modes; you highlight the relevant one when you reply.
+Building", "123 Main St"). For the user's current location, use the opaque handle
+from `get_location` (see *Place names* below). Don't pass a mode — it returns all
+four modes; you highlight the relevant one when you reply.
 
 ## Calling `directions(origin, destination, mode)`
 
@@ -45,22 +45,23 @@ If the user **names a mode**, pass it. If they **don't**, ask which mode they wa
 ## Place names (both tools)
 
 - The tool geocodes names itself — pass place NAMES, not coordinates.
-- **"from here" / "near me" / "nearby":** when the user wants travel or directions
-  from their current location and gives no named origin, pass their coordinates from
-  the message context (the `[Message context: ... from ~<lat>, <lon>]` line) as the
-  origin — e.g. `"37.77,-122.42"` (the leading `~` and spaces from the context line
-  are fine to include). If there's no location in the context, fall back to "home"
-  or ask.
-- If the user gives only one place ("directions to the airport"), the other is
-  usually "home" or the place from context; if unclear, ask.
-- For a short/ambiguous name, include the city/area from context (pass "Ferry
-  Building San Francisco", not just "the Ferry Building"). Both tools echo the
-  **resolved place names** — if one looks wrong, retry with a more specific name or
-  tell the user; don't trust the result.
+- **"from here" / "near me" / "nearby":** call `get_location()` first. If it says a
+  location is available, pass `CURRENT_LOCATION` exactly as the origin to `travel`
+  or `directions`. It is deliberately not an address: never infer or name a
+  street/neighborhood from it. If unavailable, ask for a named origin or a new
+  browser-enabled web message; do not guess or silently use "home".
+- If the user gives only one place ("directions to the airport"), use
+  =get_location= only when the request makes their current origin clear; otherwise
+  ask for the missing origin. Do not silently substitute "home".
+- For a short/ambiguous name, ask for a city/area or use one the user supplied;
+  do not infer it from a browser location. Both tools echo the **resolved place
+  names** — if one looks wrong, retry with a more specific name or tell the user;
+  don't trust the result.
 
 ## Presenting the result
 
-- **Show it on a map** — see the `render` skill (mark the user's location `origin`).
+- **Show named places on a map** — see the `render` skill. A private
+  =CURRENT_LOCATION= handle cannot be turned into a map pin.
 - **travel:** lead with the mode asked about ("driving is ~25 min"); else compare
   briefly. Round naturally. If a mode is `unavailable`, say so — don't fill a guess.
 - **directions:** relay the numbered steps. For **street** routes (car/bike/walk)

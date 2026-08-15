@@ -11,12 +11,14 @@ test_web_process_message_e2e.py); the pause is raised where the middleware would
 it (out of the agent run), and the real ``THREAD_QUEUE`` is used un-mocked.
 """
 import contextlib
+from datetime import datetime, timezone
 
 import pytest
 
 from manage import web
 from manage.web import threads
 from manage.web.state import _get_status
+from assist.location import LocationSnapshot
 from assist.thread_queue import ThreadPauseRequested
 
 
@@ -98,6 +100,19 @@ def test_pause_carries_pending_and_submits_resume(wired):
     # Lossless + no re-run: the paused message() ran once, then resume() ran once —
     # the turn was NOT restarted with the original message.
     assert calls == [("message", "hello"), ("resume",)]
+
+
+def test_pause_successor_keeps_the_original_location_snapshot(wired):
+    """A later browser fix must not move an already-paused 'from here' turn."""
+    tid, _ = wired
+    snapshot = LocationSnapshot(37.7749, -122.4194, datetime.now(timezone.utc))
+    original = threads._create_run(tid, "walk from here", location=snapshot)
+
+    threads._execute_run(original.id, tid)
+
+    item = threads._RESUME_SCHEDULER._q.get_nowait()
+    successor = threads._runs().get(tid, item["run_id"])
+    assert threads._location_from_fields(successor.location) == snapshot
 
 
 def test_new_message_while_paused_routes_through_scheduler(wired, monkeypatch):

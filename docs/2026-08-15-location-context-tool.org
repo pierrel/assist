@@ -1,0 +1,105 @@
+#+title: Deliberate current-location lookup
+
+* Goal
+
+Keep one global last-known browser location for Assist, updated whenever a web
+message supplies a valid fix.  Do not put coordinates, a neighborhood, or an
+address in the model's message context.  A normal visible agent can deliberately
+ask whether a fresh location is available, then pass an opaque handle to travel
+and directions tools.  Named origins and destinations retain their existing behavior.
+
+This replaces the old context rider's rounded coordinate prose.  That prose was
+not accurate enough to support neighborhood claims and made the model copy a
+lossy location into routing calls.
+
+* Contract
+
+1. The browser asks for a fresh fix on each submitted web message
+   (=maximumAge: 0=).  A valid pair is stored at =ASSIST_THREADS_DIR/last_location.json=
+   before run admission.  Missing/denied location leaves the previous record in
+   place.  The record is an atomic, process-owner-only JSON replacement and the most
+   recently observed timestamp wins. Coordinates are accepted only with the
+   opaque token rendered into the same-origin web form, so a cross-site form
+   post cannot overwrite the global record.
+2. A record is usable for 24 hours.  A normal main-agent turn receives only a
+   structured location snapshot in its run configuration; triage and child
+   agents receive none.  The existing rider continues to provide time and TZ,
+   but never renders any location field into the system prompt.
+3. =get_location()= returns only whether a current or recent fix is available,
+   its age, and the literal handle =CURRENT_LOCATION=.  It never returns raw
+   coordinates or an inferred address.  The tool is registered only by the web
+   composition root and is disclosed by the travel skill.
+4. =travel= and =directions= recognize =CURRENT_LOCATION= only when the
+   structured snapshot is present.  They resolve exact coordinates inside the
+   tool. =map_data= deliberately does not accept the handle, because a map pin
+   would expose its coordinates in a model-visible result. A user-provided
+   numeric coordinate remains supported; named places still go through the
+   established geocoder.
+
+The agent should load the travel skill and call =get_location()= for a request
+whose origin is “here”, “near me”, or “nearby”; it must not turn availability
+into a street or neighborhood claim.  No research dispatch is added for local
+travel/dining requests.
+
+* Boundaries and risks
+
+- The global record is runtime private state, outside every user workspace and
+  sandbox bind mount.  The model cannot choose its path or write it.
+- Normal web access is the deployment-controlled private control plane. The form
+  token protects browser cross-site submissions, not a separate account boundary.
+- Location is not offered to inbound-SMS triage or subagents, avoiding an
+  untrusted-message route to private location data.
+- Store writes occur off the async event loop at the existing run-admission
+  boundary.  The read-only tool consults invocation configuration only, so it
+  performs no file I/O while the model is executing.
+- The snapshot is persisted on the accepted visible Run and copied to a paused
+  successor, so a later browser fix cannot change an in-flight request's origin.
+- A stale or absent record produces an explicit tool result asking for a new
+  browser-enabled web message.  It never falls back to a guessed home/address.
+
+* Validation
+
+Deterministic tests cover atomic record/freshness behavior, no location prose,
+tool non-disclosure without a configured snapshot, opaque-handle exact routing,
+and normal web submission persistence/configuration.  Existing named-origin
+travel and map coverage stays in place. Its local geocoder fixture accepts a
+canonical place name with an otherwise redundant city suffix, which is an
+equivalent natural request rather than a different route outcome.  The old
+context-coordinate origin-map row is intentionally retired because that input is
+no longer part of the prompt contract.
+
+A new natural behavioral travel eval asks for walking directions from here using
+a configured last-known fix; it must load travel, deliberately call
+=get_location=, use the handle in the route tool, and not name an unsupported
+address.  Deterministic unavailable-location coverage requires the tool to ask
+for a fresh browser-enabled message instead of routing or guessing.
+
+* Evaluation record
+
+- Deterministic wiring/census: 193 tests passed.  This includes the new store,
+  browser freshness, ordinary-web configuration, child/triage exclusion, exact
+  opaque-handle routing, and prompt-census assertions.
+- Existing named-origin travel: three final real-model trials passed all three
+  established rows under local routing data (9/9 checks). They cover distance
+  routing, mode comparison, and an 18-minute canned route outcome. An earlier
+  fixture-only failure accepted neither =Ferry Building= nor the model's
+  equivalent =Ferry Building San Francisco=; the fixture was corrected before
+  the recorded pass. The existing named-place map outcome also passed in three
+  final trials (3/3: load map data, emit the render block). A broad five-row map
+  sweep reached three passing rows before its five-minute process bound; it is
+  recorded as incomplete rather than evidence for the remaining rows.
+- Opaque current-location capability: the natural prompt is “How do I walk from
+  here to the Ferry Building?”  The private configuration supplies only a
+  browser snapshot, local routing resolves the handle, and URL fetches are
+  rejected.  A pass requires travel skill loading, =get_location=, a
+  =directions(origin="CURRENT_LOCATION")= call, exact internal routing from the
+  private coordinates, and a walking reply naming the destination.  Final
+  stability result: 3/3. Two discarded initial probes exposed only fixture
+  normalization omissions (a redundant city suffix and a leading article), not
+  a product-path miss; the final fixture accepts those equivalent natural place
+  forms while retaining the opaque-handle assertions.
+
+The existing travel/map behavioural rows are reviewed rather than mechanically
+weakened: named-origin rows retain their natural outcome oracle; the old
+context-coordinate origin-map row is retired because its input is intentionally
+no longer part of the prompt contract.

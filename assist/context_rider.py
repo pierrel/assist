@@ -1,5 +1,4 @@
-"""The context rider — per-MESSAGE context a client attaches to one turn: WHEN and
-WHERE the user's message was sent.
+"""The context rider — per-MESSAGE time context a client attaches to one turn.
 
 Distinct from ``AgentSpec`` (per-agent, static): the rider changes every message, so
 it rides the per-INVOCATION ``configurable`` run config (the same mechanism emacsos
@@ -10,15 +9,15 @@ fresh ``Thread`` each turn — so the rider is always current.  A *reused*, long
 so such a client must refresh the rider every turn (not set it once) or later turns
 see a stale one.  Two consumers, one source:
 
-- the model gets a rendered prose line (``ContextRiderMiddleware``, injected
+- the model gets a rendered time line (``ContextRiderMiddleware``, injected
   ephemerally per turn — never checkpointed) so it can reason "you asked this
   morning…";
 - deterministic consumers read the value (e.g. the sandbox ``TZ`` for ``date``).
 
-Every field is OPTIONAL — no rider, or an empty one, reproduces prior behavior
-(server timezone, no location).  v1 wires TIME (sent_at + tz); the geo fields are
-defined now (so the contract is stable) but only become a model/tool input as later
-iterations land — see docs/2026-06-29-context-rider.org.
+Every field is OPTIONAL — no rider, or an empty one, reproduces prior behavior.
+Browser coordinates remain available to the web-admission boundary for private
+last-known-location storage, but never render into model context; see
+docs/2026-08-15-location-context-tool.org.
 """
 from __future__ import annotations
 
@@ -35,7 +34,7 @@ class ContextRider:
     tz: str | None = None             # IANA zone, e.g. "America/Los_Angeles"
     lat: float | None = None
     lon: float | None = None
-    place_label: str | None = None    # optional coarse human label ("downtown SF")
+    place_label: str | None = None    # legacy client field; never model-visible
 
     def __post_init__(self):
         # Validate at the boundary (no network/subprocess/lock — ZoneInfo may do a
@@ -51,16 +50,11 @@ class ContextRider:
             raise ValueError(f"longitude out of range: {self.lon}")
 
     def prose_line(self) -> str | None:
-        """A single human-readable context line for the model, or None if the rider
-        carries nothing. Location is coarse (≈city-block) — this text is what the
-        model sees; precise coords stay on the structured object for tools."""
+        """A single human-readable time line for the model, or None."""
         parts = []
         when = self._when()
         if when:
             parts.append(f"sent {when}")
-        where = self._where()
-        if where:
-            parts.append(f"from {where}")
         if not parts:
             return None
         return "[Message context: " + "; ".join(parts) + ".]"
@@ -72,13 +66,3 @@ class ContextRider:
         hour12 = dt.hour % 12 or 12   # avoid %-d/%-I (glibc-only strftime flags)
         stamp = f"{dt:%A, %B} {dt.day}, {dt.year} at {hour12}:{dt.minute:02d} {dt:%p}"
         return f"{stamp} ({self.tz})" if self.tz else stamp
-
-    def _where(self) -> str | None:
-        if self.place_label:
-            # place_label is the one free-text field and gets folded into the
-            # SYSTEM message — collapse whitespace/newlines and cap the length so a
-            # client can't smuggle instruction-like text or bloat the prompt.
-            return " ".join(self.place_label.split())[:60]
-        if self.lat is not None and self.lon is not None:
-            return f"~{self.lat:.2f}, {self.lon:.2f}"  # ≈city-block; precise coords stay off the prose
-        return None
