@@ -951,6 +951,25 @@ and embedder sources now share invocation-scoped disclosure and execution
 filtering; SMS triage remains legacy.  Deterministic tests pass 1,611/2, and
 the affected behavioral suites were baseline 18/18, candidate N=3 18/18, N=5
 30/30, and N=10 59/60 with the one miss reproduced by baseline.
+**** URGENT Refresh persisted skill catalogs when their mounted sources change
+The skills middleware stores =skills_metadata= in the thread checkpoint and
+DeepAgents deliberately skips discovery whenever that field already exists.
+That turns a source change into a permanent capability loss for an existing
+thread: a May checkpoint with only the original five built-ins cannot see the
+render skill added later or any discovered =.claude/skills/= entry, even though
+both are mounted for newly created threads.  P2b's progressive disclosure
+makes the failure visible because the frozen catalog now also authorizes
+=load_skill= and gated tool access.
+
+Treat the mounted skill inventory as versioned configuration, not forever
+thread state.  Refresh the persisted metadata when its source/content
+fingerprint differs from the current agent construction, while retaining the
+current invocation-only loaded-tool state.  Add a deterministic migration
+fixture with an old checkpoint, a newly introduced bundled skill, and a newly
+introduced domain skill; it must verify that both are listed and can be loaded
+without recreating or losing the thread.  Include an existing-thread render
+regression case.  This is a DeepAgents compatibility fix; Pi should eventually
+have the equivalent catalog invalidation contract, but need not block it.
 
 *** TODO P2c: Suppress recently loaded skill descriptions until useful again
 After P2b, compare turn-count, provider-reported input-plus-output-token,
