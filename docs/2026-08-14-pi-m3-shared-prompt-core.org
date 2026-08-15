@@ -1,0 +1,159 @@
+#+title: Pi M3: shared web-main prompt core
+#+date: <2026-08-14>
+
+* State
+
+Design in review.  This milestone makes the ordinary web Deep Agents and Pi
+routes consume one authoritative Assist policy source.  It follows, rather
+than duplicates, the still-open full prompt rewrite (GitHub #234).  No M3
+implementation branch is based on that moving branch: when #234 is merged,
+start the implementation from that =main= commit and make it the recorded
+reference input.
+
+* Decision
+
+Share the product policy, not the two harnesses.  One host-owned Python entry
+point renders a fixed, parameterless Jinja core fragment and produces a
+recorded digest.  The Deep Agents and Pi callers both call that entry point.
+Each caller adds only a short, explicitly labelled adapter for facts that are
+true only of its engine.  The policy text stays in packaged Jinja fragments,
+not Python literals, so an edit continues to hot-reload for a new turn.
+
+The result is deliberately not a claim that the final provider request is
+byte-identical.  Deep Agents adds its stock base prompt and framework-owned
+runtime blocks; Pi has a different, bounded tool set and fresh-worker
+lifecycle.  The invariant is stronger and more useful: the exact rendered
+shared-core bytes and digest are present in both requests, and no product
+policy is copied into an adapter.
+
+This is the route by which future improvements stop being two jobs.  A change
+to common purpose, authority, evidence, truthfulness, user control, or
+deliverable guidance changes one source and reaches both engines.  A change to
+a Deep Agents-only capability stays visibly Deep-specific until Pi supplies an
+equivalent capability; Pi must never be told to load a skill or launch a child
+it cannot use.
+
+* Current reference and ownership
+
+PR #234 already introduces =assist_core.md.j2= and a narrow
+=PromptCompositionMiddleware= for the web-main Deep Agents profile.  It moves
+the Deep Agents base before Assist's product core while preserving later
+framework-owned blocks.  M3 takes that accepted core as input.  It must not
+create a second “Pi version” of its prose or change the prompt-rewrite
+experiment while its final form is still under review.
+
+After #234 lands, classify every block in its current core once.  Reassembling
+the Deep fragments must render byte-for-byte to the accepted #234 core before
+the framework's existing =BASE + CORE= composition; M3 changes ownership, not
+the accepted Deep policy:
+
+| Owner | Content | Rule |
+|-
+| Shared web-main core | Stable Assist product policy | Rendered by the common function and included verbatim by both engines. |
+| Deep Agents adapter | Framework base, skill catalog/procedures, async-task and subagent facts, framework-generated runtime text | May mention only capabilities actually available on Deep Agents. |
+| Pi adapter | Pi's bounded read/write/edit/bash tools, fresh bounded turn, no unsupported skill/task claim | May mention only Pi facts and must not repeat product policy. |
+| Deterministic controls | Tool schemas, sandbox/broker, admission, queue, approvals, guards | Remain outside prompts.  A prompt never grants authority. |
+
+The present =guidance_skills= and delegation sections are capability procedure,
+not universal policy.  Keep them in the Deep Agents adapter until a Pi skill or
+task extension exposes the same contract.  When it does, move the common
+procedure into a separately rendered shared capability fragment, then include
+that fragment in both adapters.  Do not solve future parity by presenting a
+false capability today.
+
+* Small implementation shape
+
+1. Add one host-owned renderer, for example
+   =assist.web_main_prompt.render_core(...)=.  It is the sole supported path
+   for rendering the shared Jinja source and returns immutable text plus its
+   SHA-256 digest.  The shared core is parameterless.  Its assembly context is
+   closed and explicit; it must not read the workspace, thread transcript,
+   environment, or an ambient prompt file.
+2. Use source fragments, not a prompt framework.  A neutral packaged
+   =templates/prompt/web-main-core.md.j2= holds only the common product policy.
+   The post-#234 =deepagents/assist_core.md.j2= becomes an include-only
+   assembly of that fragment and a Deep-specific fragment, preserving its
+   rendered text and order.  A Pi system assembly includes the same neutral
+   fragment and its Pi-specific fragment.  There is no duplicated prose.
+3. Change =create_agent= for =AgentSpec.web_main= to obtain its core from that
+   renderer.  Keep #234's exact prompt-composition seam, including its
+   fail-closed prefix check.  Non-web-main roles remain untouched.
+4. Replace =manage.web.threads._pi_system_prompt()= and the static
+   =templates/pi/system.md= ownership model with the same renderer plus the
+   Pi adapter.  The host still supplies the final string to the disposable
+   worker, and the worker keeps the existing =before_agent_start= ownership
+   extension.  Nothing in the workspace, a thread, user input, history, an
+   environment value, or TypeScript can choose or modify it.
+5. Make adapter assembly plain and inspectable.  Do not add a generic prompt
+   plugin system, runtime discovery, model-controlled includes, or a second
+   templating language.  A small ordered list of named fragments is enough.
+6. Keep the engine selector, thread storage, web UI, provider relay, broker,
+   sandbox, and TypeScript worker protocol unchanged.  M3 is prompt ownership,
+   not a covert Pi-capability expansion.
+
+* Proof and regression checks
+
+The deterministic proof is the primary M3 gate.  It avoids rediscovering the
+same structural problem through a long model campaign.
+
+1. Unit-test the common renderer with fixed context.  It must produce stable
+   core text and a matching digest; malformed or unexpectedly large output
+   fails closed.  Workspace/template lookalikes, history, and environment
+   values must not affect it.
+2. Test the Deep Agents web-main construction path: its static Assist portion
+   is exactly the shared-core output, and #234's reorder keeps the final static
+   =BASE + CORE= contract.  Existing non-web-main prompt snapshots remain
+   unchanged.
+3. Test the Pi request path: its =systemPrompt= contains exactly one matching
+   core digest, contains the Pi adapter, and contains no Deep Agents-only
+   capability name.  It retains the existing bounded host-file read and worker
+   request validation.  Missing or malformed sources must fail before the Pi
+   sandbox, broker, relay, or model request exists; there is no legacy-file
+   fallback.
+4. Extend the prompt census/profile artifact with per-engine fields:
+   =shared_core_sha256=, =adapter_sha256=, final prompt digest, visible tool
+   schema digest, model/provider profile, and source commit.  The test asserts
+   matching core digests and intentionally permits different adapter/tool/final
+   digests.  Record source spans and assert that each adapter's declared
+   capabilities match the actual engine tool profile.
+5. Run a compact paired live panel only after the deterministic gates pass:
+   one direct workspace task, one multi-step edit-and-verify task, and one
+   untrusted-content safety task, at the existing production-priority LLM
+   admission.  The panel asks whether the shared policy is usable through Pi;
+   it does not relitigate every completed Deep Agents prompt-rewrite cohort.
+   Record failures honestly as Pi capability or model-fit gaps, not as a reason
+   to fork the core.
+
+The existing prompt-rewrite evidence remains Deep Agents evidence.  It is not
+renamed as Pi evidence.  The M3 artifact labels the final #234 commit and all
+provider/model/profile inputs so later Deep Agents changes can be compared in a
+separate refresh rather than silently mixed into this result.
+
+* Sequencing and cutover relevance
+
+1. Let #234 finish.  Record its final merge commit, rendered web-main core
+   digest, skill setting, provider profile, and relevant census fixture.
+2. Start a fresh M3 code lane from that =main= commit.  Do not stack it on the
+   prompt-rewrite branch.
+3. Land the shared renderer and deterministic proof, deploy it behind the
+   existing per-new-thread engine selector, then use real Pi threads while the
+   small paired panel runs.
+4. Subsequent Pi capabilities, such as skills, TODOs, or async work, each add
+   a distinct extension and only then promote the corresponding common prompt
+   fragment out of the Deep adapter.
+5. The eventual Pi-only cutover may delete the Deep Agents adapter and its
+   composition middleware.  The shared core remains; it is not a permanent
+   dual-engine abstraction.
+
+* Non-goals
+
+- Do not make the final Deep Agents and Pi system strings equal by hiding real
+  runtime differences.
+- Do not copy Deep Agents skill or subagent guidance into Pi before the
+  capability exists.
+- Do not weaken prompt provenance, broker authority, sandboxing, approvals, or
+  queue control for the convenience of a shared renderer.
+- Do not make this milestone depend on a wholesale repeat of historic evals.
+- Do not create a runtime prompt hot-reload mechanism.  The existing Jinja
+  auto-reload behavior for new Deep Agents turns and fresh Pi workers remains
+  the only intended development loop.
