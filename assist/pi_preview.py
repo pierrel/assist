@@ -5,39 +5,27 @@ import json
 import os
 import stat
 import tempfile
-import threading
-import time
 from pathlib import Path
-from typing import Callable
 
-from assist.pi_health import configured_preview_health_admits
 from assist.thread_engine import EngineName
 
 
 _STATE_FILE = ".pi-preview.json"
-_HEALTH_CACHE_SECONDS = 5.0
 
 
 class PiPreviewUnavailable(RuntimeError):
-    """Pi was selected while the server-owned preview policy denies it."""
+    """The Pi preview operator setting cannot be safely changed."""
 
 
 class PiPreviewPolicy:
-    """Persist the operator setting and admit Pi only with current health evidence.
+    """Persist the operator setting and admit Pi only when it is enabled.
 
     This class deliberately owns no worker, Run, or cancellation lifecycle.  The
     later runtime manager will call it while holding its own transition gate.
     """
 
-    def __init__(self, root_dir: str | Path,
-                 health_admits: Callable[[], bool] = configured_preview_health_admits):
+    def __init__(self, root_dir: str | Path):
         self.root = Path(root_dir)
-        self._health_admits = health_admits
-        self._lock = threading.Lock()
-        self._transition_lock = threading.Lock()
-        self._disabled_generation = 0
-        self._health_checked_at = float("-inf")
-        self._health_available = False
 
     @property
     def path(self) -> Path:
@@ -88,76 +76,29 @@ class PiPreviewPolicy:
         """Durably set the local operator switch, defaulting to disabled."""
         if type(enabled) is not bool:
             raise TypeError("Pi preview enabled must be a bool")
-        with self._transition_lock:
-            self._ensure_safe_root()
-            if not enabled:
-                self._disabled_generation += 1
-            temporary = tempfile.NamedTemporaryFile(
-                mode="wb", dir=self.root, prefix=".pi-preview-", delete=False)
+        self._ensure_safe_root()
+        temporary = tempfile.NamedTemporaryFile(
+            mode="wb", dir=self.root, prefix=".pi-preview-", delete=False)
+        try:
+            with temporary:
+                os.fchmod(temporary.fileno(), 0o600)
+                temporary.write(json.dumps(
+                    {"version": 1, "enabled": enabled}, sort_keys=True,
+                    separators=(",", ":")).encode())
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary.name, self.path)
+            directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                with temporary:
-                    os.fchmod(temporary.fileno(), 0o600)
-                    temporary.write(json.dumps(
-                        {"version": 1, "enabled": enabled}, sort_keys=True,
-                        separators=(",", ":")).encode())
-                    temporary.flush()
-                    os.fsync(temporary.fileno())
-                os.replace(temporary.name, self.path)
-                directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
+                os.fsync(directory)
             finally:
-                if os.path.lexists(temporary.name):
-                    os.unlink(temporary.name)
-            with self._lock:
-                self._health_checked_at = float("-inf")
-                self._health_available = False
+                os.close(directory)
+        finally:
+            if os.path.lexists(temporary.name):
+                os.unlink(temporary.name)
 
     def admits(self, engine: EngineName) -> bool:
-        """Return cached Pi availability for page and form rendering only."""
+        """Return whether the persisted operator setting permits an engine."""
         if engine == "deepagents":
             return True
-        if engine != "pi" or not self.enabled():
-            return False
-        now = time.monotonic()
-        with self._lock:
-            if now - self._health_checked_at < _HEALTH_CACHE_SECONDS:
-                return self._health_available
-        try:
-            available = self._health_admits() is True
-        except Exception:
-            available = False
-        with self._lock:
-            self._health_checked_at = time.monotonic()
-            self._health_available = available
-        return available
-
-    def claim_admits(self, engine: EngineName) -> bool:
-        """Freshly check health without letting disable/re-enable resurrect a claim."""
-        if engine == "deepagents":
-            return True
-        if engine != "pi":
-            return False
-        with self._transition_lock:
-            if not self.enabled():
-                return False
-            generation = self._disabled_generation
-        try:
-            available = self._health_admits() is True
-        except Exception:
-            available = False
-        with self._transition_lock:
-            if not self.enabled() or generation != self._disabled_generation:
-                return False
-            with self._lock:
-                self._health_checked_at = time.monotonic()
-                self._health_available = available
-            return available
-
-    def require_admission(self, engine: EngineName) -> None:
-        """Raise a visible product error rather than falling back to Deep Agents."""
-        if not self.admits(engine):
-            raise PiPreviewUnavailable(
-                "Pi preview is unavailable because its operator switch or provider health check is off.")
+        return engine == "pi" and self.enabled()
