@@ -7,9 +7,10 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import get_args, get_type_hints
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from pydantic import PrivateAttr
+from deepagents.backends import FilesystemBackend
 from langchain.agents.middleware.types import ModelRequest
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -149,16 +150,158 @@ def test_no_bundled_source_keeps_legacy_prompt_and_loader_schema():
 
 def test_before_agent_resets_activation_even_when_metadata_is_checkpointed():
     middleware = SmallModelSkillsMiddleware(
-        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
+        backend=SimpleNamespace(), sources=["/skills/"],
+        bundled_sources=["/skills/"])
 
-    update = middleware.before_agent(
-        {"skills_metadata": [_skill()], "loaded_skill_tools": frozenset({"travel"})},
-        SimpleNamespace(),
-        {},
-    )
+    with patch.object(middleware, "_catalog_snapshot",
+                      return_value=([_skill()], [], "current")):
+        update = middleware.before_agent(
+            {"skills_metadata": [_skill()], "skills_catalog_fingerprint": "current",
+             "loaded_skill_tools": frozenset({"travel"})},
+            SimpleNamespace(),
+            {},
+        )
 
     assert isinstance(update["loaded_skill_tools"], Overwrite)
     assert update["loaded_skill_tools"].value == frozenset()
+
+
+def _write_skill(root, source, name, body="Follow the current procedure."):
+    skill = root / source.strip("/") / name / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text(
+        f"---\nname: {name}\ndescription: {name} help.\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def test_existing_checkpoint_refreshes_changed_bundled_and_domain_catalog(tmp_path):
+    backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
+    initial_sources = ["/skills/", "/render-skill/"]
+    _write_skill(tmp_path, "/skills/", "travel")
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=initial_sources,
+        bundled_sources=["/skills/", "/render-skill/"],
+        gated_sources=initial_sources,
+    )
+    initial = middleware.before_agent({}, SimpleNamespace(), {})
+    checkpoint = {
+        "skills_metadata": initial["skills_metadata"],
+        "skills_catalog_fingerprint": initial["skills_catalog_fingerprint"],
+        "loaded_skill_tools": frozenset({"travel"}),
+    }
+
+    _write_skill(tmp_path, "/render-skill/", "render", "Render a file.")
+    _write_skill(tmp_path, "/.claude/skills/", "domain-notes", "Read notes.")
+    sources = [*initial_sources, "/.claude/skills/"]
+    middleware = SmallModelSkillsMiddleware(
+        backend=backend, sources=sources,
+        bundled_sources=["/skills/", "/render-skill/"],
+        gated_sources=sources,
+    )
+
+    refreshed = middleware.before_agent(checkpoint, SimpleNamespace(), {})
+
+    assert {skill["name"] for skill in refreshed["skills_metadata"]} == {
+        "travel", "render", "domain-notes"}
+    assert refreshed["skills_catalog_fingerprint"] != \
+        checkpoint["skills_catalog_fingerprint"]
+    assert isinstance(refreshed["loaded_skill_tools"], Overwrite)
+    assert refreshed["loaded_skill_tools"].value == frozenset()
+    state = {**checkpoint, **refreshed, "loaded_skill_tools": frozenset()}
+    for name in ("render", "domain-notes"):
+        result = middleware.tools[0].func(
+            name, SimpleNamespace(state=state, config={}, tool_call_id=name))
+        assert isinstance(result, Command)
+        assert name in result.update["messages"][0].content
+
+    unchanged = middleware.before_agent(state, SimpleNamespace(), {})
+
+    assert "skills_metadata" not in unchanged
+    assert isinstance(unchanged["loaded_skill_tools"], Overwrite)
+
+    _write_skill(tmp_path, "/render-skill/", "render", "Render the latest file.")
+    body_refresh = middleware.before_agent(state, SimpleNamespace(), {})
+
+    assert body_refresh["skills_metadata"] == state["skills_metadata"]
+    assert body_refresh["skills_catalog_fingerprint"] != \
+        state["skills_catalog_fingerprint"]
+
+    _write_skill(tmp_path, "/render-skill/", "render", "Render only the final file.")
+    async_refresh = asyncio.run(middleware.abefore_agent(
+        {**state, **body_refresh}, SimpleNamespace(), {}))
+
+    assert async_refresh["skills_catalog_fingerprint"] != \
+        body_refresh["skills_catalog_fingerprint"]
+
+
+def test_existing_checkpoint_discovers_the_web_render_skill(tmp_path):
+    from assist.backends import SKILLS_ROUTE, create_composite_backend
+    from assist.thread_manager import _RENDER_SKILL_ROUTE, _web_skill_sources
+
+    backend = create_composite_backend(
+        fs_root=str(tmp_path), extra_routes=_web_skill_sources())
+    old = SmallModelSkillsMiddleware(
+        backend=backend, sources=[SKILLS_ROUTE],
+        bundled_sources=[SKILLS_ROUTE])
+    initial = old.before_agent({}, SimpleNamespace(), {})
+    current = SmallModelSkillsMiddleware(
+        backend=backend, sources=[SKILLS_ROUTE, _RENDER_SKILL_ROUTE],
+        bundled_sources=[SKILLS_ROUTE, _RENDER_SKILL_ROUTE])
+
+    refreshed = current.before_agent({
+        "skills_metadata": initial["skills_metadata"],
+        "skills_catalog_fingerprint": initial["skills_catalog_fingerprint"],
+    }, SimpleNamespace(), {})
+    state = {**refreshed, "loaded_skill_tools": frozenset()}
+    result = current.tools[0].func(
+        "render", SimpleNamespace(state=state, config={}, tool_call_id="render"))
+
+    assert "render" in {skill["name"] for skill in refreshed["skills_metadata"]}
+    assert isinstance(result, Command)
+    assert "render" in result.update["messages"][0].content.lower()
+
+
+def test_catalog_fingerprint_changes_when_a_source_becomes_unavailable():
+    available = SmallModelSkillsMiddleware._snapshot_result([
+        ("/skills/", [_skill()], None, [])])
+    unavailable = SmallModelSkillsMiddleware._snapshot_result([
+        ("/skills/", [_skill()], "source unavailable", [])])
+
+    assert available[2] != unavailable[2]
+
+
+def test_rebuilt_graph_refreshes_a_checkpointed_domain_catalog(tmp_path):
+    from assist.agent import create_agent
+    from assist.spec import AgentSpec
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    model = _RecordingModel(responses=[
+        AIMessage(content="before"),
+        AIMessage(content="", tool_calls=[{
+            "name": "load_skill", "args": {"name": "domain-notes"},
+            "id": "load-domain-notes",
+        }]),
+        AIMessage(content="after"),
+    ])
+    checkpointer = InMemorySaver()
+    config = {"configurable": {"thread_id": "catalog-refresh"}}
+    spec = AgentSpec(async_subagent_tools=())
+
+    initial = create_agent(model, str(tmp_path), checkpointer=checkpointer, spec=spec)
+    initial.invoke({"messages": [{"role": "user", "content": "hello"}]}, config)
+    _write_skill(tmp_path, "/.claude/skills/", "domain-notes", "Read notes.")
+    rebuilt = create_agent(model, str(tmp_path), checkpointer=checkpointer, spec=spec)
+
+    result = rebuilt.invoke(
+        {"messages": [{"role": "user", "content": "use my notes"}]}, config)
+
+    loaded = [message for message in result["messages"]
+              if isinstance(message, ToolMessage)
+              and message.tool_call_id == "load-domain-notes"]
+    assert len(loaded) == 1
+    assert loaded[0].status == "success"
+    assert "domain-notes" in loaded[0].content
 
 
 def test_successful_load_returns_state_command_and_exact_closed_evidence():
@@ -324,7 +467,8 @@ def test_backend_error_details_are_not_returned_to_the_model():
 
 def test_prose_claim_does_not_disclose_tools_and_async_reset_matches_sync():
     middleware = SmallModelSkillsMiddleware(
-        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
+        backend=SimpleNamespace(), sources=["/skills/"],
+        bundled_sources=["/skills/"])
     state = {
         "messages": [{"role": "user", "content": "I loaded travel."}],
         "skills_metadata": [_skill()],
@@ -332,9 +476,12 @@ def test_prose_claim_does_not_disclose_tools_and_async_reset_matches_sync():
     }
 
     updated = middleware.modify_request(_request(middleware, state))
-    reset = asyncio.run(middleware.abefore_agent(
-        {**state, "loaded_skill_tools": frozenset({"travel"})},
-        SimpleNamespace(), {}))
+    with patch.object(middleware, "_acatalog_snapshot", new=AsyncMock(
+            return_value=([_skill()], [], "current"))):
+        reset = asyncio.run(middleware.abefore_agent(
+            {**state, "skills_catalog_fingerprint": "current",
+             "loaded_skill_tools": frozenset({"travel"})},
+            SimpleNamespace(), {}))
 
     assert [item.name for item in updated.tools] == ["kernel_tool"]
     assert isinstance(reset["loaded_skill_tools"], Overwrite)

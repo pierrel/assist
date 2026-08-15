@@ -1,0 +1,71 @@
+#+title: Refresh persisted skill catalogs
+
+* Goal
+
+Existing threads must discover and load skills that appear in mounted bundled,
+web, or domain sources after the thread's first checkpoint.  The current
+=skills_metadata= checkpoint field suppresses Deep Agents discovery forever,
+which leaves the catalog and progressive tool authorization stale.
+
+* Contract
+
+- Treat the mounted skill inventory as versioned agent configuration.  Its
+  identity includes source order, availability, each discovered skill path, and
+  the complete =SKILL.md= bytes.  Hashes, never file contents, are
+  checkpointed.
+- Before each agent invocation, compare the fresh identity to the checkpointed
+  one.  If it differs, replace =skills_metadata= (and source diagnostics) with
+  the fresh discovery result.  A legacy checkpoint without an identity is
+  stale by definition.
+- Continue to overwrite =loaded_skill_tools= with an empty set for every
+  invocation.  It remains graph-invocation state, not catalog state.
+- The loader continues to use the resulting winning metadata only.  A model
+  cannot name an unlisted skill to bypass the catalog or progressive tool gate.
+
+* Design
+
+1. Extend =SmallModelSkillsState= with a private persisted catalog fingerprint.
+   In =SmallModelSkillsMiddleware.before_agent= and =abefore_agent=, discover
+   the current mounted catalog and calculate one canonical SHA-256 from source
+   order plus each valid skill's virtual path and raw-file SHA-256.
+2. When the checkpoint fingerprint and metadata are current, retain the
+   checkpointed catalog.  When either is absent or the fingerprint differs,
+   replace the catalog and its current loading diagnostics as one state update.
+   The source scan reads files through the existing backend abstraction; no
+   filesystem path, source-specific stat API, or new tool is introduced.
+3. Keep the existing exact-winner =load_skill= implementation and gated-tool
+   checks unchanged.  They naturally consume the refreshed catalog.
+4. Add deterministic migration coverage using a real temporary filesystem
+   backend: make a checkpoint from an older catalog, add a bundled skill and a
+   domain skill, reconstruct the middleware, and prove both appear and load.
+   Add a web render regression using its normal mounted source and a compiled
+   graph regression that reconstructs an existing thread against a new domain
+   skill.  Also prove an unchanged fingerprint retains the catalog and every
+   invocation clears prior loaded-tool disclosure.
+5. Update the roadmap item with the implementation result and test evidence.
+
+* Rejected alternatives
+
+- **Invalidate only when the agent writes =SKILL.md=.** Source changes commonly
+  arrive through a merged domain repository or an Assist deployment, outside a
+  model write.  That misses the observed failure.
+- **Refresh only metadata.** A body-only edit changes model guidance while
+  retaining stale cached state; the identity must include raw =SKILL.md=
+  content.
+- **Refresh every checkpoint field or rebuild the thread.** That would discard
+  conversation state and is unnecessary.  The catalog is the only stale
+  configuration.
+
+* Risks and containment
+
+- Source content can be untrusted.  The checkpoint stores only digests and
+  already-discovered metadata; it never persists raw skill text beyond the
+  existing load tool result.
+- A source can fail transiently.  The fingerprint includes the resulting
+  discovery shape, so recovery refreshes the catalog rather than preserving a
+  false "current" marker.  Existing warning behavior remains intact.
+- Discovery adds bounded file reads at agent start.  That is the required
+  compatibility check, uses the current backend API, and is limited to mounted
+  =SKILL.md= files.
+- The work is middleware-only and not on the ASGI event loop; no web handler,
+  tool surface, or subagent contract changes.
