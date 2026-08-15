@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
+from assist.pi_skills import PiSkillAuthority
 
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -61,6 +62,7 @@ class PiProviderRelay:
         self._stopping = False
         self._connections: set[http.client.HTTPConnection] = set()
         self._clients: set[socket.socket] = set()
+        self._skill_authority: PiSkillAuthority | None = None
 
     @property
     def socket_path(self) -> Path:
@@ -73,6 +75,12 @@ class PiProviderRelay:
             raise RuntimeError("Pi provider relay is already running")
         self._started = True
         self._thread.start()
+
+    def configure_skills(self, authority: PiSkillAuthority) -> None:
+        """Attach the broker-shared authority before any provider admission."""
+        if self._started or self._skill_authority is not None:
+            raise RuntimeError("Pi provider relay skill authority is already configured")
+        self._skill_authority = authority
 
     def close(self) -> None:
         """Stop model admission and close any forwarding connection in progress."""
@@ -156,6 +164,8 @@ class PiProviderRelay:
             raise PiProviderRelayError("Pi model request is malformed") from error
         if not isinstance(payload, dict) or payload.get("model") != self._model:
             raise PiProviderRelayError("Pi model request uses an invalid model")
+        if self._skill_authority is not None and not self._skill_authority.continue_request(payload):
+            raise PiProviderRelayError("Pi model request does not continue skill loading")
         if ("max_completion_tokens" in payload
                 or "n" in payload and payload["n"] != 1
                 or "stream" in payload and payload["stream"] is not True):
@@ -211,6 +221,14 @@ class PiProviderRelay:
                     raise PiProviderRelayError("Pi model response exceeds its bound")
                 chunks.append(chunk)
             completed = 200 <= response.status < 300
+            if completed and self._skill_authority is not None:
+                observed = _sole_loader_completion(b"".join(chunks))
+                if observed is None:
+                    self._skill_authority.clear_loader()
+                else:
+                    self._skill_authority.observe_loader(*observed)
+            elif self._skill_authority is not None:
+                self._skill_authority.clear_loader()
             return response.status, "application/json", chunks
         finally:
             with self._state_lock:
@@ -236,6 +254,80 @@ class PiProviderRelay:
         except Exception:
             pass
 
+
+def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
+    """Extract one complete OpenAI loader call from JSON or bounded SSE bytes."""
+    values: list[object] = []
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if decoded.lstrip().startswith("data:"):
+        for line in decoded.splitlines():
+            if not line.startswith("data:"):
+                continue
+            item = line[5:].strip()
+            if item == "[DONE]":
+                continue
+            try:
+                values.append(json.loads(item))
+            except json.JSONDecodeError:
+                return None
+    else:
+        try:
+            values.append(json.loads(decoded))
+        except json.JSONDecodeError:
+            return None
+    calls: dict[int, dict[str, object]] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            return None
+        choices = value.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                return None
+            message = choice.get("message")
+            delta = choice.get("delta")
+            container = message if isinstance(message, dict) else delta
+            if not isinstance(container, dict):
+                continue
+            tool_calls = container.get("tool_calls")
+            if tool_calls is None:
+                continue
+            if not isinstance(tool_calls, list):
+                return None
+            for item in tool_calls:
+                if not isinstance(item, dict):
+                    return None
+                index = item.get("index", 0)
+                if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                    return None
+                prior = calls.setdefault(index, {"arguments": ""})
+                if isinstance(item.get("id"), str):
+                    prior["id"] = item["id"]
+                function = item.get("function")
+                if function is not None:
+                    if not isinstance(function, dict):
+                        return None
+                    if isinstance(function.get("name"), str):
+                        prior["name"] = function["name"]
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        prior["arguments"] = str(prior["arguments"]) + arguments
+                    elif arguments is not None:
+                        return None
+    if len(calls) != 1:
+        return None
+    call = next(iter(calls.values()))
+    if not isinstance(call.get("id"), str) or call.get("name") != "load_skill":
+        return None
+    try:
+        arguments = json.loads(str(call.get("arguments", "")))
+    except json.JSONDecodeError:
+        return None
+    return call["id"], "load_skill", arguments
 
 class _ProviderHandler(BaseHTTPRequestHandler):
     """Tiny HTTP boundary used only behind a private Unix socket."""

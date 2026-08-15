@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from assist.pi_broker import PiToolBroker
+from assist.pi_skills import PiSkill, PiSkillAuthority, PiSkillCatalog
 
 
 @dataclass
@@ -64,6 +65,41 @@ def _broker(tmp_path: Path) -> tuple[PiToolBroker, _Backend, str]:
     broker = PiToolBroker(backend, control, capability)  # type: ignore[arg-type]
     broker.start()
     return broker, backend, capability
+
+
+def _skill_authority() -> PiSkillAuthority:
+    return PiSkillAuthority(PiSkillCatalog((
+        PiSkill("render", "render", "body", "a" * 64, ("map_data",)),
+    )))
+
+
+def test_broker_load_requires_the_relay_observed_tool_call(tmp_path: Path) -> None:
+    broker, _backend, capability = _broker(tmp_path)
+    authority = _skill_authority()
+    broker.stop_admission()
+    broker.close()
+    # Configure before listening, as the runtime does.
+    control = tmp_path / "skills-control"
+    control.mkdir(mode=0o700)
+    configured = PiToolBroker(_Backend(), control, capability)  # type: ignore[arg-type]
+    configured.configure_skills(authority)
+    configured.start()
+    try:
+        denied = _request(configured.socket_path, {
+            "version": 1, "id": 1, "capability": capability, "operation": "load_skill",
+            "tool_call_id": "call-1", "name": "render", "arguments": {"name": "render"},
+        })
+        authority.observe_loader("call-1", "load_skill", {"name": "render"})
+        accepted = _request(configured.socket_path, {
+            "version": 1, "id": 2, "capability": capability, "operation": "load_skill",
+            "tool_call_id": "call-1", "name": "render", "arguments": {"name": "render"},
+        })
+    finally:
+        configured.close()
+
+    assert denied["ok"] is False
+    assert accepted["ok"] is True
+    assert isinstance(accepted["value"], str)
 
 
 def test_broker_rejects_wrong_capability(tmp_path: Path) -> None:

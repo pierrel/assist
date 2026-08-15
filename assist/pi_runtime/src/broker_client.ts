@@ -12,7 +12,7 @@ const MAX_FRAME_BYTES = 512 * 1024;
 const CALL_TIMEOUT_MS = 125_000;
 const WORKSPACE = "/workspace";
 
-type BrokerOperation = "access" | "bash" | "mkdir" | "read" | "write";
+type BrokerOperation = "access" | "bash" | "mkdir" | "read" | "write" | "load_skill" | "map_data";
 type BrokerRequest = {
   version: 1;
   id: number;
@@ -24,6 +24,11 @@ type BrokerRequest = {
   command?: string;
   cwd?: string;
   timeout?: number;
+  tool_call_id?: string;
+  name?: string;
+  arguments?: { name: string };
+  places?: string;
+  routes?: string;
 };
 
 type BrokerResponse = {
@@ -51,7 +56,8 @@ function validateResponse(value: unknown, id: number): BrokerResponse {
   return response as BrokerResponse;
 }
 
-class BrokerClient {
+/** Pi's closed worker-to-host client for coding, loading, and map operations. */
+export class BrokerClient {
   #nextId = 0;
 
   constructor(private readonly capability: string) {}
@@ -94,6 +100,18 @@ class BrokerClient {
     return response.value;
   }
 
+  async loadSkill(toolCallId: string, name: string): Promise<string> {
+    const value = await this.call({ operation: "load_skill", tool_call_id: toolCallId, name, arguments: { name } });
+    if (typeof value !== "string") throw responseError();
+    return value;
+  }
+
+  async mapData(places: string, routes: string): Promise<string> {
+    const value = await this.call({ operation: "map_data", places, routes });
+    if (typeof value !== "string") throw responseError();
+    return value;
+  }
+
   async readFile(path: string): Promise<Buffer> {
     const value = await this.call({ operation: "read", path });
     if (typeof value !== "string") throw responseError();
@@ -126,7 +144,6 @@ class BrokerClient {
   }
 }
 
-/** Pi's four familiar coding tools, implemented only through the host broker. */
 export function createBrokerTools(capability: string): ToolDefinition<any, any, any>[] {
   const broker = new BrokerClient(capability);
   return [

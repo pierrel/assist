@@ -364,7 +364,7 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         )
 
     def _catalog_from_responses(self, source: str, ls_result, responses):
-        """Parse one source and return its metadata plus content identity."""
+        """Parse one source and return metadata, content identity, and host records."""
         source_error = None
         if isinstance(ls_result, deepagents_skills.LsResult) and ls_result.error:
             source_error = deepagents_skills._format_skills_source_error(  # noqa: SLF001
@@ -377,6 +377,7 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
             deepagents_skills.logger.warning("%s", source_error)
         metadata = []
         fingerprint_entries = []
+        records = []
         for index, (directory, path) in enumerate(zip(skill_dirs, skill_paths,
                                                        strict=True)):
             response = responses[index] if index < len(responses) else None
@@ -398,7 +399,14 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
                 response, directory, path)
             if skill is not None:
                 metadata.append(skill)
-        return metadata, source_error, fingerprint_entries
+                try:
+                    raw = response.content.decode("utf-8")
+                except UnicodeDecodeError:
+                    # The metadata helper has already rejected this response;
+                    # keep the defensive branch local to this one-read seam.
+                    continue
+                records.append({"source": source, "skill": skill, "raw": raw})
+        return metadata, source_error, fingerprint_entries, records
 
     @staticmethod
     def _skill_paths(ls_result):
@@ -433,17 +441,36 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         )
         return list(all_skills.values()), errors, _sha256(payload)
 
-    def _catalog_snapshot(self, backend):
-        """Discover mounted skills once and fingerprint the exact read bytes."""
+    def _catalog_source_results(self, backend):
+        """Read each mounted source once for both Deep state and Pi catalog use."""
         source_results = []
         for source in self.sources:
             ls_result = backend.ls(source)
             _, paths = self._skill_paths(ls_result)
-            metadata, error, entries = self._catalog_from_responses(
+            metadata, error, entries, records = self._catalog_from_responses(
                 source, ls_result,
                 backend.download_files(paths) if paths else [])
-            source_results.append((source, metadata, error, entries))
-        return self._snapshot_result(source_results)
+            source_results.append((source, metadata, error, entries, records))
+        return source_results
+
+    def _catalog_snapshot(self, backend):
+        """Discover mounted skills once and fingerprint the exact read bytes."""
+        source_results = self._catalog_source_results(backend)
+        return self._snapshot_result([result[:4] for result in source_results])
+
+    def catalog_snapshot_records(self, backend):
+        """Return host-only raw records from the same one-read snapshot.
+
+        This is intentionally not graph state: Deep persists only metadata and
+        the fingerprint, while another trusted host consumer may select a
+        record without re-downloading the file it just described.
+        """
+        source_results = self._catalog_source_results(backend)
+        skills, errors, fingerprint = self._snapshot_result(
+            [result[:4] for result in source_results])
+        return skills, errors, fingerprint, tuple(
+            record for _source, _metadata, _error, _entries, records in source_results
+            for record in records)
 
     async def _acatalog_snapshot(self, backend):
         """Async counterpart to :meth:`_catalog_snapshot`."""
@@ -451,7 +478,7 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
         for source in self.sources:
             ls_result = await backend.als(source)
             _, paths = self._skill_paths(ls_result)
-            metadata, error, entries = self._catalog_from_responses(
+            metadata, error, entries, _records = self._catalog_from_responses(
                 source, ls_result,
                 await backend.adownload_files(paths) if paths else [])
             source_results.append((source, metadata, error, entries))

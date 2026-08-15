@@ -275,7 +275,7 @@ def test_catalog_refresh_tolerates_a_short_skill_download_batch():
     middleware = SmallModelSkillsMiddleware(
         backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
 
-    metadata, error, entries = middleware._catalog_from_responses(
+    metadata, error, entries, records = middleware._catalog_from_responses(
         "/skills/", [{"path": "/skills/travel", "is_dir": True}], [])
 
     assert metadata == []
@@ -286,6 +286,7 @@ def test_catalog_refresh_tolerates_a_short_skill_download_batch():
         "content_sha256": None,
         "error": True,
     }]
+    assert records == []
 
 
 def test_rebuilt_graph_refreshes_a_checkpointed_domain_catalog(tmp_path):

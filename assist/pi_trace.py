@@ -18,7 +18,7 @@ _MAX_BYTES = 2 * 1024 * 1024
 _MAX_EVENTS = 512
 _MAX_RUN_ID_BYTES = 256
 _KINDS = {"model", "tool"}
-_NAMES = {"model request", "read", "write", "bash"}
+_NAMES = {"model request", "read", "write", "bash", "load skill", "map data"}
 _OUTCOMES = {"started", "completed", "did not complete"}
 
 
@@ -34,7 +34,7 @@ class PiTraceEvent:
     sequence: int
     operation: int
     kind: Literal["model", "tool"]
-    name: Literal["model request", "read", "write", "bash"]
+    name: Literal["model request", "read", "write", "bash", "load skill", "map data"]
     outcome: Literal["started", "completed", "did not complete"]
 
 
@@ -209,7 +209,7 @@ class PiTraceRecorder:
         self._unavailable = False
 
     def start(self, kind: Literal["model", "tool"],
-              name: Literal["model request", "read", "write", "bash"]) -> int | None:
+              name: Literal["model request", "read", "write", "bash", "load skill", "map data"]) -> int | None:
         """Persist an admitted operation and return an opaque handle for its terminal state."""
         with self._lock:
             if self._unavailable:

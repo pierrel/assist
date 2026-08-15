@@ -39,6 +39,13 @@ treated as Deep Agents.  Only then reach the explicit Pi-only end state and dele
 Deep Agents.  Local llama.cpp stays gateway-fair at capacity one initially; test
 higher local capacity and any explicit OpenRouter cloud-thread option separately
 after the local Pi web path works.
+*** TODO M4: Align Pi skills and progressive tool disclosure
+Build the shared catalog, exact =load_skill= contract, and independent
+model-visible/execution enforcement described in
+[[file:docs/2026-08-15-pi-m4-skill-disclosure.org][the M4 design]].  Start with the portable coding skills and the existing
+=render= → =map_data= ownership path; do not advertise a Deep-only procedure
+until its typed Pi extension and trusted host boundary exist.
+
 *** TODO Next Pi milestone: infinite retained history, bounded context, recoverable detail
 Pi must retain a conversation indefinitely without repeatedly sending an
 unbounded transcript to the model.  This is *not* “infinite context”: the

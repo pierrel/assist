@@ -56,7 +56,7 @@ _render_skill_sources = None
 _triage_skill_sources_cache = None
 
 
-def _web_skill_sources() -> dict:
+def web_main_skill_sources() -> dict:
     """Route -> backend for the web AgentSpec's web-only skills.
 
     The route keeps its historical ``render-skill`` name although it serves both
@@ -71,6 +71,11 @@ def _web_skill_sources() -> dict:
             _RENDER_SKILL_ROUTE: create_bundled_skills_backend(_RENDER_SKILLS_DIR)
         }
     return _render_skill_sources
+
+
+# Compatibility for focused middleware fixtures; new callers use the explicit
+# web-main name because Pi shares this route composition.
+_web_skill_sources = web_main_skill_sources
 
 
 def _triage_skill_sources() -> dict:
@@ -365,7 +370,7 @@ class ThreadManager:
             working_dir, **thread_kwargs,
             spec=AgentSpec(
                 skill_sources=(_triage_skill_sources() if triage
-                               else _web_skill_sources()),
+                               else web_main_skill_sources()),
                 tools=tools,
                 async_subagent_tools=async_tools,
                 web_main=(assistant_id == "general-agent" and not triage),

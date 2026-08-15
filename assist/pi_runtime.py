@@ -19,10 +19,15 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
+from assist.pi_skills import (PiSkillAuthority, PiSkillError, build_pi_skill_catalog,
+                              empty_pi_skill_catalog)
 from assist.pi_trace import PiTraceRecorder, PiTraceStore
 from assist.pi_provider_relay import PiProviderRelay
 from assist.sandbox import DockerSandboxBackend
 from assist.sandbox_manager import SandboxManager
+from assist.agent import web_main_skill_composition
+from assist.backends import DOMAIN_SKILLS_PATH
+from assist.thread_manager import web_main_skill_sources
 
 
 _IMAGE = "assist-pi-runtime"
@@ -328,16 +333,31 @@ class PiRuntimeManager:
             provider_capability = secrets.token_urlsafe(32)
             result_capability = secrets.token_urlsafe(32)
             result_sink = PiResultSink(control_dir, result_capability)
-            self._write_request(control_dir, {
-                "version": 1, "prompt": prompt, "history": self._history(history),
-                "model": config.model, "systemPrompt": system_prompt,
-                "brokerCapability": broker_capability,
-                "providerCapability": provider_capability,
-                "resultCapability": result_capability, "maxTurns": max_turns,
-            })
             sandbox = self._sandbox_manager.get_pi_sandbox_backend(work_dir, timezone)
             if sandbox is None:
                 raise PiRuntimeError("Pi workspace sandbox is unavailable")
+            if isinstance(sandbox, DockerSandboxBackend):
+                try:
+                    skill_backend, skill_sources = web_main_skill_composition(
+                        sandbox, web_main_skill_sources())
+                    catalog = build_pi_skill_catalog(
+                        skill_backend, skill_sources,
+                        trusted_sources=(source for source in skill_sources
+                                         if source != DOMAIN_SKILLS_PATH))
+                except PiSkillError as error:
+                    raise PiRuntimeError("Pi skill catalog is unavailable") from error
+            else:  # Narrow test-double seam; every deployed sandbox is Docker-backed.
+                catalog = empty_pi_skill_catalog()
+            authority = PiSkillAuthority(catalog)
+            self._write_request(control_dir, {
+                "version": 1, "prompt": prompt, "history": self._history(history),
+                "model": config.model,
+                "systemPrompt": system_prompt + catalog.prompt_section(),
+                "brokerCapability": broker_capability,
+                "providerCapability": provider_capability,
+                "resultCapability": result_capability, "maxTurns": max_turns,
+                "skillCatalog": catalog.manifest(),
+            })
             if recorder is None:
                 broker = PiToolBroker(sandbox, control_dir, broker_capability)
                 relay = PiProviderRelay(
@@ -353,6 +373,9 @@ class PiRuntimeManager:
                     config.model, provider_capability,
                     trace_start=lambda: recorder.start("model", "model request"),
                     trace_settle=recorder.settle)
+            if isinstance(sandbox, DockerSandboxBackend):
+                broker.configure_skills(authority)
+                relay.configure_skills(authority)
             broker.start()
             relay.start()
             client = self._sandbox_manager._get_docker_client()

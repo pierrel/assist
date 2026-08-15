@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from assist.pi_provider_relay import PiProviderRelay, PiProviderRelayError
+from assist.pi_provider_relay import (PiProviderRelay, PiProviderRelayError,
+                                      _sole_loader_completion)
 
 
 _adapter_path = Path(__file__).parents[1] / "assist/pi_runtime/provider_adapter.py"
@@ -228,6 +229,19 @@ def test_provider_relay_refuses_nonlocal_or_malformed_endpoints(tmp_path: Path) 
         PiProviderRelay(control, "http://127.0.0.1:8000/not-v1", "key", "qwen", "a" * 43)
     with pytest.raises(PiProviderRelayError):
         PiProviderRelay(control, "http://localhost:8000/v1", "key", "qwen", "a" * 43)
+
+
+def test_loader_completion_requires_exactly_one_complete_loader_call() -> None:
+    one = json.dumps({"id": "response-1", "choices": [{"message": {"tool_calls": [{
+        "id": "call-1", "function": {"name": "load_skill", "arguments": '{"name":"render"}'},
+    }]}}]}).encode()
+    multiple = json.dumps({"id": "response-1", "choices": [{"message": {"tool_calls": [
+        {"id": "call-1", "function": {"name": "load_skill", "arguments": '{"name":"render"}'}},
+        {"id": "call-2", "function": {"name": "map_data", "arguments": "{}"}},
+    ]}}]}).encode()
+
+    assert _sole_loader_completion(one) == ("call-1", "load_skill", {"name": "render"})
+    assert _sole_loader_completion(multiple) is None
 
 
 def test_provider_relay_close_interrupts_a_stalled_model_response(tmp_path: Path) -> None:

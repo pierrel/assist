@@ -67,12 +67,13 @@ def test_pi_adapter_never_promises_deep_only_capabilities():
     for available in ("`read`", "`write`", "`edit`", "`bash`"):
         assert available in prompt
     for unavailable in (
-        "`notify`", "`grounding`", "`research`", "`load_skill`",
+        "`notify`", "`grounding`", "`research`",
         "`start_async_task`", "`research-agent`", "`complex-request`",
         "`orchestrate-repeated-work`",
     ):
         assert unavailable not in prompt
-    assert "no skill loader, notification, research,\nor background-task capability" in prompt
+    assert "`load_skill`" in prompt
+    assert "There is no notification, research, or background-task" in prompt
 
 
 def test_missing_or_malformed_template_fails_closed(monkeypatch):

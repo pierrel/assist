@@ -16,6 +16,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createBrokerTools } from "./broker_client.js";
 import { promptOwner } from "./prompt_owner.js";
+import { skillLoaderExtension, type SkillManifest } from "./skill_loader.js";
+import { toolDisclosureExtension } from "./tool_disclosure.js";
 
 const REQUEST_PATH = "/run/pi/request.json";
 const RESULT_SOCKET = "/run/pi/result.sock";
@@ -39,6 +41,7 @@ type Request = {
   providerCapability: string;
   resultCapability: string;
   maxTurns: number;
+  skillCatalog: SkillManifest[];
 };
 
 let resultCommitted = false;
@@ -48,10 +51,10 @@ function validateRequest(value: unknown): Request {
     throw new Error("Pi request must be an object");
   }
   const request = value as Record<string, unknown>;
-  if (Object.keys(request).sort().join(",") !== "brokerCapability,history,maxTurns,model,prompt,providerCapability,resultCapability,systemPrompt,version") {
+  if (Object.keys(request).sort().join(",") !== "brokerCapability,history,maxTurns,model,prompt,providerCapability,resultCapability,skillCatalog,systemPrompt,version") {
     throw new Error("Pi request has an invalid shape");
   }
-  const { brokerCapability, history, maxTurns, model, prompt, providerCapability, resultCapability, systemPrompt, version } = request;
+  const { brokerCapability, history, maxTurns, model, prompt, providerCapability, resultCapability, skillCatalog, systemPrompt, version } = request;
   if (
     version !== 1
     || typeof prompt !== "string"
@@ -71,6 +74,8 @@ function validateRequest(value: unknown): Request {
     || maxTurns > MAX_TURNS
     || !Array.isArray(history)
     || history.length > MAX_HISTORY_MESSAGES
+    || !Array.isArray(skillCatalog)
+    || skillCatalog.length > 16
   ) {
     throw new Error("Pi request has invalid fields");
   }
@@ -94,9 +99,29 @@ function validateRequest(value: unknown): Request {
   if (Buffer.byteLength(prompt, "utf8") > MAX_MESSAGE_BYTES) {
     throw new Error("Pi request prompt exceeds its bound");
   }
+  const names = new Set<string>();
+  const validatedCatalog: SkillManifest[] = [];
+  for (const skill of skillCatalog) {
+    if (skill === null || typeof skill !== "object" || Array.isArray(skill)
+        || Object.keys(skill).sort().join(",") !== "declaredTools,description,name") {
+      throw new Error("Pi skill catalog is invalid");
+    }
+    const value = skill as Record<string, unknown>;
+    if (typeof value.name !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(value.name)
+        || names.has(value.name) || typeof value.description !== "string"
+        || Buffer.byteLength(value.description, "utf8") > 4096
+        || !Array.isArray(value.declaredTools)
+        || value.declaredTools.some((tool) => tool !== "map_data")) {
+      throw new Error("Pi skill catalog is invalid");
+    }
+    names.add(value.name);
+    validatedCatalog.push({ name: value.name, description: value.description,
+      declaredTools: [...value.declaredTools] as string[] });
+  }
   return {
     version, prompt, history: validatedHistory, model, systemPrompt,
     brokerCapability, providerCapability, resultCapability, maxTurns,
+    skillCatalog: validatedCatalog,
   };
 }
 
@@ -192,7 +217,11 @@ async function main(): Promise<void> {
   const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false, maxRetries: 0 } });
   const loader = new DefaultResourceLoader({
     cwd: "/workspace", agentDir: "/agent", settingsManager: settings,
-    extensionFactories: [promptOwner(request.systemPrompt, request.providerCapability)],
+    extensionFactories: [
+      promptOwner(request.systemPrompt, request.providerCapability),
+      toolDisclosureExtension(request.brokerCapability),
+      skillLoaderExtension(request.brokerCapability, request.skillCatalog),
+    ],
     noExtensions: true, noSkills: true,
     noPromptTemplates: true, noThemes: true, noContextFiles: true, systemPrompt: request.systemPrompt,
     skillsOverride: () => ({ skills: [], diagnostics: [] }),

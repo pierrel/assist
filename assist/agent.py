@@ -122,6 +122,27 @@ def _has_domain_skills(backend: BackendProtocol) -> bool:
     return any(entry.get("is_dir") for entry in (result.entries or []))
 
 
+def web_main_skill_composition(
+        sandbox_backend: BackendProtocol, web_skill_sources: dict[str, BackendProtocol]
+        ) -> tuple[BackendProtocol, tuple[str, ...]]:
+    """Build the web-main skill universe without constructing a Deep graph.
+
+    Pi calls this after creating its per-turn sandbox.  The order is the
+    current web-main rightmost-winner order: main guidance, main-only, domain,
+    shared bundled, then web-only sources.
+    """
+    routes = dict(web_skill_sources)
+    routes.setdefault(MAIN_GUIDANCE_SKILLS_ROUTE,
+                      create_bundled_skills_backend(MAIN_GUIDANCE_SKILLS_DIR))
+    routes.setdefault(MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
+    backend = create_sandbox_composite_backend(sandbox_backend, extra_routes=routes)
+    sources = [MAIN_GUIDANCE_SKILLS_ROUTE, MAIN_SKILLS_ROUTE, SKILLS_ROUTE]
+    sources.extend(source for source in web_skill_sources if source not in sources)
+    if DOMAIN_SKILLS_PATH not in sources and _has_domain_skills(backend):
+        sources.insert(2, DOMAIN_SKILLS_PATH)
+    return backend, tuple(sources)
+
+
 def _create_standard_backend(working_dir: str,
                              extra_routes: dict[str, BackendProtocol] | None = None,
                              default_backend: BackendProtocol | None = None,
