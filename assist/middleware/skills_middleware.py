@@ -371,10 +371,22 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
                 source, ls_result.error)
             deepagents_skills.logger.warning("%s", source_error)
         skill_dirs, skill_paths = self._skill_paths(ls_result)
+        if len(responses) != len(skill_paths):
+            source_error = deepagents_skills._format_skills_source_error(  # noqa: SLF001
+                source, "skill download response count mismatch")
+            deepagents_skills.logger.warning("%s", source_error)
         metadata = []
         fingerprint_entries = []
-        for directory, path, response in zip(skill_dirs, skill_paths, responses,
-                                             strict=True):
+        for index, (directory, path) in enumerate(zip(skill_dirs, skill_paths,
+                                                       strict=True)):
+            response = responses[index] if index < len(responses) else None
+            if response is None:
+                fingerprint_entries.append({
+                    "path": path,
+                    "content_sha256": None,
+                    "error": True,
+                })
+                continue
             content = response.content
             fingerprint_entries.append({
                 "path": path,

@@ -271,6 +271,23 @@ def test_catalog_fingerprint_changes_when_a_source_becomes_unavailable():
     assert available[2] != unavailable[2]
 
 
+def test_catalog_refresh_tolerates_a_short_skill_download_batch():
+    middleware = SmallModelSkillsMiddleware(
+        backend=Mock(), sources=["/skills/"], bundled_sources=["/skills/"])
+
+    metadata, error, entries = middleware._catalog_from_responses(
+        "/skills/", [{"path": "/skills/travel", "is_dir": True}], [])
+
+    assert metadata == []
+    assert error == "Cannot load skills from '/skills/': " + \
+        "skill download response count mismatch"
+    assert entries == [{
+        "path": "/skills/travel/SKILL.md",
+        "content_sha256": None,
+        "error": True,
+    }]
+
+
 def test_rebuilt_graph_refreshes_a_checkpointed_domain_catalog(tmp_path):
     from assist.agent import create_agent
     from assist.spec import AgentSpec

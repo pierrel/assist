@@ -63,7 +63,9 @@ which leaves the catalog and progressive tool authorization stale.
   existing load tool result.
 - A source can fail transiently.  The fingerprint includes the resulting
   discovery shape, so recovery refreshes the catalog rather than preserving a
-  false "current" marker.  Existing warning behavior remains intact.
+  false "current" marker.  A short backend download batch is recorded as a
+  failed skill entry rather than aborting a later turn.  Existing warning
+  behavior remains intact.
 - Discovery adds bounded file reads at agent start.  That is the required
   compatibility check, uses the current backend API, and is limited to mounted
   =SKILL.md= files.
