@@ -1,6 +1,6 @@
 ---
 name: research
-description: Use before answering a request that needs external, current, or source-backed facts beyond the available local evidence. It delegates the research and handles its results safely.
+description: Research external facts and identify real-world people, places, works, events, or products from incomplete clues. Load before answering when a correct identification or factual answer needs evidence beyond the available local material.
 ---
 
 # Research workflow
@@ -15,8 +15,10 @@ checked facts to scope this research.
 On the response after loading this skill, make exactly one `start_async_task`
 call for `research-agent`. Give it a complete brief: the question, checked local
 facts that matter, dates, names, locations, constraints, and the evidence the
-user needs. Report the task ID and return. Do not research through another tool
-or present unsupported facts yourself.
+user needs. Choose a bare, appropriately named `.org` filename and tell the
+worker: `Save the final report in your references workspace as:
+<filename>.org`. Report the task ID and return. Do not research through another
+tool or present unsupported facts yourself.
 
 ## Completion
 
