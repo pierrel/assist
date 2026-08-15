@@ -159,8 +159,9 @@ class TestAgentWorkspaceGuidance(TestCase):
         return [
             call for call in calls
             if (operation is None or call.get("name") == operation)
-            and any(isinstance(value, str) and value.startswith("/agent/")
-                    for value in (call.get("args") or {}).values())
+            and (isinstance(path := ((call.get("args") or {}).get("file_path")
+                                     or (call.get("args") or {}).get("path")), str)
+                 and path.startswith("/agent/"))
         ]
 
     def _message(self, agent: AgentHarness, text: str) -> str:
