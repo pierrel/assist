@@ -57,6 +57,7 @@ from assist.middleware.interjection import (collect_interjection_ids,
 from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
+from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
 from assist.events.reply import SMS_SENDER_KEY
 from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
@@ -94,6 +95,7 @@ from manage.web.state import (
     GEO_REGISTRY,
     INBOUND_LOG,
     INIT_STAGES,
+    LOCATION_STORE,
     MANAGER,
     MERGE_LOCK,
     MESSAGE_BACKLOG,
@@ -135,8 +137,8 @@ from manage.web.state import (
 # {_GEO_SEND_SCRIPT}. See _build_rider for the server side.
 _GEO_SEND_SCRIPT = """<script>
 // On send (not on page open): stamp time/tz, then fetch location. The browser
-// remembers the permission grant for this origin, so it prompts once; maximumAge
-// serves a cached fix afterwards. Denied/unsupported/timeout -> submit without coords.
+// remembers the permission grant for this origin, so it prompts once. Require a fresh
+// fix for each message; denied/unsupported/timeout -> submit without coords.
 function assistSend(form){
   if(form.__sending){ return false; }  // ignore repeat clicks while a send is in flight
   try{ form.sent_at.value=new Date().toISOString(); form.tz.value=Intl.DateTimeFormat().resolvedOptions().timeZone; }catch(e){}
@@ -145,17 +147,23 @@ function assistSend(form){
   navigator.geolocation.getCurrentPosition(
     function(p){ form.lat.value=p.coords.latitude; form.lon.value=p.coords.longitude; form.submit(); },
     function(){ form.submit(); },
-    {maximumAge:3600000, timeout:5000}
+    {maximumAge:0, timeout:5000}
   );
   return false;  // wait for the async fix, then submit programmatically
 }
 </script>"""
 
+# The location proof is rendered only into same-origin forms. It prevents another
+# site from reading a form and then poisoning the shared last-known fix. It is not
+# an account boundary: ordinary web access is already deployment-controlled.
+_LOCATION_FORM_TOKEN = secrets.token_urlsafe(32)
+
 # The hidden rider fields assistSend populates; drop into a form via {_RIDER_HIDDEN_INPUTS}.
 _RIDER_HIDDEN_INPUTS = ('<input type="hidden" name="sent_at"/>'
                         '<input type="hidden" name="tz"/>'
                         '<input type="hidden" name="lat"/>'
-                        '<input type="hidden" name="lon"/>')
+                        '<input type="hidden" name="lon"/>'
+                        f'<input type="hidden" name="location_token" value="{_LOCATION_FORM_TOKEN}"/>')
 
 # Pull-to-refresh for touch devices — drop before </body> on every page.  When the
 # page is scrolled to the top and the user drags down past TRIGGER px, reload.  Shows
@@ -1670,7 +1678,7 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
                 parent_run_id=None, dispatch_key=None,
                 cancel_pending=False, max_runs=None,
                 max_pending=None, multitask_strategy="enqueue",
-                delegate_user_urls=()) -> Run:
+                delegate_user_urls=(), location: LocationSnapshot | None = None) -> Run:
     """Commit one web turn before placing its id on a dispatch queue."""
     return _runs().create(
         tid, assistant_id, text, work_id=work_id, mode=mode,
@@ -1681,7 +1689,8 @@ def _create_run(tid: str, text: str | None, *, rider=None, sender=None,
         pending_text=pending_text, active_ms=active_ms,
         cancel_pending=cancel_pending, max_runs=max_runs,
         max_pending=max_pending, multitask_strategy=multitask_strategy,
-        delegate_user_urls=delegate_user_urls)
+        delegate_user_urls=delegate_user_urls,
+        location=_location_to_fields(location) if location else None)
 
 
 def _delegate_configurable(run: Run) -> dict | None:
@@ -1937,6 +1946,7 @@ def _execute_run(run_id: str, tid: str, *, user_priority: bool = False) -> None:
     with async_task_context(context):
         _process_message(
             tid, run.text, rider=_rider_from_fields(run.rider), sender=run.sender,
+            location=_location_from_fields(run.location),
             resume_decision=run.resume_decision, resume=run.resume,
             accumulated_active_ms=run.active_ms, pending_text=run.pending_text,
             origin=run.origin, _run=run,
@@ -2090,7 +2100,8 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
             successor = _create_run(
                 tid, None, rider=_rider_from_fields(run.rider), sender=run.sender,
                 resume=True, active_ms=run.active_ms, pending_text=pending_text,
-                origin=run.origin, work_id=run.work_id)
+                origin=run.origin, work_id=run.work_id,
+                location=_location_from_fields(run.location))
         _RESUME_SCHEDULER.submit(
             successor.id, tid, user_priority=user_priority)
         return
@@ -2116,7 +2127,8 @@ def _recover_run(run: Run, *, user_priority: bool = False) -> None:
         rider=_rider_from_fields(run.rider), sender=run.sender,
         resume=(decision == "resume"), active_ms=run.active_ms,
         pending_text=pending_text if decision == "resume" else None,
-        origin=run.origin, work_id=run.work_id)
+        origin=run.origin, work_id=run.work_id,
+        location=_location_from_fields(run.location))
     _RESUME_SCHEDULER.submit(successor.id, tid, user_priority=user_priority)
 
 
@@ -2125,6 +2137,7 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                      resume: bool = False, accumulated_active_ms: float = 0.0,
                      pending_text: str | None = None,
                      origin: str | None = None, _run: Run | None = None,
+                     location: LocationSnapshot | None = None,
                      assistant_id: str = "general-agent",
                      queue_user_priority: bool = False) -> None:
     event_id = _run.id if _run is not None else None
@@ -2322,6 +2335,12 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     _cfg = {}
                     if rider:
                         _cfg[CONTEXT_RIDER_KEY] = rider
+                    if not sender and assistant_id == "general-agent":
+                        snapshot = location
+                        if snapshot is None and _run is None:
+                            snapshot = LOCATION_STORE.recent()
+                        if snapshot is not None:
+                            _cfg[LOCATION_CONTEXT_KEY] = snapshot
                     if sender:
                         _cfg[SMS_SENDER_KEY] = sender
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
@@ -2477,7 +2496,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
             successor = _create_run(
                 tid, None, rider=rider, sender=sender, resume=True,
                 active_ms=carry, pending_text=pending_kwargs.get("pending_message"),
-                origin=origin, work_id=_run.work_id)
+                origin=origin, work_id=_run.work_id,
+                location=_location_from_fields(_run.location))
             _RESUME_SCHEDULER.submit(successor.id, tid)
         else:
             # Compatibility for direct low-level callers during the migration.
@@ -2709,11 +2729,13 @@ async def create_thread_with_message(
     engine: str = Form("deepagents"),
     sent_at: str | None = Form(None), tz: str | None = Form(None),
     lat: str | None = Form(None), lon: str | None = Form(None),
+    location_token: str | None = Form(None),
 ):
-    rider = _build_rider(sent_at, tz, lat, lon)
+    rider = _browser_rider(sent_at, tz, lat, lon, location_token)
+    location = await run_in_threadpool(_record_browser_location, rider)
     tid, run_id, selected = await run_in_threadpool(
         create_thread_with_message_core,
-        text, domain, rider, engine,
+        text, domain, rider, engine, location,
     )
     background_tasks.add_task(
         _initialize_thread, tid, run_id, selected, rider,
@@ -2723,6 +2745,7 @@ async def create_thread_with_message(
 
 def create_thread_with_message_core(
     text: str, domain: str | None, rider: ContextRider | None = None, engine: str = "deepagents",
+    location: LocationSnapshot | None = None,
 ) -> tuple[str, str, str | None]:
     """Persist a new thread's first Run before its slow initialization starts."""
     selected_engine = _require_new_thread_engine(engine)
@@ -2734,7 +2757,7 @@ def create_thread_with_message_core(
         _ensure_pi_description(tid, text)
     _set_status(tid, "initializing", pending_message=text, domain=selected or "",
                 started_at=_now_ms())
-    run = _create_run(tid, text, rider=rider)
+    run = _create_run(tid, text, rider=rider, location=location)
     return tid, run.id, selected
 
 
@@ -2860,7 +2883,8 @@ class _EmailApprovalPending(Exception):
     """A web submission tried to bypass a displayed email approval."""
 
 
-def _accept_message_run(tid: str, text: str, rider=None) -> tuple[Run, bool]:
+def _accept_message_run(tid: str, text: str, rider=None,
+                        location: LocationSnapshot | None = None) -> tuple[Run, bool]:
     """Persist one web submission and return whether earlier work owns the thread."""
     with _RUN_ADMISSION_LOCK:
         if _get_status(tid).get("pending_email_token"):
@@ -2874,7 +2898,7 @@ def _accept_message_run(tid: str, text: str, rider=None) -> tuple[Run, bool]:
             # Dispatch will make the existing invalid-engine error durable; title
             # best-effort must not change message-admission semantics.
             pass
-        run = _create_run(tid, text, rider=rider)
+        run = _create_run(tid, text, rider=rider, location=location)
         if busy:
             # Cover both wait points. The paused head may still be queued on
             # the scheduler, or it may already be parked inside the affinity
@@ -2883,6 +2907,30 @@ def _accept_message_run(tid: str, text: str, rider=None) -> tuple[Run, bool]:
             THREAD_QUEUE.promote(tid)
         _mark_pending(tid, text, busy, run.id)
         return run, busy
+
+
+def _record_browser_location(rider: ContextRider | None) -> LocationSnapshot | None:
+    """Persist a valid browser fix before run admission, never exposing it in prose."""
+    if rider is not None and rider.lat is not None and rider.lon is not None:
+        return LOCATION_STORE.record(rider.lat, rider.lon)
+    return LOCATION_STORE.recent()
+
+
+def _admit_message_with_location(tid: str, text: str,
+                                 rider: ContextRider | None) -> tuple[Run, bool]:
+    """Record this submission's browser fix before durably admitting its run."""
+    location = _record_browser_location(rider)
+    return _accept_message_run(tid, text, rider, location)
+
+
+def _browser_rider(sent_at: str | None, tz: str | None,
+                   lat: str | None, lon: str | None,
+                   location_token: str | None) -> ContextRider | None:
+    """Build a browser rider, admitting coordinates only from a rendered form."""
+    if (lat is not None or lon is not None) and not hmac.compare_digest(
+            location_token or "", _LOCATION_FORM_TOKEN):
+        lat = lon = None
+    return _build_rider(sent_at, tz, lat, lon)
 
 
 def _build_rider(sent_at: str | None, tz: str | None,
@@ -3250,6 +3298,23 @@ def _rider_to_fields(rider: ContextRider) -> dict:
             "tz": rider.tz, "lat": rider.lat, "lon": rider.lon}
 
 
+def _location_from_fields(fields: dict | None) -> LocationSnapshot | None:
+    """Rebuild a durable per-run private location snapshot, never prompt prose."""
+    if not fields:
+        return None
+    try:
+        return LocationSnapshot(float(fields["lat"]), float(fields["lon"]),
+                                datetime.fromisoformat(str(fields["observed_at"])))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _location_to_fields(location: LocationSnapshot) -> dict:
+    """Serialize the private snapshot carried through a paused run successor."""
+    return {"lat": location.lat, "lon": location.lon,
+            "observed_at": location.observed_at.isoformat()}
+
+
 def _recovery_decision(tid: str, pending_message: str) -> str:
     """Resume-vs-redispatch for one recovered thread, decided by GRAPH STATE (not
     text equality — a re-sent duplicate text or the supersede prefix would fool a
@@ -3559,16 +3624,17 @@ def _get_run_admission_limiter() -> anyio.CapacityLimiter:
 async def post_message(tid: str, background_tasks: BackgroundTasks,
                        text: str = Form(...),
                        sent_at: str | None = Form(None), tz: str | None = Form(None),
-                       lat: str | None = Form(None), lon: str | None = Form(None)):
+                       lat: str | None = Form(None), lon: str | None = Form(None),
+                       location_token: str | None = Form(None)):
     _existing_thread_dir(tid)  # validates tid (404 on traversal/NUL) + existence
     admitted = await anyio.to_thread.run_sync(
         _pi_message_admits, tid, limiter=_get_run_admission_limiter())
     if not admitted:
         raise HTTPException(status_code=503, detail="Pi preview is unavailable")
-    rider = _build_rider(sent_at, tz, lat, lon)
+    rider = _browser_rider(sent_at, tz, lat, lon, location_token)
     try:
         run, busy = await anyio.to_thread.run_sync(
-            lambda: _accept_message_run(tid, text, rider),
+            lambda: _admit_message_with_location(tid, text, rider),
             limiter=_get_run_admission_limiter())
     except _EmailApprovalPending:
         raise HTTPException(status_code=409,
@@ -3941,10 +4007,9 @@ def _as_lines(value) -> list:
 # origin is green, every other place is the default blue.
 _ORIGIN_COLOR, _ORIGIN_FILL = "#15803d", "#22c55e"    # user's origin / current location
 _DEFAULT_COLOR, _DEFAULT_FILL = "#1d4ed8", "#3b82f6"   # every other place
-# A pin's coordinate, tolerant of how the model copies the message-context location
-# ("sent from ~37.77, -122.42"): an OPTIONAL leading ~ on either number and whitespace
-# after the comma. Without this, a verbatim-copied origin coord fails float() and the pin
-# (the user's own location — the whole point of the origin marker) is silently dropped.
+# A pin's coordinate tolerates legacy user-provided coordinate spelling: an OPTIONAL
+# leading ~ on either number and whitespace after the comma. Without this, a copied
+# coordinate fails float() and its intended origin marker is silently dropped.
 _COORD_RE = re.compile(r"~?\s*(-?\d+(?:\.\d+)?)\s*,\s*~?\s*(-?\d+(?:\.\d+)?)")
 
 

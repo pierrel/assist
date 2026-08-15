@@ -1,6 +1,12 @@
 #+title: Context rider — per-message time (+ geo) for the agent
 #+date: 2026-06-29
 
+* Superseded geo portion
+
+Time and timezone remain rider responsibilities.  The described location-prose
+and geo-context plan are superseded by
+[[file:2026-08-15-location-context-tool.org][deliberate current-location lookup]].
+
 * Goal
 Deliver to the agent, with each message, WHEN (and later WHERE) the message was
 sent. A "rider" = per-MESSAGE context on the turn — distinct from ~AgentSpec~

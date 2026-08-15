@@ -79,11 +79,16 @@ class Run:
     # For delegate slices only: brief-form URLs canonically matched to owner Runs
     # already accepted at admission, without added or changed userinfo.
     delegate_user_urls: tuple[str, ...] = ()
+    # Private host-side location snapshot for this visible run. It is excluded
+    # from protocol responses and is only reconstructed into tool configuration.
+    location: dict | None = None
 
     def to_dict(self) -> dict:
         value = asdict(self)
         if not self.delegate_user_urls:
             value.pop("delegate_user_urls")
+        if self.location is None:
+            value.pop("location")
         return value
 
     @staticmethod
@@ -118,6 +123,7 @@ class Run:
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
             delegate_user_urls=tuple(value.get("delegate_user_urls") or ()),
+            location=dict(value["location"]) if value.get("location") else None,
         )
 
 
@@ -184,6 +190,7 @@ class RunService(PerThreadJsonStore[Run]):
         max_pending: int | None = None,
         multitask_strategy: str = "enqueue",
         delegate_user_urls: tuple[str, ...] = (),
+        location: dict | None = None,
     ) -> Run:
         """Persist and return a pending run, the work-acceptance commit."""
         if not assistant_id:
@@ -213,6 +220,7 @@ class RunService(PerThreadJsonStore[Run]):
             multitask_strategy=multitask_strategy,
             created_at=now, updated_at=now,
             delegate_user_urls=tuple(delegate_user_urls),
+            location=dict(location) if location else None,
         )
         with self._lock:
             if mode == "child":

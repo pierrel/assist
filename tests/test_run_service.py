@@ -25,6 +25,22 @@ def test_create_is_durable_acceptance_commit(service, tmp_path):
     assert service.get("t1", run.id).rider == {"tz": "UTC"}
 
 
+def test_visible_run_keeps_private_location_across_a_successor(service, tmp_path):
+    location = {"lat": 37.7749, "lon": -122.4194,
+                "observed_at": "2026-08-15T20:00:00+00:00"}
+    first = service.create("t1", "general-agent", "walk from here", location=location)
+    service.claim("t1", first.id)
+    service.transition("t1", first.id, "interrupted")
+    successor = service.create(
+        "t1", "general-agent", None, work_id=first.work_id, resume=True,
+        pending_text=first.text, location=first.location,
+    )
+
+    stored = json.loads((tmp_path / "t1" / "runs.json").read_text())
+    assert stored[-1]["location"] == location
+    assert successor.location == location
+
+
 def test_delegate_user_urls_round_trip_only_on_the_child_slice(service, tmp_path):
     child = service.create(
         "sub-t3", "delegate-agent", "read https://owner.example/page",

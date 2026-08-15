@@ -114,20 +114,16 @@ class TestMapAgent(AgentTestMixin, TestCase):
                       "so I can see where they are relative to each other.")
         self._assert_wellformed(self._map_blocks(agent))
 
-    def test_recommendation_renders_map_with_origin_pin(self):
+    def test_recommendation_renders_map(self):
         """The updated guidance: when RECOMMENDING places (NOT explicitly asked to map),
-        the model still renders a map — and marks the user's current location with the
-        `origin` prefix (the renderer colors it green). Places are named so no research
-        runs; the model doesn't pick colors, only marks the origin."""
+        the model still renders a map. Places are named so no research runs. The
+        older coordinate-in-context origin assertion is intentionally retired:
+        current location now comes only from the deliberate travel-tool lookup."""
         agent = self.message_with_mocked_research(self._agent,
-            "[Message context: sent from ~37.7749, -122.4194] "
             "Which of these is best for a laptop session for a couple hours: Four Barrel "
             "Coffee, Ritual Coffee, or Haus Coffee? They're all near Valencia Street, SF.")
         blocks = self._map_blocks(agent)
         self._assert_wellformed(blocks)     # a map appeared though the user never said "map it"
-        self.assertTrue(
-            any(_ORIGIN_PIN.search(b) for b in blocks),
-            f"expected an `origin`-marked pin for the user's location; blocks: {blocks}")
 
 
 class TestPromptRewriteMapOutcome(TestMapAgent):
@@ -136,7 +132,7 @@ class TestPromptRewriteMapOutcome(TestMapAgent):
     test_emits_map_block_for_places = None
     test_emits_map_with_route = None
     test_emits_map_alternate_wording = None
-    test_recommendation_renders_map_with_origin_pin = None
+    test_recommendation_renders_map = None
 
     def _agent(self):
         root = tempfile.mkdtemp(prefix="map_web_main_")

@@ -1,6 +1,13 @@
 #+title: Geo context rider (#5) — per-message location → model + "from here"
 #+date: 2026-06-29
 
+* Superseded
+
+This is the historical v1 design.  The current contract is
+[[file:2026-08-15-location-context-tool.org][deliberate current-location lookup]]:
+coordinates are not model context, and travel/directions tools resolve an opaque handle
+from a private global last-known-location record.
+
 * Goal
 Extend the context rider (#3 shipped TIME only) to also carry the user's
 geo-location per message, so the agent knows *where* they are — enabling "find a
