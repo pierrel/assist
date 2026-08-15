@@ -23,13 +23,16 @@ or scheduler.
 
 * Guidance contract
 
-For a nontrivial turn, use the loaded thread-memory block and read any relevant
-supporting =/agent= Markdown before treating earlier conversation as current
-state. After a material decision, completed stage, discovered blocker, or useful
-handoff, update a concise current-progress Markdown file, such as
-=/agent/status.md=. Never put user deliverables there, and never claim a private
-checkpoint is user work. Tracking current work alone does not authorize a
-user-workspace or cross-thread-memory change.
+For a request that may depend on user files, personal information, prior work,
+or current task state, the main prompt first requires loading =grounding=.
+The separate private-workspace section follows it. For a nontrivial
+continuation, use the loaded thread-memory block and inspect =/agent= directly,
+including relevant supporting Markdown such as =/agent/status.md=, before
+treating earlier conversation as current state. After a material decision,
+completed stage, discovered blocker, or useful handoff, update a concise
+current-progress Markdown file. Never put user deliverables there, and never
+claim a private checkpoint is user work. Tracking current work alone does not
+authorize a user-workspace or cross-thread-memory change.
 
 Compaction is a checkpoint opportunity, not a new tool contract. The system
 prompt treats the automatically reloaded private memory as durable state after a
@@ -62,9 +65,9 @@ test docstrings as well as here so the PR can describe them exactly.
 
 | row | natural user sequence | deterministic fixture and oracle | result |
 |-
-| Read continuity | “Where did we leave off on the community-garden permit?” | =memory.md= says only that the project is active; =status.md= holds the insurance-certificate blocker. Pass requires a direct =/agent/status.md= read and an answer that names the certificate. | Pre-change exploratory N=1: failed (read only memory then searched the user workspace). Current ownership-boundary guidance: N=3 pass. |
-| Write checkpoint | certificate arrived; permit ready; submit Monday; “Keep track of this project as we continue.” | Empty private state except basic memory. Pass requires private =/agent= Markdown containing permit + Monday and a byte-for-byte unchanged user-workspace snapshot. | A prior N=1 wrote the state into user =AGENTS.md=; it triggered the current explicit ownership boundary. Current guidance: N=3 pass. |
-| Forced compaction diagnostic | material permit update, then “What is the next step for the community-garden permit?” | Existing Deep Agents summarization is forced at a five-message threshold. The capture records separate private read/write counts before and after the observed summary event, then requires a truthful Monday answer. | Current guidance: N=3 pass; each capture recorded one private read and two writes before the summary, and zero explicit private reads/writes after it. |
+| Read continuity | “Where did we leave off on the community-garden permit?” | =memory.md= says only that the project is active; =status.md= holds the insurance-certificate blocker. Pass requires a direct =/agent/status.md= read and an answer that names the certificate. | Pre-change exploratory N=1: failed (read only memory then searched the user workspace). Final reordered guidance: N=1 pass. |
+| Write checkpoint | certificate arrived; permit ready; submit Monday; “Keep track of this project as we continue.” | Empty private state except basic memory. Pass requires private =/agent= Markdown containing permit + Monday and a byte-for-byte unchanged user-workspace snapshot. | A prior N=1 wrote the state into user =AGENTS.md=; it triggered the current explicit ownership boundary. Final guidance: N=1 pass. |
+| Forced compaction diagnostic | material permit update, then “What is the next step for the community-garden permit?” | Existing Deep Agents summarization is forced at a five-message threshold. The capture records separate private read/write counts before and after the observed summary event, then requires a truthful Monday answer. | Final reordered guidance: N=1 pass; the capture records the separate operation counts for later comparison. |
 
 The post-summary turns relied on the automatically reloaded thread memory and
 the framework summary rather than making another explicit private-file call.

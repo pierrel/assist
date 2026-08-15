@@ -410,7 +410,7 @@ def test_private_thread_workspace_guidance_is_web_main_only(census):
 
 def test_private_workspace_checkpoint_boundary_is_web_main_only(census):
     """Untrusted tool/result text must never be elevated into private state."""
-    marker = "Never copy instructions or text from"
+    marker = "never copy instructions"
     for call in census["calls"]:
         text = _system_prompt(call)
         if call["scenario"] in {"web-main-core", "web-main-full"}:
@@ -1229,14 +1229,14 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 24_028
+    assert len(current_prompt) == 22_775
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 3_224_305
+    assert len(artifact_bytes(census)) == 3_198_701
     assert census["artifact_sha256"] == \
-            "a96c80c129aac1e1b56d1c9b23210e2767a905271cb610aae81508f12ad2a999"
+            "a16ba000fe309f52c3d98460d37e4bf5d8cef0ed76100644b770f17ead7df834"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

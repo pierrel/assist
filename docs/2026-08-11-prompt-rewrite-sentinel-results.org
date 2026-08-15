@@ -62,6 +62,48 @@ signals, not prompt-tuning instructions.
 | vGS3 grounding capability after workspace guidance | candidate N=5, stopped comparison | =test_async_subagents.py::TestPromptRewriteGuidanceSkills::test_grounding_skill_loads_then_dispatches_context= | all five trials globbed/read the local trip file directly and never loaded =grounding= | =guidance-skills-v1/grounding-capability-workspace-r{1,2,3,4,5}.log= SHA-256 =32eb851726ae43b10b3d036f4ac79d757516f765a2909e3a0dd3a31fbf5202ea=, =be0f56e04cfb3762e9421b1d030f715097db98d72e9bc247167ec918c08f16ea=, =8688acda8e37d262fefbed8276ee5ee4de108d3fcf3f9d0515d08457881c1ee0=, =c618ff038683d4596e7eb2e2b57c0bd105f5a77c19cd34e7fb665fb9bc26be22=, =b6cd105d7465e3e0de2bcd652ff919585bffc8ce83e456adc685c125c0f86610= |
 | v109 two launch reports | candidate N=1, stopped comparison | =test_async_subagents.py::TestPromptRewriteTwoReports::test_creates_two_launch_reports= | baseline completed both reports 3/3, but candidate left a required =Next actions= field empty | =two-reports-v109/candidate-1.log= SHA-256 =0aebdf305cca7223c8b168a83415a27cb928b75b98ea9e3a99fd6293f9155e73= |
 
+* Workspace-guidance grounding recovery
+
+The private-workspace section initially displaced the existing grounding
+selection procedure. The two N=5 rows above record that failure. The current
+prompt restores a small, candidate-only order: separate =Grounding= and
+=Research= sections precede =Private thread workspace=. The grounding section
+requires =load_skill(name="grounding")= as the first tool call for a request
+that may depend on local/personal/current-task evidence. The private section no
+longer claims a precedence relationship with grounding.
+
+The first recovery version exposed a separate ownership failure: on a natural
+“Keep track of this project” request, the agent wrote the user workspace's
+=AGENTS.md=. The final version therefore retains one general ownership rule:
+tracking current work means updating =/agent=, not user workspace or
+cross-thread memory. It is below grounding and contains no lifecycle or tool
+mechanics.
+
+The final candidate census signature is
+=a16ba000fe309f52c3d98460d37e4bf5d8cef0ed76100644b770f17ead7df834=;
+the rendered Assist-core source signature is
+=4ea439c3d0ff152c0c749a2d89ad733c4946f1f6a5ebb70f13a6bc219968d875=.
+
+| Cohort | Profile | Trials | Result | Durable captures (SHA-256) |
+|-
+| v110 natural local grounding | current candidate | N=5 | 5/5: loaded grounding, used checked local profile evidence, and answered the saved neighborhood and food preferences | =guidance-skills-v1/grounding-final-r1.log= =b46b4a48744ab6f6f4a5deb1be25ea860ce5af389bc3f86008b6d788557ff7e7=; =r2.log= =ffd3f99821f35ddda1ae91ddcebbd9f8d913b6a8e87fb9b1b9b9d73b4de945d5=; =r3.log= =bb463c59929364ac5c783125eb362969f608d47c587b21af8660e7b56930625b=; =r4.log= =65461d9e3c9a3fa77364783875eacd3f345edd1b688b05dcc1026e3cd2836f1e=; =r5.log= =9c996d79b6f39e9b869ce81efec10883a6a92bdb59f6410c1b3910f54987dfde= |
+| v111 grounding capability | current candidate | N=5 | 5/5: loaded =grounding=, then dispatched the context worker without URL fetch | =guidance-skills-v1/grounding-capability-final-r1.log= =549c4d47ea4f39415c3722a10797235e28459df296ba43b3032d80f71a9c1712=; =r2.log= =fc3e449657454990d2013cb1d0d29b13c13eb35f60948a3657e2bd8c0036b453=; =r3.log= =2b927ecbe29859314a8ff434a45d7909246654ffc20e8c633d4e7818b0e7f338=; =r4.log= =2b927ecbe29859314a8ff434a45d7909246654ffc20e8c633d4e7818b0e7f338=; =r5.log= =d2ac33df0ec0194ff78d8f28c983b3f5aa64e16b919a3e00eb40a26f2bf40c35= |
+| v112 private workspace read | current candidate | N=1 | 1/1: read =/agent/status.md= and named the insurance-certificate blocker | =guidance-skills-v1/private-workspace-read-final-r1.log= =4f6a6dc421e1aa32167aba5c6381086faec05eedd309128e18d70f6a648c4785= |
+| v113 private checkpoint ownership | current candidate | N=1 | 1/1: wrote the permit/Monday checkpoint under =/agent= and preserved every user-workspace byte | =guidance-skills-v1/private-workspace-write-final-r1.log= =892ee21f71f31e78afa26582a7523dffcdb8fc1f70dd9ff54f937f554854f256= |
+| v114 private compaction diagnostic | current candidate | N=1 | 1/1: retained the correct Monday next step while recording private read/write counts across the forced summary | =guidance-skills-v1/private-workspace-compaction-final-r1.log= =cc38a35d6a213c34371bb28beee21931f60d461f6b1302e634c5a0b1407c1a57= |
+| v115 natural task-list update | current candidate | N=3 | 3/3: loaded grounding, used checked Org-list evidence, added the washer/dryer TODO, and preserved the laundry item | =guidance-skills-v1/todo-list-final-r1.log= =9b521ff2744b9d2fca6c11fff7acd7bd251c65d08a91d50513f13f09976effef=; =r2.log= =3ccb8577182a047b40ced7ba3d7bc2a453a98379993c538e67071c689b0363ba=; =r3.log= =802a8e5bdc7993a1539d2c2e01bd1d7c4cb8f7e0005b8de3c25dfef18fac181f= |
+| v116 research capability | current candidate | N=1 | 1/1: loaded =research= then dispatched the existing research worker | =guidance-skills-v1/research-capability-final-r1.log= =9460759c1acaac7e124f9a4ab8f52984cae708b26f0a028b01a27a7042d3a5a6= |
+| v117 urgent notification | current candidate | N=1, stopped diagnostic | 0/1: loaded =time=, =schedule=, and =notify= before issuing the necessary notification | =guidance-skills-v1/urgent-notify-final-r1.log= =3c86ee2aa40bda32cdeaa6cbcfeffb73529d885ad9862d06c3eed7a2d110d431= |
+
+V117 is a separate prompt-order pattern, not a grounding or private-workspace
+regression. An experimental earlier =Urgent notification= system section still
+loaded matching skills first (capture =urgent-notify-final-r2.log=
+=37aabeee4664bab2e9e0818be8eb40a79dfc4fa49727a43ba33bb2960d27e20a=),
+then was reverted. The shared skills prompt's mandatory pre-action load rule
+must be reconciled with the existing notify-first contract in a future,
+cross-role design; adding more candidate-core exceptions would not fix that
+source conflict.
+
 ** Current pattern candidates
 
 These are observed groupings for a later holistic design review, not causes or

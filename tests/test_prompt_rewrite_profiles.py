@@ -36,13 +36,16 @@ def test_guidance_skill_profile_capture_keeps_web_main_shape_on_both_sides():
     assert candidate["guidance_skills_env"] is True
     assert baseline["initial_text"].startswith("## Purpose\n\nYou are Assist")
     assert candidate["initial_text"].startswith("## Purpose\n\nYou are Assist")
+    assert "## Grounding and research" in baseline["initial_text"]
+    assert "## Grounding and research" not in candidate["initial_text"]
     assert "- **grounding**:" not in baseline["final_text"]
     assert "- **research**:" not in baseline["final_text"]
     assert "- **grounding**:" in candidate["final_text"]
     assert "- **research**:" in candidate["final_text"]
-    grounding_instruction = "load `grounding`\nbefore deciding"
+    grounding_instruction = 'make `load_skill(name="grounding")` your first'
     assert grounding_instruction not in baseline["initial_text"]
     assert grounding_instruction in candidate["initial_text"]
+    assert "## Private thread workspace" in candidate["initial_text"]
     assert baseline["visible_tools"] == candidate["visible_tools"]
     assert "assist.PromptCompositionMiddleware" in baseline["transition_owners"]
     assert "assist.PromptCompositionMiddleware" in candidate["transition_owners"]

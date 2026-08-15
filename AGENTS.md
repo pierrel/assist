@@ -130,6 +130,13 @@ When changing how the model behaves (a skill, a prompt, a tool surface):
 3. **Review for generality; don't overfit to the one case.** A fix tuned to the exact reproduction is a non-fix. Stress-test the rule against the range of real request shapes (an agent reviewing for generality is worth a pass).
 4. **Chasing a residual: 100%-or-revert.** When adding an extra rider to close the last failures, keep it only if it fully clears them; otherwise revert to the simpler version that already worked.
 5. **Evals are not a pass/fail gate.** A partial pass-rate is expected and fine for evals (unlike unit tests). Don't mask a known-partial eval with `xfail` to keep a suite green — let it report its real rate.
+6. **Run capability coverage for model-facing edits.** Before changing a system
+   prompt, skill, model-visible tool description, or other behavior-modifying
+   guidance, inventory every capability it mentions, moves, removes, or
+   rewords. Run the corresponding natural and/or explicit capability evals in
+   the candidate safety panel, including a capability whose instruction was
+   removed. Treat framework capabilities such as `write_todos` the same way as
+   named skills, and list the selected rows and results in the PR description.
 
 # Testing guidelines
 1. Always run python tests (`pytest`) whenever any python files are modified and iterate on any failures until tests pass.
