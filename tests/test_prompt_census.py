@@ -375,12 +375,9 @@ def test_every_prompt_transition_is_observed_and_attributed(census):
 
 def test_web_main_alone_has_the_attributed_static_prompt_reorder(census):
     from deepagents.graph import BASE_AGENT_PROMPT
-    from assist.promptable import base_prompt_for
+    from assist.web_main_prompt import render_deep_web_main_prompt
 
-    core = base_prompt_for(
-        "deepagents/assist_core.md.j2", workspace_dir="/workspace",
-        references_dir="/workspace/references", delegation_mode="async",
-        agent_role="main", guidance_skills=True)
+    core = render_deep_web_main_prompt(guidance_skills=True).text
     for scenario in ("web-main-core", "web-main-full"):
         call = _call(census, scenario)
         composition = [transition for transition in call["provenance"]["transitions"]
@@ -417,6 +414,36 @@ def test_private_workspace_checkpoint_boundary_is_web_main_only(census):
             assert marker in text
         else:
             assert marker not in text
+
+
+def test_web_main_engine_profiles_record_shared_and_engine_specific_identity(census):
+    profiles = census["web_main_engine_profiles"]
+    deep = profiles["deepagents"]
+    pi = profiles["pi"]
+
+    assert set(profiles) == {"deepagents", "pi"}
+    assert census["web_main_prompt_rewrite_reference_commit"] == (
+        "8969b7c4aa4354886b5464b0e868235696373d72")
+    assert deep["source_commit"] == pi["source_commit"]
+    assert re.fullmatch(r"[0-9a-f]{40}", deep["source_commit"])
+    assert deep["shared_core_sha256"] == pi["shared_core_sha256"]
+    assert deep["adapter_sha256"] != pi["adapter_sha256"]
+    assert deep["static_prompt_sha256"] != pi["static_prompt_sha256"]
+    assert deep["provider_system_prompt_sha256"] != pi["host_system_prompt_sha256"]
+    assert pi["host_system_prompt_sha256"] == pi["static_prompt_sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", pi["worker_source_sha256"])
+    assert pi["worker_declared_tool_names"] == ["read", "write", "edit", "bash"]
+    assert pi["worker_provider_declaration"] == {
+        "provider": "assist-pi",
+        "transport": "openai-completions",
+        "model_source": "request.model",
+        "thinking_level": "off",
+    }
+    assert deep["provider_profile"] == {
+        "model": "synthetic-qwen-census",
+        "temperature": 0.1,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
 
 
 def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):

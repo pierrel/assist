@@ -38,8 +38,10 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 FIXED_NOW = "2026-07-30 12:00 UTC"
+WEB_MAIN_PROMPT_REWRITE_REFERENCE_COMMIT = (
+    "8969b7c4aa4354886b5464b0e868235696373d72")
 MAX_RUN_BYTES = 16 * 1024 * 1024
 DEFAULT_OUTPUT_ROOT = Path.home() / "deploy" / "assist" / "prompt-census"
 REQUIRED_PATHS = {
@@ -1086,6 +1088,7 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
     import langchain.agents.factory as factory_mod
     import langchain.agents.middleware.todo as todo_mod
     import assist.agent as assist_agent_mod
+    import assist.web_main_prompt as web_main_prompt_mod
     import assist.middleware.context_rider_middleware as rider_mod
     import assist.middleware.prompt_composition as composition_mod
     import assist.middleware.skills_middleware as assist_skills_mod
@@ -1198,6 +1201,9 @@ def _instrument(trace: CensusTrace) -> Iterator[None]:
         stack.enter_context(patch.object(
             assist_agent_mod, "base_prompt_for",
             prompt_renderer("assist", assist_agent_mod.base_prompt_for)))
+        stack.enter_context(patch.object(
+            web_main_prompt_mod, "base_prompt_for",
+            prompt_renderer("assist", web_main_prompt_mod.base_prompt_for)))
         stack.enter_context(patch.object(
             capture_agent_mod, "base_prompt_for",
             prompt_renderer("edd", capture_agent_mod.base_prompt_for)))
@@ -2254,10 +2260,69 @@ def _assert_json_schema(schema: dict[str, Any]) -> None:
 
 def _assert_closed_artifact_shapes(artifact: dict[str, Any]) -> None:
     root_keys = {"schema_version", "fixed_clock", "source_manifest", "calls",
-                 "tool_nodes", "capabilities", "observations", "findings"}
+                 "tool_nodes", "capabilities", "observations", "findings",
+                 "web_main_engine_profiles",
+                 "web_main_prompt_rewrite_reference_commit"}
     if "artifact_sha256" in artifact:
         root_keys.add("artifact_sha256")
     _assert_keys(artifact, root_keys, "census artifact")
+    if artifact["web_main_prompt_rewrite_reference_commit"] != \
+            WEB_MAIN_PROMPT_REWRITE_REFERENCE_COMMIT:
+        raise AssertionError("web-main prompt rewrite reference commit drifted")
+
+    profiles = artifact["web_main_engine_profiles"]
+    if set(profiles) != {"deepagents", "pi"}:
+        raise AssertionError("web-main engine profiles are incomplete")
+    profile_common = {
+        "source_commit", "source_tree_dirty", "shared_core_sha256",
+        "adapter_sha256", "static_prompt_sha256",
+        "provider_system_prompt_sha256", "provider_profile",
+    }
+    _assert_keys(
+        profiles["deepagents"],
+        profile_common | {"visible_tool_schema_sha256"},
+        "DeepAgents web-main profile",
+    )
+    _assert_keys(
+        profiles["pi"],
+        {"source_commit", "source_tree_dirty", "shared_core_sha256",
+         "adapter_sha256", "static_prompt_sha256",
+         "host_system_prompt_sha256", "worker_source_sha256",
+         "worker_declared_tool_names", "worker_declared_tool_names_sha256",
+         "worker_provider_declaration"},
+        "Pi web-main profile",
+    )
+    for engine, profile in profiles.items():
+        if not re.fullmatch(r"[0-9a-f]{40}", profile["source_commit"]):
+            raise AssertionError(f"{engine} profile source commit is not exact")
+        if not isinstance(profile["source_tree_dirty"], bool):
+            raise AssertionError(f"{engine} profile source tree state is not declared")
+        for key in ("shared_core_sha256", "adapter_sha256", "static_prompt_sha256"):
+            if not re.fullmatch(r"[0-9a-f]{64}", profile[key]):
+                raise AssertionError(f"{engine} profile {key} is not a digest")
+    if not re.fullmatch(
+            r"[0-9a-f]{64}", profiles["deepagents"]["visible_tool_schema_sha256"]):
+        raise AssertionError("DeepAgents profile tool schema is not a digest")
+    if not re.fullmatch(
+            r"[0-9a-f]{64}", profiles["deepagents"]["provider_system_prompt_sha256"]):
+        raise AssertionError("DeepAgents provider system prompt is not a digest")
+    for key in ("host_system_prompt_sha256", "worker_source_sha256",
+                "worker_declared_tool_names_sha256"):
+        if not re.fullmatch(r"[0-9a-f]{64}", profiles["pi"][key]):
+            raise AssertionError(f"Pi profile {key} is not a digest")
+    if profiles["pi"]["worker_declared_tool_names"] != [
+            "read", "write", "edit", "bash"]:
+        raise AssertionError("Pi worker tool declaration drifted")
+    _assert_keys(
+        profiles["deepagents"]["provider_profile"],
+        {"model", "temperature", "extra_body"},
+        "DeepAgents provider profile",
+    )
+    _assert_keys(
+        profiles["pi"]["worker_provider_declaration"],
+        {"provider", "transport", "model_source", "thinking_level"},
+        "Pi worker provider declaration",
+    )
 
     source_keys = {
         "package": {"id", "kind", "version"},
@@ -2460,6 +2525,28 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
     }
     if actual_paths != EXPECTED_PATHS_BY_SCENARIO:
         raise AssertionError("census scenario-to-path matrix drifted")
+    profiles = artifact["web_main_engine_profiles"]
+    deep_call = next(
+        call for call in artifact["calls"]
+        if call["scenario"] == "web-main-core" and call["call_index"] == 0)
+    deep_profile = profiles["deepagents"]
+    if deep_profile["provider_system_prompt_sha256"] != _sha(
+            _system_prompt(deep_call)):
+        raise AssertionError("DeepAgents profile system prompt drifted")
+    if deep_profile["visible_tool_schema_sha256"] != _sha(
+            deep_call["provider_payload"].get("tools", [])):
+        raise AssertionError("DeepAgents profile tool schema drifted")
+    if deep_profile["provider_profile"] != {
+            key: deep_call["provider_payload"].get(key)
+            for key in ("model", "temperature", "extra_body")}:
+        raise AssertionError("DeepAgents provider profile drifted")
+    pi_profile = profiles["pi"]
+    if pi_profile["host_system_prompt_sha256"] != \
+            pi_profile["static_prompt_sha256"]:
+        raise AssertionError("Pi host prompt identity drifted")
+    if pi_profile["worker_declared_tool_names_sha256"] != _sha(
+            pi_profile["worker_declared_tool_names"]):
+        raise AssertionError("Pi worker tool declaration digest drifted")
     for call in artifact["calls"]:
         messages = call["provider_payload"].get("messages", [])
         if call["scenario"] == "capture":
@@ -3279,6 +3366,92 @@ def capture_census() -> dict[str, Any]:
     return artifact
 
 
+def _source_identity() -> tuple[str, bool]:
+    """Identify the exact commit and dirty state that produced this census."""
+    repo = Path(__file__).resolve().parents[1]
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=repo, text=True).strip())
+        return commit, dirty
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise AssertionError("prompt census source commit is unavailable") from error
+
+
+def _pi_worker_declaration() -> tuple[list[str], str]:
+    """Read Pi's closed worker declaration without loading ambient SDK state."""
+    worker = (Path(__file__).resolve().parents[1] / "assist" / "pi_runtime"
+              / "src" / "worker.ts").read_text(encoding="utf-8")
+    match = re.search(r"tools:\s*\[([^]]+)]\s*,\s*customTools", worker)
+    if match is None:
+        raise AssertionError("Pi worker tool declaration is unavailable")
+    names = re.findall(r'"([A-Za-z0-9_-]+)"', match.group(1))
+    if names != ["read", "write", "edit", "bash"]:
+        raise AssertionError("Pi worker tool declaration drifted")
+    required = (
+        'runtime.registerProvider("assist-pi"',
+        'api: "openai-completions"',
+        'id: request.model',
+        'thinkingLevel: "off"',
+    )
+    if not all(marker in worker for marker in required):
+        raise AssertionError("Pi worker provider declaration drifted")
+    return names, hashlib.sha256(worker.encode("utf-8")).hexdigest()
+
+
+def _web_main_engine_profiles(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Record the comparable prompt/tool/provider identity for both engines."""
+    from assist.web_main_prompt import (
+        render_deep_web_main_prompt,
+        render_pi_web_main_prompt,
+    )
+
+    deep = render_deep_web_main_prompt(guidance_skills=True)
+    pi = render_pi_web_main_prompt()
+    deep_call = next(
+        call for call in calls
+        if call["scenario"] == "web-main-core" and call["call_index"] == 0)
+    deep_system = _system_prompt(deep_call)
+    if deep.text not in deep_system:
+        raise AssertionError("Deep web-main core is absent from its provider prompt")
+    pi_tools, worker_source_sha256 = _pi_worker_declaration()
+    source_commit, source_tree_dirty = _source_identity()
+    return {
+        "deepagents": {
+            "source_commit": source_commit,
+            "source_tree_dirty": source_tree_dirty,
+            "shared_core_sha256": deep.shared_core_sha256,
+            "adapter_sha256": deep.adapter_sha256,
+            "static_prompt_sha256": deep.sha256,
+            "provider_system_prompt_sha256": _sha(deep_system),
+            "visible_tool_schema_sha256": _sha(
+                deep_call["provider_payload"].get("tools", [])),
+            "provider_profile": {
+                key: deep_call["provider_payload"].get(key)
+                for key in ("model", "temperature", "extra_body")
+            },
+        },
+        "pi": {
+            "source_commit": source_commit,
+            "source_tree_dirty": source_tree_dirty,
+            "shared_core_sha256": pi.shared_core_sha256,
+            "adapter_sha256": pi.adapter_sha256,
+            "static_prompt_sha256": pi.sha256,
+            "host_system_prompt_sha256": pi.sha256,
+            "worker_source_sha256": worker_source_sha256,
+            "worker_declared_tool_names": pi_tools,
+            "worker_declared_tool_names_sha256": _sha(pi_tools),
+            "worker_provider_declaration": {
+                "provider": "assist-pi",
+                "transport": "openai-completions",
+                "model_source": "request.model",
+                "thinking_level": "off",
+            },
+        },
+    }
+
+
 def capture_prompt_rewrite_profiles() -> dict[str, dict[str, Any]]:
     """Capture the exact legacy and candidate eval-helper prompt profiles.
 
@@ -3431,15 +3604,19 @@ def _capture_census() -> dict[str, Any]:
             raise trace.faults[0]
         source_manifest = _source_manifest(trace)
         capabilities = _capabilities(trace, observations, source_manifest)
+        engine_profiles = _web_main_engine_profiles(trace.calls)
         artifact = {
             "schema_version": SCHEMA_VERSION,
             "fixed_clock": FIXED_NOW,
+            "web_main_prompt_rewrite_reference_commit": (
+                WEB_MAIN_PROMPT_REWRITE_REFERENCE_COMMIT),
             "source_manifest": source_manifest,
             "calls": trace.calls,
             "tool_nodes": trace.tool_nodes,
             "capabilities": capabilities,
             "observations": observations,
             "findings": _findings(trace, capabilities, observations),
+            "web_main_engine_profiles": engine_profiles,
         }
         paths = {call["path"] for call in trace.calls}
         missing = REQUIRED_PATHS - paths
