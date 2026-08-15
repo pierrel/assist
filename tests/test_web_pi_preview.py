@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import shutil
+from contextlib import contextmanager
 
 import pytest
 from fastapi import HTTPException
@@ -11,9 +11,10 @@ from fastapi.testclient import TestClient
 
 from manage.web import threads
 from manage.web import state
-from assist.pi_runtime import PiRuntimeError
+from assist.pi_runtime import PiRuntimeError, PiRuntimeResult
 from assist.pi_trace import PiTraceEvent
 from assist.thread_engine import read_thread_engine
+from assist.web_main_prompt import WebMainPromptError, render_pi_web_main_prompt
 
 
 class _Preview:
@@ -27,6 +28,14 @@ class _Preview:
     def admits(self, engine: str) -> bool:
         assert engine == "pi"
         return self._admits
+
+
+class _Queue:
+    @contextmanager
+    def acquire(self, tid: str, *, user_priority: bool):
+        assert tid == "pi-source"
+        assert user_priority is False
+        yield
 
 
 @pytest.fixture
@@ -55,18 +64,71 @@ def test_new_pi_thread_requires_fresh_host_admission(monkeypatch) -> None:
     assert threads._require_new_thread_engine("pi") == "pi"
 
 
-def test_pi_system_prompt_rejects_an_oversized_file(monkeypatch) -> None:
-    original_open = open
+def test_pi_system_prompt_translates_a_renderer_failure(monkeypatch) -> None:
+    def broken_renderer():
+        raise WebMainPromptError("web-main prompt is invalid")
 
-    def oversized_open(path, mode="r", *args, **kwargs):
-        if path.endswith("assist/templates/pi/system.md") and mode == "rb":
-            return io.BytesIO(b"x" * (threads._PI_SYSTEM_PROMPT_MAX_BYTES + 1))
-        return original_open(path, mode, *args, **kwargs)
+    monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
 
-    monkeypatch.setattr("builtins.open", oversized_open)
-
-    with pytest.raises(PiRuntimeError, match="invalid"):
+    with pytest.raises(PiRuntimeError, match="unavailable"):
         threads._pi_system_prompt()
+
+
+def test_pi_system_prompt_is_the_host_rendered_shared_prompt() -> None:
+    assert threads._pi_system_prompt() == render_pi_web_main_prompt().text
+
+
+def test_pi_run_passes_the_host_rendered_prompt_to_the_runtime(
+    pi_threads_root, monkeypatch,
+) -> None:
+    threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._create_empty_pi_workspace("pi-source")
+    run = threads._create_run("pi-source", "Inspect this workspace")
+    received = {}
+
+    class Runtime:
+        def run(self, **kwargs):
+            received.update(kwargs)
+            return PiRuntimeResult("Done", 1)
+
+    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
+    monkeypatch.setattr(threads, "THREAD_QUEUE", _Queue())
+    monkeypatch.setattr(threads, "_PI_RUNTIME", Runtime())
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: None)
+
+    threads._execute_pi_run(run, user_priority=False)
+
+    assert received["system_prompt"] == render_pi_web_main_prompt().text
+    assert received["prompt"] == "Inspect this workspace"
+    assert received["history"] == []
+
+
+def test_pi_prompt_render_failure_does_not_start_the_runtime(
+    pi_threads_root, monkeypatch,
+) -> None:
+    threads.MANAGER.reserve_visible("pi", thread_id="pi-source")
+    threads._create_empty_pi_workspace("pi-source")
+    run = threads._create_run("pi-source", "Inspect this workspace")
+    started = False
+
+    class Runtime:
+        def run(self, **_kwargs):
+            nonlocal started
+            started = True
+            raise AssertionError("Pi runtime must not start")
+
+    def broken_renderer():
+        raise WebMainPromptError("web-main prompt is invalid")
+
+    monkeypatch.setattr(threads, "PI_PREVIEW", _Preview(True))
+    monkeypatch.setattr(threads, "THREAD_QUEUE", _Queue())
+    monkeypatch.setattr(threads, "_PI_RUNTIME", Runtime())
+    monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
+    monkeypatch.setattr(threads, "_dispatch_pending_after", lambda *_args: None)
+
+    threads._execute_pi_run(run, user_priority=False)
+
+    assert not started
 
 
 def test_merge_refuses_pi_before_constructing_a_deep_thread(monkeypatch) -> None:

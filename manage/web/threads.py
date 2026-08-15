@@ -68,6 +68,7 @@ from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.pi_conversation import PiConversationStore
 from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
 from assist.pi_trace import PiTraceError, PiTraceStore
+from assist.web_main_prompt import WebMainPromptError, render_pi_web_main_prompt
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
@@ -1539,22 +1540,12 @@ _PI_TRACES = PiTraceStore()
 _PI_RUNTIME = PiRuntimeManager()
 _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 _PI_DESCRIPTION_LIMIT = 120
-_PI_SYSTEM_PROMPT_MAX_BYTES = 64 * 1024
-
-
 def _pi_system_prompt() -> str:
-    """Read the host-owned Pi prompt for this fresh turn; never use workspace text."""
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                        "assist", "templates", "pi", "system.md")
+    """Render the host-owned Pi prompt; never use workspace text."""
     try:
-        with open(path, "rb") as stream:
-            raw = stream.read(_PI_SYSTEM_PROMPT_MAX_BYTES + 1)
-        prompt = raw.decode("utf-8")
-    except (OSError, UnicodeDecodeError) as error:
+        return render_pi_web_main_prompt().text
+    except WebMainPromptError as error:
         raise PiRuntimeError("Pi system prompt is unavailable") from error
-    if not prompt.strip() or len(raw) > _PI_SYSTEM_PROMPT_MAX_BYTES:
-        raise PiRuntimeError("Pi system prompt is invalid")
-    return prompt
 
 
 def _pi_should_yield() -> bool:

@@ -15,6 +15,7 @@ from langchain.agents.middleware import HumanInTheLoopMiddleware
 from openai import APIConnectionError, InternalServerError
 
 from assist.promptable import base_prompt_for
+from assist.web_main_prompt import render_deep_web_main_prompt
 from assist.spec import AgentSpec
 from assist.tools import directions, map_data, read_url, search_internet, travel
 from assist.backends import (
@@ -509,16 +510,18 @@ def create_agent(model: BaseChatModel,
 
     delegation_mode = ("legacy" if legacy_subagents else
                        "async" if spec.async_subagent_tools else "disabled")
-    prompt_template = ("deepagents/assist_core.md.j2" if spec.web_main
-                       else "deepagents/general_instructions.md.j2")
-    static_prompt = base_prompt_for(
-        prompt_template,
-        workspace_dir=workspace_dir,
-        references_dir=references_dir,
-        delegation_mode=delegation_mode,
-        agent_role=spec.role,
-        guidance_skills=spec.main_guidance_skills,
-    )
+    if spec.web_main:
+        static_prompt = render_deep_web_main_prompt(
+            guidance_skills=spec.main_guidance_skills).text
+    else:
+        static_prompt = base_prompt_for(
+            "deepagents/general_instructions.md.j2",
+            workspace_dir=workspace_dir,
+            references_dir=references_dir,
+            delegation_mode=delegation_mode,
+            agent_role=spec.role,
+            guidance_skills=spec.main_guidance_skills,
+        )
     agent = create_deep_agent(
         model=model,
         checkpointer=checkpointer or InMemorySaver(),
