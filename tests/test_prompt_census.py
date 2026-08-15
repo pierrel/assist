@@ -443,6 +443,9 @@ def test_web_main_engine_profiles_record_shared_and_engine_specific_identity(cen
     assert deep["shared_core_sha256"] == pi["shared_core_sha256"]
     assert deep["adapter_sha256"] != pi["adapter_sha256"]
     assert deep["static_prompt_sha256"] != pi["static_prompt_sha256"]
+    provider_prompt = _system_prompt(_call(census, "web-main-core"))
+    assert deep["provider_system_prompt_sha256"] == hashlib.sha256(
+        provider_prompt.encode("utf-8")).hexdigest()
     assert deep["provider_system_prompt_sha256"] != pi["host_system_prompt_sha256"]
     assert pi["host_system_prompt_sha256"] == pi["static_prompt_sha256"]
     assert re.fullmatch(r"[0-9a-f]{64}", pi["worker_source_sha256"])

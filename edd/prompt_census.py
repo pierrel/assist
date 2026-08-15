@@ -96,6 +96,11 @@ def _sha(value: Any) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _sha_text(value: str) -> str:
+    """Digest exact UTF-8 text rather than its JSON representation."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _blocks(message) -> list[dict[str, Any]]:
     if message is None:
         return []
@@ -2536,7 +2541,7 @@ def _assert_declared_inputs(artifact: dict[str, Any]) -> None:
         call for call in artifact["calls"]
         if call["scenario"] == "web-main-core" and call["call_index"] == 0)
     deep_profile = profiles["deepagents"]
-    if deep_profile["provider_system_prompt_sha256"] != _sha(
+    if deep_profile["provider_system_prompt_sha256"] != _sha_text(
             _system_prompt(deep_call)):
         raise AssertionError("DeepAgents profile system prompt drifted")
     if deep_profile["visible_tool_schema_sha256"] != _sha(
@@ -3433,7 +3438,7 @@ def _web_main_engine_profiles(calls: list[dict[str, Any]]) -> dict[str, dict[str
             "shared_core_sha256": deep.shared_core_sha256,
             "adapter_sha256": deep.adapter_sha256,
             "static_prompt_sha256": deep.sha256,
-            "provider_system_prompt_sha256": _sha(deep_system),
+            "provider_system_prompt_sha256": _sha_text(deep_system),
             "visible_tool_schema_sha256": _sha(
                 deep_call["provider_payload"].get("tools", [])),
             "provider_profile": {
