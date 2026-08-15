@@ -38,8 +38,6 @@ ENV_VARS=""
 # the proxy-mounted approvals subdir); unset = feature dormant. Must NOT be
 # under ASSIST_THREADS_DIR (both the web wiring and the proxy mount refuse it).
 [ -n "$ASSIST_EGRESS_APPROVALS_DIR" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_EGRESS_APPROVALS_DIR=$ASSIST_EGRESS_APPROVALS_DIR\"\n"
-[ -n "$ASSIST_PI_HEALTH_DIR" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_PI_HEALTH_DIR=$ASSIST_PI_HEALTH_DIR\"\n"
-[ -n "$ASSIST_PI_PROVIDER_SERVICE" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_PI_PROVIDER_SERVICE=$ASSIST_PI_PROVIDER_SERVICE\"\n"
 [ -n "$ASSIST_SSL_CERT" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_CERT=$ASSIST_SSL_CERT\"\n"
 [ -n "$ASSIST_SSL_KEY" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SSL_KEY=$ASSIST_SSL_KEY\"\n"
 [ -n "$ASSIST_SMS_SECRET" ] && ENV_VARS="${ENV_VARS}Environment=\"ASSIST_SMS_SECRET=$ASSIST_SMS_SECRET\"\n"

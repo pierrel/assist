@@ -1021,7 +1021,7 @@ def render_thread(
                     '</div></div>')
 
     # Disabled Pi is intentionally readable but cannot accept more work. This
-    # is a product mirror of the server-side admission check, not its authority.
+    # mirrors the server-side operator setting; it is not the authority.
     try:
         pi_read_only = is_pi and not PI_PREVIEW.admits("pi")
     except ThreadEngineError:
@@ -1566,9 +1566,9 @@ def _is_pi_thread(tid: str) -> bool:
 
 
 def _pi_message_admits(tid: str) -> bool:
-    """Apply the Pi admission gate, failing closed for an invalid engine marker."""
+    """Apply the Pi operator setting, failing closed for an invalid engine marker."""
     try:
-        return not _is_pi_thread(tid) or PI_PREVIEW.claim_admits("pi")
+        return not _is_pi_thread(tid) or PI_PREVIEW.admits("pi")
     except ThreadEngineError as error:
         raise HTTPException(status_code=409, detail="Thread engine is unavailable") from error
 
@@ -1986,11 +1986,10 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
     tid = run.thread_id
     try:
         with THREAD_QUEUE.acquire(tid, user_priority=user_priority):
-            # The selector's earlier check only permits reservation.  This is
-            # the authority-bearing check: a queued Pi Run cannot outlive a
-            # disable or stale provider-health record and then acquire the
-            # model slot later.
-            if not PI_PREVIEW.claim_admits("pi"):
+            # The selector's earlier check only permits reservation. This
+            # authority-bearing recheck prevents a queued Pi Run from starting
+            # after the operator disables the preview.
+            if not PI_PREVIEW.admits("pi"):
                 with _RUN_ADMISSION_LOCK:
                     current = _runs().get(tid, run.id)
                     if current.status == "pending":
@@ -2013,11 +2012,11 @@ def _execute_pi_run(run: Run, *, user_priority: bool) -> None:
             result = _PI_RUNTIME.run(
                 work_dir=MANAGER.thread_default_working_dir(tid), timezone=(run.rider or {}).get("tz"),
                 prompt=run.text, history=history, system_prompt=_pi_system_prompt(),
-                turn_id=tid, admitted=lambda: PI_PREVIEW.claim_admits("pi"),
+                turn_id=tid, admitted=lambda: PI_PREVIEW.admits("pi"),
                 should_yield=_pi_should_yield, trace_dir=thread_dir, trace_run_id=run.id)
             # A worker can exit in the interval after its last one-second
             # admission observation. Recheck before making its reply durable.
-            if not PI_PREVIEW.claim_admits("pi"):
+            if not PI_PREVIEW.admits("pi"):
                 raise PiRuntimeError("Pi preview was stopped")
             _PI_CONVERSATIONS.append(thread_dir, run.id, "assistant", result.reply)
             with _RUN_ADMISSION_LOCK:
@@ -2680,7 +2679,7 @@ def _require_new_thread_engine(engine: str) -> str:
     """Admit only the immutable server-owned engine choice for a new web thread."""
     if engine not in {"deepagents", "pi"}:
         raise HTTPException(status_code=400, detail="Unknown thread engine")
-    if engine == "pi" and not PI_PREVIEW.claim_admits("pi"):
+    if engine == "pi" and not PI_PREVIEW.admits("pi"):
         raise HTTPException(status_code=503, detail="Pi preview is unavailable")
     return engine
 
