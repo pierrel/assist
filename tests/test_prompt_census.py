@@ -413,6 +413,18 @@ def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):
         "web-main-core", "web-main-full"}
 
 
+def test_research_worker_prompt_uses_markdown_reports():
+    from assist.promptable import base_prompt_for
+
+    prompt = base_prompt_for("deepagents/research_instructions.txt.j2")
+
+    assert "bare Markdown filename" in prompt
+    assert "`<topic>.md`" in prompt
+    assert "Markdown links (`[Title](URL)`)" in prompt
+    assert ".org" not in prompt
+    assert "org format" not in prompt.lower()
+
+
 def test_ambiguous_constructor_prompt_ownership_fails():
     call = {
         "scenario": "synthetic-ambiguity",
@@ -1196,14 +1208,14 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 21_747
+    assert len(current_prompt) == 21_809
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 3_181_697
+    assert len(artifact_bytes(census)) == 3_178_597
     assert census["artifact_sha256"] == \
-            "35cffdea8d37ea0d28283a8c65bcf909c7cd5f93c09dcd1b0cc2968c79e16ff8"
+            "8bfef150b8f9a6e712c70fe8c5ebd56e954329eee9c9e798ebd15cf3efdbd891"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

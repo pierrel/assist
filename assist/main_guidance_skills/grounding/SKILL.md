@@ -1,14 +1,9 @@
 ---
 name: grounding
-description: Required before answering or acting on a request that depends on the user's local workspace, files, personal information, prior work, or ongoing task state. Load it before using filesystem or task tools to discover or inspect that context.
+description: Load before answering or acting on a request that depends on the user's local workspace, files, personal information, prior work, or ongoing task state. Skip a self-contained request that an exact available capability can complete directly.
 ---
 
 # Grounding workflow
-
-Use this skill when local context could materially change the answer or action.
-Do not load it for a self-contained request that an exact available capability
-can complete directly, such as a calculation, a time conversion, or a recurring
-schedule with all necessary details in the request.
 
 ## Dispatch
 
