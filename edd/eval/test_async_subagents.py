@@ -1583,7 +1583,7 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
         get.assert_not_called()
 
     def test_research_brief_names_report_destination(self):
-        """A research worker receives its bare report filename in the brief."""
+        """A research worker receives a bare Markdown report filename in its brief."""
         with patch.dict(os.environ,
                         {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
                         clear=False), \
@@ -1602,7 +1602,12 @@ class TestPromptRewriteGuidanceResearch(TestAsyncSubagentSupervisor):
             self.assertTrue(skill_was_loaded(agent, "research"), self._calls(agent))
             self.assertRegex(
                 research["args"]["description"],
-                r"(?is)\bsave\b.*(?<![/\w])[\w][\w.-]*\.org(?![\w./])",
+                r"(?is)\bsave\b.*(?<![/\w])[\w][\w.-]*\.md"
+                r"(?=$|[\s,;:!?]|\.(?:\s|$))",
+            )
+            self.assertIn(
+                "references workspace",
+                research["args"]["description"].lower(),
             )
 
         get.assert_not_called()
