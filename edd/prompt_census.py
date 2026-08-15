@@ -505,7 +505,7 @@ _OWNER_SOURCE_IDS = {
 _PACKAGED_SKILL_ROOTS = {
     "/skills/": Path("assist/skills"),
     "/main-skills/": Path("assist/main_skills"),
-    "/web-main-skills/": Path("assist/web_main_skills"),
+    "/main-guidance-skills/": Path("assist/main_guidance_skills"),
     "/render-skill/": Path("assist/web_skills"),
 }
 
@@ -2002,7 +2002,7 @@ def _expected_skill_file(tool_call_id: str) -> str:
     repo = Path(__file__).resolve().parents[1]
     files = {
         "synthetic-call-grounding-load":
-            (repo / "assist/web_main_skills/grounding/SKILL.md").read_text(
+            (repo / "assist/main_guidance_skills/grounding/SKILL.md").read_text(
                 encoding="utf-8"),
         "synthetic-call-hitl-skill-load":
             (repo / "assist/web_skills/send-email/SKILL.md").read_text(

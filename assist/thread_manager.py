@@ -367,7 +367,7 @@ class ThreadManager:
                 tools=tools,
                 async_subagent_tools=async_tools,
                 web_main=(assistant_id == "general-agent" and not triage),
-                web_main_guidance_skills=(assistant_id == "general-agent" and not triage),
+                main_guidance_skills=(assistant_id == "general-agent" and not triage),
                 interrupt_on=interrupt_on))
 
     def remove(self, thread_id: str) -> None:

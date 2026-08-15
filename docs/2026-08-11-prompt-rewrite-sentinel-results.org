@@ -1157,7 +1157,7 @@ separately failed local-evidence principle should be combined with it.
 
 This is the active follow-on to v2b. The candidate keeps the ordinary web-main
 prompt composition and existing lifecycle tools, then adds a candidate-only,
-read-only =/web-main-skills/= prompt source. It contains =grounding= and
+read-only =/main-guidance-skills/= prompt source. It contains =grounding= and
 =research= only; no new action tools, worker descriptions, state, tool gating,
 or semantic routing changed. The compact candidate core directs applicable
 local-context requests to =grounding= and applicable external-fact requests to
@@ -1538,8 +1538,8 @@ appended to the system core.
 
 ** Historical grounding-skill catalog experiment
 
-The candidate-only =grounding= skill was mounted under =/web-main-skills/= only
-for explicit =web_main=. It exposed no new tools. Its body directed the next
+The candidate-only =grounding= skill was mounted under
+=/main-guidance-skills/= only for explicit =web_main=. It exposed no new tools. Its body directed the next
 model response to dispatch =context-agent= and return; on its completion wake,
 it directed an exact check before loading task-specific guidance. The paired
 profile/census capture proved the skill was listed only in candidate web-main

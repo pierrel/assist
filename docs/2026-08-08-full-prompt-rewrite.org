@@ -101,7 +101,7 @@ v2a did not clear its standalone gate.
 
 The direct grounding/research procedure in the current core predates real skill
 contracts. This phase moves that detailed procedure into two progressively
-loaded, web-main-only guidance skills while keeping =context-agent= and
+loaded, ordinary-main guidance skills while keeping =context-agent= and
 =research-agent= as the existing execution workers. It changes no lifecycle
 tool, worker implementation, tool registration, or middleware order.
 
@@ -128,15 +128,16 @@ existing async-task lifecycle.
 
 ** Comparison boundary
 
-Add a closed =AgentSpec.web_main_guidance_skills= opt-in, default false and
-valid only for the existing =web_main= identity. ThreadManager enables it for
-the ordinary visible web assistant. The eval helper keeps =web_main=true= on
-both sides, then switches only this opt-in: the pre-skill baseline retains the
-current v2b core and catalog; the candidate receives the refactored core and a
-read-only bundled =/web-main-skills/= source containing the two contracts.
-Every other role remains byte-for-byte unchanged. The prompt census and paired
-profile capture must prove the catalog/body source and core variant appear only
-on the opted-in web-main calls.
+Add a closed =AgentSpec.main_guidance_skills= opt-in, default false and valid
+only for the existing =web_main= identity. ThreadManager enables it for the
+ordinary visible main assistant, including CLI and Assist voice-call runs. The
+eval helper keeps =web_main=true= on both sides, then switches only this opt-in: the
+pre-skill baseline retains the current v2b core and catalog; the candidate
+receives the refactored core and a read-only bundled
+=/main-guidance-skills/= source containing the two contracts. Every other role
+remains byte-for-byte unchanged. The prompt census and paired profile capture
+must prove the catalog/body source and core variant appear only on the opted-in
+web-main calls.
 
 ** Capped behavioral panel
 
@@ -171,7 +172,7 @@ On a local-context request Qwen therefore chose =glob=/=read_file=; on an
 external-fact request it chose =start_async_task(research-agent)=. Both routes
 bypassed the named skill despite the candidate core and catalog descriptions.
 
-The candidate adds only the two web-main skill sources and their catalog/core
+The candidate adds only the two main guidance skill sources and their catalog/core
 guidance. Existing local filesystem, execution, and async-launch schemas remain
 visible and retain their ordinary authorization behavior. The loaded contracts
 instruct the model which existing worker to use; they do not create a new

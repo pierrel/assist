@@ -80,13 +80,13 @@ class TestValidation:
         with pytest.raises(TypeError, match="async_subagent_tools must be a sequence"):
             AgentSpec(async_subagent_tools=42)
 
-    def test_web_main_guidance_skills_requires_web_main(self):
+    def test_main_guidance_skills_requires_web_main(self):
         with pytest.raises(ValueError, match="guidance_skills requires web_main"):
-            AgentSpec(web_main_guidance_skills=True)
+            AgentSpec(main_guidance_skills=True)
 
-    def test_web_main_guidance_skills_must_be_bool(self):
+    def test_main_guidance_skills_must_be_bool(self):
         with pytest.raises(TypeError, match="guidance_skills must be bool"):
-            AgentSpec(web_main_guidance_skills="yes")
+            AgentSpec(main_guidance_skills="yes")
 
     def test_skill_sources_non_mapping_rejected(self):
         with pytest.raises(TypeError, match="skill_sources must be a mapping"):

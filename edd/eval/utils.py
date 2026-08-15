@@ -36,7 +36,7 @@ def prompt_rewrite_web_main_spec(*, tools=(), interrupt_on=None):
         async_subagent_tools=_TOOLS,
         web_main=(guidance_skills is not None
                   or os.environ.get("ASSIST_PROMPT_REWRITE_CANDIDATE") == "1"),
-        web_main_guidance_skills=guidance_skills == "1",
+        main_guidance_skills=guidance_skills == "1",
         skill_sources=_web_skill_sources(),
         tools=tools,
         interrupt_on=interrupt_on,
