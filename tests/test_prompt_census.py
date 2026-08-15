@@ -1236,7 +1236,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(census["findings"]) == 23
     assert len(artifact_bytes(census)) == 3_198_701
     assert census["artifact_sha256"] == \
-            "a16ba000fe309f52c3d98460d37e4bf5d8cef0ed76100644b770f17ead7df834"
+            "1f14a35ad5d3a6a75e333f86002328372fde2f608782e6312f518ed986ce24b7"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

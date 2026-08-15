@@ -116,7 +116,10 @@ without it produces incorrect output for that domain.
 
 
 class SmallModelSkillsState(SkillsState):
-    """Private activation state for one graph invocation."""
+    """Private catalog and activation state for the current thread."""
+
+    skills_catalog_fingerprint: NotRequired[Annotated[str, PrivateStateAttr]]
+    """Version of the mounted skill sources used to produce the catalog."""
 
     loaded_skill_tools: NotRequired[
         Annotated[frozenset[str], PrivateStateAttr, operator.or_]
@@ -132,6 +135,10 @@ class _LoadArtifact(TypedDict):
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _bytes_sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 def _source_contains(source: str, path: str) -> bool:
@@ -356,12 +363,135 @@ class SmallModelSkillsMiddleware(SkillsMiddleware):
                 request.system_message, skills_section),
         )
 
+    def _catalog_from_responses(self, source: str, ls_result, responses):
+        """Parse one source and return its metadata plus content identity."""
+        source_error = None
+        if isinstance(ls_result, deepagents_skills.LsResult) and ls_result.error:
+            source_error = deepagents_skills._format_skills_source_error(  # noqa: SLF001
+                source, ls_result.error)
+            deepagents_skills.logger.warning("%s", source_error)
+        skill_dirs, skill_paths = self._skill_paths(ls_result)
+        metadata = []
+        fingerprint_entries = []
+        for directory, path, response in zip(skill_dirs, skill_paths, responses,
+                                             strict=True):
+            content = response.content
+            fingerprint_entries.append({
+                "path": path,
+                "content_sha256": (_bytes_sha256(content)
+                                   if content is not None else None),
+                "error": bool(response.error),
+            })
+            skill = deepagents_skills._skill_metadata_from_response(  # noqa: SLF001
+                response, directory, path)
+            if skill is not None:
+                metadata.append(skill)
+        return metadata, source_error, fingerprint_entries
+
+    @staticmethod
+    def _skill_paths(ls_result):
+        items = (ls_result.entries if isinstance(ls_result, deepagents_skills.LsResult)
+                 else ls_result)
+        directories = [item["path"] for item in items or [] if item.get("is_dir")]
+        paths = [
+            str(deepagents_skills.PurePosixPath(
+                deepagents_skills.to_posix_path(directory)) / "SKILL.md")
+            for directory in directories
+        ]
+        return directories, paths
+
+    @staticmethod
+    def _snapshot_result(source_results):
+        all_skills = {}
+        errors = []
+        sources = []
+        for source, metadata, error, entries in source_results:
+            if error is not None:
+                errors.append(error)
+            for skill in metadata:
+                all_skills[skill["name"]] = skill
+            sources.append({
+                "source": source,
+                "skills": entries,
+                "unavailable": error is not None,
+            })
+        payload = json.dumps(
+            {"schema": "assist.skill-catalog.v1", "sources": sources},
+            ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        )
+        return list(all_skills.values()), errors, _sha256(payload)
+
+    def _catalog_snapshot(self, backend):
+        """Discover mounted skills once and fingerprint the exact read bytes."""
+        source_results = []
+        for source in self.sources:
+            ls_result = backend.ls(source)
+            _, paths = self._skill_paths(ls_result)
+            metadata, error, entries = self._catalog_from_responses(
+                source, ls_result,
+                backend.download_files(paths) if paths else [])
+            source_results.append((source, metadata, error, entries))
+        return self._snapshot_result(source_results)
+
+    async def _acatalog_snapshot(self, backend):
+        """Async counterpart to :meth:`_catalog_snapshot`."""
+        source_results = []
+        for source in self.sources:
+            ls_result = await backend.als(source)
+            _, paths = self._skill_paths(ls_result)
+            metadata, error, entries = self._catalog_from_responses(
+                source, ls_result,
+                await backend.adownload_files(paths) if paths else [])
+            source_results.append((source, metadata, error, entries))
+        return self._snapshot_result(source_results)
+
     def before_agent(self, state, runtime, config):
-        update = super().before_agent(state, runtime, config) or {}
+        backend = self._get_backend(state, runtime, config)
+        if "skills_metadata" not in state:
+            # Preserve Deep Agents' initial discovery hook and its census
+            # provenance.  The snapshot immediately below is authoritative so
+            # its metadata and fingerprint always come from the same reads.
+            super().before_agent(state, runtime, config)
+            skills, errors, fingerprint = self._catalog_snapshot(backend)
+            update = {
+                "skills_metadata": skills,
+                "skills_load_errors": errors,
+                "skills_catalog_fingerprint": fingerprint,
+            }
+        else:
+            skills, errors, fingerprint = self._catalog_snapshot(backend)
+            if state.get("skills_catalog_fingerprint") == fingerprint:
+                update = {}
+            else:
+                update = {
+                    "skills_metadata": skills,
+                    "skills_load_errors": errors,
+                    "skills_catalog_fingerprint": fingerprint,
+                }
         return {**update, "loaded_skill_tools": Overwrite(frozenset())}
 
     async def abefore_agent(self, state, runtime, config):
-        update = await super().abefore_agent(state, runtime, config) or {}
+        backend = self._get_backend(state, runtime, config)
+        if "skills_metadata" not in state:
+            # Keep the async discovery hook aligned with the synchronous path;
+            # use one snapshot for the state actually persisted below.
+            await super().abefore_agent(state, runtime, config)
+            skills, errors, fingerprint = await self._acatalog_snapshot(backend)
+            update = {
+                "skills_metadata": skills,
+                "skills_load_errors": errors,
+                "skills_catalog_fingerprint": fingerprint,
+            }
+        else:
+            skills, errors, fingerprint = await self._acatalog_snapshot(backend)
+            if state.get("skills_catalog_fingerprint") == fingerprint:
+                update = {}
+            else:
+                update = {
+                    "skills_metadata": skills,
+                    "skills_load_errors": errors,
+                    "skills_catalog_fingerprint": fingerprint,
+                }
         return {**update, "loaded_skill_tools": Overwrite(frozenset())}
 
     def _hidden_call_message(self, tool_call: dict[str, Any]) -> ToolMessage:

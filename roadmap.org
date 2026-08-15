@@ -986,7 +986,7 @@ and embedder sources now share invocation-scoped disclosure and execution
 filtering; SMS triage remains legacy.  Deterministic tests pass 1,611/2, and
 the affected behavioral suites were baseline 18/18, candidate N=3 18/18, N=5
 30/30, and N=10 59/60 with the one miss reproduced by baseline.
-**** URGENT Refresh persisted skill catalogs when their mounted sources change
+**** DONE Refresh persisted skill catalogs when their mounted sources change
 The skills middleware stores =skills_metadata= in the thread checkpoint and
 DeepAgents deliberately skips discovery whenever that field already exists.
 That turns a source change into a permanent capability loss for an existing
@@ -1005,6 +1005,13 @@ introduced domain skill; it must verify that both are listed and can be loaded
 without recreating or losing the thread.  Include an existing-thread render
 regression case.  This is a DeepAgents compatibility fix; Pi should eventually
 have the equivalent catalog invalidation contract, but need not block it.
+
+Completed on 2026-08-15 in the =skill-catalog-refresh= lane.  The normal and
+async skills middleware now persist a hash of mounted source order plus every
+discovered =SKILL.md= content hash.  An old or changed hash refreshes metadata
+and diagnostics while =loaded_skill_tools= remains invocation-local.  Focused
+migration coverage proves a thread learns new bundled, domain, and normal web
+=render= skills, including a body-only update.
 
 *** TODO P2c: Suppress recently loaded skill descriptions until useful again
 After P2b, compare turn-count, provider-reported input-plus-output-token,
