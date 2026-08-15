@@ -49,6 +49,18 @@ def _unsigned_copy(artifact):
     return unsigned
 
 
+def test_pi_worker_declaration_is_controlled_when_its_source_is_unreadable(
+    monkeypatch,
+):
+    def unreadable(*_args, **_kwargs):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(prompt_census.Path, "read_text", unreadable)
+
+    with pytest.raises(AssertionError, match="Pi worker tool declaration is unavailable"):
+        prompt_census._pi_worker_declaration()
+
+
 def _named_text_block(name):
     document = Path("docs/2026-07-26-agent-prompt-architecture.org").read_text(
         encoding="utf-8")
@@ -1263,9 +1275,9 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 3_198_701
-    assert census["artifact_sha256"] == \
-            "d6af3e0df06080597135ecf09beb128a6e226471ba1a571a6d8845aa655350e2"
+    # M3 records this checkout's exact source commit in each engine profile, so
+    # both artifact size and fingerprint deliberately vary with capture source
+    # and dirty state. The structural and historical assertions remain stable.
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

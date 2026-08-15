@@ -14,7 +14,8 @@ from manage.web import state
 from assist.pi_runtime import PiRuntimeError, PiRuntimeResult
 from assist.pi_trace import PiTraceEvent
 from assist.thread_engine import read_thread_engine
-from assist.web_main_prompt import WebMainPromptError, render_pi_web_main_prompt
+from assist.web_main_prompt import (WebMainPromptError, WebMainPromptUnavailable,
+                                    render_pi_web_main_prompt)
 
 
 class _Preview:
@@ -66,7 +67,7 @@ def test_new_pi_thread_requires_fresh_host_admission(monkeypatch) -> None:
 
 def test_pi_system_prompt_translates_a_renderer_failure(monkeypatch) -> None:
     def broken_renderer():
-        raise WebMainPromptError("web-main prompt is unavailable")
+        raise WebMainPromptUnavailable("web-main prompt is unavailable")
 
     monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
 
@@ -74,9 +75,9 @@ def test_pi_system_prompt_translates_a_renderer_failure(monkeypatch) -> None:
         threads._pi_system_prompt()
 
 
-def test_pi_system_prompt_preserves_an_invalid_renderer_failure(monkeypatch) -> None:
+def test_pi_system_prompt_fails_closed_on_an_unknown_renderer_error(monkeypatch) -> None:
     def broken_renderer():
-        raise WebMainPromptError("web-main prompt composition is invalid: pi/system.md.j2")
+        raise WebMainPromptError("web-main prompt is unavailable")
 
     monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
 
