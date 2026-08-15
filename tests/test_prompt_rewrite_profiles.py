@@ -40,8 +40,9 @@ def test_guidance_skill_profile_capture_keeps_web_main_shape_on_both_sides():
     assert "- **research**:" not in baseline["final_text"]
     assert "- **grounding**:" in candidate["final_text"]
     assert "- **research**:" in candidate["final_text"]
-    assert "load `grounding` before deciding" not in baseline["initial_text"]
-    assert "load `grounding` before deciding" in candidate["initial_text"]
+    grounding_instruction = "load `grounding`\nbefore deciding"
+    assert grounding_instruction not in baseline["initial_text"]
+    assert grounding_instruction in candidate["initial_text"]
     assert baseline["visible_tools"] == candidate["visible_tools"]
     assert "assist.PromptCompositionMiddleware" in baseline["transition_owners"]
     assert "assist.PromptCompositionMiddleware" in candidate["transition_owners"]
