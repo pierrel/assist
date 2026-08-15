@@ -42,6 +42,8 @@ SCHEMA_VERSION = 3
 FIXED_NOW = "2026-07-30 12:00 UTC"
 WEB_MAIN_PROMPT_REWRITE_REFERENCE_COMMIT = (
     "8969b7c4aa4354886b5464b0e868235696373d72")
+WEB_MAIN_PROMPT_REWRITE_BASE_COMMIT = (
+    "699150dd1600cbba2906010dd2c4bcff921f9cbf")
 MAX_RUN_BYTES = 16 * 1024 * 1024
 DEFAULT_OUTPUT_ROOT = Path.home() / "deploy" / "assist" / "prompt-census"
 REQUIRED_PATHS = {
@@ -2262,13 +2264,17 @@ def _assert_closed_artifact_shapes(artifact: dict[str, Any]) -> None:
     root_keys = {"schema_version", "fixed_clock", "source_manifest", "calls",
                  "tool_nodes", "capabilities", "observations", "findings",
                  "web_main_engine_profiles",
-                 "web_main_prompt_rewrite_reference_commit"}
+                 "web_main_prompt_rewrite_reference_commit",
+                 "web_main_prompt_rewrite_base_commit"}
     if "artifact_sha256" in artifact:
         root_keys.add("artifact_sha256")
     _assert_keys(artifact, root_keys, "census artifact")
     if artifact["web_main_prompt_rewrite_reference_commit"] != \
             WEB_MAIN_PROMPT_REWRITE_REFERENCE_COMMIT:
         raise AssertionError("web-main prompt rewrite reference commit drifted")
+    if artifact["web_main_prompt_rewrite_base_commit"] != \
+            WEB_MAIN_PROMPT_REWRITE_BASE_COMMIT:
+        raise AssertionError("web-main prompt rewrite base commit drifted")
 
     profiles = artifact["web_main_engine_profiles"]
     if set(profiles) != {"deepagents", "pi"}:
@@ -3610,6 +3616,8 @@ def _capture_census() -> dict[str, Any]:
             "fixed_clock": FIXED_NOW,
             "web_main_prompt_rewrite_reference_commit": (
                 WEB_MAIN_PROMPT_REWRITE_REFERENCE_COMMIT),
+            "web_main_prompt_rewrite_base_commit": (
+                WEB_MAIN_PROMPT_REWRITE_BASE_COMMIT),
             "source_manifest": source_manifest,
             "calls": trace.calls,
             "tool_nodes": trace.tool_nodes,
