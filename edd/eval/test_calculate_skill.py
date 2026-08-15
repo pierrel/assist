@@ -42,7 +42,8 @@ from assist.model_manager import select_assistant_model
 from assist.sandbox_manager import SandboxManager
 
 from .utils import (complete_web_main_tasks, create_filesystem, cleanup_workspace, executed_commands,
-                    prompt_rewrite_web_main_spec, skill_was_loaded)
+                    prompt_rewrite_web_main_spec, skill_was_loaded,
+                    stub_research_subagent)
 
 
 class TestCalculateSkill(TestCase):
@@ -81,12 +82,13 @@ class TestCalculateSkill(TestCase):
     def _create_agent(self, filesystem: dict | None = None):
         if filesystem:
             create_filesystem(self.workspace, filesystem)
-        return AgentHarness(create_agent(
-            self.model,
-            self.workspace,
-            sandbox_backend=self.sandbox,
-            spec=prompt_rewrite_web_main_spec(),
-        ))
+        with stub_research_subagent():
+            return AgentHarness(create_agent(
+                self.model,
+                self.workspace,
+                sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec(),
+            ))
 
     def _ran_python(self, agent) -> bool:
         """True iff at least one execute call ran Python.
