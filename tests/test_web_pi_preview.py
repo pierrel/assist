@@ -66,11 +66,21 @@ def test_new_pi_thread_requires_fresh_host_admission(monkeypatch) -> None:
 
 def test_pi_system_prompt_translates_a_renderer_failure(monkeypatch) -> None:
     def broken_renderer():
-        raise WebMainPromptError("web-main prompt is invalid")
+        raise WebMainPromptError("web-main prompt is unavailable")
 
     monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
 
     with pytest.raises(PiRuntimeError, match="unavailable"):
+        threads._pi_system_prompt()
+
+
+def test_pi_system_prompt_preserves_an_invalid_renderer_failure(monkeypatch) -> None:
+    def broken_renderer():
+        raise WebMainPromptError("web-main prompt composition is invalid: pi/system.md.j2")
+
+    monkeypatch.setattr(threads, "render_pi_web_main_prompt", broken_renderer)
+
+    with pytest.raises(PiRuntimeError, match="invalid"):
         threads._pi_system_prompt()
 
 

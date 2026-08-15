@@ -80,3 +80,21 @@ def test_missing_or_malformed_template_fails_closed(monkeypatch):
 
     with pytest.raises(web_main_prompt.WebMainPromptError, match="invalid"):
         web_main_prompt.render_pi_web_main_prompt()
+
+
+def test_composition_failure_names_its_template_without_prompt_content(monkeypatch):
+    original = web_main_prompt.base_prompt_for
+    purpose = original("prompt/web_main_purpose.md.j2")
+
+    def duplicated_purpose(template, **kwargs):
+        text = original(template, **kwargs)
+        if template == "pi/system.md.j2":
+            return f"{purpose}\n{text}"
+        return text
+
+    monkeypatch.setattr(web_main_prompt, "base_prompt_for", duplicated_purpose)
+
+    with pytest.raises(
+            web_main_prompt.WebMainPromptError,
+            match=r"invalid: prompt/web_main_purpose\.md\.j2"):
+        web_main_prompt.render_pi_web_main_prompt()

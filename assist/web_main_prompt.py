@@ -62,9 +62,11 @@ def _assemble(template: str, adapter_template: str, **kwargs: object) -> WebMain
     shared = tuple(_render(source) for source in _SHARED_TEMPLATES)
     adapter = _render(adapter_template, **kwargs)
     text = _render(template, **kwargs)
-    for fragment in (*shared, adapter):
+    components = (*zip(_SHARED_TEMPLATES, shared), (adapter_template, adapter))
+    for source, fragment in components:
         if text.count(fragment) != 1:
-            raise WebMainPromptError("web-main prompt composition is invalid")
+            raise WebMainPromptError(
+                f"web-main prompt composition is invalid: {source}")
     return WebMainPrompt(text=text, shared_fragments=shared, adapter=adapter)
 
 
