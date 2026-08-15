@@ -424,6 +424,16 @@ Shipped for review 2026-07-29 in PR #221. Natural real-model
 coverage distinguishes an imminent deadline from a routine request, while =notify(message)=
 now requires an informative, directly texted message and preserves the urgent state when
 SMS is unconfigured or fails. Baseline first; the eval remains the small-model contract.
+** TODO Notify skill + one-off notification schedules
+Add a progressive =notify= skill that explains when a direct notification is useful,
+when an ordinary reply is enough, and how to honor “notify me at <time>” or “notify me
+in 10 minutes.” Those future requests should create a first-class one-off schedule whose
+turn prompts the agent to call =notify=, then retires itself after that single execution.
+Do not emulate this by creating an ordinary recurring schedule and asking the agent to
+delete it afterward. The scheduler owns the exactly-once, terminal cleanup behavior; the
+skill owns the user-facing judgment and message guidance. Evaluate both absolute and
+relative requests, a normal non-notification control, delivery exactly once, and no
+remaining schedule after completion.
 ** TODO (NICE-TO-HAVE, iOS-phone-only) Async server-side Web Push (notify while app closed)
 Deliver an actual push notification (+ home-screen badge) to a CLOSED PWA via a service
 worker woken by a server push (VAPID + pywebpush).  Design fully sketched + DISPOSABLE
