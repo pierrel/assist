@@ -7,8 +7,9 @@ Implemented candidate, awaiting the normal review and paired live checks.  This
 milestone makes the ordinary web Deep Agents and Pi routes consume one
 authoritative Assist policy source.  It follows the merged full prompt rewrite
 (GitHub #234, merge commit =8969b7c=) rather than duplicating it.  The code lane
-was freshly rebased onto reconciled =github/main= commit =1fd4c7f=; it does not
-stack on the rewrite branch.
+is rebased onto the current deployed prompt-rearchitecture commit =699150d=.
+That incorporates the later grounding and private-workspace guidance rather
+than freezing the earlier rewrite text.
 
 * Decision
 
@@ -38,28 +39,28 @@ it cannot use.
 PR #234 introduced =assist_core.md.j2= and a narrow
 =PromptCompositionMiddleware= for the web-main Deep Agents profile.  It moves
 the Deep Agents base before Assist's product core while preserving later
-framework-owned blocks.  M3 takes that accepted core as input.  It does not
-create a second “Pi version” of its prose or change the accepted prompt-rewrite
-behavior.
+framework-owned blocks.  M3 takes the currently deployed descendant as input.
+It does not create a second “Pi version” of product-policy prose or roll back
+later prompt-rearchitecture behavior.
 
 Classify every block in its current core once.  Reassembling
-the Deep fragments must render byte-for-byte to the accepted #234 core before
+the Deep fragments must render byte-for-byte to the current deployed core before
 the framework's existing =BASE + CORE= composition; M3 changes ownership, not
 the accepted Deep policy:
 
 | Owner | Content | Rule |
 |-
 | Shared web-main core | Stable Assist product policy | Rendered by the common function and included verbatim by both engines. |
-| Deep Agents adapter | Framework base, skill catalog/procedures, async-task and subagent facts, framework-generated runtime text | May mention only capabilities actually available on Deep Agents. |
+| Deep Agents adapter | Current grounding/skill procedures, private-thread workspace guidance, async-task and subagent facts | May mention only capabilities actually available on Deep Agents. |
 | Pi adapter | Pi's bounded read/write/edit/bash tools, fresh bounded turn, no unsupported skill/task claim | May mention only Pi facts and must not repeat product policy. |
 | Deterministic controls | Tool schemas, sandbox/broker, admission, queue, approvals, guards | Remain outside prompts.  A prompt never grants authority. |
 
-The present =guidance_skills= and delegation sections are capability procedure,
-not universal policy.  Keep them in the Deep Agents adapter until a Pi skill or
-task extension exposes the same contract.  When it does, move the common
-procedure into a separately rendered shared capability fragment, then include
-that fragment in both adapters.  Do not solve future parity by presenting a
-false capability today.
+The present =guidance_skills=, private-thread workspace, and delegation sections
+are engine procedure, not universal policy.  Keep them in the Deep Agents
+adapter until a Pi extension exposes the same contract.  When it does, move the
+common procedure into a separately rendered shared capability fragment, then
+include that fragment in both adapters.  Do not solve future parity by
+presenting a false capability today.
 
 * Small implementation shape
 
@@ -102,7 +103,7 @@ same structural problem through a long model campaign.
    values must not affect it.
 2. Test the Deep Agents web-main construction path: each shared fragment occurs
    exactly once in its static Assist text, with the truthful Deep adapter in
-   the #234-preserved order, and #234's reorder keeps the final static
+   the current deployed order, and #234's composition seam keeps the final static
    =BASE + CORE= contract.
    Existing non-web-main prompt snapshots remain unchanged.
 3. Test the Pi request path: its =systemPrompt= is exactly the host-rendered
@@ -133,14 +134,16 @@ same structural problem through a long model campaign.
 The existing prompt-rewrite evidence remains Deep Agents evidence.  It is not
 renamed as Pi evidence.  The M3 artifact labels the source commit that produced
 its code and separately records the #234 merge commit as M3's accepted design
-input.  A clean, post-commit capture is the frozen record; a dirty capture is
+input, alongside the deployed descendant commit used for the final rebase.  A
+clean, post-commit capture is the frozen record; a dirty capture is
 explicit scratch evidence.  Later Deep Agents changes are compared in a
 separate refresh rather than silently mixed into this result.
 
 * Sequencing and cutover relevance
 
-1. Record the #234 merge commit, rendered web-main core digest, skill setting,
-   provider profile, and relevant census fixture.
+1. Record the #234 merge commit, current deployed rebase commit, rendered
+   web-main core digest, skill setting, provider profile, and relevant census
+   fixture.
 2. Land the shared renderer and deterministic proof, deploy it behind the
    existing per-new-thread engine selector, then use real Pi threads while the
    small paired panel runs.

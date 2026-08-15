@@ -424,6 +424,8 @@ def test_web_main_engine_profiles_record_shared_and_engine_specific_identity(cen
     assert set(profiles) == {"deepagents", "pi"}
     assert census["web_main_prompt_rewrite_reference_commit"] == (
         "8969b7c4aa4354886b5464b0e868235696373d72")
+    assert census["web_main_prompt_rewrite_base_commit"] == (
+        "699150dd1600cbba2906010dd2c4bcff921f9cbf")
     assert deep["source_commit"] == pi["source_commit"]
     assert re.fullmatch(r"[0-9a-f]{40}", deep["source_commit"])
     assert deep["shared_core_sha256"] == pi["shared_core_sha256"]
