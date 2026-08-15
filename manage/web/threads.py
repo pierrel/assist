@@ -1540,12 +1540,16 @@ _PI_TRACES = PiTraceStore()
 _PI_RUNTIME = PiRuntimeManager()
 _PI_CONTINUATION_SUMMARY_LIMIT = 8_000
 _PI_DESCRIPTION_LIMIT = 120
+
+
 def _pi_system_prompt() -> str:
     """Render the host-owned Pi prompt; never use workspace text."""
     try:
         return render_pi_web_main_prompt().text
     except WebMainPromptError as error:
-        raise PiRuntimeError("Pi system prompt is unavailable") from error
+        state = ("unavailable" if str(error) == "web-main prompt is unavailable"
+                 else "invalid")
+        raise PiRuntimeError(f"Pi system prompt is {state}") from error
 
 
 def _pi_should_yield() -> bool:
