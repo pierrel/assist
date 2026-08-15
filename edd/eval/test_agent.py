@@ -308,6 +308,81 @@ class TestPromptRewriteLocalGrounding(TestCase):
                          "The answer must use the saved food preferences")
 
 
+class TestPromptRewriteTodoList(TestCase):
+    """Natural web-main task-list outcome after local grounding."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = select_assistant_model(0.1)
+
+    def setUp(self):
+        self.workspace = tempfile.mkdtemp(prefix="todo_list_eval_")
+        self.agent_dir = tempfile.mkdtemp(prefix="prompt_rewrite_todo_agent_")
+        self.inbox = os.path.join(self.workspace, "gtd", "inbox.org")
+        create_filesystem(self.workspace, {
+            "README.org": "All of my tasks are in gtd/inbox.org.",
+            "gtd": {"inbox.org": dedent("""\
+                * Tasks
+                ** TODO Fold laundry
+                Just get it done
+                """)},
+        })
+        self.sandbox = SandboxManager.get_sandbox_backend(
+            self.workspace, agent_dir=self.agent_dir)
+        if self.sandbox is None:
+            self.skipTest("Docker sandbox unavailable — is Docker running and assist-sandbox built?")
+        reset_task_fixture()
+
+    def tearDown(self):
+        SandboxManager.cleanup(self.workspace)
+        cleanup_workspace(self.workspace)
+        shutil.rmtree(self.agent_dir, ignore_errors=True)
+
+    def test_adds_requested_task_after_grounding(self):
+        """A natural task request discovers and updates the user's real task list.
+
+        User prompt: “I need a new washer/dryer. Add it to my task list.” The
+        fixture's trusted context result points to the Org inbox and supplies
+        its shape. The outcome requires loading grounding, completing the
+        ordinary context lifecycle, adding a dryer task without splitting the
+        existing item, and a non-empty completion response.
+        """
+        with patch("assist.tools.requests.get",
+                   side_effect=AssertionError("todo-list eval must not fetch URLs")) as get, \
+             patch("assist.tools.requests.post",
+                   side_effect=AssertionError("todo-list eval must not post URLs")) as post, \
+             patch.dict(os.environ,
+                        {"ASSIST_PROMPT_REWRITE_GUIDANCE_SKILLS": "1"},
+                        clear=False), \
+             stub_research_subagent():
+            agent = AgentHarness(create_agent(
+                self.model,
+                self.workspace,
+                agent_dir=self.agent_dir,
+                sandbox_backend=self.sandbox,
+                spec=prompt_rewrite_web_main_spec(),
+            ))
+            initial_response = agent.message(
+                "I need a new washer/dryer. Add it to my task list.")
+            context = next((
+                call for call in agent_tool_calls(agent, "start_async_task")
+                if call["args"].get("subagent_type") == "context-agent"), None)
+            self.assertIsNotNone(context, agent.all_messages())
+            _TASK_RESULTS[_task_id_for_call(context)] = (
+                "Tasks live in /gtd/inbox.org. It is an Org list whose task items "
+                "use ** TODO headings.")
+            completion_response = complete_web_main_tasks(agent)
+        get.assert_not_called()
+        post.assert_not_called()
+
+        inbox = read_file(self.inbox)
+        self.assertTrue(skill_was_loaded(agent, "grounding"), agent.all_messages())
+        self.assertRegex(inbox, r"(?im)^\*\* TODO.*(?:washer|dryer)", inbox)
+        self.assertIn("Fold laundry\nJust get it done", inbox)
+        response = completion_response or initial_response
+        self.assertTrue(response.strip(), agent.all_messages())
+
+
 def _extract_dollar_amounts(text: str) -> list[float]:
     """Pull dollar amounts out of free-form text in common shapes.
 
