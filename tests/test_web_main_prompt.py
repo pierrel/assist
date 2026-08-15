@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from assist import web_main_prompt
+from assist import promptable
 
 
 @pytest.mark.parametrize(("guidance_skills", "expected_sha256"), [
@@ -29,6 +30,10 @@ def test_both_engines_include_the_same_shared_policy_once():
     for fragment in deep.shared_fragments:
         assert deep.text.count(fragment) == 1
         assert pi.text.count(fragment) == 1
+
+
+def test_shared_prompt_sources_auto_reload_for_later_turns():
+    assert promptable.env.auto_reload is True
 
 
 def test_pi_adapter_never_promises_deep_only_capabilities():
