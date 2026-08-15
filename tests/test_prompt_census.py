@@ -411,8 +411,8 @@ def test_grounding_and_research_skill_sources_are_web_main_only(census):
     }
     assert {source["scenario"] for source in guidance_sources} == {
         "web-main-core", "web-main-full"}
-    for call in census["calls"]:
-        prompt = _system_prompt(call)
+
+
 def test_ambiguous_constructor_prompt_ownership_fails():
     call = {
         "scenario": "synthetic-ambiguity",
