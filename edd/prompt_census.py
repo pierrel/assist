@@ -3387,8 +3387,11 @@ def _source_identity() -> tuple[str, bool]:
 
 def _pi_worker_declaration() -> tuple[list[str], str]:
     """Read Pi's closed worker declaration without loading ambient SDK state."""
-    worker = (Path(__file__).resolve().parents[1] / "assist" / "pi_runtime"
-              / "src" / "worker.ts").read_text(encoding="utf-8")
+    try:
+        worker = (Path(__file__).resolve().parents[1] / "assist" / "pi_runtime"
+                  / "src" / "worker.ts").read_text(encoding="utf-8")
+    except OSError as error:
+        raise AssertionError("Pi worker tool declaration is unavailable") from error
     match = re.search(r"tools:\s*\[([^]]+)]\s*,\s*customTools", worker)
     if match is None:
         raise AssertionError("Pi worker tool declaration is unavailable")

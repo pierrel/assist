@@ -68,7 +68,8 @@ from assist.thread_engine import ThreadEngineError, read_thread_engine
 from assist.pi_conversation import PiConversationStore
 from assist.pi_runtime import PiRuntimeError, PiRuntimeManager
 from assist.pi_trace import PiTraceError, PiTraceStore
-from assist.web_main_prompt import WebMainPromptError, render_pi_web_main_prompt
+from assist.web_main_prompt import (WebMainPromptError, WebMainPromptUnavailable,
+                                    render_pi_web_main_prompt)
 from assist.thread_queue import (THREAD_QUEUE, QueueWaitTimeout,
                                  ThreadHoldExpired, ThreadPauseRequested,
                                  active_handle)
@@ -1547,8 +1548,9 @@ def _pi_system_prompt() -> str:
     try:
         return render_pi_web_main_prompt().text
     except WebMainPromptError as error:
-        state = ("unavailable" if str(error) == "web-main prompt is unavailable"
-                 else "invalid")
+        state = (
+            "unavailable" if isinstance(error, WebMainPromptUnavailable)
+            else "invalid")
         raise PiRuntimeError(f"Pi system prompt is {state}") from error
 
 

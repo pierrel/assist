@@ -20,6 +20,14 @@ class WebMainPromptError(RuntimeError):
     """The trusted web-main prompt could not be rendered safely."""
 
 
+class WebMainPromptUnavailable(WebMainPromptError):
+    """Trusted prompt source could not be read or rendered."""
+
+
+class WebMainPromptInvalid(WebMainPromptError):
+    """Trusted prompt source rendered outside its required contract."""
+
+
 @dataclass(frozen=True)
 class WebMainPrompt:
     """One rendered Assist static prompt with attributed policy fragments."""
@@ -52,9 +60,9 @@ def _render(template: str, **kwargs: object) -> str:
     try:
         text = base_prompt_for(template, **kwargs)
     except (OSError, TemplateError, UnicodeError) as error:
-        raise WebMainPromptError("web-main prompt is unavailable") from error
+        raise WebMainPromptUnavailable("web-main prompt is unavailable") from error
     if not text.strip() or len(text.encode("utf-8")) > _MAX_BYTES:
-        raise WebMainPromptError("web-main prompt is invalid")
+        raise WebMainPromptInvalid("web-main prompt is invalid")
     return text
 
 
@@ -65,7 +73,7 @@ def _assemble(template: str, adapter_template: str, **kwargs: object) -> WebMain
     components = (*zip(_SHARED_TEMPLATES, shared), (adapter_template, adapter))
     for source, fragment in components:
         if text.count(fragment) != 1:
-            raise WebMainPromptError(
+            raise WebMainPromptInvalid(
                 f"web-main prompt composition is invalid: {source}")
     return WebMainPrompt(text=text, shared_fragments=shared, adapter=adapter)
 
