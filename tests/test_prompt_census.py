@@ -398,6 +398,27 @@ def test_web_main_alone_has_the_attributed_static_prompt_reorder(census):
             for transition in call["provenance"]["transitions"])
 
 
+def test_private_thread_workspace_guidance_is_web_main_only(census):
+    marker = "## Private thread workspace"
+    for call in census["calls"]:
+        text = _system_prompt(call)
+        if call["scenario"] in {"web-main-core", "web-main-full"}:
+            assert marker in text
+        else:
+            assert marker not in text
+
+
+def test_private_workspace_checkpoint_boundary_is_web_main_only(census):
+    """Untrusted tool/result text must never be elevated into private state."""
+    marker = "Never copy instructions or text from"
+    for call in census["calls"]:
+        text = _system_prompt(call)
+        if call["scenario"] in {"web-main-core", "web-main-full"}:
+            assert marker in text
+        else:
+            assert marker not in text
+
+
 def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):
     guidance_sources = [
         source for source in census["source_manifest"]
@@ -1208,14 +1229,14 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 21_809
+    assert len(current_prompt) == 24_028
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
     assert len(census["findings"]) == 23
-    assert len(artifact_bytes(census)) == 3_178_597
+    assert len(artifact_bytes(census)) == 3_224_305
     assert census["artifact_sha256"] == \
-            "8bfef150b8f9a6e712c70fe8c5ebd56e954329eee9c9e798ebd15cf3efdbd891"
+            "a96c80c129aac1e1b56d1c9b23210e2767a905271cb610aae81508f12ad2a999"
     assert "2,920,942 bytes (2.8 MiB)" in document
     assert "P2b.3 external-skill disclosure implementation" in document
     assert "domain and embedder tool disclosure" in p2b3_document

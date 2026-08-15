@@ -130,6 +130,31 @@ big-bang rewrite.
 Visible main-agent turns auto-load =/agent/memory.md= beside unchanged repo memory;
 spawned child agents receive self-contained briefs instead of that private state.
 
+** TODO Directory ownership model
+Make =/agent= Markdown-first, private, per-thread working state; make =/tmp=
+truly disposable; and introduce =/user= as a compatible agent-facing name for
+user-owned files. Preserve child isolation and use main-owned, bounded handoffs
+for retained research or context results. The immediate prompt/eval increment is
+[[file:docs/2026-08-14-agent-workspace-guidance.org][recorded separately]].
+
+** TODO Infrequent agent-maintenance decisions
+Some useful thread-maintenance work should happen periodically, not on every
+turn: save a compact Markdown status checkpoint in =/agent=, refresh a working
+recap, or review stale private state. Add a small host-owned frequency tool that accepts a
+reviewed probability in [0, 1] and returns whether the named maintenance step
+should run for this turn. Make the result reproducible for a thread, turn, and
+policy, and record it once so retries cannot resample it. A loaded maintenance
+skill should own the named policies and their rates; the tool decides only
+run/skip, never what to save. First prove the value with a natural long-thread
+eval: retained state must help a later turn without imposing every-turn work.
+Compaction is the preferred deterministic checkpoint: it is the moment context
+is being discarded and the agent most needs to preserve useful state. An
+optional nightly thread-maintenance job can make the same decision for inactive
+threads; it must use the same policy/recording contract and never invent user
+work or present private maintenance as a completed user request.
+This follows a directory-model design that separates agent-private =/agent=
+state from disposable =/tmp= artifacts and user-owned workspace files.
+
 * Dev updates
 The dev agent needs significant improvements
 ** TODO Many more evals

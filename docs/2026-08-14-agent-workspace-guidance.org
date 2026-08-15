@@ -1,0 +1,80 @@
+#+title: Main-agent private workspace guidance
+
+* Goal
+
+Improve how the ordinary main agent uses its existing private =/agent= mount.
+The model should treat Markdown files there as the durable source of thread
+continuity, read the relevant files before relying on conversational recall, and
+write a concise status checkpoint after material progress. This increment is
+prompt and evaluation work only: it adds no tools, mounts, worker privileges,
+or scheduler.
+
+* Scope
+
+- The section is rendered only in the ordinary web-main system prompt, which is
+  also the profile used by the current CLI and Assist voice-call paths.
+- =/agent/memory.md= stays the automatically loaded core thread state. The
+  guidance may use =status.md= and =recap.md= as optional Markdown conventions,
+  not a rigid required tree.
+- Children remain isolated: context and research workers receive self-contained
+  briefs and do not mount or write the parent =/agent= directory.
+- The physical user workspace remains =/workspace= in this increment. The
+  planned =/user= alias and truly ephemeral =/tmp= migration are separate work.
+
+* Guidance contract
+
+For a nontrivial turn, use the loaded thread-memory block and read any relevant
+supporting =/agent= Markdown before treating earlier conversation as current
+state. After a material decision, completed stage, discovered blocker, or useful
+handoff, update a concise current-progress Markdown file, such as
+=/agent/status.md=. Never put user deliverables there, and never claim a private
+checkpoint is user work. Tracking current work alone does not authorize a
+user-workspace or cross-thread-memory change.
+
+Compaction is a checkpoint opportunity, not a new tool contract. The system
+prompt treats the automatically reloaded private memory as durable state after a
+summary and directs the agent to read additional private Markdown when it holds
+relevant detail. This increment does not claim a particular Deep Agents
+compaction hook or force a write at every compaction.
+
+* Eval contract
+
+1. Natural read: preseed =/agent/status.md= with a concrete active next step;
+   a natural continuation question must read it and answer from it.
+2. Natural write: a substantive project update must leave a concise private
+   Markdown checkpoint which records the decision/progress without touching the
+   user workspace.
+3. Forward-looking compaction probe: force the existing summarization middleware
+   at a low message threshold, trace =/agent= reads/writes before and after the
+   observed compaction event, and retain the counts in the capture. The natural
+   continuation must still use the saved checkpoint. This measures whether the
+   guidance causes useful extra state work around compaction rather than assuming
+   it does.
+
+All behavioral rows reject URL fetches and stub research. The initial pre-change
+read probe established the failure mode; candidate runs begin N=1, then use N=3
+only after the oracle is sound and the result is promising.
+
+* Eval record
+
+The user prompts, fixtures, and pass conditions are deliberately kept in the
+test docstrings as well as here so the PR can describe them exactly.
+
+| row | natural user sequence | deterministic fixture and oracle | result |
+|-
+| Read continuity | “Where did we leave off on the community-garden permit?” | =memory.md= says only that the project is active; =status.md= holds the insurance-certificate blocker. Pass requires a direct =/agent/status.md= read and an answer that names the certificate. | Pre-change exploratory N=1: failed (read only memory then searched the user workspace). Current ownership-boundary guidance: N=3 pass. |
+| Write checkpoint | certificate arrived; permit ready; submit Monday; “Keep track of this project as we continue.” | Empty private state except basic memory. Pass requires private =/agent= Markdown containing permit + Monday and a byte-for-byte unchanged user-workspace snapshot. | A prior N=1 wrote the state into user =AGENTS.md=; it triggered the current explicit ownership boundary. Current guidance: N=3 pass. |
+| Forced compaction diagnostic | material permit update, then “What is the next step for the community-garden permit?” | Existing Deep Agents summarization is forced at a five-message threshold. The capture records separate private read/write counts before and after the observed summary event, then requires a truthful Monday answer. | Current guidance: N=3 pass; each capture recorded one private read and two writes before the summary, and zero explicit private reads/writes after it. |
+
+The post-summary turns relied on the automatically reloaded thread memory and
+the framework summary rather than making another explicit private-file call.
+The test remains a diagnostic because later models, thresholds, and real long
+threads may choose a different mix of explicit reads and writes.
+
+* Risks and non-goals
+
+Do not turn every response into a write or introduce a second memory system.
+Repository =AGENTS.md= remains the cross-thread facts/preferences layer. The
+future frequency-decision tool may later govern periodic recap refreshes, but it
+is not required to establish this basic read/write behavior. Location inference
+is unrelated evidence grounding work and stays out of scope.
