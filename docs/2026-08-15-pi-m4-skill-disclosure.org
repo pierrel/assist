@@ -3,12 +3,14 @@
 
 * State
 
-Implemented locally; deployment smoke pending the active production-test
-reservation. M3 established one host-owned web-main product-policy source for
-Deep Agents and Pi.  M4 is the next convergence slice: it gives Pi the current
-web-main skill contract and proves one non-kernel application tool family can be
-hidden, loaded, and executed through the same declared ownership boundary.  It
-starts from the merged M3 mainline (=8360821=), not the stale Pi M2 prompt.
+Implemented, reviewed, and deployed from this feature branch.  The deployed
+runtime at =117f0ed= passed a plain Pi greeting smoke and a =render= →
+=map_data= smoke; the branch CI passed at =2d499fc2=.  M3 established one
+host-owned web-main product-policy source for Deep Agents and Pi.  M4 is the
+next convergence slice: it gives Pi the current web-main skill contract and
+proves one non-kernel application tool family can be hidden, loaded, and
+executed through the same declared ownership boundary.  It starts from the
+merged M3 mainline (=8360821=), not the stale Pi M2 prompt.
 
 M4 deliberately does not call the resulting engine “feature complete.”  The
 current Pi preview has only four brokered coding tools.  Deep-only lifecycle,
