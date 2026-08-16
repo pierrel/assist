@@ -39,6 +39,16 @@ treated as Deep Agents.  Only then reach the explicit Pi-only end state and dele
 Deep Agents.  Local llama.cpp stays gateway-fair at capacity one initially; test
 higher local capacity and any explicit OpenRouter cloud-thread option separately
 after the local Pi web path works.
+*** TODO M5a: Let Pi use the existing durable research child
+After the Pi M4 skill-disclosure implementation lands, add a closed Pi
+async-task extension whose first admitted task is the existing Deep
+=research-agent=. Keep task IDs, Run lifecycle, queue, cancellation, sandbox,
+search, URL-provenance, and egress authority in Python; Pi owns only typed
+parent-side start/check/cancel tools. The first slice deliberately requires an
+explicit later check rather than changing Pi transcript/recovery semantics for
+an automatic wake. Automatic delivery and the later Pi research-leaf swap are
+separately gated. See
+[[file:docs/2026-08-16-pi-research-child.org][the M5a design]].
 ** TODO Complete Voice-call assistant P1 against the fake bridge
 Goal: phone a number, pass the PIN-gated receptionist, select or create a thread,
 and hold a natural voice conversation. The hardware-independent build/state contract

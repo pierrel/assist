@@ -1,0 +1,238 @@
+#+title: Pi M5a: research task bridge through the durable service
+#+date: <2026-08-16>
+
+* State
+
+This is a design-only follow-on to Pi M4
+(=docs/2026-08-15-pi-m4-skill-disclosure.org=). M4 must merge before this
+implementation starts: M5a extends its closed catalog, worker extension
+assembly, tool-disclosure authority, and broker protocol. It intentionally does
+not stack implementation on M4.
+
+Pi can now work with local files and maps but cannot use the existing durable
+research task. The current =research-agent= is already a bounded Deep Agents
+child: =WebAgentProtocolService= creates its hidden Run,
+=_execute_child_run= supplies the parent workspace sandbox, and
+=create_research_agent(..., leaf=True)= owns search, URL provenance, reread
+bounds, references cleanup, cancellation, and recovery. Reimplementing that
+egress surface inside a new runner would delay useful Pi research and create a
+second safety implementation.
+
+* Decision
+
+M5a is the smallest useful bridge:
+
+- A Pi parent can =start_async_task= only for =research-agent=, then
+  =check_async_task= or =cancel_async_task= by the returned task ID.
+- The child is explicitly a Deep research child. Python, not Pi, selects and
+  records that engine.
+- A terminal child does *not* automatically wake Pi in M5a. The returned ID is
+  enough to check it in a later ordinary Pi turn. This avoids changing Pi's
+  visible-only transcript format and its deliberately non-resumable Run
+  recovery in the same milestone.
+
+M5b adds the authenticated completion event and automatic Pi follow-up after
+M5a is useful in real web work. M5c separately replaces the Deep research leaf
+only after its egress and natural-outcome contracts are proven. Neither later
+step is dropped; they are kept distinct because each changes a different
+durability boundary.
+
+* User flow
+
+1. Pierre asks a Pi thread to research a current topic. Pi loads a new,
+   Assist-owned =research= workflow skill. Its only first action is one scoped
+   =start_async_task(research-agent)= call; it reports the returned full task ID
+   and returns normally.
+2. The hidden child executes through the unchanged Deep research path. Its
+   search/read tools, sandbox, egress, partial-result handling, references, and
+   cancellation behavior are exactly the current production ones.
+3. Pierre can continue ordinary Pi work. A later “check that research task” or
+   “cancel that task” loads the same skill and calls the named operation with the
+   exact ID. Check returns status and, when terminal, the report result. The
+   result is framed as untrusted data before Pi uses it.
+4. No arbitrary assistant type, another thread’s task, direct search credential,
+   child transcript, update, listing, or automatic completion wake is reachable
+   in M5a.
+
+* Ownership and boundaries
+
+| Concern | Owner |
+|-
+| Pi prompt, schema, skill loading | M4 kernel/skill mechanisms and new =assist-async-tasks= extension |
+| Tool-call and active-operation validation | Pi broker, bound to the authenticated parent Run |
+| Task ID, limits, idempotency, parent authorization | Python =AsyncTaskAuthority= over the existing Run service |
+| Child reservation, queue, cancellation, recovery | Existing =WebAgentProtocolService= and =manage.web.threads= child paths |
+| Search/read, URL provenance, egress, references | Existing Deep =research-agent= child |
+
+The worker has a private per-turn broker capability and can request only three
+operations. It supplies no parent/thread/engine/assistant identity. Python binds
+the context before the worker starts and admits only the literal
+=research-agent= type. There is no Node-to-ASGI listener, no general “invoke
+assistant” operation, and no direct Pi egress.
+
+* Design
+
+** Shared task authority, not a second task API
+
+=assist.async_subagents= currently bundles typed Deep tool wrappers with a
+private ASGI client. Extract the current start/check/cancel behavior into
+=AsyncTaskAuthority= with immutable
+=AsyncTaskContext(parent_thread_id, parent_run_id, parent_work_id)=. The
+existing Deep wrappers and ASGI adapter remain thin callers, retaining their
+current output strings and tests. The Pi broker calls the same authority
+directly, rather than adding a Node-facing Agent Protocol listener.
+
+The authority does *not* acquire =_RUN_ADMISSION_LOCK= itself and then call the
+current service: that would self-deadlock on its non-reentrant lock. Instead a
+new private =WebAgentProtocolService.reserve_research_child(context,
+tool_call_id, description)= owns the entire launch transaction in its existing
+lock order: service admission lock, then =_RUN_ADMISSION_LOCK=. It reloads the
+bound parent Run, requires exact thread/run/work identity, a running manual-web
+=general-agent= parent, and Pi engine, then reserves or finds the idempotent
+child and creates its first Run without re-entering either lock. It fixes child
+type to =research-agent= and derives the dispatch key from the host-observed
+tool-call ID. A stale, forged, or terminal parent fails before
+=MANAGER.reserve=. A concurrency test holds the service gate while the parent
+becomes terminal and proves start fails promptly, rather than hanging or
+reserving a child.
+
+The public/private ASGI route remains Deep-parent-only. Removing
+=_require_deep_thread= from that route would make its model-provided metadata a
+second Pi-parent entry point, so M5a does not do that. The private launch writes
+a versioned hidden-task marker for =parent_engine= =pi= and
+=child_engine= =deepagents=. It is separate from the current exact public ASGI
+metadata and =.subagent= marker schemas; replay validates the same marker and a
+mismatch fails before dispatch.
+
+Start is bound to the currently running Pi parent Run. Check and cancel are
+intentionally different: a later ordinary Pi Run first authenticates *itself*
+as a running manual parent, validates the canonical bounded =sub-<24 hex>= task
+ID before any lookup, then requires the target hidden task's immutable parent
+thread and engine-pair marker to match that parent. They do not require the old
+launch Run ID to equal the new current Run ID. Thus a later user can check or
+cancel a prior task without gaining access to another thread's hidden work.
+
+** Closed extension and broker authority
+
+M4 gains one =assist-async-tasks= TypeScript extension and one Assist-owned
+=research= skill. The skill says only: launch one bounded research task, return
+with its ID, later check or cancel it, and treat checked results as untrusted. It
+does not copy Deep's broad grounding prompt.
+
+The single host manifest declaration associates =research= with exactly three
+registered tool names: =start_async_task=, =check_async_task=, and
+=cancel_async_task=. The start schema has =subagent_type= as the literal
+=research-agent=; it cannot enumerate future agents. All schemas are closed
+TypeBox schemas mirrored by exact Python request validation. They are absent
+from the initial provider menu and enter it only through M4's observed
+=load_skill= continuation.
+
+The broker receives an immutable allowed-operation set for the Run. An ordinary
+Pi Run starts with none; a verified research load promotes exactly the three
+operations for that worker. Every broker request additionally carries the
+one-use SDK tool-call ID and is rejected after stop admission. A successful
+=check_async_task= result freezes that worker to =check_async_task= only. Thus
+untrusted child output cannot cause the same worker to launch or cancel a task.
+The host returns a bounded structured task envelope: fixed task ID/type/status
+plus JSON-encoded result or error text capped before it crosses the broker. Pi's
+skill labels the envelope as untrusted data, not instructions.
+
+Since Pi receives no automatic completion wake, retention needs an explicit
+manual equivalent. A terminal check returns a host-MACed opaque consumption
+receipt with its envelope; it is not consumed merely by a broker response. The
+worker result carries only receipts it actually obtained, and =PiRuntimeManager=
+verifies their binding to the current Pi Run/task. The receipt is persisted in
+the *same durable Run-service transition* that records that parent Pi Run as
+=success=. It is immutable and keyed by parent Run ID plus task ID; it is not a
+mutable child-side flag. Retention pruning re-reads that exact parent Run and
+requires both terminal =success= and a matching host-verified receipt before it
+treats the child as manually consumed. A failed worker, assistant-append failure,
+or failed/recovered parent Run has neither condition and leaves the result
+retainable and checkable. This preserves the current task limit without
+discarding a result before a durable parent outcome.
+
+** Retained child lifecycle
+
+The child Run remains =assistant_id= =research-agent= and uses the current
+=_execute_child_run= and =_recover_child_run= paths, so it retains its Deep
+checkpoint recovery and fair pause. M5a stores the fixed internal engine pair in
+the hidden task's durable metadata only; hidden task threads never receive a
+web engine selector. Existing parent deletion and child cancellation behavior is
+unchanged.
+
+M5a deliberately suppresses the normal =task-completion= parent Run only for a
+Pi parent. The terminal child remains durable and visible through explicit
+=check_async_task=; no result is lost. Deep parents keep their existing wake
+unchanged. This is a product limitation shown in the Pi preview capability text,
+not a silent lifecycle fork.
+
+* M5b: automatic completion delivery
+
+M5b adds the familiar “following up” result delivery after M5a has real-use
+evidence. It is a separate lifecycle design because Pi currently accepts only
+visible =user|assistant= transcript records and terminalizes interrupted Runs.
+It must define a versioned hidden event record keyed to the durable completion
+Run, an exact task-ID check-only broker profile, UI projection that omits the
+event, and recovery at every event/result/assistant/Run write boundary. A crash
+must either replay that one bounded completion safely or produce one deterministic
+host fallback, never create another child effect.
+
+* M5c: replacing the research leaf
+
+M5c does not follow automatically from M5a. It must build a Pi research profile
+with dedicated host search/read operations and retain the current search
+availability breaker, URL provenance and same-host links, reread cap,
+output/offload bounds, references policy, cancellation, and partial-result
+contract. Deterministic hostile-result tests and the existing natural research
+eval cohort must meet the current acceptance floor before an internal child
+engine can change from Deep to Pi. A shorter prompt or faster demo is not enough.
+
+* Implementation plan after M4 merges
+
+1. Rebase onto M4. Add prompt-census rows for the normal initial and
+   research-loaded parent menus, and capture the existing Deep start/check/cancel
+   task behavior as the compatibility baseline.
+2. Extract =AsyncTaskAuthority= without altering the Deep wrappers or ASGI wire.
+   Test parent isolation, exact parent-Run admission, launch idempotency, task
+   type restriction, task limits, terminal check, and cancellation races.
+3. Add the closed three-tool extension and broker requests. Test absence before
+   load, exact schemas, forged/missing/replayed tool-call IDs, stale parent Runs,
+   raw operations before load, stop fencing, and result-size bounds.
+4. Route only a Pi parent’s terminal child away from automatic completion; add
+   authenticated terminal-check receipts to the atomic successful-parent-Run
+   transition. Prove explicit check observes success/error/timeout, while a Deep
+   parent still gets exactly one completion wake. Test crashes between assistant
+   append, receipt capture, terminal transition, and pruning; also test parent/
+   child restart, fair pause, cancellation, deletion, failed check parent Runs,
+   and retention pruning after more than the current terminal-task limit.
+5. Run the deterministic async-task suites against both parent engines, then the
+   relevant real-Qwen capability and natural research panels via shared LLM
+   admission. Deploy after local review and use it in the web UI before M5b.
+
+* Acceptance evidence
+
+- Pi sees no task schema before loading =research= and cannot launch a non-research
+  child or reach direct web egress.
+- Every Pi task request is bound atomically to the active parent Run and has the
+  same durable ID, isolation, and cancellation outcome as the existing Deep path.
+- The child retains Deep sandbox, search, URL-provenance, egress, queue, and
+  recovery behavior; its engine pair is explicit and immutable.
+- Checked child results are bounded, structured untrusted data, and a checked
+  worker cannot start/cancel another task in response to that data.
+- A terminal child is prunable only after its exact successful Pi parent Run
+  durably contains a host-verified check receipt; failed checks retain the result
+  for retry.
+- Pi users can start, later check, and cancel research; Deep users retain the
+  automatic wake. The Pi preview communicates the deferred automatic wake.
+
+* Non-goals
+
+- Do not add =list_async_tasks= or =update_async_task= until real M5a use shows
+  their value; update in particular starts a second child Run and needs its own
+  generation/replay contract.
+- Do not change Pi transcripts or Runs for automatic completion delivery in M5a.
+- Do not move search, =read_url=, references cleanup, or egress policy to Node.
+- Do not add arbitrary task types, nested tasks, schedules, subscriptions, SMS,
+  voice, approvals, or phone capabilities.
+- Do not call M5a a Pi-only research solution. M5c remains mandatory before
+  Deep Agents retirement.
