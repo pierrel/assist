@@ -134,12 +134,24 @@ gh api graphql -f query='
 
 ### Eval cadence
 
-- **Baseline** (before any changes): N=3 per test on the affected suite. Establishes failure mode.
-- **Post-implementation** (after coding, before code-review team): N=3 per test. Confirms no obvious regression.
-- **Post-review** (after code-review team findings are addressed): N=5 per test. Catches issues the reviewers flagged but the implementation didn't fully fix.
-- **Stability** (final, before push): N=10 per test. Pin the contract.
+Unless Pierre explicitly overrides it, first survey the relevant behavioral
+evals for every model-facing prompt, skill, tool, or guidance change. The
+survey may be representative rather than exhaustive, but must include affected
+and adjacent behavior, name the selected rows, and explain the selection in the
+PR description.
 
-Treat any drop in pass rate compared to the prior step as a regression; investigate before scaling further.
+- **Baseline** (before any changes): N=3 per selected row on the matched
+  pre-change profile.
+- **Testing** (after implementation): N=3 per selected candidate row.
+- **Confidence** (after review findings are addressed): N=5 per selected
+  candidate row.
+- **Stability** (final, before push): N=10 per selected candidate row.
+
+Put every stage beside its matched baseline in a PR-description table. There
+must be no candidate regression. New natural behavioral rows must reach at
+least 70% by the final stage; deterministic and explicit capability contracts
+must pass completely. Treat a drop as a regression, iterate generally rather
+than fitting the fixture, and repeat the affected stage before scaling.
 
 ### Testing & verification — catch the bug the review misses
 

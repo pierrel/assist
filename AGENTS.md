@@ -137,6 +137,16 @@ When changing how the model behaves (a skill, a prompt, a tool surface):
    the candidate safety panel, including a capability whose instruction was
    removed. Treat framework capabilities such as `write_todos` the same way as
    named skills, and list the selected rows and results in the PR description.
+7. **Survey, compare, and scale by default.** Unless Pierre explicitly
+   overrides it, survey the affected and adjacent behavioral evals before a
+   model-facing change. The survey may be representative rather than
+   exhaustive, but must name the selected rows and why they cover the changed
+   behavior. Run the matched pre-change baseline at N=3, candidate testing at
+   N=3, confidence at N=5, and final stability at N=10. Do not advance after a
+   regression: iterate generally, then re-run the affected stage. New natural
+   behavioral rows must reach at least 70% by the final stage; deterministic or
+   explicit capability contracts must pass completely. Put a baseline-versus-
+   candidate table with every stage and pass count in the PR description.
 
 # Testing guidelines
 1. Always run python tests (`pytest`) whenever any python files are modified and iterate on any failures until tests pass.
@@ -207,12 +217,14 @@ meaningful comments to `~/src/agentic/review-bridge-log.md`). Redeploy on every 
 change. Then Pierre merges (commits landing on `main` need his go-ahead); re-pin the agentic
 submodule; deploy `main`.
 
-**Eval cadence (assist-specific — evals are the contract):** baseline N=3 (before) → post-impl
-N=3 → post-review N=5 → stability N=10. Treat any pass-rate drop vs the prior step as a
-regression. **Reproduce the failure in an eval FIRST**; measure, don't argue. Change one thing
-at a time. Mock the research sub-agent unless the eval tests search. Baseline a NEW eval on
-`main` first. Run evals via the deploy venv; respect the eval duty-cycle + (when re-enabled) the
-nightly-cron window — see the meta `AGENTS.md` "Infra & ops facts".
+**Eval cadence (assist-specific — evals are the contract):** follow the survey,
+N=3 baseline/testing, N=5 confidence, and N=10 stability requirement above.
+Treat any pass-rate drop versus baseline as a regression. **Reproduce the
+failure in an eval FIRST**; measure, don't argue. Change one thing at a time.
+Mock the research sub-agent unless the eval tests search. Baseline a NEW eval
+on `main` first. Run evals via the deploy venv; respect the eval duty-cycle +
+(when re-enabled) the nightly-cron window — see the meta `AGENTS.md` "Infra &
+ops facts".
 
 **Branching:** off `main` only, never off another feature branch (wait for the dependency to
 merge). Commit/push freely on feature branches; commits that land on `main` need explicit
