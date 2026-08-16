@@ -1,6 +1,6 @@
 ---
 name: grounding
-description: Load before answering or acting on a request that depends on the user's local workspace, files, personal information, prior work, or ongoing task state outside /agent. Skip a self-contained request that an exact available capability can complete directly.
+description: Load before answering or acting on a request that depends on the user's local files, personal information, prior work, or ongoing task state outside /agent. Skip a self-contained request that an exact available capability can complete directly.
 ---
 
 # Grounding workflow

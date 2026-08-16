@@ -36,6 +36,22 @@ def test_changed_policy_cannot_resample_a_run(tmp_path):
         store.decide("thread-1", "run-1", "another-policy", 0.25)
 
 
+@pytest.mark.parametrize("corrupt", [
+    "[]",
+    "42",
+    '"not decisions"',
+    '{"run-1:thread-checkpoint": 42}',
+    '{"run-1:thread-checkpoint": {"probability": "bad", "should_run": true}}',
+])
+def test_non_mapping_decision_file_recovers_as_empty(tmp_path, corrupt):
+    directory = tmp_path / "thread-1"
+    directory.mkdir()
+    (directory / "frequency-decisions.json").write_text(corrupt)
+    decision = frequency.FrequencyDecisionStore(str(tmp_path)).decide(
+        "thread-1", "run-1", "thread-checkpoint", 0.25)
+    assert isinstance(decision.should_run, bool)
+
+
 @pytest.mark.parametrize("policy, probability", [
     ("../escape", 0.25), ("Thread Checkpoint", 0.25),
     ("thread-checkpoint", -0.1), ("thread-checkpoint", 1.1),

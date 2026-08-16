@@ -71,6 +71,15 @@ class FrequencyDecisionStore:
                     decisions = json.load(handle)
             except (FileNotFoundError, json.JSONDecodeError):
                 decisions = {}
+            if not isinstance(decisions, dict) or any(
+                    not isinstance(value, dict)
+                    or isinstance(value.get("probability"), bool)
+                    or not isinstance(value.get("probability"), (int, float))
+                    or not math.isfinite(value["probability"])
+                    or not 0 <= value["probability"] <= 1
+                    or not isinstance(value.get("should_run"), bool)
+                    for value in decisions.values()):
+                decisions = {}
             existing = decisions.get(key)
             if existing is not None:
                 if existing["probability"] != probability:
