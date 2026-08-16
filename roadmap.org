@@ -39,6 +39,32 @@ treated as Deep Agents.  Only then reach the explicit Pi-only end state and dele
 Deep Agents.  Local llama.cpp stays gateway-fair at capacity one initially; test
 higher local capacity and any explicit OpenRouter cloud-thread option separately
 after the local Pi web path works.
+*** TODO Next Pi milestone: infinite retained history, bounded context, recoverable detail
+Pi must retain a conversation indefinitely without repeatedly sending an
+unbounded transcript to the model.  This is *not* “infinite context”: the
+model receives a bounded, deliberately composed view, while the complete
+append-only transcript remains available to the web UI and for exact recall.
+
+Implement this as a distinct first-party =conversation-history= extension, not
+as more Pi runtime core.  It owns the compaction policy and context projection:
+
+- preserve the full raw transcript; compaction never deletes or overwrites it;
+- inject the ordinary system prompt, a versioned structured summary of the
+  compacted prefix, and the recent raw turns into each model request;
+- structure summaries around durable facts and preferences, decisions, active
+  plans and todos, artifacts, and unresolved questions;
+- retrieve and inject exact older excerpts on demand through bounded
+  conversation search/read capabilities when the summary is insufficient;
+- make compaction atomic and fail-safe: a failed or rejected summary leaves the
+  previous checkpoint and raw history authoritative.
+
+The UI continues to render the complete transcript, rather than the compacted
+model view.  Large tool output and generated files belong in a later companion
+artifact extension, referenced from context rather than copied into it.  Prove
+the extension with deterministic transcript/checkpoint/retrieval tests plus
+real Qwen multi-turn continuity evals.  This replaces Pi’s current fixed recent
+message replay with durable, recoverable long-thread memory while preserving
+Pi’s simple prompt and extension boundaries.
 ** TODO Complete Voice-call assistant P1 against the fake bridge
 Goal: phone a number, pass the PIN-gated receptionist, select or create a thread,
 and hold a natural voice conversation. The hardware-independent build/state contract
