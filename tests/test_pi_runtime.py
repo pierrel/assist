@@ -195,6 +195,7 @@ def test_result_sink_exposes_only_allowlisted_worker_failure_codes(tmp_path: Pat
         client.connect(str(control / "result.sock"))
         client.sendall(json.dumps({
             "capability": "a" * 43, "status": "failed", "code": "turn-bound-exceeded",
+            "phase": "prompt",
         }).encode())
         client.shutdown(socket.SHUT_WR)
     try:
@@ -208,6 +209,7 @@ def test_result_sink_exposes_only_allowlisted_worker_failure_codes(tmp_path: Pat
         client.connect(str(control / "result.sock"))
         client.sendall(json.dumps({
             "capability": "a" * 43, "status": "failed", "code": "host-path:/secret",
+            "phase": "prompt",
         }).encode())
         client.shutdown(socket.SHUT_WR)
     try:

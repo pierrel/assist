@@ -37,6 +37,7 @@ _MAX_MESSAGE_BYTES = 32 * 1024
 _MAX_TURNS = 12
 _WALL_TIMEOUT_SECONDS = 900
 _WORKER_FAILURE_CODES = {"turn-bound-exceeded", "worker-failed"}
+_WORKER_FAILURE_PHASES = {"request", "runtime", "session", "prompt"}
 
 
 class PiRuntimeError(RuntimeError):
@@ -116,12 +117,13 @@ class PiResultSink:
         if not isinstance(capability, str) or not secrets.compare_digest(capability, self._capability):
             raise PiRuntimeError("Pi worker result is unauthorized")
         if value.get("status") == "failed":
-            if set(value) != {"capability", "status", "code"}:
+            if set(value) != {"capability", "status", "code", "phase"}:
                 raise PiRuntimeError("Pi worker result is malformed")
-            code = value["code"]
-            if not isinstance(code, str) or code not in _WORKER_FAILURE_CODES:
+            code, phase = value["code"], value["phase"]
+            if (not isinstance(code, str) or code not in _WORKER_FAILURE_CODES
+                    or not isinstance(phase, str) or phase not in _WORKER_FAILURE_PHASES):
                 raise PiRuntimeError("Pi worker result is malformed")
-            raise PiRuntimeError(f"Pi worker failed: {code}")
+            raise PiRuntimeError(f"Pi worker failed: {code} ({phase})")
         if value.get("status") != "completed" or set(value) != {
                 "capability", "status", "reply", "turns"}:
             raise PiRuntimeError("Pi worker result is malformed")

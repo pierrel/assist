@@ -29,6 +29,7 @@ const MAX_MESSAGE_BYTES = 32 * 1024;
 const MAX_TURNS = 12;
 
 type FailureCode = "turn-bound-exceeded" | "worker-failed";
+type FailurePhase = "request" | "runtime" | "session" | "prompt";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type Request = {
@@ -45,6 +46,7 @@ type Request = {
 };
 
 let resultCommitted = false;
+let failurePhase: FailurePhase = "request";
 
 function validateRequest(value: unknown): Request {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -195,6 +197,7 @@ function failureCode(error: unknown): FailureCode {
 async function main(): Promise<void> {
   const raw = readRequestBytes();
   const request = validateRequest(JSON.parse(raw.toString("utf8")));
+  failurePhase = "runtime";
   for (const key of Object.keys(process.env)) delete process.env[key];
   Object.assign(process.env, { HOME: "/tmp/pi-home", PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" });
   const runtime = await ModelRuntime.create({
@@ -230,6 +233,7 @@ async function main(): Promise<void> {
     agentsFilesOverride: () => ({ agentsFiles: [] }), appendSystemPromptOverride: () => [],
   });
   await loader.reload();
+  failurePhase = "session";
   const created = await createAgentSession({
     cwd: "/workspace", agentDir: "/agent", model, modelRuntime: runtime, thinkingLevel: "off",
     noTools: "builtin", tools: ["read", "write", "edit", "bash"], customTools: createBrokerTools(request.brokerCapability),
@@ -244,6 +248,7 @@ async function main(): Promise<void> {
     }
   });
   try {
+    failurePhase = "prompt";
     await created.session.prompt(turnInput(request.history, request.prompt));
     if (turns > request.maxTurns) throw new Error("Pi turn bound exceeded");
     await writeResult(request.resultCapability, {
@@ -259,7 +264,9 @@ main().catch(async (error: unknown) => {
   if (!resultCommitted) {
     try {
       const request = validateRequest(JSON.parse(readRequestBytes().toString("utf8")));
-      await writeResult(request.resultCapability, { status: "failed", code: failureCode(error) });
+      await writeResult(request.resultCapability, {
+        status: "failed", code: failureCode(error), phase: failurePhase,
+      });
     } catch {
       // The trusted host turns a missing result into an honest failed Run.
     }
