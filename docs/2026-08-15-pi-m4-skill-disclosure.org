@@ -126,7 +126,8 @@ not a general plugin registry.
    Pi inactive tool is absent from the provider schema, including in the loader
    response; the relay independently rejects a wrong schema and the broker
    independently rejects a premature call.  It establishes the initial
-   inactive set in =session_start=; the loader invokes only its narrow
+   inactive set in =before_agent_start=, after Pi has registered extension
+   tools; the loader invokes only its narrow
    disclosure function, never a generic plugin API.
 
 The current Pi coding tools remain kernel tools, matching Deep Agents P2b's

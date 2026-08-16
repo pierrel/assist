@@ -14,6 +14,7 @@ export function activateDisclosure(pi: ExtensionAPI, names: string[]): void {
 export function toolDisclosureExtension(capability: string): ExtensionFactory {
   const broker = new BrokerClient(capability);
   return (pi) => {
+    let initialized = false;
     pi.registerTool({
       name: "map_data",
       label: "Map data",
@@ -27,10 +28,13 @@ export function toolDisclosureExtension(capability: string): ExtensionFactory {
         details: {},
       }),
     });
-    pi.on("session_start", () => {
-      // The registered map tool is deliberately absent until a host-verified
-      // loader result reaches the next provider request.
-      pi.setActiveTools(INITIAL_TOOLS);
+    pi.on("before_agent_start", () => {
+      if (!initialized) {
+        // Resource registration follows session_start in Pi. Set the initial
+        // menu here so registration cannot re-expose map_data before a load.
+        pi.setActiveTools(INITIAL_TOOLS);
+        initialized = true;
+      }
     });
   };
 }
