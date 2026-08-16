@@ -159,20 +159,6 @@ function turnInput(history: HistoryMessage[], prompt: string): string {
   ].join("\n");
 }
 
-function assistantText(value: unknown): string {
-  if (value === null || typeof value !== "object") throw new Error("Pi produced no assistant message");
-  const message = value as { role?: unknown; content?: unknown };
-  if (message.role !== "assistant") throw new Error("Pi produced no assistant message");
-  if (typeof message.content === "string") return message.content;
-  if (!Array.isArray(message.content)) throw new Error("Pi assistant content is invalid");
-  const text = message.content
-    .filter((item): item is { type: "text"; text: string } => item !== null && typeof item === "object"
-      && (item as { type?: unknown }).type === "text" && typeof (item as { text?: unknown }).text === "string")
-    .map((item) => item.text).join("");
-  if (!text) throw new Error("Pi assistant reply is empty");
-  return text;
-}
-
 async function writeResult(capability: string, value: Record<string, unknown>): Promise<void> {
   const raw = Buffer.from(JSON.stringify({ capability, ...value }), "utf8");
   if (raw.length > MAX_RESULT_BYTES) {
@@ -253,8 +239,10 @@ async function main(): Promise<void> {
     await created.session.prompt(turnInput(request.history, request.prompt));
     if (turns > request.maxTurns) throw new Error("Pi turn bound exceeded");
     failurePhase = "reply";
+    const reply = created.session.getLastAssistantText();
+    if (reply === undefined) throw new Error("Pi produced no assistant reply");
     await writeResult(request.resultCapability, {
-      status: "completed", reply: assistantText(created.session.messages.at(-1)), turns,
+      status: "completed", reply, turns,
     });
   } finally {
     unsubscribe();
