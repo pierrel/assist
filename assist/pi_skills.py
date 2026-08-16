@@ -204,6 +204,7 @@ class PiSkillAuthority:
         with self._lock:
             pending = self._pending
             if not isinstance(payload, dict):
+                self._pending = None
                 return False
             tools = payload.get("tools")
             if not isinstance(tools, list):

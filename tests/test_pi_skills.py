@@ -94,6 +94,15 @@ def test_authority_preflight_does_not_promote_a_pending_capability() -> None:
     assert authority.active_tools == frozenset({"map_data"})
 
 
+def test_authority_non_object_preflight_clears_a_pending_capability() -> None:
+    authority = PiSkillAuthority(_catalog())
+    authority.observe_loader("call-1", "load_skill", {"name": "render"})
+    authority.load_skill("call-1", "load_skill", {"name": "render"})
+
+    assert not authority.can_continue_request([])
+    assert authority.active_tools == frozenset()
+
+
 def test_authority_rejects_missing_or_extra_provider_schemas() -> None:
     authority = PiSkillAuthority(_catalog())
     fixed = [{"type": "function", "function": {"name": name}}
