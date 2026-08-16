@@ -236,7 +236,8 @@ async function main(): Promise<void> {
   failurePhase = "session";
   const created = await createAgentSession({
     cwd: "/workspace", agentDir: "/agent", model, modelRuntime: runtime, thinkingLevel: "off",
-    noTools: "builtin", tools: ["read", "write", "edit", "bash"], customTools: createBrokerTools(request.brokerCapability),
+    noTools: "builtin", tools: ["read", "write", "edit", "bash", "load_skill", "map_data"],
+    customTools: createBrokerTools(request.brokerCapability),
     resourceLoader: loader, sessionManager: SessionManager.inMemory("/workspace"),
     settingsManager: settings,
   });

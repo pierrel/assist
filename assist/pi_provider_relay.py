@@ -4,9 +4,7 @@ from __future__ import annotations
 import hmac
 import http.client
 import json
-import logging
 import os
-import re
 import socket
 import socketserver
 import stat
@@ -20,7 +18,6 @@ from assist.pi_skills import PiSkillAuthority
 
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-_LOG = logging.getLogger(__name__)
 _MAX_MODEL_CALLS = 12
 _MAX_TOKENS = 8192
 _SOCKET_TIMEOUT_SECONDS = 5
@@ -168,7 +165,6 @@ class PiProviderRelay:
         if not isinstance(payload, dict) or payload.get("model") != self._model:
             raise PiProviderRelayError("Pi model request uses an invalid model")
         if self._skill_authority is not None and not self._skill_authority.continue_request(payload):
-            _LOG.warning("Pi tool authority rejected provider menu: %s", _tool_menu_summary(payload))
             raise PiProviderRelayError("Pi model request does not continue skill loading")
         if ("max_completion_tokens" in payload
                 or "n" in payload and payload["n"] != 1
@@ -334,17 +330,6 @@ def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
     return call["id"], "load_skill", arguments
 
 
-def _tool_menu_summary(payload: object) -> str:
-    """Return only bounded schema names for a private relay diagnostic."""
-    if not isinstance(payload, dict) or not isinstance(payload.get("tools"), list):
-        return "invalid"
-    names: list[str] = []
-    for item in payload["tools"][:16]:
-        function = item.get("function") if isinstance(item, dict) else None
-        name = function.get("name") if isinstance(function, dict) else None
-        names.append(name if isinstance(name, str) and re.fullmatch(r"[a-z_]{1,64}", name)
-                     else "invalid")
-    return ",".join(names)
 
 class _ProviderHandler(BaseHTTPRequestHandler):
     """Tiny HTTP boundary used only behind a private Unix socket."""
