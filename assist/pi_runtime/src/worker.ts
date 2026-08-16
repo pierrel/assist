@@ -240,7 +240,7 @@ async function main(): Promise<void> {
     if (turns > request.maxTurns) throw new Error("Pi turn bound exceeded");
     failurePhase = "reply";
     const reply = created.session.getLastAssistantText();
-    if (reply === undefined) throw new Error("Pi produced no assistant reply");
+    if (!reply?.trim()) throw new Error("Pi produced no assistant reply");
     await writeResult(request.resultCapability, {
       status: "completed", reply, turns,
     });
