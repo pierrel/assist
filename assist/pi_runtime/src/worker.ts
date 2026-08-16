@@ -29,7 +29,7 @@ const MAX_MESSAGE_BYTES = 32 * 1024;
 const MAX_TURNS = 12;
 
 type FailureCode = "turn-bound-exceeded" | "worker-failed";
-type FailurePhase = "request" | "runtime" | "session" | "prompt";
+type FailurePhase = "request" | "runtime" | "session" | "prompt" | "reply";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type Request = {
@@ -252,6 +252,7 @@ async function main(): Promise<void> {
     failurePhase = "prompt";
     await created.session.prompt(turnInput(request.history, request.prompt));
     if (turns > request.maxTurns) throw new Error("Pi turn bound exceeded");
+    failurePhase = "reply";
     await writeResult(request.resultCapability, {
       status: "completed", reply: assistantText(created.session.messages.at(-1)), turns,
     });
