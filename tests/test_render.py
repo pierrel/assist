@@ -5,6 +5,7 @@ CPU/no-model: the agent-driven behavior (model emits a render block) is an eval
 (edd/eval/test_render_agent.py). Here we test the parser + renderer + route.
 """
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +21,13 @@ from manage.web.threads import (
     _extract_pdf_pages,
     _RENDER_DISPATCH,
 )
+
+
+def test_render_skill_uses_the_single_user_file_path():
+    skill = (Path(__file__).parents[1] / "assist/web_skills/render/SKILL.md").read_text()
+
+    assert "/user/PATH-TO-THE-FILE" in skill
+    assert "/workspace" not in skill
 
 
 def _make_pdf(path, n_pages):

@@ -1,6 +1,6 @@
 ---
 name: render
-description: MUST load before reading or replying when the user asks to show, open, view, or display a named or existing workspace file or directory in the web conversation. Also use for rendering generated or existing PNG graphs/charts and maps. EXAMPLES — "show me fitness.org"; "show me what is in projects"; "open the project notes"; "display the chart here"; "show that PNG again".
+description: MUST load before reading or replying when the user asks to show, open, view, or display a named or existing user file or directory in the web conversation. Also use for rendering generated or existing PNG graphs/charts and maps. EXAMPLES — "show me fitness.org"; "show me what is in projects"; "open the project notes"; "display the chart here"; "show that PNG again".
 allowed-tools: map_data
 ---
 
@@ -35,13 +35,13 @@ code block tagged `render` whose body names the file's type and path:
 
 ```render
 type: file
-path: /workspace/PATH-TO-THE-FILE
+path: /user/PATH-TO-THE-FILE
 ```
 
-Replace `PATH-TO-THE-FILE` with the real file — either in the user's workspace
+Replace `PATH-TO-THE-FILE` with the real file — either under `/user`
 (e.g. `path: /user/fitness.org`) or under `/tmp` (e.g.
 `path: /tmp/summary.md`). **`/tmp` is a persistent scratch directory** that
-renders exactly like the workspace, so you can `write_file` a file there to show
+renders exactly like `/user`, so you can `write_file` a file there to show
 it (see "Showing other file types" below).
 
 When the user asks to show the contents of a directory, first list the directory.
@@ -104,8 +104,8 @@ type: file
 path: /tmp/sub_research.md
 ```
 
-`/tmp` is a per-thread scratch dir that persists across turns and renders like the
-workspace, so this is the way
+`/tmp` is a per-thread scratch dir that persists across turns and renders like
+`/user`, so this is the way
 to show a nicely-formatted version of a file whose own extension wouldn't format.
 Use it when converting adds value; otherwise just render the original path as
 plain text (above).

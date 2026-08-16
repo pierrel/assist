@@ -19,9 +19,9 @@ worker privileges or the persistence of =/tmp=.
   not a rigid required tree.
 - Children remain isolated: context and research workers receive self-contained
   briefs and do not mount or write the parent =/agent= directory.
-- =/user= is the user-owned alias for the established physical =/workspace=
-  mount. Existing =/workspace= paths remain compatible; neither path creates a
-  second user tree.
+- The model sees =/user= as the sole user-owned file tree. It is an alias for
+  the established physical =/workspace= mount, which remains compatible for
+  existing implementation and user files; neither path creates a second tree.
 - =/tmp= remains intentionally persistent per thread. It holds disposable
   conversions and generated render artifacts, never user deliverables.
 - The visible main agent gets a single =should_run_maintenance= tool. It returns
@@ -43,7 +43,8 @@ current-progress Markdown file. Never put user deliverables there, and never
 claim a private checkpoint is user work. Tracking current work alone does not
 authorize a user-workspace or cross-thread-memory change.
 
-The visible main agent alone may preserve useful context/research handoffs under
+The loaded grounding and research procedures, not the bootstrap prompt, direct
+the visible main agent to preserve useful context/research handoffs under
 =/agent/context/= or =/agent/research/=. Children remain isolated and return
 untrusted evidence; the main agent distills only relevant facts, sources or
 paths, uncertainty, and its decisions rather than copying raw task output.
@@ -104,6 +105,19 @@ The post-summary turns relied on the automatically reloaded thread memory and
 the framework summary rather than making another explicit private-file call.
 The test remains a diagnostic because later models, thresholds, and real long
 threads may choose a different mix of explicit reads and writes.
+
+* Review experiments
+
+Pierre proposed strengthening the grounding catalog trigger to “could be
+enriched by additional context” and removing the bootstrap Grounding section.
+On the actual branch profile, the catalog-only variant bypassed =grounding= and
+read the trip file directly. The stronger catalog plus broader bootstrap rule
+also regressed the small candidate panel. The original narrower trigger stays;
+the loaded skill remains the detailed procedure. With the final wording, the
+quick panel was 2/3: local-profile grounding and a grounded task edit passed,
+while the trip-notes capability still bypassed the skill and read the file
+directly. A dependent context-to-research handoff passed N=1. These are
+exploratory results, not parity claims.
 
 * Risks and non-goals
 

@@ -430,9 +430,8 @@ def test_private_workspace_checkpoint_boundary_is_web_main_only(census):
 
 def test_user_and_persistent_tmp_guidance_are_web_main_only(census):
     markers = (
-        "`/user` is the user-owned workspace.",
+        "`/user` is the user-owned file tree.",
         "`/tmp` is persistent per-thread scratch space.",
-        "in `/agent/context/` or `/agent/research/`",
     )
     for call in census["calls"]:
         text = _system_prompt(call)
@@ -1289,7 +1288,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 23_766
+    assert len(current_prompt) == 23_381
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
