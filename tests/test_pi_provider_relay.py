@@ -15,6 +15,7 @@ import pytest
 
 from assist.pi_provider_relay import (PiProviderRelay, PiProviderRelayError,
                                       _sole_loader_completion)
+from assist.pi_skills import PiSkill, PiSkillAuthority, PiSkillCatalog
 
 
 _adapter_path = Path(__file__).parents[1] / "assist/pi_runtime/provider_adapter.py"
@@ -83,6 +84,28 @@ def _request(path: Path, capability: str, *, model: str = "qwen",
         while chunk := client.recv(65536):
             chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _pending_render_authority() -> tuple[PiSkillAuthority, str]:
+    authority = PiSkillAuthority(PiSkillCatalog((
+        PiSkill("render", "show a file", "render rules", "a" * 64, ("map_data",)),
+    )))
+    authority.observe_loader("call-1", "load_skill", {"name": "render"})
+    return authority, authority.load_skill("call-1", "load_skill", {"name": "render"})
+
+
+def _render_continuation(result: str) -> dict[str, object]:
+    return {
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call-1", "function": {
+                "name": "load_skill", "arguments": '{"name":"render"}'}}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": result},
+        ],
+        "tools": [
+            {"type": "function", "function": {"name": name}}
+            for name in ("read", "write", "edit", "bash", "load_skill", "map_data")
+        ],
+    }
 
 
 def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -> None:
@@ -221,6 +244,55 @@ def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> No
     assert b" 403 " in streaming
     assert b" 200 " in accepted_streaming
     assert _Upstream.requests[0][2]["stream"] is True
+
+
+def test_rejected_continuation_does_not_promote_its_declared_tool(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    _Upstream.requests = []
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43,
+                            extra=_render_continuation(result) | {"stream": False})
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert authority.active_tools == frozenset()
+    assert _Upstream.requests == []
+
+
+def test_failed_continuation_does_not_promote_its_declared_tool(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FailedUpstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        failed = _request(relay.socket_path, "a" * 43, extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 500 " in failed
+    assert authority.active_tools == frozenset()
 
 
 def test_provider_relay_refuses_nonlocal_or_malformed_endpoints(tmp_path: Path) -> None:

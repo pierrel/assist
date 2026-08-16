@@ -165,11 +165,14 @@ class PiProviderRelay:
             raise PiProviderRelayError("Pi model request is malformed") from error
         if not isinstance(payload, dict) or payload.get("model") != self._model:
             raise PiProviderRelayError("Pi model request uses an invalid model")
-        if self._skill_authority is not None and not self._skill_authority.continue_request(payload):
+        if (self._skill_authority is not None
+                and not self._skill_authority.can_continue_request(payload)):
             raise PiProviderRelayError("Pi model request does not continue skill loading")
         if ("max_completion_tokens" in payload
                 or "n" in payload and payload["n"] != 1
                 or "stream" in payload and payload["stream"] is not True):
+            if self._skill_authority is not None:
+                self._skill_authority.clear_loader()
             raise PiProviderRelayError("Pi model request changes its generation policy")
         normalized = dict(payload)
         normalized["model"] = self._model
@@ -185,11 +188,17 @@ class PiProviderRelay:
         normalized["stream"] = True
         canonical = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
         if len(canonical) > _MAX_REQUEST_BYTES:
+            if self._skill_authority is not None:
+                self._skill_authority.clear_loader()
             raise PiProviderRelayError("Pi model request exceeds its bound")
         with self._state_lock:
-            if self._stopping or self._calls >= _MAX_MODEL_CALLS:
-                raise PiProviderRelayError("Pi model turn bound exceeded")
-            self._calls += 1
+            limited = self._stopping or self._calls >= _MAX_MODEL_CALLS
+            if not limited:
+                self._calls += 1
+        if limited:
+            if self._skill_authority is not None:
+                self._skill_authority.clear_loader()
+            raise PiProviderRelayError("Pi model turn bound exceeded")
         return canonical
 
     def forward(self, body: bytes, trace_operation: object | None = None) -> tuple[int, str, list[bytes]]:
@@ -226,6 +235,12 @@ class PiProviderRelay:
                 chunks.append(chunk)
             completed = 200 <= response.status < 300
             if completed and self._skill_authority is not None:
+                try:
+                    payload = json.loads(body)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise PiProviderRelayError("Pi model request is malformed") from error
+                if not self._skill_authority.continue_request(payload):
+                    raise PiProviderRelayError("Pi model request does not continue skill loading")
                 observed = _sole_loader_completion(b"".join(chunks))
                 if observed is None:
                     self._skill_authority.clear_loader()

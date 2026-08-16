@@ -162,14 +162,15 @@ This ordering reflects the real lifecycle: provider completion, worker tool
 execution, then the following provider request.
 
 On the immediate next provider request, the relay requires the matching
-assistant tool call and the matching tool result before it forwards anything.
+assistant tool call and the matching tool result before it admits anything.
 It also requires that the request's tool names equal the expected set:
 kernel tools, =load_skill=, already active declarations, and this winner's new
 declaration if any.  Any malformed SSE/JSON, mismatched ID/name/arguments/
 result digest, intervening request, duplicate loader, upstream failure, timeout,
 cancellation, or teardown clears the loader phase while leaving prior
-=active_tools= unchanged.  The relay then promotes this winner's declaration
-before forwarding the verified continuation.  This is intentionally a
+=active_tools= unchanged.  The relay forwards the prevalidated continuation
+without granting a tool, then promotes this winner's declaration only after a
+successful upstream response.  This is intentionally a
 per-turn capability grant: a verified successful load authorizes its declared
 tool for the rest of that Pi turn, not only a particular provider-returned
 tool-call ID.  The next request must expose the tool to the provider, and the

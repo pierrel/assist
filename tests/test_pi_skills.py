@@ -72,6 +72,28 @@ def test_authority_requires_observed_load_and_exact_following_continuation() -> 
     authority.require("map_data")
 
 
+def test_authority_preflight_does_not_promote_a_pending_capability() -> None:
+    authority = PiSkillAuthority(_catalog())
+    authority.observe_loader("call-1", "load_skill", {"name": "render"})
+    result = authority.load_skill("call-1", "load_skill", {"name": "render"})
+    continuation = {
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call-1", "function": {
+                "name": "load_skill", "arguments": '{"name":"render"}'}}]},
+            {"role": "tool", "tool_call_id": "call-1", "content": result},
+        ],
+        "tools": [
+            {"type": "function", "function": {"name": name}}
+            for name in ("read", "write", "edit", "bash", "load_skill", "map_data")
+        ],
+    }
+
+    assert authority.can_continue_request(continuation)
+    assert authority.active_tools == frozenset()
+    assert authority.continue_request(continuation)
+    assert authority.active_tools == frozenset({"map_data"})
+
+
 def test_authority_rejects_missing_or_extra_provider_schemas() -> None:
     authority = PiSkillAuthority(_catalog())
     fixed = [{"type": "function", "function": {"name": name}}

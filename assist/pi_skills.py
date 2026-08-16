@@ -199,8 +199,8 @@ class PiSkillAuthority:
             self._observed = None
             return result
 
-    def continue_request(self, payload: object) -> bool:
-        """Promote only the exact next assistant/tool continuation, otherwise clear."""
+    def _continue_request(self, payload: object, *, activate: bool) -> bool:
+        """Validate the next continuation and activate it only after relay admission."""
         with self._lock:
             pending = self._pending
             if not isinstance(payload, dict):
@@ -221,35 +221,51 @@ class PiSkillAuthority:
                 return False
             if pending is None:
                 return True
-            self._pending = None
             messages = payload.get("messages")
             if not isinstance(messages, list):
+                self._pending = None
                 return False
             assistant = next((item for item in reversed(messages)
                               if isinstance(item, dict) and item.get("role") == "assistant"), None)
             result = next((item for item in reversed(messages)
                            if isinstance(item, dict) and item.get("role") == "tool"), None)
             if not isinstance(assistant, dict) or not isinstance(result, dict):
+                self._pending = None
                 return False
             calls = assistant.get("tool_calls")
             if (not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict)
                     or calls[0].get("id") != pending.observed.call_id):
+                self._pending = None
                 return False
             function = calls[0].get("function")
             if not isinstance(function, dict) or function.get("name") != "load_skill":
+                self._pending = None
                 return False
             try:
                 args = json.loads(function.get("arguments", ""))
             except (TypeError, json.JSONDecodeError):
+                self._pending = None
                 return False
             if self._canonical_args(args) != pending.observed.arguments:
+                self._pending = None
                 return False
             content = result.get("content")
             if (result.get("tool_call_id") != pending.observed.call_id
                     or not isinstance(content, str) or _sha(content) != pending.result_sha256):
+                self._pending = None
                 return False
-            self._active_tools = frozenset(set(self._active_tools) | set(pending.tools))
+            if activate:
+                self._pending = None
+                self._active_tools = frozenset(set(self._active_tools) | set(pending.tools))
             return True
+
+    def can_continue_request(self, payload: object) -> bool:
+        """Validate a continuation before the relay forwards it without granting a tool."""
+        return self._continue_request(payload, activate=False)
+
+    def continue_request(self, payload: object) -> bool:
+        """Promote only the exact forwarded assistant/tool continuation, otherwise clear."""
+        return self._continue_request(payload, activate=True)
 
     def require(self, name: str) -> None:
         """Reject a broker operation that has not crossed the relay boundary."""
