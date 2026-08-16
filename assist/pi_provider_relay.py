@@ -149,9 +149,10 @@ class PiProviderRelay:
     def validate_request(self, method: str, path: str, headers: object,
                          body: bytes) -> bytes:
         """Validate an inbound request before it can consume model authority."""
-        if method != "POST" or path != _PATH or len(body) > _MAX_REQUEST_BYTES:
-            raise PiProviderRelayError("Pi model request is invalid")
         if not hasattr(headers, "get"):
+            raise PiProviderRelayError("Pi model request is invalid")
+        if method != "POST" or path != _PATH or len(body) > _MAX_REQUEST_BYTES:
+            self.clear_loader_for_capability(headers)
             raise PiProviderRelayError("Pi model request is invalid")
         content_type = headers.get("Content-Type")
         capability = headers.get(_CAPABILITY_HEADER)
@@ -200,6 +201,14 @@ class PiProviderRelay:
                 self._skill_authority.clear_loader()
             raise
 
+    def clear_loader_for_capability(self, headers: object) -> None:
+        """Clear a pending continuation only for this relay's authenticated worker."""
+        if self._skill_authority is None or not hasattr(headers, "get"):
+            return
+        capability = headers.get(_CAPABILITY_HEADER)
+        if isinstance(capability, str) and hmac.compare_digest(capability, self._capability):
+            self._skill_authority.clear_loader()
+
     def forward(self, body: bytes, trace_operation: object | None = None) -> tuple[int, str, list[bytes]]:
         """Forward one already-authorized request without forwarding its headers."""
         completed = False
@@ -208,6 +217,8 @@ class PiProviderRelay:
         connection = connection_type(self._upstream.hostname, self._upstream.port, timeout=_SOCKET_TIMEOUT_SECONDS)
         with self._state_lock:
             if self._stopping:
+                if self._skill_authority is not None:
+                    self._skill_authority.clear_loader()
                 raise PiProviderRelayError("Pi provider relay is stopped")
             self._connections.add(connection)
             # Holding the short connection/send operation under this gate means
@@ -364,6 +375,12 @@ class _ProviderHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         self.request.settimeout(_SOCKET_TIMEOUT_SECONDS)
         super().setup()
+
+    def send_error(self, code: int, message: str | None = None,
+                   explain: str | None = None) -> None:
+        """Make any authenticated rejected request invalidate its continuation."""
+        self.relay.clear_loader_for_capability(getattr(self, "headers", None))
+        super().send_error(code, message, explain)
 
     def do_POST(self) -> None:
         registered = False

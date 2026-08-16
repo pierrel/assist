@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from assist.pi_provider_relay import (PiProviderRelay, PiProviderRelayError,
+from assist.pi_provider_relay import (_MAX_REQUEST_BYTES, PiProviderRelay, PiProviderRelayError,
                                       _sole_loader_completion)
 from assist.pi_skills import PiSkill, PiSkillAuthority, PiSkillCatalog
 
@@ -68,11 +68,11 @@ class _FailedUpstream(http.server.BaseHTTPRequestHandler):
 
 
 def _request(path: Path, capability: str, *, model: str = "qwen",
-             extra: dict[str, object] | None = None) -> bytes:
+             extra: dict[str, object] | None = None, request_path: str = "/v1/chat/completions") -> bytes:
     body = json.dumps({"model": model, "messages": []} | (extra or {})).encode()
     raw = (
-        b"POST /v1/chat/completions HTTP/1.1\r\n"
-        b"Content-Type: application/json\r\n"
+        f"POST {request_path} HTTP/1.1\r\n".encode()
+        + b"Content-Type: application/json\r\n"
         + f"X-Assist-Pi-Capability: {capability}\r\n".encode()
         + f"Content-Length: {len(body)}\r\n\r\n".encode() + body
     )
@@ -286,7 +286,7 @@ def test_invalid_authenticated_request_clears_a_pending_tool(tmp_path: Path) -> 
     relay.start()
     try:
         rejected = _request(relay.socket_path, "a" * 43,
-                            model="other", extra=_render_continuation(result))
+                            extra=_render_continuation(result), request_path="/other")
         accepted = _request(relay.socket_path, "a" * 43,
                             extra=_render_continuation(result))
     finally:
@@ -295,6 +295,39 @@ def test_invalid_authenticated_request_clears_a_pending_tool(tmp_path: Path) -> 
         upstream.server_close()
 
     assert b" 403 " in rejected
+    assert b" 403 " in accepted
+    assert authority.active_tools == frozenset()
+
+
+def test_oversized_authenticated_request_clears_a_pending_tool(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        with socket.socket(socket.AF_UNIX) as client:
+            client.connect(str(relay.socket_path))
+            client.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"X-Assist-Pi-Capability: " + b"a" * 43 + b"\r\n"
+                + f"Content-Length: {_MAX_REQUEST_BYTES + 1}\r\n\r\n".encode())
+            rejected = client.recv(65536)
+        accepted = _request(relay.socket_path, "a" * 43,
+                            extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 413 " in rejected
     assert b" 403 " in accepted
     assert authority.active_tools == frozenset()
 
@@ -354,6 +387,30 @@ def test_transport_failed_continuation_clears_its_pending_tool(tmp_path: Path) -
         if upstream is not None:
             upstream.shutdown()
             upstream.server_close()
+
+    assert authority.active_tools == frozenset()
+
+
+def test_stopped_continuation_clears_its_pending_tool(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, "http://127.0.0.1:1/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    payload = {"model": "qwen"} | _render_continuation(result)
+    try:
+        canonical = relay.validate_request(
+            "POST", "/v1/chat/completions",
+            {"Content-Type": "application/json", "x-assist-pi-capability": "a" * 43},
+            json.dumps(payload).encode(),
+        )
+        relay.stop_admission()
+        with pytest.raises(PiProviderRelayError, match="stopped"):
+            relay.forward(canonical)
+    finally:
+        relay.close()
 
     assert authority.active_tools == frozenset()
 
