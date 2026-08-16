@@ -2340,7 +2340,7 @@ def _assert_closed_artifact_shapes(artifact: dict[str, Any]) -> None:
         if not re.fullmatch(r"[0-9a-f]{64}", profiles["pi"][key]):
             raise AssertionError(f"Pi profile {key} is not a digest")
     if profiles["pi"]["worker_declared_tool_names"] != [
-            "read", "write", "edit", "bash"]:
+            "read", "write", "edit", "bash", "load_skill", "map_data"]:
         raise AssertionError("Pi worker tool declaration drifted")
     _assert_keys(
         profiles["deepagents"]["provider_profile"],
@@ -3419,7 +3419,7 @@ def _pi_worker_declaration() -> tuple[list[str], str]:
     if match is None:
         raise AssertionError("Pi worker tool declaration is unavailable")
     names = re.findall(r'"([A-Za-z0-9_-]+)"', match.group(1))
-    if names != ["read", "write", "edit", "bash"]:
+    if names != ["read", "write", "edit", "bash", "load_skill", "map_data"]:
         raise AssertionError("Pi worker tool declaration drifted")
     required = (
         'runtime.registerProvider("assist-pi"',
