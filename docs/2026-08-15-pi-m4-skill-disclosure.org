@@ -19,6 +19,33 @@ remain absent until their own typed Pi extensions and trusted host handlers
 exist.  A Pi catalog must never advertise a skill whose required capability is
 not present.
 
+** Regression correction: bounded streamed turns
+
+A live =render= request exposed a Pi-only transport bug: the relay correctly
+forced OpenAI streaming, but then waited for the upstream HTTP connection to
+close.  llama.cpp can legally send =data: [DONE]= and keep that HTTP/1.1
+connection alive.  The worker consequently held the thread until its old
+15-minute wall limit, even though the model had finished its response.
+
+The relay now recognizes only a complete, exact SSE =data: [DONE]= line as a
+successful stream termination.  It byte-bounds every response, rejects malformed
+data frames and EOF before the marker, and clears a pending skill continuation
+on any such failure.  A successful skill continuation is promoted only after
+that complete response.  Since Pi itself requests streaming, a successful
+non-stream response is rejected; bounded non-success responses remain useful
+provider errors.
+
+Pi is an interactive bounded preview, so one model call is capped at 2,048
+tokens and 75 seconds; the worker, adapter, and host relay use that same
+per-call bound, and the whole turn is capped at three minutes.  These are Pi
+product limits, not changes to Deep Agents.
+
+Portable skill files remain shared and unmodified.  Pi wraps each loaded body
+with its host-owned vocabulary mapping both before and after the shared text,
+so examples using Deep Agents names such as =write_file= and =execute= map to
+Pi's actual =write= and =bash= tool schemas.  Broker enforcement remains the
+authority regardless of prompt wording.
+
 * Goal
 
 Give an ordinary Pi web turn the same skill-selection mechanics as current

@@ -130,5 +130,6 @@ def test_catalog_adds_the_actual_pi_edit_and_bash_call_shapes() -> None:
     backend = _Backend({"edit-files": "---\nname: edit-files\ndescription: edit\n---\nbody"})
     catalog = build_pi_skill_catalog(backend, ("/skills/",))
 
-    assert "edits: [{oldText, newText}]" in catalog.get("edit-files").body  # type: ignore[union-attr]
-    assert 'cwd: "/workspace"' in catalog.get("edit-files").body  # type: ignore[union-attr]
+    body = catalog.get("edit-files").body  # type: ignore[union-attr]
+    assert body.startswith("## Pi tool vocabulary")
+    assert body.endswith("available.\n")

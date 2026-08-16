@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from assist import pi_provider_relay
 from assist.pi_provider_relay import (_MAX_REQUEST_BYTES, PiProviderRelay, PiProviderRelayError,
                                       _sole_loader_completion)
 from assist.pi_skills import PiSkill, PiSkillAuthority, PiSkillCatalog
@@ -32,9 +33,9 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
         length = int(self.headers["Content-Length"])
         payload = json.loads(self.rfile.read(length))
         type(self).requests.append((self.path, dict(self.headers), payload))
-        body = b'{"id":"test","choices":[]}'
+        body = b'data: {"id":"test","choices":[{}]}\n\ndata: [DONE]\n\n'
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -62,6 +63,123 @@ class _FailedUpstream(http.server.BaseHTTPRequestHandler):
         self.send_response(500)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _KeepAliveSSEUpstream(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    sent_done = threading.Event()
+    release = threading.Event()
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for part in (b': ping\n\ndata: {"choices":[{}]}\n\ndata: [DO', b'NE]\n\n'):
+            self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
+        self.wfile.flush()
+        type(self).sent_done.set()
+        type(self).release.wait(10)
+        try:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except OSError:
+            pass
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _IncompleteSSEUpstream(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = b'data: {"choices":[{}]}\n\n'
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _MalformedSSEUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = b"data: not-json\n\n"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _ErrorSSEUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = b'data: {"error":"bad model response"}\n\ndata: [DONE]\n\n'
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _UnstreamedUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        body = b'{"choices":[{}]}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _HeaderInjectionUpstream(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(500)
+        self.send_header("Content-Type", "application/json\r\nX-Upstream-Injected: yes")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+class _SlowLineSSEUpstream(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    started = threading.Event()
+    release = threading.Event()
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        part = b'data: {"choices":[{}]}'
+        self.wfile.write(f"{len(part):X}\r\n".encode() + part + b"\r\n")
+        self.wfile.flush()
+        type(self).started.set()
+        type(self).release.wait(10)
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
@@ -139,7 +257,7 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     assert path == "/v1/chat/completions"
     assert headers["Authorization"] == "Bearer secret"
     assert payload["model"] == "qwen"
-    assert payload["max_tokens"] == 8192
+    assert payload["max_tokens"] == 2048
     assert payload["n"] == 1
     assert payload["temperature"] == 0.1
     assert payload["stream"] is True
@@ -214,6 +332,160 @@ def test_provider_relay_marks_an_upstream_error_did_not_complete(tmp_path: Path)
 
     assert b" 500 " in response
     assert outcomes == [False]
+
+
+def test_provider_relay_returns_on_a_complete_sse_done_before_upstream_eof(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _KeepAliveSSEUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    _KeepAliveSSEUpstream.sent_done.clear()
+    _KeepAliveSSEUpstream.release.clear()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.start()
+    response: list[bytes] = []
+    client = threading.Thread(
+        target=lambda: response.append(_request(relay.socket_path, "a" * 43)), daemon=True)
+    client.start()
+    try:
+        assert _KeepAliveSSEUpstream.sent_done.wait(1)
+        client.join(timeout=1)
+        assert not client.is_alive()
+    finally:
+        _KeepAliveSSEUpstream.release.set()
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 200 " in response[0]
+    assert b"Content-Type: text/event-stream" in response[0]
+    assert b"data: [DONE]" in response[0]
+
+
+def test_incomplete_sse_does_not_promote_a_pending_skill(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _IncompleteSSEUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43, extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert authority.active_tools == frozenset()
+
+
+def test_malformed_sse_does_not_promote_a_pending_skill(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _MalformedSSEUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43, extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert authority.active_tools == frozenset()
+
+
+@pytest.mark.parametrize("handler", [_ErrorSSEUpstream, _UnstreamedUpstream])
+def test_invalid_success_response_does_not_promote_a_pending_skill(
+        tmp_path: Path, handler: type[http.server.BaseHTTPRequestHandler]) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43, extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert authority.active_tools == frozenset()
+
+
+def test_provider_relay_does_not_forward_an_upstream_error_header(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HeaderInjectionUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.start()
+    try:
+        response = _request(relay.socket_path, "a" * 43)
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 500 " in response
+    assert b"X-Upstream-Injected" not in response
+
+
+def test_provider_relay_deadline_interrupts_an_unterminated_sse_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowLineSSEUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    _SlowLineSSEUpstream.started.clear()
+    _SlowLineSSEUpstream.release.clear()
+    monkeypatch.setattr(pi_provider_relay, "_MODEL_RESPONSE_TIMEOUT_SECONDS", 0.25)
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.start()
+    response: list[bytes] = []
+    client = threading.Thread(
+        target=lambda: response.append(_request(relay.socket_path, "a" * 43)), daemon=True)
+    client.start()
+    try:
+        assert _SlowLineSSEUpstream.started.wait(1)
+        client.join(timeout=1)
+        assert not client.is_alive()
+    finally:
+        _SlowLineSSEUpstream.release.set()
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in response[0]
 
 
 def test_provider_relay_rejects_generation_policy_override(tmp_path: Path) -> None:
@@ -435,7 +707,8 @@ def test_loader_completion_requires_exactly_one_complete_loader_call() -> None:
         {"id": "call-2", "function": {"name": "map_data", "arguments": "{}"}},
     ]}}]}).encode()
 
-    assert _sole_loader_completion(one) == ("call-1", "load_skill", {"name": "render"})
+    stream = b": ping\n\ndata: " + one + b"\n\ndata: [DONE]\n\n"
+    assert _sole_loader_completion(stream) == ("call-1", "load_skill", {"name": "render"})
     assert _sole_loader_completion(multiple) is None
 
 

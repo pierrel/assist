@@ -35,7 +35,7 @@ _MAX_RESULT_BYTES = 96 * 1024
 _MAX_HISTORY_MESSAGES = 32
 _MAX_MESSAGE_BYTES = 32 * 1024
 _MAX_TURNS = 12
-_WALL_TIMEOUT_SECONDS = 900
+_WALL_TIMEOUT_SECONDS = 180
 _WORKER_FAILURE_CODES = {"turn-bound-exceeded", "worker-failed"}
 _WORKER_FAILURE_PHASES = {"request", "runtime", "session", "prompt", "reply"}
 

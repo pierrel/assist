@@ -194,7 +194,7 @@ async function main(): Promise<void> {
     models: [{
       id: request.model, name: request.model, reasoning: true, input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 131072,
-      maxTokens: 8192, baseUrl: PROVIDER_URL,
+      maxTokens: 2048, baseUrl: PROVIDER_URL,
       compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false,
         supportsUsageInStreaming: true, supportsStrictMode: false, maxTokensField: "max_tokens",
         thinkingFormat: "qwen-chat-template" },

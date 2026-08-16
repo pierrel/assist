@@ -9,6 +9,7 @@ import socket
 import socketserver
 import stat
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -19,8 +20,9 @@ from assist.pi_skills import PiSkillAuthority
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_MODEL_CALLS = 12
-_MAX_TOKENS = 8192
+_MAX_TOKENS = 2048
 _SOCKET_TIMEOUT_SECONDS = 5
+_MODEL_RESPONSE_TIMEOUT_SECONDS = 75
 _CAPABILITY_HEADER = "x-assist-pi-capability"
 _PATH = "/v1/chat/completions"
 _QWEN_TEMPLATE_OPTIONS = {"enable_thinking": False}
@@ -214,7 +216,21 @@ class PiProviderRelay:
         completed = False
         connection_type = (http.client.HTTPSConnection
                            if self._upstream.scheme == "https" else http.client.HTTPConnection)
-        connection = connection_type(self._upstream.hostname, self._upstream.port, timeout=_SOCKET_TIMEOUT_SECONDS)
+        deadline = time.monotonic() + _MODEL_RESPONSE_TIMEOUT_SECONDS
+        connection = connection_type(
+            self._upstream.hostname, self._upstream.port,
+            timeout=min(_SOCKET_TIMEOUT_SECONDS, self._remaining_timeout(deadline)),
+        )
+        sockets: list[socket.socket] = []
+
+        def expire() -> None:
+            for socket_ in sockets:
+                try:
+                    socket_.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        expiry: threading.Timer | None = None
         with self._state_lock:
             if self._stopping:
                 if self._skill_authority is not None:
@@ -235,16 +251,15 @@ class PiProviderRelay:
                     self._skill_authority.clear_loader()
                 raise
         try:
-            if connection.sock is not None:
-                connection.sock.settimeout(650)
+            if connection.sock is None:
+                raise PiProviderRelayError("Pi model connection is unavailable")
+            sockets.append(connection.sock)
+            expiry = threading.Timer(self._remaining_timeout(deadline), expire)
+            expiry.daemon = True
+            expiry.start()
+            connection.sock.settimeout(self._remaining_timeout(deadline))
             response = connection.getresponse()
-            chunks: list[bytes] = []
-            total = 0
-            while chunk := response.read(65536):
-                total += len(chunk)
-                if total > _MAX_RESPONSE_BYTES:
-                    raise PiProviderRelayError("Pi model response exceeds its bound")
-                chunks.append(chunk)
+            chunks = self._read_response(response, deadline)
             completed = 200 <= response.status < 300
             if completed and self._skill_authority is not None:
                 try:
@@ -260,7 +275,8 @@ class PiProviderRelay:
                     self._skill_authority.observe_loader(*observed)
             elif self._skill_authority is not None:
                 self._skill_authority.clear_loader()
-            return response.status, "application/json", chunks
+            content_type = "text/event-stream" if completed else "application/json"
+            return response.status, content_type, chunks
         except BaseException:
             if self._skill_authority is not None:
                 self._skill_authority.clear_loader()
@@ -269,7 +285,63 @@ class PiProviderRelay:
             with self._state_lock:
                 self._connections.discard(connection)
             connection.close()
+            if expiry is not None:
+                expiry.cancel()
             self.settle_trace(trace_operation, completed)
+
+    @staticmethod
+    def _remaining_timeout(deadline: float) -> float:
+        """Return the remaining absolute budget for one model response."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PiProviderRelayError("Pi model response timed out")
+        return remaining
+
+    @classmethod
+    def _set_response_timeout(cls, response: http.client.HTTPResponse, deadline: float) -> None:
+        raw = getattr(response.fp, "raw", None)
+        socket_ = getattr(raw, "_sock", None)
+        if socket_ is not None:
+            socket_.settimeout(cls._remaining_timeout(deadline))
+
+    @classmethod
+    def _read_response(cls, response: http.client.HTTPResponse, deadline: float) -> list[bytes]:
+        if 200 <= response.status < 300:
+            if not _is_sse(response):
+                raise PiProviderRelayError("Pi model response is not streamed")
+            return cls._read_complete_sse(response, deadline)
+        return cls._read_bounded_response(response, deadline)
+
+    @classmethod
+    def _read_bounded_response(cls, response: http.client.HTTPResponse,
+                               deadline: float) -> list[bytes]:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            cls._set_response_timeout(response, deadline)
+            chunk = response.read(65536)
+            if not chunk:
+                return chunks
+            total = _append_response_chunk(chunks, total, chunk)
+
+    @classmethod
+    def _read_complete_sse(cls, response: http.client.HTTPResponse,
+                           deadline: float) -> list[bytes]:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            cls._set_response_timeout(response, deadline)
+            line = response.readline(_MAX_RESPONSE_BYTES + 1)
+            if not line:
+                raise PiProviderRelayError("Pi model stream ended before completion")
+            total = _append_response_chunk(chunks, total, line)
+            value = _sse_data_value(line)
+            if value is None:
+                continue
+            if value == b"[DONE]":
+                return chunks
+            if not _is_openai_stream_frame(value):
+                raise PiProviderRelayError("Pi model stream is malformed")
 
     def start_trace(self) -> object | None:
         """Keep optional activity recording from changing model admission."""
@@ -297,7 +369,7 @@ def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    if decoded.lstrip().startswith("data:"):
+    if _contains_sse_data(raw):
         for line in decoded.splitlines():
             if not line.startswith("data:"):
                 continue
@@ -363,6 +435,44 @@ def _sole_loader_completion(raw: bytes) -> tuple[str, str, object] | None:
     except json.JSONDecodeError:
         return None
     return call["id"], "load_skill", arguments
+
+
+def _append_response_chunk(chunks: list[bytes], total: int, chunk: bytes) -> int:
+    total += len(chunk)
+    if total > _MAX_RESPONSE_BYTES:
+        raise PiProviderRelayError("Pi model response exceeds its bound")
+    chunks.append(chunk)
+    return total
+
+
+def _is_sse(response: http.client.HTTPResponse) -> bool:
+    content_type = response.getheader("Content-Type", "")
+    return content_type.lower().split(";", 1)[0].strip() == "text/event-stream"
+
+
+def _sse_data_value(line: bytes) -> bytes | None:
+    """Return an exact complete SSE data line, if this is one."""
+    if not line.endswith(b"\n"):
+        raise PiProviderRelayError("Pi model stream is malformed")
+    content = line[:-1]
+    if content.endswith(b"\r"):
+        content = content[:-1]
+    if not content.startswith(b"data:"):
+        return None
+    return content[5:].lstrip(b" \t")
+
+
+def _contains_sse_data(raw: bytes) -> bool:
+    return any(line.startswith(b"data:") for line in raw.splitlines())
+
+
+def _is_openai_stream_frame(value: bytes) -> bool:
+    try:
+        parsed = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    choices = parsed.get("choices") if isinstance(parsed, dict) else None
+    return isinstance(choices, list) and bool(choices)
 
 
 

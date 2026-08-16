@@ -14,7 +14,7 @@ _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_HEADERS_BYTES = 32 * 1024
 _REQUEST_TIMEOUT_SECONDS = 5
-_RESPONSE_TIMEOUT_SECONDS = 650
+_RESPONSE_TIMEOUT_SECONDS = 75
 
 
 class _WorkerExited(RuntimeError):
@@ -95,7 +95,8 @@ def _relay(client: socket.socket, child: int | None = None) -> None:
         upstream.connect(_SOCKET_PATH)
         upstream.sendall(request)
         transferred = 0
-        while chunk := _receive(upstream, child, _RESPONSE_TIMEOUT_SECONDS):
+        deadline = time.monotonic() + _RESPONSE_TIMEOUT_SECONDS
+        while chunk := _receive(upstream, child, max(0, deadline - time.monotonic())):
             transferred += len(chunk)
             if transferred > _MAX_HEADERS_BYTES + _MAX_RESPONSE_BYTES:
                 raise RuntimeError("Pi provider response exceeds its bound")

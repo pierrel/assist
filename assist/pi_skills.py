@@ -23,6 +23,13 @@ class PiSkillError(ValueError):
     """A Pi catalog or its capability transition is unsafe or inconsistent."""
 
 
+def _pi_skill_body(raw: str) -> str:
+    """Wrap portable Deep guidance in the fixed Pi vocabulary contract."""
+    adapted = _sanitize(raw)
+    rider = _RIDER.lstrip()
+    return f"{rider}\n{adapted}\n\n{rider}"
+
+
 def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -112,7 +119,7 @@ def build_pi_skill_catalog(backend: object, sources: Iterable[str], *,
         if declared != expected:
             # A changed trusted skill cannot silently acquire a Pi capability.
             raise PiSkillError("Pi skill declares an unsupported tool")
-        body = _sanitize(raw) + _RIDER
+        body = _pi_skill_body(raw)
         if len(body.encode("utf-8")) > _MAX_SKILL_BYTES:
             raise PiSkillError("Pi skill body exceeds its Pi bound")
         winners[name] = (source, PiSkill(name, description, body, _sha(body), expected))
