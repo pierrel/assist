@@ -112,8 +112,8 @@ def test_send_email_rejects_invalid_provider_response(configured_email, monkeypa
 
 
 @pytest.mark.parametrize("subject,body", [
-    ("x" * 999, "Body"),
-    ("Subject", "x" * (64 * 1024 + 1)),
+    pytest.param("x" * 999, "Body", id="subject-over-limit"),
+    pytest.param("Subject", "x" * (64 * 1024 + 1), id="body-over-limit"),
 ])
 def test_send_email_bounds_user_content(configured_email, monkeypatch, subject, body):
     called = []
