@@ -140,6 +140,7 @@ class Thread:
                  max_concurrency: int = 5,
                  sandbox_backend=None,
                  agent_dir: str | None = None,
+                 scratch_dir: str | None = None,
                  on_queue_state: Callable[[str], None] | None = None,
                  agent=None):
         """The embedder surface (docs/2026-06-11-embedder-contract.org):
@@ -162,9 +163,11 @@ class Thread:
         runs. It is mutually exclusive with `spec`; ordinary embedders use the
         single `AgentSpec` declaration surface.
 
-        Passing ``agent_dir`` enables per-thread private working state. It is
-        per-instance wiring, not part of the reusable ``AgentSpec`` declaration;
-        the web composition passes it only to visible main agents.
+        Passing ``agent_dir`` enables per-thread private working state. Passing
+        ``scratch_dir`` maps persistent private scratch to ``/tmp`` when this
+        local Thread has no Docker sandbox. Both are per-instance wiring, not
+        part of the reusable ``AgentSpec`` declaration; the web composition
+        passes them only to visible main agents.
 
         The remaining params are per-instance/run wiring: identity
         (``thread_id``), persistence (``checkpointer``), model,
@@ -222,6 +225,7 @@ class Thread:
         self.agent = agent or create_agent(
             self.model, working_dir=working_dir, checkpointer=checkpointer,
             sandbox_backend=sandbox_backend, agent_dir=agent_dir,
+            scratch_dir=scratch_dir,
             spec=spec)
 
     def _run(self, graph_input) -> str:

@@ -5,9 +5,10 @@
 Improve how the ordinary main agent uses its existing private =/agent= mount.
 The model should treat Markdown files there as the durable source of thread
 continuity, read the relevant files before relying on conversational recall, and
-write a concise status checkpoint after material progress. This increment is
-prompt and evaluation work only: it adds no tools, mounts, worker privileges,
-or scheduler.
+write a concise status checkpoint after material progress. This increment adds a
+=/user= compatibility alias, a visible-main handoff convention, and one stable
+frequency-decision tool for occasional private maintenance; it does not alter
+worker privileges or the persistence of =/tmp=.
 
 * Scope
 
@@ -18,27 +19,48 @@ or scheduler.
   not a rigid required tree.
 - Children remain isolated: context and research workers receive self-contained
   briefs and do not mount or write the parent =/agent= directory.
-- The physical user workspace remains =/workspace= in this increment. The
-  planned =/user= alias and truly ephemeral =/tmp= migration are separate work.
+- =/user= is the user-owned alias for the established physical =/workspace=
+  mount. Existing =/workspace= paths remain compatible; neither path creates a
+  second user tree.
+- =/tmp= remains intentionally persistent per thread. It holds disposable
+  conversions and generated render artifacts, never user deliverables.
+- The visible main agent gets a single =should_run_maintenance= tool. It returns
+  one durable, retry-stable =thread-checkpoint= decision for a probability; a
+  loaded skill owns when it is appropriate to ask and what private Markdown to
+  refresh.
 
 * Guidance contract
 
 For a request that may depend on user files, personal information, prior work,
-or current task state, the main prompt first requires loading =grounding=.
-The separate private-workspace section follows it. For a nontrivial
-continuation, use the loaded thread-memory block and inspect =/agent= directly,
-including relevant supporting Markdown such as =/agent/status.md=, before
-treating earlier conversation as current state. After a material decision,
+or task state outside =/agent=, the main prompt first requires loading
+=grounding=. A private =/agent= read for the ongoing thread remains allowed
+before that workflow. For a nontrivial continuation, use the loaded
+thread-memory block and inspect =/agent= directly, including relevant supporting
+Markdown such as =/agent/status.md=, before treating earlier conversation as
+current state. After a material decision,
 completed stage, discovered blocker, or useful handoff, update a concise
 current-progress Markdown file. Never put user deliverables there, and never
 claim a private checkpoint is user work. Tracking current work alone does not
 authorize a user-workspace or cross-thread-memory change.
+
+The visible main agent alone may preserve useful context/research handoffs under
+=/agent/context/= or =/agent/research/=. Children remain isolated and return
+untrusted evidence; the main agent distills only relevant facts, sources or
+paths, uncertainty, and its decisions rather than copying raw task output.
 
 Compaction is a checkpoint opportunity, not a new tool contract. The system
 prompt treats the automatically reloaded private memory as durable state after a
 summary and directs the agent to read additional private Markdown when it holds
 relevant detail. This increment does not claim a particular Deep Agents
 compaction hook or force a write at every compaction.
+
+The =maintain-thread-state= skill makes periodic state refresh explicit without
+an every-turn prompt requirement. It calls the host tool once with the reviewed
+=thread-checkpoint= policy and a 0.25 probability. The host stores the resulting
+run/skip result by thread and visible Run, so retries cannot resample or switch
+policies. Completion and other machine-initiated turns receive no decision ID.
+On run it may update =/agent/status.md= or =/agent/recap.md=; on skip it resumes
+the user’s work.
 
 * Eval contract
 
@@ -53,6 +75,12 @@ compaction hook or force a write at every compaction.
    continuation must still use the saved checkpoint. This measures whether the
    guidance causes useful extra state work around compaction rather than assuming
    it does.
+4. Deterministic directory boundary: =/user/foo= resolves to the existing
+   user-workspace file =/workspace/foo= in local and sandbox backends; render
+   routes accept either user path.
+5. Deterministic periodic maintenance: the same thread/Run/policy/probability
+   returns the same saved decision after retry and process restart; a changed
+   probability is rejected rather than re-sampled.
 
 All behavioral rows reject URL fetches and stub research. The initial pre-change
 read probe established the failure mode; candidate runs begin N=1, then use N=3
@@ -68,6 +96,9 @@ test docstrings as well as here so the PR can describe them exactly.
 | Read continuity | “Where did we leave off on the community-garden permit?” | =memory.md= says only that the project is active; =status.md= holds the insurance-certificate blocker. Pass requires a direct =/agent/status.md= read and an answer that names the certificate. | Pre-change exploratory N=1: failed (read only memory then searched the user workspace). Final reordered guidance: N=1 pass. |
 | Write checkpoint | certificate arrived; permit ready; submit Monday; “Keep track of this project as we continue.” | Empty private state except basic memory. Pass requires private =/agent= Markdown containing permit + Monday and a byte-for-byte unchanged user-workspace snapshot. | A prior N=1 wrote the state into user =AGENTS.md=; it triggered the current explicit ownership boundary. Final guidance: N=1 pass. |
 | Forced compaction diagnostic | material permit update, then “What is the next step for the community-garden permit?” | Existing Deep Agents summarization is forced at a five-message threshold. The capture records separate private read/write counts before and after the observed summary event, then requires a truthful Monday answer. | Final reordered guidance: N=1 pass; the capture records the separate operation counts for later comparison. |
+| Directory compatibility | n/a (deterministic backend/render contract) | Write =/user/notes.md=; require the existing user-root file changes, direct =/user= listing works, sandbox resolution maps it to =/workspace=, and render accepts the alias. | Final deterministic suite: pass. |
+| Directory render | “Show me what is in my projects directory.” | Workspace has =projects/permit.md= and =projects/budget.md=. Require render-skill load, =ls= of the directory, a =/tmp/*.md= write, and a render block for it. | Initial N=1 failed: Qwen listed the directory without loading render. Adding “directory” to the existing render catalog description produced N=3 pass (r2-r4; 31.7s, 34.4s, 34.4s); current-profile r5 passed in 30.8s after the grounding-description alignment. |
+| Occasional maintenance | n/a (deterministic host contract) | Repeat =thread-checkpoint= on the same thread/Run with p=0.25, including after reopening the store; require the identical decision and reject p=0.5 on the same key. | Final deterministic suite: pass. |
 
 The post-summary turns relied on the automatically reloaded thread memory and
 the framework summary rather than making another explicit private-file call.
@@ -78,6 +109,6 @@ threads may choose a different mix of explicit reads and writes.
 
 Do not turn every response into a write or introduce a second memory system.
 Repository =AGENTS.md= remains the cross-thread facts/preferences layer. The
-future frequency-decision tool may later govern periodic recap refreshes, but it
-is not required to establish this basic read/write behavior. Location inference
-is unrelated evidence grounding work and stays out of scope.
+frequency-decision tool governs periodic recap refreshes but does not create
+nightly jobs or force a checkpoint every turn. Location inference is unrelated
+evidence grounding work and stays out of scope.

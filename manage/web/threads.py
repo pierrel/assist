@@ -58,6 +58,7 @@ from assist.middleware.url_provenance import DELEGATE_USER_URLS_KEY
 from assist.events.thread_log import append_event
 from assist.context_rider import ContextRider, CONTEXT_RIDER_KEY
 from assist.location import LOCATION_CONTEXT_KEY, LocationSnapshot
+from assist.frequency import FREQUENCY_RUN_ID_KEY
 from assist.events.reply import SMS_SENDER_KEY
 from assist.events.email import email_identity, valid_email_content
 from assist.schedule.scheduler import Scheduler
@@ -1700,6 +1701,15 @@ def _delegate_configurable(run: Run) -> dict | None:
     return {DELEGATE_USER_URLS_KEY: run.delegate_user_urls}
 
 
+def _frequency_configurable(run: Run | None, *, sender: str | None,
+                            assistant_id: str) -> dict | None:
+    """Return the maintenance identity only for an ordinary visible web Run."""
+    if (run is None or run.mode != "turn" or run.origin is not None or sender
+            or assistant_id != "general-agent"):
+        return None
+    return {FREQUENCY_RUN_ID_KEY: run.work_id}
+
+
 def _execute_child_run(run: Run, *, resume: bool = False) -> None:
     """Execute one hidden task slice and wake its parent at terminal state."""
     parent_working_dir = None
@@ -2340,6 +2350,8 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                         _cfg[LOCATION_CONTEXT_KEY] = location
                     if sender:
                         _cfg[SMS_SENDER_KEY] = sender
+                    _cfg.update(_frequency_configurable(
+                        _run, sender=sender, assistant_id=assistant_id) or {})
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.
                     assistant_kwargs = ({"assistant_id": assistant_id}
                                         if assistant_id != "general-agent" else {})
@@ -3700,6 +3712,7 @@ _SHOW_SECURITY_HEADERS = {
 # "/workspace/fitness.org", "/fitness.org", or "fitness.org".  All three name the
 # same host file under the working dir; map them before resolving.
 _SANDBOX_MOUNT = "/workspace"
+_USER_MOUNT = "/user"
 # The sandbox also bind-mounts a persistent host dir at /tmp (sandbox_manager.py),
 # so a render block may point at /tmp/foo.md — a .md copy the agent stashed for
 # rendering.  /tmp maps to the thread's tmp dir, NOT the working dir, so it's
@@ -3710,7 +3723,7 @@ _TMP_MOUNT = "/tmp"
 def _safe_workspace_file(tid: str, path: str) -> str | None:
     """Resolve an AGENT path against the matching thread host dir, traversal-safe.
     ``/tmp/x`` → ``<thread>/tmp/x`` (the persistent /tmp mount); ``/workspace/x``,
-    ``/x`` and ``x`` → ``<workdir>/x``.  Returns the host path, or None if it would
+    ``/user/x``, ``/x`` and ``x`` → ``<workdir>/x``.  Returns the host path, or None if it would
     escape its root (a crafted ``../``) or is malformed (embedded NUL)."""
     if path == _TMP_MOUNT or path.startswith(_TMP_MOUNT + "/"):
         base = os.path.realpath(MANAGER.thread_tmp_dir(tid))
@@ -3718,8 +3731,10 @@ def _safe_workspace_file(tid: str, path: str) -> str | None:
     else:
         base = os.path.realpath(MANAGER.thread_default_working_dir(tid))
         rel = path
-        if rel == _SANDBOX_MOUNT or rel.startswith(_SANDBOX_MOUNT + "/"):
-            rel = rel[len(_SANDBOX_MOUNT):]
+        for mount in (_SANDBOX_MOUNT, _USER_MOUNT):
+            if rel == mount or rel.startswith(mount + "/"):
+                rel = rel[len(mount):]
+                break
     rel = rel.lstrip("/")  # treat as relative to the chosen mount root
     try:
         target = os.path.realpath(os.path.join(base, rel))

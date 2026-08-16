@@ -22,15 +22,19 @@ where reliability is harder than with frontier APIs.
 - **Small-LLM-tuned memory.** Cross-conversation facts and preferences live in
   the workspace's `AGENTS.md`; private working state for one long-running thread
   lives under `/agent`. Visible web main-agent turns auto-load both; other
-  constructions retain repository memory alone.
+  constructions retain repository memory alone. `/user` is the user-facing alias
+  for the established `/workspace`, while persistent `/tmp` is scratch space for
+  conversions and render artifacts.
 
 - **Small-LLM-tuned skills.** Shared, domain-repository, and embedder-supplied
   skills are progressively-disclosed capability bundles. Assist-owned skills
   live under `assist/skills/<name>/SKILL.md`; supervisor-only workflows live
-  under `assist/main_skills/`; ordinary-main grounding and research guidance
+  under `assist/main_skills/`; ordinary-main grounding, research, and occasional
+  private-state maintenance guidance
   live under `assist/main_guidance_skills/`; domain skills use
   `.claude/skills/`. The ordinary web, CLI, and Assist voice-call paths receive
-  the grounding and research guidance without adding tools.
+  the guidance profile. The optional maintenance workflow exposes one stable
+  decision tool only on ordinary visible web Runs.
 
 - **Web-path sandboxing.** When Docker is available, web turns run filesystem
   and code tools inside a per-turn container with the workspace bind-mounted at
@@ -696,6 +700,10 @@ Visible Assist threads have two sources:
   directory proactively; it survives turns and is deleted with the thread. Spawned
   child agents receive a self-contained brief instead of the private `/agent`
   route/mount or its prompt.
+- `/user` is the user-owned alias for `/workspace`; use either path for user
+  deliverables while existing `/workspace` references remain compatible.
+- `/tmp` persists for the thread and is for disposable conversions, generated
+  images, and renderable intermediates, never for user deliverables.
 
 The original one-source shape remains available to other embedders. Its
 `SMALL_MODEL_MEMORY_PROMPT` provides:
@@ -832,7 +840,7 @@ When enabled, each thread creates a git branch and can merge changes back to mai
 
 ## Docker Sandbox
 
-On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`. Visible main-agent turns also mount private thread state at `/agent`. The current sandbox also inherits the configured `ASSIST_*` environment, so it is not yet a credential-free boundary. The CLI path remains host-backed.
+On the web path, the agent executes shell commands inside a Docker container rather than on the host. Each turn gets a fresh container with the domain repository bind-mounted at `/workspace`, also exposed as `/user`; persistent thread scratch at `/tmp`; and, for visible main-agent turns, private state at `/agent`. The current sandbox also inherits the configured `ASSIST_*` environment, so it is not yet a credential-free boundary. The CLI path remains host-backed.
 
 The sandbox image is built automatically by `make web` (and `make deploy`). To build it manually:
 ```bash

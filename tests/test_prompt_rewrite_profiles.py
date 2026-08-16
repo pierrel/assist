@@ -42,10 +42,12 @@ def test_guidance_skill_profile_capture_keeps_web_main_shape_on_both_sides():
     assert "- **research**:" not in baseline["final_text"]
     assert "- **grounding**:" in candidate["final_text"]
     assert "- **research**:" in candidate["final_text"]
-    grounding_instruction = 'make `load_skill(name="grounding")` your first'
+    grounding_instruction = 'make\n`load_skill(name="grounding")` your first'
     assert grounding_instruction not in baseline["initial_text"]
     assert grounding_instruction in candidate["initial_text"]
-    assert "## Private thread workspace" in candidate["initial_text"]
+    assert "## Directories" in candidate["initial_text"]
+    assert "`/user` is the user-owned workspace." in candidate["initial_text"]
+    assert "`/tmp` is persistent per-thread scratch space." in candidate["initial_text"]
     assert baseline["visible_tools"] == candidate["visible_tools"]
     assert "assist.PromptCompositionMiddleware" in baseline["transition_owners"]
     assert "assist.PromptCompositionMiddleware" in candidate["transition_owners"]

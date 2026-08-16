@@ -407,8 +407,8 @@ def test_web_main_alone_has_the_attributed_static_prompt_reorder(census):
             for transition in call["provenance"]["transitions"])
 
 
-def test_private_thread_workspace_guidance_is_web_main_only(census):
-    marker = "## Private thread workspace"
+def test_directory_guidance_is_web_main_only(census):
+    marker = "## Directories"
     for call in census["calls"]:
         text = _system_prompt(call)
         if call["scenario"] in {"web-main-core", "web-main-full"}:
@@ -426,6 +426,20 @@ def test_private_workspace_checkpoint_boundary_is_web_main_only(census):
             assert marker in text
         else:
             assert marker not in text
+
+
+def test_user_and_persistent_tmp_guidance_are_web_main_only(census):
+    markers = (
+        "`/user` is the user-owned workspace.",
+        "`/tmp` is persistent per-thread scratch space.",
+        "in `/agent/context/` or `/agent/research/`",
+    )
+    for call in census["calls"]:
+        text = _system_prompt(call)
+        if call["scenario"] in {"web-main-core", "web-main-full"}:
+            assert all(marker in text for marker in markers)
+        else:
+            assert all(marker not in text for marker in markers)
 
 
 def test_web_main_engine_profiles_record_shared_and_engine_specific_identity(census):
@@ -472,6 +486,8 @@ def test_main_guidance_skill_sources_are_closed_to_opted_in_main(census):
 
     assert {(source["name"], source["path"]) for source in guidance_sources} == {
         ("grounding", "/main-guidance-skills/grounding/SKILL.md"),
+        ("maintain-thread-state",
+         "/main-guidance-skills/maintain-thread-state/SKILL.md"),
         ("research", "/main-guidance-skills/research/SKILL.md"),
     }
     assert {source["scenario"] for source in guidance_sources} == {
@@ -1273,7 +1289,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 22_775
+    assert len(current_prompt) == 23_766
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38

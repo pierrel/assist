@@ -475,6 +475,8 @@ def test_rider_flows_to_sandbox_tz_and_private_location_config(client, monkeypat
     run = threads._runs().list("thread-e2e")[0]
     persisted = threads._location_from_fields(run.location)
     assert persisted == location
+    from assist.frequency import FREQUENCY_RUN_ID_KEY
+    assert (captured.get("configurable") or {}).get(FREQUENCY_RUN_ID_KEY) == run.work_id
 
 
 def test_cross_site_style_coordinate_post_cannot_reach_location_admission(client, monkeypatch):

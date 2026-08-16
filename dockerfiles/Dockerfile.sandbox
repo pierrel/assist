@@ -62,7 +62,8 @@ ENV PATH=/home/sandbox/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 # image can write /workspace before the runtime --user override
 # kicks in (e.g. during a manual `docker run --rm assist-sandbox`).
 RUN mkdir -p /workspace && \
-    chown sandbox:sandbox /workspace
+    chown sandbox:sandbox /workspace && \
+    ln -s /workspace /user
 WORKDIR /workspace
 
 # Default user — runtime --user from SandboxManager overrides this

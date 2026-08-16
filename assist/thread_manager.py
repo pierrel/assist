@@ -359,6 +359,8 @@ class ThreadManager:
             agent_dir = self.thread_agent_dir(thread_id)
             os.makedirs(agent_dir, exist_ok=True)
             thread_kwargs["agent_dir"] = agent_dir
+            if assistant_id == "general-agent" and not triage:
+                thread_kwargs["scratch_dir"] = self.thread_tmp_dir(thread_id)
         return Thread(
             working_dir, **thread_kwargs,
             spec=AgentSpec(

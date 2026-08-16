@@ -60,6 +60,36 @@ class _ReferencesNormalizingBackend(FilesystemBackend):
     def glob(self, pattern, path="/", *args, **kwargs):
         return super().glob(pattern, self._normalize(path), *args, **kwargs)
 
+
+class _UserWorkspaceAliasBackend(FilesystemBackend):
+    """Expose the default workspace through the user-owned ``/user`` alias."""
+
+    @staticmethod
+    def _normalize(path):
+        if path == "/user":
+            return "/"
+        if path and path.startswith("/user/"):
+            return path[len("/user"):]
+        return path
+
+    def read(self, file_path, *args, **kwargs):
+        return super().read(self._normalize(file_path), *args, **kwargs)
+
+    def write(self, file_path, *args, **kwargs):
+        return super().write(self._normalize(file_path), *args, **kwargs)
+
+    def edit(self, file_path, *args, **kwargs):
+        return super().edit(self._normalize(file_path), *args, **kwargs)
+
+    def ls(self, path, *args, **kwargs):
+        return super().ls(self._normalize(path), *args, **kwargs)
+
+    def grep(self, pattern, path=None, glob=None):
+        return super().grep(pattern, self._normalize(path), glob)
+
+    def glob(self, pattern, path="/", *args, **kwargs):
+        return super().glob(pattern, self._normalize(path), *args, **kwargs)
+
 STATEFUL_PATHS = [
     "/question.txt",
     "question.txt",
@@ -162,7 +192,8 @@ def create_composite_backend(fs_root: str | None = None,
         merged_routes.update(extra_routes)
     return CompositeBackend(
         default=(default_backend if default_backend is not None
-                 else FilesystemBackend(root_dir=fs_root, virtual_mode=True)),
+                 else _UserWorkspaceAliasBackend(
+                     root_dir=fs_root, virtual_mode=True)),
         routes=merged_routes
     )
 
