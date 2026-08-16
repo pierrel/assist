@@ -1060,6 +1060,27 @@ See [[file:docs/2026-07-26-agent-prompt-architecture.org::#phase-7b][P7b hypothe
 Keep the umbrella open until the final census passes the [[file:docs/2026-07-26-agent-prompt-architecture.org::#final-architecture-gate][program completion gate]].
 
 * Web UI — thread list
+** TODO Persistent rendered items at the top of a thread
+When a thread renders a file, image, map, or other render block, keep that
+rendered item in a per-thread persistent collection as well as in its original
+AI message. Show the collection at the top of the thread, collapsed by default
+so it does not consume reading space; expanding it provides direct access to
+every retained render without hunting through the conversation.
+
+Each retained item must keep its source-message association for display, but
+removing it from the collection must be possible both from the UI and through a
+main-agent action. Removal affects only the top-of-thread collection: it must
+not delete or alter the render block in the original AI message, nor delete the
+underlying file. Persist the collection independently of the rendered message
+stream so it survives page reloads and has a clear per-thread deletion lifecycle.
+
+Design and eval before implementation: define the durable record (render block,
+source message, and stable item ID), test that a newly rendered item appears in
+both places, that collapsed-by-default state does not hide it from an explicit
+open action, and that UI- and agent-initiated removal leave the original message
+and source file intact. Keep this separate from the existing render skill's
+choice of what to render and from workspace file retention.
+
 ** DONE Thread list ordering by status then last-message age
 Shipped: PR #188 (merged 2026-07-09). =_thread_status_rank= in
 manage/web/threads.py is the single status→rank map (urgent > busy > queued >
