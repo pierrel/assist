@@ -34,6 +34,11 @@ class TestDockerSandboxBackend(TestCase):
     def test_resolve_preserves_workspace_path(self):
         self.assertEqual(self.sandbox._resolve("/workspace/myfile.txt"), "/workspace/myfile.txt")
 
+    def test_resolve_maps_user_alias_to_workspace(self):
+        self.assertEqual(self.sandbox._resolve("/user/myfile.txt"), "/workspace/myfile.txt")
+        self.assertEqual(self.sandbox._resolve("/user"), "/workspace")
+        self.assertEqual(self.sandbox._resolve("/userfoo"), "/workspace/userfoo")
+
     def test_resolve_handles_relative_path(self):
         self.assertEqual(self.sandbox._resolve("myfile.txt"), "/workspace/myfile.txt")
 

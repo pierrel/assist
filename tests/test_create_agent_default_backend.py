@@ -63,6 +63,28 @@ class TestCompositeDefaultBackend:
                                       default_backend=inj)
         assert cb.default is inj
 
+    def test_user_alias_writes_to_the_default_workspace(self, tmp_path):
+        backend = create_composite_backend(str(tmp_path))
+        result = backend.write("/user/notes.md", "# Notes\n")
+        assert result.error is None or result.error == ""
+        assert (tmp_path / "notes.md").read_text() == "# Notes\n"
+        # The alias is implemented by the default backend, not a second route:
+        # root glob/grep must not duplicate the same user files.
+        assert "/user/" not in backend.routes
+        paths = [entry["path"] for entry in backend.glob("*.md", "/").matches]
+        assert paths.count("/notes.md") == 1
+        assert "/user/notes.md" not in paths
+
+    def test_scratch_route_keeps_tmp_out_of_user_workspace(self, tmp_path):
+        scratch = tmp_path / "scratch"
+        backend = create_composite_backend(
+            str(tmp_path), extra_routes={"/tmp/": FilesystemBackend(
+                root_dir=scratch, virtual_mode=True)})
+        result = backend.write("/tmp/listing.md", "# Listing\n")
+        assert result.error is None or result.error == ""
+        assert (scratch / "listing.md").read_text() == "# Listing\n"
+        assert not (tmp_path / "tmp" / "listing.md").exists()
+
 
 class TestCreateAgentDefaultBackend:
     """`create_agent` is heavy; patch `create_deep_agent` and inspect the
@@ -103,6 +125,14 @@ class TestCreateAgentDefaultBackend:
         backend = self._build()["backend"]
         assert isinstance(backend.default, FilesystemBackend)
         assert supports_execution(backend) is False
+
+    def test_local_scratch_dir_is_routed_at_tmp(self, tmp_path):
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        backend = self._build(scratch_dir=str(scratch))["backend"]
+        result = backend.write("/tmp/listing.md", "# Listing\n")
+        assert result.error is None or result.error == ""
+        assert (scratch / "listing.md").read_text() == "# Listing\n"
 
     def test_default_and_sandbox_are_mutually_exclusive(self):
         with pytest.raises(ValueError):

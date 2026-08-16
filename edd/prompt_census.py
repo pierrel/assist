@@ -1250,6 +1250,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
     from assist.events.notify import notify_tools
     from assist.events.store import SubscriptionStore
     from assist.events.tools import subscription_tools
+    from assist.frequency import FrequencyDecisionStore, frequency_tools
     from assist.schedule.store import ScheduleStore
     from assist.schedule.tools import schedule_tools
     from assist.location import get_location
@@ -1261,6 +1262,7 @@ def _web_toolset(root: Path, *, full: bool) -> list:
         + notify_tools(lambda _tid: None)
         + email_tools()
         + [get_location]
+        + frequency_tools(FrequencyDecisionStore(str(root)))
     )
     if full:
         from assist.egress.store import EgressStore
@@ -1715,6 +1717,7 @@ _TOOL_ORIGINS = {
     "edit_file": "deepagents.middleware.filesystem",
     "execute": "deepagents.middleware.filesystem",
     "find_regions": "assist.geo.tools",
+    "should_run_maintenance": "assist.frequency",
     "get_location": "assist.location",
     "glob": "deepagents.middleware.filesystem",
     "grep": "deepagents.middleware.filesystem",
@@ -1760,6 +1763,8 @@ _DECLARED_TEMPLATE_RENDER_HASHES = {
         "37d8b35868296a9623a05a8f0d6c21dcf56b9e67bd061a7b94959a3c00207bf2",
         "18641e7a04979397d92c8fd26ce39abb1b03eb087c009d052553d633b7e311c3",
         "4ea439c3d0ff152c0c749a2d89ad733c4946f1f6a5ebb70f13a6bc219968d875",
+        "fdd1e02fd66463f944ab6707a037ab72d44e026dd2f27c1c07ac4c30bfbab744",
+        "09d98ae2f46173bb0efe16372141321842c7697fd924cab875d4eea9678463b6",
     },
     "assist/templates/deepagents/context_agent.md.j2": {
         "29cca4088f56e56eee0a685e794de8a6ff0c63526231839f2f24e246adb9ec70",
@@ -2135,9 +2140,9 @@ _TOOL_RESULT_METADATA = {
 _DECLARED_CAPTURE_TASK_SHA256 = \
     "dc6155e1863f23b35006efd98f0a5e2ea0c1b392650567596cd7c86a6c6af402"
 _DECLARED_TOOL_NODE_HISTORY_SHA256 = \
-    "61b7d662212a4acadf5de72079ecb3186eec03f519d8530be20e32b68d868c96"
+    "280b8f416c6c26282d8f71a3f8132a9839269cb665904f09a572b56d42255842"
 _DECLARED_PROMPT_BLOCK_CHAIN_SHA256 = \
-    "cbbf77a3a07861936b21fa22987a5f0ed7bf621408269c4dc2bad95c0f2e3e21"
+    "eea222ae57e912f9b75206451b1ab98d3eb93586c237846c3073e33aed85707c"
 
 
 def _provider_tool_pair(tool_call_id: str) -> list[dict[str, Any]]:

@@ -99,7 +99,21 @@ class TestThreadManagerLazy(TestCase):
                     manager.get("visible")
                 assert thread.call_args.kwargs["agent_dir"] == manager.thread_agent_dir(
                     "visible")
+                assert thread.call_args.kwargs["scratch_dir"] == manager.thread_tmp_dir(
+                    "visible")
                 assert os.path.isdir(manager.thread_agent_dir("visible"))
+            finally:
+                manager.close()
+
+    def test_triage_get_does_not_receive_persistent_scratch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ThreadManager(root_dir=tmp)
+            manager.reserve("triage")
+            manager._model = MagicMock()
+            try:
+                with patch("assist.thread_manager.Thread", return_value=MagicMock()) as thread:
+                    manager.get("triage", triage=True)
+                assert "scratch_dir" not in thread.call_args.kwargs
             finally:
                 manager.close()
 

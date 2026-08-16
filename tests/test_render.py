@@ -57,7 +57,7 @@ class TestSafeWorkspaceFile:
     def test_rejects_traversal(self, workspace, path):
         assert _safe_workspace_file("t1", path) is None
 
-    @pytest.mark.parametrize("path", ["a.md", "/a.md", "/workspace/a.md"])
+    @pytest.mark.parametrize("path", ["a.md", "/a.md", "/workspace/a.md", "/user/a.md"])
     def test_maps_agent_workspace_paths(self, workspace, path):
         # The agent addresses files in /workspace space; all three forms name the
         # same host file under the working dir.

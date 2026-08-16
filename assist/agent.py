@@ -277,6 +277,7 @@ def create_agent(model: BaseChatModel,
                  sandbox_backend=None,
                  *,
                  agent_dir: str | None = None,
+                 scratch_dir: str | None = None,
                  spec: AgentSpec | None = None,
                  ) -> CompiledStateGraph:
     """Build an Assist main or delegate agent.
@@ -289,9 +290,10 @@ def create_agent(model: BaseChatModel,
     mutually exclusive with ``sandbox_backend``.
 
     Passing ``agent_dir`` enables local-mode private state at ``/agent`` and
-    auto-loads ``/agent/memory.md``. A sandbox enables the same state through
-    its native ``/agent`` capability. The web composition supplies either only
-    to visible main agents and omits them for delegates and specialists.
+    auto-loads ``/agent/memory.md``. ``scratch_dir`` maps persistent local-mode
+    scratch to ``/tmp``. A sandbox provides both through its native mounts. The
+    web composition supplies either only to visible main agents and omits them
+    for delegates and specialists.
 
     **Domain skills are auto-discovered** from
     ``<working_dir>/.claude/skills/`` (the agent-agnostic agentskills.io
@@ -352,6 +354,10 @@ def create_agent(model: BaseChatModel,
         from deepagents.backends import FilesystemBackend
         extra_routes["/agent/"] = FilesystemBackend(
             root_dir=agent_dir, virtual_mode=True)
+    if scratch_dir is not None and sandbox_backend is None:
+        from deepagents.backends import FilesystemBackend
+        extra_routes["/tmp/"] = FilesystemBackend(
+            root_dir=scratch_dir, virtual_mode=True)
     if sandbox_backend:
         backend = create_sandbox_composite_backend(sandbox_backend,
                                                    extra_routes=extra_routes)

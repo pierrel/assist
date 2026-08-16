@@ -176,6 +176,13 @@ class DockerSandboxBackend(BaseSandbox):
         # that must stay confined under work_dir, NOT escape into the shared /tmp.
         if path == "/tmp" or path.startswith("/tmp/"):
             return stripped
+        # /user is an alias for the user-owned /workspace mount.  Keep the
+        # alias at this boundary so file tools and shell commands agree while
+        # the host keeps its established directory layout.
+        if path == "/user":
+            return self.work_dir
+        if path.startswith("/user/"):
+            return self.work_dir + path[len("/user"):]
         if (self._native_agent_dir
                 and (path == "/agent" or path.startswith("/agent/"))):
             return stripped

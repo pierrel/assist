@@ -167,6 +167,40 @@ class TestRenderAgent(TestCase):
             f"expected a render block for recipes.org; render blocks: {blocks}",
         )
 
+    def test_renders_a_directory_listing_from_persistent_tmp(self):
+        """Natural directory-display request: list local files, make a temporary
+        Markdown view, and render it instead of creating a user artifact.
+
+        Fixture: a small named ``projects`` directory with two files. User prompt:
+        ``Show me what is in my projects directory.`` Pass requires the render
+        skill, an actual directory listing, a ``/tmp/*.md`` write, and a file
+        render block for that temporary Markdown file. Research is stubbed and
+        URL fetch is not part of the fixture.
+        """
+        fs = dict(_personal_workspace())
+        fs["projects"] = {
+            "permit.md": "Permit renewal notes.\n",
+            "budget.md": "Project budget.\n",
+        }
+        with stub_research_subagent():
+            agent = self.create_agent(fs)
+            agent.message("Show me what is in my projects directory.")
+            complete_web_main_tasks(agent)
+        calls = agent_tool_calls(agent)
+        writes = self._write_paths(agent)
+        blocks = self._render_block_paths(agent)
+        self.assertTrue(self._render_skill_was_loaded(agent),
+                        f"render skill should load; calls: {calls}")
+        self.assertTrue(any(call.get("name") == "ls" and "projects" in str(
+            call.get("args") or call.get("arguments") or {}) for call in calls),
+                        f"expected projects directory listing; calls: {calls}")
+        self.assertTrue(any(path.startswith("/tmp/") and path.endswith(".md")
+                            for path in writes),
+                        f"expected temporary Markdown listing; writes: {writes}")
+        self.assertTrue(any("/tmp/" in block and ".md" in block.lower()
+                            for block in blocks),
+                        f"expected temporary Markdown render block; blocks: {blocks}")
+
     def test_emits_line_range(self):
         """Section by line: 'show me lines X-Y of <file>' carries a lines: range."""
         fs = dict(_personal_workspace())

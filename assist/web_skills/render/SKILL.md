@@ -1,6 +1,6 @@
 ---
 name: render
-description: MUST load before reading or replying when the user asks to show, open, view, or display a named or existing workspace file in the web conversation. Also use for rendering generated or existing PNG graphs/charts and maps. EXAMPLES — "show me fitness.org"; "open the project notes"; "display the chart here"; "show that PNG again".
+description: MUST load before reading or replying when the user asks to show, open, view, or display a named or existing workspace file or directory in the web conversation. Also use for rendering generated or existing PNG graphs/charts and maps. EXAMPLES — "show me fitness.org"; "show me what is in projects"; "open the project notes"; "display the chart here"; "show that PNG again".
 allowed-tools: map_data
 ---
 
@@ -39,10 +39,14 @@ path: /workspace/PATH-TO-THE-FILE
 ```
 
 Replace `PATH-TO-THE-FILE` with the real file — either in the user's workspace
-(e.g. `path: /workspace/fitness.org`) or under `/tmp` (e.g.
+(e.g. `path: /user/fitness.org`) or under `/tmp` (e.g.
 `path: /tmp/summary.md`). **`/tmp` is a persistent scratch directory** that
 renders exactly like the workspace, so you can `write_file` a file there to show
 it (see "Showing other file types" below).
+
+When the user asks to show the contents of a directory, first list the directory.
+Then write a concise Markdown listing under `/tmp` and render that Markdown file.
+Do not create a user file merely to display a directory listing.
 
 ## Showing only part of a file
 
@@ -55,7 +59,7 @@ for org/md, `pages: N-M` for pdf. So **resolve a description into a range first*
 **Explicit range — use it directly:**
 ```render
 type: file
-path: /workspace/notes.org
+path: /user/notes.org
 lines: 10-40
 ```
 
@@ -67,7 +71,7 @@ lines: 10-40
   (end of file if it's the last). Emit `lines: START-END`.
   - e.g. user: "show the section about backups in notes.org" → you read it, see
     `* Backups` starts at line 42 and the next `*`/`**` heading is line 58 → emit
-    `path: /workspace/notes.org` with `lines: 42-57`.
+    `path: /user/notes.org` with `lines: 42-57`.
 - *pdf:* load the `pdf` skill and use its tools to read the pdf's text and find
   which page(s) cover the topic, then emit `pages: N-M` for those pages.
 
@@ -84,7 +88,7 @@ inline image. Other files render as plain text. So you CAN show a `.txt`, `.py`,
 
 ```render
 type: file
-path: /workspace/assist/templates/deepagents/sub_research.txt.j2
+path: /user/assist/templates/deepagents/sub_research.txt.j2
 ```
 
 **When the file would read better converted, convert it first.** If a file is
