@@ -2335,12 +2335,9 @@ def _process_message(tid: str, text: str | None, rider: ContextRider | None = No
                     _cfg = {}
                     if rider:
                         _cfg[CONTEXT_RIDER_KEY] = rider
-                    if not sender and assistant_id == "general-agent":
-                        snapshot = location
-                        if snapshot is None and _run is None:
-                            snapshot = LOCATION_STORE.recent()
-                        if snapshot is not None:
-                            _cfg[LOCATION_CONTEXT_KEY] = snapshot
+                    if (not sender and assistant_id == "general-agent"
+                            and location is not None):
+                        _cfg[LOCATION_CONTEXT_KEY] = location
                     if sender:
                         _cfg[SMS_SENDER_KEY] = sender
                     # A triage turn (sender set) gets the reduced, HITL-gated tool surface.

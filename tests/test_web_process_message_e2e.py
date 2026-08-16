@@ -526,6 +526,31 @@ def test_child_turn_never_receives_global_location(client, monkeypatch):
     assert LOCATION_CONTEXT_KEY not in (captured.get("configurable") or {})
 
 
+def test_direct_main_turn_never_receives_global_location(client, monkeypatch):
+    """Only an admitted visible Run may carry the browser snapshot to the main agent."""
+    threads.LOCATION_STORE.record(37.7749, -122.4194)
+    captured = {}
+
+    class _FakeChat:
+        def message(self, text):
+            return "ok"
+        def pending_reply(self):
+            return None
+        def get_messages(self):
+            return [{"role": "user", "content": "continuation"}]
+
+    monkeypatch.setattr("manage.web.threads._get_sandbox_backend", lambda tid, tz=None: None)
+    monkeypatch.setattr(
+        web.MANAGER, "get",
+        lambda *args, **kwargs: captured.update(configurable=kwargs.get("configurable")) or _FakeChat())
+    monkeypatch.setattr(web.MANAGER, "touch", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads._get_domain_manager", lambda tid: None)
+    monkeypatch.setattr("manage.web.threads.get_cached_description", lambda tid: "stub")
+
+    threads._process_message("thread-e2e", "continue", origin="continuation")
+    assert LOCATION_CONTEXT_KEY not in (captured.get("configurable") or {})
+
+
 def test_new_thread_form_flows_rider(client, monkeypatch):
     """The index new-thread form (/threads/with-message) now carries the rider too —
     sent_at/tz/lat/lon reach _initialize_thread (→ the first message's _process_message)."""
