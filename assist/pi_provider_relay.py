@@ -160,46 +160,45 @@ class PiProviderRelay:
                 or not hmac.compare_digest(capability, self._capability)):
             raise PiProviderRelayError("Pi model request is unauthorized")
         try:
-            payload = json.loads(body)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PiProviderRelayError("Pi model request is malformed") from error
-        if not isinstance(payload, dict) or payload.get("model") != self._model:
-            raise PiProviderRelayError("Pi model request uses an invalid model")
-        if (self._skill_authority is not None
-                and not self._skill_authority.can_continue_request(payload)):
-            raise PiProviderRelayError("Pi model request does not continue skill loading")
-        if ("max_completion_tokens" in payload
-                or "n" in payload and payload["n"] != 1
-                or "stream" in payload and payload["stream"] is not True):
+            try:
+                payload = json.loads(body)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise PiProviderRelayError("Pi model request is malformed") from error
+            if not isinstance(payload, dict) or payload.get("model") != self._model:
+                raise PiProviderRelayError("Pi model request uses an invalid model")
+            if (self._skill_authority is not None
+                    and not self._skill_authority.can_continue_request(payload)):
+                raise PiProviderRelayError("Pi model request does not continue skill loading")
+            if ("max_completion_tokens" in payload
+                    or "n" in payload and payload["n"] != 1
+                    or "stream" in payload and payload["stream"] is not True):
+                raise PiProviderRelayError("Pi model request changes its generation policy")
+            normalized = dict(payload)
+            normalized["model"] = self._model
+            normalized["max_tokens"] = _MAX_TOKENS
+            normalized["n"] = 1
+            normalized["temperature"] = 0.1
+            # Qwen otherwise spends the entire bounded completion on hidden reasoning
+            # and returns no visible reply. Match the established Deep Agents request.
+            normalized["chat_template_kwargs"] = _QWEN_TEMPLATE_OPTIONS
+            # Pi's provider adapter expects the OpenAI stream shape. The relay
+            # bounds and buffers that response before handing it back to the worker,
+            # so the worker cannot choose a non-streaming or unbounded mode.
+            normalized["stream"] = True
+            canonical = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
+            if len(canonical) > _MAX_REQUEST_BYTES:
+                raise PiProviderRelayError("Pi model request exceeds its bound")
+            with self._state_lock:
+                limited = self._stopping or self._calls >= _MAX_MODEL_CALLS
+                if not limited:
+                    self._calls += 1
+            if limited:
+                raise PiProviderRelayError("Pi model turn bound exceeded")
+            return canonical
+        except PiProviderRelayError:
             if self._skill_authority is not None:
                 self._skill_authority.clear_loader()
-            raise PiProviderRelayError("Pi model request changes its generation policy")
-        normalized = dict(payload)
-        normalized["model"] = self._model
-        normalized["max_tokens"] = _MAX_TOKENS
-        normalized["n"] = 1
-        normalized["temperature"] = 0.1
-        # Qwen otherwise spends the entire bounded completion on hidden reasoning
-        # and returns no visible reply. Match the established Deep Agents request.
-        normalized["chat_template_kwargs"] = _QWEN_TEMPLATE_OPTIONS
-        # Pi's provider adapter expects the OpenAI stream shape. The relay
-        # bounds and buffers that response before handing it back to the worker,
-        # so the worker cannot choose a non-streaming or unbounded mode.
-        normalized["stream"] = True
-        canonical = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
-        if len(canonical) > _MAX_REQUEST_BYTES:
-            if self._skill_authority is not None:
-                self._skill_authority.clear_loader()
-            raise PiProviderRelayError("Pi model request exceeds its bound")
-        with self._state_lock:
-            limited = self._stopping or self._calls >= _MAX_MODEL_CALLS
-            if not limited:
-                self._calls += 1
-        if limited:
-            if self._skill_authority is not None:
-                self._skill_authority.clear_loader()
-            raise PiProviderRelayError("Pi model turn bound exceeded")
-        return canonical
+            raise
 
     def forward(self, body: bytes, trace_operation: object | None = None) -> tuple[int, str, list[bytes]]:
         """Forward one already-authorized request without forwarding its headers."""
@@ -221,6 +220,8 @@ class PiProviderRelay:
             except BaseException:
                 self._connections.discard(connection)
                 connection.close()
+                if self._skill_authority is not None:
+                    self._skill_authority.clear_loader()
                 raise
         try:
             if connection.sock is not None:
@@ -249,6 +250,10 @@ class PiProviderRelay:
             elif self._skill_authority is not None:
                 self._skill_authority.clear_loader()
             return response.status, "application/json", chunks
+        except BaseException:
+            if self._skill_authority is not None:
+                self._skill_authority.clear_loader()
+            raise
         finally:
             with self._state_lock:
                 self._connections.discard(connection)

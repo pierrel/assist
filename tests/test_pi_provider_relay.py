@@ -272,6 +272,33 @@ def test_rejected_continuation_does_not_promote_its_declared_tool(tmp_path: Path
     assert _Upstream.requests == []
 
 
+def test_invalid_authenticated_request_clears_a_pending_tool(tmp_path: Path) -> None:
+    upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{upstream.server_port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    relay.start()
+    try:
+        rejected = _request(relay.socket_path, "a" * 43,
+                            model="other", extra=_render_continuation(result))
+        accepted = _request(relay.socket_path, "a" * 43,
+                            extra=_render_continuation(result))
+    finally:
+        relay.close()
+        upstream.shutdown()
+        upstream.server_close()
+
+    assert b" 403 " in rejected
+    assert b" 403 " in accepted
+    assert authority.active_tools == frozenset()
+
+
 def test_failed_continuation_does_not_promote_its_declared_tool(tmp_path: Path) -> None:
     upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FailedUpstream)
     thread = threading.Thread(target=upstream.serve_forever, daemon=True)
@@ -292,6 +319,42 @@ def test_failed_continuation_does_not_promote_its_declared_tool(tmp_path: Path) 
         upstream.server_close()
 
     assert b" 500 " in failed
+    assert authority.active_tools == frozenset()
+
+
+def test_transport_failed_continuation_clears_its_pending_tool(tmp_path: Path) -> None:
+    unavailable = socket.socket(socket.AF_INET)
+    unavailable.bind(("127.0.0.1", 0))
+    port = unavailable.getsockname()[1]
+    unavailable.close()
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    authority, result = _pending_render_authority()
+    relay = PiProviderRelay(
+        control, f"http://127.0.0.1:{port}/v1", "secret", "qwen", "a" * 43,
+    )
+    relay.configure_skills(authority)
+    payload = {"model": "qwen"} | _render_continuation(result)
+    upstream: http.server.ThreadingHTTPServer | None = None
+    try:
+        canonical = relay.validate_request(
+            "POST", "/v1/chat/completions",
+            {"Content-Type": "application/json", "x-assist-pi-capability": "a" * 43},
+            json.dumps(payload).encode(),
+        )
+        with pytest.raises(OSError):
+            relay.forward(canonical)
+        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", port), _Upstream)
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        with pytest.raises(PiProviderRelayError, match="does not continue"):
+            relay.forward(canonical)
+    finally:
+        relay.close()
+        if upstream is not None:
+            upstream.shutdown()
+            upstream.server_close()
+
     assert authority.active_tools == frozenset()
 
 
