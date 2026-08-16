@@ -98,7 +98,9 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     )
     relay.start()
     try:
-        accepted = _request(relay.socket_path, "a" * 43, extra={"max_tokens": 999999})
+        accepted = _request(relay.socket_path, "a" * 43, extra={
+            "max_tokens": 999999, "chat_template_kwargs": {"enable_thinking": True},
+        })
         denied = _request(relay.socket_path, "b" * 43)
         wrong_model = _request(relay.socket_path, "a" * 43, model="other")
     finally:
@@ -118,6 +120,7 @@ def test_provider_relay_forwards_only_its_model_and_capability(tmp_path: Path) -
     assert payload["n"] == 1
     assert payload["temperature"] == 0.1
     assert payload["stream"] is True
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_provider_relay_traces_only_an_admitted_request(tmp_path: Path) -> None:

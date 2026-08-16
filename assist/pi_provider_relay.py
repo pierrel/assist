@@ -23,6 +23,7 @@ _MAX_TOKENS = 8192
 _SOCKET_TIMEOUT_SECONDS = 5
 _CAPABILITY_HEADER = "x-assist-pi-capability"
 _PATH = "/v1/chat/completions"
+_QWEN_TEMPLATE_OPTIONS = {"enable_thinking": False}
 
 
 class PiProviderRelayError(ValueError):
@@ -175,6 +176,9 @@ class PiProviderRelay:
         normalized["max_tokens"] = _MAX_TOKENS
         normalized["n"] = 1
         normalized["temperature"] = 0.1
+        # Qwen otherwise spends the entire bounded completion on hidden reasoning
+        # and returns no visible reply. Match the established Deep Agents request.
+        normalized["chat_template_kwargs"] = _QWEN_TEMPLATE_OPTIONS
         # Pi's provider adapter expects the OpenAI stream shape. The relay
         # bounds and buffers that response before handing it back to the worker,
         # so the worker cannot choose a non-streaming or unbounded mode.

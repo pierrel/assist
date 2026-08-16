@@ -100,6 +100,12 @@ overlong text, or a declared tool outside the worker's fixed registered set.
 The worker does not read the workspace, =.pi=, environment, or an Agent Skills
 directory.
 
+The relay also pins the local Qwen request to
+=chat_template_kwargs.enable_thinking=false=, matching the established Deep
+Agents request.  Otherwise this reasoning model can spend its bounded
+completion on hidden reasoning and produce no visible assistant reply; the
+worker cannot override this host-owned generation policy.
+
 ** Three Pi extensions, one small shared state
 
 The worker adds a small immutable manifest shared only by these first-party
