@@ -71,8 +71,7 @@ Constraints on the saved sentence:
 
 ### When to save
 
-- The user explicitly says "remember", "save", "commit to memory", or
-  similar.
+- The user explicitly asks to remember or save a fact for future conversations.
 - The user states a persistent fact about themselves (identity,
   possessions, preferences, environment) NOT already in
   `<agent_memory>` above.
@@ -86,14 +85,18 @@ Constraints on the saved sentence:
 
 - Transient state ("I'm running late", "I'm on my phone").
 - One-off task requests ("find me a recipe", "what's 25 * 4?").
+- Current project progress, a task's status, or a request to keep track of
+  ongoing work. This is thread state, not a fact about the user across
+  conversations; use private thread memory when the system provides it.
 - Acknowledgments and small talk ("thanks", "sounds good").
 - Credentials, API keys, passwords — never echo or save these.
 
 ### Pre-action check (MANDATORY — apply on every turn)
 
 Before any work tool (`task`, `write_todos`, `read_file`, etc.), scan
-the user's latest message for a fact about the user, an explicit
-save request, or forward-looking feedback that is NOT already in
+the user's latest message for a durable fact about the user, an explicit
+request to remember something across conversations, or forward-looking
+feedback that is NOT already in
 `<agent_memory>` above.  If you find one, your save MUST happen this
 turn: `write_file(file_path="{memory_path}", ...)` if `<agent_memory>`
 above shows `(No memory loaded)`, otherwise

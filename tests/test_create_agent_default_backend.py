@@ -75,6 +75,26 @@ class TestCompositeDefaultBackend:
         assert paths.count("/notes.md") == 1
         assert "/user/notes.md" not in paths
 
+    def test_write_recovers_an_existing_empty_user_file(self, tmp_path):
+        """An empty existing memory source is safe to initialize once."""
+        (tmp_path / "AGENTS.md").touch()
+        backend = create_composite_backend(str(tmp_path))
+
+        result = backend.write("/user/AGENTS.md", "User has 3 cats.\n")
+
+        assert result.error is None or result.error == ""
+        assert (tmp_path / "AGENTS.md").read_text() == "User has 3 cats.\n"
+
+    def test_write_keeps_nonempty_user_file_no_clobber(self, tmp_path):
+        """Empty-file recovery must not turn write_file into overwrite."""
+        (tmp_path / "AGENTS.md").write_text("User has 3 cats.\n")
+        backend = create_composite_backend(str(tmp_path))
+
+        result = backend.write("/user/AGENTS.md", "User has 2 dogs.\n")
+
+        assert result.error
+        assert (tmp_path / "AGENTS.md").read_text() == "User has 3 cats.\n"
+
     def test_scratch_route_keeps_tmp_out_of_user_workspace(self, tmp_path):
         scratch = tmp_path / "scratch"
         backend = create_composite_backend(
