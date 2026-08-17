@@ -61,7 +61,28 @@ class _ReferencesNormalizingBackend(FilesystemBackend):
         return super().glob(pattern, self._normalize(path), *args, **kwargs)
 
 
-class _UserWorkspaceAliasBackend(FilesystemBackend):
+class _EmptyFileRecoveryFilesystemBackend(FilesystemBackend):
+    """Filesystem backend that can initialize a real zero-byte file once."""
+
+    def _write_path(self, file_path: str) -> str:
+        return file_path
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        path = self._write_path(file_path)
+        result = super().write(path, content)
+        if not (result.error and result.error.startswith("Cannot write to ")):
+            return result
+        # DeepAgents' memory prompt correctly treats an empty file as no saved
+        # memory, but write_file refuses that existing zero-byte source. An
+        # empty-string edit succeeds only for an actually empty regular file
+        # and retains no-clobber behavior for every other case.
+        recovered = super().edit(path, "", content)
+        if recovered.error:
+            return result
+        return WriteResult(path=file_path)
+
+
+class _UserWorkspaceAliasBackend(_EmptyFileRecoveryFilesystemBackend):
     """Expose the default workspace through the user-owned ``/user`` alias."""
 
     @staticmethod
@@ -75,8 +96,8 @@ class _UserWorkspaceAliasBackend(FilesystemBackend):
     def read(self, file_path, *args, **kwargs):
         return super().read(self._normalize(file_path), *args, **kwargs)
 
-    def write(self, file_path, *args, **kwargs):
-        return super().write(self._normalize(file_path), *args, **kwargs)
+    def _write_path(self, file_path: str) -> str:
+        return self._normalize(file_path)
 
     def edit(self, file_path, *args, **kwargs):
         return super().edit(self._normalize(file_path), *args, **kwargs)

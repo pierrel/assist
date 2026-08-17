@@ -14,6 +14,10 @@ worker privileges or the persistence of =/tmp=.
 
 - The section is rendered only in the ordinary web-main system prompt, which is
   also the profile used by the current CLI and Assist voice-call paths.
+- The existing durable-memory procedure is also clarified for every profile:
+  current project progress is thread state, not a cross-thread user fact. When
+  a private thread memory is available, it is the place for that state; this
+  changes no filesystem capability or worker authority.
 - =/agent/memory.md= stays the automatically loaded core thread state. The
   guidance may use =status.md= and =recap.md= as optional Markdown conventions,
   not a rigid required tree.
@@ -63,6 +67,14 @@ policies. Completion and other machine-initiated turns receive no decision ID.
 On run it may update =/agent/status.md= or =/agent/recap.md=; on skip it resumes
 the user’s work.
 
+The web-main prompt also has a =Deterministic actions= section: when an existing
+artifact or direct operation can produce the requested outcome, use it rather
+than reconstructing content from memory, prose, or an approximate edit. This
+means direct copy/move operations preserve unchanged bytes, while user-visible
+files, directory contents, images, and maps use the available rendering
+capability rather than a pasted or summarized substitute. It does not replace
+requested user edits with shell operations.
+
 * Eval contract
 
 1. Natural read: preseed =/agent/status.md= with a concrete active next step;
@@ -82,6 +94,10 @@ the user’s work.
 5. Deterministic periodic maintenance: the same thread/Run/policy/probability
    returns the same saved decision after retry and process restart; a changed
    probability is rejected rather than re-sampled.
+6. Deterministic empty-source recovery: initializing a real, zero-byte memory
+   file with =write_file= succeeds through an exact empty-string edit; a
+   nonempty file retains its no-clobber error in the user workspace, private
+   =/agent= route, and sandbox backends.
 
 All behavioral rows reject URL fetches and stub research. The initial pre-change
 read probe established the failure mode; candidate runs begin N=1, then use N=3
@@ -95,11 +111,104 @@ test docstrings as well as here so the PR can describe them exactly.
 | row | natural user sequence | deterministic fixture and oracle | result |
 |-
 | Read continuity | “Where did we leave off on the community-garden permit?” | =memory.md= says only that the project is active; =status.md= holds the insurance-certificate blocker. Pass requires a direct =/agent/status.md= read and an answer that names the certificate. | Pre-change exploratory N=1: failed (read only memory then searched the user workspace). Final reordered guidance: N=1 pass. |
-| Write checkpoint | certificate arrived; permit ready; submit Monday; “Keep track of this project as we continue.” | Empty private state except basic memory. Pass requires private =/agent= Markdown containing permit + Monday and a byte-for-byte unchanged user-workspace snapshot. | A prior N=1 wrote the state into user =AGENTS.md=; it triggered the current explicit ownership boundary. Final guidance: N=1 pass. |
+| Write checkpoint | certificate arrived; permit ready; submit Monday; “Keep track of this project as we continue.” | Empty private state except basic memory. Pass requires private =/agent= Markdown containing permit + Monday and a byte-for-byte unchanged user-workspace snapshot. | A prior N=1 wrote the state into user =AGENTS.md=; it triggered the current explicit ownership boundary. The recovered guidance passed N=5. |
 | Forced compaction diagnostic | material permit update, then “What is the next step for the community-garden permit?” | Existing Deep Agents summarization is forced at a five-message threshold. The capture records separate private read/write counts before and after the observed summary event, then requires a truthful Monday answer. | Final reordered guidance: N=1 pass; the capture records the separate operation counts for later comparison. |
 | Directory compatibility | n/a (deterministic backend/render contract) | Write =/user/notes.md=; require the existing user-root file changes, direct =/user= listing works, sandbox resolution maps it to =/workspace=, and render accepts the alias. | Final deterministic suite: pass. |
-| Directory render | “Show me what is in my projects directory.” | Workspace has =projects/permit.md= and =projects/budget.md=. Require render-skill load, =ls= of the directory, a =/tmp/*.md= write, and a render block for it. | Initial N=1 failed: Qwen listed the directory without loading render. Adding “directory” to the existing render catalog description produced N=3 pass (r2-r4; 31.7s, 34.4s, 34.4s); current-profile r5 passed in 30.8s after the grounding-description alignment. |
+| Directory render | “Show me what is in my projects directory.” | Workspace has =projects/permit.md= and =projects/budget.md=. Require render-skill load, =ls= of the directory, a =/tmp/*.md= write, and a render block for it. | Historical N=3 passed after adding directory guidance. The current profile is 0/5: every run only listed the directory. Two stronger catalog descriptions and three source-name probes (=show=, =show-to-user=, =display=; N=1 each) also only listed it. A system-prompt experiment reached 5/5 but was withdrawn; this remains an explicitly unresolved natural row. |
 | Occasional maintenance | n/a (deterministic host contract) | Repeat =thread-checkpoint= on the same thread/Run with p=0.25, including after reopening the store; require the identical decision and reject p=0.5 on the same key. | Final deterministic suite: pass. |
+
+* Current Render Survey
+
+A current-profile N=1 survey of the whole real-model render suite found four
+passes: the named =fitness.org= file, requested graph creation, graph render
+follow-up, and an explicit =render= skill request. Seven natural render rows
+failed: formatted conversion to =/tmp=, line-range rendering, alternate-verb
+file display, an existing-PNG follow-up, directory display, described-section
+rendering, and unsupported-file display. The PDF page-range fixture had an old
+missing-import defect and now uses the shared web-skill source like the rest of
+the suite. Its repaired N=3 result is 2/3: the failed trial sent raw PDF content
+that llama.cpp rejected as an unsupported content type. This is a diagnostic
+survey, not a matched baseline comparison. It establishes that the directory
+result is not the only weak current render behavior, but it does not yet
+establish which failures are regressions from the parent profile.
+
+* Deterministic Actions Experiment
+
+The retained web-main-only =Deterministic actions= section states a general
+principle: use exact direct operations instead of recreating existing content
+from memory, prose, or approximate edits. For user-visible artifacts, it tells
+the agent to use the applicable rendering capability and procedure rather than
+a pasted or summarized substitute. It deliberately does not name or boost a
+single skill. The first, withdrawn wording named =render= directly: the formerly
+0/5 directory-render row was 3/3 and the new natural sandbox row “Make a
+byte-for-byte backup of project-overview.md named project-overview-copy.md” was
+3/3. Each copy trial used =execute=, produced an exactly equal destination, and
+made no =write_file= or =edit_file= call. Those results are diagnostic evidence
+for the broader principle, not evidence for the retained wording. A complete
+N=3 current-profile render survey was then run with the retained wording:
+
+| Journey | Prompt profile | Current N=3 |
+|-
+| named file | web-main candidate | 3/3 |
+| alternate-verb file display | web-main candidate | 3/3 |
+| directory display | web-main candidate | 0/3 |
+| byte-for-byte direct copy | web-main candidate | 3/3 |
+| line range | web-main candidate | 0/3 |
+| described section | web-main candidate | 0/3 |
+| unsupported-file formatted conversion | web-main candidate | 0/3 |
+| unsupported-file display | web-main candidate | 0/3 |
+| web-main candidate subtotal |  | 9/24 (38%) |
+| requested graph creation | legacy sandbox profile | 3/3 |
+| existing graph follow-up | legacy sandbox profile | 2/3 |
+| explicit skill request | legacy sandbox profile | 3/3 |
+| graph follow-up sequence | legacy sandbox profile | 3/3 |
+| PDF page range | legacy shared-source profile | 3/3 |
+| Whole suite, mixed profiles |  | 23/39 (59%) |
+
+This is a broader survey, not a matched baseline comparison: it establishes
+which current journeys the general principle does and does not help. In
+particular, the only rows that receive this web-main system section are 9/24,
+while the overall mixed-profile suite is 23/39. It misses the 70% natural-eval
+confidence bar, so it does not justify a further render-specific system-prompt
+iteration. The failures are recorded for a later holistic capability/design pass
+rather than tuned individually.
+
+* Current Related Stability Panel
+
+The same web-main candidate profile was also run N=3 against adjacent local
+work, memory, and travel journeys. Research was stubbed and URL fetching was
+hard-rejected in the local rows. This panel is likewise a current-profile
+stability survey, not a matched baseline comparison.
+
+| Journey | Current N=3 | Result |
+|-
+| local dinner facts after grounding | 3/3 | stable |
+| grounded task-list edit | 3/3 | stable |
+| private status read for a continuation | 3/3 | stable |
+| private checkpoint after material progress | 3/3; focused recovery N=10 | stable |
+| forced-compaction continuity diagnostic | 3/3 | stable |
+| local routing outcome | 3/3 | stable |
+| repository fact plus private thread fact | 3/3; focused recovery N=10 | stable |
+
+Before recovery, the scope row consistently wrote its cross-thread fact with
+=write_file= to an already-existing empty =/AGENTS.md=. The tool rejected an
+otherwise safe initialization; the model then read a synthetic empty-file
+reminder, attempted an impossible edit against it, and falsely reported
+completion. The backend now retries that exact case as an empty-string edit,
+which cannot overwrite a nonempty file. A separate prompt conflict classified
+current project progress as durable repository memory despite the private
+workspace contract. The durable-memory procedure now explicitly distinguishes
+current thread state from cross-thread facts. Both natural rows passed the
+post-fix N=5 panel. These historical failures are not evidence that the
+deterministic-actions section caused a regression; the current-panel stability
+record is the relevant guard.
+
+After the final private-route recovery was added, the full seven-row panel
+passed N=3: all 21 invocations succeeded. The two directly corrected natural
+journeys then passed their focused N=10 stability panel (20/20 invocations).
+The exact pre-change profile was attempted under the same bounded runner but
+did not yield a comparable complete panel, so these are current-profile
+stability results rather than a causal baseline comparison.
 
 The post-summary turns relied on the automatically reloaded thread memory and
 the framework summary rather than making another explicit private-file call.

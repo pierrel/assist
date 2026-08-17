@@ -76,7 +76,7 @@ class TestRenderAgent(TestCase):
         return AgentHarness(create_agent(
             self.model, root, spec=prompt_rewrite_web_main_spec()))
 
-    def create_sandbox_agent(self, filesystem: dict):
+    def create_sandbox_agent(self, filesystem: dict, *, spec: AgentSpec | None = None):
         """Production-shaped agent: real Docker execute + persistent sibling /tmp."""
         thread_root = tempfile.mkdtemp(prefix="render_graph_eval_")
         workspace = os.path.join(thread_root, "domain")
@@ -90,7 +90,7 @@ class TestRenderAgent(TestCase):
         self.addCleanup(SandboxManager.cleanup, workspace)
         agent = AgentHarness(create_agent(
             self.model, workspace, sandbox_backend=sandbox,
-            spec=AgentSpec(skill_sources=_web_skill_sources())))
+            spec=spec or AgentSpec(skill_sources=_web_skill_sources())))
         return agent, thread_root
 
     def _render_block_paths(self, agent, message_count: int = 0) -> list[str]:
@@ -200,6 +200,42 @@ class TestRenderAgent(TestCase):
         self.assertTrue(any("/tmp/" in block and ".md" in block.lower()
                             for block in blocks),
                         f"expected temporary Markdown render block; blocks: {blocks}")
+
+    def test_copies_unchanged_file_with_a_direct_operation(self):
+        """Natural web-main request: copy a known user file without recreating it.
+
+        Fixture: a small Markdown project overview in the user workspace. User
+        prompt: ``Make a byte-for-byte backup of project-overview.md named
+        project-overview-copy.md.`` Pass requires an ``execute`` operation, an
+        exactly equal destination file, and no write/edit reconstruction. This
+        exercises the deterministic-actions rule under the production-shaped
+        web-main prompt; research is stubbed and no URL is present.
+        """
+        fs = dict(_personal_workspace())
+        fs["project-overview.md"] = (
+            "# Project overview\n\n"
+            "Keep the original wording and blank lines exactly.\n")
+        with stub_research_subagent():
+            agent, thread_root = self.create_sandbox_agent(
+                fs, spec=prompt_rewrite_web_main_spec())
+            agent.message(
+                "Make a byte-for-byte backup of project-overview.md named "
+                "project-overview-copy.md.")
+            complete_web_main_tasks(agent)
+        calls = agent_tool_calls(agent)
+        destination = os.path.join(
+            thread_root, "domain", "project-overview-copy.md")
+        self.assertTrue(any(call.get("name") == "execute" for call in calls),
+                        f"expected a direct execute operation; calls: {calls}")
+        self.assertTrue(os.path.isfile(destination),
+                        f"expected copied file at {destination}; calls: {calls}")
+        with open(destination, "rb") as copied:
+            self.assertEqual(
+                copied.read(), fs["project-overview.md"].encode(),
+                "copy must preserve the original bytes")
+        self.assertFalse(
+            any(call.get("name") in {"write_file", "edit_file"} for call in calls),
+            f"copy should not recreate content with file edits; calls: {calls}")
 
     def test_emits_line_range(self):
         """Section by line: 'show me lines X-Y of <file>' carries a lines: range."""
@@ -380,10 +416,9 @@ class TestRenderAgent(TestCase):
             w.add_blank_page(width=200, height=200)
         with open(os.path.join(root, "report.pdf"), "wb") as f:
             w.write(f)
-        skills = {"/render-skill/": FilesystemBackend(root_dir=_RENDER_SKILLS_DIR,
-                                                      virtual_mode=True)}
         agent = AgentHarness(create_agent(self.model, root,
-                                          spec=AgentSpec(skill_sources=skills)))
+                                          spec=AgentSpec(
+                                              skill_sources=_web_skill_sources())))
         agent.message("Show me page 3 of report.pdf")
         blocks = self._render_block_paths(agent)
         self.assertTrue(

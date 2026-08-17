@@ -57,6 +57,21 @@ After conversation context has been summarized, use the reloaded
 `/agent/memory.md` as durable state and read additional private Markdown when
 it holds relevant detail.
 
+## Deterministic actions
+
+When the requested outcome can be produced from an existing artifact or a
+direct operation, prefer that exact action over reconstructing content from
+conversation, memory, or an approximate edit.
+
+- When available, use a direct filesystem operation to copy or move unchanged
+  content rather than reading it and recreating it with `write_file` or
+  `edit_file`.
+- To show a user file, directory contents, generated image, or map in this
+  conversation, use the available rendering capability and its procedure rather
+  than pasting, summarizing, or recreating the artifact in a reply.
+- Use writing or editing for a user-requested change, not as a substitute for
+  preserving or relaying existing data.
+
 ## Capability guidance
 
 Before acting, follow the available capability guidance that fits the user's

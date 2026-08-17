@@ -475,6 +475,41 @@ class TestSpecWiring(_CreateAgentHarness):
             with open(f"{agent_dir}/memory.md") as stream:
                 assert stream.read() == "private state"
 
+    def test_local_agent_route_initializes_an_empty_memory_source(self):
+        """Private memory has the same safe empty-file recovery as /user."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent_dir = os.path.join(temp_dir, "agent")
+            os.makedirs(agent_dir)
+            open(f"{agent_dir}/memory.md", "w").close()
+            kwargs = self._build(
+                agent_dir=agent_dir,
+                spec=AgentSpec(async_subagent_tools=()))
+
+            result = kwargs["backend"].write(
+                "/agent/memory.md", "private state")
+
+            assert result.error is None
+            with open(f"{agent_dir}/memory.md") as stream:
+                assert stream.read() == "private state"
+
+    def test_local_agent_route_keeps_nonempty_memory_no_clobber(self):
+        """Empty-file recovery must not overwrite existing private state."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            agent_dir = os.path.join(temp_dir, "agent")
+            os.makedirs(agent_dir)
+            with open(f"{agent_dir}/memory.md", "w") as stream:
+                stream.write("existing private state")
+            kwargs = self._build(
+                agent_dir=agent_dir,
+                spec=AgentSpec(async_subagent_tools=()))
+
+            result = kwargs["backend"].write(
+                "/agent/memory.md", "replacement state")
+
+            assert result.error
+            with open(f"{agent_dir}/memory.md") as stream:
+                assert stream.read() == "existing private state"
+
     def test_local_specialized_child_cannot_read_parent_agent_dir(self):
         from assist.agent import create_context_agent
 

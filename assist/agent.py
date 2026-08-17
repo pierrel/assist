@@ -27,6 +27,7 @@ from assist.backends import (
     MAIN_GUIDANCE_SKILLS_ROUTE,
     SKILLS_ROUTE,
     STATEFUL_PATHS,
+    _EmptyFileRecoveryFilesystemBackend,
     create_composite_backend,
     create_bundled_skills_backend,
     create_references_backend,
@@ -351,8 +352,7 @@ def create_agent(model: BaseChatModel,
         extra_routes.setdefault(
             MAIN_SKILLS_ROUTE, create_skills_backend(MAIN_SKILLS_DIR))
     if agent_dir is not None and sandbox_backend is None:
-        from deepagents.backends import FilesystemBackend
-        extra_routes["/agent/"] = FilesystemBackend(
+        extra_routes["/agent/"] = _EmptyFileRecoveryFilesystemBackend(
             root_dir=agent_dir, virtual_mode=True)
     if scratch_dir is not None and sandbox_backend is None:
         from deepagents.backends import FilesystemBackend

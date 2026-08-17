@@ -332,7 +332,17 @@ class DockerSandboxBackend(BaseSandbox):
         return super().read(self._resolve(file_path), offset, limit)
 
     def write(self, file_path: str, content: str) -> WriteResult:
-        return super().write(self._resolve(file_path), content)
+        resolved = self._resolve(file_path)
+        result = super().write(resolved, content)
+        if not (result.error and result.error.startswith("Error: File already exists:")):
+            return result
+        # The memory source may be a real but zero-byte file.  Replacing an
+        # empty string succeeds only in that exact safe case; nonempty files
+        # retain BaseSandbox's no-clobber result.
+        recovered = super().edit(resolved, "", content)
+        if recovered.error:
+            return result
+        return WriteResult(path=file_path)
 
     def edit(self, file_path: str, old_string: str, new_string: str,
              replace_all: bool = False) -> EditResult:

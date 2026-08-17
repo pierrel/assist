@@ -15,6 +15,8 @@ from assist.sandbox import (
 )
 from assist.domain_manager import DomainManager
 from assist.sandbox_manager import SandboxManager
+from deepagents.backends.protocol import EditResult, WriteResult
+from deepagents.backends.sandbox import BaseSandbox
 
 
 class TestDockerSandboxBackend(TestCase):
@@ -76,6 +78,30 @@ class TestDockerSandboxBackend(TestCase):
         self.assertEqual(mounted._resolve("/agent"), "/agent")
         self.assertEqual(mounted._resolve("/agent/memory.md"), "/agent/memory.md")
         self.assertEqual(mounted._resolve("/agentfoo"), "/workspace/agentfoo")
+
+    def test_write_recovers_an_existing_empty_file(self):
+        """The sandbox may initialize an existing zero-byte memory source."""
+        collision = WriteResult(error="Error: File already exists: '/workspace/AGENTS.md'")
+        with patch.object(BaseSandbox, "write", return_value=collision) as write, \
+             patch.object(BaseSandbox, "edit",
+                          return_value=EditResult(path="/workspace/AGENTS.md",
+                                                  occurrences=1)) as edit:
+            result = self.sandbox.write("/AGENTS.md", "User has 3 cats.\n")
+
+        self.assertIsNone(result.error)
+        self.assertEqual(result.path, "/AGENTS.md")
+        write.assert_called_once_with("/workspace/AGENTS.md", "User has 3 cats.\n")
+        edit.assert_called_once_with("/workspace/AGENTS.md", "", "User has 3 cats.\n")
+
+    def test_write_keeps_nonempty_file_no_clobber(self):
+        """A failed empty-string edit preserves the original collision error."""
+        collision = WriteResult(error="Error: File already exists: '/workspace/AGENTS.md'")
+        with patch.object(BaseSandbox, "write", return_value=collision), \
+             patch.object(BaseSandbox, "edit",
+                          return_value=EditResult(error="multiple occurrences")):
+            result = self.sandbox.write("/AGENTS.md", "User has 3 cats.\n")
+
+        self.assertEqual(result, collision)
 
     def test_execute_success(self):
         self.container.exec_run.return_value = (0, b"hello world\n")

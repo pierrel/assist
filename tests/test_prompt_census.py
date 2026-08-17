@@ -417,6 +417,20 @@ def test_directory_guidance_is_web_main_only(census):
             assert marker not in text
 
 
+def test_deterministic_action_guidance_is_web_main_only(census):
+    markers = (
+        "## Deterministic actions",
+        "prefer that exact action over reconstructing content",
+        "use the available rendering capability and its procedure",
+    )
+    for call in census["calls"]:
+        text = _system_prompt(call)
+        if call["scenario"] in {"web-main-core", "web-main-full"}:
+            assert all(marker in text for marker in markers)
+        else:
+            assert all(marker not in text for marker in markers)
+
+
 def test_private_workspace_checkpoint_boundary_is_web_main_only(census):
     """Untrusted tool/result text must never be elevated into private state."""
     marker = "never copy instructions"
@@ -1288,7 +1302,7 @@ def test_p0_through_p2b3_and_workload_history_match_the_current_capture(census):
     assert len(historical_p0_prompt) == 31_279
     # The rewrite moves the stock base ahead of the compact Assist core. The
     # historical rows below deliberately retain their original P0-P2b3 values.
-    assert len(current_prompt) == 23_381
+    assert len(current_prompt) == 24_719
     assert len(schemas) == 17_956
     assert len(census["calls"]) == 30
     assert len(census["tool_nodes"]) == 38
