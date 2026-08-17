@@ -25,7 +25,9 @@ from edd.prompt_census import (
     write_capture,
 )
 
-pytestmark = pytest.mark.timeout(60)
+# The isolated child has a 120-second diagnostic timeout; the parent must allow
+# that bound plus cleanup on slower CI runners.
+pytestmark = pytest.mark.timeout(150)
 
 
 @pytest.fixture(scope="module")
