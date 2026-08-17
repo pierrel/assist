@@ -396,6 +396,17 @@ emitted alongside the prose, WITHOUT over-mapping non-spatial replies (a
 regression spot-check on plain Q&A).
 
 * Scheduling
+** TODO Preserve the user's timezone through asynchronous task completion
+When a schedule setup first needs local context, the main agent creates the
+schedule on the context task's completion wake rather than the original user
+turn.  The schedule tool reads its timezone only from that run's rider, but the
+current completion wake has none.  In thread =20260816090612-d1519e70= this
+made =create_schedule= reject an otherwise complete weekly setup with "I don't
+know your timezone for this message."  Carry the originating user run's
+timezone, and only that timezone, into the completion wake (do not reintroduce
+location context).  Pin the real sequence in an integration test: a
+timezone-bearing user turn starts context work, the completion wake creates a
+weekly schedule, and the saved schedule uses that timezone.
 ** TODO Day-of-month schedules (e.g. "run on the 25th of each month")
 Thread schedules (#161) support interval + weekday recurrence but not
 day-of-month.  Add it so a user can say "set a schedule to run on the 25th of
@@ -502,6 +513,17 @@ or escape-then-markdown for the tool/assistant text while keeping the render-blo
 pipeline. Eval/verify: a message containing =<img onerror>= must not execute.
 
 * Reliability
+** TODO Deliver a completed context task after an early polling failure
+Thread =20260817084835-4df04000= started a context task to locate an existing
+Org appointment item.  The main agent prematurely polled the task until loop
+detection stopped the launch turn.  The context task later succeeded, but its
+ordinary completion wake remained pending while the parent thread was ready.
+Diagnose that completion-wake dispatch path and make the terminal task produce
+one processed wake even after an earlier parent-turn failure.  Reproduce the
+sequence with a deterministic integration test: launch, premature checks and
+loop termination, child success, then one processed wake that checks the result
+and performs the requested local edit.  This is lifecycle reliability, not an
+Assist recurring-schedule operation.
 ** DONE Streamed sub-agent wedge — langgraph checkpoint-put thread-pool exhaustion
 *Symptom.*  A =/chat= turn that spawns a sub-agent (=task= → research/context-agent) over the STREAMED path (emacsos-server: =Thread.stream_message= → =agent.stream()= consumed via =run_in_executor=→=next()=) hangs after the sub-agent runs, with no error, and then wedges every later turn (they block on =THREAD_QUEUE=).  The web UI's blocking =Thread.message()= → =invoke_with_rollback= → =.invoke()= path was initially thought to be immune.  *That was wrong.*  On 2026-05-29 thread =20260528073914-cbd6a4cb= wedged for ~5h26m via the same chained-futures mechanism after a general-agent → research-agent → 4-concurrent-tools nesting depth was reached from the =.invoke()= side.  Mirrored the =durability="sync"= fix into =invoke_with_rollback= on 2026-05-30; see [[file:docs/2026-05-30-message-path-durability-sync.org][docs/2026-05-30-message-path-durability-sync.org]].
 
