@@ -52,6 +52,17 @@ def test_non_mapping_decision_file_recovers_as_empty(tmp_path, corrupt):
     assert isinstance(decision.should_run, bool)
 
 
+def test_non_utf8_decision_file_recovers_as_empty(tmp_path):
+    directory = tmp_path / "thread"
+    directory.mkdir()
+    (directory / "frequency-decisions.json").write_bytes(b"\xff")
+
+    decision = frequency.FrequencyDecisionStore(str(tmp_path)).decide(
+        "thread", "run", "thread-checkpoint", 0.25)
+
+    assert isinstance(decision.should_run, bool)
+
+
 @pytest.mark.parametrize("policy, probability", [
     ("../escape", 0.25), ("Thread Checkpoint", 0.25),
     ("thread-checkpoint", -0.1), ("thread-checkpoint", 1.1),

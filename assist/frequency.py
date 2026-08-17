@@ -69,7 +69,7 @@ class FrequencyDecisionStore:
             try:
                 with open(path, encoding="utf-8") as handle:
                     decisions = json.load(handle)
-            except (FileNotFoundError, json.JSONDecodeError):
+            except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
                 decisions = {}
             if not isinstance(decisions, dict) or any(
                     not isinstance(value, dict)
