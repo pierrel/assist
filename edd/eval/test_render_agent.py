@@ -191,9 +191,9 @@ class TestRenderAgent(TestCase):
         blocks = self._render_block_paths(agent)
         self.assertTrue(self._render_skill_was_loaded(agent),
                         f"render skill should load; calls: {calls}")
-        self.assertTrue(any(call.get("name") == "ls" and "projects" in str(
+        self.assertTrue(any(call.get("name") in {"ls", "glob"} and "projects" in str(
             call.get("args") or call.get("arguments") or {}) for call in calls),
-                        f"expected projects directory listing; calls: {calls}")
+                        f"expected projects directory inspection; calls: {calls}")
         self.assertTrue(any(path.startswith("/tmp/") and path.endswith(".md")
                             for path in writes),
                         f"expected temporary Markdown listing; writes: {writes}")

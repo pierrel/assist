@@ -70,7 +70,7 @@ class _EmptyFileRecoveryFilesystemBackend(FilesystemBackend):
     def write(self, file_path: str, content: str) -> WriteResult:
         path = self._write_path(file_path)
         result = super().write(path, content)
-        if not (result.error and result.error.startswith("Cannot write to ")):
+        if not (result.error and " because it already exists" in result.error):
             return result
         # DeepAgents' memory prompt correctly treats an empty file as no saved
         # memory, but write_file refuses that existing zero-byte source. An

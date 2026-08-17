@@ -27,7 +27,7 @@ from assist.backends import (
 )
 from assist.spec import AgentSpec
 from deepagents.backends import FilesystemBackend, StateBackend
-from deepagents.backends.protocol import SandboxBackendProtocol
+from deepagents.backends.protocol import SandboxBackendProtocol, WriteResult
 from deepagents.middleware.filesystem import supports_execution
 
 
@@ -94,6 +94,16 @@ class TestCompositeDefaultBackend:
 
         assert result.error
         assert (tmp_path / "AGENTS.md").read_text() == "User has 3 cats.\n"
+
+    def test_write_does_not_retry_a_non_collision_error(self, tmp_path):
+        backend = create_composite_backend(str(tmp_path)).default
+        failure = WriteResult(error="Cannot write to /AGENTS.md: permission denied")
+        with patch.object(FilesystemBackend, "write", return_value=failure), \
+             patch.object(FilesystemBackend, "edit") as edit:
+            result = backend.write("/user/AGENTS.md", "User has 3 cats.\n")
+
+        assert result == failure
+        edit.assert_not_called()
 
     def test_scratch_route_keeps_tmp_out_of_user_workspace(self, tmp_path):
         scratch = tmp_path / "scratch"
