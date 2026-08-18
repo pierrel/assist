@@ -33,7 +33,11 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
         length = int(self.headers["Content-Length"])
         payload = json.loads(self.rfile.read(length))
         type(self).requests.append((self.path, dict(self.headers), payload))
-        body = b'data: {"id":"test","choices":[{"delta":{}}]}\n\ndata: [DONE]\n\n'
+        body = (
+            b'data: {"id":"test","choices":[{"delta":{}}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,'
+            b'"total_tokens":2}}\n\ndata: [DONE]\n\n'
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
@@ -874,6 +878,9 @@ def test_loader_completion_requires_exactly_one_complete_loader_call() -> None:
             "index": 0, "id": "call-1", "function": {
                 "name": "load_skill", "arguments": '"render"}'}}]}},
     ]}).encode()
+    usage_only = json.dumps({"choices": [], "usage": {
+        "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
+    }}).encode()
 
     stream = b": ping\n\ndata: " + one + b"\n\ndata: [DONE]\n\n"
     fragmented_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\n"
@@ -882,7 +889,9 @@ def test_loader_completion_requires_exactly_one_complete_loader_call() -> None:
     invalid_name_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\ndata: " + invalid_name_fragment + b"\n\n"
     invalid_function_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\ndata: " + invalid_function_fragment + b"\n\n"
     invalid_arguments_stream = b"data: " + first_fragment + b"\n\ndata: " + final_fragment + b"\n\ndata: " + invalid_arguments_fragment + b"\n\n"
+    usage_stream = stream + b"data: " + usage_only + b"\n\n"
     assert _sole_loader_completion(stream) == ("call-1", "load_skill", {"name": "render"})
+    assert _sole_loader_completion(usage_stream) == ("call-1", "load_skill", {"name": "render"})
     assert _sole_loader_completion(fragmented_stream) == (
         "call-1", "load_skill", {"name": "render"})
     assert _sole_loader_completion(multiple) is None
@@ -900,6 +909,8 @@ def test_loader_completion_requires_exactly_one_complete_loader_call() -> None:
     assert _sole_loader_completion(invalid_delta_container) is None
     assert _sole_loader_completion(alternate_choices) is None
     assert not pi_provider_relay._is_openai_stream_frame(alternate_choices)
+    assert pi_provider_relay._is_openai_stream_frame(usage_only)
+    assert pi_provider_relay._loader_completion(usage_only) == (False, None)
 
 
 def test_provider_relay_close_interrupts_a_stalled_model_response(tmp_path: Path) -> None:

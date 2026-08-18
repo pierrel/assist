@@ -366,6 +366,14 @@ def _choice_container(value: object) -> dict[str, object] | None:
     return container if isinstance(container, dict) else None
 
 
+def _usage_only_stream_frame(value: object) -> bool:
+    """Accept OpenAI's terminal usage record, which has no completion choice."""
+    if not isinstance(value, dict) or value.get("choices") != []:
+        return False
+    usage = value.get("usage")
+    return isinstance(usage, dict)
+
+
 def _loader_completion(raw: bytes) -> tuple[bool, tuple[str, str, object] | None]:
     """Validate one model response and return its sole complete loader, if any."""
     values: list[object] = []
@@ -393,10 +401,14 @@ def _loader_completion(raw: bytes) -> tuple[bool, tuple[str, str, object] | None
         return False, None
     calls: dict[int, dict[str, object]] = {}
     saw_unindexed_call = False
+    saw_completion = False
     for value in values:
+        if _usage_only_stream_frame(value):
+            continue
         container = _choice_container(value)
         if container is None:
             return False, None
+        saw_completion = True
         if "tool_calls" not in container:
             continue
         tool_calls = container["tool_calls"]
@@ -445,6 +457,8 @@ def _loader_completion(raw: bytes) -> tuple[bool, tuple[str, str, object] | None
                     if not isinstance(arguments, str):
                         return False, None
                     prior["arguments"] = str(prior["arguments"]) + arguments
+    if not saw_completion:
+        return False, None
     parsed_arguments: dict[int, object] = {}
     for index, call in calls.items():
         call_id = call.get("id")
@@ -505,6 +519,8 @@ def _is_openai_stream_frame(value: bytes) -> bool:
         parsed = json.loads(value.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
+    if _usage_only_stream_frame(parsed):
+        return True
     container = _choice_container(parsed)
     return container is not None and (
         "tool_calls" not in container or isinstance(container["tool_calls"], list))
