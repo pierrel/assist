@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import secrets
@@ -22,9 +23,10 @@ from assist.model_manager import OpenAIConfig, current_model_config
 from assist.pi_broker import PiToolBroker
 from assist.pi_skills import (PiLoadedSkill, PiSkillAuthority, PiSkillError,
                               build_pi_skill_catalog, empty_pi_skill_catalog)
-from assist.pi_conversation import PI_HISTORY_LIMIT, PiConversationError, PiMessage
+from assist.pi_conversation import (PI_HISTORY_LIMIT, PiCompactionCandidate,
+                                    PiConversationError, PiHistorySummary, PiMessage)
 from assist.pi_trace import PiTraceRecorder, PiTraceStore
-from assist.pi_provider_relay import PiProviderRelay
+from assist.pi_provider_relay import PiProviderRelay, PiProviderRelayError
 from assist.sandbox import DockerSandboxBackend
 from assist.sandbox_manager import SandboxManager
 from assist.agent import web_main_skill_composition
@@ -77,6 +79,7 @@ class PiRuntimeResult:
     turns: int
     promoted_skills: tuple[PiLoadedSkill, ...] = ()
     evicted_skills: tuple[PiLoadedSkill, ...] = ()
+    history_summary: PiHistorySummary | None = None
 
 
 @dataclass
@@ -85,6 +88,7 @@ class _ActivePiTurn:
 
     stopped: threading.Event
     finished: threading.Event
+    relay: PiProviderRelay | None = None
 
 
 class PiResultSink:
@@ -220,6 +224,8 @@ class PiRuntimeManager:
         if active is None:
             return
         active.stopped.set()
+        if active.relay is not None:
+            active.relay.stop_admission()
         if not active.finished.wait(timeout):
             raise PiRuntimeError("Pi worker did not stop within its bound")
 
@@ -313,7 +319,8 @@ class PiRuntimeManager:
     def _request_context(request_fixed: dict[str, object], system_prompt: str, catalog: object,
                          history: Iterable[PiMessage | tuple[str, str]],
                          retained: Iterable[PiLoadedSkill],
-                         evicted: Iterable[PiLoadedSkill]) -> tuple[list[dict[str, str]], tuple[PiLoadedSkill, ...], tuple[PiLoadedSkill, ...], str]:
+                         evicted: Iterable[PiLoadedSkill],
+                         summary: PiHistorySummary | None = None) -> tuple[list[dict[str, str]], tuple[PiLoadedSkill, ...], tuple[PiLoadedSkill, ...], str]:
         """Fit complete visible Runs and complete skill records in one request bound."""
         if not hasattr(catalog, "manifest") or not hasattr(catalog, "prompt_section"):
             raise PiRuntimeError("Pi skill catalog is invalid")
@@ -328,6 +335,9 @@ class PiRuntimeManager:
             payload = {
                 **request_fixed,
                 "history": [{"role": item.role, "text": item.text} for item in selected_history],
+                "historySummary": (None if summary is None else {
+                    "body": summary.body, "bodySha256": summary.body_sha256,
+                    "lastRunId": summary.last_run_id}),
                 "systemPrompt": prompt_with_catalog,
                 "skillCatalog": catalog.manifest(),
                 "retainedSkills": [skill.manifest() for skill in selected_skills],
@@ -391,6 +401,8 @@ class PiRuntimeManager:
             history: Iterable[PiMessage | tuple[str, str]], system_prompt: str,
             retained_skills: Iterable[PiLoadedSkill] = (),
             evicted_skills: Iterable[PiLoadedSkill] = (),
+            history_summary: PiHistorySummary | None = None,
+            compaction_candidate: PiCompactionCandidate | None = None,
             skill_run_id: str | None = None,
             commit: Callable[[PiRuntimeResult], None] | None = None,
             max_turns: int = _MAX_TURNS, turn_id: str | None = None,
@@ -404,6 +416,7 @@ class PiRuntimeManager:
             raise PiRuntimeError("Pi request is invalid")
         if len(prompt.encode("utf-8")) > _MAX_MESSAGE_BYTES:
             raise PiRuntimeError("Pi prompt exceeds its bound")
+        history = tuple(history)
         config = current_model_config()
         if (trace_dir is None) != (trace_run_id is None):
             raise PiRuntimeError("Pi activity trace is invalid")
@@ -419,6 +432,7 @@ class PiRuntimeManager:
         worker_exited = False
         completion_committed = False
         primary_error: BaseException | None = None
+        deadline = time.monotonic() + _WALL_TIMEOUT_SECONDS
         try:
             broker_capability = secrets.token_urlsafe(32)
             provider_capability = secrets.token_urlsafe(32)
@@ -445,30 +459,72 @@ class PiRuntimeManager:
                 "providerCapability": provider_capability, "resultCapability": result_capability,
                 "maxTurns": max_turns,
             }
+            if recorder is None:
+                relay = PiProviderRelay(
+                    control_dir, self._relay_url(config), config.api_key,
+                    config.model, provider_capability, config.context_len)
+            else:
+                relay = PiProviderRelay(
+                    control_dir, self._relay_url(config), config.api_key,
+                    config.model, provider_capability, config.context_len,
+                    trace_start=lambda: recorder.start("model", "model request"),
+                    trace_settle=recorder.settle)
+            if active is not None:
+                active.relay = relay
+            base_history, base_skills, base_evicted, base_prompt = self._request_context(
+                request_fixed, system_prompt, catalog, history, retained_skills, evicted_skills,
+                history_summary)
+            if len(base_history) < len(self._history(history)):
+                raise PiRuntimeError("Pi visible history exceeds its request bound")
+            final_summary = history_summary
+            if compaction_candidate is not None:
+                def summary_check() -> None:
+                    if active is not None and active.stopped.is_set():
+                        raise PiProviderRelayError("Pi preview was stopped")
+                    if admitted is not None and not admitted():
+                        raise PiProviderRelayError("Pi preview was stopped")
+                    if should_yield is not None and should_yield():
+                        raise PiProviderRelayError("Pi preview yielded to waiting work")
+                    if time.monotonic() >= deadline:
+                        raise PiProviderRelayError("Pi history summary timed out")
+                try:
+                    body = relay.summarize(compaction_candidate.body, check=summary_check)
+                    final_summary = PiHistorySummary(
+                        body, hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                        compaction_candidate.last_run_id)
+                except PiProviderRelayError as error:
+                    if ((active is not None and active.stopped.is_set())
+                            or (admitted is not None and not admitted())
+                            or (should_yield is not None and should_yield())):
+                        raise PiRuntimeError("Pi preview was stopped") from error
+                    logging.info("Pi history compaction skipped: %s", error)
             request_history, request_skills, request_evicted, prompt_with_catalog = self._request_context(
-                request_fixed, system_prompt, catalog, history, retained_skills, evicted_skills)
+                request_fixed, system_prompt, catalog, history, retained_skills, evicted_skills,
+                final_summary)
+            # Compaction may add enough checkpoint bytes to force one more raw
+            # Run out of the request.  Do not publish that checkpoint unless it
+            # still covers every omitted complete Run.
+            if len(request_history) < len(base_history):
+                final_summary = history_summary
+                request_history, request_skills, request_evicted, prompt_with_catalog = (
+                    base_history, base_skills, base_evicted, base_prompt)
             authority = PiSkillAuthority(
                 catalog, retained=request_skills, load_run_id=skill_run_id)
             self._write_request(control_dir, {
                 **request_fixed, "history": request_history,
+                "historySummary": (None if final_summary is None else {
+                    "body": final_summary.body, "bodySha256": final_summary.body_sha256,
+                    "lastRunId": final_summary.last_run_id}),
                 "systemPrompt": prompt_with_catalog,
                 "skillCatalog": catalog.manifest(),
                 "retainedSkills": [skill.manifest() for skill in request_skills],
             })
             if recorder is None:
                 broker = PiToolBroker(sandbox, control_dir, broker_capability)
-                relay = PiProviderRelay(
-                    control_dir, self._relay_url(config), config.api_key,
-                    config.model, provider_capability, config.context_len)
             else:
                 broker = PiToolBroker(
                     sandbox, control_dir, broker_capability,
                     trace_start=lambda name: recorder.start("tool", name),
-                    trace_settle=recorder.settle)
-                relay = PiProviderRelay(
-                    control_dir, self._relay_url(config), config.api_key,
-                    config.model, provider_capability, config.context_len,
-                    trace_start=lambda: recorder.start("model", "model request"),
                     trace_settle=recorder.settle)
             if isinstance(sandbox, DockerSandboxBackend):
                 broker.configure_skills(authority)
@@ -485,7 +541,6 @@ class PiRuntimeManager:
                 volumes={str(control_dir): {"bind": "/run/pi", "mode": "ro"}},
                 environment={}, labels={"assist.pi-runtime": "true"},
             )
-            deadline = time.monotonic() + _WALL_TIMEOUT_SECONDS
             while True:
                 if ((active is not None and active.stopped.is_set())
                         or (admitted is not None and not admitted())):
@@ -502,7 +557,8 @@ class PiRuntimeManager:
             if not isinstance(status, dict) or status.get("StatusCode") != 0:
                 raise PiRuntimeError("Pi worker exited unsuccessfully")
             completed = PiRuntimeResult(
-                result.reply, result.turns, authority.committed_skills, request_evicted)
+                result.reply, result.turns, authority.committed_skills, request_evicted,
+                final_summary)
             if active is not None and active.stopped.is_set():
                 raise PiRuntimeError("Pi preview was stopped")
             if admitted is not None and not admitted():

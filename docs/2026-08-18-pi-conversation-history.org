@@ -1,0 +1,230 @@
+#+title: Pi conversation-history extension
+#+date: 2026-08-18
+
+* Decision
+
+Pi needs durable long-thread context now.  M6a replaces its current “last 32
+messages” replay with a first-party =conversation-history= extension.  It keeps
+the complete visible transcript for the web UI, but each fresh worker receives
+only a bounded projection: the ordinary host-owned system prompt, one structured
+checkpoint for the compacted prefix, and a recent raw tail plus the current user
+message.
+
+This is not a persistent Pi SDK session.  Fresh workers, disposable sandboxes,
+per-turn capabilities, host-owned M5 records, and the provider relay remain
+unchanged.  Pi's pinned compaction design informs the summary format, but Assist
+owns raw retention, checkpoint durability, projection, and recovery.  SDK
+auto-compaction stays disabled for ordinary workers.
+
+The result is long retained history, not infinite model context.  A checkpoint
+never preserves a loaded skill or tool authority.  It summarizes facts about
+past work only; a skill record remains a complete M5 body/digest/declaration
+record or disappears as a unit when its source Run leaves the raw tail.
+
+M6a deliberately defers model-accessible exact-history search/read.  The full
+raw transcript remains visible in the web UI.  M6b can add bounded retrieval
+only after M6a works in real long threads, with broker-minted opaque references
+and pagination.  It does not belong in this first compaction deployment.
+
+* User flow
+
+1. The web UI continues to render every user and assistant message.  A private
+   checkpoint does not replace, hide, or edit the visible conversation.
+2. Before a new user turn crosses the selected raw-tail boundary, the host
+   prepares an incremental candidate from the previous checkpoint plus the
+   oldest complete Runs that must leave that tail.
+3. The host invokes one dedicated no-tool summary request under the held Pi
+   runtime lease.  A valid result is injected with the raw tail into this same
+   user turn.  This makes compaction useful immediately, rather than one turn
+   late.  The occasional compaction turn takes one extra model request and the
+   UI remains in its existing processing state until it finishes.
+4. If summary generation fails, times out, is stopped, or cannot cover the
+   selected boundary within its fixed budget, the normal user turn still runs
+   using the current 32-message fallback.  The checkpoint is unchanged.  M5
+   records are nevertheless intersected with that actual fallback tail and
+   evicted at the ordinary successful completion, so a body/tool cannot survive
+   after its source Run left model context.  A later turn retries the checkpoint;
+   a failed best-effort summary never hides a reply.
+5. The ordinary worker reply, any M5 skill mutation, and the successful new
+   checkpoint commit through one recoverable host transaction before its Run
+   becomes successful.  The next turn sees either the complete new projection
+   or the preceding complete projection, never a mix.
+
+* M6a durable model
+
+** Raw log
+
+The extension migrates the current =pi-conversation.jsonl= on its first
+successful history access to a =pi-history/= segment log.  Segments contain only the
+existing validated visible user/assistant events.  They are bounded
+individually; the current segment is atomically replaced when one event is
+appended, and compaction never rewrites visible history.  Snapshot validation
+reads the bounded raw log before selecting the raw tail.  This removes the
+monolithic 2 MiB transcript limit without putting an unbounded file in one
+request.
+
+Migration validates the legacy sequence, copies every visible event unchanged,
+and derives current M5 records from the *current validated M5 context* before
+publication.  It therefore neither resurrects expired old skills nor drops a
+still-retained one.  New segment manifest and state are fsynced before the
+legacy file is removed.  If either is absent or malformed after a crash, the
+legacy file remains authoritative and migration restarts safely.
+If both new files validate, they are authoritative even if the legacy file
+still remains; removing that redundant legacy file is later cleanup.
+
+** Projection state and completion receipt
+
+A small atomically replaced =pi-history/state.json= contains only projection
+state: schema version, optional =PiHistorySummary= (bounded
+body/digest, inclusive last compacted Run), and M5's current coupled records.
+Raw visible messages never live in this state.
+
+A completion is made recoverable with a durable, 0600 =pi-history/pending.json=
+receipt.  It contains the claimed Run id, the exact expected assistant event,
+and the previous and next serialized projection states.  The order is:
+
+1. fsync the complete receipt;
+2. atomically publish/fsync the visible assistant event and its raw manifest;
+3. atomically replace/fsync the exact next state; then
+4. remove/fsync the receipt.
+
+On every read/complete/recovery, the extension parses both receipt states and
+resolves the receipt before returning a context.  If raw assistant and next
+state match it, cleanup is idempotent.  If raw assistant matches but state is
+old, it publishes the receipt's exact next state.  If state is new but the raw
+assistant is absent, it restores the receipt's old state and the Run has no
+completion witness.  Any other mismatch fails closed.  Only a resolved receipt
+plus its visible assistant witness lets =_execute_pi_run= recover a
+running/interrupted Run as successful.  This preserves M5 promotion/eviction
+facts across every crash point without deriving them from a summary.
+
+* Bounded checkpoint formation
+
+The conversation-history extension owns the single projection builder.  It
+accounts for system prompt, catalog, retained skill bodies, checkpoint, raw
+tail, current prompt, and fixed JSON shape beneath the existing 512 KiB worker
+request cap.  It chooses whole Runs and whole records only.  If fixed content
+cannot fit, the request fails before a worker begins.
+
+=PiCompactionCandidate= is separately bounded.  It contains the previous
+checkpoint and only a host-selected consecutive sequence of complete Runs,
+with a 384 KiB serialized-input limit, a 32 KiB serialized-output limit, and
+one provider call.  Bytes are the independent denial-of-service bound, not a
+proxy for model context.  Before admission, the host builds the exact fixed
+summary chat-completion body, asks the configured llama.cpp server's
+=/v1/chat/completions/input_tokens= endpoint to count that body, and admits it
+only when =input_tokens + 2048= (the requested summary completion reserve) is
+at most the current =OpenAIConfig.context_len=.  The same model identity,
+authentication, request timeout, stop connection, and bounded response parser
+apply to the count request.  A counter error or an unsupported endpoint is a
+best-effort compaction failure, never a guessed estimate or a user-turn
+failure.
+
+The candidate must cover every Run omitted from the selected raw tail.  If no
+whole candidate fits either bound, M6a does not publish a partial checkpoint:
+the turn uses the present 32-message fallback and retries on a later turn.
+That rare oversized-Run case remains visible and safe; a later multi-stage
+summary design can address it without weakening this first release's complete
+Run invariant.  Thus repeated summary failures never grow an input request,
+and a partial batch can never create an invisible unsummarized gap.
+
+The summary instructions require concise sections for durable facts and
+preferences, decisions, active plans/todos, artifacts, unresolved questions,
+and chronology.  The body is untrusted historical context, not a schema that
+can grant authority.  The host validates UTF-8 and byte bounds and binds it to
+the already selected Run boundary; no worker output selects a boundary.
+
+* Dedicated host-only summary lane
+
+The existing relay admits ordinary worker requests only through its per-turn
+provider capability and M5 continuation rules.  M6a adds a distinct internal
+=summarize= path to =PiProviderRelay=.  It is called only by
+=PiRuntimeManager= while that Run's active lease is held, before the ordinary
+worker is started.  It accepts a host-built, exact no-tool chat-completion
+shape, pins the configured model/Qwen sampling/streaming policy, rejects tool
+requests and tool-bearing responses, has a separate one-call reserve, and
+applies the established idle-byte and worker-wall-clock cancellation fences.
+It never uses a worker capability, invokes =PiSkillAuthority=, or exposes a
+new socket/listener.
+
+The active turn registers this summary relay before forwarding.  =stop()= and
+=retire()= close its in-flight upstream connection as well as setting the
+active stop event.  The summary reader uses short control polls to check stop,
+preview admission, and fair-yield state while preserving the established
+idle-byte timeout and the turn's remaining two-hour wall-clock deadline.  A
+stalled summary therefore cannot hold deletion, preview disable, or fair yield
+until the 600-second idle timeout.  This has deterministic stalled-summary
+stop/gate/delete coverage.
+
+This solves two properties by construction: an untrusted worker cannot use
+summary authority for arbitrary model requests, and a normal Pi turn may still
+use its existing twelve provider calls.  The summary lane has its own one-call
+and input/output bounds.  Its failure is recorded only in internal diagnostics;
+it is not a user-visible reply failure.
+
+* Interfaces and implementation plan
+
+1. Refactor =assist.pi_conversation= into the history Resource Access object:
+   safe legacy migration, bounded segmented raw history, validated state and
+   receipt recovery, tail/projection selection, and one receipt-backed
+   completion method.  Preserve =get_messages()= as the complete visible UI
+   transcript interface.
+2. Add =PiHistorySummary= and =PiCompactionCandidate= typed host values.  The
+   context result includes a candidate only when it covers the entire prefix
+   outside its selected tail.  M5 skill eligibility remains tied to exact raw
+   source Runs and current tail membership.
+3. Extend =PiProviderRelay= with its internal host-only summary admission and
+   strict streamed-text extraction.  Extend =PiRuntimeManager= to request a
+   candidate summary before it writes the normal worker request, then pass only
+   the resulting validated checkpoint to the worker.  No worker result shape,
+   SDK setting, broker operation, or provider capability changes in M6a.
+4. Extend =worker.ts= request validation with an optional bounded checkpoint
+   and append it as a labelled custom context message before retained skills.
+   Its prompt explains that the checkpoint is historical context, not policy or
+   authority.  Normal SDK compaction stays off.
+5. Change =manage/web/threads.py= only in its existing background Pi path: it
+   obtains the snapshot after Run claim, supplies it to runtime, and commits
+   the reply/M5 changes/checkpoint through the receipt-held callback.  It does
+   no blocking file or network work on the FastAPI event loop.
+6. Record the parallel delivery rule in workspace and Assist process docs: if
+   deployment is unavailable, push/open the ready PR and start Copilot review
+   immediately; deployment remains a parallel required track, not a blocker.
+
+* Threat model and tests
+
+- Transcript and summary text is untrusted model context.  It is never a path,
+  capability, tool declaration, or state instruction.
+- The host alone selects the checkpoint boundary and owns raw writes, state,
+  receipts, skills, and model summary admission.  A worker cannot persist a
+  summary or make a tool survive compaction.
+- Segment, manifest, state, and receipt use owner/mode/no-follow validation,
+  byte-bounded reads, atomic replacement, and directory fsync.  Corruption
+  fails the complete snapshot closed.
+- Preview admission, stop, yielding, deletion/retirement, and Run recovery
+  apply through summary and ordinary work.  The active summary relay is closed
+  immediately for stop/gate/delete/yield; a gate close before the callback
+  commits neither reply nor projection.
+- Token-boundary tests inject a 32,768-token model configuration and a fake
+  exact counter.  They prove that byte-valid candidates over the configured
+  context never reach generation, while the largest whole candidate under both
+  bounds does.
+
+Deterministic coverage proves legacy migration with current M5 records,
+multi-segment UI history, complete-Run tail boundaries, successful checkpoint
+advance, bounded repeated failure, M5 body/tool expiry, every receipt crash
+state, delete/gate races, summary shape/tool rejection, and 512 KiB projection
+fits.  Run focused Python tests and TypeScript check.  Then run one admitted,
+natural real-Qwen multi-turn continuity smoke and let Pierre exercise the live
+thread.  A larger N=5/N=10 comparison campaign is useful later evidence, but
+not a gate for this practical M6a deployment.  Exact historic detail retrieval
+is M6b acceptance work, not claimed by M6a.
+
+* Rejected alternatives
+
+- Persistent SDK sessions: durable model context would sit in the disposable
+  worker boundary and weaken Assist's reload/recovery audit surface.
+- SDK auto-compaction alone: fresh workers lack a durable SDK session and it
+  cannot own Assist raw history, M5 records, or Run recovery.
+- A summary that claims a skill is loaded: it splits instructions from authority.
+- Search/read tools now: they add the hardest new authority and disclosure
+  surface without being necessary to make long ordinary threads work.

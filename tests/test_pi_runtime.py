@@ -13,7 +13,8 @@ from urllib3.exceptions import ReadTimeoutError
 
 from assist.model_manager import OpenAIConfig
 from assist import pi_runtime
-from assist.pi_conversation import PiConversationError, PiMessage
+from assist.pi_conversation import (PiCompactionCandidate, PiConversationError,
+                                    PiHistorySummary, PiMessage)
 from assist.pi_skills import PiLoadedSkill, PiSkillCatalog
 from assist.thread_queue import DEFAULT_HOLD_TIMEOUT_S
 
@@ -158,6 +159,13 @@ class _Relay:
     def start(self) -> None:
         self.events.append("relay.start")
 
+    def summarize(self, historical_context: str, *, check=None) -> str:
+        assert historical_context == "old complete history"
+        if check is not None:
+            check()
+        self.events.append("relay.summarize")
+        return "compact checkpoint"
+
     def stop_admission(self) -> None:
         self.events.append("relay.stop")
 
@@ -224,6 +232,53 @@ def test_runtime_writes_retained_skill_body_and_loaded_name_to_the_worker_reques
     assert _Containers.request is not None
     assert _Containers.request["retainedSkills"] == [retained.manifest()]
     assert "Already loaded for this conversation: `render`" in _Containers.request["systemPrompt"]
+
+
+def test_runtime_summarizes_a_complete_candidate_before_writing_checkpoint_context(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    _Containers.request = None
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+
+    result = pi_runtime.PiRuntimeManager(_SandboxManager).run(
+        work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="continue",
+        history=[("user", "recent")], system_prompt="be useful",
+        compaction_candidate=PiCompactionCandidate("old complete history", "run-1"))
+
+    expected = PiHistorySummary("compact checkpoint", hashlib.sha256(
+        b"compact checkpoint").hexdigest(), "run-1")
+    assert result.history_summary == expected
+    assert _Containers.request is not None
+    assert _Containers.request["historySummary"] == {
+        "body": expected.body, "bodySha256": expected.body_sha256, "lastRunId": "run-1"}
+    assert _SandboxManager.events[:3] == ["sandbox.start", "relay.summarize", "broker.start"]
+
+
+def test_runtime_refuses_a_trimmed_tail_without_an_advanceable_checkpoint(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    work_dir = tmp_path / "thread" / "workspace"
+    work_dir.mkdir(parents=True)
+    _SandboxManager.events = []
+    monkeypatch.setattr(pi_runtime, "current_model_config", lambda: OpenAIConfig(
+        "http://localhost:8000/v1", "qwen", "secret", 32768))
+    monkeypatch.setattr(pi_runtime, "PiToolBroker", _Broker)
+    monkeypatch.setattr(pi_runtime, "PiProviderRelay", _Relay)
+    monkeypatch.setattr(pi_runtime, "PiResultSink", _ResultSink)
+    history = [PiMessage(f"run-{number}", role, "x" * (32 * 1024))
+               for number in range(1, 17) for role in ("user", "assistant")]
+
+    with pytest.raises(pi_runtime.PiRuntimeError, match="visible history exceeds"):
+        pi_runtime.PiRuntimeManager(_SandboxManager).run(
+            work_dir=str(work_dir), timezone="America/Los_Angeles", prompt="continue",
+            history=history, system_prompt="be useful")
+
+    assert "worker.start" not in _SandboxManager.events
 
 
 def test_result_sink_accepts_only_a_capability_authenticated_result(tmp_path: Path) -> None:
